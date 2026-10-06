@@ -1,9 +1,10 @@
 """Exact producer-family and input-origin resolution shared by admission and freeze."""
 from __future__ import annotations
 
+import json
 from typing import Any
 from ..schema.refs import ArtifactRef
-from ..schema.common import canonical_sha256
+from ..schema.common import canonical_json, canonical_sha256
 from ...operations.invoke import (
     InvocationArtifact, OperationInvocationError, ProducerOutputFamily,
     ProducerFamilyMember, ProducerInputProjection, ProducerEvidenceSource,
@@ -476,7 +477,7 @@ class OperationOrigins:
             def reject(reason):
                 raise OperationInvocationError(reason, port=rule.anchor_port,
                     message="The selected scientific subject has missing, ambiguous or inaccessible original materials. Select a subject with its sealed producer history; no newer material is substituted.")
-            if len(anchors) != 1:
+            if len(anchors) != 1 and not (anchors and rule.select in {"parents", "receipt_materials"} and not rule.producer_input_path):
                 reject("input_origin_ambiguous" if anchors else "input_origin_missing")
             def family_for(ref):
                 name = self.bindings.find_name(instance=self._instance_id(),
@@ -485,7 +486,7 @@ class OperationOrigins:
                     reject("input_origin_unavailable")
                 self.artifacts.verify(ref)
                 return self._producer_output_family_from_envelope(name, self.artifacts.catalog(ref))
-            refs = [anchors[0].ref]
+            refs = [anchor.ref for anchor in anchors]
             for edge in rule.producer_input_path:
                 following = []
                 for ref in refs:
@@ -498,13 +499,43 @@ class OperationOrigins:
                     reject("input_origin_missing")
             private_names = {}
             family = None
-            if rule.select == "parents":
+            if rule.select == "receipt_materials":
+                # Receipt manifests are control-owned, exact original records.
+                # Follow only recorded material refs, never all inherited inputs.
+                selected = []
+                for ref in refs:
+                    envelope = self.artifacts.verify(ref)
+                    owner_id = envelope.labels.get("tool_producer_run")
+                    if (envelope.schema_id != "scidiscovery.tool-evidence-manifest.v1"
+                            or envelope.labels.get("operation_output_port") != "recovery_manifest_output"
+                            or envelope.size_bytes > 1024 * 1024 or not owner_id or self.runs is None):
+                        reject("input_origin_unavailable")
+                    owner = self.runs.status(owner_id)
+                    if (owner.instance_id != self._instance_id() or owner.state != "completed"
+                            or owner.output_ref is None or ref not in self.artifacts.catalog(owner.output_ref).parent_refs
+                            or envelope.labels.get("operation_digest") != owner.operation_digest):
+                        reject("input_origin_unavailable")
+                    original = {item["alias"]: item for item in self.runs.tool_evidence(owner_id)}
+                    for record in json.loads(self.artifacts.read(ref)).get("records", ()):
+                        retained = original.get(record.get("alias"))
+                        if retained is None or canonical_json(retained) != canonical_json(record):
+                            reject("input_origin_unavailable")
+                        material = ArtifactRef.model_validate(record["artifact_ref"])
+                        if material not in envelope.parent_refs:
+                            reject("input_origin_unavailable")
+                        if self._artifact_matches_input_port(self.artifacts.catalog(material), port):
+                            selected.append(material)
+                            private_names[material] = next(anchor.artifact_name for anchor in anchors if anchor.ref == ref)
+                refs = list(dict.fromkeys(selected))
+            elif rule.select == "parents":
                 # Only the exact anchor's immutable direct parents are candidates.
                 # No public parent alias, completed author, head or global lookup
                 # is needed to bind a control-owned typed execution package.
                 refs = list(dict.fromkeys(parent for ref in refs
                     for parent in self._derived_parent_refs(ref, port)))
-                private_names = {ref: anchors[0].artifact_name for ref in refs}
+                private_names = ({ref: anchors[0].artifact_name for ref in refs} if len(anchors) == 1 else
+                    {ref: next(anchor.artifact_name for anchor in anchors
+                        if ref in self._derived_parent_refs(anchor.ref, port)) for ref in refs})
             elif rule.select != "subject":
                 if len(refs) != 1:
                     reject("input_origin_ambiguous")

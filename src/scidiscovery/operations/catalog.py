@@ -373,6 +373,9 @@ def _validate_operation_contracts(plugin_map: dict[str, PluginDefinition], compo
                     if (current.name in seen or rule.anchor_port not in input_ports
                             or (rule.select == "parents" and
                                 (current.agent_visible or current.schema_id in {"*", "opaque"}))
+                            or (rule.select == "receipt_materials" and
+                                (current.agent_visible or input_ports[rule.anchor_port].schema_id != "scidiscovery.tool-evidence-manifest.v1"
+                                 or rule.producer_input_path))
                             or (rule.producer_output_port is not None and
                                 (not _ID.fullmatch(rule.producer_output_port) or rule.select != "subject"))
                             or len(rule.producer_input_path) > 8

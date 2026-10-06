@@ -70,8 +70,11 @@ class ValidationSources(dict[str, bytes]):
         self.__reference_calculation_resolver = reference_calculation_resolver
         self.__sealed_material_resolver = sealed_material_resolver
 
-    def sealed_material_record(self, alias):
-        return self.__sealed_material_resolver(alias) if self.__sealed_material_resolver else None
+    def sealed_material_record(self, alias, *, read_content=False):
+        if self.__sealed_material_resolver is None:
+            return None
+        return (self.__sealed_material_resolver(alias, read_content=True) if read_content
+                else self.__sealed_material_resolver(alias))
 
     def verified_calculations(self, report):
         """Read-only calculation view; core retains receipt and origin verification."""

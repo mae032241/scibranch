@@ -103,6 +103,13 @@ class InstanceReadModel:
                     result["gaps"].append(self._read_gap(error, selection_kind=selection.kind))
         result["selected_nodes"] = selected[:100]
         result["selected_node"] = selected[0] if len(selected) == 1 and len(selections) == 1 else None
+        from ..service.scientific_results import current_result
+        try:
+            result["scientific_result"] = current_result(artifacts=self.artifacts, runs=self.runs,
+                bindings=self.bindings, instance_id=instance_id)
+        except (ValueError, *_READ_ERRORS) as error:
+            result["scientific_result"] = {"state": "unavailable", "reason": type(error).__name__}
+            result["gaps"].append(gap("selected_scientific_result_unavailable"))
         if len(selections) > 100:
             result["gaps"].append(gap("current_selection_read_limit"))
         if len(selections) > 1:
@@ -836,6 +843,8 @@ class InstanceReadModel:
 
     def _run_detail(self, result, value):
         if value.operation_id == "science.experiment.v1":
+            result["scientific_result_semantics"] = {"scheduler_verdict": "experiment_delivery_only",
+                "scientific_acceptance": "not_assessed", "reason": "legacy_report_has_no_structured_scientific_result"}
             from .experiment_progress import read_progress
             result["experiment_progress"] = read_progress(self, value, detail=True)
         from ...plugin_runtime.observation import read_summary

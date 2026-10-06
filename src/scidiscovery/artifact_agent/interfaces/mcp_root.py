@@ -92,6 +92,20 @@ class LifecycleEventsInput(RootToolInput):
         description="Consume at most this many changed states; poll again if poll_again is true.")
 
 
+class ScientificResultCurrentInput(ReadInput):
+    limit: int = Field(default=30, ge=1, le=30,
+        description="Maximum binding records inspected for related changes; unscanned history remains unknown.")
+    before: str | None = Field(default=None, max_length=2048,
+        description="Continue freshness inspection with the exact returned freshness.next_before; cursors bind the selected immutable synthesis.")
+    section: Literal["summary", "candidates", "metrics", "contract", "figures", "changes"] = "summary"
+    candidate: str | None = Field(default=None, max_length=128,
+        description="metrics only: exact candidate alias returned by the candidate page.")
+    offset: int = Field(default=0, ge=0)
+    page_limit: int = Field(default=4, ge=1, le=16)
+    result_name: str | None = Field(default=None, pattern=_NAME_PATTERN,
+        description="Pass the returned exact result_name on continuation. A changed current selection requires restarting.")
+
+
 class DiagnosticReadInput(RootToolInput):
     reference: str = Field(pattern=r"^diag_[0-9a-f]{32}$")
     offset: int = Field(default=0, ge=0)
@@ -289,6 +303,7 @@ ROOT_TOOLS = (
     RootTool("scientific_inventory", "List scientific-object metadata within the configured page byte budget. Summary retains qualification flags; use artifact_catalog for one object's details. limit is a maximum; continue with next_before.", PageInput),
     RootTool("scientific_current", "Read explicit current scientific-object selections for this research instance.", PageInput),
     RootTool("scientific_current_select", "Compare-and-set one immutable scientific object as the explicit current selection.", ScientificCurrentSelectInput),
+    RootTool("scientific_result_current", "Read the exact selected scientific synthesis: best available is distinct from accepted; includes completed analysis, metrics, methods, observations and bounded freshness coverage. With no selected structured synthesis the result is unorganized, never inferred from old pass or recent records.", ScientificResultCurrentInput),
     RootTool("lifecycle_events", "Return persistent semantic task, approval, execution and attention changes for this scheduler process. Attention notices are also included automatically in ordinary Root tool replies; reading a notice does not resolve it.", LifecycleEventsInput),
     RootTool("artifact_ingest_file", "Freeze and bind one project file under a semantic name.", IngestFileInput),
     RootTool("artifact_ingest_text", "Freeze original user text and bind it under a semantic name in the current instance; does not create a Run.", IngestTextInput),
@@ -611,11 +626,12 @@ class RootMCPRouter:
                 return response
             notices, delivery = batch
             budget = field = key = None
-            if name in {'run_list', 'scientific_inventory'}:
+            if name in {'run_list', 'scientific_inventory', 'scientific_result_current'}:
                 from ...agent_execution_settings import MCPReadSettings
                 settings = getattr(getattr(self.facade.runs, 'agent_settings', None), 'mcp_read', None) or MCPReadSettings()
                 budget = settings.detail_max_bytes if values.get('view') == 'detail' else settings.summary_max_bytes
-                field, key = ('runs', 'name') if name == 'run_list' else ('objects', 'artifact_name')
+                if name != 'scientific_result_current':
+                    field, key = ('runs', 'name') if name == 'run_list' else ('objects', 'artifact_name')
             from .mcp_response_views import append_attention
             result, count = append_attention(response, notices, budget=budget, field=field, key=key)
             claimed = self.facade.acknowledge_attention_notifications(delivery, count)

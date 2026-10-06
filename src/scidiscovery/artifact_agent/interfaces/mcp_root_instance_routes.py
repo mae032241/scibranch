@@ -121,6 +121,13 @@ class RootInstanceRoutes:
             raise RootToolError(
                 f"{name}: scientific object kind is {envelope.kind}, expected {kind}"
             )
+        if kind == "scientific_result":
+            from ..service.scientific_results import read_sealed_result
+            try:
+                read_sealed_result(artifacts=self.artifacts, runs=self.runs,
+                    instance_id=self._instance_id(), reference=envelope.ref)
+            except ValueError as error:
+                raise RootToolError(str(error)) from error
         expected_ref = None
         if expected_artifact_name is not None:
             expected_id = self._resolve_input_artifact(expected_artifact_name)
@@ -137,6 +144,18 @@ class RootInstanceRoutes:
             "artifact_name": binding.name,
             "selected_at": selected.selected_at,
         }
+
+    def scientific_result_current(self, *, limit: int = 30, before: str | None = None,
+            section="summary", candidate=None, offset=0, page_limit=4, result_name=None):
+        from ..service.scientific_results import current_result, public_result
+        try:
+            result = public_result(current_result(artifacts=self.artifacts, runs=self.runs,
+                bindings=self.bindings, instance_id=self._instance_id(), limit=limit, before=before))
+            if result_name is not None and result.get("artifact_name") != result_name:
+                raise ValueError("Scientific result selection changed; restart the exact selection query.")
+            return result
+        except ValueError as error:
+            raise RootToolError(str(error)) from error
 
     def scientific_inventory(self, *, include_operations: bool = True) -> dict[str, Any]:
         """Return only latest scientific records and explicit current selections."""

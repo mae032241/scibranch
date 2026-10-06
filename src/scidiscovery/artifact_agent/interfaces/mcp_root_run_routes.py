@@ -307,7 +307,11 @@ class RootRunRoutes:
                 "integrity_failure": "The sealed materials failed integrity checks. Restore the exact originals before retrying.",
                 "admission_defect": "The selected materials did not satisfy the declared input requirements. Inspect the saved diagnostics.",
             }.get(failure.get("category"), "The Run failed. Read the saved diagnostic page to identify a repair or choose another scientific action.")
-        allowed = {"name", "operation_id", "operation_contract_status", "state", "agent_type", "execution_profile",
+        if value.operation_id in {"science.experiment.v1", "science.results.compare.v1"}:
+            result["scientific_result_semantics"] = {"scheduler_verdict": "delivery_only",
+                "scientific_acceptance": "not_assessed" if value.operation_id == "science.experiment.v1" else "read_structured_scientific_result",
+                "reason": "completed_or_pass_does_not_mean_model_accepted"}
+        allowed = {"name", "operation_id", "operation_contract_status", "state", "agent_type", "execution_profile", "scientific_result_semantics",
             "created_at", "started_at", "completed_at", "deadline_at", "last_activity_at", "output_artifact_name",
             "recovery_available", "draft_from", "diagnostics_available", "attention_required", "reason", "diagnostic_events", "sealed_output_status", "sealed_output",
             "scheduler_signal_status", "scheduler_signal", "scheduler_signal_omissions", "output_delivery", "output_metadata", "selected_output",

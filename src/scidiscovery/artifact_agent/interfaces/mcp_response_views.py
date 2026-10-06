@@ -30,6 +30,7 @@ def run_intent_projection(value, *, intent):
         "sealed_stages",
         "dispatch",
         "reason",
+        "scientific_result_semantics",
     )
     if isinstance(result.get("execution_profile"), dict):
         result["execution_profile"] = pick(result["execution_profile"], "profile")
@@ -393,9 +394,137 @@ def append_attention(response, notices, *, budget=None, field=None, key=None):
     return result, len(selected)
 
 
+def scientific_result_response(value, arguments, *, budget):
+    """Budgeted scheduler pages; the workbench's complete read model stays intact."""
+    def size(item):
+        return len(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    if value.get("state") != "selected":
+        return value
+    section = arguments.get("section", "summary")
+    name, run_name = value["artifact_name"], value.get("run_name")
+    response = {"state": "selected", "result_name": name, "section": section,
+        "scope": value["scope"], "scheduler_signal_semantics": value["scheduler_signal_semantics"]}
+    def request(selected_section, **fields):
+        return {"name": "scientific_result_current", "arguments": {"result_name": name,
+            "section": selected_section, "view": "detail", "limit": arguments.get("limit", 30),
+            "page_limit": arguments.get("page_limit", 4), **pick(arguments, "before"), **fields}}
+    def omitted(pointer):
+        return {"omitted": "page_byte_budget", "json_pointer": pointer,
+            "read_request": {"name": "run_status", "arguments": {"name": run_name,
+                "intent": "decision", "output_paths": [pointer]}}}
+    if section == "summary":
+        response.update(pick(value, "disposition", "best_available", "accepted_candidates", "summary", "remaining_question"))
+        response.update(candidate_count=len(value["candidates"]),
+            best_available_count=len(value["best_available"]), accepted_count=len(value["accepted_candidates"]),
+            candidates_request=request("candidates"))
+        freshness = value.get("freshness", {})
+        response["freshness"] = pick(freshness, "state", "examined", "scan_complete", "next_before", "coverage")
+        response["freshness"]["change_count"] = len(freshness.get("changes", ()))
+        for key in ("summary", "remaining_question", "best_available", "accepted_candidates"):
+            if size(response) <= budget:
+                break
+            response[key] = omitted("/" + key)
+        if size(response) > budget:
+            response.pop("freshness", None)
+            response["freshness_request"] = request("changes")
+        if size(response) > budget:
+            # Even very long scientific names cannot make the minimum configured
+            # budget fail. The exact selected result and advancing page remain.
+            response = {"state": "selected", "result_name": name, "disposition": value["disposition"],
+                "candidate_count": len(value["candidates"]), "fields_omitted": "page_byte_budget",
+                "read_request": request("candidates")}
+        return response
+    candidates = value["candidates"]
+    offset, limit = arguments.get("offset", 0), arguments.get("page_limit", 4)
+    if section == "candidates":
+        items = []
+        for index, candidate in enumerate(candidates):
+            item = pick(candidate, "candidate", "artifact_name", "analysis_outcome", "execution", "evidence", "scientific",
+                "mechanism", "conclusion", "evidence_readiness", "analysis_artifact_name", "method_names", "observation_names", "limitations")
+            item.update(is_best_available=candidate["candidate"] in value["best_available"],
+                metric_count=len(candidate["metrics"]), metrics_request=request("metrics", candidate=candidate["candidate"]))
+            items.append((item, "/candidates/" + str(index)))
+    elif section == "metrics":
+        alias = arguments.get("candidate")
+        indexed = [(index, item) for index, item in enumerate(candidates) if item["candidate"] == alias]
+        if len(indexed) != 1:
+            raise RootToolError("Select one exact candidate alias from the candidate page.")
+        index, candidate = indexed[0]
+        response["candidate"] = alias
+        items = [(metric, f"/candidates/{index}/metrics/{metric_index}") for metric_index, metric in enumerate(candidate["metrics"])]
+    elif section == "contract":
+        contract = value["comparison_contract"]
+        items = [({"field": key, "value": contract[key]}, "/comparison_contract/" + key) for key in contract]
+        response["evaluation_contract_name"] = value["evaluation_contract_name"]
+    elif section == "figures":
+        items = [(figure, "/figures/" + str(index)) for index, figure in enumerate(value["figures"])]
+    elif section == "changes":
+        freshness = value.get("freshness", {})
+        response["freshness"] = pick(freshness, "state", "examined", "scan_complete", "next_before", "coverage")
+        items = [(change, "") for change in freshness.get("changes", ())]
+    else:
+        raise RootToolError("Unknown scientific-result section.")
+    if offset > len(items):
+        raise RootToolError("Scientific-result offset exceeds this exact section.")
+    response.update(total=len(items), offset=offset, items=[], next_offset=None)
+    for index in range(offset, min(len(items), offset + limit)):
+        item, pointer = items[index]
+        row = json.loads(json.dumps(item))
+        trial = {**response, "items": [*response["items"], row], "next_offset": index + 1 if index + 1 < len(items) else None}
+        if size(trial) > budget:
+            if response["items"]:
+                response["next_offset"] = index
+                response["page_limited_by"] = "bytes"
+                break
+            # Keep decisive metadata where possible; oversized explanations or
+            # evidence names get explicit exact-original pointers.
+            for key in ("conclusion", "limitations", "method_names", "observation_names", "value", "json_pointer", "artifact_name"):
+                if key in row:
+                    original_key = {"method_names": "method_evidence", "observation_names": "observation_evidence",
+                        "artifact_name": "source_key" if section in {"metrics", "figures"} else "candidate"}.get(key, key)
+                    row[key] = omitted(pointer + "/" + original_key)
+                    trial["items"] = [row]
+                    if size(trial) <= budget:
+                        break
+            if size(trial) > budget:
+                row = {"entry_omitted": "page_byte_budget", **omitted(pointer),
+                    **pick(item, "candidate", "key", "source_key", "field")}
+                trial["items"] = [row]
+            if size(trial) > budget:
+                raise RootToolError("Scientific-result metadata exceeds the configured page budget.")
+            trial["page_limited_by"] = "bytes"
+        response = trial
+    if response["next_offset"] is not None:
+        response["next_request"] = request(section, offset=response["next_offset"],
+            **({"candidate": response["candidate"]} if "candidate" in response else {}))
+        # The continuation belongs to the budget too; reserve its bytes before
+        # returning. Remove complete last entries rather than truncating science.
+        while size(response) > budget and len(response["items"]) > 1:
+            response["items"].pop()
+            response["next_offset"] = offset + len(response["items"])
+            response["next_request"]["arguments"]["offset"] = response["next_offset"]
+    if size(response) > budget:
+        response["items"] = [{"entry_omitted": "page_byte_budget", **omitted(items[offset][1])}]
+        response["next_offset"] = offset + 1 if offset + 1 < len(items) else None
+        if response["next_offset"] is not None:
+            response["next_request"]["arguments"]["offset"] = response["next_offset"]
+        else:
+            response.pop("next_request", None)
+    if size(response) > budget:
+        response.pop("next_request", None)
+    if size(response) > budget:
+        raise RootToolError("Scientific-result metadata exceeds the configured page budget.")
+    return response
+
+
 def root_response(name, value, arguments, *, read_settings=None):
     """Never replace a scientific object, precise request, or error with a verdict."""
     detail = arguments.get("view") == "detail"
+    if name == "scientific_result_current":
+        from ...agent_execution_settings import MCPReadSettings
+        settings = read_settings or MCPReadSettings()
+        return scientific_result_response(value, arguments,
+            budget=settings.detail_max_bytes if detail else settings.summary_max_bytes)
     if name in {"execution_status", "execution_sync", "execution_start", "execution_cancel", "execution_abandon"}:
         if detail and isinstance(value.get("progress"), dict):
             from ...plugin_runtime.experiment import progress_summary

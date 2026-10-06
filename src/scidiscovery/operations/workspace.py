@@ -98,6 +98,7 @@ class WorkspaceFinalizationRequest:
     binding_descriptors: Mapping[str, InputBindingDescriptor] = field(default_factory=dict)
     # Control-only sources, including private proof; never materialize for Agents.
     input_contents: Mapping[str, bytes] = field(default_factory=dict)
+    sealed_material_resolver: Callable | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(

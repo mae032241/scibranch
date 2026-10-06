@@ -433,6 +433,76 @@ def _trajectory_pagination(trajectory: dict, base: str, query: dict) -> str:
         + "</nav>")
 
 
+def _scientific_result_card(value, instance_id):
+    result = _dict(value)
+    if result.get("state") != "selected":
+        message = "科学结果尚未整理。历史运行完成或 pass 不代表模型已被接受。" if result.get("state") in (None, "unorganized") else "选中的科学汇总暂不可读取；请查看原件与读取缺口。"
+        return _section("当前科学结果", "<p class='source-gap'>" + message + "</p>", section_id="scientific-result")
+    labels = {"accepted_model": "纳入集合中存在已接受模型", "no_accepted_model": "纳入集合中尚无已接受模型",
+        "inconclusive": "接受结论尚不确定", "accepted": "已接受", "rejected": "未达标 / 拒绝",
+        "not_assessed": "未评估", "identified": "可识别", "ambiguous": "仍有歧义", "succeeded": "执行成功",
+        "failed": "执行失败", "not_observed": "未观测", "complete": "完整", "incomplete": "待补全", "unknown": "未知",
+        "completed": "分析已完成", "blocked": "分析受阻"}
+    def name_link(name, label=None):
+        return _link(_node_href(instance_id, "artifact:" + name), label or name) if isinstance(name, str) else "<span class='source-gap'>原件名称未绑定</span>"
+    candidates = _list(result.get("candidates"))
+    by_alias = {item.get("candidate"): item for item in candidates}
+    best = _list(result.get("best_available"))
+    best_text = "、".join(str(_dict(by_alias.get(alias)).get("artifact_name") or alias) for alias in best) if best else "暂无符合证据条件的最佳候选 / 合同未声明排序"
+    body = "<p class='eyebrow'>Root 采用的精确封存汇总</p><h3>最佳可用：" + _text(best_text, 1024) + "</h3>"
+    body += "<p><strong>" + _text(labels.get(result.get("disposition"), result.get("disposition"))) + "</strong> · 最佳可用不等于 accepted。</p>"
+    body += "<p>" + render_scientific_text(result.get("summary", ""), 8192) + "</p>"
+    body += "<p class='source-note'>结论仅覆盖本次纳入的 " + str(len(candidates)) + " 个候选；不表示已证伪所有模型。</p>"
+    contract = _dict(result.get("comparison_contract"))
+    body += "<h3>冻结比较合同</h3><p>" + name_link(result.get("evaluation_contract_name")) + "</p>"
+    body += "<p>比较条件：" + render_scientific_text(contract.get("conditions", ""), 4096) + "</p>"
+    body += "<p>原始参考依据：" + " · ".join(name_link(name) for name in _list(result.get("reference_evidence_names"))) + "</p>"
+    criteria = {item.get("key"): item for item in _list(contract.get("criteria"))}
+    ranking = _dict(contract.get("ranking"))
+    body += "<p>排序规则：" + (_text(str(ranking.get("metric")) + " / " + str(ranking.get("direction"))) if ranking else "未声明；候选保持不排序") + "</p>"
+    for candidate in candidates:
+        alias = candidate.get("candidate")
+        body += "<article class='conclusion-card scientific-candidate'><h3>" + name_link(candidate.get("artifact_name"), candidate.get("artifact_name") or alias)
+        body += (" · 最佳可用" if alias in best else "") + "</h3><p>"
+        body += " · ".join(title + "：" + _text(labels.get(candidate.get(key), candidate.get(key))) for key, title in
+            (("analysis_outcome", "结果分析"), ("execution", "执行"), ("evidence", "证据"), ("scientific", "科学达标"), ("mechanism", "机制识别"), ("evidence_readiness", "排名依据"))) + "</p>"
+        body += "<p>" + render_scientific_text(candidate.get("conclusion", ""), 2048) + "</p>"
+        body += "<p>分析原件：" + name_link(candidate.get("analysis_artifact_name")) + "</p>"
+        body += "<p>方法 / 实现：" + (" · ".join(name_link(name) for name in _list(candidate.get("method_names"))) or "待补全") + "</p>"
+        body += "<p>实际运行 / 收集证据：" + (" · ".join(name_link(name) for name in _list(candidate.get("observation_names"))) or ("合同声明不适用" if contract.get("execution_required") is False else "待补全")) + "</p>"
+        metrics = _list(candidate.get("metrics"))
+        if metrics:
+            body += "<table class='parameter-table'><thead><tr><th>决定性指标</th><th>数值</th><th>接受阈值</th><th>达标</th><th>证据原件</th></tr></thead><tbody>"
+            for metric in metrics:
+                criterion = _dict(criteria.get(metric.get("key")))
+                threshold = ("≤" if criterion.get("relation") == "le" else "≥") + " " + str(criterion.get("threshold")) + " " + str(criterion.get("unit", ""))
+                body += "<tr><td>" + _text(criterion.get("label", metric.get("key"))) + "</td><td>" + _text(metric.get("value")) + "</td><td>" + _text(threshold) + "</td><td>" + ("是" if metric.get("meets_threshold") is True else "否") + "</td><td>" + name_link(metric.get("artifact_name")) + " · " + _text(metric.get("json_pointer"), 1024) + "</td></tr>"
+            body += "</tbody></table>"
+        if candidate.get("limitations"):
+            body += "<p>限制：" + render_scientific_text("；".join(candidate["limitations"]), 4096) + "</p>"
+        body += "</article>"
+    figures = _list(result.get("figures"))
+    main = result.get("main_figure")
+    figures = sorted(figures, key=lambda item: item.get("source_key") != main)
+    if figures:
+        body += "<h3>主叠图与比较图件</h3>"
+        for figure in figures:
+            artifact_id = figure.get("artifact_id")
+            if not isinstance(artifact_id, str):
+                continue
+            href = _path(instance_id) + "/evidence/" + quote(artifact_id, safe="") + "?format=image"
+            body += "<figure><a href='" + html.escape(href, quote=True) + "'><img loading='lazy' src='" + html.escape(href, quote=True) + "' alt='" + _text(figure.get("label")) + "'></a><figcaption>" + _text(figure.get("label")) + "</figcaption></figure>"
+    body += "<h3>剩余问题</h3><p>" + render_scientific_text(result.get("remaining_question", ""), 8192) + "</p>"
+    if result.get("limitations"):
+        body += "<p>限制：" + render_scientific_text("；".join(result["limitations"]), 8192) + "</p>"
+    freshness = _dict(result.get("freshness"))
+    body += "<p class='source-note'>更新状态：" + ("存在未纳入的新证据 / 合同变化，需更新比较" if freshness.get("state") == "needs_update" else "覆盖不完整，尚不能确认是否有遗漏的新证据" if freshness.get("state") == "unknown" else "当前登记范围内未发现变更") + "。新证据不会自动覆盖本次选择。</p>"
+    if freshness.get("changes"):
+        body += "<ul>" + "".join("<li>" + name_link(change.get("artifact_name")) + " · " + _text(change.get("reason")) + "</li>" for change in freshness["changes"]) + "</ul>"
+    body += "<p>" + _link(_node_href(instance_id, result.get("key")), "完整汇总与封存原件 →") + "</p>"
+    return _section("当前科学结果", body, section_id="scientific-result", class_name="conclusion-card")
+
+
 def render_workbench(overview: dict, *, browse_base: str, csrf_token: str, can_manage: bool = False,
                      can_retry_summary: bool = False, summary_unavailable_reason: str | None = "access_required") -> bytes:
     instance = _dict(overview.get("instance"))
@@ -477,11 +547,13 @@ def render_workbench(overview: dict, *, browse_base: str, csrf_token: str, can_m
     display = _dict(overview.get("display_node"))
     title = "最近节点" if not overview.get("selected_node") else "选中节点"
     display_link = _link(_node_href(instance_id, display.get("key")), "打开节点详情 →") if display else ""
-    presentation = render_presentation(overview.get("presentation"),
+    same_result = bool(display.get("key")) and display.get("key") == _dict(overview.get("scientific_result")).get("key")
+    presentation = "" if same_result else render_presentation(overview.get("presentation"),
         evidence_href=lambda artifact, pointer: _evidence_href(instance_id, artifact, pointer),
         image_href=lambda artifact: base + "/evidence/" + quote(artifact, safe="") + "?format=image")
     content = ("<div class='workspace-grid'><aside class='workspace-sidebar'>" + _goal_panel(overview, instance_id) + timeline
-        + "</aside><div class='workspace-main'><div class='panel-heading'><h2>" + title + "</h2>" + display_link + "</div>"
+        + "</aside><div class='workspace-main'>" + _scientific_result_card(overview.get("scientific_result"), instance_id)
+        + "<div class='panel-heading'><h2>" + title + "</h2>" + display_link + "</div>"
         + active_panel + _experiment_progress(display, instance_id)
         + _display_copy(display, instance_id, **retry_options)
         + presentation + _sealed_stages(display, instance_id) + "</div></div>")

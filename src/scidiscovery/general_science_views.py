@@ -9,7 +9,8 @@ from .artifact_agent.approval_ui.presentation import (
 
 
 _ROOTS = {
-    "scidiscovery.experiment-report.v1": ("实验报告", (("outcome", "实验结果"), ("summary", "正式摘要"), ("limitations", "限制"), ("remaining_question", "未解决问题"), ("adopted_stages", "采用的封存阶段"))),
+    "scidiscovery.experiment-report.v1": ("实验报告", (("outcome", "实验交付状态（不代表科学接受）"), ("summary", "正式摘要"), ("limitations", "限制"), ("remaining_question", "未解决问题"), ("adopted_stages", "采用的封存阶段"))),
+    "scidiscovery.scientific-result.v1": ("科学结果汇总", (("summary", "正式科学分析"), ("disposition", "纳入候选的接受结论"), ("best_available", "最佳可用候选（不等于接受）"), ("accepted_candidates", "已接受候选"), ("comparison_contract", "冻结比较合同"), ("candidates", "逐候选分析与决定性指标"), ("limitations", "限制"), ("remaining_question", "未解决问题"))),
     "scidiscovery.experiment-review.v1": ("独立科学审查", (("verdict", "审查结论"), ("summary", "正式摘要"), ("findings", "审查意见"), ("limitations", "限制"))),
     "scidiscovery.experiment-scientific-skeleton.v1": ("科学骨架", (("current_objectives", "本轮目标"), ("competing_explanations_and_controls", "竞争解释与对照"), ("discrimination_criteria_and_basis", "判别标准及依据"), ("immutable_conditions", "不可改科学条件"), ("stop_conditions", "停止条件"), ("feasibility_limitations", "可行性限制"))),
     "scidiscovery.research-objective.v1": ("总体研究目标", (("statement", "目标原文"), ("intent", "目标类型"), ("mandatory_targets", "必需目标"), ("closure_requirements", "完成条件"))),

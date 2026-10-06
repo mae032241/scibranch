@@ -227,9 +227,14 @@ class ToolEvidenceMixin(ReferenceAccessMixin):
             return self._bind_evidence_output(connection, producer, record["origin_alias"],
                 ArtifactRef.model_validate(record["artifact_ref"])).name
 
-    def sealed_material_record(self, value, alias):
+    def sealed_material_record(self, value, alias, *, read_content=False):
         from .sealed_materials import resolve_material
-        return resolve_material(self, value, alias)
+        record = resolve_material(self, value, alias)
+        if record is not None and read_content:
+            if record["size_bytes"] > 1024 * 1024:
+                raise ValueError("Numeric material exceeds the 1 MiB comparison read bound.")
+            record = {**record, "content": self.artifacts.read(ArtifactRef.model_validate(record["artifact_ref"]))}
+        return record
 
     def available_material_records(self, value):
         from .sealed_materials import available_materials

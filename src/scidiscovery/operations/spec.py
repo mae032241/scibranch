@@ -107,7 +107,7 @@ class InputDerivationSpec(FrozenSpec):
     """Exact producer traversal or typed direct parents; never global artifact search."""
     anchor_port: str
     producer_input_path: tuple[str, ...] = ()
-    select: Literal["subject", "siblings", "sources", "parents"] = "subject"
+    select: Literal["subject", "siblings", "sources", "parents", "receipt_materials"] = "subject"
     producer_output_port: str | None = None
 
 

@@ -1578,7 +1578,7 @@ class RunService(ToolEvidenceMixin):
                 validation_deadline=validation_deadline,
                 tool_snapshot=self._evidence_snapshot(value.run_id) if tool_evidence_ports(compiled) else None,
                 reference_calculation_resolver=lambda alias: self.reference_calculation_sources(value, alias, validation_deadline=validation_deadline, validation_budget=reference_validation_budget),
-                sealed_material_resolver=lambda alias: self.sealed_material_record(value, alias),
+                sealed_material_resolver=lambda alias, **options: self.sealed_material_record(value, alias, **options),
             )
             if incomplete_collections:
                 coordinator.validate_incomplete_delivery(validated.content, incomplete_collections)
@@ -1716,6 +1716,7 @@ class RunService(ToolEvidenceMixin):
                     output_schema_id=operation_primary_output(compiled).schema_id,
                     binding_descriptors=descriptors,
                     input_contents=contents,
+                    sealed_material_resolver=lambda alias, **options: self.sealed_material_record(value, alias, **options),
                 )
             )
             writer = getattr(self.backend, "write_primary_output", None)
