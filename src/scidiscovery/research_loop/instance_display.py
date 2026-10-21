@@ -76,10 +76,22 @@ def settings(root):
     return _json(_path(root, 'settings.json'))
 
 
+def _inherited(root, step):
+    from . import fork_runtime, originals
+    if fork_runtime.is_fork(root) and not (Path(root) / 'jobs' / f'{step:03d}.json').exists():
+        return originals.node(root, step)
+    return None
+
+
 def _saved(root, step):
     root = _root(root)
     if type(step) is not int or step < 1:
         raise ValueError('Exact saved scientific node required')
+    source = _inherited(root, step)
+    if source is not None:
+        from . import originals
+        seal = _json(originals.source_record(source, 'result-identity.json'))
+        return root, source, seal, originals.source_raw(source)
     record = f'native-evidence/{step:03d}'
     seal = _json(_path(root, record + '/result-identity.json'))
     reference = seal.get('execution_ref')
@@ -93,6 +105,10 @@ def _saved(root, step):
 
 def node(root, step):
     root, record, seal, raw = _saved(root, step)
+    if not isinstance(record, str):
+        from . import originals
+        return dict(job=originals.source_job(record), payload=_json(raw), seal=seal,
+                    result=_json(originals.source_record(record, 'result.json')))
     return dict(job=_json(_path(root, f'jobs/{step:03d}.json')),
                 payload=_json(raw), seal=seal,
                 result=_json(_path(root, record + '/result.json')))
@@ -109,6 +125,10 @@ def observation(root, step, node=None):
     relative = f'host-history/observations/{step:03d}.json'
     if receipt.get('path') != relative:
         raise ValueError('Saved observation escaped its node')
+    source = _inherited(root, step)
+    if source is not None:
+        from . import originals
+        return _json(originals.resolve_ref(source, receipt))
     return _json(_path(root, relative))
 
 
@@ -158,6 +178,15 @@ def artifact(root, step, index):
     name = _label(material, step)
     if sum(row['path'] == material['path'] for row in rows) != 1:
         raise ValueError('Saved scientific deliverable name is ambiguous')
+    inherited = _inherited(root, step)
+    if inherited is not None:
+        from . import originals
+        source = Path(material['source'])
+        original_root = Path(inherited.original_root)
+        if not source.is_absolute() or not source.is_relative_to(original_root):
+            raise ValueError('Saved deliverable escaped its original output owner')
+        reference = dict(material, path=source.relative_to(original_root).as_posix())
+        return Original(originals.resolve_ref(inherited, reference)), name
     source = Path(material['source'])
     if (not source.is_absolute() or not source.is_relative_to(root)
             or '..' in source.parts or '\\' in str(source)):

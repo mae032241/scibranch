@@ -430,9 +430,10 @@ def rounds(reader, nodes, clean, *, completed=False, mechanisms=None, labels=Non
         return dict(rounds=[], omitted=0, total=0, before=0)
     first = nodes[0]['step']
     before = 0
-    for step in range(1, first):
+    from . import originals
+    for source in originals.source_sequence(reader.root, first):
         try:
-            before += reader.role(step) == 'H'
+            before += reader.role(source.step) == 'H'
         except Exception:  # noqa: BLE001 - earlier numbering becomes unknown, not invented
             before = None
             break
@@ -611,6 +612,21 @@ def usage_stats(view, *, used_steps=None, candidates=None):
                  limit=str(max_steps) if max_steps else '未记录', raw=used_steps, raw_limit=max_steps, notes=[])
     steps['percent'] = percent(used_steps, max_steps)
     steps['over'] = bool(used_steps is not None and max_steps and used_steps > max_steps)
+    if view.get('fork'):
+        tokens['label'] = '本分支新增模型用量（tokens）'
+        duration['label'] = '本分支新增研究时间'
+        steps['label'] = '本分支新增控制动作'
+        inherited = view['fork'].get('inherited_costs', {})
+        for item, key, formatter in ((tokens, 'tokens', fmt_tokens), (duration, 'active_seconds', fmt_duration),
+                                      (steps, 'control_actions', str)):
+            cost = inherited.get(key, {})
+            if cost.get('status') == 'known':
+                message = formatter(cost.get('value'))
+            else:
+                message = '未知'
+                if cost.get('known_lower_bound') is not None:
+                    message += '（已知下界 ' + formatter(cost['known_lower_bound']) + '）'
+            item['notes'].append('继承历史成本：' + message)
     candidates = candidates or {}
     count = candidates.get('count')
     card = dict(label='历史候选记录', value=str(count) if count is not None else '未记录', limit=None, raw=count, notes=[])
@@ -634,7 +650,7 @@ def project(root, view, *, final_step=None, objective=None, memo=None):
     reader = Reader(root, memo)
     nodes = list(view.get('nodes') or [])
     steps = [node['step'] for node in nodes]
-    mechanisms = guarded(mechanism_labels, reader, range(1, (steps[-1] if steps else 0) + 1))
+    mechanisms = guarded(mechanism_labels, reader, steps)
     mechanisms = {} if 'error' in mechanisms else mechanisms
     labels, references, candidate_ids, observed_any, unreadable = {}, {}, [], False, []
     for node in nodes:
@@ -679,7 +695,7 @@ def project(root, view, *, final_step=None, objective=None, memo=None):
                       recommended=recommended is not None, delivered=confirmed is not None)
     if unreadable:
         candidates['unreadable'] = len(unreadable)
-    used_steps = closeout.get('used_steps') if isinstance(closeout.get('used_steps'), int) else (steps[-1] if steps else 0)
+    used_steps = view.get('used_steps', closeout.get('used_steps') if isinstance(closeout.get('used_steps'), int) else (steps[-1] if steps else 0))
     materials = sum(line.get('materials') or 0 for item in ([] if 'error' in trail else trail['rounds'])
                     for line in [item['h'], *item['w'], *item['a'], *item['others']] if line)
     mechanism_trails = guarded(ui_mechanisms.project, reader,

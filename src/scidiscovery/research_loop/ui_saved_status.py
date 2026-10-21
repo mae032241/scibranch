@@ -13,6 +13,13 @@ def steps(root):
         if path.stem.isascii() and path.stem.isdecimal() and path.stem == f'{int(path.stem):03d}')
 
 
+def visible_steps(root):
+    from . import fork_runtime, fork_sources
+    inherited = ({row['step'] for row in fork_sources.validate_manifest(root)['prefix_entries']}
+                 if fork_runtime.is_fork(root) else set())
+    return sorted(set(steps(root)) | inherited)
+
+
 def operations(root):
     return sorted([c.read(path) for path in (root / 'host-control/operations').glob('*.json')],
                   key=lambda row: row.get('sequence', 0))
@@ -24,6 +31,9 @@ def attempts(root, step):
 
 
 def used_steps(root, numbers=None, events=None):
+    from . import fork_runtime
+    if fork_runtime.is_fork(root):
+        return budget.used_steps(root)
     numbers = steps(root) if numbers is None else numbers
     events = events if events is not None else [c.read(path) for path in sorted((root / 'control-ledger').glob('*.json'))]
     continuations = sum(1 for step in numbers for record in attempts(root, step)[1:]
@@ -247,13 +257,22 @@ def status(root, *, after=0, limit=None):
     settings = display.settings(root)
     numbers = steps(root)
     events = [c.read(path) for path in sorted((root / 'control-ledger').glob('*.json'))]
-    selected = [step for step in numbers if step > after]
+    from . import fork_runtime, fork_sources, originals
+    manifest = fork_sources.validate_manifest(root) if fork_runtime.is_fork(root) else None
+    inherited = {row['step']: row for row in manifest['prefix_entries']} if manifest else {}
+    visible = sorted(set(numbers) | set(inherited))
+    selected = [step for step in visible if step > after]
     if limit is not None:
         selected = selected[:limit]
-    nodes = [_node(root, step, c.read(root / 'jobs' / f'{step:03d}.json')) for step in selected]
+    nodes = [_node(root, step, c.read(root / 'jobs' / f'{step:03d}.json')) if step in numbers else
+        dict(step=step, role=originals.source_job(originals.node(root, step))['role'],
+             state='seal_present_unverified', inherited=True) for step in selected]
     last = selected[-1] if selected else after
     return dict(instance=str(root), goal_id=settings['goal_id'], objective=settings['objective'],
         paused=(root / 'pause.request').exists(), nodes=nodes, usage=_usage(root, numbers),
         budget=_budget(root, settings, events), correction=_correction(root), closeout=closeout(root, events, numbers),
         closeout_preparation=None, goal_completion='not_asserted', after=after,
-        next_after=last if any(step > last for step in numbers) else None)
+        used_steps=used_steps(root, numbers, events),
+        **(dict(fork=dict(inherited_costs=manifest.get('inherited_costs',
+            dict(status='unknown', reason='Exact cut costs are not reconstructed')))) if manifest else {}),
+        next_after=last if any(step > last for step in visible) else None)

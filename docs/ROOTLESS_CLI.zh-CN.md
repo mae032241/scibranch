@@ -84,6 +84,62 @@ scid-research guidance-revoke --root /absolute/instance --guidance-id ID --expec
 自动采用 research 范围并保留原目标记录。待应用项须按当前 revision 修改/撤销；已应用任务输入
 不改写，research 项可追加仅未来生效的撤销回执。建议不授结论、独审资格、预算或执行权限。
 
+## 从历史任务创建分支
+
+`fork-preview` 与 `fork-create` 只接受已完成且静止、冻结协议 23 的明确父实例，以及精确逻辑
+步骤 N。新分支从 N 首次科学输入在新 session 重跑，N 输出和后缀不继承；不能选择任意 attempt
+断点。普通、FINAL、正式审查、工程修复及已有 continuation 的任务边界见
+[架构中的分支语义](ARCHITECTURE.zh-CN.md#历史任务分支)。缺真实原件、历史 cut 不足或协议不支持
+时明确拒绝；unknown 外部效果须回原调用对账，禁止换身份自动重提。
+
+以下路径、步骤和预算仅为命令示例；操作者须自行选择准确原件与有限新额度，本文不构成科学
+运行授权。目标根须为独立 canonical 绝对路径，其父目录已存在，且不能位于父实例内或包含父实例。
+可选 `--guidance-file` 读取 UTF-8 准确原文，至多 256000 字节；不提供时省略该选项。
+
+```sh
+scid-research fork-preview --root /absolute/project/parent --step 7 \
+  --child-root /absolute/project/branch \
+  --max-tokens 100000 --max-seconds 3600 --max-steps 12 \
+  --guidance-file /absolute/project/fork-guidance.txt
+```
+
+核对回包中的 `source`、`cut`、`native`、`budget`、`inherited_costs`、`limitations` 与 `blockers`。
+只有 `fork_preview_ready` 才创建；将其 `preview_id` 原样填入 `--expected-preview-id`，自行选定一次
+操作 ID，保留整条请求供对账。create 的来源、步骤、目标、新预算和指引内容须与预览一致。
+
+```sh
+scid-research fork-create --root /absolute/project/parent --step 7 \
+  --child-root /absolute/project/branch \
+  --max-tokens 100000 --max-seconds 3600 --max-steps 12 \
+  --guidance-file /absolute/project/fork-guidance.txt \
+  --expected-preview-id PREVIEW_ID --operation-id fork-branch-001
+scid-research status --root /absolute/project/branch
+```
+
+创建返回 `fork_created`、新身份及 paused 状态；预览和创建不运行模型或 solver。启动子实例须再
+显式清除暂停：
+
+```sh
+scid-research start --continue --root /absolute/project/branch
+```
+
+新有限预算只供子实例新工作使用，历史科学投入与机会不清零，未知历史成本不填零；旧审查和
+执行许可不授权新 subject 或调用。指引按原文作为可不采纳的 advice；正式审查仍用中立输入，
+通用指引延后到合法后继。创建复制所需科学原件及其原身份，支持嵌套分支，创建后读取这些输入
+无需父目录；工具、认证、模型 session、solver 和运行环境仍须满足自身声明与准入条件。
+分支不会复制、重建或扩大已声明的外部文件读取范围、运行路径映射或交付目标；继续子实例前，
+这些路径及目标仍须在原声明范围内有效可用。
+
+创建响应丢失时，使用完全相同的 `fork-create` 请求和 `operation_id` 核对持久回执，保留原
+`expected-preview-id` 与指引原文；不要另换 ID 或目标来猜测成功与否。已发布回执可在父目录消失后
+核对。同 ID 改请求会拒绝；预览过期时须重新预览，已尝试创建须先核对原操作。
+
+网页在历史节点提供“从这里分叉”，使用同一 service，错误时保留草稿，创建后链接暂停的新实例；
+打开新实例后点击“继续研究”才推进。
+同 UI host/browser session 中可“核对原操作结果”；跨 host 重启的通用 Web 恢复尚未建立，必要时
+用保存的完整 CLI 请求核对持久回执。分支复制使用当前版本的协作 lease 与只读原件，属于同用户
+软边界；不得与升级前仍活动的旧 writer 混用，新 guard 不会追溯锁住旧版本进程。
+
 ## 当前进度与封存结果
 
 ```sh

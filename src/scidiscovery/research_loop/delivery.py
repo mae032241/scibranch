@@ -4,6 +4,7 @@ from __future__ import annotations
 from . import configuration_updates
 from . import execution
 
+import copy
 import hashlib
 import json
 import math
@@ -17,7 +18,7 @@ import subprocess
 import tempfile
 import time
 
-from . import budget, contracts as c, history, runtime
+from . import budget, contracts as c, history, originals, runtime
 from .instance_owner import effect as owner_effect
 
 MAX_BYTES = 256_000
@@ -174,21 +175,22 @@ def catalogue_sources(root, source_nodes, *, job=None):
     The complete bounded directory is readable in the A workspace. A resolver is
     called only for a selected ID, so historical objects cannot crowd it out.
     """
+    return _catalogue_sources(root,source_nodes,job=job)
+
+
+def _catalogue_sources(root, source_nodes, *, job=None):
     from .protocol import require_current
     require_current(root)
     _adapter(root, job)
     items, known = [], set()
     for receipt in source_nodes:
-        _, _, seal, seal_sha = history._source(root, receipt['step'])
+        source_job, _, seal, seal_sha = history._source(root, receipt['step'])
         if seal_sha != receipt['seal_sha256']:
             raise ValueError('Delivery source scientific seal changed')
         observation = seal.get('observations')
         if observation is None:
             continue
-        path = _file(root / observation['path'])
-        if c.digest(path) != observation['sha256']:
-            raise ValueError('Delivery observer original changed')
-        fact = c.read(path)
+        fact = history.read_observation(root, source_job, seal)
         if fact['binding']['source_sha256'] != seal['raw_sha256']:
             raise ValueError('Delivery observer source binding changed')
         for candidate in fact['candidates']:
@@ -198,6 +200,11 @@ def catalogue_sources(root, source_nodes, *, job=None):
             items.append(dict(candidate_id=candidate['id'], status='available', source_step=receipt['step']))
     result = dict(catalogue=True, items=items, omitted_count=0, source_nodes=list(source_nodes))
     return result
+
+
+def rebind_sources(root, refs, *, job=None):
+    """Rebuild a branch catalogue from exact source seals, without old effects."""
+    return _catalogue_sources(root, refs['source_nodes'], job=job) if refs is not None else None
 
 
 def selected_sources(root, refs, candidate_id, *, prepare=False, job=None):
@@ -293,36 +300,35 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
         finally:
             if temporary is not None:temporary.unlink(missing_ok=True)
     candidates, known, evidence, contexts, direct = [], set(), {}, {}, []
+    candidate_owners={}
     managed = (_settings(root, job).get('history_observer') or {}).get('contract_version') == 2
     for receipt in source_nodes:
-        _, _, seal, seal_sha = history._source(root, receipt['step'])
+        source_job, _, seal, seal_sha = history._source(root, receipt['step'])
         if seal_sha != receipt['seal_sha256']:
             raise ValueError('Delivery source scientific seal changed')
         observation = seal.get('observations')
         if observation is None:
             continue
-        path = _file(root / observation['path'])
-        if c.digest(path) != observation['sha256']:
-            raise ValueError('Delivery observer original changed')
-        fact = c.read(path)
+        fact = history.read_observation(root, source_job, seal)
         if fact['binding']['source_sha256'] != seal['raw_sha256']:
             raise ValueError('Delivery observer source binding changed')
+        source = originals.node(root, receipt['step'])
         for context in fact.get('contexts', []):
             context_candidate_id = context.get('candidate_id')
             if context_candidate_id is not None:
-                contexts.setdefault(context_candidate_id, []).append(context)
+                contexts.setdefault(context_candidate_id, []).append((source, context))
         for candidate in fact['candidates']:
             if candidate_id is not None and candidate['id'] != candidate_id:
                 continue
             if candidate['id'] in known:
                 raise ValueError('Delivery candidate identity is ambiguous')
-            known.add(candidate['id'])
+            known.add(candidate['id']);candidate_owners[candidate['id']]=source
             from . import generic_results
-            resolved = generic_results.sources(root, fact, candidate['id'])
+            resolved = generic_results.sources(root, fact, candidate['id'], source=source)
             if resolved is not None:
                 resolved['audit_required'] = 'audit' in spec.get('capabilities', ['audit'])
-                resolved['ledger'] = freeze(_proof(root, resolved['ledger']))
-                resolved['objects'] = {label: freeze(_proof(root, proof)) for label, proof in resolved['objects'].items()}
+                resolved['ledger'] = freeze(_proof(root, resolved['ledger'], source=source))
+                resolved['objects'] = {label: freeze(_proof(root, proof, source=source)) for label, proof in resolved['objects'].items()}
                 for proof in spec['inputs']:
                     if proof['label']=='runtime-python':continue
                     if proof['label'] in resolved['objects']:raise ValueError('Provider input collides with candidate original')
@@ -335,17 +341,17 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
             for proof in candidate['evidence']:
                 if proof.get('retention') != 'archived':continue
                 bound = dict(path=proof['snapshot'], sha256=proof['sha256'], size_bytes=proof['size_bytes'])
-                _proof(root, bound)
+                bound = freeze(_proof(root, bound, source=source))
                 label = 'evidence/' + proof['sha256'] + '.jsonl'
                 evidence[label] = bound
                 proofs.append(dict(label=label, sha256=proof['sha256']))
             candidates.append(dict(candidate_id=candidate['id'], status=candidate['status'], evidence=proofs))
-    def execution_proof(proof):
+    def execution_proof(source, proof):
         value = dict(name=Path(proof['path']).name, sha256=proof['sha256'],
                      size_bytes=proof['size_bytes'], retention=proof.get('retention'), input_label=None)
         if proof.get('retention') == 'archived':
             bound = dict(path=proof['snapshot'], sha256=proof['sha256'], size_bytes=proof['size_bytes'])
-            _proof(root, bound)
+            bound = freeze(_proof(root, bound, source=source))
             label = 'execution/' + proof['sha256']
             if label in evidence and evidence[label] != bound:
                 raise ValueError('Execution archive alias changed')
@@ -357,9 +363,9 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
         if managed:
             candidate['execution_contexts'] = [dict(call_id=context['call_id'], status=context['status'],
                 candidate_id=context['candidate_id'], run_id=context['run_id'],
-                proofs=[execution_proof(proof) for proof in context['proofs']],
-                model=execution_proof(context['model']) if context.get('model') is not None else None)
-                for context in contexts.get(candidate['candidate_id'], [])]
+                proofs=[execution_proof(source, proof) for proof in context['proofs']],
+                model=execution_proof(source, context['model']) if context.get('model') is not None else None)
+                for source, context in contexts.get(candidate['candidate_id'], [])]
     if not candidates:
         return dict(items=direct,omitted_count=0,source_nodes=list(source_nodes),capabilities=spec.get('capabilities',[]))
     with tempfile.TemporaryDirectory(prefix='scid-resolve-') as directory:
@@ -375,15 +381,39 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
             destination = stage / 'inputs' / proof['label'];destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(_file(proof['path']), destination);destination.chmod(0o400)
             if c.digest(destination) != proof['sha256']:raise ValueError('Frozen provider input changed during staging')
-        request = dict(scope=dict(handoff_protocol=_settings(root, job)['handoff_protocol']),phase='resolve', operation_id=hashlib.sha256(_bytes(source_nodes)).hexdigest(),
-                       candidate_id=None, artifact_sha256=None, root=str(root), source_roots=spec['source_roots'],
-                       candidates=candidates, inputs=spec['inputs'], config=spec['config'], target=spec['target'], stage=str(stage))
-        value = _call(spec, request, deadline - time.clock_gettime(time.CLOCK_BOOTTIME), evidence=leaf_output(root))
+        groups={}
+        for candidate in candidates:
+            owner=candidate_owners[candidate['candidate_id']]
+            groups.setdefault(originals.identity_key(owner.origin_identity),[]).append(candidate)
+        value=dict(items=[],capabilities=[])
+        from . import candidate_refs
+        for origin,group in groups.items():
+            owner=candidate_owners[group[0]['candidate_id']]
+            mapping={candidate_refs.original_id(owner.origin_identity,row['candidate_id']):row['candidate_id'] for row in group}
+            if len(mapping)!=len(group):raise ValueError('Adapter candidate identity is ambiguous within its exact origin')
+            projected=copy.deepcopy(group)
+            for row in projected:
+                row['candidate_id']=candidate_refs.original_id(owner.origin_identity,row['candidate_id'])
+                for context in row.get('execution_contexts') or []:
+                    context['candidate_id']=candidate_refs.original_id(owner.origin_identity,context['candidate_id'])
+            request = dict(scope=dict(handoff_protocol=_settings(root, job)['handoff_protocol']),phase='resolve',
+                operation_id=hashlib.sha256(_bytes(dict(source_nodes=source_nodes,origin=origin))).hexdigest(),
+                candidate_id=None, artifact_sha256=None, root=str(root), source_roots=spec['source_roots'],
+                candidates=projected, inputs=spec['inputs'], config=spec['config'], target=spec['target'], stage=str(stage))
+            resolved = _call(spec, request, deadline - time.clock_gettime(time.CLOCK_BOOTTIME), evidence=leaf_output(root))
+            if (not isinstance(resolved,dict) or set(resolved)-{'capabilities'}!={'items'}
+                    or not isinstance(resolved['items'],list) or not isinstance(resolved.get('capabilities',[]),list)):
+                raise DeliveryUnresolved('delivery_resolver_unavailable')
+            for item in resolved['items']:
+                if not isinstance(item,dict) or item.get('candidate_id') not in mapping:
+                    raise ValueError('Resolver candidate escaped its exact original instance')
+                value['items'].append(dict(item,candidate_id=mapping[item['candidate_id']]))
+            value['capabilities'].extend(name for name in resolved.get('capabilities',[]) if name not in value['capabilities'])
     declared = value.get('capabilities', []) if isinstance(value, dict) else None
     if (not isinstance(value, dict) or set(value) - {'capabilities'} != {'items'} or not isinstance(value['items'], list)
             or not isinstance(declared, list) or not all(isinstance(name, str) for name in declared) or not set(declared) <= CAPABILITIES):
         raise DeliveryUnresolved('delivery_resolver_unavailable')
-    originals = {row['candidate_id']: row for row in candidates}
+    candidate_originals = {row['candidate_id']: row for row in candidates}
     items, seen = list(direct), set()
     static = {}
     for proof in spec['inputs']:
@@ -392,14 +422,14 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
         if frozen['sha256'] != proof['sha256']:raise ValueError('Frozen provider input changed before snapshot')
         static[proof['label']] = frozen
     for item in value['items']:
-        if (not isinstance(item, dict) or item.get('candidate_id') not in originals or item['candidate_id'] in seen
+        if (not isinstance(item, dict) or item.get('candidate_id') not in candidate_originals or item['candidate_id'] in seen
                 or item.get('status') not in {'audit_pending', 'unavailable'}):
             raise ValueError('Resolver candidate identity or availability changed')
         seen.add(item['candidate_id'])
         if item['status'] == 'unavailable':
             items.append(dict(candidate_id=item['candidate_id'], status='unavailable', reason=(item.get('reason') if item.get('reason') in {'delivery_code_source_unavailable','delivery_managed_original_missing_or_ambiguous','delivery_model_unavailable','delivery_original_missing'} else 'delivery_source_unavailable')));continue
         evidence_label = item.get('evidence_label')
-        if evidence_label not in {proof['label'] for proof in originals[item['candidate_id']]['evidence']}:
+        if evidence_label not in {proof['label'] for proof in candidate_originals[item['candidate_id']]['evidence']}:
             raise ValueError('Resolver used another candidate original')
         objects = dict(static)
         try:
@@ -409,7 +439,7 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
                 if not isinstance(obj, dict):raise ValueError('Resolver object fields changed')
                 from_execution = set(obj) == {'label', 'proof_label'}
                 if from_execution:
-                    authorized = {proof['input_label'] for context in originals[item['candidate_id']].get('execution_contexts') or []
+                    authorized = {proof['input_label'] for context in candidate_originals[item['candidate_id']].get('execution_contexts') or []
                                   for proof in context['proofs'] if proof.get('retention') == 'archived'}
                     label = obj['proof_label']
                     if label not in authorized or label not in evidence:
@@ -427,8 +457,11 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
                     raise ValueError('Resolver object changed before freezing')
                 objects[obj['label']] = proof
             if 'artifact' not in objects:raise DeliveryUnresolved('delivery_artifact_unavailable')
+            owner=candidate_owners[item['candidate_id']]
+            raw_id=candidate_refs.original_id(owner.origin_identity,item['candidate_id'])
             items.append(dict(candidate_id=item['candidate_id'], status='audit_pending',
                               context=item['context'], ledger=evidence[evidence_label], objects=objects,
+                              **(dict(origin_identity=owner.origin_identity,original_candidate_id=raw_id) if raw_id!=item['candidate_id'] else {}),
                               **(dict(audit_required='audit' in spec['capabilities']) if 'capabilities' in spec else {})))
         except DeliveryUnresolved as error:
             items.append(dict(candidate_id=item['candidate_id'], status='unavailable', reason=error.code))
@@ -460,11 +493,12 @@ def public_sources(refs, audits=(), *, nominated_ids=None):
     return result
 
 
-def _proof(root, proof):
+def _proof(root, proof, *, source=None):
     name = Path(proof['path'])
     if name.is_absolute() or '..' in name.parts:
         raise ValueError('Delivery object is outside its exact instance')
-    path = _file(root / name)
+    path = _file(originals.resolve_ref(source, proof) if source is not None
+        else originals.resolve_root_ref(root, proof))
     if path.stat().st_size != proof['size_bytes'] or c.digest(path) != proof['sha256']:
         raise ValueError('Frozen delivery original changed')
     return path
@@ -477,6 +511,11 @@ def validate_sources(root, refs, *, job=None):
             raise ValueError('Delivery source scientific identity changed')
     seen = {}
     for item in refs['items']:
+        if 'original_candidate_id' in item or 'origin_identity' in item:
+            from . import candidate_refs
+            if (not {'original_candidate_id','origin_identity'} <= set(item)
+                    or candidate_refs.origin_candidate(item['origin_identity'],item['original_candidate_id'])!=item['candidate_id']):
+                raise ValueError('Adapter candidate differs from its exact original instance')
         if item['status'] == 'audit_pending':
             for proof in [item['ledger'], *item['objects'].values()]:
                 identity = (proof['sha256'], proof['size_bytes'])
@@ -491,12 +530,17 @@ def validate_sources(root, refs, *, job=None):
 def _choice(root, job, result):
     if result.get('next_action') != 'deliver':
         raise DeliveryUnresolved('delivery_authorization_required')
+    from . import candidate_refs
     chosen=result.get('candidate_recommendation')
-    if chosen is not None and (not isinstance(chosen,str) or chosen not in job.get('history',{}).get('candidate_ids',[])):
+    if chosen is not None and (not isinstance(chosen,str) or chosen not in candidate_refs.available_ids(root,job)):
         raise DeliveryUnresolved('selection_candidate_unavailable')
     from . import shortlist
     if _settings(root, job).get('selection_policy') is not None:
-        expected = shortlist.marker(root,job['step'])
+        if job.get('fork_source') and job.get('selection') is not None:
+            shortlist._screen(root,job['selection'],job=job)
+            expected=job['selection']
+        else:
+            expected = shortlist.marker(root,job['step'])
         if expected is None:
             raise DeliveryUnresolved('selection_screen_unavailable')
         if job.get('selection') != expected:
@@ -549,8 +593,14 @@ def binding(root, job, result):
     item = rows[0]
     from . import engineering
     for repair_step in engineering.steps(root,job['step']):
-        repair=c.read(root/'jobs'/f'{repair_step:03d}.json')['engineering_repair']
-        if repair['candidate_id']==chosen:
+        owner=originals.node(root,repair_step)
+        repair=originals.source_job(owner)['engineering_repair']
+        producer=originals.dependency(owner,repair['source']['step'],seal_sha256=repair['source']['seal_sha256'])
+        if c.digest(originals.source_record(producer,'result-identity.json'))!=repair['source']['seal_sha256']:
+            raise ValueError('Engineering repair candidate source seal changed')
+        original=(candidate_refs.origin_candidate(producer.origin_identity,repair['candidate_id'])
+            if producer.inherited else repair['candidate_id'])
+        if original==chosen:
             raise DeliveryUnresolved('delivery_engineering_original_unrepaired')
     for row in budget.closeout_state(root)['actions']:
         outcome = row['outcome']
@@ -720,7 +770,13 @@ def _staged(root, spec, source, operation_id, stage, *, job=None):
         (stage / 'inputs' / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(_proof(root, proof), stage / 'inputs' / name)
         (stage / 'inputs' / name).chmod(0o400)
-    return dict(scope=dict(handoff_protocol=_settings(root, job)['handoff_protocol']), operation_id=operation_id, candidate_id=source['candidate_id'],
+    candidate=source['candidate_id']
+    if 'original_candidate_id' in source:
+        from . import candidate_refs
+        if candidate_refs.origin_candidate(source['origin_identity'],source['original_candidate_id'])!=candidate:
+            raise ValueError('Adapter candidate differs from its exact original instance')
+        candidate=source['original_candidate_id']
+    return dict(scope=dict(handoff_protocol=_settings(root, job)['handoff_protocol']), operation_id=operation_id, candidate_id=candidate,
                 artifact_sha256=source['objects']['artifact']['sha256'], context=source['context'],
                 object_digests={name: proof['sha256'] for name, proof in source['objects'].items()},
                 inputs=spec['inputs'], config=spec['config'], target=spec['target'], stage=str(stage))
@@ -829,6 +885,7 @@ def invoke(root, intent, max_seconds, *, on_process=None, audit_only=False, coll
                     or not isinstance(value['note'], str) or len(value['note'].encode()) > 1024):
                 result = _result(bound, 'failed' if phase == 'audit' else 'unknown', 'invalid_' + phase + '_result')
                 return dict(result, failure_phase='audit') if phase == 'audit' else result
+            value=dict(value,candidate_id=bound['candidate_id'])
             if phase == 'audit' and value['status'] == 'audited':
                 if audit_only:
                     return dict(value, cleanup_confirmed=True)

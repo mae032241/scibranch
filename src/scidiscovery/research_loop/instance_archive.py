@@ -94,7 +94,7 @@ def _inventory(root):
         unknown = (parts[0] not in ROOT_FILES | ROOT_DIRS
             or len(parts) == 2 and parts[0] == 'project' and parts[1] not in {'global', 'nodes'}
             or len(parts) == 2 and parts[0] == 'host-control' and parts[1] != 'configuration'
-            or len(parts) == 2 and parts[0] == 'host-runtime' and parts[1] not in {'experiment-control', 'restore'})
+            or len(parts) == 2 and parts[0] == 'host-runtime' and parts[1] not in {'experiment-control', 'restore', 'fork'})
         if unknown:
             yield dict(path=name, kind='gap', reason='unrecognized_framework_ownership_not_traversed', **identity)
             return

@@ -104,7 +104,11 @@ def capture_participants(root, job):
              attempts=rows, scope='Actual controlled native participants only; arbitrary shell work remains outside this proof.'))
 
 
-def participants(root, job, seal):
+def participants(root, job, seal, *, source=None):
+    from . import originals
+    source = originals.node(root, job['step']) if source is None else source
+    if source.inherited:
+        return _inherited_participants(source, job, seal)
     ref = seal.get('native_authorship')
     if ref is None:
         return dict(complete=False, participants=[], reason='native_identity_unavailable')
@@ -138,68 +142,150 @@ def participants(root, job, seal):
                 reason=None if proof['complete'] else 'native_identity_unavailable')
 
 
-def authors(root, step, active=None, memo=None):
+def _inherited_participants(source, job, seal):
+    """Verify retained headers in the original workspace identity, without a home."""
+    from . import originals, continuation
+    ref = seal.get('native_authorship')
+    if ref is None:
+        return dict(complete=False, participants=[], reason='native_identity_unavailable')
+    proof = c.read(originals.resolve_ref(source, ref))
+    found, complete = set(), True
+    first_digest = previous = None
+    for number, row in enumerate(proof['attempts']):
+        intent_path = originals.resolve_ref(source, row['intent'])
+        intent = c.read(intent_path)
+        outcome = c.read(originals.resolve_ref(source, row['outcome']))
+        if row['attempt'] != number or intent['task_sha256'] != seal['job_sha256']:
+            raise q.IntegrityError('Inherited authorship changed its original task or attempt')
+        if number == 0:
+            first_digest = c.digest(intent_path)
+        elif (intent.get('attempt') != number or intent.get('root_intent_sha256') != first_digest
+                or (intent.get('previous') or {}).get('native-intent.json') != previous):
+            raise q.IntegrityError('Inherited authorship omitted its original attempt chain')
+        previous = c.digest(intent_path)
+        if row['status'] != 'known':
+            complete = False
+            continue
+        if outcome.get('native_identity', {}).get('participant_scope') != 'codex_exec_single_agent_v1':
+            raise q.IntegrityError('Inherited native participant scope is incomplete')
+        identity = ('codex_exec', outcome['thread_id'])
+        header = originals.resolve_ref(source, row['header'])
+        continuation.validate_session_header(header.read_bytes(), identity[1], source.logical_workspace)
+        if row['participant'] != list(identity) or row['session']['thread_id'] != identity[1]:
+            raise q.IntegrityError('Inherited native participant changed')
+        found.add(identity)
+    expected = [list(row) for row in sorted(found)]
+    if proof['participants'] != expected or proof['complete'] != (complete and bool(proof['attempts'])):
+        raise q.IntegrityError('Inherited authorship completeness changed')
+    return dict(complete=proof['complete'], participants=expected,
+        reason=None if proof['complete'] else 'native_identity_unavailable')
+
+
+def validate_original(source, job, seal, payload):
+    """Retain an original review's historical meaning without granting a child call."""
+    from . import originals
+    reviewer = _inherited_participants(source, job, seal)
+    if not job.get('formal_review'):
+        return
+    ref = seal.get('formal_review')
+    if ref is None:
+        raise q.IntegrityError('Original formal review lost its sealed qualification')
+    context = originals.source_for_ref(source, job['formal_review'])
+    request = c.read(originals.resolve_ref(context, job['formal_review']))
+    proof = c.read(originals.resolve_ref(source, ref))
+    subject = request['subject']
+    producer = originals.dependency(context, subject['producer_step'],
+        seal_sha256=subject['producer_seal']['sha256'])
+    original_seal = c.read(originals.resolve_ref(producer, subject['producer_seal']))
+    if subject['material'] not in original_seal['materials']:
+        raise q.IntegrityError('Original formal review lost its exact subject')
+    if job.get('fork_source'):
+        subject = dict(subject, producer_seal=dict(subject['producer_seal'], origin_identity=producer.origin_identity))
+    host_root = source.storage_root.parents[1] if source.inherited else source.storage_root
+    actual_authors = authors(host_root, subject['producer_step'], source=producer)
+    independent = review_rules.independence(
+        [tuple(row) for row in actual_authors['participants']], [tuple(row) for row in reviewer['participants']],
+        authors_complete=actual_authors['complete'], reviewers_complete=reviewer['complete'])
+    expected = dict(version=1, review_step=job['step'], subject=subject, request=job['formal_review'],
+        contract=request['contract'], authors=actual_authors, reviewer=reviewer,
+        native_authorship=seal.get('native_authorship'), raw_sha256=seal['raw_sha256'], result_sha256=seal['sha256'],
+        verdict=payload['verdict'], independence=independent,
+        status='passed' if independent == 'independent' and payload['verdict'] == 'pass' else 'not_qualified')
+    if request['authors'] != actual_authors or proof != expected:
+        raise q.IntegrityError('Original formal review changed its subject, authors, or verdict')
+
+
+def authors(root, step, active=None, memo=None, *, source=None):
     """Only exact producer and declared implementation contributors are authors."""
     active, memo = set() if active is None else active, {} if memo is None else memo
-    if step in active:
+    from . import originals
+    owner = originals.node(root, step) if source is None else originals.at_step(source, step)
+    key = (originals.identity_key(owner.origin_identity), step)
+    if key in active:
         return dict(complete=False, participants=[], reason='authorship_cycle')
-    if step in memo:
-        return memo[step]
-    job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
-    seal = c.read(c.regular(c.host_record(c.workspace(root, step)) / 'result-identity.json'))
-    own = participants(root, job, seal)
+    if key in memo:
+        return memo[key]
+    context = owner if owner.inherited else None
+    job = originals.source_job(owner)
+    seal = c.read(originals.source_record(owner, 'result-identity.json'))
+    own = participants(root, job, seal, source=owner)
     people = {tuple(row) for row in own['participants']}
     complete = own['complete']
     source = seal.get('source_provenance')
     coverage = None
     if source is not None:
-        proof = q._read(root, source)
+        proof = c.read(originals.resolve_ref(owner, source))
         coverage = proof.get('managed_input_coverage')
+        q.validate_outputs(root, job, seal, source=context)
         if coverage is not None:
-            q.validate_outputs(root, job, seal)
             complete = complete and all(row['complete'] for row in coverage)
         elif proof.get('missing_reason') is not None:
             complete = False  # Legacy/opaque call inputs have no trusted coverage.
     if not job.get('formal_review'):
         contributions = list(job.get('selected_inputs', []))
         from . import execution_inputs
-        execution_inputs.validate_seal(root, job, seal)
-        originals = []
+        execution_inputs.validate_seal(root, job, seal, source=context)
+        compiled_originals = []
         for row in seal.get('compiled_implementations', []):
             compiler = execution_inputs.verify_compilation(root, row['compiler'], material=row['material'],
-                client_binding=row.get('client_binding'))
-            originals.extend(item['original'] for item in compiler['inputs'])
+                client_binding=row.get('client_binding'), source=context)
+            compiled_originals.extend(item['original'] for item in compiler['inputs'])
             if compiler.get('author_input') is not None:
-                originals.append(compiler['author_input'])
+                compiled_originals.append(compiler['author_input'])
         # q.validate_outputs above verified this immutable accepted view. Only
         # actual input contributions join the existing traversal, not all parents.
         for value in coverage or []:
             if value['complete'] and 'input_sources' in value:
-                declared = execution_inputs.managed_source_contributions(root, job, q._read(root, value['accepted_ref']))
+                declared = execution_inputs.managed_source_contributions(root, job,
+                    q._read(root, value['accepted_ref'], source=context), source=context)
                 contributions.extend(declared['contributions'])
-        if configuration_updates.for_job(root, job).get('history_observer') is not None:
+        if originals.source_settings(owner).get('history_observer') is not None:
             from . import history
-            observation = history.read_observation(root, job, seal)
-            declared = history.observer_input_sources(root, job, observation) if observation is not None else None
+            observation = (history.validate_observation_original(owner, job, seal) if context is not None
+                else history.read_observation(root, job, seal))
+            declared = history.observer_input_sources(root, job, observation, source=context) if observation is not None else None
             complete = complete and declared is not None and declared['complete']
             if declared is not None:
                 contributions.extend(declared['contributions'])
-        for original in originals:
-            origin_seal = q._read(root, original['producer_seal'])
+        for original in compiled_originals:
+            producer = originals.dependency(owner, original['producer_step'], seal_sha256=original['producer_seal']['sha256'])
+            origin_seal = c.read(originals.resolve_ref(producer, original['producer_seal']))
             contributions.append(dict(origin_step=original['producer_step'],
                 origin_result_sha256=origin_seal['sha256'], material=execution_inputs.resolve_native_original(
-                    root, original, compiler_job=job)))
+                    root, original, compiler_job=job, source=context), producer_seal=original['producer_seal']))
         for selected in contributions:
             origin = selected['origin_step']
-            origin_seal = c.read(c.regular(c.host_record(c.workspace(root, origin)) / 'result-identity.json'))
+            producer = originals.dependency(owner, origin,
+                seal_sha256=selected.get('producer_seal', {}).get('sha256'))
+            origin_seal = c.read(originals.source_record(producer, 'result-identity.json'))
             if selected['material'] not in origin_seal['materials'] or selected['origin_result_sha256'] != origin_seal['sha256']:
                 raise q.IntegrityError('Declared author contribution differs from its exact producer')
-            contributor = authors(root, origin, {*active, step}, memo)
+            contributor = authors(root, origin, {*active, key}, memo, source=producer)
             complete = complete and contributor['complete']
             people.update(tuple(row) for row in contributor['participants'])
     value = dict(complete=complete, participants=[list(row) for row in sorted(people)],
                  reason=None if complete else 'subject_authorship_unsupported')
-    memo[step] = value
+    memo[key] = value
     return value
 
 
@@ -208,12 +294,52 @@ def _subject(root, selected):
         return None
     item = selected[0]
     step = item['origin_step']
-    c.validate(c.workspace(root, step))
-    path = c.host_record(c.workspace(root, step)) / 'result-identity.json'
+    from . import originals
+    source = originals.node(root, step)
+    if not source.inherited:
+        c.validate(c.workspace(root, step))
+    path = originals.source_record(source, 'result-identity.json')
     seal = c.read(path)
     if item['material'] not in seal['materials'] or item['origin_result_sha256'] != seal['sha256']:
         raise q.IntegrityError('Formal review subject differs from its exact producer')
-    return dict(producer_step=step, producer_seal=q._ref(root, path), material=item['material'])
+    ref = (originals.original_ref(source, f'native-evidence/{step:03d}/result-identity.json')
+        if source.inherited else q._ref(root, path))
+    return dict(producer_step=step, producer_seal=ref, material=item['material'])
+
+
+def _request_original(root, reference):
+    """Carry the request's origin while reading its unchanged nested references."""
+    from . import originals
+    parts = Path(reference['path']).parts
+    if len(parts) < 3 or parts[0] != 'native-evidence' or not parts[1].isdigit():
+        raise q.IntegrityError('Formal review request has no exact original requester')
+    step = int(parts[1])
+    if reference.get('origin_identity') is not None:
+        manifest = originals._manifest(root)
+        if manifest is None:
+            raise q.IntegrityError('Formal review request lost its original instance')
+        source = originals._source(root, manifest, reference['origin_identity'], step)
+    else:
+        source = originals.node(root, step)
+    return source, c.read(originals.resolve_ref(source, reference))
+
+
+def _seal_original(root, step, reference, context=None):
+    from . import originals
+    source = originals.node(root, step)
+    if reference.get('origin_identity') is not None:
+        manifest = originals._manifest(root)
+        source = originals._source(root, manifest, reference['origin_identity'], step)
+    elif context is not None and source.origin_identity != context.origin_identity:
+        # A nested request may refer to another origin only through an explicit
+        # binding. Equal logical labels do not establish that relationship.
+        raise q.IntegrityError('Formal review subject lacks its exact origin binding')
+    plain = originals.original_ref(source, f'native-evidence/{step:03d}/result-identity.json')
+    if reference.get('origin_identity') is None:
+        plain.pop('origin_identity')
+    if reference != plain:
+        raise q.IntegrityError('Formal review seal differs from its exact original')
+    return source, c.read(originals.resolve_ref(source, reference))
 
 
 def _request_value(root, selected, job):
@@ -252,11 +378,13 @@ def request_route(root, job, payload, parents):
 
 def input_binding(root, reference):
     """Exact material and producer metadata, without mounting authored conclusions."""
-    request = q._read(root, reference)
-    requester = c.read(c.regular(Path(root) / 'jobs' / f'{request["requester"]["step"]:03d}.json'))
-    subject = request['subject']; seal = q._read(root, subject['producer_seal'])
-    if (request['contract'] != contract(root, requester) or request['question'] != QUESTION
-            or subject['producer_seal'] != q._ref(root, c.host_record(c.workspace(root,subject['producer_step']))/'result-identity.json')
+    from . import originals
+    context, request = _request_original(root, reference)
+    requester = originals.source_job(context)
+    subject = request['subject']
+    _, seal = _seal_original(root, subject['producer_step'], subject['producer_seal'], context)
+    expected_contract = originals.source_settings(context).get('formal_review_policy', {}).get('contract')
+    if (request['contract'] != expected_contract or request['question'] != QUESTION
             or subject['material'] not in seal['materials']):
         raise q.IntegrityError('Formal review inputs differ from the exact requested subject')
     selected = dict(label='Exact reviewed artifact', origin_step=subject['producer_step'],
@@ -285,12 +413,21 @@ def input_binding(root, reference):
 
 def unavailable(root, step):
     """Read a host failure against its exact sealed requester, never a model label."""
-    path=c.host_record(c.workspace(root,step))/'formal-review-unavailable.json'
-    if not path.exists() and not path.is_symlink():
-        return None
+    from . import originals
+    source = originals.node(root, step)
+    relative = f'native-evidence/{step:03d}/formal-review-unavailable.json'
+    if source.inherited:
+        if not any(row['origin_identity'] == source.origin_identity and row['path'] == relative for row in source.entries):
+            return None
+        path = originals.resolve_ref(source, dict(path=relative))
+    else:
+        path = c.host_record(c.workspace(root, step)) / 'formal-review-unavailable.json'
+        if not path.exists() and not path.is_symlink():
+            return None
     value=c.read(c.regular(path))
-    seal_path=c.host_record(c.workspace(root,step))/'result-identity.json'
-    if (value['requester']!=dict(step=step,seal=q._ref(root,seal_path))
+    seal_ref = originals.original_ref(source, f'native-evidence/{step:03d}/result-identity.json')
+    seal_ref.pop('origin_identity')
+    if (value['requester']!=dict(step=step,seal=seal_ref)
             or value['failure_key']!={key:value['failure'][key] for key in
                 ('contract','subject','authors','unresolved_selection','reason')}
             or value['failure']['reason'] is None):
@@ -302,8 +439,9 @@ def unavailable_attempts(root, step, *, before_step=None):
     """Validate historical finite-correction originals; new routes never count these."""
     key=unavailable(root,step)['failure_key']
     stop=before_step if before_step is not None else step+1
-    steps=sorted(int(path.parent.name) for path in (Path(root)/'native-evidence').glob('*/formal-review-unavailable.json'))
-    return [prior for prior in steps if prior<stop and unavailable(root,prior)['failure_key']==key]
+    from . import originals
+    steps = [source.step for source in originals.source_sequence(root, stop)]
+    return [prior for prior in steps if (value := unavailable(root, prior)) is not None and value['failure_key'] == key]
 
 
 def choice_constraints(root, job, references=None):
@@ -313,6 +451,10 @@ def choice_constraints(root, job, references=None):
     if references is None:
         paths=sorted((Path(root)/'native-evidence').glob('*/formal-review-unavailable.json'),key=lambda path:int(path.parent.name))
         references=[q._ref(root,path) for path in paths if int(path.parent.name)<job['step']]
+        from . import originals
+        for source in originals.source_sequence(root, job['step']):
+            if source.inherited and unavailable(root, source.step) is not None:
+                references.append(originals.original_ref(source, f'native-evidence/{source.step:03d}/formal-review-unavailable.json'))
     for reference in references:
         value=q._read(root,reference)
         step=value['requester']['step']
@@ -369,14 +511,14 @@ def bind_job(root, job):
         return
     if job['role'] != 'A' or contract(root, job) is None:
         raise q.IntegrityError('Formal review requires its explicit frozen operator contract')
-    request = q._read(root, back['request'])
-    requester = c.read(c.regular(Path(root) / 'jobs' / f'{request["requester"]["step"]:03d}.json'))
-    if request['contract'] != contract(root, requester) or request['requester']['step'] >= job['step']:
+    from . import originals
+    context, request = _request_original(root, back['request'])
+    requester = originals.source_job(context)
+    expected_contract = originals.source_settings(context).get('formal_review_policy', {}).get('contract')
+    if request['contract'] != expected_contract or request['requester']['step'] >= job['step']:
         raise q.IntegrityError('Formal review request contract or requester changed')
-    if request['requester']['seal'] != q._ref(root,c.host_record(c.workspace(root,request['requester']['step']))/'result-identity.json'):
-        raise q.IntegrityError('Formal review requester differs from its exact original node')
-    q._read(root, request['requester']['seal'])
-    q._read(root, request['subject']['producer_seal'])
+    _seal_original(root, request['requester']['step'], request['requester']['seal'], context)
+    _seal_original(root, request['subject']['producer_step'], request['subject']['producer_seal'], context)
     job.update(purpose='formal_review', formal_review=back['request'])
 
 
@@ -422,7 +564,7 @@ def feedback(root, job):
 
 
 def public(root, job):
-    request = q._read(root, job['formal_review'])
+    _, request = _request_original(root, job['formal_review'])
     material = request['subject']['material']
     binding=input_binding(root,job['formal_review'])
     scientific=binding.get('compiler_scientific_materials',[])
@@ -440,9 +582,11 @@ def public(root, job):
 
 
 def _qualification(root, job, payload, seal):
-    request = q._read(root, job['formal_review'])
+    context, request = _request_original(root, job['formal_review'])
     subject = request['subject']
-    q._read(root, subject['producer_seal'])
+    producer, _ = _seal_original(root, subject['producer_step'], subject['producer_seal'], context)
+    if job.get('fork_source'):
+        subject = dict(subject, producer_seal=dict(subject['producer_seal'], origin_identity=producer.origin_identity))
     current_authors = authors(root, subject['producer_step'])
     input_binding(root, job['formal_review'])
     if request['authors'] != current_authors:
@@ -475,21 +619,47 @@ def validate_seal(root, job, payload, seal):
 
 
 def return_route(root, job, parents):
-    request = q._read(root, job['formal_review'])
+    _, request = _request_original(root, job['formal_review'])
     seal = c.read(c.host_record(c.workspace(root, job['step'])) / 'result-identity.json')
     return 'A', sorted(set([*parents, request['requester']['step'], job['step']])), \
         'Use the exact formal review findings and limitations to choose the scientific next action.', \
         dict(kind='formal_review_return', review=seal['formal_review'])
 
 
+def subject_for_receipt(root, receipt):
+    """Host interpretation of a retained exact subject; original bytes stay intact."""
+    import copy
+    from . import originals
+    proof = q._read(root, receipt)
+    subject = copy.deepcopy(proof['subject'])
+    if 'origin_identity' in receipt:
+        context = originals.for_origin(root, receipt['origin_identity'], step=proof['review_step'])
+        owner = originals.dependency(context, subject['producer_step'],
+            seal_sha256=subject['producer_seal']['sha256'])
+        subject['producer_seal'].setdefault('origin_identity', owner.origin_identity)
+    return subject
+
+
 def require_review(root, subject, receipt):
     """Future P3 gate consumes an explicit exact receipt; never a latest lookup."""
     root=Path(root).resolve()
     proof = q._read(root, receipt)
-    job = c.read(c.regular(root / 'jobs' / f'{proof["review_step"]:03d}.json'))
-    c.validate(c.workspace(root, job['step']))
-    seal = c.read(c.host_record(c.workspace(root, job['step'])) / 'result-identity.json')
-    if (seal.get('formal_review') != receipt or proof['subject'] != subject
-            or proof['contract'] != q._read(root, job['formal_review'])['contract'] or proof['status'] != 'passed'):
+    from . import originals
+    context = (originals.for_origin(root, receipt['origin_identity'], step=proof['review_step'])
+        if 'origin_identity' in receipt else originals.node(root, proof['review_step']))
+    job = originals.source_job(context)
+    if context.inherited:
+        c.validate_original(context)
+        seal = c.read(originals.source_record(context, 'result-identity.json'))
+        request = c.read(originals.resolve_ref(originals.source_for_ref(context, job['formal_review']), job['formal_review']))
+        bound_receipt = dict(seal.get('formal_review') or {})
+        bound_receipt.setdefault('origin_identity', context.origin_identity)
+    else:
+        c.validate(c.workspace(root, job['step']))
+        seal = c.read(c.host_record(c.workspace(root, job['step'])) / 'result-identity.json')
+        request = q._read(root, job['formal_review'])
+        bound_receipt = seal.get('formal_review')
+    if (bound_receipt != receipt or subject_for_receipt(root, receipt) != subject
+            or proof['contract'] != request['contract'] or proof['status'] != 'passed'):
         raise ValueError('Exact subject has no compatible independent sealed pass')
     return receipt

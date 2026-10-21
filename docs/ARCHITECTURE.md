@@ -387,6 +387,76 @@ not qualify as independent review. Source restrictions propagate through frozen
 inputs, and unknown origins remain unknown. These checks cover declared framework
 surfaces, not arbitrary native reads or scientific correctness.
 
+## Historical-task forks
+
+`fork_service.py` provides the shared CLI/UI preview and create path. A parent must
+use frozen protocol 23, be completed and quiescent, and retain the exact selected
+logical task N and its declared dependency originals. Unsupported protocols,
+missing historical cuts, ambiguous identities and missing originals are refused.
+Unknown native, managed-execution or delivery effects must first be reconciled
+against their original calls; a fork never automatically resubmits them.
+
+The child has a new instance identity. Its first task keeps logical label N and
+reruns N's frozen first-invocation scientific inputs in a fresh native session. N's
+outputs, later tasks, tool feedback and continuation/repair attempt context are
+not inherited as that task's input. The entry selects a logical task, with no
+arbitrary attempt breakpoint or remaining-at-cut budget mode. Ordinary tasks
+retain their selected route. FINAL and closeout tasks retain their phase and
+source cutoff; new budget alone does not convert them into ordinary exploration.
+Formal-review tasks retain their neutral exact-subject contract and independence
+gates. Engineering-repair tasks retain their bounded repair contract. A task with
+continuations or output repairs restarts from its first input, rather than
+resuming those attempts.
+
+`fork_sources.py` copies a bounded closure of exact scientific originals and
+required host proofs; `originals.py` resolves local and inherited sources by their
+original identity and digest. Nested branches preserve those identities and copy
+the required closure again, so reading inherited scientific inputs does not need
+the parent or ancestor directories after creation. Native homes, credentials,
+model sessions, tools, solvers, licenses and the execution environment are not
+copied. Frozen model, permission and launcher declarations remain declarations;
+arbitrary unfrozen native reads are not portable. Declared external runtime/adapter
+read scopes, namespace mappings and delivery targets remain frozen; forking does
+not copy, recreate or expand them, and they must remain valid and available when
+the child continues. The current closure bounds are
+65,536 entries, 4 GiB, 16 ancestry levels and 32 MiB per parsed control JSON.
+
+The operator declares positive finite new token, active-time and control-action
+limits. Child accounting measures new work; logical step N is not N newly
+consumed actions. Inherited scientific investment and comparison opportunities
+remain in scientific history. Inherited costs are reported separately: incomplete
+meters stay unknown with any known lower bound; historical active time and total
+control actions are not reconstructed as exact costs. A new allowance does not
+reset historical science or turn missing usage into zero. Source restrictions
+travel with exact originals. Historical review verdicts and execution grants
+remain bound to their original subjects and calls; they grant no permission or
+qualification to a new child subject or execution.
+
+Creation atomically publishes a paused child and a durable request/receipt.
+`fork-create` binds `expected_preview_id` and `operation_id` to the full request,
+including target, budgets and exact guidance text. Repeating the same ID and
+request reconciles the same receipt, including after loss of the response; a
+conflicting request or existing unrelated target is refused. Receipt reconciliation
+does not require a surviving parent. Explicit `start --continue` clears the pause
+and starts child work under its own gates. Preview and creation launch no model
+or solver calls.
+
+Optional guidance preserves the user's exact text as advice for the selected
+ordinary task and legal successors. General fork guidance is deferred past a
+selected formal reviewer so its neutral inputs remain intact. It grants no
+scientific verdict, budget or execution permission. The UI enters through a
+historical node; open the paused child and choose “继续研究” to advance. It retains
+failed form drafts and offers same-request receipt
+reconciliation for the attempted operation in the same UI host/browser session.
+General Web operation recovery across host restarts is not established; the
+CLI/service receipt is durable.
+
+Read-only originals and the host's cooperative source lease protect the declared
+copy boundary among cooperating current-version writers. They remain a same-user
+soft boundary. Do not combine forking with active pre-upgrade writers: the lease
+does not retroactively fence older processes. These controls do not establish
+real-model, solver or scientific qualification.
+
 ## Extension rules
 
 Domain algorithms, scientific schemas and execution adapters belong to plugins.

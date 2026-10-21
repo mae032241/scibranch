@@ -57,6 +57,18 @@ def main(argv=None):
     config_check = commands.add_parser('config-check', help='Read-only validation of the effective research TOML configuration')
     config_check.add_argument('--config', type=Path, required=True)
     config_inspect = commands.add_parser('config-inspect', help='Inspect effective TOML or exact frozen instance settings; host-private output')
+    for name in ('fork-preview', 'fork-create'):
+        command = commands.add_parser(name, help='Preview or create a paused branch from an exact historical logical task; never starts native work')
+        command.add_argument('--root', type=Path, required=True)
+        command.add_argument('--step', type=int, required=True)
+        command.add_argument('--child-root', type=Path, required=True)
+        command.add_argument('--max-tokens', type=int, required=True)
+        command.add_argument('--max-seconds', type=float, required=True)
+        command.add_argument('--max-steps', type=int, required=True)
+        command.add_argument('--guidance-file', type=Path)
+        if name == 'fork-create':
+            command.add_argument('--expected-preview-id', required=True)
+            command.add_argument('--operation-id', required=True)
     config_source = config_inspect.add_mutually_exclusive_group(required=True)
     config_source.add_argument('--config', type=Path)
     config_source.add_argument('--root', type=Path)
@@ -200,10 +212,19 @@ def main(argv=None):
             if root_arg is not None else None)
     try:
         workspace_ui = args.command == 'serve-ui' and args.workspace is not None
-        if args.command not in {'prepare','config-check','config-inspect','status','archive-inspect','checkpoint-enroll','checkpoint-export','checkpoint-restore'} and not workspace_ui:
+        if args.command not in {'prepare','config-check','config-inspect','status','archive-inspect','checkpoint-enroll','checkpoint-export','checkpoint-restore','fork-preview','fork-create'} and not workspace_ui:
             from .protocol import require_current
             require_current(root)
-        if args.command in {'config-check', 'config-inspect'}:
+        if args.command in {'fork-preview', 'fork-create'}:
+            from . import fork_service
+            options = dict(budget=dict(max_tokens=args.max_tokens, max_seconds=args.max_seconds, max_steps=args.max_steps),
+                guidance_text=contracts.regular(args.guidance_file, limit=256000).read_text(encoding='utf-8') if args.guidance_file is not None else None)
+            if args.command == 'fork-preview':
+                result = fork_service.preview(root, args.step, args.child_root, **options)
+            else:
+                result = fork_service.create(root, args.step, args.child_root, **options,
+                    expected_preview_id=args.expected_preview_id, operation_id=args.operation_id)
+        elif args.command in {'config-check', 'config-inspect'}:
             result = research_config.inspect(config=args.config, root=root)
         elif args.command == 'prepare':
             if args.config is not None:
@@ -381,11 +402,10 @@ def main(argv=None):
         else:
             result = controller.run(root)
     except (OSError, ValueError, RuntimeError) as error:
-        from .protocol import UnsupportedProtocol
-        print(json.dumps(dict(status='error',error=str(error),**(dict(code=error.code) if isinstance(error,UnsupportedProtocol) else {})), ensure_ascii=False))
+        print(json.dumps(dict(status='error',error=str(error),**(dict(code=error.code) if hasattr(error, 'code') else {})), ensure_ascii=False))
         return 1
     print(json.dumps(result, ensure_ascii=False))
-    return 0 if result.get('status') in {None, 'preserved_read_only', 'prepared', 'finish', 'final_a_completed', 'wait', 'paused', 'pause_requested', 'budget_amended', 'delivery_confirmed', 'execution_recovered', 'execution_resume_recorded', 'exported_unsubmitted', 'ui_stopped', 'archive_exported', 'archive_inspected', 'material_restored', 'material_already_present','checkpoint_enrolled','checkpoint_exported','checkpoint_restored','checkpoint_restore_already_completed','execution_maintained','config_checked','config_inspected','accepted','running','applied','operations','guidance_listed','pending','revoked','progress_read','progress_unavailable','artifact_downloaded'} else 2
+    return 0 if result.get('status') in {None, 'fork_preview_ready', 'fork_created', 'preserved_read_only', 'prepared', 'finish', 'final_a_completed', 'wait', 'paused', 'pause_requested', 'budget_amended', 'delivery_confirmed', 'execution_recovered', 'execution_resume_recorded', 'exported_unsubmitted', 'ui_stopped', 'archive_exported', 'archive_inspected', 'material_restored', 'material_already_present','checkpoint_enrolled','checkpoint_exported','checkpoint_restored','checkpoint_restore_already_completed','execution_maintained','config_checked','config_inspected','accepted','running','applied','operations','guidance_listed','pending','revoked','progress_read','progress_unavailable','artifact_downloaded'} else 2
 
 
 if __name__ == '__main__':

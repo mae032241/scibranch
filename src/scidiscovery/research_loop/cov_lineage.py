@@ -285,7 +285,8 @@ def _progress(config, scope):
             if not isinstance(accepted.get('parent'), dict):
                 raise IntegrityError('Published live parent is malformed')
             parent = accepted['parent']['candidate_id']
-            if parent is not None and (not isinstance(parent, str) or not 0 < len(parent.encode()) <= 80):
+            from scidiscovery.research_loop import candidate_refs
+            if parent is not None and not candidate_refs.valid_parent_id(parent):
                 raise IntegrityError('Published live parent is malformed')
             if completed is not None:
                 state = completed['status']
@@ -401,6 +402,11 @@ def configure(root, step, run_argv, runs_root, output, *, receipt_channel='publi
         if context and context['status']=='known_success' and model and model.get('retention')=='archived':
             # The qualified namespace retains the original public runs alias.
             path=Path(runs_root)/f'model_run{context["run_id"]}.pkl'
+            from . import originals
+            producer=originals.node(root,context['scope']['step'])
+            if producer.inherited:
+                source=originals.source_for_ref(producer,model)
+                path=originals.resolve_ref(source,dict(model,path=model['snapshot']))
             completion=next((p for p in context['proofs'] if Path(p['path']).name=='completed.json'),None)
             if completion is None:continue
             parents.append(dict(name=candidate,candidate_id=candidate,model=dict(path=str(path),sha256=model['sha256'],size_bytes=model['size_bytes']),

@@ -28,6 +28,7 @@ from . import instance_live as live
 from . import budget, configuration_form, configuration_updates, progress, public_output, research_config, user_guidance
 from . import ui_components as ui
 from . import ui_mechanisms, ui_view, ui_translation, ui_errors, ui_guidance
+from . import fork_ui
 
 
 _ENTRY_SCRIPT = "location.replace('./');"
@@ -77,6 +78,7 @@ class InstanceUI:
         self.control_lock = threading.Lock()
         self.control_result = None
         self.config_selections = {}
+        self.fork_attempts = {}
         self.host = None
         self.live_cache = live.SnapshotCache()
         self.summary_cache = live.SnapshotCache()
@@ -159,6 +161,15 @@ class InstanceUI:
     def _control_error(self, token, action, form, error):
         context = 'configuration' if action in {'configure', 'create', 'configuration', 'configuration-update'} else action if action in {'open', 'load-config', 'budget'} else 'control'
         problem = self._problem(error, context=context)
+        if action in {'fork-preview', 'fork-create'}:
+            code = getattr(error, 'code', '')
+            if code.startswith('fork_'):
+                problem = ui_errors.Problem(409 if code in {'fork_preview_stale', 'fork_source_changed',
+                    'fork_operation_conflict', 'fork_target_exists', 'fork_busy'} else 422,
+                    '分支条件尚未满足', '本次分支尚未创建，或已发布结果需要按原操作编号核对。',
+                    '保留原输入；检查来源、额度和操作编号后重新预览。', code=code)
+            return self._fork_page(token, form.get('step', ''), draft=form, problem=problem,
+                reconcile=action == 'fork-create')
         if action == 'configuration-update':
             state = configuration_updates.status(self.root)
             fields = {key: value for key, value in form.items() if key not in {'nonce', 'csrf', 'expected_revision', 'authorization_note'}}
@@ -720,7 +731,7 @@ class InstanceUI:
         return '<article class="event"><p>' + html.escape(text) + '</p>' + ('<small>本条公开文本已截短</small>' if item.get('omitted_characters') else '') + '</article>' if text else ''
 
     def _latest_step(self):
-        return max(saved_status.steps(self.root), default=0)
+        return max(saved_status.visible_steps(self.root), default=0)
 
     def _final_step(self):
         final = saved_status.final_return(self.root)
@@ -836,7 +847,7 @@ class InstanceUI:
             return dict(view=view, conclusion=conclusion, final=self._final_step(),
                 operation=operations[-1] if operations else None, operations=operations[-20:],
                 ui=dict(header=ui_view.header(self.root, view['objective']),
-                    used_steps=(view.get('closeout') or {}).get('used_steps', latest)))
+                    used_steps=view.get('used_steps', (view.get('closeout') or {}).get('used_steps', latest))))
         return self.summary_cache.read(self.root, load, force=force)
 
     def _loaded_instances(self, *, force=False):
@@ -1190,6 +1201,8 @@ class InstanceUI:
                 body += '<p><a href="/results/' + str(node['step']) + '">阅读阶段结论</a> · <a href="' + base + '/science">完整结论原文</a> · <a href="' + base + '/materials">下载研究文件</a></p>'
             else:
                 body += '<p><a href="' + base + '/progress?attempt=' + str(node.get('continuations', 0)) + '">查看此阶段公开进度</a></p>'
+            if 'maintenance' in self.browser.verify(browser_token, instance_id=self.instance).scopes:
+                body += '<p><a href="' + base + '/fork">从这里分叉</a></p>'
             body += '</article>'
         if view.get('next_after') is not None:
             body += '<a href="/?after=' + str(view['next_after']) + '">查看后续阶段</a>'
@@ -1197,6 +1210,34 @@ class InstanceUI:
         body += '<div id="live-token-monitor">' + parts['live-token-monitor'] + '</div>'
         body += self._more_actions(browser_token, snapshot, step=step)
         return 200, self._page('研究阶段', body), {}
+
+    def _fork_page(self, token, step, *, draft=None, preview=None, problem=None, reconcile=False):
+        self._admin(token)
+        attempted = self.fork_attempts.get(token)
+        if draft is None and preview is None and attempted and attempted.get('step') == str(step):
+            draft = attempted
+            reconcile = True
+        body = self._navigation() + '<p>重新执行所选逻辑任务，继承它开始前的准确输入。创建后保持暂停，请在新实例显式开始。</p>'
+        body += '<p class="note">方向指引保持原文；正式审查的中立输入限制优先。历史许可不授予新执行权限。</p>'
+        if problem:
+            body += problem.markup()
+            body += '<p class="note">错误代码：' + html.escape(problem.code) + '</p>'
+        if preview:
+            body += fork_ui.summary(preview)
+        draft = dict(draft or {})
+        if reconcile and draft.get('expected_preview_id') and draft.get('operation_id'):
+            body += '<section><h2>核对已尝试的创建操作</h2><p>按原目标、原预览编号与原操作编号核对结果；此操作不要求重新读取父实例。</p>'
+            body += self._form(token, 'fork-create', fork_ui.reconciliation_fields(draft), '核对原操作结果') + '</section>'
+            # A new preview is a separately declared request. The immutable
+            # recovery form above keeps the original operation identifiers.
+            draft.update(operation_id=uuid.uuid4().hex, expected_preview_id='')
+        if preview:
+            draft['expected_preview_id'] = preview['preview_id']
+        fields = fork_ui.fields(step, draft)
+        body += self._form(token, 'fork-preview', fields, '预览分支')
+        if preview and preview.get('status') == 'fork_preview_ready':
+            body += self._form(token, 'fork-create', fields, '创建暂停的新分支')
+        return (problem.status if problem else 200), self._page('从第 ' + str(step) + ' 阶段分叉', body, live=False), {}
 
     def _materials_page(self, step, after):
         page=display.materials(self.root,step,after=after)
@@ -1210,13 +1251,16 @@ class InstanceUI:
         return 200,self._page('研究文件下载',body,live=False),{}
 
     def _sealed_steps(self, after=0, limit=None):
-        steps = sorted(int(path.stem) for path in (self.root/'jobs').glob('*.json')
+        from . import fork_runtime, fork_sources
+        inherited = ({row['step'] for row in fork_sources.validate_manifest(self.root)['prefix_entries']}
+                     if fork_runtime.is_fork(self.root) else set())
+        steps = sorted(inherited | {int(path.stem) for path in (self.root/'jobs').glob('*.json')
             if path.stem.isascii() and path.stem.isdecimal() and path.stem == f'{int(path.stem):03d}'
-            and after < int(path.stem))
+            and after < int(path.stem)})
         found = []
         for step in steps:
             record = self.root / 'native-evidence' / f'{step:03d}' / 'result-identity.json'
-            if record.exists() or record.is_symlink():
+            if step > after and (step in inherited or record.exists() or record.is_symlink()):
                 found.append(step)
             if limit is not None and len(found) == limit:
                 break
@@ -1462,6 +1506,8 @@ class InstanceUI:
             step=int(number)
             if len(parts)==1 and not parsed.query:
                 return self._instance_page(browser_token,step=step)
+            if parts[1:] == ['fork'] and not parsed.query:
+                return self._fork_page(browser_token, step)
             if parts[1:] in (['progress'], ['events']):
                 query = parse_qs(parsed.query, strict_parsing=True) if parsed.query else {}
                 if set(query) - {'attempt', 'cursor'} or any(len(values) != 1 for values in query.values()):
@@ -1574,6 +1620,7 @@ class InstanceUI:
                 'guidance-submit': {'text', 'target', 'kind', 'scope', 'effective_step'},
                 'guidance-edit': {'guidance_id', 'expected_revision', 'text'},
                 'guidance-revoke': {'guidance_id', 'expected_revision'},
+                'fork-preview': fork_ui.FIELDS, 'fork-create': fork_ui.FIELDS,
             }
             if action not in schemas:
                 raise ValueError('Unknown instance control')
@@ -1629,7 +1676,25 @@ class InstanceUI:
                 raise ui_errors.InputError(field, '此字段必须填写整数。', '修改此字段后重新提交。') from None
 
         location = '/'
-        if action == 'continue':
+        if action in {'fork-preview', 'fork-create'}:
+            from . import fork_service
+            step = integer('step')
+            child_root = Path(form['child_root']).expanduser().absolute()
+            options = fork_ui.options(form)
+            if action == 'fork-preview':
+                preview = fork_service.preview(self.root, step, child_root, **options)
+                return self._fork_page(browser_token, step, draft=form, preview=preview)
+            self.fork_attempts[browser_token] = {key: form[key] for key in fork_ui.FIELDS}
+            receipt = fork_service.create(self.root, step, child_root, **options,
+                expected_preview_id=form['expected_preview_id'], operation_id=form['operation_id'])
+            if child_root not in self.instance_roots:
+                self.instance_roots.append(child_root)
+            child = self._child(self.instance_roots.index(child_root))
+            link = '/instances/' + str(self.instance_roots.index(child_root)) + '/manage?token=' + child.management_token
+            return 200, self._page('新分支已创建并暂停', '<p>新分支已创建；开始研究须进入新实例后显式操作。</p>'
+                + '<p><a href="' + html.escape(link, quote=True) + '">打开新实例</a></p><pre>'
+                + html.escape(json.dumps({key: receipt[key] for key in ('status', 'operation_id', 'child_identity') if key in receipt}, ensure_ascii=False)) + '</pre>', live=False), {}
+        elif action == 'continue':
             self._continue(ack_correction=form['ack_correction'] or None,
                            authorization_note=form['authorization_note'] or None)
         elif action == 'start':

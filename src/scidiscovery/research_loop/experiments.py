@@ -545,10 +545,11 @@ def configure(root,step,executor,config,output):
     # are checked separately before preparation or explicit file selection.
     admission=budget.review_configuration(root,job)
     from .protocol import stage_scope
-    from . import experiment_client
+    from . import candidate_refs, experiment_client
     value=dict(config,**implementation,record_dir=str(experiment_client.record_directory(root,step)),native_attempt=native_attempt,admission=admission,
         scope=stage_scope(root,job),breadth=(job.get('search') or {}).get('breadth'),
-        **(dict(engineering_repair=dict(candidate_id=job['engineering_repair']['candidate_id'])) if job.get('engineering_repair') else {}))
+        **(dict(engineering_repair=dict(candidate_id=candidate_refs.resolve_reference(root,job,
+            job['engineering_repair']['candidate_id']))) if job.get('engineering_repair') else {}))
     client = None
     if job.get('worker_view_version') == 1:
         from . import experiment_client
@@ -790,7 +791,8 @@ class Records:
         if not isinstance(parent,dict) or 'candidate_id' not in parent:
             raise IntegrityError('Published execution parent is malformed')
         candidate=parent['candidate_id']
-        if candidate is not None and (not isinstance(candidate,str) or not 0<len(candidate.encode())<=80):
+        from . import candidate_refs
+        if candidate is not None and not candidate_refs.valid_parent_id(candidate):
             raise IntegrityError('Published execution parent is malformed')
         return value
 

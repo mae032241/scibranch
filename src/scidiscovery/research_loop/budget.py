@@ -738,7 +738,8 @@ def execution_blocked(root, *, ignore_operation=None, include_managed=True, igno
                     return True
     if any(op != ignore_operation for op in state['unresolved_operations']):
         return True
-    for step in range(1, historical_step_limit(root) + 1):
+    from . import fork_runtime
+    for step in fork_runtime.local_steps(root):
         record = execution.record(root, step)
         if not (record / 'native-intent.json').exists():
             continue
@@ -813,6 +814,15 @@ def historical_step_limit(root):
 
 
 step_limit = effective_max_steps
+
+
+def task_step_available(root, step):
+    """Check a new task's resource count independently of its logical label."""
+    from . import fork_runtime
+    if not fork_runtime.is_fork(root):
+        return step <= step_limit(root)
+    additional = int(step not in fork_runtime.local_steps(root))
+    return used_steps(root) + additional <= step_limit(root)
 
 
 def _validate_usage_reserve(root, event):
@@ -1202,6 +1212,7 @@ def _event_ref(root, event):
 
 
 def _validate_cursor(root, cursor, before_step, events):
+    from . import fork_runtime
     fields = {'role','parents','instruction','evidence_return','correction_request','author_correction','source_refs'}
     if (not isinstance(cursor,dict) or set(cursor) != fields or cursor['role'] not in ('H','W','A','E')
             or not isinstance(cursor['instruction'],str) or not isinstance(cursor['parents'],list)
@@ -1213,7 +1224,7 @@ def _validate_cursor(root, cursor, before_step, events):
         if (set(ref) != {'step','seal_sha256'} or type(number) is not int or number <= 0
                 or not isinstance(ref['seal_sha256'],str) or len(ref['seal_sha256']) != 64
                 or any(char not in '0123456789abcdef' for char in ref['seal_sha256'])
-                or contracts.read(Path(root)/'jobs'/f'{number:03d}.json').get('final_only')):
+                or fork_runtime.source_job(root, number).get('final_only')):
             raise ValueError('Final resume source differs from declared normal science')
         steps.append(number)
     resumed = normal_resume(root,before_step,events=events)
@@ -1226,6 +1237,8 @@ def _validate_cursor(root, cursor, before_step, events):
     expected += [number for number in range(first,before_step)
         if (Path(root)/'jobs'/f'{number:03d}.json').exists()
         and not contracts.read(Path(root)/'jobs'/f'{number:03d}.json').get('final_only')]
+    if fork_runtime.is_fork(root):
+        expected = fork_runtime.science_steps(root, before_step)
     if (steps != sorted(set(steps)) or any(number not in steps for number in cursor['parents']) or steps != expected):
         raise ValueError('Final resume parents are outside its exact declared sequence')
 
@@ -1236,7 +1249,13 @@ def require_cursor_eligibility(root, cursor, before_step, events):
     if cursor['source_refs'] != _normal_source_refs(root,before_step,events):
         raise ValueError('Final resume source differs from accepted normal science')
     for ref in cursor['source_refs']:
-        contracts.validate(contracts.workspace(root,ref['step']))
+        from . import fork_runtime
+        if (Path(root)/'jobs'/f'{ref["step"]:03d}.json').exists():
+            contracts.validate(contracts.workspace(root,ref['step']))
+        elif not fork_runtime.is_fork(root):
+            raise ValueError('Final resume scientific original is missing')
+        elif contracts.digest(fork_runtime.source_record(root, ref['step'], 'result-identity.json')) != ref['seal_sha256']:
+            raise ValueError('Final resume inherited scientific original changed')
 
 
 def _threshold_raised(events, after_seq):
@@ -1281,6 +1300,10 @@ def resume_cursor(root, resume, *, events=None):
 
 
 def _normal_source_refs(root, before_step, events):
+    from . import fork_runtime
+    if fork_runtime.is_fork(root):
+        return [dict(step=number, seal_sha256=contracts.digest(fork_runtime.source_record(root, number, 'result-identity.json')))
+            for number in fork_runtime.science_steps(root, before_step)]
     resumed = normal_resume(root,before_step,events=events)
     if resumed is None:
         refs,first = [],1
@@ -1303,6 +1326,9 @@ def scientific_steps(root, before_step, *, resume=None):
     if resume is not None and resume != resumed:
         raise ValueError('Scientific history requires its exact original resume event')
     if resumed is None:
+        from . import fork_runtime
+        if fork_runtime.is_fork(root):
+            return fork_runtime.science_steps(root, before_step)
         return list(range(1,before_step))
     resume_cursor(root,resumed,events=events)
     return [ref['step'] for ref in _normal_source_refs(root,before_step,events)]
@@ -1343,7 +1369,7 @@ def _validate_final_a_event(root, settings, event, previous):
             or not isinstance(selection, dict) or set(selection) != {'max_steps', 'used_steps', 'accounted_tokens', 'seconds_remaining', 'blocked_role', 'stopped_original'}
             or selection['blocked_role'] not in (None, 'H', 'W', 'A', 'E')
             or type(selection['max_steps']) is not int or selection['max_steps'] != max_steps
-            or type(selection['used_steps']) is not int or not job['step'] <= selection['used_steps']
+            or type(selection['used_steps']) is not int or not _selection_accounts_job(root, job, selection['used_steps'])
             or type(selection['accounted_tokens']) is not int or selection['accounted_tokens'] < 0
             or type(selection['seconds_remaining']) not in (int, float)
             or not math.isfinite(selection['seconds_remaining']) or not 0 <= selection['seconds_remaining'] <= ceilings['max_seconds']
@@ -1892,13 +1918,24 @@ def closeout_floor(settings, *, preparation_seconds=0.):
 
 def used_steps(root):
     from . import execution
-    prepared = [int(path.stem) for path in (root / 'jobs').glob('*.json')]
+    from . import fork_runtime
+    prepared = fork_runtime.local_steps(root)
     continuations = sum(1 for step in prepared for record,_ in execution.accepted_intents(root,step)
         if record != execution.origin(root,step))
     from . import candidate_audit
     from . import audit_recovery
     audits = sum(1 for _ in candidate_audit.intents(root)) + sum(1 for _ in audit_recovery.intents(root))
-    return max(prepared, default=0) + continuations + len(closeout_state(root)['actions']) + audits
+    return fork_runtime.node_count(root, prepared) + continuations + len(closeout_state(root)['actions']) + audits
+
+
+def _selection_accounts_job(root, job, selected_used):
+    from . import fork_runtime
+    if not fork_runtime.is_fork(root):
+        return job['step'] <= selected_used
+    # The FINAL original was prepared before acceptance. Its logical label is
+    # unrelated to consumption; later events may add more local originals.
+    prepared = [number for number in fork_runtime.local_steps(root) if number <= job['step']]
+    return job['step'] in prepared and len(prepared) <= selected_used
 
 
 def exploration_admission(root, job, *, ignore_step=None, intent=None):

@@ -67,11 +67,18 @@ def candidates(rows, *, diagnostics=None):
     return result
 
 
-def sources(root, fact, candidate_id):
+def sources(root, fact, candidate_id, *, source=None):
     """Resolve only a declared local candidate, from its exact sealed call archive."""
+    from . import originals, candidate_refs
+    if source is None:
+        source = originals.node(root, fact['managed_calls'][0]['scope']['step']) if fact.get('managed_calls') else None
+    raw_id = candidate_refs.original_id(source.origin_identity, candidate_id) if source is not None else candidate_id
+    def retained(proof):
+        bound=dict(path=proof['snapshot'],sha256=proof['sha256'],size_bytes=proof['size_bytes'])
+        return originals.resolve_ref(source,bound)
     matches = [(row, item) for row in fact.get('managed_calls', [])
         for item in declarations(row)
-        if isinstance(item,dict) and isinstance(item.get('artifact'),str) and identity(row,item)==candidate_id]
+        if isinstance(item,dict) and isinstance(item.get('artifact'),str) and identity(row,item)==raw_id]
     if not matches:
         return None
     if len(matches) != 1:
@@ -79,13 +86,13 @@ def sources(root, fact, candidate_id):
     row, declaration = matches[0]
     if 'result_protocol' not in row:
         from . import history
-        accepted=c.read(root/row['accepted']['snapshot'])
+        accepted=c.read(retained(row['accepted']))
         row=dict(row,result_protocol=protocol(history._execution_interface(root,accepted)))
-    observed = [item for item in candidates([row]) if item['id'] == candidate_id]
-    if len(observed) != 1 or observed[0] not in fact['candidates']:
+    observed = [item for item in candidates([row]) if item['id'] == raw_id]
+    if len(observed) != 1 or not any(dict(item,id=raw_id)==observed[0] for item in fact['candidates'] if item['id']==candidate_id):
         raise ValueError('Managed candidate differs from declared sealed result')
-    accepted = c.read(root / row['accepted']['snapshot'])
-    completed = c.read(root / row['completed']['snapshot'])
+    accepted = c.read(retained(row['accepted']))
+    completed = c.read(retained(row['completed']))
     if 'entry' not in accepted:
         raise ValueError('Managed delivery requires retained experiment inputs')
     def proof(item):
@@ -95,7 +102,7 @@ def sources(root, fact, candidate_id):
     # Input names come from the accepted snapshot inventory, never basename matching.
     objects = {}
     for item in accepted['snapshot_files']:
-        matches = [p for p in row['originals'] if root / p['path'] == Path(accepted['cwd']) / item['name']]
+        matches = [p for p in row['originals'] if Path(source.original_root) / p['path'] == Path(accepted['cwd']) / item['name']]
         if len(matches) != 1 or any(matches[0][key] != item[key] for key in ('sha256', 'size_bytes')):
             raise ValueError('Managed delivery input differs from accepted snapshot')
         objects['inputs/' + item['name']] = proof(matches[0])

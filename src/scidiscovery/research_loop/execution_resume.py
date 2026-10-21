@@ -103,35 +103,68 @@ def _capture_pending(root, job):
             calls_namespace=namespace, complete=complete))
 
 
-def verify_pending_set(root, seal, allocation_ref=None, *, unprepared=False, require_complete=True, context=None):
+def _source_path(source, proof):
+    from . import originals
+    owner = originals.source_for_ref(source, proof)
+    path = Path(proof['path'])
+    if path.is_absolute():
+        path = path.relative_to(owner.original_root)
+    try:
+        return originals.resolve_ref(owner, dict(proof, path=path.as_posix()))
+    except (OSError, ValueError) as error:
+        raise ValueError('Frozen execution original unavailable: ' + path.as_posix()) from error
+
+
+def verify_pending_set(root, seal, allocation_ref=None, *, unprepared=False, require_complete=True, context=None, source=None):
     """Check frozen positive facts; mutable absence is only an extra contradiction check."""
     from . import execution_authority as authority
     root = Path(root).resolve()
+    if source is not None and unprepared:
+        raise ValueError('Inherited pending evidence never authorizes dispatch')
+    read = (lambda proof: q._read(root, proof)) if source is None else (lambda proof: c.read(_source_path(source, proof)))
+    def proof_at(path, expected):
+        if source is None:return q._ref(root, path)
+        relative = Path(path).relative_to(source.original_root).as_posix()
+        actual = _source_path(source, dict(expected, path=relative))
+        return dict(path=relative, sha256=c.digest(actual), size_bytes=actual.stat().st_size)
     ref = seal.get('pending_executions')
     if ref is None:
         raise ValueError('Original seal has no positive pending execution evidence')
-    value = q._read(root, ref)
-    job = q._read(root, value['job'])
+    value = read(ref)
+    job = read(value['job'])
+    if source is None:
+        expected_contract = authority.contract(root,job)
+        logical_root = root
+    else:
+        from . import originals
+        policy = originals.source_settings(source).get('execution_authority_policy')
+        if policy is None:raise q.IntegrityError('Original pending evidence has no authority contract')
+        expected_contract = policy['contract']
+        contract_value = read(expected_contract)
+        if {key:item for key,item in contract_value.items() if key != 'implementation'} != dict(
+                version=1, options=list(authority.OPTIONS), scope=authority.SCOPE, stage='decision_originals_resource_gate_separate'):
+            raise q.IntegrityError('Original pending authority contract changed')
+        logical_root = Path(source.original_root)
     if (value.get('version') != 1 or value['job']['sha256'] != seal['job_sha256']
             or type(value.get('complete')) is not bool
-            or ref['path'] != (execution.origin(root, job['step']) / 'pending-execution-set.json').relative_to(root).as_posix()
-            or value['contract'] != authority.contract(root,job)):
+            or ref['path'] != (execution.origin(logical_root, job['step']) / 'pending-execution-set.json').relative_to(logical_root).as_posix()
+            or value['contract'] != expected_contract):
         raise q.IntegrityError('Pending execution evidence differs from its original seal')
     for proofs in value['attempts']:
         for proof in proofs.values():
-            q._read(root, proof)
+            read(proof)
     for row in value['allocations']:
         if context is not None:context.remaining_seconds()
-        allocation = q._read(root, row['allocation'])
+        allocation = read(row['allocation'])
         if allocation['call_id'] != row['call_id'] or allocation['binding']['scope']['job_sha256'] != seal['job_sha256']:
             raise q.IntegrityError('Pending allocation escaped its original job')
         for proof in row['requests']:
-            request = q._read(root, proof)
+            request = read(proof)
             if request['call_id'] != row['call_id'] or request['job'] != value['job']:
                 raise q.IntegrityError('Pending request escaped its original allocation')
         for key in ('prepare_intent','accepted','submission.json','tcad-dispatch.json','tcad-backend-binding.json','completed.json','submission-retirement.json'):
             if row[key] is not None:
-                q._read(root, row[key])
+                read(row[key])
     if allocation_ref is None:
         return value
     matches = [row for row in value['allocations'] if row['allocation'] == allocation_ref]
@@ -140,17 +173,24 @@ def verify_pending_set(root, seal, allocation_ref=None, *, unprepared=False, req
     if not require_complete:
         if unprepared:raise ValueError('Fresh dispatch always requires complete positive evidence')
         return matches[0]
-    records = execution.records(root, job['step'])
+    if source is None:
+        records = execution.records(root, job['step'])
+    else:
+        count = len((seal.get('execution_ref') or {}).get('chain', [None]))
+        records = [execution.origin(logical_root, job['step']) / (f'continuations/{number:03d}' if number else '')
+            for number in range(count)]
     if len(records) != len(value['attempts']):
         raise q.IntegrityError('Original pending attempt set changed')
     for number,(record, proofs) in enumerate(zip(records, value['attempts'])):
         if (set(proofs) != {'native-intent.json', 'native-outcome.json', 'runner-process.json', 'native-process.json'}
-                or any(proof != q._ref(root, record / name) for name, proof in proofs.items())
-                or q._read(root, proofs['native-outcome.json']).get('cleanup') != 'observed_group_cleaned'):
+                or any(proof != proof_at(record / name, proof) for name, proof in proofs.items())
+                or read(proofs['native-outcome.json']).get('cleanup') != 'observed_group_cleaned'):
             raise q.IntegrityError('Original positive cleanup evidence is incomplete')
         for name in ('runner-process.json','native-process.json'):
-            process=q._read(root,proofs[name])
-            if (process.get('task_sha256')!=execution.identity(root,job['step'],number) or not process.get('boot_id')
+            process=read(proofs[name])
+            binding = (execution.identity(root,job['step'],number) if source is None else
+                (value['job']['sha256'] if number == 0 else proof_at(record / 'native-intent.json', proofs['native-intent.json'])['sha256']))
+            if (process.get('task_sha256')!=binding or not process.get('boot_id')
                     or any(type(process.get(key)) is not int or process[key]<=0 for key in ('pid','start_ticks','pgid','sid'))):
                 raise q.IntegrityError('Original cleanup has no exact process owner')
     row = matches[0]

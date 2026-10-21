@@ -143,17 +143,21 @@ def _secret(root, secret):
 
 
 def _qualifications(root, job):
+    from . import originals
     candidates = []
     back = job.get('evidence_return') or {}
     if back.get('kind') == 'formal_review_return':
         candidates.append(back['review'])
     for row in job['direct_refs']:
         parent = int(row['path'].split('/')[2])
-        previous = c.read(c.regular(Path(root) / 'jobs' / f'{parent:03d}.json'))
-        candidates.extend(previous.get('execution_qualifications', []))
+        source = originals.node(root, parent)
+        previous = originals.source_job(source)
+        def original_ref(ref):
+            return dict(ref, origin_identity=ref.get('origin_identity', source.origin_identity)) if source.inherited else ref
+        candidates.extend(original_ref(ref) for ref in previous.get('execution_qualifications', []))
         returned = previous.get('evidence_return') or {}
         if returned.get('kind') == 'formal_review_return':
-            candidates.append(returned['review'])
+            candidates.append(original_ref(returned['review']))
     result = []
     bound = [*job['direct_materials'], *[row['material'] for row in job.get('selected_inputs', [])]]
     for ref in candidates:
@@ -161,7 +165,7 @@ def _qualifications(root, job):
         if proof['subject']['material'] in bound and ref not in result:
             # Unqualified findings remain scientific evidence, never a grant.
             if proof['status'] == 'passed':
-                review.require_review(root, proof['subject'], ref)
+                review.require_review(root, review.subject_for_receipt(root, ref), ref)
                 result.append(ref)
     return result
 
@@ -239,7 +243,7 @@ def require_request_eligibility(root, value):
             or q._read(root,value['native_intent']).get('task_sha256') != value['job']['sha256']):
         raise q.IntegrityError('Execution native intent does not bind the exact requester')
     subject = value['subject']
-    if q._read(root,value['review'])['subject'] != subject:
+    if review.subject_for_receipt(root,value['review']) != subject:
         raise q.IntegrityError('Execution review names another subject')
     review.require_review(root,subject,value['review'])
     if (q.output_status(root,subject['producer_step'],subject['material'])['restriction'] != 'clear'
@@ -488,7 +492,7 @@ def _selected_subject(root, job, payload):
         raise q.IntegrityError('Execution payload bytes changed')
     found = []
     for ref in job.get('execution_qualifications', []):
-        subject = q._read(root, ref)['subject']; material = subject['material']
+        subject = review.subject_for_receipt(root, ref); material = subject['material']
         original=q.execution_payload(root,material)
         if alias['path'] in {original['path'],material['source'], str(c.workspace(root, job['step']) / material['path'])}:
             if any(alias[key]!=original[key] for key in ('sha256','size_bytes')):
@@ -618,9 +622,11 @@ def _permit(root, ref, config, target, call, payload, secret):
     return value
 
 
-def _accepted_input_subject(root, job, accepted, secret):
+def _accepted_input_subject(root, job, accepted, secret, *, source=None):
     """Exact historical relations, without current review/source/clock gates."""
-    root = Path(root).resolve()
+    root = Path(source.original_root) if source is not None else Path(root).resolve()
+    def read(ref):return q._read(root, ref, source=source)
+    def ref_at(path):return q._ref(root, path, source=source)
     ref = accepted.get('execution_authority')
     if ref is None:
         return None
@@ -628,26 +634,31 @@ def _accepted_input_subject(root, job, accepted, secret):
     number = attempt.get('number')
     if type(number) is not int or number < 0:
         raise q.IntegrityError('Managed source has no exact native attempt')
-    config = c.read(c.regular(execution.record(root, job['step'], number) / 'experiment-config.json'))
-    q._check(ref); authorization = c.read(Path(ref['path']))
-    request_ref = authorization['request']; request_value = q._read(root, request_ref)
+    from . import execution_inputs
+    native_record = execution_inputs._native_record(root, job['step'], number, source=source)
+    config_path = native_record / 'experiment-config.json'
+    config = c.read(q._source_path(source, dict(path=str(config_path)))) if source is not None else c.read(c.regular(config_path))
+    q._check(ref, source=source)
+    authorization = c.read(q._source_path(source, ref)) if source is not None else c.read(Path(ref['path']))
+    request_ref = authorization['request']; request_value = read(request_ref)
     request_id = Path(request_ref['path']).parent.name
-    directory = _directory(root, request_id)
+    if not ID.fullmatch(request_id):raise q.IntegrityError('Managed request identity changed')
+    directory = root / 'execution-authority/requests' / request_id if source is not None else _directory(root, request_id)
     body = {key:value for key,value in request_value.items() if key != 'nonce_hash'}
-    if (request_ref != q._ref(root, directory / 'request.json')
+    if (request_ref != ref_at(directory / 'request.json')
             or Path(ref['path']) != directory / 'authorization.json'
             or hashlib.sha256(security.canonical(body)).hexdigest() != request_id):
         raise q.IntegrityError('Managed source request original changed')
-    allocation_ref = authorization['allocation']; allocation = q._read(root, allocation_ref)
-    decision_ref = authorization['decision']; decided = q._read(root, decision_ref)
+    allocation_ref = authorization['allocation']; allocation = read(allocation_ref)
+    decision_ref = authorization['decision']; decided = read(decision_ref)
     call = accepted['call_id']; target = accepted.get('execution_target')
     binding = allocation['binding']; subject = request_value['subject']
     alias = request_value.get('payload_alias', request_value['payload'])
     if (config.get('scope') != accepted['scope'] or config.get('native_attempt') != attempt
             or config.get('execution_interface') != accepted['interface']
-            or accepted['scope']['job_sha256'] != c.digest(root / 'jobs' / f'{job["step"]:03d}.json')
-            or request_value['job'] != q._ref(root, root / 'jobs' / f'{job["step"]:03d}.json')
-            or allocation_ref != q._ref(root, root / 'execution-authority/calls' / call / 'allocation.json')
+            or accepted['scope']['job_sha256'] != ref_at(root / 'jobs' / f'{job["step"]:03d}.json')['sha256']
+            or request_value['job'] != ref_at(root / 'jobs' / f'{job["step"]:03d}.json')
+            or allocation_ref != ref_at(root / 'execution-authority/calls' / call / 'allocation.json')
             or allocation['call_id'] != call or binding['scope'] != accepted['scope']
             or binding['native_attempt'] != attempt or binding['interface'] != accepted['interface']
             or binding['subject'] != subject or binding['review'] != request_value['review']
@@ -657,9 +668,9 @@ def _accepted_input_subject(root, job, accepted, secret):
             or authorization['target'] != target or request_value['target'] != target
             or authorization['payload_alias'] != alias
             or allocation['native_intent'] != request_value['native_intent']
-            or request_value['native_intent'] != q._ref(root, execution.record(root, job['step'], number) / 'native-intent.json')
-            or q._read(root, request_value['native_intent'])['task_sha256'] != request_value['job']['sha256']
-            or decision_ref != q._ref(root, directory / 'decision.json')
+            or request_value['native_intent'] != ref_at(native_record / 'native-intent.json')
+            or read(request_value['native_intent'])['task_sha256'] != request_value['job']['sha256']
+            or decision_ref != ref_at(directory / 'decision.json')
             or decided['request'] != request_ref or decided['nonce_hash'] != request_value['nonce_hash']
             or not security.decision_authorizes(request_value['kind'], decided['selected_option'], request_value['options'])):
         raise q.IntegrityError('Managed source differs from its exact authorized call')
@@ -668,20 +679,30 @@ def _accepted_input_subject(root, job, accepted, secret):
             signed_body = {key:value for key,value in signed.items() if key != 'receipt_hmac'}
             if not hmac.compare_digest(signed.get('receipt_hmac', ''), security.receipt_hmac(secret, security.canonical(signed_body))):
                 raise q.IntegrityError('Managed source host signature changed')
-    seal = q._read(root, subject['producer_seal']); material = subject['material']
-    original=q.execution_payload(root,material)
-    if (subject['producer_seal'] != q._ref(root, c.host_record(c.workspace(root, subject['producer_step'])) / 'result-identity.json')
+    seal = read(subject['producer_seal']); material = subject['material']
+    original = execution_inputs.compiled_payload(root, material, source=source)
+    q._check(alias, source=source)
+    expected_seal = None
+    if source is not None:
+        from . import originals
+        producer = originals.dependency(source, subject['producer_step'], seal_sha256=subject['producer_seal']['sha256'])
+        expected_seal = q._ref(producer.original_root,
+            Path(producer.original_root) / f'native-evidence/{producer.step:03d}/result-identity.json', source=producer)
+        if 'origin_identity' in subject['producer_seal']:
+            expected_seal['origin_identity'] = producer.origin_identity
+    else:
+        expected_seal = ref_at(c.host_record(c.workspace(root, subject['producer_step'])) / 'result-identity.json')
+    if (subject['producer_seal'] != expected_seal
             or material not in seal['materials'] or request_value['payload'] != original
             or alias['path'] not in {original['path'],material['source'], str(c.workspace(root, job['step']) / material['path'])}
-            or alias != q._identity(alias['path'])
             or any(alias[key] != request_value['payload'][key] for key in ('sha256','size_bytes'))):
         raise q.IntegrityError('Managed source payload or exact producer changed')
     prepared = accepted['prepared']; script = accepted['script']
-    q._check(script)
-    q._check(dict(path=prepared['local_path'], sha256=prepared['sha256'], size_bytes=prepared['size_bytes']))
+    q._check(script, source=source)
+    q._check(dict(path=prepared['local_path'], sha256=prepared['sha256'], size_bytes=prepared['size_bytes']), source=source)
     if any(script[key] != prepared[key] for key in ('sha256','size_bytes')):
         raise q.IntegrityError('Managed source prepared bytes differ from accepted original')
-    return dict(subject=subject, authority=q._ref(root, Path(ref['path'])), request=request_ref,
+    return dict(subject=subject, authority=ref_at(Path(ref['path'])), request=request_ref,
                 decision=decision_ref, allocation=allocation_ref)
 
 
@@ -693,9 +714,9 @@ def accepted_input_subject(root, job, accepted):
     return _accepted_input_subject(root, job, accepted, host_secret(root))
 
 
-def validate_accepted_input_subject(root, job, accepted, published):
+def validate_accepted_input_subject(root, job, accepted, published, *, source=None):
     """Read only an already sealed binding; no key, promotion or re-signing."""
-    if _accepted_input_subject(root, job, accepted, None) != published:
+    if _accepted_input_subject(root, job, accepted, None, source=source) != published:
         raise q.IntegrityError('Sealed managed source authority binding changed')
 
 

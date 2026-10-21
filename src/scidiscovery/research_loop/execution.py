@@ -179,6 +179,9 @@ def record(root, step, attempt=None):
 
 
 def raw(root, step):
+    from . import originals
+    if originals.inherited(root, step):
+        return originals.source_raw(originals.node(root, step))
     return record(root, step) / 'science-output.json'
 
 

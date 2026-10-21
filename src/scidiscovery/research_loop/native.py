@@ -27,7 +27,8 @@ def usage(root: Path):
     """Sum distinct node meters, never re-add cumulative observations."""
     totals = dict(input_tokens=0, cached_input_tokens=0, output_tokens=0)
     unknown = []
-    for step in range(1, control_budget.historical_step_limit(root) + 1):
+    from . import fork_runtime
+    for step in fork_runtime.local_steps(root):
         for record in execution.records(root, step):
             if not (record / 'native-intent.json').exists():continue
             meter = record / 'usage.json'
@@ -75,7 +76,7 @@ def execute_native(root: Path, step: int, *, final_report=None):
     job = read(job_path)
     profile_binding = profiles.binding(settings, job)
     node_anchor = control_budget.accept_node(root, job, final_report=final_report)
-    if step > control_budget.effective_max_steps(root) and not (node_anchor or {}).get('final_return'):
+    if not control_budget.task_step_available(root, step) and not (node_anchor or {}).get('final_return'):
         raise control_budget.NodeBudgetUnavailable('step_limit')
     if node_anchor is not None and job['role'] == 'W' and search.launch_reason(root, job):
         raise ValueError('W dispatch violates its frozen search authorization')

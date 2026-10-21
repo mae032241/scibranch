@@ -6,7 +6,7 @@ Qualification is obtained only for an explicitly requested audit or delivery.
 from __future__ import annotations
 
 from . import configuration_updates
-from . import budget, contracts as c, delivery, selection
+from . import budget, contracts as c, delivery, originals, selection
 from .candidate_audit import _save
 
 
@@ -85,17 +85,41 @@ def marker(root,before_step=None):
     return dict(version=2, sha256=c.digest(path),**(dict(repair_step=int(directory.name)) if directory.parent.name=='repairs' else {}))
 
 
-def _screen(root, mark):
+def _screen(root, mark, *, job=None):
     if mark.get('version') != 2:raise ValueError('Unsupported frozen candidate catalogue marker')
     directory = _directory(root,repair_step=mark.get('repair_step',0))
     path = directory / 'screen.json'
+    source=None
+    if job is not None and job.get('fork_source'):
+        current=originals.node(root,job['step'])
+        ref=job['fork_source']['job']
+        source=originals.source_for_ref(current,ref)
+        seen=set()
+        while True:
+            identity=(originals.identity_key(source.origin_identity),source.step)
+            if identity in seen:raise ValueError('Fork candidate catalogue ancestry cycle')
+            seen.add(identity)
+            original=originals.source_job(source)
+            if original.get('selection')!=mark:
+                raise ValueError('Fork candidate catalogue differs from its exact original task')
+            if not original.get('fork_source'):break
+            ref=original['fork_source']['job']
+            source=originals.source_for_ref(source,ref)
+            originals.resolve_ref(source,ref)
+        path=originals.resolve_ref(source,dict(path=path.relative_to(root).as_posix(),sha256=mark['sha256']))
     if c.digest(c.regular(path)) != mark['sha256']:
         raise ValueError('Control candidate catalogue changed')
     value = c.read(path)
     if value.get('version') != 2 or value.get('public_view_version') != 3:
         raise ValueError('Unsupported frozen candidate catalogue')
-    if value['shortlist_sha256'] != c.digest(c.regular(directory / 'shortlist.json')):
+    original=directory/'shortlist.json'
+    if source is not None:
+        original=originals.resolve_ref(source,dict(path=original.relative_to(root).as_posix(),sha256=value['shortlist_sha256']))
+    if value['shortlist_sha256'] != c.digest(c.regular(original)):
         raise ValueError('Control candidate catalogue source changed')
+    if source is not None:
+        from . import candidate_refs
+        value=candidate_refs.public_fields(value,candidate_refs.source_input_mapping(source,originals.source_job(source)))
     return value
 
 
@@ -136,7 +160,7 @@ def choice(root, job, payload):
     """Only the author's explicit, evidence-bound candidate can be delivered."""
     chosen = payload.get('candidate_recommendation')
     if chosen is None:raise delivery.DeliveryUnresolved('delivery_no_decision')
-    value = _screen(root, job['selection'])
+    value = _screen(root, job['selection'], job=job)
     members = [row['candidate_id'] for row in value['rows']]
     if chosen not in members:raise delivery.DeliveryUnresolved('selection_candidate_unavailable')
     return chosen

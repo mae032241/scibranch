@@ -333,7 +333,8 @@ def fragment_start(root, step):
     if correction.gate(root, step - 1) is not None:
         raise ResumeUnavailable('worker_resume_correction_paused')
     settings = configuration_updates.for_step(root, step)
-    for later in range(step + 1, budget.historical_step_limit(root) + 1):
+    from . import fork_runtime
+    for later in (number for number in fork_runtime.local_steps(root) if number > step):
         if (execution.origin(root, later) / 'native-intent.json').exists():
             raise ResumeUnavailable('worker_resume_successor_present')
     paths = execution.records(root, step)
@@ -423,7 +424,8 @@ def start(root, step):
     repairs = sum(c.read(path / 'native-intent.json').get('continuation_kind', 'repair') != 'fragment' for path in paths[1:])
     if repairs >= limits['max_attempts']:raise ResumeUnavailable('worker_resume_limit')
     settings = configuration_updates.for_step(root, step)
-    for later in range(step + 1, budget.historical_step_limit(root) + 1):
+    from . import fork_runtime
+    for later in (number for number in fork_runtime.local_steps(root) if number > step):
         if (execution.origin(root, later) / 'native-intent.json').exists():
             raise ResumeUnavailable('worker_resume_successor_present')
     original_intent = c.read(c.regular(paths[0] / 'native-intent.json'))
@@ -478,7 +480,9 @@ def wake_start(root,step,observations):
         raise ResumeUnavailable('worker_resume_paused_or_closeout')
     from . import correction
     if correction.gate(root,step-1) is not None:raise ResumeUnavailable('worker_resume_correction_paused')
-    if any((execution.origin(root,later)/'native-intent.json').exists() for later in range(step+1,budget.historical_step_limit(root)+1)):
+    from . import fork_runtime
+    if any((execution.origin(root,later)/'native-intent.json').exists()
+            for later in fork_runtime.local_steps(root) if later > step):
         raise ResumeUnavailable('worker_resume_successor_present')
     attempts=sum(c.read(path/'native-intent.json').get('continuation_kind','repair')!='fragment' for path in paths[1:])
     if attempts>=limits['max_attempts']:raise ResumeUnavailable('worker_resume_limit')

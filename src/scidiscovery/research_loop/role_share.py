@@ -34,10 +34,11 @@ def usage(root, through_step):
     """Sum original meters of steps 1..through_step only, so replay is exact."""
     totals = dict(H=0, W=0, A=0, E=0, closeout=0)
     unknown = []
-    for step in range(1, through_step + 1):
-        path = root / 'jobs' / f'{step:03d}.json'
-        if not path.exists():
+    from . import fork_runtime
+    for step in fork_runtime.local_steps(root):
+        if step > through_step:
             break
+        path = root / 'jobs' / f'{step:03d}.json'
         job = c.read(c.regular(path))
         key = 'closeout' if job.get('purpose') == 'closeout' else job['role']
         for record in execution.records(root, step):

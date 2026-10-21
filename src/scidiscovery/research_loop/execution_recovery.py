@@ -13,14 +13,25 @@ def prefix(root,step):
     if path.exists():return c.read(c.regular(path)).get('history',{}).get('execution_recoveries',[])
     directory=Path(root)/DIRECTORY
     paths=sorted([*directory.glob('*/*.json'), *directory.glob('*/*/[0-9]*.json')])
-    return [dict(path=path.relative_to(root).as_posix(),sha256=c.digest(c.regular(path))) for path in paths]
+    local = [dict(path=path.relative_to(root).as_posix(),sha256=c.digest(c.regular(path))) for path in paths]
+    from . import originals
+    inherited = originals.frozen_recovery_refs(root, step) if originals._manifest(root) is not None else []
+    return inherited + [ref for ref in local if ref not in inherited]
 
 
 def validate(root,refs,*,originals=True):
     if not isinstance(refs,list):raise ValueError('Execution recovery prefix must be a list')
     values=[];seen=set();chains={};sources={};pending={}
     for ref in refs:
-        if set(ref)!={'path','sha256'}:raise ValueError('Execution recovery prefix is malformed')
+        if set(ref) not in ({'path','sha256'}, {'path','sha256','origin_identity'}, {'path','sha256','size_bytes','origin_identity'}):
+            raise ValueError('Execution recovery prefix is malformed')
+        if 'origin_identity' in ref:
+            from . import originals as source_originals
+            source = source_originals.for_origin(root, ref['origin_identity'])
+            value = c.read(source_originals.resolve_ref(source, ref))
+            _validate_inherited(root, source, ref, value, chains, originals=originals)
+            values.append(value)
+            continue
         path=Path(root)/ref['path']
         if (path.resolve()!=path or not path.is_relative_to(Path(root)/DIRECTORY)
                 or c.digest(c.regular(path,limit=None))!=ref['sha256']):
@@ -53,14 +64,57 @@ def validate(root,refs,*,originals=True):
     return values
 
 
+def _validate_inherited(root, context, ref, value, chains, *, originals=True):
+    """Read an already accepted original recovery; never operate its provider."""
+    from . import originals as o
+    step = value['source_step']
+    call = value.get('call_id', (value.get('row') or {}).get('call_id'))
+    key = (o.identity_key(context.origin_identity), step, call)
+    source = o.dependency(context, step, seal_sha256=value['seal_sha256'])
+    job = o.source_job(source)
+    seal = c.read(o.source_record(source, 'result-identity.json'))
+    if c.digest(o.source_record(source, 'result-identity.json')) != value['seal_sha256']:
+        raise history.ObserverIntegrityError('Inherited recovery source seal changed')
+    def read_ref(proof):
+        return c.read(o.resolve_ref(o.source_for_ref(context, proof), proof))
+    if value.get('version') == 2:
+        local_key = (step, call)
+        isolated = {} if key not in chains else {local_key: chains[key]}
+        plain_ref = {field: ref[field] for field in ('path', 'sha256')}
+        _validate_event(root, plain_ref, value, isolated, originals=originals, source=source)
+        chains[key] = isolated[local_key]
+        return
+    else:
+        if ref['path'] != f'{DIRECTORY}/{step:03d}/{call}.json' or key in chains:
+            raise history.ObserverIntegrityError('Inherited recovery identity is ambiguous')
+        old = read_ref(seal['observations'])
+        matches = [row for row in old.get('managed_calls', []) if row['call_id'] == call]
+        row = value['row']
+        if (len(matches) != 1 or matches[0]['status'] != 'unknown'
+                or hashlib.sha256(e.encoded(matches[0])).hexdigest() != value['old_row_sha256']
+                or row['accepted'] != matches[0]['accepted'] or row['scope'] != matches[0]['scope']
+                or row.get('mechanism_binding') != matches[0].get('mechanism_binding')
+                or row['status'] not in {'known_success', 'known_failed', 'not_submitted'}):
+            raise history.ObserverIntegrityError('Inherited recovery changed its original reservation')
+        chains[key] = dict(ref=ref, number=1, phase='terminal', value=value)
+    if originals and row is not None:
+        history.validate_managed_original(source, job, [row])
+
+
 def resolved(root,refs):
     return {key:value['row'] for key,value in call_view(root,[],refs).items()
             if value.get('row') is not None and value['row']['status'] in {'known_success','known_failed','not_submitted'}}
 
 
-def _validate_event(root,ref,value,chains,*,originals=True,sources=None,pending=None,context=None):
+def _validate_event(root,ref,value,chains,*,originals=True,sources=None,pending=None,context=None,source=None):
     from . import qualification as q
-    from .execution_resume import verify_pending_set
+    from .execution_resume import verify_pending_set, _source_path
+    read = (lambda proof: q._read(root, proof)) if source is None else (lambda proof: c.read(_source_path(source, proof)))
+    def proof_file(path, expected):
+        if source is None:return e.proof(path, context=context)
+        actual = _source_path(source, dict(path=str(path),
+            **{field: expected[field] for field in ('sha256', 'size_bytes')}))
+        return dict(path=str(path), sha256=c.digest(actual), size_bytes=actual.stat().st_size)
     step=value['source_step'];call=value['call_id'];key=(step,call)
     prior=chains.get(key)
     number=1 if prior is None else prior['number']+1
@@ -76,8 +130,8 @@ def _validate_event(root,ref,value,chains,*,originals=True,sources=None,pending=
         for key_name in ('source_step','call_id','scope','seal_sha256','pending_set','allocation','request','decision','admission','origin'):
             if value[key_name]!=prior['value'][key_name]:
                 raise history.ObserverIntegrityError('Execution recovery changed its original dispatch bindings')
-    request=q._read(root,value['request']);decision=q._read(root,value['decision'])
-    admission=q._read(root,value['admission'])
+    request=read(value['request']);decision=read(value['decision'])
+    admission=read(value['admission'])
     if (request['call_id']!=call or request['job']['sha256']!=value['scope']['job_sha256']
             or decision['request']!=value['request'] or admission['allocation']!=value['allocation']
             or admission['pending_set']!=value['pending_set']):
@@ -97,7 +151,11 @@ def _validate_event(root,ref,value,chains,*,originals=True,sources=None,pending=
     if originals:
         sources={} if sources is None else sources;pending={} if pending is None else pending
         if step not in sources:
-            if context is None:sources[step]=history._source(root,step)
+            if source is not None:
+                from . import originals as source_originals
+                seal_path=source_originals.source_record(source, 'result-identity.json')
+                sources[step]=(source_originals.source_job(source),None,c.read(seal_path),c.digest(seal_path))
+            elif context is None:sources[step]=history._source(root,step)
             else:
                 # Current publication verifies its exact source, not every old call's logs.
                 from . import execution
@@ -114,34 +172,42 @@ def _validate_event(root,ref,value,chains,*,originals=True,sources=None,pending=
             raise history.ObserverIntegrityError('Execution recovery source seal changed')
         identity=(step,value['allocation']['path'],value['allocation']['sha256'])
         fresh=value['origin']=='sealed_unprepared'
-        if identity not in pending:pending[identity]=verify_pending_set(root,seal,value['allocation'],require_complete=fresh,context=context)
+        if identity not in pending:pending[identity]=verify_pending_set(root,seal,value['allocation'],require_complete=fresh,context=context,source=source)
         if pending[identity]['disposition']!=('unprepared' if fresh else 'possibly_prepared'):
             raise history.ObserverIntegrityError('Late dispatch has no positive original unprepared evidence')
-        allocation=q._read(root,value['allocation'])
+        allocation=read(value['allocation'])
         if allocation['call_id']!=call or allocation['binding']['scope']!=value['scope']:
             raise history.ObserverIntegrityError('Execution recovery allocation changed')
         if row is not None:
-            history.validate_managed(root,job,[row],context=context)
+            if source is None:history.validate_managed(root,job,[row],context=context)
+            else:history.validate_managed_original(source,job,[row])
             if row.get('mechanism_binding')!=allocation['binding'].get('mechanism_binding'):
                 raise history.ObserverIntegrityError('Recovered execution changed original scientific opportunity')
-            accepted=c.read(Path(root)/row['accepted']['snapshot'])
+            accepted=(c.read(Path(root)/row['accepted']['snapshot']) if source is None else
+                read(dict(path=row['accepted']['snapshot'],sha256=row['accepted']['sha256'])))
             selected=allocation['binding'];prepared=accepted['prepared']
-            original=accepted['execution_authority'];q._check(original)
-            authority=c.read(Path(original['path']))
+            original=accepted['execution_authority']
+            if source is None:q._check(original)
+            authority=c.read(Path(original['path'])) if source is None else read(original)
+            if source is None:records=experiment_client.record_directory(root,step)
+            else:
+                logical_root=Path(source.original_root)
+                records=(logical_root/'host-runtime/experiment-control'/value['scope']['job_sha256']/'records'
+                    if job.get('worker_view_version')==experiment_client.VERSION else source.logical_workspace/'work/lineage')
             if (accepted.get('native_attempt')!=selected['native_attempt'] or accepted.get('interface')!=selected['interface']
                     or authority['allocation']!=value['allocation'] or authority['request']!=value['request']
                     or authority['decision']!=value['decision'] or authority['scope']!=value['scope']
                     or authority['native_attempt']!=selected['native_attempt'] or authority['interface']!=selected['interface']
                     or authority['payload_alias']!=selected['payload_alias'] or accepted['execution_target']!=request['target']
                     or authority['target']!=request['target'] or prepared['name']!=call
-                    or accepted['script']['path']!=str(experiment_client.record_directory(root,step)/'calls'/call/'source.py')
+                    or accepted['script']['path']!=str(records/'calls'/call/'source.py')
                     or (accepted['script']['sha256'],accepted['script']['size_bytes'])!=(prepared['sha256'],prepared['size_bytes'])
-                    or e.proof(accepted['script']['path'],context=context)!=accepted['script']
-                    or e.proof(prepared['local_path'],context=context)!=dict(path=prepared['local_path'],sha256=prepared['sha256'],size_bytes=prepared['size_bytes'])):
+                    or proof_file(accepted['script']['path'],accepted['script'])!=accepted['script']
+                    or proof_file(prepared['local_path'],prepared)!=dict(path=prepared['local_path'],sha256=prepared['sha256'],size_bytes=prepared['size_bytes'])):
                 raise history.ObserverIntegrityError('Recovered accepted/prepared authority lost its exact original allocation')
         if value.get('query') is not None:
-            query=q._read(root,value['query'])
-            submission=q._read(root,value['submission']) if value.get('submission') is not None else None
+            query=read(value['query'])
+            submission=read(value['submission']) if value.get('submission') is not None else None
             if (query.get('call_id')!=call or query.get('state')!=value['native_state']
                     or submission is not None and (submission['call_id']!=call or submission['scope']!=value['scope']
                         or query.get('external_run_id')!=submission['external_run_id'])
@@ -154,10 +220,11 @@ def append(root,base,phase,*,row=None,query=None,native_state=None,submission=No
     """Only actual fact changes append; caller owns the controller writer."""
     root=Path(root);refs=prefix(root,budget.historical_step_limit(root)+1)
     values=validate(root,refs,originals=False)
-    chain=[value for value in values if value.get('version')==2 and
+    local_values=[value for ref,value in zip(refs,values) if 'origin_identity' not in ref]
+    chain=[value for value in local_values if value.get('version')==2 and
            (value['source_step'],value['call_id'])==(base['source_step'],base['call_id'])]
     if chain and all(chain[-1].get(key)==item for key,item in dict(phase=phase,row=row,native_state=native_state,submission=submission).items()):
-        return next(ref for ref in refs if c.read(root/ref['path'])==chain[-1])
+        return next(ref for ref in refs if 'origin_identity' not in ref and c.read(root/ref['path'])==chain[-1])
     directory=root/DIRECTORY/f'{base["source_step"]:03d}'/base['call_id']
     previous=None if not chain else dict(path=(directory/f'{len(chain):06d}.json').relative_to(root).as_posix(),
                                          sha256=c.digest(directory/f'{len(chain):06d}.json'))
@@ -167,7 +234,8 @@ def append(root,base,phase,*,row=None,query=None,native_state=None,submission=No
     ref=dict(path=path.relative_to(root).as_posix(),sha256=hashlib.sha256(e.encoded(value)).hexdigest())
     chains={}
     for old_ref,old in zip(refs,values):
-        if old.get('version')==2:_validate_event(root,old_ref,old,chains,originals=False)
+        if 'origin_identity' not in old_ref and old.get('version')==2:
+            _validate_event(root,old_ref,old,chains,originals=False)
     _validate_event(root,ref,value,chains,context=context)
     if context is not None:context.remaining_seconds()
     c.write(path,value);path.chmod(0o400)
@@ -180,7 +248,9 @@ def call_view(root,sources,refs,*,originals=True,validated=None,original_rows=No
     sources=list(sources)
     result={**sealed_pending_rows(root,sources),**(original_rows or {})}
     for job,_,seal,_ in sources:
-        observed=c.read(Path(root)/seal['observations']['path']) if seal.get('observations') else {}
+        from . import originals as source_originals
+        source = source_originals.node(root, job['step'])
+        observed=c.read(source_originals.resolve_ref(source, seal['observations'])) if seal.get('observations') else {}
         for row in observed.get('managed_calls',[]):
             result[(job['step'],row['call_id'])]=dict(row=row,phase='original',native_state=None)
     for value in (validate(root,list(refs),originals=originals) if validated is None else validated):
@@ -198,12 +268,14 @@ def sealed_pending_rows(root,sources):
     for job,_,seal,_ in sources:
         ref=seal.get('pending_executions')
         if ref is None:continue
-        value=q._read(root,ref)
+        from . import originals
+        source = originals.node(root, job['step'])
+        value=c.read(originals.resolve_ref(source,ref))
         if (value['job']['sha256']!=seal['job_sha256'] or value['job']['path']!=f'jobs/{job["step"]:03d}.json'):
             raise history.ObserverIntegrityError('Pending execution metadata escaped its sealed source')
         for row in value['allocations']:
             if row['disposition']!='possibly_prepared' or row['accepted'] is not None:continue
-            allocation=q._read(root,row['allocation'])
+            allocation=c.read(originals.resolve_ref(originals.source_for_ref(source,row['allocation']),row['allocation']))
             if allocation['call_id']!=row['call_id'] or allocation['binding']['scope']['job_sha256']!=seal['job_sha256']:
                 raise history.ObserverIntegrityError('Unknown preparation lost its original allocation')
             result[(job['step'],row['call_id'])]=dict(row=None,phase='original_prepare_unknown',native_state=None)
@@ -235,6 +307,9 @@ def pending(root,*,unknown_only=False,ignore=None):
 
 
 def create(root,step):
+    from . import originals
+    if originals.inherited(root, step):
+        raise ValueError('Inherited calls require reconciliation at their exact original instance')
     job,_,seal,sha=history._source(root,step)
     if job['role']!='W' or not seal.get('observations'):raise ValueError('Recovery requires an exact sealed W observation')
     old=c.read(root/seal['observations']['path']);created=[];unresolved=[]

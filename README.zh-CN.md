@@ -20,6 +20,7 @@ SciDiscovery 是以 CLI 为核心、提供 Codex 与显式 Agent 协议后端的
 | --- | --- |
 | `scid-research` | 准备实例，运行、查看、暂停和继续研究，收束并导出结果。 |
 | `scid-research start` | 为明确实例启动或连接 detached 控制进程。 |
+| `scid-research fork-preview` / `fork-create` | 从精确历史逻辑任务预览并创建暂停的新分支。 |
 | `scid-research serve-ui` | 同一实例的可选网页，提供实例控制和封存结果分页。 |
 | `scid-research archive-*` / `checkpoint-*` | 导出和核验原件、恢复指定材料，或执行限定的同宿主冷迁移。 |
 | `scid-experiment` | 使用受管本地实验或声明的领域执行接口。 |
@@ -51,6 +52,12 @@ scid-research --help
 运行期间由原生宿主自动处理普通文件提交并返回响应。受管本地命令需要受支持的原生权限投影，
 前提及明确不支持的情形见 CLI 指南。external 执行仍由声明的 launcher 负责。
 执行另需冻结配置及授权；科研预算、独立审查和用户陈述均不授予执行权限。
+
+已完成且静止的当前协议实例可在精确逻辑步骤 N 处分支。新分支在新 session 中从该任务
+首次输入重跑，显式声明新的有限预算，并自包含复制其已声明科学原件。创建后保持暂停，
+须显式 `start --continue` 才推进。历史科学投入、来源限制及未知成本仍保留；既有审查或执行许可
+不授权新对象。语义见[架构](docs/ARCHITECTURE.zh-CN.md#历史任务分支)，操作见
+[CLI 指南](docs/ROOTLESS_CLI.zh-CN.md#从历史任务创建分支)。
 
 H/W/A/E 单节点 token 预算统一为软目标：触线时提示收口，不仅因达线拒绝新受管实验或强制转 A，原节点可以完成原结果。实际 input+output 完整记账，不预付整个节点 token 额度。当前协议 23 仅接受 soft 节点设置；旧实例只读，冻结设置不改写。单次执行的有限时间、权限与清理限制仍有效。
 

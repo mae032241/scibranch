@@ -39,7 +39,11 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
             candidate_extra_slots: int = 2,
             native_backend: str = 'codex', native_options: dict | None = None,
             ui: dict | None = None, validate_only: bool = False,
-            objective_text: str | None = None, _existing_settings: dict | None = None) -> dict:
+            objective_text: str | None = None, _existing_settings: dict | None = None,
+            _identity_root: Path | None = None,
+            _public_identity_root: Path | None = None,
+            _user_update_texts: list[str] | None = None,
+            _source_facts_factory=None) -> dict:
     """Freeze an explicit goal and finite launch budgets in a fresh directory."""
     from . import candidate_nominations
     nomination_limits=candidate_nominations.configuration(candidate_extra_slots)
@@ -61,6 +65,14 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     if node_budget_mode != 'soft':
         raise ValueError('All H/W/A/E node token targets must use soft mode; hard mode is unsupported')
     root, objective, public_root = map(Path, (root, objective, public_root))
+    identity_root = root.resolve() if _identity_root is None else Path(_identity_root).absolute()
+    if identity_root.resolve() != identity_root or identity_root.is_symlink():
+        raise ValueError('Preparation identity requires an exact canonical final root')
+    if _identity_root is not None and identity_root != root.resolve() and (identity_root.exists() or identity_root.is_symlink()):
+        raise ValueError('Preparation identity requires a fresh final root')
+    public_identity = public_root.resolve() if _public_identity_root is None else Path(_public_identity_root).absolute()
+    if public_identity.resolve() != public_identity or public_identity.is_symlink():
+        raise ValueError('Preparation public identity requires an exact canonical root')
     for name, value in (("max_tokens", max_tokens), ("max_steps", max_steps)):
         if type(value) is not int or value <= 0:
             raise ValueError(f"{name} must be a positive integer")
@@ -121,10 +133,17 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
         raise ValueError("The objective must contain original user text")
     updates = [contracts.regular(Path(path)).read_text(encoding='utf-8')
                for path in (user_updates or [])]
+    if _user_update_texts is not None:
+        if user_updates or not isinstance(_user_update_texts, list) or any(not isinstance(text, str) for text in _user_update_texts):
+            raise ValueError('Generated updates require explicit original texts without external update paths')
+        updates = list(_user_update_texts)
     if any(not update.strip() for update in updates):
         raise ValueError('Global user updates must contain original user text')
     from . import qualification
     original_globals = [objective, *[Path(path) for path in (user_updates or [])]]
+    if _user_update_texts is not None:
+        original_globals = [objective, *[root.resolve() / 'project/global/updates' / f'{index:03d}.md'
+            for index in range(1, len(updates) + 1)]]
     source_facts = (qualification.source_configuration(public_root, source_restrictions, original_globals)
                     if _existing_settings is None else None)
     from . import formal_review
@@ -175,7 +194,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     if selection_limits is not None and not production:
         raise ValueError('Control selection requires public observations and an isolated delivery adapter')
     settings = dict(goal_id="scid-hwa-" + uuid.uuid4().hex[:12], objective=text,
-        public_root=str(public_root.resolve()), native_launcher_argv=list(launcher),
+        public_root=str(public_identity), native_launcher_argv=list(launcher),
         max_tokens=max_tokens, max_seconds=max_seconds, max_steps=max_steps, time_budget_basis="active",
         model=model, reasoning_effort=reasoning_effort, service_tier=service_tier,
         max_output_item_bytes=max_output_item_bytes,
@@ -254,7 +273,33 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
         settings['global_materials'].append(dict(source=source.relative_to(root).as_posix(),
             path='inputs/global/' + source.relative_to(globals_).as_posix(),
             sha256=contracts.digest(source)))
+    if _source_facts_factory is not None:
+        if source_restrictions:
+            raise ValueError('Staged source facts cannot replace external source declarations')
+        source_facts = _source_facts_factory(root, settings['global_materials'])
+        if not isinstance(source_facts, list):
+            raise ValueError('Staged source preparation must return exact configured declarations')
     settings['source_provenance'] = qualification.freeze_sources(root, source_facts, original_globals, settings['global_materials'])
+    if identity_root != root.resolve() and (objective_text is not None or _user_update_texts is not None or _source_facts_factory is not None):
+        # This original is created by prepare itself. Freeze its final logical
+        # location before sealing; supplied external originals keep their identity.
+        provenance_path = root / settings['source_provenance']['path']
+        provenance = contracts.read(provenance_path)
+        for index, mapping in enumerate(provenance['globals']):
+            if index == 0 and objective_text is None or index > 0 and _user_update_texts is None:
+                continue
+            relative = 'project/global/objective.md' if index == 0 else f'project/global/updates/{index:03d}.md'
+            generated = mapping['origin']
+            if generated['path'] != str((root / relative).resolve()):
+                raise ValueError('Generated global lost its exact preparation original')
+            generated['path'] = str(identity_root / relative)
+        if _source_facts_factory is not None:
+            for declaration in provenance['declarations']:
+                source_path = Path(declaration['origin']['path'])
+                if source_path.is_relative_to(root.resolve()):
+                    declaration['origin']['path'] = str(identity_root / source_path.relative_to(root.resolve()))
+        contracts.write(provenance_path, provenance)
+        settings['source_provenance'] = qualification._ref(root, provenance_path)
     if review_policy is not None:
         settings['formal_review_policy']=formal_review.freeze_contract(root)
     if authority_policy is not None:
@@ -375,6 +420,13 @@ def _finish(root, settings, status, completed, last, *, reason=None, next_role=N
 def _check_job(root, settings, step, role, parents, instruction, evidence_return, correction_request=None, author_correction=None):
     """A retained node must be the exact job selected by its sealed predecessor."""
     job = contracts.read(root / "jobs" / f"{step:03d}.json")
+    if job.get('fork_source'):
+        from . import fork_runtime
+        fork_runtime.validate_selected_job(root, contracts.workspace(root, step), job)
+        if (job['role'], job['instruction'], job.get('evidence_return'), job.get('correction_request'), job.get('author_correction')) != (
+                role, instruction, evidence_return, correction_request, author_correction):
+            raise ValueError('Fork task differs from its exact bootstrap route')
+        return job
     expected_refs = [dict(path=f"inputs/parents/{parent:03d}/conclusion.json",
         sha256=contracts.digest(execution.raw(root, parent)))
         for parent in parents]
@@ -500,7 +552,8 @@ def _step_numbers(root, first_step):
                 and not (root / 'pause.request').exists() and not budget.execution_blocked(root)):
             control_operations.apply_pending_budget(root)
             configuration_updates.bind_new_job(root, step)
-        if step > budget.historical_step_limit(root):
+        from . import fork_runtime
+        if not fork_runtime.is_fork(root) and step > budget.historical_step_limit(root):
             return
         yield step
         step += 1
@@ -548,6 +601,10 @@ def _continue_wait(root, step, job, result, next_role, target):
 def _run(root, *, continue_wait=None):
     from .protocol import require_current
     require_current(root)
+    from . import fork_runtime
+    fork = fork_runtime.bootstrap(root)
+    if fork is not None:
+        fork_runtime.ensure_phase(root, fork)
     settings = configuration_updates.current(root)
     started_path = root / "host-started.json"
     if not started_path.exists():
@@ -567,6 +624,15 @@ def _run(root, *, continue_wait=None):
     author_correction = None
     current_h = current_w = last = None
     completed, first_step = 0, 1
+    if fork is not None:
+        first_step = fork['next_step']
+        route = fork['route']
+        role, parents, instruction, evidence_return, correction_request, author_correction = (
+            route[key] for key in ('role', 'parents', 'instruction', 'evidence_return', 'correction_request', 'author_correction'))
+        def source_number(ref):
+            return int(Path(ref['path']).stem) if ref is not None else None
+        current_h, current_w = source_number(fork['current_h']), source_number(fork['current_w'])
+        completed = max((source_number(ref) for ref in fork['completed_source_refs']), default=0)
     resumed = budget.normal_resume(root)
     if resumed is not None:
         cursor = budget.resume_cursor(root,resumed)
@@ -576,7 +642,7 @@ def _run(root, *, continue_wait=None):
         completed = max(source_steps,default=0)
         last = contracts.validate(contracts.workspace(root,completed)) if completed else None
         for number in source_steps:
-            source_role = contracts.read(root/'jobs'/f'{number:03d}.json')['role']
+            source_role = fork_runtime.source_job(root, number)['role']
             if source_role == 'H': current_h = number
             if source_role == 'W': current_w = number
         first_step = resumed['first_step']
@@ -645,7 +711,7 @@ def _run(root, *, continue_wait=None):
         if not identity.exists():
             # Accepted originals above a later reduced ceiling were collected
             # above; no new native turn may consume that historical allowance.
-            if step > budget.effective_max_steps(root):
+            if not budget.task_step_available(root, step):
                 final = start_final(completed, step, role, 'bounded_steps_exhausted')
                 if final is not None:
                     return final
@@ -700,9 +766,12 @@ def _run(root, *, continue_wait=None):
                     return _finish(root, settings, 'retained_job_conflict', completed, last,
                         reason='A prepared task differs from the exact retained scientific route', next_role=role)
             try:
-                job = contracts.build_job(root, step, role, parents, instruction=instruction,
-                    evidence_return=evidence_return, correction_request=correction_request,
-                    **(dict(author_correction=author_correction) if author_correction is not None else {}))
+                if fork is not None and step == fork['next_step']:
+                    job = fork_runtime.build_selected_job(root, step)
+                else:
+                    job = contracts.build_job(root, step, role, parents, instruction=instruction,
+                        evidence_return=evidence_return, correction_request=correction_request,
+                        **(dict(author_correction=author_correction) if author_correction is not None else {}))
             except engineering.RepairUnavailable as error:
                 return _finish(root,settings,str(error),completed,last,next_role=role)
             search_limit = search.launch_reason(root, job)
@@ -943,7 +1012,8 @@ def _closeout_result(root, status, *, reason=None, step=None, read_only=False):
         previous_submission_observation=previous['actual_submission'], existing_A_recommendation=latest['a_recommended'],
         last_confirmed=confirmed[-1] if confirmed else None,
         current_actual='unknown' if state['unresolved_operations'] or pending_confirmation else (confirmed[-1] if confirmed else None))
-    if last is not None:
+    if last is not None and (root / 'jobs' / f'{last:03d}.json').exists():
+        # Inherited science supplies evidence, not a child completion/overrun.
         completion = contracts.read(execution.record(root, last) / 'native-outcome.json').get('final_a_completion')
         if completion is not None:
             result['final_overrun'] = completion['final_overrun']
@@ -1024,7 +1094,7 @@ def _resume_final(root, begin):
         return False
     first = max(begin['first_step'],max((int(path.stem) for path in (root/'jobs').glob('*.json')),default=0))+1
     cursor = begin['resume_cursor']
-    if first > budget.effective_max_steps(root) or budget.node_admission(root,
+    if not budget.task_step_available(root, first) or budget.node_admission(root,
             dict(step=first,role=cursor['role']),normal_resume_check=True) is not None:
         return False
     budget.resume_final(root,begin,first)
@@ -1081,14 +1151,22 @@ def _run_final(root, begin):
     prospective_job = dict(step=step, configuration_revision=revision)
     settings = configuration_updates.for_new_job(root, step)
     accepted = []
-    for path in sorted((root / 'jobs').glob('*.json')):
-        number = int(path.stem)
-        if number >= step or not (_record(root, number) / 'result-identity.json').exists():
-            continue
-        contracts.validate(contracts.workspace(root, number))
-        accepted.append(number)
-    has_worker = any(contracts.read(root / 'jobs' / f'{number:03d}.json')['role'] == 'W' for number in accepted)
+    from . import fork_runtime
+    if fork_runtime.is_fork(root):
+        from . import originals
+        accepted = [source.step for source in originals.source_sequence(root, step)]
+    else:
+        for path in sorted((root / 'jobs').glob('*.json')):
+            number = int(path.stem)
+            if number >= step or not (_record(root, number) / 'result-identity.json').exists():
+                continue
+            contracts.validate(contracts.workspace(root, number))
+            accepted.append(number)
+    has_worker = any(fork_runtime.source_job(root, number)['role'] == 'W' for number in accepted)
     path = root / 'jobs' / f'{step:03d}.json'
+    fork = fork_runtime.bootstrap(root)
+    if fork is not None and step == fork['next_step']:
+        fork_runtime.build_selected_job(root, step)
     if path.exists():
         job = contracts.read(path)
         if not job.get('final_only'):
@@ -1098,7 +1176,7 @@ def _run_final(root, begin):
         control_operations.apply_pending_budget(root)
         parents = []
         for role in ('H', 'W', 'A', 'E'):
-            matching = [number for number in accepted if contracts.read(root / 'jobs' / f'{number:03d}.json')['role'] == role]
+            matching = [number for number in accepted if fork_runtime.source_job(root, number)['role'] == role]
             if matching:
                 parents.append(matching[-1])
         # Keep all accepted closeout science in the exact final history.
@@ -1116,7 +1194,7 @@ def _run_final(root, begin):
         # Execution safety was checked above. Billing uncertainty cannot remove
         # accepted W originals or the final author's submission choice.
         if has_worker and policy is not None and policy['adapter'] is not None:
-            nodes = [dict(step=number, seal_sha256=contracts.digest(_record(root, number) / 'result-identity.json')) for number in accepted]
+            nodes = [dict(step=number, seal_sha256=contracts.digest(fork_runtime.source_record(root, number, 'result-identity.json'))) for number in accepted]
             try:
                 sources = delivery.catalogue_sources(root, nodes, job=prospective_job)
             except delivery.DeliveryUnresolved as error:
@@ -1329,6 +1407,11 @@ def _run_closeout(root):
         return _collect_final_a(root, final)
     initial_repair=None
     first_job=root/'jobs'/f'{begin["first_step"]:03d}.json'
+    from . import fork_runtime
+    fork = fork_runtime.bootstrap(root)
+    selected_closeout = fork is not None and fork['next_step'] == begin['first_step']
+    if selected_closeout:
+        fork_runtime.build_selected_job(root, begin['first_step'])
     if first_job.exists():initial_repair=contracts.read(first_job).get('engineering_repair')
     closeout_settings = configuration_updates.for_new_job(root, begin['first_step'])
     if closeout_settings.get('selection_policy') and not first_job.exists():
@@ -1338,9 +1421,9 @@ def _run_closeout(root):
             return _closeout_result(root, 'closeout_preparation_unavailable', reason=error.code)
         if stopped is not None:return _closeout_result(root,stopped)
     parents = []
+    source_numbers = budget.scientific_steps(root, begin['source_cutoff'] + 1)
     for role in ('H', 'W', 'A'):
-        matching = [step for step in range(1, begin['source_cutoff'] + 1)
-                    if contracts.read(root / 'jobs' / f'{step:03d}.json')['role'] == role]
+        matching = [step for step in source_numbers if fork_runtime.source_job(root, step)['role'] == role]
         if matching:
             parents.append(matching[-1])
     instruction = ('Choose a scientifically justified frozen candidate to retain or replace for delivery within the remaining authorization. '
@@ -1363,6 +1446,10 @@ def _run_closeout(root):
     repair=initial_repair
     if repair:parents=sorted({repair['decision_step'],repair['source']['step']})
     author_request, corrections = None, 0
+    if selected_closeout:
+        original_route = fork['route']
+        parents, instruction = original_route['parents'], original_route['instruction']
+        author_request = original_route['author_correction']
     direct_author = begin.get('authorization_step') is not None and repair is None
     if direct_author and not budget.closeout_state(root)['actions'] and not _closeout_funds(root,
             preparation_seconds=begin['preparation_seconds'], author_required=False):
@@ -1415,6 +1502,10 @@ def _run_closeout(root):
     last_step = max(begin['first_step'], budget.historical_step_limit(root))
     if contracts.settings(root).get('final_a_completion_policy') is not None:
         last_step += 1  # A preserved unused repair may occupy the last granted slot.
+    if fork_runtime.is_fork(root):
+        # Include a denial boundary so exhaustion can journal FINAL. Logical
+        # labels cannot determine how many new closeout actions fit.
+        last_step = max(last_step, begin['first_step'] + budget.effective_max_steps(root) + 1)
     for step in range(begin['first_step'], last_step + 1):
         if not (root / 'jobs' / f'{step:03d}.json').exists():
             configuration_updates.bind_new_job(root, step)
@@ -1455,7 +1546,7 @@ def _run_closeout(root):
                             return _closeout_result(root,'engineering_repair_budget_unavailable',step=step)
                         return _start_budget_closeout(root, begin['source_cutoff'], step, 'W', 'engineering_repair_budget_unavailable')
 
-                if step > budget.effective_max_steps(root):
+                if not budget.task_step_available(root, step):
                     final = _start_budget_closeout(root, begin['source_cutoff'], step, 'W' if repair else 'A', 'bounded_steps_exhausted')
                     if final is not None:
                         return final
@@ -1475,10 +1566,13 @@ def _run_closeout(root):
                     stopped=shortlist.screen(root,begin,before_step=step)
                     if stopped is not None:return _closeout_result(root,stopped,step=step)
                 try:
-                    contracts.build_job(root, step, 'W' if repair else 'A', parents,
-                        instruction=engineering.public(repair)['scope'] if repair else instruction, purpose='closeout',
-                        source_cutoff=begin['source_cutoff'], delivery_sources=engineering.sources(root,step),
-                        author_correction=author_request if repair is None else None, engineering_repair=repair)
+                    if selected_closeout and step == fork['next_step']:
+                        fork_runtime.build_selected_job(root, step)
+                    else:
+                        contracts.build_job(root, step, 'W' if repair else 'A', parents,
+                            instruction=engineering.public(repair)['scope'] if repair else instruction, purpose='closeout',
+                            source_cutoff=begin['source_cutoff'], delivery_sources=engineering.sources(root,step),
+                            author_correction=author_request if repair is None else None, engineering_repair=repair)
                 except engineering.RepairUnavailable as error:
                     return _closeout_result(root,str(error),step=step)
                 try:
@@ -1579,16 +1673,36 @@ def closeout(root, *, export_only=False):
     with _writer(root), _inactive_on_error(root):
         if budget.closeout_state(root)['begin'] is not None:
             return _closeout_result(root, 'exported_unsubmitted', reason='operator_export_only') if export_only else _run_closeout(root)
-        cutoff = 0
-        for step in range(1, budget.historical_step_limit(root) + 1):
+        from . import fork_runtime, originals
+        fork = fork_runtime.bootstrap(root)
+        if fork is None:
+            cutoff = 0
+            steps = range(1, budget.historical_step_limit(root) + 1)
+            first = max((int(path.stem) for path in (root / 'jobs').glob('*.json')), default=0) + 1
+        else:
+            steps = fork_runtime.local_steps(root)
+            # The frozen selection remains reserved even if operator closeout
+            # precedes its first preparation. A new FINAL cannot replace it.
+            first = max([fork['next_step'], *steps]) + 1
+            inherited = [source for source in originals.source_sequence(root, first) if source.inherited]
+            for source in inherited:
+                contracts.validate(contracts.workspace(root, source.step))
+            cutoff = max((source.step for source in inherited
+                if not originals.source_job(source).get('final_only')), default=0)
+            resumed = budget.normal_resume(root)
+            if resumed is not None:
+                visible = set(budget.scientific_steps(root, first))
+                steps = [number for number in steps if number in visible or number >= resumed['first_step']]
+        for step in steps:
             record = _record(root, step)
             if (record / 'result-identity.json').exists():
-                contracts.validate(contracts.workspace(root, step));cutoff = step
+                contracts.validate(contracts.workspace(root, step))
+                if fork is None or not fork_runtime.source_job(root, step).get('final_only'):
+                    cutoff = step
             elif not export_only and (record / 'native-intent.json').exists() and _terminal_success(root, execution.record(root, step)):
                 continuation.seal_or_repair(root, step);cutoff = step
             else:
                 break
-        first = max((int(path.stem) for path in (root / 'jobs').glob('*.json')), default=0) + 1
         if not (root / 'host-started.json').exists():
             contracts.write(root / 'host-started.json', budget.clock_stamp())
         return _start_closeout(root, cutoff, first, 'operator_closeout', export_only=export_only)

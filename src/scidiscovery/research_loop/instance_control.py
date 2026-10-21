@@ -14,11 +14,22 @@ def status(root: Path, *, after=0, limit=None, live_feedback=True):
     if type(after) is not int or after < 0 or (limit is not None and (type(limit) is not int or limit <= 0)):
         raise ValueError('Exact positive node page and continuation required')
     nodes = []
-    stop = budget.historical_step_limit(root) + 1 if limit is None else min(budget.historical_step_limit(root) + 1, after + limit + 1)
-    for step in range(after + 1, stop):
+    from . import fork_runtime, originals
+    local = fork_runtime.local_steps(root)
+    inherited = {}
+    if fork_runtime.is_fork(root):
+        from . import fork_sources
+        inherited = {row['step']: row for row in fork_sources.validate_manifest(root)['prefix_entries']}
+    numbers = sorted(set(local) | set(inherited))
+    selected = [step for step in numbers if step > after]
+    if limit is not None:
+        selected = selected[:limit]
+    for step in selected:
         job_path = root / 'jobs' / f'{step:03d}.json'
-        if not job_path.exists():
-            break
+        if step not in local:
+            job = originals.source_job(originals.node(root, step))
+            nodes.append(dict(step=step, role=job['role'], state='seal_present_unverified', inherited=True))
+            continue
         job = contracts.read(job_path)
         state = runtime.node_state(root, step)
         state = {'sealed': 'seal_present_unverified', 'terminal': 'native_outcome_unsealed',
@@ -57,7 +68,7 @@ def status(root: Path, *, after=0, limit=None, live_feedback=True):
     page = {}
     if limit is not None:
         last = nodes[-1]['step'] if nodes else after
-        more = last < budget.historical_step_limit(root) and (root / 'jobs' / f'{last + 1:03d}.json').exists()
+        more = any(step > last for step in numbers)
         page = dict(after=after, next_after=last if more else None)
     closeout = budget.closeout_state(root)
     from . import delivery
@@ -66,7 +77,10 @@ def status(root: Path, *, after=0, limit=None, live_feedback=True):
                 goal_completion='not_asserted', budget=budget.status_snapshot(root),
                 correction=correction.project(root, before_step=closeout['begin']['source_cutoff'] + 1 if closeout['begin'] else None),
                 closeout_preparation=delivery.preparation_status(root),
-                closeout=controller._closeout_result(root, 'closeout_status', read_only=True) if closeout['begin'] else None, **page)
+                closeout=controller._closeout_result(root, 'closeout_status', read_only=True) if closeout['begin'] else None,
+                used_steps=budget.used_steps(root),
+                **(dict(fork=dict(inherited_costs=fork_sources.validate_manifest(root).get('inherited_costs',
+                    dict(status='unknown', reason='Exact cut costs are not reconstructed')))) if inherited or fork_runtime.is_fork(root) else {}), **page)
 
 
 @owner_effect

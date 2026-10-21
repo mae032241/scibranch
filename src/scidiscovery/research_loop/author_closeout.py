@@ -216,16 +216,44 @@ def _verified_digest(path):
     return value,generation[3]
 
 
-def _ref(root, path):
+def _ref(root, path, *, source=None):
+    if source is not None:
+        from . import originals
+        proof=originals.original_ref(source,Path(path).relative_to(root).as_posix())
+        return {key:proof[key] for key in ('path','sha256','size_bytes')}
     path=Path(path);digest,size=_verified_digest(path)
     return dict(path=path.relative_to(root).as_posix(),sha256=digest,size_bytes=size)
 
 
-def _check(root, ref):
+def _check(root, ref, *, source=None):
     path=root/ref['path']
-    if Path(ref['path']).is_absolute() or '..' in Path(ref['path']).parts or _ref(root,path)!=ref:
+    if Path(ref['path']).is_absolute() or '..' in Path(ref['path']).parts or _ref(root,path,source=source)!=ref:
         raise ValueError('Author closeout original changed')
+    if source is not None:
+        from . import originals
+        return originals.resolve_ref(source,ref)
     return path
+
+
+def _read_original(root, path, source):
+    return c.read(_check(root,_ref(root,path,source=source),source=source))
+
+
+def _optional_original(root, path, source):
+    if source is None or not source.inherited:
+        return path.exists()
+    from . import originals
+    retained=originals.legacy_compilation(source)
+    field=('author_successor' if path==successor_path(root,source.step) else 'output_upgrade')
+    proof=retained[field]
+    if proof is None:
+        return False
+    if proof.get('origin_identity',source.origin_identity)!=source.origin_identity:
+        raise ValueError('Author closeout optional original changed its origin')
+    proof={key:proof[key] for key in ('path','sha256','size_bytes')}
+    _declared_ref(root,proof,path)
+    _check(root,proof,source=source)
+    return True
 
 
 def _calls(root, step):
@@ -250,20 +278,26 @@ def _declared_ref(root, ref, expected=None):
     return path
 
 
-def _validate_original(root, value):
+def _validate_original(root, value, *, source=None):
     """Validate permission objects and scope independently of execution results."""
     root=Path(root)
     if value.get('version')!=1 or value.get('context')!='new_context' or value.get('scope')!='author_closeout_only':
         raise ValueError('Explicit finite author closeout authorization required')
     step=value['step'];origin=root/'native-evidence'/f'{step:03d}'
-    job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
-    expected=dict(job=root/'jobs'/f'{step:03d}.json',settings=configuration_updates.settings_path(root, job),
+    job=_read_original(root,root/'jobs'/f'{step:03d}.json',source)
+    if source is None:
+        settings_path=configuration_updates.settings_path(root,job)
+    else:
+        from . import originals
+        originals.source_settings(source)
+        settings_path=root/(job.get('configuration_revision') or {}).get('path','settings.json')
+    expected=dict(job=root/'jobs'/f'{step:03d}.json',settings=settings_path,
         original_intent=origin/'native-intent.json',original_outcome=origin/'native-outcome.json',
         original_usage=origin/'usage.json',original_experiment_config=origin/'experiment-config.json')
     for key,path in expected.items():
         _declared_ref(root,value[key],path)
-        if key not in {'original_outcome','original_usage'}:_check(root,value[key])
-    job=c.read(root/value['job']['path'])
+        if key not in {'original_outcome','original_usage'}:_check(root,value[key],source=source)
+    job=c.read(_check(root,value['job'],source=source))
     if type(step) is not int or job['step']!=step or job['role']!='W' or value['source_attempt']!=0:
         raise ValueError('Author closeout must retain the original stopped W')
     for ref in value['calls']:_declared_ref(root,ref)
@@ -292,15 +326,15 @@ def require_original_eligibility(root, value):
     return value
 
 
-def validate(root, value):
+def validate(root, value, *, source=None):
     """Validate old bytes or their exact explicitly authorized retained upgrade."""
     root=Path(root)
     successor=successor_path(root,value['step'])
-    if successor.exists():
+    if _optional_original(root,successor,source):
         # The successor verifier includes the complete original validation.
-        validate_successor(root,c.read(c.regular(successor)),original=value)
+        validate_successor(root,_read_original(root,successor,source),original=value,source=source)
     else:
-        _validate_original(root,value)
+        _validate_original(root,value,source=source)
     return value
 
 
@@ -546,7 +580,7 @@ def successor_path(root, step):
     return Path(root)/'host-recovery/author-closeout'/f'{step:03d}-successor.json'
 
 
-def validate_successor(root, value, *, original=None):
+def validate_successor(root, value, *, original=None, source=None):
     """Pure exact-original checks, never usage/records/snapshot or a new grant."""
     root=Path(root)
     if (value.get('version')!=1 or value.get('scope')!='author_closeout_successor_only'
@@ -558,21 +592,21 @@ def validate_successor(root, value, *, original=None):
                    for key in ('authorization_note','authorization_statement'))):
         raise ValueError('One explicit finite author successor authorization required')
     step=value['step'];permit=root/'host-recovery/author-closeout'/f'{step:03d}.json'
-    if _check(root,value['original_permit'])!=permit:
+    if _declared_ref(root,value['original_permit'])!=permit:
         raise ValueError('Author successor changed its original permit')
-    old=c.read(permit)
+    old=c.read(_check(root,value['original_permit'],source=source))
     if old.get('step')!=step:raise ValueError('Author successor original step changed')
     if original is not None and old!=original:raise ValueError('Author successor original permit changed')
-    _validate_original(root,old)
+    _validate_original(root,old,source=source)
     output_upgrade=_output_record(root,step,'upgrade')
-    if output_upgrade.exists():
-        _validate_output_upgrade(root,c.read(c.regular(output_upgrade)),successor=value)
+    if _optional_original(root,output_upgrade,source):
+        _validate_output_upgrade(root,_read_original(root,output_upgrade,source),successor=value,source=source)
     prior=root/'native-evidence'/f'{step:03d}'/'continuations/001'
     if set(value.get('source_originals',{}))!={'native-intent.json','native-outcome.json','usage.json','usage-observation.json','native.jsonl','runner-process.json','native-process.json'}:
         raise ValueError('Author successor needs the exact stopped source originals')
     for name,ref in value['source_originals'].items():
         if _declared_ref(root,ref)!=prior/name:raise ValueError('Author successor source original changed')
-    intent=c.read(_check(root,value['source_originals']['native-intent.json']))
+    intent=c.read(_check(root,value['source_originals']['native-intent.json'],source=source))
     if (intent.get('attempt')!=1 or intent.get('continuation_kind')!='author_closeout'
             or intent.get('context_mode')!='new_context'
             or intent.get('root_intent_sha256')!=old['original_intent']['sha256']
@@ -711,7 +745,7 @@ def _output_record(root, step, kind):
     return Path(root)/'host-recovery/author-closeout'/f'{step:03d}-output-{kind}.json'
 
 
-def _validate_output_upgrade(root, value, *, successor=None):
+def _validate_output_upgrade(root, value, *, successor=None, source=None):
     """Bind output authorization to its exact successor without executing work."""
     root=Path(root)
     if (value.get('version')!=1 or value.get('scope')!='completed_author_output_code_upgrade'
@@ -720,8 +754,8 @@ def _validate_output_upgrade(root, value, *, successor=None):
                    for key in ('authorization_note','authorization_statement'))):
         raise ValueError('Explicit completed-output implementation authorization required')
     path=successor_path(root,value['step'])
-    if _check(root,value['successor'])!=path:raise ValueError('Output upgrade changed its author successor')
-    original=c.read(path)
+    if _declared_ref(root,value['successor'])!=path:raise ValueError('Output upgrade changed its author successor')
+    original=c.read(_check(root,value['successor'],source=source))
     if successor is not None and original!=successor:raise ValueError('Output upgrade successor changed')
     return value
 

@@ -9,7 +9,9 @@ import json
 import copy
 import re
 
-from . import budget, contracts as c, history
+from pathlib import Path
+
+from . import budget, contracts as c, history, originals
 
 DEFAULT_POLICY = dict(max_w_seconds=900.0, max_w_observed_tokens=2_000_000, max_requested_repairs=2)
 MAX_VIEW_BYTES = 4096
@@ -68,7 +70,7 @@ def schema(role, protocol=None):
 
 def _managed_refs(root,source,seal,state):
     if not seal.get('observations'):return set()
-    observation=c.read(root/seal['observations']['path']);hashes={};refs=set()
+    observation=history.read_observation(root,source,seal);hashes={};refs=set()
     for row in observation.get('managed_calls',[]):
         binding=row.get('mechanism_binding')
         if binding is None:continue
@@ -76,7 +78,7 @@ def _managed_refs(root,source,seal,state):
         current=state['mechanisms'].get(ref)
         if current is None or row['status'] not in {'known_success','known_failed'} or binding['source_h']!=current['source_h']:continue
         step=current['source_h']
-        if step not in hashes:hashes[step]=c.digest(c.regular(c.host_record(c.workspace(root,step))/'result-identity.json'))
+        if step not in hashes:hashes[step]=c.digest(originals.source_record(originals.node(root,step),'result-identity.json'))
         if binding['source_h_sha256']==hashes[step]:refs.add(ref)
     return refs
 
@@ -89,12 +91,38 @@ def _screen_refs(root,source,seal,state):
     """
     from . import worker_delivery
     if not worker_delivery.applicable(source):return _managed_refs(root,source,seal,state)
-    record=execution.record(root,source['step'])
-    facts=worker_delivery.validate(root,source,record)
+    owner=originals.node(root,source['step'])
+    if owner.inherited:
+        fact_path=originals.source_record(owner,worker_delivery.FACT_NAME)
+        facts=c.read(fact_path)
+        intent=c.read(originals.source_record(owner,'native-intent.json'))
+        if facts.get('version')!=1 or facts.get('binding')!=dict(job_sha256=seal['job_sha256'],
+                raw_sha256=seal['raw_sha256'],source_attempt=intent.get('attempt',0)):
+            raise history.ObserverIntegrityError('Inherited W evidence changed its exact attempt')
+        from . import execution_recovery
+        recovery_refs=[dict(ref,origin_identity=ref.get('origin_identity',owner.origin_identity))
+            for ref in source.get('history',{}).get('execution_recoveries',[])]
+        recovered=execution_recovery.resolved(root,recovery_refs)
+        for row in facts['evidence']:
+            accepted=c.read(originals.resolve_ref(owner,dict(row['accepted'],path=row['accepted']['snapshot'])))
+            producer=originals.dependency(owner,accepted['scope']['step'])
+            producer_job=originals.source_job(producer)
+            producer_seal=c.read(originals.source_record(producer,'result-identity.json'))
+            observed=c.read(originals.resolve_ref(producer,producer_seal['observations']))
+            calls=[recovered.get((producer.step,call['call_id']),call) for call in observed.get('managed_calls',[])]
+            matches=[call for call in calls if call['accepted']==row['accepted']
+                and all(call.get(key)==row.get(key) for key in ('completed','terminal','observation'))]
+            if len(matches)!=1 or matches[0]['status'] not in {'known_success','known_failed'}:
+                raise history.ObserverIntegrityError('Inherited W evidence lacks its exact known observation')
+            history.validate_managed_original(producer,producer_job,matches)
+    else:
+        record=execution.record(root,source['step'])
+        facts=worker_delivery.validate(root,source,record)
+        fact_path=c.regular(record/worker_delivery.FACT_NAME)
     receipt=seal['control_outcome'].get('worker_delivery') or {}
-    if receipt.get('facts_sha256')!=c.digest(c.regular(record/worker_delivery.FACT_NAME)):
+    if receipt.get('facts_sha256')!=c.digest(fact_path):
         raise history.ObserverIntegrityError('Final W scientific evidence differs from its seal')
-    science=c.science_payload(execution.raw(root,source['step']),'W',source['handoff_protocol'])
+    science=c.science_payload(originals.source_raw(owner),'W',source['handoff_protocol'])
     declared={};mechanisms=source['search']['breadth']['mechanisms']
     for finding in c.scientific_field(source,science,'mechanism_findings') or []:
         matches=[item['mechanism_ref'] for item in mechanisms
@@ -104,8 +132,8 @@ def _screen_refs(root,source,seal,state):
     for row in facts['evidence']:
         ref=row['mechanism_ref'];findings=declared.get(ref,[]);current=state['mechanisms'].get(ref)
         if current is None or len(findings)!=1 or findings[0]['basis']!='observed' or not findings[0]['finding'].strip():continue
-        binding=c.read(root/row['accepted']['snapshot'])['mechanism_binding'];step=current['source_h']
-        if step not in hashes:hashes[step]=c.digest(c.regular(c.host_record(c.workspace(root,step))/'result-identity.json'))
+        binding=c.read(originals.resolve_ref(owner,dict(row['accepted'],path=row['accepted']['snapshot'])))['mechanism_binding'];step=current['source_h']
+        if step not in hashes:hashes[step]=c.digest(originals.source_record(originals.node(root,step),'result-identity.json'))
         if binding['source_h']==step and binding['source_h_sha256']==hashes[step]:refs.add(ref)
     return refs
 
@@ -142,20 +170,20 @@ def _repair_subject(root,job,ref,*,payload=None):
     candidates=[];chosen=[]
     for step,(source,seal) in sources.items():
         if not seal.get('observations'):continue
-        observation=c.read(c.regular(root/seal['observations']['path']))
+        observation=history.read_observation(root,source,seal)
         for row in observation.get('managed_calls',[]):
             binding=row.get('mechanism_binding')
             if binding is None or binding['mechanism_ref']!=ref:continue
-            accepted=c.read(c.regular(root/row['accepted']['snapshot']))
-            originals=[dict(accepted['script'],path=accepted['source_script']),*accepted.get('snapshot_files',[])]
+            accepted=c.read(originals.resolve_ref(originals.node(root,step),dict(row['accepted'],path=row['accepted']['snapshot'])))
+            input_originals=[dict(accepted['script'],path=accepted['source_script']),*accepted.get('snapshot_files',[])]
             # Archive objects deduplicate bytes across distinct logical outputs.
             # Only the selected producer's original artifact path can prove this
             # input identity; an archive-path alias cannot disambiguate a call.
             prefix=f'inputs/parents/{step:03d}/artifacts/'
-            explicit=any(material['source']==str(c.workspace(root,step)/'artifacts'/material['path'][len(prefix):])
+            explicit=any(material['source']==str(originals.node(root,step).logical_workspace/'artifacts'/material['path'][len(prefix):])
                 and material['source']==original['path']
                 and all(material[key]==original[key] for key in ('sha256','size_bytes'))
-                for material in inputs.get(step,[]) for original in originals)
+                for material in inputs.get(step,[]) for original in input_originals)
             candidate=(source,seal,row)
             if step in direct:candidates.append(candidate)
             if explicit:chosen.append(candidate)
@@ -169,7 +197,7 @@ def _repair_subject(root,job,ref,*,payload=None):
     original_h,_,_,sha=history._source(root,old_h)
     if original_h['role']!='H' or binding['source_h_sha256']!=sha:
         return dict(status='version_mismatch',root=None,source=None)
-    identity=c.regular(c.host_record(c.workspace(root,source['step']))/'result-identity.json')
+    identity=originals.source_record(originals.node(root,source['step']),'result-identity.json')
     subject=dict(step=source['step'],job_sha256=seal['job_sha256'],raw_sha256=seal['raw_sha256'],
         seal_sha256=c.digest(identity),call=copy.deepcopy(row))
     return dict(status='available',root=source['search'].get('repair_root') or source['step'],source=subject)
@@ -201,7 +229,7 @@ def _assessed(root,job,state):
     if not any(ref['path']==f'inputs/parents/{source["step"]:03d}/conclusion.json' for ref in original['direct_refs']):return None
     focus=(source.get('search') or {}).get('focus')
     if focus is None:return None
-    seal=c.regular(c.host_record(c.workspace(root,source['step']))/'result-identity.json')
+    seal=originals.source_record(originals.node(root,source['step']),'result-identity.json')
     return dict(identity=(source['step'],c.digest(seal)),mechanism_ref=focus['mechanism_ref'],allocation=source['search']['allocation'],
         breadth=bool(source['search'].get('breadth')),mechanism_refs=sorted(_managed_refs(root,source,source_seal,state)))
 
@@ -311,36 +339,43 @@ def apply_source(root,job,payload,seal,state):
 def fold(root,sources,*,recovery_refs=()):
     from . import execution_recovery
     sources=list(sources)
-    all_refs={ref['path']:ref for ref in recovery_refs}
+    def ref_key(ref):
+        return (json.dumps(ref.get('origin_identity'),sort_keys=True),ref['path'])
+    all_refs={ref_key(ref):ref for ref in recovery_refs};source_refs={}
     for job,_,_,_ in sources:
-        for ref in job.get('history',{}).get('execution_recoveries',[]):
-            prior=all_refs.setdefault(ref['path'],ref)
+        owner=originals.node(root,job['step'])
+        refs=[dict(ref,origin_identity=ref.get('origin_identity',owner.origin_identity)) if owner.inherited else ref
+            for ref in job.get('history',{}).get('execution_recoveries',[])]
+        source_refs[job['step']]=refs
+        for ref in refs:
+            prior=all_refs.setdefault(ref_key(ref),ref)
             if prior!=ref:raise ValueError('Frozen execution recovery prefixes disagree')
-    ordered=sorted(all_refs.values(),key=lambda ref:ref['path'])
+    ordered=[all_refs[key] for key in sorted(all_refs)]
     checked=execution_recovery.validate(root,ordered)
-    cache={ref['path']:value for ref,value in zip(ordered,checked)}
+    cache={ref_key(ref):value for ref,value in zip(ordered,checked)}
     state=dict(opportunity_counts={},opportunity_grants={},opportunity_unknown=False,extra_grant=None,mechanisms={},current_h=None,scope=None,plan=None,authorized=set(),focus=None,accepted_slices=[],repairs={},
         order=dict(remaining=[],seen_w=set(),allocation=None,diagnostics=[]))
     state['portfolio']=dict(invested={},deferred={},seen_w=set(),pending_w=None,last_branch=None,last_decision_step=None)
     original_rows={}
     for job,payload,seal,seal_sha in sources:
         # Scientific claims see exactly their own frozen mechanical input prefix.
-        _execution_opportunities(root,state,original_rows,job.get('history',{}).get('execution_recoveries',[]),cache)
-        if c.settings(root,job).get('search_policy') is not None:apply_source(root,job,payload,seal,state)
+        _execution_opportunities(root,state,original_rows,source_refs[job['step']],cache)
+        if originals.source_settings(originals.node(root,job['step'])).get('search_policy') is not None:apply_source(root,job,payload,seal,state)
         if 'portfolio' in state:_portfolio_update(root,job,payload,seal,state,seal_sha)
-        step=job['step'];intent=execution.record(root,step)/'native-intent.json'
+        step=job['step'];source=originals.node(root,step)
+        intent=originals.source_record(source,'native-intent.json')
         if job['role']=='W' and job.get('search') and intent.exists():
             value=c.read(c.regular(intent))
-            if value['task_sha256']!=c.digest(root/'jobs'/f'{step:03d}.json'):raise ValueError('W dispatch identity changed')
-            outcome=c.read(execution.record(root,step)/'native-outcome.json')
-            observation=c.read(root/seal['observations']['path']) if seal.get('observations') else None
+            if value['task_sha256']!=c.digest(originals.resolve_ref(source,dict(path=f'jobs/{step:03d}.json'))):raise ValueError('W dispatch identity changed')
+            outcome=c.read(originals.source_record(source,'native-outcome.json'))
+            observation=history.read_observation(root,job,seal) if seal.get('observations') else None
             state['accepted_slices'].append(dict(step=step,focus=job['search']['focus'],meter=outcome.get('search_slice'),
                 observed_new_candidates=len(observation['candidates']) if observation else None,
                 candidate_coverage=observation['coverage']['status'] if observation else 'unknown'))
             focus=job['search']['focus']
             if focus and focus['action']=='repair':
                 repair_root=job['search']['repair_root'];state['repairs'][repair_root]=state['repairs'].get(repair_root,0)+1
-        observed=c.read(root/seal['observations']['path']) if seal.get('observations') else {}
+        observed=history.read_observation(root,job,seal) if seal.get('observations') else {}
         original_rows.update(execution_recovery.sealed_pending_rows(root,[(job,payload,seal,seal_sha)]))
         for row in observed.get('managed_calls',[]):
             original_rows[(job['step'],row['call_id'])]=dict(row=row,phase='original',native_state=None)
@@ -352,7 +387,7 @@ def _execution_opportunities(root,state,original_rows,refs,cache):
     from . import execution_recovery
     state['opportunity_counts']={};state['opportunity_grants']={};state['opportunity_unknown']=False
     for value in execution_recovery.call_view(root,[],refs,original_rows=original_rows,
-            validated=[cache[ref['path']] for ref in refs]).values():
+            validated=[cache[(json.dumps(ref.get('origin_identity'),sort_keys=True),ref['path'])] for ref in refs]).values():
         row=value.get('row')
         if row is None:
             state['opportunity_unknown']=True;continue
@@ -369,7 +404,9 @@ def _execution_opportunities(root,state,original_rows,refs,cache):
 
 def project(root,before_step):
     from . import execution_recovery
-    return fold(root,history.source_sequence(root,before_step),recovery_refs=execution_recovery.prefix(root,before_step))
+    refs=(originals.frozen_recovery_refs(root,before_step) if (Path(root)/originals.MANIFEST).exists()
+        else execution_recovery.prefix(root,before_step))
+    return fold(root,history.source_sequence(root,before_step),recovery_refs=refs)
 
 
 
@@ -384,11 +421,11 @@ def _breadth(root,state,limits,focus):
     for ref in refs:
         item=state['mechanisms'][ref];step=item['source_h']
         mechanisms.append(dict(mechanism_ref=ref,label=item['label'],source_h=step,
-            source_h_sha256=c.digest(c.regular(c.host_record(c.workspace(root,step))/'result-identity.json')),
+            source_h_sha256=c.digest(originals.source_record(originals.node(root,step),'result-identity.json')),
             minimal_test=item['minimal_test'],status=item['status']))
     declared=state.get('extra_grant');grant=None
     if declared and declared['mechanism_ref'] in refs:
-        step=declared['source_a'];sha=c.digest(c.regular(c.host_record(c.workspace(root,step))/'result-identity.json'))
+        step=declared['source_a'];sha=c.digest(originals.source_record(originals.node(root,step),'result-identity.json'))
         grant=dict(declared,source_a_sha256=sha,extra_calls=1,used_calls=min(1,state['opportunity_grants'].get((step,sha),0)))
     return breadth.validate(dict(version=1,initial_calls=limits.get('initial_calls',1),mechanisms=mechanisms,
         baseline=[dict(mechanism_ref=ref,accepted_count=state['opportunity_counts'].get(ref,0)) for ref in refs],
@@ -402,16 +439,15 @@ def bind(root,step,role,protocol=None,*,write_pages=True,state=None,unified=True
     focus=state['focus'] if role=='W' else None
     repair_root=repair_binding=repair_source=repair_authorization=None
     if focus is not None and focus['action']=='repair':
-        chooser_step=max(index for index in range(1,step) if c.read(root/'jobs'/f'{index:03d}.json')['role'] in {'H','A'})
-        chooser=c.read(root/'jobs'/f'{chooser_step:03d}.json')
-        payload=c.read(execution.raw(root,chooser_step))
+        chooser,payload,_,_=next(source for source in reversed(history.source_sequence(root,step)) if source[0]['role'] in {'H','A'})
+        chooser_step=chooser['step'];chooser_source=originals.node(root,chooser_step)
         choice=_repair_choice(root,chooser,focus['mechanism_ref'],payload=payload)
         repair_binding,repair_root,repair_source=choice['status'],choice['root'],choice['source']
-        seal=c.regular(c.host_record(c.workspace(root,chooser_step))/'result-identity.json')
-        repair_authorization=dict(step=chooser_step,job_sha256=c.digest(root/'jobs'/f'{chooser_step:03d}.json'),seal_sha256=c.digest(seal))
+        seal=originals.source_record(chooser_source,'result-identity.json')
+        repair_authorization=dict(step=chooser_step,job_sha256=c.digest(originals.resolve_ref(chooser_source,dict(path=f'jobs/{chooser_step:03d}.json'))),seal_sha256=c.digest(seal))
     obligation=[]
     if role=='W' and focus and focus['action']=='screen':
-        obligation=[dict(mechanism_ref=ref,source_h=item['source_h'],source_h_sha256=c.digest(c.regular(c.host_record(c.workspace(root,item['source_h']))/'result-identity.json')))
+        obligation=[dict(mechanism_ref=ref,source_h=item['source_h'],source_h_sha256=c.digest(originals.source_record(originals.node(root,item['source_h']),'result-identity.json')))
             for ref,item in state['mechanisms'].items() if ref in state['authorized'] and item['status']=='pending']
     return dict(coverage_obligation=obligation,focus=focus,allocation=copy.deepcopy(state['order']['allocation']),unfinished_plan=copy.deepcopy(state['order']['remaining']),
         breadth=_breadth(root,state,limits,focus) if role=='W' else None,intent_diagnostics=state['order']['diagnostics'],repair_root=repair_root,repair_binding=repair_binding,repair_source=repair_source,repair_authorization=repair_authorization,limits=policy(limits),files=[])
@@ -512,10 +548,10 @@ def _portfolio_update(root, job, payload, seal, state, seal_sha=None):
             identity=(job['step'],seal_sha)
             if focus['action']=='repair':
                 original=job['search']['repair_root']
-                identity=(original,c.digest(c.regular(c.host_record(c.workspace(root,original))/'result-identity.json')))
+                identity=(original,c.digest(originals.source_record(originals.node(root,original),'result-identity.json')))
             branches=[focus['mechanism_ref']]
             if (job.get('search') or {}).get('breadth'):
-                observation=c.read(root/seal['observations']['path']) if seal.get('observations') else {}
+                observation=history.read_observation(root,job,seal) if seal.get('observations') else {}
                 branches=list(dict.fromkeys(row['mechanism_binding']['mechanism_ref'] for row in observation.get('managed_calls',[]) if row.get('mechanism_binding') is not None))
             portfolio['pending_w']=dict(step=job['step'],identity=identity,branch=focus['mechanism_ref'],branches=branches)
         return

@@ -14,7 +14,7 @@ from test_delivery import FAKE_HARNESS, descriptor, delivery_policy, prepare_fix
 from test_history_handoff import finish
 
 
-def managed_scene(tmp_path, *, alias_correct=True, rewrite_script=True, launcher=None, harness=None, audit=False, max_tokens=100000, resume_policy=None, output_capacity=None):
+def managed_scene(tmp_path, *, alias_correct=True, rewrite_script=True, launcher=None, harness=None, audit=False, max_tokens=100000, resume_policy=None, output_capacity=None, namespace_runs=None):
     if shutil.which('bwrap') is None:
         pytest.skip('Actual namespace lane required')
     root, public = tmp_path / 'instance', tmp_path / 'public'
@@ -34,7 +34,8 @@ def managed_scene(tmp_path, *, alias_correct=True, rewrite_script=True, launcher
         shutil.copyfile(Path(cov_delivery.__file__).with_name('protocol.py'),tmp_path/'protocol.py')
         adapter.write_text(Path(cov_delivery.__file__).read_text().replace("script='/inputs/source.py'", "script=request['context']['row']['script']"))
         spec.update(adapter=str(adapter),launcher_argv=[sys.executable,str(adapter),'--isolate'])
-    spec['config']['namespace_runs'] = str(root / 'runs') if alias_correct else '/opt/exp/runs'
+    spec['config']['namespace_runs'] = (str(namespace_runs) if namespace_runs is not None
+        else str(root / 'runs') if alias_correct else '/opt/exp/runs')
     controller.prepare(root, objective, public, launcher or ['fake-no-model'], max_tokens=max_tokens, max_seconds=300, max_steps=12,
         model='fixture', reasoning_effort='high', search_policy=None,**(dict(max_output_item_bytes=output_capacity,max_output_total_bytes=output_capacity) if output_capacity else {}),resume_policy=resume_policy,candidate_audit_policy={'version':1} if audit else None,
         node_budget_policy={role: dict(max_observed_tokens=2000, max_seconds=60) for role in ('H','W','A','E')},

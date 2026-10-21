@@ -25,7 +25,7 @@ def outcome(root,job,payload):
     if job['role']=='W':
         from . import worker_delivery
         delivery=worker_delivery.require_delivery(root,job,payload,execution.record(root,job['step']))
-    rows=[*diagnostics,*selection,*requests,*history.validate_recommendation(job,payload)]
+    rows=[*diagnostics,*selection,*requests,*history.validate_recommendation(job,payload,root=root)]
     rows.extend(row for row in c.scientific_diagnostics(job,payload) if row not in rows)
     return dict(**(dict(stage_end_reason='continuation_unavailable') if job['role']=='W' and payload.get('stage_intent')=='continue' and not job.get('worker_fragment_policy') else {}),
         **(dict(worker_delivery=delivery) if delivery is not None else {}),
@@ -43,7 +43,8 @@ def _source(root, step):
 def public_request(root, job):
     """Bound scientific clarification, without the private identity chain."""
     request = job['author_correction']
-    first = c.read(c.host_record(c.workspace(root, request['root']['step'])) / 'result-identity.json')
+    from . import fork_runtime
+    first = c.read(fork_runtime.source_record(root, request['root']['step'], 'result-identity.json'))
     diagnostics = first['control_outcome']['diagnostics']
     if request['reason']=='formal_review_unavailable':
         from . import formal_review
@@ -77,7 +78,8 @@ def validate_job(root, job):
         if (not isinstance(ref, dict) or type(ref.get('step')) is not int or not 0 < ref['step'] < job['step']
                 or ref != _source(root, ref['step'])):
             raise ValueError('Author correction original identity changed')
-    source = c.read(root / 'jobs' / f'{request["source"]["step"]:03d}.json')
+    from . import fork_runtime
+    source = fork_runtime.source_job(root, request['source']['step'])
     original = source.get('author_correction')
     if request['reason']=='formal_review_unavailable' and job.get('purpose')!='closeout':
         from . import formal_review
@@ -135,20 +137,25 @@ def accepted(root, request, before_step):
     if request['reason']=='formal_review_unavailable':
         from . import formal_review
         return max(0,len(formal_review.unavailable_attempts(root,request['root']['step'],before_step=before_step))-1)
-    original = c.read(root / 'jobs' / f'{request["root"]["step"]:03d}.json')
+    from . import fork_runtime, originals
+    original = fork_runtime.source_job(root, request['root']['step'])
     from . import budget
     begin = budget.closeout_state(root)['begin']
     if original.get('purpose') == 'closeout' or begin is not None and begin.get('authorization_step') == original['step']:
         return max(0, closeout_errors(root, before_step) - 1)
     count = 0
-    for step in range(request['root']['step'] + 1, before_step):
-        path = root / 'jobs' / f'{step:03d}.json'
-        if not path.exists():
-            break
-        job = c.read(c.regular(path))
+    sources = {source.step: source for source in originals.source_sequence(root, before_step)}
+    sources.update((step, originals.node(root, step)) for step in fork_runtime.local_steps(root) if step < before_step)
+    for step, source in sorted(sources.items()):
+        if step <= request['root']['step']:
+            continue
+        job = originals.source_job(source)
         previous = job.get('author_correction')
-        intent = execution.record(root, step) / 'native-intent.json'
-        if previous is not None and previous['root'] == request['root'] and job['role'] in {'H', 'A'} and intent.exists():
+        if previous is not None and previous['root'] == request['root'] and job['role'] in {'H', 'A'}:
+            if not source.inherited and not (execution.record(root, step) / 'native-intent.json').exists():
+                continue
+            intent = originals.source_record(source, 'native-intent.json')
+            path = originals.resolve_ref(source, dict(path=f'jobs/{step:03d}.json'))
             if c.read(c.regular(intent)).get('task_sha256') != c.digest(path):
                 raise ValueError('Author correction execution identity changed')
             count += 1
@@ -175,6 +182,7 @@ def closeout_errors(root, before_step):
         except delivery.DeliveryUnresolved as error:
             errors += error.code not in {'delivery_source_unprepared', 'selection_comparison_required'}
     return errors
+
 
 
 def effective_route(root, step, result, job, route):

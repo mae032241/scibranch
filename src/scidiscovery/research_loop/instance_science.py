@@ -84,6 +84,13 @@ def _proof(path, sha256):
 
 def _sealed(root, step):
     root = Path(root).resolve()
+    from . import originals
+    if type(step) is int and originals.inherited(root, step):
+        source = originals.node(root, step)
+        c.validate_original(source)
+        seal = _json(originals.source_record(source, 'result-identity.json'))
+        raw = originals.source_raw(source)
+        return root, seal, raw, _proof(raw, seal['raw_sha256'])
     try:
         settings = c.settings(root)
         if type(step) is not int or not 1 <= step <= budget.historical_step_limit(root):
@@ -146,6 +153,10 @@ def artifact(root, step, index):
     # The ordinal selects an existing seal member, never a caller-provided path.
     if sum(row['path']==material['path'] for row in rows)!=1:
         raise ValueError('Scientific deliverable name is ambiguous')
+    from . import originals
+    if originals.inherited(root, step):
+        c.material_name(c.workspace(root, step), material)
+        return Original(originals.material_path(root, material), material), name
     source = Path(material['source']); work = c.workspace(root,step)
     if not source.is_absolute() or not source.is_relative_to(root) or source.resolve()!=source:
         raise ValueError('Scientific deliverable source escaped its exact output owner')

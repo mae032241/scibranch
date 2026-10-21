@@ -10,17 +10,27 @@ import copy
 import json
 from pathlib import Path
 
-from . import contracts as c, history, search
+from . import contracts as c, history, originals, search
 
 MAX_CONTEXTS = 128
 
 
-def _parent_original(root, item, available):
+def _parent_original(root, item, available, *, source=None):
     """Bind the declared choice to an earlier exact completed call, never a name."""
     accepted=next((p for p in item['proofs'] if Path(p['path']).name=='accepted.json'),None)
     if accepted is None or accepted.get('retention')!='archived':
         raise ValueError('Accepted context original unavailable')
-    original=c.read(c.regular(root/accepted['snapshot']))
+    path=dict(accepted,path=accepted['snapshot'])
+    original=c.read(originals.resolve_ref(source,path) if source is not None else originals.resolve_root_ref(root,path))
+    if source is not None and source.inherited:
+        from . import candidate_refs
+        original=copy.deepcopy(original)
+        parent=original.get('parent')
+        if parent is not None and parent.get('candidate_id') is not None:
+            identity=parent['candidate_id']
+            mapping=candidate_refs.source_input_mapping(source,originals.source_job(source))
+            parent['candidate_id']=(candidate_refs.origin_candidate(source.origin_identity,identity)
+                if parent['source']=='same_node_completed_call' else mapping.get(identity,identity))
     for key in ('call_id','scope','parent','change_intent'):
         if original.get(key)!=item[key]:
             raise history.ObserverIntegrityError('Context differs from accepted original')
@@ -106,28 +116,31 @@ def build(root, before_step, *, sources=None, search_state=None):
     sources=history.source_sequence(root,before_step) if sources is None else sources
     if search_state is None:
         from . import execution_recovery
-        state=search.fold(root,sources,recovery_refs=execution_recovery.prefix(root,before_step))
+        recovery_refs = (originals.frozen_recovery_refs(root, before_step) if (Path(root) / originals.MANIFEST).exists()
+            else execution_recovery.prefix(root,before_step))
+        state=search.fold(root,sources,recovery_refs=recovery_refs)
     else:
         state=search_state
     nodes=[];candidates={};edges=[];calls=set();coverage='complete';available={}
     for job,payload,seal,_ in sources:
-        step=job['step']
+        step=job['step'];owner=originals.node(root,step)
         nodes.append(dict(step=step,role=job['role'],parents=[int(Path(r['path']).parts[2]) for r in job['direct_refs']],
                           source_sha256=seal['raw_sha256'],summary=payload['summary'],limitations=payload['limitations']))
         for selected in seal.get('selected_inputs',[]):
             edges.append(dict(kind='reuse',subject=dict(node=step),target=dict(node=selected['origin_step'],material=selected['material']),scope='declared_handoff_not_proven_read'))
         receipt=seal.get('observations')
         if not receipt:coverage='partial';continue
-        observation=c.read(root/receipt['path'])
+        observation=history.read_observation(root, job, seal)
         if observation['coverage']['status']!='complete':coverage='partial'
         for row in observation['candidates']:
             if row['id'] in candidates and candidates[row['id']]['observation']!=row:
                 raise ValueError('Candidate identity changed')
             candidates.setdefault(row['id'],dict(observation=row,mechanism_ref=None,parent=None,derivation='unknown',support='unknown'))
         for context in observation.get('contexts',[]):
-            if context['call_id'] in calls:raise ValueError('Context was sealed more than once')
-            calls.add(context['call_id']);candidate=context['candidate_id']
-            _parent_original(root,context,available)
+            identity=(originals.identity_key(owner.origin_identity),context['call_id'])
+            if identity in calls:raise ValueError('Context was sealed more than once')
+            calls.add(identity);candidate=context['candidate_id']
+            _parent_original(root,context,available,source=owner)
             if context['status']=='known_success':available[candidate]=context
             if context['status']=='unknown':coverage='partial';continue
             if candidate not in candidates:raise ValueError('Context has no observed candidate')
@@ -207,7 +220,8 @@ def project(root, before_step, *, source_cutoff=None, extra_steps=()):
     """One verified source collection feeds all derived scientific navigation."""
     sources=history.source_sequence(root,before_step,source_cutoff=source_cutoff,extra_steps=extra_steps)
     from . import execution_recovery
-    recovery_refs=execution_recovery.prefix(root,before_step)
+    recovery_refs = (originals.frozen_recovery_refs(root, before_step) if (Path(root) / originals.MANIFEST).exists()
+        else execution_recovery.prefix(root,before_step))
     records=execution_recovery.project_records(root,history.records_from_sources(root,sources,write_cache=False),recovery_refs,sources=sources)
     state=search.fold(root,sources,recovery_refs=recovery_refs) if configuration_updates.for_new_job(root,before_step).get('search_policy') is not None else None
     graph=build(root,before_step,sources=sources,search_state=state)
@@ -432,6 +446,9 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
     experiments=[];recovery_materials=[]
     source_jobs={job['step']:job for job,_,_,_ in projection['sources']}
     for record in records:
+        owner=originals.node(root,record['step'])
+        def archive_path(proof):
+            return originals.resolve_ref(originals.source_for_ref(owner,proof),dict(proof,path=proof['snapshot']))
         resumes={row['call_id']:row for row in record.get('execution_resumes',[])}
         for resumed in resumes.values():
             if resumed['phase'] in {'resume_intent','original_prepare_unknown'}:
@@ -439,13 +456,13 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                     limitation='Original preparation may have started; no accepted execution or scientific result is claimed. Preserve the original identity.'))
         for call in (record.get('observation') or {}).get('managed_calls',[]):
             if call.get('retirement') is not None:
-                original=c.read(Path(root)/call['retirement']['snapshot'])
+                original=c.read(archive_path(call['retirement']))
                 prefix=f'inputs/recovered/{record["step"]:03d}/{call["call_id"]}'
                 retained=[(call['retirement'],'retirement.json')]
                 native=[original[key] for key in ('request','response','protocol')]
                 if original.get('dispatch_intent') is not None:native.append(original['dispatch_intent'])
                 for number,proof in enumerate(native,1):
-                    matches=[item for item in call['originals'] if Path(root)/item['path']==Path(proof['path'])
+                    matches=[item for item in call['originals'] if Path(owner.original_root)/item['path']==Path(proof['path'])
                              and item['sha256']==proof['sha256'] and item['size_bytes']==proof['size_bytes']]
                     if len(matches)!=1:raise ValueError('Retirement native original is unavailable')
                     retained.append((matches[0],f'originals/{number:03d}'))
@@ -456,7 +473,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                     if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
                         raise ValueError('Retirement proof materials exceed the original input bound')
                     target=f'{prefix}/{name}'
-                    c._copy_bound(Path(root)/item['snapshot'],c.workspace(root,step)/target,item['sha256'])
+                    c._copy_bound(archive_path(item),c.workspace(root,step)/target,item['sha256'])
                     recovery_materials.append(dict(path=target,sha256=item['sha256'],size_bytes=item['size_bytes']))
                 experiments.append(dict(step=record['step'],call_id=call['call_id'],execution_status='not_submitted',
                     **(dict(retirement_proof=f'{prefix}/retirement.json',native_originals=[f'{prefix}/{name}' for _,name in retained[1:]])
@@ -481,13 +498,13 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                     limits=configuration_updates.for_new_job(root,step)
                     if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
                         raise ValueError('Execution recovery materials exceed the original input bound')
-                    c._copy_bound(Path(root)/item['snapshot'],c.workspace(root,step)/output['path'],item['sha256'])
+                    c._copy_bound(archive_path(item),c.workspace(root,step)/output['path'],item['sha256'])
                     recovery_materials.append(dict(path=output['path'],sha256=item['sha256'],size_bytes=item['size_bytes']))
             native_originals=[]
             if call['call_id'] in record.get('recovered_calls',[]):
-                observed=c.read(Path(root)/call['observation']['snapshot'])
+                observed=c.read(archive_path(call['observation']))
                 for number,proof in enumerate(observed['proofs'],1):
-                    matches=[item for item in call['originals'] if Path(root)/item['path']==Path(proof['path']) and item['sha256']==proof['sha256']]
+                    matches=[item for item in call['originals'] if Path(owner.original_root)/item['path']==Path(proof['path']) and item['sha256']==proof['sha256']]
                     if len(matches)!=1 or matches[0]['retention']!='archived':raise ValueError('Recovered native original is unavailable')
                     if worker_view_version == 1:
                         continue  # Do not publish host control proofs as scientific inputs.
@@ -495,7 +512,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                     limits=configuration_updates.for_new_job(root,step)
                     if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
                         raise ValueError('Execution recovery originals exceed the original input bound')
-                    c._copy_bound(Path(root)/item['snapshot'],c.workspace(root,step)/target,item['sha256'])
+                    c._copy_bound(archive_path(item),c.workspace(root,step)/target,item['sha256'])
                     recovery_materials.append(dict(path=target,sha256=item['sha256'],size_bytes=item['size_bytes']))
                     native_originals.append(dict(path=target))
             native_pages=paged(native_originals,16,'originals',f'inputs/history/recoveries/{record["step"]:03d}/{call["call_id"]}','recovered-native-originals') if native_originals else []

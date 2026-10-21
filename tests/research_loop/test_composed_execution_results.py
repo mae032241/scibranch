@@ -41,7 +41,8 @@ def case(tmp_path,options,observer=None):
         dict(label=label,minimal_test='Read the exact backend observation',existing_ref=None) for label in ('P','Q')],
         focus=dict(label=None,action='screen')))
     job=c.build_job(root,2,'W',[1]);record=execution.record(root,2)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json')))
+    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json'),
+        search_slice=search.accept(root,job)))
     path=c.workspace(root,2)/'work/config.json';config=e.configure(root,2,'composed_execution:fixture',options,path)
     package=c.workspace(root,2)/'work/package';package.write_bytes(b'opaque original job package')
     def cli(*args,expected=0):

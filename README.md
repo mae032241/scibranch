@@ -30,6 +30,7 @@ the claims established by its exact inputs, experiment and validation contract.
 | --- | --- |
 | `scid-research` | Prepare an instance; run, inspect, pause and continue research; close out results. |
 | `scid-research start` | Start or reconnect to a detached controller for one explicit instance. |
+| `scid-research fork-preview` / `fork-create` | Preview and create a paused branch from one exact historical logical task. |
 | `scid-research serve-ui` | Optional webpage for the same instance controls and paginated sealed results. |
 | `scid-research archive-*` / `checkpoint-*` | Export and inspect originals, restore selected material, or perform a bounded same-host cold transfer. |
 | `scid-experiment` | Use managed local experiments or a declared domain execution interface. |
@@ -73,6 +74,15 @@ local commands require a supported native permission projection; see the
 cases. External execution remains owned by its declared launcher.
 Execution requires its own frozen configuration and authorization. Research
 budgets, independent review and user statements do not grant execution permission.
+
+A completed, quiescent current-protocol instance can be forked at an exact logical
+step N. The child reruns that task from its original first-invocation inputs in a fresh
+session, with explicit finite new budgets and a self-contained copy of its declared
+scientific originals. Creation leaves it paused; explicitly use `start --continue`
+to launch it. Historical scientific investment, source restrictions and unknown
+costs remain visible; prior review or execution permission does not authorize new
+subjects. See [fork semantics](docs/ARCHITECTURE.md#historical-task-forks) and the
+[CLI workflow](docs/ROOTLESS_CLI.zh-CN.md#从历史任务创建分支).
 
 All H/W/A/E node token budgets and W stage targets are advisory: reaching a target requests a bounded conclusion without rejecting new managed experiments or forcing A review. Actual input plus output is fully accounted; no whole-node token allocation is prepaid. Current protocol 23 accepts only soft node settings; older instances remain read-only without rewriting their frozen settings. Shared budget checks for new nodes, finite execution time, permissions and cleanup limits remain enforced.
 

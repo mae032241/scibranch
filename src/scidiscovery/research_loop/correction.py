@@ -109,10 +109,53 @@ def _append(root, events, parent, **fields):
     return event
 
 
+def _inherited_events(root):
+    from . import originals
+    manifest = originals._manifest(root)
+    refs = [] if manifest is None else manifest['cut'].get('correction_events', [])
+    values, chains = [], {}
+    for ref in refs:
+        identity = ref.get('origin_identity')
+        if identity is None:
+            raise ValueError('Inherited correction fact lacks its exact instance identity')
+        key = originals.identity_key(identity)
+        path = Path(ref['path'])
+        previous, sequence = chains.get(key, (None, 0))
+        if path.as_posix() != f'correction-ledger/{sequence + 1:06d}.json':
+            raise ValueError('Inherited correction fact sequence changed')
+        actual = originals.resolve_root_ref(root, ref)
+        event = c.read(actual)
+        if (event.get('seq') != sequence + 1 or event.get('parent_sha256') != previous
+                or event.get('settings_sha256') != identity['settings_sha256']
+                or event.get('kind') not in {'trigger', 'ack'}):
+            raise ValueError('Inherited correction fact identity changed')
+        chains[key] = (c.digest(actual), sequence + 1)
+        values.append(event)
+    return values
+
+
+def freeze_prefix(root):
+    """Freeze the actual pre-task control prefix, never reconstruct a later ack."""
+    from . import originals
+    manifest = originals._manifest(root)
+    inherited = [] if manifest is None else list(manifest['cut'].get('correction_events', []))
+    _inherited_events(root)
+    events, _ = _records(root)
+    return inherited + [dict(path=f'correction-ledger/{event["seq"]:06d}.json',
+        sha256=c.digest(root / 'correction-ledger' / f'{event["seq"]:06d}.json'),
+        size_bytes=(root / 'correction-ledger' / f'{event["seq"]:06d}.json').stat().st_size) for event in events]
+
+
+def _view_events(root):
+    return _inherited_events(root) + _records(root)[0]
+
+
 def _trigger(root, step, seal, reason, level):
-    value = dict(step=step, seal_sha256=c.digest(c.host_record(c.workspace(root, step)) / 'result-identity.json'),
+    from . import originals
+    source = originals.node(root, step)
+    value = dict(step=step, seal_sha256=c.digest(originals.source_record(source, 'result-identity.json')),
                  raw_sha256=seal['raw_sha256'], reason=reason, level=level)
-    identity = dict(settings_sha256=c.digest(root / 'settings.json'), **value)
+    identity = dict(settings_sha256=source.origin_identity['settings_sha256'], **value)
     value['trigger_id'] = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     return value
 
@@ -123,14 +166,14 @@ def project(root, before_step=None):
                 else configuration_updates.current(root))
     limits = settings.get('correction_policy')
     enabled = limits is not None
-    if not enabled and not any((root / 'correction-ledger').glob('*.json')):
+    if not enabled and not any((root / 'correction-ledger').glob('*.json')) and not _inherited_events(root):
         return dict(enabled=False, counters=dict(no_progress=0, unknown=0), current_pause=None,
                     review_request=None, triggers=[], eligible=[], permit=None)
     if enabled:
         limits = policy(limits)
     # Disabling future assessments cannot revoke an already published pause.
     # Replay each original policy so its exact acknowledgment remains required.
-    events, _ = _records(root)
+    events = _view_events(root)
     published = {event['trigger']['trigger_id']: event['trigger'] for event in events if event['kind'] == 'trigger'}
     acks = {}
     for event in events:
@@ -145,14 +188,14 @@ def project(root, before_step=None):
     used, eligible, triggers = set(), [], []
     pause = permit = None
     before_step = before_step or budget.historical_step_limit(root) + 1
-    for step in range(1, before_step):
-        record = c.host_record(c.workspace(root, step))
-        if not (record / 'result-identity.json').exists():
-            break
+    from . import originals
+    for source in originals.source_sequence(root, before_step):
+        step = source.step
+        record = originals.source_record(source, 'result-identity.json').parent
         job, payload, seal, _ = history._source(root, step)
-        outcome = c.read(c.regular(execution.record(root, step) / 'native-outcome.json'))
-        intent = c.read(c.regular(execution.record(root, step) / 'native-intent.json'))
-        if (intent.get('task_sha256') != c.digest(root / 'jobs' / f'{step:03d}.json')
+        outcome = c.read(originals.source_record(source, 'native-outcome.json'))
+        intent = c.read(originals.source_record(source, 'native-intent.json'))
+        if (intent.get('task_sha256') != c.digest(originals.resolve_ref(source, dict(path=f'jobs/{step:03d}.json')))
                 or type(outcome.get('returncode')) is not int or outcome['returncode'] != 0
                 or outcome.get('stop_reason') or outcome.get('usage', {}).get('blocking_unknown_steps', outcome.get('usage', {}).get('unknown_steps')) != []
                 or outcome.get('raw_sha256') != seal['raw_sha256']):
@@ -263,6 +306,7 @@ def publish(root, cutoff):
     require_current(root)
     events, parent = _records(root)
     known = {event['trigger']['trigger_id'] for event in events if event['kind'] == 'trigger'}
+    known.update(event['trigger']['trigger_id'] for event in _inherited_events(root) if event['kind'] == 'trigger')
     while True:
         state = project(root, cutoff + 1)
         trigger = next((item for item in state['triggers'] if item['trigger_id'] not in known), None)
@@ -289,7 +333,8 @@ def effective_route(root, step, result, job, route):
         instruction += 'own the scientific response; the prior A conclusion is unchanged.'
     elif job['role'] == 'E' and role == 'H':
         # Base E routing clears evidence_return; use its original requester.
-        requester = c.read(root / 'jobs' / f'{job["evidence_return"]["step"]:03d}.json')
+        from . import originals
+        requester = originals.source_job(originals.node(root, job['evidence_return']['step']))
         request = requester.get('correction_request')
     return role, parents, instruction, evidence_return, current_h, current_w, request
 
@@ -301,7 +346,7 @@ def validate_job(root, job):
     if (job.get('handoff_protocol', 1) < 6 or job['role'] != 'H'
             or not isinstance(request, dict) or set(request) != {'trigger_id'}):
         raise ValueError('Correction H request binding is invalid')
-    events, _ = _records(root)
+    events = _view_events(root)
     trigger = next((event['trigger'] for event in events if event['kind'] == 'trigger'
                     and event['trigger']['trigger_id'] == request['trigger_id']), None)
     if trigger is None or trigger['level'] != 'review' or trigger['step'] >= job['step']:
