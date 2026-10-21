@@ -254,7 +254,7 @@ def test_unchanged_unavailable_candidate_stops_repeated_audit_route(tmp_path,mon
     root=audit_fixture(tmp_path)
     job,payload=request(root)
     calls=[]
-    def unavailable(root,nodes,*,candidate_id=None):
+    def unavailable(root,nodes,*,candidate_id=None,job=None):
         calls.append(candidate_id)
         return dict(items=[dict(candidate_id=candidate_id,status='unavailable',reason='delivery_managed_original_missing_or_ambiguous')],
             omitted_count=0,source_nodes=nodes)
@@ -284,7 +284,7 @@ def test_unchanged_unavailable_candidate_stops_repeated_audit_route(tmp_path,mon
 def test_unavailable_audit_does_not_block_a_different_exact_candidate(tmp_path,monkeypatch):
     root=audit_fixture(tmp_path,candidate_count=2)
     job,payload=request(root)
-    def unavailable(root,nodes,*,candidate_id=None):
+    def unavailable(root,nodes,*,candidate_id=None,job=None):
         return dict(items=[dict(candidate_id=candidate_id,status='unavailable',reason='delivery_code_source_unavailable')],
             omitted_count=0,source_nodes=nodes)
     monkeypatch.setattr(delivery,'freeze_sources',unavailable)

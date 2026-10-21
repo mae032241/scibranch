@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 
+from . import configuration_updates
 from . import budget, contracts as c, history, execution
 from .output_repair import WorkRepairRequired
 
@@ -190,7 +191,7 @@ def authorize_exit(root,job,record,reason):
     paths=execution.records(root,job['step']);number=paths.index(record)
     value=dict(reason=reason,job_sha256=c.digest(root/'jobs'/f'{job["step"]:03d}.json'),
         source_attempt=number,outcome_sha256=c.digest(c.regular(record/'native-outcome.json')))
-    policy=c.settings(root).get('resume_policy')
+    policy=configuration_updates.for_job(root, job).get('resume_policy')
     repairs=sum(c.read(path/'native-intent.json').get('continuation_kind','repair')=='repair' for path in paths[1:number+1])
     if (reason=='worker_resume_unsupported' and policy is None
             or reason=='worker_resume_output_only' and policy is not None and policy.get('output_only') is True):
@@ -227,7 +228,7 @@ def validate_exit(root,job,record,value):
     if (not isinstance(value,dict) or value.get('job_sha256')!=c.digest(root/'jobs'/f'{job["step"]:03d}.json')
             or value.get('source_attempt')!=number or value.get('outcome_sha256')!=c.digest(c.regular(record/'native-outcome.json'))):
         raise history.ObserverIntegrityError('Worker exit differs from original attempt')
-    policy=c.settings(root).get('resume_policy');kind=value.get('kind');reason=value['reason']
+    policy=configuration_updates.for_job(root, job).get('resume_policy');kind=value.get('kind');reason=value['reason']
     if kind=='resume_policy':
         unsupported=reason=='worker_resume_unsupported' and policy is None
         output_only=reason=='worker_resume_output_only' and policy is not None and policy.get('output_only') is True
@@ -270,8 +271,8 @@ def validate_exit(root,job,record,value):
             # The control snapshot is immutable in stage-end; source consumption
             # and policy are checked above. Later amendments never rewrite it.
             shared=value['shared'];meter=value['meter'];soft=budget.node_mode(root)=='soft'
-            reserve=budget.delivery_reserve(c.settings(root)) or dict(tokens=0,seconds=0,steps=0)
-            actual_only=c.settings(root).get('final_a_completion_policy') is not None
+            reserve=budget.delivery_reserve(configuration_updates.for_job(root, job)) or dict(tokens=0,seconds=0,steps=0)
+            actual_only=configuration_updates.for_job(root, job).get('final_a_completion_policy') is not None
             needed_tokens=0 if soft or actual_only else max(0,value['limits']['max_observed_tokens']-tokens)
             needed_seconds=0. if soft else max(0.,value['limits']['max_seconds']-seconds)
             if not (meter.get('blocking_unknown_steps', meter['unknown_steps']) or shared['max_tokens']-meter.get('accounted_tokens', meter['observed_tokens'])<needed_tokens+reserve['tokens']

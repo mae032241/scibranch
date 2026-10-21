@@ -34,7 +34,8 @@ def h(root, step=1, parents=(), labels=('P','Q','R'), existing=None):
 
 def worker(root, tmp_path, step, parents, *, cov=False):
     job=c.build_job(root,step,'W',parents);record=execution.record(root,step)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs'/f'{step:03d}.json')))
+    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs'/f'{step:03d}.json'),
+        search_slice=search.accept(root,job)))
     output=tmp_path/f'config-{step}.json'
     if cov:
         backend=tmp_path/'backend.py'

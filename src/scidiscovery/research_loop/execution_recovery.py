@@ -212,7 +212,6 @@ def sealed_pending_rows(root,sources):
 
 def _current_pending_sources(root):
     # Clock/new-call admission explicitly use current seals; frozen science never does.
-    if c.settings(root).get('execution_authority_policy') is None:return []
     result=[]
     for path in sorted((Path(root)/'native-evidence').glob('*/result-identity.json')):
         seal=c.read(c.regular(path,limit=None))

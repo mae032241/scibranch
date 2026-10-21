@@ -1,7 +1,7 @@
 """One preparation/defaulting entry for TOML, CLI and host interfaces.
 
 The TOML is an input declaration for a new instance. Existing instances always
-read their identity-bound settings; editing the declaration is not an amendment.
+retain their identity-bound settings; operational edits append exact node revisions.
 """
 from __future__ import annotations
 
@@ -295,3 +295,119 @@ def inspect(*, config=None, root=None):
     settings = prepare(config, validate_only=True)
     settings.pop('goal_id', None)
     return dict(status='config_checked', source='research_config', settings=settings)
+
+
+def to_document(root, settings=None):
+    """Reconstruct an editable declaration without changing frozen provenance."""
+    root = Path(root).resolve()
+    value = contracts.settings(root) if settings is None else settings
+    research = dict(root=str(root), public_root=value['public_root'], objective_text=value['objective'])
+    updates = [str(root / row['source']) for row in value.get('global_materials', [])
+               if row['source'] != 'project/global/objective.md']
+    if updates:
+        research['user_updates'] = updates
+    agent = dict(backend=value.get('native_backend', 'codex'), launcher=value['native_launcher_argv'],
+                 model=value['model'], reasoning_effort=value.get('reasoning_effort'),
+                 service_tier=value.get('service_tier'))
+    agent = {key: copy.deepcopy(item) for key, item in agent.items() if item is not None}
+    if 'role_profiles' in value:
+        agent['roles'] = copy.deepcopy(value['role_profiles'])
+    native = value.get('native_options') or {}
+    permissions = {key: copy.deepcopy(native[key]) for key in ('workspace', 'network', 'web', 'subagents') if key in native}
+    extra = {key: copy.deepcopy(native[key]) for key in ('sandbox_workspace_write', 'features') if key in native}
+    if extra:
+        agent['native'] = extra
+    budgets = {key: value[key] for key in ('max_tokens', 'max_seconds', 'max_steps',
+               'max_output_item_bytes', 'max_output_total_bytes') if value.get(key) is not None}
+    for source, target in (('node_budget_policy', 'node_targets'), ('role_budget_policy', 'role_shares'),
+                           ('search_policy', 'breadth'), ('correction_policy', 'correction')):
+        if value.get(source) is not None:
+            budgets[target] = copy.deepcopy(value[source])
+    if value.get('candidate_nomination_policy') is not None:
+        budgets['candidate_extra_slots'] = value['candidate_nomination_policy']['extra_slots']
+    if value.get('portfolio_policy') is not None:
+        budgets['portfolio_review_after_cycles'] = value['portfolio_policy']['review_after_cycles']
+    executor = {target: copy.deepcopy(value[source]) for source, target in
+                (('experiment_mode', 'mode'), ('execution_config', 'config'), ('execution_resource_policy', 'resource_policy'))
+                if value.get(source) is not None}
+    if isinstance(executor.get('config'), dict):
+        executor['config'].pop('implementation', None)
+    policies = {target: value.get(source) is not None for source, target in
+                (('formal_review_policy', 'formal_review'), ('execution_authority_policy', 'execution_authority'),
+                 ('candidate_audit_policy', 'candidate_audit'), ('decision_contract_version', 'decision_contract'))}
+    for source, target in (('selection_policy', 'selection'), ('resume_policy', 'resume'), ('history_observer', 'history_observer')):
+        if value.get(source) is not None:
+            policies[target] = copy.deepcopy(value[source])
+    if isinstance(policies.get('resume'), dict):
+        policies['resume'].pop('launcher_files', None)
+    observer = policies.get('history_observer')
+    if isinstance(observer, dict) and isinstance(observer.get('source_contract'), dict):
+        from . import execution_inputs
+        observer['source_contract'] = copy.deepcopy(execution_inputs.SOURCE_CONTRACT)
+    if value.get('worker_fragment_policy') is not None:
+        policies['worker_context'] = copy.deepcopy(value['worker_fragment_policy']['context'])
+    result = dict(version=1, research=research, agent=agent, permissions=permissions,
+                  budget=budgets, executor=executor, policies=policies, ui=copy.deepcopy(value.get('ui', {})))
+    if value.get('delivery_policy') is not None:
+        result['delivery'] = copy.deepcopy(value['delivery_policy'])
+        adapter = result['delivery'].get('adapter')
+        if isinstance(adapter, dict):
+            adapter.pop('launcher_files', None)
+            adapter['inputs'] = [{key: row[key] for key in ('label', 'path')} for row in adapter['inputs']]
+    return result
+
+
+def validate_update(root, document, *, base=None):
+    """Validate a full operational declaration against an existing identity."""
+    root = Path(root).resolve()
+    original = contracts.settings(root)
+    from . import configuration_updates
+    previous = configuration_updates.editable(root)
+    baseline = to_document(root, previous)
+    for key in ('version', 'research', 'ui'):
+        if document.get(key, baseline.get(key)) != baseline.get(key):
+            raise ValueError(f'{key} is immutable for an existing research instance')
+    candidate = copy.deepcopy(document)
+    for key in ('version', 'research', 'ui'):
+        candidate[key] = baseline[key]
+    if candidate == baseline:
+        return previous
+    options = from_document(candidate, base=root if base is None else base)
+    # Existing configuration has already been defaulted. Absence disables an
+    # optional policy instead of silently recreating standard-launcher defaults.
+    options.setdefault('search_policy', None)
+    if previous.get('native_options') is None and candidate.get('permissions', {}) == baseline.get('permissions', {}) and candidate.get('agent', {}).get('native', {}) == baseline.get('agent', {}).get('native', {}):
+        options['native_options'] = None
+    for key in ('model', 'reasoning_effort', 'service_tier'):
+        options.setdefault(key, previous.get(key))
+    if (candidate.get('executor', {}).get('config') == baseline.get('executor', {}).get('config')
+            and options.get('experiment_mode') == previous.get('experiment_mode')):
+        # Normalized plugin settings are already frozen; config_file-only
+        # plugins must not require their source declaration for a model edit.
+        options['execution_config'] = copy.deepcopy(previous.get('execution_config'))
+    settings = controller.prepare(**options, validate_only=True, _existing_settings=previous)
+    if (candidate.get('permissions', {}) == baseline.get('permissions', {})
+            and candidate.get('agent', {}).get('native', {}) == baseline.get('agent', {}).get('native', {})
+            and settings.get('native_backend') == previous.get('native_backend')
+            and settings.get('native_launcher_argv') == previous.get('native_launcher_argv')):
+        for key in ('native_options', 'native_permissions', 'native_capabilities'):
+            if key in previous:
+                settings[key] = copy.deepcopy(previous[key])
+            else:
+                settings.pop(key, None)
+    if 'ui' not in original:
+        settings.pop('ui', None)
+    for key in ('goal_id', 'objective', 'public_root', 'global_materials', 'source_provenance',
+                'time_budget_basis', 'handoff_protocol', 'final_a_completion_policy'):
+        if key in original:
+            settings[key] = copy.deepcopy(original[key])
+    # Preserve historical options which have no public declaration field.
+    for key in ('role_guidance', 'node_budget_mode', 'handoff_authority_version',
+                'lineage_projection_version', 'selection_protocol', 'live_feedback_version',
+                'experiment_interface_version', 'managed_admission_version', 'worker_view_version'):
+        if key in previous:
+            settings[key] = copy.deepcopy(previous[key])
+        else:
+            settings.pop(key, None)
+    # Contract originals are frozen separately when the revision is committed.
+    return settings

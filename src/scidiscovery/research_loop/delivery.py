@@ -1,6 +1,7 @@
 """Bounded delivery bindings and isolated calls; the control ledger owns actions."""
 from __future__ import annotations
 
+from . import configuration_updates
 from . import execution
 
 import hashlib
@@ -133,8 +134,12 @@ def _label(label):
         raise ValueError('Canonical bounded provider object label required')
 
 
-def _adapter(root):
-    spec = c.settings(root).get('delivery_policy', {}).get('adapter')
+def _settings(root, job=None):
+    return configuration_updates.for_job(root, job) if job is not None else configuration_updates.current(root)
+
+
+def _adapter(root, job=None):
+    spec = (_settings(root, job).get('delivery_policy') or {}).get('adapter')
     if spec is None:
         raise DeliveryUnresolved('delivery_adapter_unavailable')
     for proof in spec['launcher_files']:
@@ -163,7 +168,7 @@ def _adapter(root):
 
 
 @owner_effect
-def catalogue_sources(root, source_nodes):
+def catalogue_sources(root, source_nodes, *, job=None):
     """Discover every exact candidate without opening executable/model originals.
 
     The complete bounded directory is readable in the A workspace. A resolver is
@@ -171,7 +176,7 @@ def catalogue_sources(root, source_nodes):
     """
     from .protocol import require_current
     require_current(root)
-    _adapter(root)
+    _adapter(root, job)
     items, known = [], set()
     for receipt in source_nodes:
         _, _, seal, seal_sha = history._source(root, receipt['step'])
@@ -195,13 +200,16 @@ def catalogue_sources(root, source_nodes):
     return result
 
 
-def selected_sources(root, refs, candidate_id, *, prepare=False):
+def selected_sources(root, refs, candidate_id, *, prepare=False, job=None):
     """Reuse one immutable resolution, or prepare exactly one candidate's originals."""
     if not refs.get('catalogue'):
         return refs
     if candidate_id not in {row['candidate_id'] for row in refs['items']}:
         raise DeliveryUnresolved('delivery_source_unavailable')
-    key = hashlib.sha256(_bytes(dict(source_nodes=refs['source_nodes'], candidate_id=candidate_id))).hexdigest()
+    identity = dict(source_nodes=refs['source_nodes'], candidate_id=candidate_id)
+    if job is not None and job.get('configuration_revision') is not None:
+        identity['configuration_revision'] = job['configuration_revision']
+    key = hashlib.sha256(_bytes(identity)).hexdigest()
     path = root / 'host-delivery/resolved' / (key + '.json')
     if not path.exists():
         if not prepare:
@@ -212,7 +220,7 @@ def selected_sources(root, refs, candidate_id, *, prepare=False):
         if preparation_blocked(root) or budget.closeout_state(root)['unresolved_operations']:
             raise DeliveryUnresolved('delivery_original_execution_unresolved')
         try:
-            value = freeze_sources(root, refs['source_nodes'], candidate_id=candidate_id)
+            value = freeze_sources(root, refs['source_nodes'], candidate_id=candidate_id, job=job)
         except DeliveryUnresolved as error:
             preparation_failure(root, error.code, refs['source_nodes'], candidate_id=candidate_id)
             raise
@@ -221,7 +229,7 @@ def selected_sources(root, refs, candidate_id, *, prepare=False):
     value = c.read(c.regular(path, limit=None))
     if value['source_nodes'] != refs['source_nodes'] or any(row['candidate_id'] != candidate_id for row in value['items']):
         raise ValueError('Selected delivery originals differ from their catalogue')
-    return validate_sources(root, value)
+    return validate_sources(root, value, job=job)
 
 
 def preparation_failure(root, reason, source_nodes, *, candidate_id=None, decision_step=None):
@@ -246,14 +254,14 @@ def preparation_blocked(root):
 
 
 @owner_effect
-def freeze_sources(root, source_nodes, *, candidate_id=None):
+def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
     """Freeze readable objects before A; no model load, audit or qualification claim."""
     from .protocol import require_current
     require_current(root)
     root = Path(root).resolve()
-    spec = _adapter(root)
+    spec = _adapter(root, job)
     remaining = budget.snapshot(root)['seconds_remaining']
-    allowance = min(SOURCE_SECONDS, c.settings(root)['delivery_policy']['cleanup_seconds'])
+    allowance = min(SOURCE_SECONDS, _settings(root, job)['delivery_policy']['cleanup_seconds'])
     if budget.final_a_barrier(root) is None and (budget.closeout_state(root)['begin'] or {}).get('mode') != 'final':
         allowance = min(allowance, remaining)
     if allowance <= 0:
@@ -285,7 +293,7 @@ def freeze_sources(root, source_nodes, *, candidate_id=None):
         finally:
             if temporary is not None:temporary.unlink(missing_ok=True)
     candidates, known, evidence, contexts, direct = [], set(), {}, {}, []
-    managed = c.settings(root).get('history_observer', {}).get('contract_version') == 2
+    managed = (_settings(root, job).get('history_observer') or {}).get('contract_version') == 2
     for receipt in source_nodes:
         _, _, seal, seal_sha = history._source(root, receipt['step'])
         if seal_sha != receipt['seal_sha256']:
@@ -367,7 +375,7 @@ def freeze_sources(root, source_nodes, *, candidate_id=None):
             destination = stage / 'inputs' / proof['label'];destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(_file(proof['path']), destination);destination.chmod(0o400)
             if c.digest(destination) != proof['sha256']:raise ValueError('Frozen provider input changed during staging')
-        request = dict(scope=dict(handoff_protocol=c.settings(root)['handoff_protocol']),phase='resolve', operation_id=hashlib.sha256(_bytes(source_nodes)).hexdigest(),
+        request = dict(scope=dict(handoff_protocol=_settings(root, job)['handoff_protocol']),phase='resolve', operation_id=hashlib.sha256(_bytes(source_nodes)).hexdigest(),
                        candidate_id=None, artifact_sha256=None, root=str(root), source_roots=spec['source_roots'],
                        candidates=candidates, inputs=spec['inputs'], config=spec['config'], target=spec['target'], stage=str(stage))
         value = _call(spec, request, deadline - time.clock_gettime(time.CLOCK_BOOTTIME), evidence=leaf_output(root))
@@ -462,8 +470,8 @@ def _proof(root, proof):
     return path
 
 
-def validate_sources(root, refs):
-    _adapter(root)
+def validate_sources(root, refs, *, job=None):
+    _adapter(root, job)
     for receipt in refs['source_nodes']:
         if history._source(root, receipt['step'])[3] != receipt['seal_sha256']:
             raise ValueError('Delivery source scientific identity changed')
@@ -487,7 +495,7 @@ def _choice(root, job, result):
     if chosen is not None and (not isinstance(chosen,str) or chosen not in job.get('history',{}).get('candidate_ids',[])):
         raise DeliveryUnresolved('selection_candidate_unavailable')
     from . import shortlist
-    if c.settings(root).get('selection_policy') is not None:
+    if _settings(root, job).get('selection_policy') is not None:
         expected = shortlist.marker(root,job['step'])
         if expected is None:
             raise DeliveryUnresolved('selection_screen_unavailable')
@@ -502,7 +510,7 @@ def prepare_binding(root, job, result):
         if chosen is not None:
             refs = job.get('delivery_sources') or budget.closeout_state(root)['begin']['delivery_sources']
             try:
-                prepared=selected_sources(root, refs, chosen, prepare=True)
+                prepared=selected_sources(root, refs, chosen, prepare=True, job=job)
                 rows=[row for row in prepared['items'] if row['candidate_id']==chosen]
                 if len(rows)==1 and rows[0]['status']=='unavailable' and rows[0].get('reason')=='delivery_code_source_unavailable':
                     preparation_failure(root,'implementation_source_missing',refs['source_nodes'],candidate_id=chosen,decision_step=job['step'])
@@ -534,7 +542,7 @@ def binding(root, job, result):
     chosen = _choice(root, job, raw)
     if chosen is None:
         raise DeliveryUnresolved('delivery_no_decision')
-    refs = selected_sources(root, job.get('delivery_sources') or begin['delivery_sources'], chosen)
+    refs = selected_sources(root, job.get('delivery_sources') or begin['delivery_sources'], chosen, job=job)
     rows = [row for row in refs['items'] if row['candidate_id'] == chosen]
     if len(rows) != 1 or rows[0]['status'] != 'audit_pending':
         raise DeliveryUnresolved('delivery_source_unavailable')
@@ -560,7 +568,7 @@ def binding(root, job, result):
     decision = dict(step=job['step'], job_sha256=c.digest(path),
                     raw_sha256=c.digest(execution.raw(root, job['step'])), seal_sha256=c.digest(record / 'result-identity.json'))
     result = dict(candidate_id=chosen, decision=decision, source=item,
-                  target=c.settings(root)['delivery_policy']['adapter']['target'])
+                  target=_settings(root, job)['delivery_policy']['adapter']['target'])
     result['operation_id'] = hashlib.sha256(_bytes(dict(settings_sha256=c.digest(root / 'settings.json'), **result))).hexdigest()
     return result
 
@@ -703,7 +711,7 @@ def _call(spec, request, seconds, *, on_process=None, evidence=None):
         except (ValueError,UnicodeDecodeError):return None
 
 
-def _staged(root, spec, source, operation_id, stage):
+def _staged(root, spec, source, operation_id, stage, *, job=None):
     """Copy exact frozen candidate objects into a fresh stage; the leaf mounts only these."""
     (stage / 'inputs/harness').mkdir(parents=True)
     (stage / 'scratch').mkdir()
@@ -712,26 +720,26 @@ def _staged(root, spec, source, operation_id, stage):
         (stage / 'inputs' / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(_proof(root, proof), stage / 'inputs' / name)
         (stage / 'inputs' / name).chmod(0o400)
-    return dict(scope=dict(handoff_protocol=c.settings(root)['handoff_protocol']), operation_id=operation_id, candidate_id=source['candidate_id'],
+    return dict(scope=dict(handoff_protocol=_settings(root, job)['handoff_protocol']), operation_id=operation_id, candidate_id=source['candidate_id'],
                 artifact_sha256=source['objects']['artifact']['sha256'], context=source['context'],
                 object_digests={name: proof['sha256'] for name, proof in source['objects'].items()},
                 inputs=spec['inputs'], config=spec['config'], target=spec['target'], stage=str(stage))
 
 
 @owner_effect
-def leaf_phase(root, source, operation_id, phase, seconds, *, on_process=None):
+def leaf_phase(root, source, operation_id, phase, seconds, *, on_process=None, job=None):
     """One control screening phase on exact frozen originals; never promotes or confirms."""
     from .protocol import require_current
     require_current(root)
     if (phase not in {'smoke', 'audit'} or source.get('status') != 'audit_pending'
             or type(seconds) not in (int, float) or not 0 < seconds < float('inf')):
         raise ValueError('Control screening requires an exact pending original and bounded phase')
-    spec = _adapter(Path(root).resolve())
+    spec = _adapter(Path(root).resolve(), job)
     with tempfile.TemporaryDirectory(prefix='scid-selection-') as directory:
-        request = dict(_staged(root, spec, source, operation_id, Path(directory)), phase=phase)
+        request = dict(_staged(root, spec, source, operation_id, Path(directory), job=job), phase=phase)
         if phase == 'audit':
             from . import audit_recovery
-            value, _, _ = audit_recovery.run(root, spec, source, request, seconds, on_process=on_process)
+            value, _, _ = audit_recovery.run(root, spec, source, request, seconds, on_process=on_process, job=job)
             return value
         value = _call(spec, request, seconds, on_process=on_process, evidence=leaf_output(root))
     if value is None:
@@ -776,7 +784,6 @@ def invoke(root, intent, max_seconds, *, on_process=None, audit_only=False, coll
         max_seconds = min(max_seconds, budget.snapshot(root)['seconds_remaining'])
     if max_seconds <= 0:return _result(intent['binding'], 'unknown', 'action_time_limit')
     deadline = time.clock_gettime(time.CLOCK_BOOTTIME) + max_seconds
-    spec = _adapter(root)
     bound = intent['binding']
     if intent['operation_id'] != bound['operation_id'] or intent['decision'] != bound['decision']:
         raise ValueError('Delivery action identity differs from frozen decision')
@@ -787,6 +794,7 @@ def invoke(root, intent, max_seconds, *, on_process=None, audit_only=False, coll
         if c.digest(_file(path)) != decision[key]:
             raise ValueError('Delivery scientific decision changed')
     job = c.read(root / 'jobs' / f'{step:03d}.json')
+    spec = _adapter(root, job)
     if audit_only:
         candidate_audit.validate_binding(root, intent)
     elif binding(root, job, c.validate(c.workspace(root, step))) != bound:
@@ -794,14 +802,14 @@ def invoke(root, intent, max_seconds, *, on_process=None, audit_only=False, coll
     if intent['action_kind'] not in (('audit',) if audit_only else ('submit', 'confirm')):
         raise ValueError('Unknown delivery action')
     with tempfile.TemporaryDirectory(prefix='scid-delivery-') as directory:
-        request = _staged(root, spec, bound['source'], bound['operation_id'], Path(directory))
+        request = _staged(root, spec, bound['source'], bound['operation_id'], Path(directory), job=job)
         phases = ('audit',) if audit_only else (('audit', 'promote') if bound['source'].get('audit_required', True)
             else ('promote',)) if intent['action_kind'] == 'submit' else ('confirm',)
         for phase in phases:
             remaining = deadline - time.clock_gettime(time.CLOCK_BOOTTIME)
             if phase == 'audit':
                 from . import audit_recovery
-                value, request, deadline = audit_recovery.run(root, spec, bound['source'], request, remaining, on_process=on_process, author_required=audit_only)
+                value, request, deadline = audit_recovery.run(root, spec, bound['source'], request, remaining, on_process=on_process, author_required=audit_only, job=job)
                 if value['status'] == 'audited':
                     if audit_only:
                         return dict(_result(bound, 'audited', value['note']), cleanup_confirmed=value['cleanup_confirmed'])

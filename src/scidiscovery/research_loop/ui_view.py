@@ -599,6 +599,9 @@ def usage_stats(view, *, used_steps=None, candidates=None):
                     raw=consumed, raw_limit=seconds, notes=[])
     duration['percent'] = percent(consumed, seconds)
     duration['over'] = bool(consumed is not None and seconds is not None and consumed > seconds)
+    if budget.get('time_status') == 'unknown':
+        duration['value'] = '无法核实'
+        duration['notes'].append('时钟记录不足以核实已用时间与剩余额度；已保留原有记录。')
     if budget.get('waiting_seconds'):
         duration['notes'].append('其中等待 ' + fmt_duration(budget['waiting_seconds']))
     if budget.get('historical_time') not in (None, 'recorded'):

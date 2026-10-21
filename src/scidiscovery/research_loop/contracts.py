@@ -127,7 +127,11 @@ def digest(path: Path):
     return value
 
 
-def settings(root: Path):
+def settings(root: Path, job=None):
+    root = Path(root)
+    if job is not None:
+        from . import configuration_updates
+        return configuration_updates.for_job(root, job)
     path = regular(root / 'settings.json')
     identity = read(regular(root / 'settings-identity.json'))
     # Read once: verify and parse the same bytes, not two racing reads.
@@ -440,7 +444,7 @@ def artifact_entry_points(work, payload, materials, protocol=CURRENT, unresolved
 def selected_inputs(work, payload, job, diagnostics=None):
     """Resolve explicit reuse intent against this role's already frozen inputs."""
     root = work.parents[2]
-    policy = settings(root)
+    policy = settings(root, job)
     bound = {row['path']: row for row in job['direct_materials']}
     selected, seen, total = [], set(), 0
     choices = []
@@ -585,7 +589,7 @@ def science_view(job, root=None):
     audit_capability = None
     if job['role'] == 'A' and root is not None:
         from . import candidate_audit
-        available = candidate_audit.enabled(settings(Path(root)))
+        available = candidate_audit.enabled(settings(Path(root), job))
         audit_capability = dict(available=available,
             unavailable_reason=None if available else 'candidate_audit_disabled')
     closeout = None
@@ -628,7 +632,7 @@ def science_view(job, root=None):
             formal_review_feedback=formal_review.feedback(root,job))
            if job.get('formal_review_version')==1 else {}),
         **(dict(source_restrictions=job['source_restrictions']) if 'source_restrictions' in job else {}),
-        **(dict(execution_authority=dict(status='trusted_gate_required' if settings(Path(root)).get('execution_resource_policy') else 'authority_only_production_gate_unavailable',
+        **(dict(execution_authority=dict(status='trusted_gate_required' if settings(Path(root), job).get('execution_resource_policy') else 'authority_only_production_gate_unavailable',
             qualified_materials=[read(Path(root) / ref['path'])['subject']['material']['path']
                                  for ref in job.get('execution_qualifications', [])[:3]],
             qualified_materials_omitted_count=max(0, len(job.get('execution_qualifications', [])) - 3),
@@ -678,7 +682,7 @@ def science_view(job, root=None):
         **(dict(candidate_audit=audit) if audit is not None else {}),
         **(dict(audit_capability=audit_capability) if audit_capability is not None else {}),
         **(dict(delivery_selection='Frozen selection policy requires the complete candidate catalogue and an explicit evidence-bound closeout A comparison before delivery. Null supplies no delivery choice.')
-           if job['role'] == 'A' and root is not None and settings(Path(root)).get('selection_policy') is not None else {}),
+           if job['role'] == 'A' and root is not None and settings(Path(root), job).get('selection_policy') is not None else {}),
         **(dict(search=job['search']['view']) if job.get('search') and not unified else {}),
         **(dict(progress_assessment=('Judge the current assessed work as progress/no_progress/unknown; '
                 'null means unknown. Explain scientific support and limitations in ordinary science. '
@@ -703,7 +707,7 @@ def science_view(job, root=None):
 
 def collect_materials(root: Path, step: int):
     """Collect selected deliverables; scratch and input trees never enter a seal."""
-    policy = settings(root)
+    policy = settings(root, read(regular(root / 'jobs' / f'{step:03d}.json')))
     work = workspace(root, step)
     rows, total = [], 0
     private_packages=set()
@@ -824,7 +828,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     if len(parents) != len(set(parents)) or any(type(p) is not int or not 0 < p < step for p in parents):
         raise ValueError('Parents must be exact distinct preceding nodes')
     from .protocol import require_current
-    policy=require_current(root)
+    require_current(root)
     from . import budget
     if budget.final_a_barrier(root, before_step=step) is not None:
         raise ValueError('Final A return permits no further scientific task')
@@ -856,6 +860,9 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     job_path=root/'jobs'/f'{step:03d}.json'
     retained=read(regular(job_path)) if job_path.exists() else None
     if retained is not None:require_current(root,retained)
+    from . import configuration_updates
+    revision = configuration_updates.bind_new_job(root, step)
+    policy = configuration_updates.for_new_job(root, step)
     worker_view_version=1 if retained is None or retained.get('worker_view_version')==1 else 0
     protocol=CURRENT
     authority_version=projection_version=selection_protocol=1
@@ -914,6 +921,8 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
                instruction=instruction, direct_refs=refs, direct_materials=materials, direct_entry_points=entry_points, global_materials=globals_,
                evidence_return=evidence_return, **(dict(selected_inputs=selected) if selected else {}),
                **(dict(handoff_protocol=protocol) if protocol >= 2 else {}))
+    if revision is not None:
+        job['configuration_revision'] = revision
     if retained is None:
         from . import delivery
         job['configured_delivery'] = delivery.public_configuration(policy.get('delivery_policy'))
@@ -1085,7 +1094,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
 def _native_output_identity(root, step, native_record, intent, outcome):
     from . import budget
     job = read(regular(Path(root) / 'jobs' / f'{step:03d}.json'))
-    if settings(root).get('final_a_completion_policy') is not None or outcome.get('final_a_completion') is not None or (intent.get('budget_slice') or {}).get('final_return') is not None:
+    if settings(root, read(regular(root / 'jobs' / f'{step:03d}.json'))).get('final_a_completion_policy') is not None or outcome.get('final_a_completion') is not None or (intent.get('budget_slice') or {}).get('final_return') is not None:
         budget.validate_final_a_receipt(root, job, intent, outcome)
     # The original stopped outcome remains byte-exact. Only a separate explicit
     # completed-return receipt can provide its exceptional final raw identity.
@@ -1167,7 +1176,7 @@ def validate(work: Path):
 
 
 def _validate_inputs(root, work, job):
-    if 'scientific_response_fields' in job and job['scientific_response_fields']!=response_fields(job,settings(root)):
+    if 'scientific_response_fields' in job and job['scientific_response_fields']!=response_fields(job,settings(root, job)):
         raise ValueError('Frozen scientific response consumers changed')
     from . import budget
     report = budget.validate_final_report_inputs(root, job)
@@ -1189,14 +1198,14 @@ def _validate_inputs(root, work, job):
     qualification.validate_inputs(root, job)
     if 'source_provenance' in job and job.get('source_restrictions') != qualification.status(root, job):
         raise ValueError('Frozen source restriction view changed')
-    if job.get('experiment_mode')!=settings(root).get('experiment_mode'):
+    if job.get('experiment_mode')!=settings(root, job).get('experiment_mode'):
         raise ValueError('Frozen experiment mode differs from its original settings')
-    selected=settings(root).get('execution_config')
+    selected=settings(root, job).get('execution_config')
     if job.get('execution_config_sha256')!=(hashlib.sha256(json.dumps(selected,sort_keys=True).encode()).hexdigest() if selected is not None else None):
         raise ValueError('Frozen execution selection differs from its original settings')
-    if job['role']=='W' and job.get('worker_fragment_policy')!=settings(root).get('worker_fragment_policy'):
+    if job['role']=='W' and job.get('worker_fragment_policy')!=settings(root, job).get('worker_fragment_policy'):
         raise ValueError('Frozen W continuation configuration differs from its original settings')
-    if job.get('candidate_nomination_policy') is not None and job['candidate_nomination_policy']!=settings(root).get('candidate_nomination_policy'):
+    if job.get('candidate_nomination_policy') is not None and job['candidate_nomination_policy']!=settings(root, job).get('candidate_nomination_policy'):
         raise ValueError('Frozen candidate nomination configuration changed')
     if job.get('audit_projection_version') == 1:
         if (job['history'].get('audit_projection_version') != 1
@@ -1211,7 +1220,7 @@ def _validate_inputs(root, work, job):
         raise ValueError('Frozen scientific task changed')
     if job['global_materials'] != global_materials(root):
         raise ValueError('Bound global context changed')
-    policy = settings(root)
+    policy = settings(root, job)
     if job.get('purpose') == 'closeout':
         from . import budget, delivery
         boundary = job.get('closeout_begin') or {}
@@ -1235,7 +1244,7 @@ def _validate_inputs(root, work, job):
             for ref in job['direct_refs'] if int(ref['path'].split('/')[2]) > job['source_cutoff'])]
         if [row['step'] for row in job['history']['nodes']] != expected_steps:
             raise ValueError('Closeout history differs from its frozen science prefix and direct authors')
-        delivery.validate_sources(root, job['delivery_sources'])
+        delivery.validate_sources(root, job['delivery_sources'], job=job)
         if job['delivery_sources'].get('catalogue'):
             from . import candidate_refs
             catalogue=candidate_refs.public_fields(dict(items=job['delivery_sources']['items'],
@@ -1331,7 +1340,7 @@ def seal_result(root: Path, step: int):
     final = budget.final_a_return(root, job, intent)
     if (type(outcome.get('returncode')) is not int or outcome['returncode'] != 0
             or outcome.get('stop_reason') and accepted is None
-            or budget.final_a_usage_unknown(final, outcome['usage']) and not budget.native_completion_known(outcome, settings(root))):
+            or budget.final_a_usage_unknown(final, outcome['usage']) and not budget.native_completion_known(outcome, settings(root, read(regular(root / 'jobs' / f'{step:03d}.json'))))):
         raise ValueError('Terminal scientific output is unverified or changed')
     if native_record!=execution.origin(root,step):
         from . import author_closeout

@@ -24,7 +24,7 @@ def compiler(tmp_path, monkeypatch):
     host.root, host.job = root, job
     host.config = dict(worker_view_version=1, record_dir=str(experiment_client.record_directory(root, 2)))
     monkeypatch.setattr(execution_authority, '_remaining', lambda *args: None)
-    monkeypatch.setattr(c, 'settings', lambda root: {})
+    monkeypatch.setattr(c, 'settings', lambda root, job=None: {})
     monkeypatch.setattr(c, 'output_quota_exceeded', lambda *args: False)
 
     def compile(output):

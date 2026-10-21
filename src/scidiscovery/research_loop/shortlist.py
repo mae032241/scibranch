@@ -5,6 +5,7 @@ Qualification is obtained only for an explicitly requested audit or delivery.
 """
 from __future__ import annotations
 
+from . import configuration_updates
 from . import budget, contracts as c, delivery, selection
 from .candidate_audit import _save
 
@@ -16,7 +17,7 @@ def policy(value):
 
 
 def configured(root):
-    value = c.settings(root).get('selection_policy')
+    value = configuration_updates.current(root).get('selection_policy')
     return policy(value) if value is not None else None
 
 

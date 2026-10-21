@@ -1,6 +1,8 @@
 """Frozen W slices and scientific commitments derived from original nodes."""
 from __future__ import annotations
 
+from . import configuration_updates
+
 from . import execution
 
 import json
@@ -182,9 +184,9 @@ def _repair_choice(root,job,ref,*,payload=None):
         return dict(status='missing_original',root=None,source=None)
 
 
-def _repair_diagnostic(root,state,choice):
+def _repair_diagnostic(root,state,choice,job):
     if choice['status']!='available':return 'search_repair_source_'+choice['status']
-    if state['repairs'].get(choice['root'],0)>=c.settings(root)['search_policy']['max_requested_repairs']:
+    if state['repairs'].get(choice['root'],0)>=c.settings(root,job)['search_policy']['max_requested_repairs']:
         return 'search_repair_limit'
     return None
 
@@ -257,7 +259,7 @@ def _apply_science(root,job,payload,state,diagnostics):
     focus=interpretation['focus']
     if job['role'] in {'H','A'} and payload.get('next_action') in {'experiment','continue_w'} and focus and focus['action']=='repair' and not diagnostics:
         choice=_repair_choice(root,job,focus['mechanism_ref'],payload=payload)
-        code=_repair_diagnostic(root,state,choice)
+        code=_repair_diagnostic(root,state,choice,job)
         if code:diagnostics.append(dict(code=code,subject=focus['mechanism_ref']))
     state['focus']=focus
     if job['role']=='A' and interpretation['focus'] and ((c.scientific_field(job,payload,'search_review') or {}).get('next_focus') or {}).get('mechanism_ref') is not None and not diagnostics:
@@ -319,14 +321,12 @@ def fold(root,sources,*,recovery_refs=()):
     cache={ref['path']:value for ref,value in zip(ordered,checked)}
     state=dict(opportunity_counts={},opportunity_grants={},opportunity_unknown=False,extra_grant=None,mechanisms={},current_h=None,scope=None,plan=None,authorized=set(),focus=None,accepted_slices=[],repairs={},
         order=dict(remaining=[],seen_w=set(),allocation=None,diagnostics=[]))
-    enabled=c.settings(root).get('search_policy') is not None
-    if enabled:
-        state['portfolio']=dict(invested={},deferred={},seen_w=set(),pending_w=None,last_branch=None,last_decision_step=None)
+    state['portfolio']=dict(invested={},deferred={},seen_w=set(),pending_w=None,last_branch=None,last_decision_step=None)
     original_rows={}
     for job,payload,seal,seal_sha in sources:
         # Scientific claims see exactly their own frozen mechanical input prefix.
         _execution_opportunities(root,state,original_rows,job.get('history',{}).get('execution_recoveries',[]),cache)
-        if enabled:apply_source(root,job,payload,seal,state)
+        if c.settings(root,job).get('search_policy') is not None:apply_source(root,job,payload,seal,state)
         if 'portfolio' in state:_portfolio_update(root,job,payload,seal,state,seal_sha)
         step=job['step'];intent=execution.record(root,step)/'native-intent.json'
         if job['role']=='W' and job.get('search') and intent.exists():
@@ -396,7 +396,7 @@ def _breadth(root,state,limits,focus):
 
 
 def bind(root,step,role,protocol=None,*,write_pages=True,state=None,unified=True):
-    limits=c.settings(root).get('search_policy')
+    limits=configuration_updates.for_new_job(root,step).get('search_policy')
     if limits is None:return None
     state=project(root,step) if state is None else state
     focus=state['focus'] if role=='W' else None
@@ -421,7 +421,7 @@ def launch_reason(root,job):
     if job['role']!='W':return None
     if job.get('engineering_repair'):return None
     if job.get('input_selection_status')=='unresolved':return 'implementation_unresolved'
-    if c.settings(root).get('search_policy') is None:return None
+    if c.settings(root, job).get('search_policy') is None:return None
     bound=job['search'];focus=bound['focus'];state=project(root,job['step'])
     if bound['intent_diagnostics']:return bound['intent_diagnostics'][0]['code']
     if focus is None:return 'science_plan_empty'
@@ -432,7 +432,7 @@ def launch_reason(root,job):
 
 
 def validate_payload(root,job,payload):
-    if c.settings(root).get('search_policy') is None:return
+    if c.settings(root, job).get('search_policy') is None:return
     diagnostics=assess_payload(root,job,payload)
     if diagnostics:raise UnresolvedSearch(diagnostics[0]['code'],diagnostics[0]['subject'],'Scientific intent needs clarification')
 

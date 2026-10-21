@@ -125,7 +125,7 @@ def test_thirty_two_models_one_call_preview_seven_and_a_can_choose_unlisted_orig
     assert c.validate(work)['candidate_recommendation']==observed['candidates'][31]['id']
     resolved=generic_results.sources(root,observed,observed['candidates'][31]['id'])
     assert resolved['candidate_id']==observed['candidates'][31]['id']
-    monkeypatch.setattr(delivery,'_adapter',lambda root:{})
+    monkeypatch.setattr(delivery,'_adapter',lambda root,job=None:{})
     catalogue=delivery.catalogue_sources(root,judge['history']['nodes'])
     assert len(catalogue['items'])==32
     compact=delivery.public_sources(catalogue,nominated_ids=judge['history']['candidate_nomination_ids'])

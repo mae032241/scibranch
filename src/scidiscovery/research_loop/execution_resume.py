@@ -22,7 +22,7 @@ def capture_pending(root, job):
         return _capture_pending(root,job)
     except (OSError,ValueError,KeyError,TypeError) as error:
         return q._save(root,path,dict(version=1,job=q._ref(root,root/'jobs'/f'{job["step"]:03d}.json'),
-                contract=authority.contract(root),attempts=[],allocations=[],calls_namespace=[],complete=False,
+                contract=authority.contract(root,job),attempts=[],allocations=[],calls_namespace=[],complete=False,
                 unavailable_reason='Pending namespace or owner evidence could not be captured: '+type(error).__name__))
 
 
@@ -99,7 +99,7 @@ def _capture_pending(root, job):
         if lineage.exists() and any(item.name.startswith('.prepared-') for item in lineage.iterdir()):
             complete = False
         return q._save(root, path, dict(version=1, job=q._ref(root, root / 'jobs' / f'{job["step"]:03d}.json'),
-            contract=authority.contract(root), attempts=attempts, allocations=allocations,
+            contract=authority.contract(root,job), attempts=attempts, allocations=allocations,
             calls_namespace=namespace, complete=complete))
 
 
@@ -115,7 +115,7 @@ def verify_pending_set(root, seal, allocation_ref=None, *, unprepared=False, req
     if (value.get('version') != 1 or value['job']['sha256'] != seal['job_sha256']
             or type(value.get('complete')) is not bool
             or ref['path'] != (execution.origin(root, job['step']) / 'pending-execution-set.json').relative_to(root).as_posix()
-            or value['contract'] != authority.contract(root)):
+            or value['contract'] != authority.contract(root,job)):
         raise q.IntegrityError('Pending execution evidence differs from its original seal')
     for proofs in value['attempts']:
         for proof in proofs.values():

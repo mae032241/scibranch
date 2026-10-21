@@ -80,20 +80,16 @@ def review_reason(root,step):
 def replay(nodes,jobs,settings,limits):
     """Counterfactual frozen-share classification of the original sequence; only the first refusal is meaningful."""
     used=dict(H=0,A=0,E=0);rows=[];authorized=settings.get('max_tokens') or 0
-    def target(role):
-        node=(settings.get('node_budget_policy') or {}).get(role,{}).get('max_observed_tokens')
-        if node is None:return limits['thinking_node_target_tokens']
-        return min(node,limits['thinking_node_target_tokens']) if settings.get('node_budget_mode','hard')=='soft' else node
     for previous,node in zip(nodes,nodes[1:]):
         for key in used:used[key]+=previous['tokens'] if previous['role']==key else 0
         role,job=node['role'],jobs[node['step']]
         if role not in ('H','A'):continue
         required=(job.get('correction_request') is not None or previous['role']=='W' and role=='A'
                   or previous['role']=='A' and previous['next_action']=='audit' and role=='A' and 'candidate_audit' in job)
-        thinking=used['H']+used['A'];projected=thinking+target(role)
+        thinking=used['H']+used['A']
         reason=(None if required else 'role_repeat_without_evidence' if previous['role']==role
-                else 'role_share_thinking_reached' if projected>limits['max_thinking_share']*authorized
-                else 'role_share_w_floor_reached' if projected+used['E']>(1-limits['min_w_share'])*authorized else None)
+                else 'role_share_thinking_reached' if thinking>=limits['max_thinking_share']*authorized
+                else 'role_share_w_floor_reached' if thinking+used['E']>=(1-limits['min_w_share'])*authorized else None)
         rows.append(dict(step=node['step'],role=role,dispatch='required' if required else 'optional',thinking_before=thinking,refused=reason))
     first=next((row for row in rows if row['refused']),None)
     return dict(policy=limits,authorized_tokens=authorized,first_refusal=first,

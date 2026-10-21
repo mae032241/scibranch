@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shutil
 
+from . import configuration_updates
 from . import contracts as c, profiles
 
 _review_preflight = ContextVar('native_startup_review_preflight',default=None)
@@ -272,7 +273,7 @@ def start(root, step, *, reconciliation, reconciliation_sha256, native_home, aut
     from .controller import _writer,_inactive_on_error,_run
     root = Path(root).resolve()
     with _writer(root),_inactive_on_error(root,'native_startup_successor_stopped'):
-        c.settings(root)
+        configuration_updates.for_step(root, step)
         permit_path = path(root,step)
         if permit_path.exists():
             value = validate(root,step)
@@ -289,7 +290,7 @@ def start(root, step, *, reconciliation, reconciliation_sha256, native_home, aut
                 identity = c.read(Path(originals[name]['path']))
                 if runtime.process_matches(identity,originals['job']['sha256']):
                     raise ValueError('Original startup writer is still live')
-            settings = c.settings(root)
+            settings = configuration_updates.for_step(root, step)
             program = shutil.which(settings['native_launcher_argv'][0])
             if program is None:raise ValueError('Exact native launcher is unavailable')
             if Path(program).resolve().name == 'codex.js':

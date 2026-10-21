@@ -5,6 +5,7 @@ may produce a new candidate; A must judge and authorize those new bytes.
 """
 from __future__ import annotations
 
+from . import configuration_updates
 from . import contracts as c, execution
 from .audit_recovery import WORKER_CODES
 
@@ -120,7 +121,7 @@ def validate_job(root, job):
 
 def bind_inputs(root, job):
     from . import delivery
-    policy=c.settings(root)
+    policy=configuration_updates.for_job(root, job)
     repair=job['engineering_repair']
     proofs=[repair['objects'][name] for name in ('source.py','artifact') if name in repair['objects']]
     if c.output_quota_exceeded(policy,(proof['size_bytes'] for proof in [*proofs,*job['direct_materials']])):
@@ -158,4 +159,6 @@ def sources(root, before_step):
     if not repaired:return begin['delivery_sources']
     nodes=[*begin['delivery_sources']['source_nodes'],*[dict(step=step,
         seal_sha256=c.digest(execution.origin(root,step)/'result-identity.json')) for step in repaired]]
-    return delivery.catalogue_sources(root,nodes)
+    path=root/'jobs'/f'{before_step:03d}.json'
+    job=c.read(c.regular(path)) if path.exists() else configuration_updates._reservation(root,before_step)
+    return delivery.catalogue_sources(root,nodes,job=job)

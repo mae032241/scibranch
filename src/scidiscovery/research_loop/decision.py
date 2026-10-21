@@ -43,7 +43,7 @@ def _completed(job, payload, sources):
 
 
 def assess(root, job, payload, *, focus=None):
-    if c.settings(root).get('decision_contract_version')!=1 or job['role'] != 'A' or job.get('purpose') in {'closeout','formal_review'}:
+    if c.settings(root, job).get('decision_contract_version')!=1 or job['role'] != 'A' or job.get('purpose') in {'closeout','formal_review'}:
         return []
     if payload['next_action'] not in ACTIONS:
         return []  # Necessary audit, pause and delivery choices are independent.
@@ -73,6 +73,6 @@ def assess(root, job, payload, *, focus=None):
 
 def reason(root, job, payload):
     from . import search
-    interpretation=search.interpret(root,job,payload) if c.settings(root).get('search_policy') else None
+    interpretation=search.interpret(root,job,payload) if c.settings(root, job).get('search_policy') else None
     diagnostics = assess(root, job, payload,focus=interpretation['focus'] if interpretation else None)
     return diagnostics[0]['code'] if diagnostics else None

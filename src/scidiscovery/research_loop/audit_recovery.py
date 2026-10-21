@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 import re
 
-from . import budget, contracts as c
+from . import budget, contracts as c, configuration_updates
 
 AUDIT_STATUSES = {'audited', 'rejected', 'engineering_error', 'unclassified', 'unknown'}
 WORKER_CODES = {'implementation_source_missing', 'audit_dependency_missing', 'audit_training_error', 'audit_prediction_error',
@@ -21,13 +21,14 @@ def intents(root):
     """Accepted retry declarations; outcome integrity is a separate result check."""
     for path in sorted((root / 'host-delivery/audit-recovery').glob('*/intent.json')):
         intent = c.read(c.regular(path))
+        settings = configuration_updates.for_job(root, intent)
         if (intent.get('settings_sha256') != c.digest(root / 'settings.json')
                 or intent.get('operation_id') != path.parent.name
                 or type(intent.get('attempt')) is not int or intent['attempt'] != 1
                 or intent.get('reason') not in WORKER_CODES | CONTROL_CODES
                 or not re.fullmatch('[0-9a-f]{64}',path.parent.name)
                 or type(intent.get('max_seconds')) not in (int,float) or not math.isfinite(intent['max_seconds'])
-                or not 0 < intent['max_seconds'] <= c.settings(root)['delivery_policy']['submit_seconds']
+                or not 0 < intent['max_seconds'] <= settings['delivery_policy']['submit_seconds']
                 or type(intent.get('advance_seconds')) not in (int,float) or not math.isfinite(intent['advance_seconds'])
                 or intent['advance_seconds']<0):
             raise ValueError('Audit engineering recovery identity changed')
@@ -59,7 +60,7 @@ def blocked(root):
     return any(value is None or not value['cleanup_confirmed'] for _, value in facts(root))
 
 
-def run(root, spec, source, request, seconds, *, on_process=None, author_required=True):
+def run(root, spec, source, request, seconds, *, on_process=None, author_required=True, job=None):
     from pathlib import Path
     import time
     from . import budget, delivery, native
@@ -104,7 +105,8 @@ def run(root, spec, source, request, seconds, *, on_process=None, author_require
     if result['note'] in WORKER_CODES:
         return result, request, deadline
     limits, meter = budget.snapshot(root), native.usage(root)
-    policy=c.settings(root)['delivery_policy']
+    settings = delivery._settings(root, job)
+    policy=settings['delivery_policy']
     reserved_seconds=policy['cleanup_seconds']+policy['confirm_seconds']
     if author_required:reserved_seconds+=policy['closeout_a']['max_seconds']+policy['submit_seconds']
     remaining=min(policy['submit_seconds'],limits['seconds_remaining']-reserved_seconds)
@@ -116,9 +118,11 @@ def run(root, spec, source, request, seconds, *, on_process=None, author_require
         candidate_id=request['candidate_id'], artifact_sha256=request['artifact_sha256'],
         object_digests=request['object_digests'], reason=result['note'], max_seconds=min(remaining,limits['seconds_remaining']),
         advance_seconds=limits['advance_seconds'])
+    if job is not None and job.get('configuration_revision') is not None:
+        intent['configuration_revision'] = job['configuration_revision']
     _save(intent_path, intent)
     deadline=time.clock_gettime(time.CLOCK_BOOTTIME)+intent['max_seconds']
-    fresh = delivery._staged(root, spec, source, request['operation_id'], Path(request['stage'])/'recovery-1')
+    fresh = delivery._staged(root, spec, source, request['operation_id'], Path(request['stage'])/'recovery-1', job=job)
     def process(phase, identity):
         _save(directory/'process.json', dict(phase=phase, identity=identity))
     result = call(fresh, process)

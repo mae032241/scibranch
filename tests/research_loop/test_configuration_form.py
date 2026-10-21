@@ -215,3 +215,269 @@ def test_invalid_edit_retains_all_controls_for_correction(tmp_path):
     with pytest.raises(ValueError,match='类型错误'):
         form.create(caught.value.draft)
     assert not (tmp_path/'instance').exists()
+
+
+def test_policy_forms_edit_real_schemas_and_preserve_extra_fields(tmp_path):
+    draft = complete(tmp_path)
+    draft['document']['budget']['role_shares'] = dict(version=1, min_w_share=.65,
+        max_thinking_share=.35, thinking_node_target_tokens=250000,
+        imported_extension=dict(keep=[]))
+    draft['document']['policies'] = dict(resume=dict(max_attempts=2,
+        protocol='codex_exec_resume', usage_scope='turn', output_repair=True,
+        output_only=False))
+    fields = submitted(draft)
+    assert fields['cfg.budget.role_shares.min_w_share'] == '0.65'
+    assert fields['cfg.policies.resume.output_only'] == 'false'
+    fields['cfg.budget.role_shares.min_w_share'] = '0.6'
+    fields['cfg.policies.resume.max_attempts'] = '1'
+    parsed = form.parse(fields, base=tmp_path)
+    assert parsed['document']['budget']['role_shares'] == dict(version=1, min_w_share=.6,
+        max_thinking_share=.35, thinking_node_target_tokens=250000,
+        imported_extension=dict(keep=[]))
+    assert parsed['document']['policies']['resume']['max_attempts'] == 1
+    assert parsed['document']['policies']['resume']['output_only'] is False
+    assert research_config.tomllib.loads(form.export_toml(parsed))['budget'] == parsed['document']['budget']
+    fields['cfg.policies.resume.max_attempts'] = 'invalid attempts'
+    with pytest.raises(form.FormError) as caught:
+        form.parse(fields, base=tmp_path)
+    assert submitted(caught.value.draft)['cfg.policies.resume.max_attempts'] == 'invalid attempts'
+    del fields['enabled.policies.resume']
+    assert 'policies' not in form.parse(fields, base=tmp_path)['document']
+
+
+def test_collapsed_controls_keep_custom_values_false_empty_and_omission(tmp_path):
+    draft = complete(tmp_path)
+    draft['document']['agent'].update(reasoning_effort='backend-specific-effort',
+        service_tier='backend-specific-tier', roles=dict(E=dict(model='')))
+    draft['document']['permissions'] = dict(network=False)
+    draft['document']['research']['user_updates'] = []
+    html = form.render(draft)
+    fields = Controls(html).fields
+    parsed = form.parse(fields, base=tmp_path)
+    assert form.declaration(parsed) == form.declaration(draft)
+    assert 'list="config-agent-reasoning_effort-suggestions"' in html
+    assert 'E · 证据检索与提取' in html
+    assert 'W · 实验与实现' in html
+    assert 'data-config-group="agent.roles"' in html
+    assert '已设置，折叠后仍保留' in html
+    del fields['present.agent.roles.E.model']
+    del fields['enabled.research.user_updates']
+    omitted = form.parse(fields, base=tmp_path)['document']
+    assert 'roles' not in omitted['agent']
+    assert 'user_updates' not in omitted['research']
+    assert omitted['permissions']['network'] is False
+    exported = research_config.tomllib.loads(form.export_toml(parsed))
+    assert exported['agent']['roles']['E']['model'] == ''
+    assert exported['research']['user_updates'] == []
+
+
+@pytest.mark.parametrize('edit', [False, True])
+def test_compact_role_matrix_shares_rows_and_keeps_accessible_labels(tmp_path, edit):
+    draft = complete(tmp_path)
+    draft['document']['agent']['roles'] = dict(H=dict(reasoning_effort='custom-effort'), E=dict(model=''))
+    draft['document']['budget']['node_targets'] = {
+        role: dict(max_observed_tokens=400, max_seconds=30.5) for role in 'HWAE'}
+    html = form.render(draft, edit=edit)
+
+    class Matrix(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.inside = False
+            self.body = False
+            self.rows = 0
+            self.controls = []
+            self.labels = {}
+            self.label = None
+            self.feed(html)
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == 'table' and 'config-role-matrix' in attrs.get('class', '').split():
+                self.inside = True
+            if not self.inside:
+                return
+            if tag == 'tbody':
+                self.body = True
+            if tag == 'tr' and self.body:
+                self.rows += 1
+            if tag == 'input' and attrs.get('name', '').startswith('cfg.'):
+                self.controls.append(attrs)
+            if tag == 'label':
+                self.label = attrs.get('for')
+
+        def handle_endtag(self, tag):
+            if tag == 'table':
+                self.inside = False
+            if tag == 'label':
+                self.label = None
+
+        def handle_data(self, data):
+            if self.label:
+                self.labels[self.label] = self.labels.get(self.label, '')+data
+
+    matrix = Matrix()
+    assert matrix.rows == 4
+    assert len(matrix.controls) == 20
+    assert len({item['name'] for item in matrix.controls}) == 20
+    for item in matrix.controls:
+        path = item['name'].removeprefix('cfg.')
+        field = next(field for field in form.FIELDS if field.path == path)
+        assert matrix.labels[item['id']] == field.label
+        assert item['aria-describedby'] == 'role-settings-help'
+        assert html.count('name="'+item['name']+'"') == 1
+    assert 'class="role-settings-card"' not in html
+    assert 'id="budget-settings"' in html
+    assert '<th scope="col">用量（tokens）</th>' in html
+    assert '<th scope="col">时间（秒）</th>' in html
+    fields = Controls(html).fields
+    parsed = (form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
+        if edit else form.parse(fields, base=tmp_path))
+    assert (parsed['document'] if edit else form.declaration(parsed)) == draft['document']
+
+
+def test_compact_numeric_groups_keep_units_and_collapsible_help(tmp_path):
+    html = form.render(complete(tmp_path), edit=True)
+    for group in ('探索切片', '补正阈值', '输出与候选'):
+        assert '<legend>'+group+'</legend>' in html
+    for label in ('模型用量（tokens）', '活动时间（秒）', '节点上限（步）',
+                  '单项输出（字节）', 'W 时间目标（秒）', '暂停阈值（次）'):
+        assert label in html
+    assert '<details class="config-help">' in html
+    assert 'aria-describedby="config-budget-max_seconds-help"' in html
+    assert '<p id="config-budget-max_seconds-help">单位：秒。' in html
+    assert 'name="enabled.budget.role_shares"' in html
+    assert 'name="enabled.policies.resume"' in html
+
+
+@pytest.mark.parametrize('edit', [False, True])
+def test_advanced_standard_controls_keep_closed_category_disclosures_and_roundtrip(tmp_path, edit):
+    draft = complete(tmp_path)
+    draft['document']['budget'].update(candidate_extra_slots=0,
+        role_shares=dict(version=1, min_w_share=0, max_thinking_share=.35,
+            thinking_node_target_tokens=250, extension=dict(enabled=False, empty=[])))
+    draft['document']['policies'] = dict(formal_review=False, resume=dict(max_attempts=1,
+        protocol='codex_exec_resume', usage_scope='turn', output_only=False, native_home=''))
+    draft['document']['executor'] = dict(config=dict(configuration=dict(
+        enabled=False, count=0, text='', nested=dict(items=[]))))
+    html = form.render(draft, edit=edit)
+
+    class DisclosureControls(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.disclosures = []
+            self.categories = []
+            self.controls = {}
+            self.feed(html)
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == 'details':
+                disclosure = (attrs.get('class', ''), attrs.get('data-config-group'), 'open' in attrs)
+                self.disclosures.append(disclosure)
+                if disclosure[0] == 'advanced-category' and disclosure[1]:
+                    self.categories.append(disclosure)
+            if tag in {'input', 'select', 'textarea'} and attrs.get('name', '').startswith('cfg.'):
+                self.controls[attrs['name']] = tuple(self.disclosures)
+
+        def handle_endtag(self, tag):
+            if tag == 'details':
+                self.disclosures.pop()
+
+    parsed_controls = DisclosureControls()
+    controls = parsed_controls.controls
+    categories = ['agent', 'budget', 'executor', 'delivery', 'policies'] if edit else [
+        'research', 'agent', 'budget', 'executor', 'delivery', 'policies', 'ui', 'version']
+    assert parsed_controls.categories == [('advanced-category', prefix, False) for prefix in categories]
+    for path in ('agent.backend', 'agent.native.features.fast_mode', 'budget.breadth.initial_calls',
+                 'budget.correction.pause_after', 'budget.max_output_item_bytes',
+                 'budget.role_shares.min_w_share', 'executor.mode', 'executor.config.executor',
+                 'policies.formal_review', 'policies.resume.output_only', 'policies.resume.native_home'):
+        assert controls['cfg.'+path] == (('advanced-settings', None, False),
+            ('advanced-category', path.split('.')[0], False))
+        assert html.count('name="cfg.'+path+'"') == 1
+    assert '<details class="advanced-category" data-config-group="budget"><summary>' in html
+    assert '<fieldset class="structured-setting known-settings" data-config-path="budget.role_shares"' in html
+    assert '<fieldset class="structured-setting known-settings" data-config-path="policies.resume"' in html
+    assert '<label class="config-node-key">键名 ' in html
+    assert '<label class="config-node-type">类型 ' in html
+    fields = Controls(html).fields
+    fields['cfg.budget.candidate_extra_slots'] = '1'
+    fields['cfg.policies.resume.output_only'] = 'true'
+    parsed = (form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
+        if edit else form.parse(fields, base=tmp_path))
+    expected = form.declaration(draft)
+    expected['budget']['candidate_extra_slots'] = 1
+    expected['policies']['resume']['output_only'] = True
+    assert (parsed['document'] if edit else form.declaration(parsed)) == expected
+
+
+def test_list_entry_works_without_script_and_blank_entry_adds_no_value(tmp_path):
+    draft = complete(tmp_path)
+    fields = submitted(draft)
+    omitted = form.parse(dict(fields, **{'enabled.agent.launcher': ''}), base=tmp_path)
+    assert 'launcher' not in omitted['document'].get('agent', {})
+    fields['cfg.research.user_updates'] = 'one update.md'
+    parsed = form.parse(fields, base=tmp_path)
+    assert parsed['document']['research']['user_updates'] == ['one update.md']
+    fields['cfg.research.user_updates'] = ''
+    assert 'user_updates' not in form.parse(fields, base=tmp_path)['document']['research']
+
+
+def test_edit_form_roundtrips_operational_groups_and_keeps_instance_inputs_server_side(tmp_path):
+    draft = complete(tmp_path)
+    draft['document']['ui'] = dict(approval_secret_file='/private/operator.key')
+    draft['document']['permissions'] = dict(workspace='workspace-write', network=False, web='live', subagents=False)
+    draft['document']['executor'] = dict(mode='external', config=dict(configuration=dict(nested=[1, False, 'exact'])))
+    draft['document']['delivery'] = dict(adapter=dict(config=dict(destination='exact-target')))
+    fields = Controls(form.render(draft, edit=True)).fields
+    assert not any(name.startswith(('cfg.research.', 'cfg.ui.', 'cfg.version', 'task_')) for name in fields)
+    assert '/private/operator.key' not in form.render(draft, edit=True)
+    assert fields['cfg.permissions.web'] == 'live'
+    assert fields['cfg.executor.mode'] == 'external'
+    parsed = form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
+    assert parsed['document'] == draft['document']
+    fields['cfg.agent.model'] = 'next-model'
+    fields['cfg.budget.max_tokens'] = 'invalid budget'
+    with pytest.raises(form.FormError) as caught:
+        form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
+    retry = Controls(form.render(caught.value.draft, edit=True)).fields
+    assert retry['cfg.budget.max_tokens'] == 'invalid budget'
+    assert retry['cfg.agent.model'] == 'next-model'
+    assert caught.value.draft['document']['research'] == draft['document']['research']
+    fields['cfg.research.root'] = '/another-instance'
+    with pytest.raises(ValueError, match='不能在研究配置中修改'):
+        form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
+
+
+@pytest.mark.parametrize('seconds', [900.0, 0.25])
+def test_normalized_breadth_seconds_survive_invalid_edit_correction_and_save(tmp_path, seconds):
+    from scidiscovery.research_loop import configuration_updates, search
+    draft = complete(tmp_path)
+    # The ordinary creation path supplies a float-valued default; sub-second
+    # ceilings are valid too. Counts and token ceilings remain integers.
+    if seconds != search.DEFAULT_POLICY['max_w_seconds']:
+        draft['document']['budget']['breadth'] = dict(search.DEFAULT_POLICY, max_w_seconds=seconds)
+    form.create(draft)
+    root = tmp_path / 'instance'
+    state = configuration_updates.status(root)
+    assert state['configuration']['budget']['breadth']['max_w_seconds'] == seconds
+    editable = form.imported(state['configuration'], base=root)
+    fields = Controls(form.render(editable, edit=True)).fields
+    fields['cfg.agent.model'] = 'model-after-correction'
+    fields['cfg.budget.max_tokens'] = 'invalid total'
+    with pytest.raises(form.FormError) as caught:
+        form.parse_edit(fields, base=root, configuration=state['configuration'])
+    assert 'W 软目标秒数' not in str(caught.value)
+    retry = Controls(form.render(caught.value.draft, edit=True)).fields
+    assert retry['cfg.budget.breadth.max_w_seconds'] == str(seconds)
+    assert retry['cfg.agent.model'] == 'model-after-correction'
+    retry['cfg.budget.max_tokens'] = str(state['configuration']['budget']['max_tokens'])
+    corrected = form.parse_edit(retry, base=root, configuration=state['configuration'])
+    saved = configuration_updates.submit(root, corrected['document'], expected_revision=state['revision'])
+    assert saved['pending']
+    assert saved['settings']['model'] == 'model-after-correction'
+    assert saved['settings']['search_policy']['max_w_seconds'] == seconds
+    assert type(saved['settings']['search_policy']['max_w_observed_tokens']) is int
+    retry['cfg.budget.breadth.max_w_observed_tokens'] = '1.5'
+    with pytest.raises(form.FormError, match='W 软目标 tokens'):
+        form.parse_edit(retry, base=root, configuration=state['configuration'])

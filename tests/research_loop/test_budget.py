@@ -57,6 +57,114 @@ def test_active_clock_counts_overlapping_control_and_native_once(clocked):
     assert budget.snapshot(root)['seconds_remaining'] == 11
 
 
+@pytest.mark.parametrize('closeout', [False, True])
+def test_status_reads_closed_active_intervals_without_sampling_current_clock(clocked, monkeypatch, closeout):
+    root, now = clocked
+    transition(root, 'advance')
+    now[0] = 105.
+    if closeout:
+        budget.begin_closeout(root, 0, 1, 'Retain an exact completed export', export_only=True)
+    transition(root, 'paused')
+    now[0] = 110.
+    budget.amend(root, max_tokens=200, max_seconds=40, authorization_note='Retain the audited ceiling')
+    originals = {path: path.read_bytes() for path in (
+        root / 'settings.json', root / 'settings-identity.json', root / 'host-started.json',
+        *(root / 'control-ledger').glob('*.json'))}
+    monkeypatch.setattr(budget, 'clock_stamp', lambda: pytest.fail('Closed active status must use only recorded interval endpoints'))
+    value = status(root)
+    shown = value['budget']
+    assert shown['consumed_seconds'] == 5 and shown['seconds_remaining'] == 35
+    assert shown['max_tokens'] == 200 and shown['max_seconds'] == 40
+    assert shown['paused_seconds'] is None and shown['elapsed_seconds'] is None
+    if closeout:
+        assert value['closeout']['status'] == 'exported_unsubmitted'
+        assert value['closeout']['budget'] == shown
+    assert all(path.read_bytes() == original for path, original in originals.items())
+
+
+def test_unstarted_status_does_not_sample_current_clock(clocked, monkeypatch):
+    root, _ = clocked
+    (root / 'host-started.json').unlink()
+    monkeypatch.setattr(budget, 'clock_stamp', lambda: pytest.fail('An unstarted budget has no clock interval'))
+    value = status(root)['budget']
+    assert value['consumed_seconds'] == 0 and value['seconds_remaining'] == 20
+
+
+@pytest.mark.parametrize('query, final_only', [('pending_status', False), ('pending_status', True), ('repair_funds', False)])
+def test_closed_closeout_funds_use_recorded_limits_only_for_queries(clocked, monkeypatch, query, final_only):
+    from scidiscovery.research_loop import delivery
+    root, now = clocked
+    settings = contracts.settings(root)
+    settings['delivery_policy'] = delivery.policy(dict(closeout_a=dict(max_observed_tokens=10, max_seconds=2),
+        inflight_tokens=0, cleanup_seconds=0, submit_seconds=0, confirm_seconds=0, adapter=None))
+    settings['node_budget_policy'] = budget.node_policy({
+        role: dict(max_observed_tokens=10, max_seconds=2) for role in 'HWAE'})
+    contracts.write(root / 'settings.json', settings)
+    contracts.write(root / 'settings-identity.json', dict(sha256=contracts.digest(root / 'settings.json')))
+    transition(root, 'advance')
+    budget.begin_closeout(root, 0, 1, 'A retained pending closeout', final_only=final_only)
+    now[0] = 105.
+    transition(root, 'paused')
+    originals = {path: path.read_bytes() for path in (
+        root / 'settings.json', root / 'settings-identity.json', root / 'host-started.json',
+        *(root / 'control-ledger').glob('*.json'))}
+    stamp = budget.clock_stamp(); stamp.update(boot_id='next-boot', at_boottime=1.)
+    monkeypatch.setattr(budget, 'clock_stamp', lambda: pytest.fail('Query-only funds use the already recorded limits'))
+    if query == 'pending_status':
+        value = status(root)
+        assert value['closeout']['status'] == 'closeout_pending'
+        assert value['closeout']['budget']['consumed_seconds'] == 5
+    else:
+        limits = budget.status_snapshot(root)
+        assert controller._repair_funds(root, limits=limits)
+    monkeypatch.setattr(budget, 'clock_stamp', lambda: dict(stamp))
+    for funds in (controller._closeout_funds, controller._repair_funds):
+        with pytest.raises(ValueError, match='Control clock boot changed'):
+            funds(root)
+    assert all(path.read_bytes() == original for path, original in originals.items())
+
+
+@pytest.mark.parametrize('basis, phase', [('active', 'advance'), ('active', 'waiting'), ('elapsed', 'paused')])
+def test_status_keeps_unclosed_and_legacy_clock_reads_strict(clocked, monkeypatch, basis, phase):
+    root, _ = clocked
+    settings = contracts.settings(root)
+    settings['time_budget_basis'] = basis
+    contracts.write(root / 'settings.json', settings)
+    contracts.write(root / 'settings-identity.json', dict(sha256=contracts.digest(root / 'settings.json')))
+    transition(root, phase)
+    stamp = budget.clock_stamp(); stamp.update(boot_id='next-boot', at_boottime=1.)
+    monkeypatch.setattr(budget, 'clock_stamp', lambda: dict(stamp))
+    with pytest.raises(ValueError, match='Control clock boot changed'):
+        status(root)
+
+
+@pytest.mark.parametrize('action', ['snapshot', 'transition', 'amend', 'bind_new_job'])
+def test_closed_status_does_not_authorize_cross_boot_budget_effects(clocked, monkeypatch, action):
+    from scidiscovery.research_loop import configuration_updates
+    root, now = clocked
+    transition(root, 'advance')
+    now[0] = 105.
+    transition(root, 'paused')
+    document = configuration_updates.status(root)['configuration']
+    document['agent']['model'] = 'queued-model'
+    configuration_updates.submit(root, document, expected_revision=0)
+    originals = {path: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')}
+    stamp = budget.clock_stamp(); stamp.update(boot_id='next-boot', at_boottime=1.)
+    monkeypatch.setattr(budget, 'clock_stamp', lambda: dict(stamp))
+    assert status(root)['budget']['consumed_seconds'] == 5
+    with pytest.raises(ValueError, match='Control clock boot changed'):
+        if action == 'transition':
+            transition(root, 'advance')
+        elif action == 'amend':
+            budget.amend(root, max_seconds=40, authorization_note='A new boot is not a clock continuation')
+        elif action == 'bind_new_job':
+            configuration_updates.bind_new_job(root, 1)
+        else:
+            budget.snapshot(root)
+    assert all(path.read_bytes() == original for path, original in originals.items())
+    assert not (root / 'host-control/configuration/bindings/000001.json').exists()
+
+
 def test_pause_request_and_restart_do_not_make_unknown_time_free(clocked):
     root, now = clocked
     transition(root, 'advance')

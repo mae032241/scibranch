@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from . import configuration_updates
 from ..operations.provenance_rules import dependency_sources, inherited_restriction
 from . import contracts as c
 
@@ -263,7 +264,7 @@ def _output(root, job, seal, *, managed_coverage=None):
             raise IntegrityError('Source observation receipt changed')
         observation = c.read(path)
         observer_unknown = False
-        if c.settings(root).get('history_observer') is not None:
+        if configuration_updates.for_job(root, job).get('history_observer') is not None:
             from . import history
             covered = history.observer_input_sources(root, job, observation)
             observer_unknown = covered is None or not covered['complete']

@@ -28,6 +28,13 @@ def form(ui, cookie, action):
             for key, value in re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)">', original)}
 
 
+def control_fields(ui, cookie, action):
+    # Direct legacy-control boundary tests do not depend on the ordinary UI
+    # exposing an exceptional recovery form.
+    token = ui._browser(cookie)
+    return dict(nonce=ui.control_nonce, csrf=ui._csrf(token, action, ui.control_nonce))
+
+
 def post(ui, cookie, action, value):
     return ui.post('/control/' + action, host=ui.host, origin='http://' + ui.host,
         cookie=cookie, content_type='application/x-www-form-urlencoded', body=urlencode(value).encode())
@@ -268,7 +275,7 @@ def test_budget_form_queues_exact_limits_and_original_adjustment_text(tmp_path, 
     root, key = prepare(tmp_path, enabled=False)
     ui, cookie = session(root, key)
     note = '  Raise this ceiling for the next bounded work.\n保留原文。\n'
-    fields = dict(form(ui, cookie, 'budget'), max_tokens='', max_seconds='', max_steps='', authorization_note=note)
+    fields = dict(control_fields(ui, cookie, 'budget'), max_tokens='', max_seconds='', max_steps='', authorization_note=note)
     fields[ceiling] = value
     if legacy_statement is not None:
         fields['authorization_statement'] = legacy_statement
@@ -296,12 +303,12 @@ def test_budget_form_queues_exact_limits_and_original_adjustment_text(tmp_path, 
 def test_budget_form_rejects_empty_explanation_and_keeps_one_retry_field(tmp_path, note):
     root, key = prepare(tmp_path, enabled=False)
     ui, cookie = session(root, key)
-    fields = dict(form(ui, cookie, 'budget'), max_tokens='', max_seconds='', max_steps='9', authorization_note=note)
+    fields = dict(control_fields(ui, cookie, 'budget'), max_tokens='', max_seconds='', max_steps='9', authorization_note=note)
     status, page, _ = post(ui, cookie, 'budget', fields)
     assert status == 422 and not control.operations(root)
     retry = re.search(r'<form method="post" action="/control/budget">(.*?)</form>', page.decode(), re.S).group(1)
     assert retry.count('name="authorization_note"') == 1 and '调整说明' in retry
-    assert 'name="authorization_statement"' not in retry and '确认调整预算' in retry
+    assert 'name="authorization_statement"' not in retry and '确认追加预算' in retry
     assert '9' in retry and 'name="csrf"' in retry and 'name="nonce"' in retry
     ui.translation.close()
 
@@ -310,7 +317,7 @@ def test_budget_form_rejects_empty_explanation_and_keeps_one_retry_field(tmp_pat
 def test_budget_form_rejects_unknown_or_duplicate_fields_before_queueing(tmp_path, extra):
     root, key = prepare(tmp_path, enabled=False)
     ui, cookie = session(root, key)
-    fields = dict(form(ui, cookie, 'budget'), max_tokens='', max_seconds='', max_steps='9', authorization_note='Exact bounded adjustment.')
+    fields = dict(control_fields(ui, cookie, 'budget'), max_tokens='', max_seconds='', max_steps='9', authorization_note='Exact bounded adjustment.')
     with pytest.raises(ValueError, match='missing or duplicate fields'):
         ui.post('/control/budget', host=ui.host, origin='http://' + ui.host, cookie=cookie,
             content_type='application/x-www-form-urlencoded', body=(urlencode(fields) + '&' + extra).encode())
@@ -400,6 +407,68 @@ def test_loopback_science_download_uses_existing_browser_scope_and_safe_headers(
     assert not worker.is_alive() and not errors
 
 
+def test_settings_index_has_one_entry_for_each_setting(tmp_path):
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    page = ui.get('/settings', host=ui.host, cookie=cookie)[1].decode()
+    groups = page.split('<div class="settings-groups">', 1)[1]
+    assert re.findall(r'href="([^"]+)"', groups) == ['/configuration', '/guidance', '/reading', '/operations']
+    overview = ui.get('/', host=ui.host, cookie=cookie)[1].decode()
+    assert 'href="/configuration#budget-settings"' in overview
+    assert 'action="/control/budget"' not in overview
+    configuration = ui.get('/configuration', host=ui.host, cookie=cookie)[1].decode()
+    assert 'id="budget-settings"' in configuration
+    assert 'href="/#budget"' not in configuration
+    assert configuration.count('name="cfg.budget.max_tokens"') == 1
+    assert 'action="/control/budget"' not in configuration
+    ui.translation.close()
+
+
+@pytest.mark.parametrize('exhaustion', ['tokens', 'time', 'steps'])
+@pytest.mark.parametrize('state,available', [
+    ('ordinary', False), ('exhausted', True), ('paused_exhausted', True),
+    ('waiting_exhausted', True), ('active_exhausted', False), ('final', True), ('completed_final', True),
+])
+def test_budget_recovery_has_one_contextual_editor_and_preserves_read_only_boundary(tmp_path, monkeypatch, state, available, exhaustion):
+    import copy
+    root, key = prepare(tmp_path, enabled=False)
+    finish(root, 1, 'H', [], action='analyze')
+    ui, cookie = session(root, key)
+    if state == 'waiting_exhausted':
+        finish(root, 2, 'A', [1], action='wait')
+    snapshot = copy.deepcopy(ui._snapshot())
+    if 'exhausted' in state:
+        if exhaustion == 'tokens':
+            snapshot['view']['budget']['max_tokens'] = 1
+            snapshot['view']['usage']['accounted_tokens'] = 2
+        elif exhaustion == 'time':
+            snapshot['view']['budget']['seconds_remaining'] = 0
+        else:
+            snapshot['view']['budget']['max_steps'] = snapshot['ui']['used_steps']
+    if state == 'paused_exhausted':
+        snapshot['view']['paused'] = True
+    if state == 'active_exhausted':
+        snapshot['view']['nodes'][-1]['state'] = 'running'
+    if state in {'final', 'completed_final'}:
+        snapshot['view']['closeout'] = dict(status='final_a_completed' if state == 'completed_final' else 'final_only')
+    monkeypatch.setattr(ui, '_snapshot_or_error', lambda **options: snapshot)
+    page = ui.get('/budget-recovery', host=ui.host, cookie=cookie)[1].decode()
+    assert ('action="/control/budget"' in page) is available
+    assert ui._budget_recovery_available(snapshot) is available
+    overview = ui.get('/', host=ui.host, cookie=cookie)[1].decode()
+    assert 'action="/control/budget"' not in overview
+    if available:
+        assert 'href="/budget-recovery#budget"' in overview
+        assert '确认追加预算' in page and '恢复仍须满足原有条件' in page
+        assert '生效后返回总览继续研究；提交本表不会启动研究。' in page
+    else:
+        assert 'href="/configuration#budget-settings"' in page
+    _, _, headers = ui.get('/view?' + urlencode({'token': ui.read_token}), host=ui.host)
+    with pytest.raises(PermissionError):
+        ui.get('/budget-recovery', host=ui.host, cookie=headers['Set-Cookie'])
+    ui.translation.close()
+
+
 def test_management_configuration_guidance_and_explicit_instance_selection(tmp_path):
     from scidiscovery.research_loop import contracts as c
     from test_research_config import declaration
@@ -407,11 +476,14 @@ def test_management_configuration_guidance_and_explicit_instance_selection(tmp_p
     ui, cookie = session(root, key)
     _, _, read_headers = ui.get('/view?' + urlencode({'token': ui.read_token}), host=ui.host)
     reader = read_headers['Set-Cookie']
-    for path in ('/instances', '/configuration', '/operations'):
+    for path in ('/instances', '/configuration', '/new', '/operations'):
         with pytest.raises(PermissionError):
             ui.get(path, host=ui.host, cookie=reader)
     page = ui.get('/configuration', host=ui.host, cookie=cookie)[1]
-    assert '此实例实际冻结的配置'.encode() in page and b'operator.key' not in page
+    assert '从下一个新节点生效'.encode() in page and b'operator.key' not in page
+    assert b'id="research-config-edit-form"' in page and b'action="/control/configuration-update"' in page
+    assert b'id="research-config-form"' not in page and b'action="/control/configure"' not in page
+    assert b'id="research-config-form"' in ui.get('/new', host=ui.host, cookie=cookie)[1]
     submit = dict(form(ui, cookie, 'pause'), text='Check uncertainty', target='W', kind='advice', scope='research', effective_step='')
     submit['csrf'] = ui._csrf(ui._browser(cookie), 'guidance-submit', submit['nonce'])
     assert post(ui, cookie, 'guidance-submit', submit)[2]['Location'] == '/guidance'
@@ -555,6 +627,283 @@ def test_configuration_displays_requested_and_effective_permission_limits(tmp_pa
     assert 'operator.key' not in page and 'native_launcher_argv' not in page
 
 
+def test_configuration_reads_audited_budget_without_rewriting_frozen_settings(tmp_path):
+    from scidiscovery.research_loop import budget, contracts as c
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    frozen = (root / 'settings.json').read_bytes()
+    budget.amend(root, max_tokens=54321, max_seconds=7654, authorization_note='Review revised ceilings')
+    page = ui.get('/configuration', host=ui.host, cookie=cookie)[1].decode()
+    current, original = page.split('<summary>查看创建时的原始总上限</summary>')
+    assert '54321 tokens' in current and '7654 秒' in current
+    assert str(c.settings(root)['max_tokens']) + ' tokens' in original
+    assert (root / 'settings.json').read_bytes() == frozen
+
+
+@pytest.mark.parametrize('change_budget', [False, True])
+def test_workspace_configuration_limits_are_independent_of_live_clock(tmp_path, monkeypatch, change_budget):
+    from scidiscovery.research_loop import budget, configuration_updates, contracts as c
+    from test_configuration_form import Controls
+    root, key = prepare(tmp_path, enabled=False)
+    c.build_job(root, 1, 'H', [])
+    stamp = dict(at_unix=1000., at_boottime=10., boot_id='historical-boot')
+    monkeypatch.setattr(budget, 'clock_stamp', lambda: dict(stamp))
+    c.write(root / 'host-started.json', stamp)
+    budget.amend(root, max_tokens=54321, max_seconds=7654, max_steps=9,
+                 authorization_note='Retain the audited ceilings across host restart',
+                 authorization_statement='Allow nine research nodes')
+    budget.transition(root, 'advance', 'An open historical interval')
+    workspace = tmp_path / 'workspace'; workspace.mkdir()
+    ui = InstanceUI(workspace, secret_file=key, workspace=True, instance_roots=[root])
+    ui.host = '127.0.0.1:18754'
+    child = ui._child(1)
+    _, _, headers = ui.get('/instances/1/manage?' + urlencode({'token': child.management_token}), host=ui.host)
+    cookie = headers['Set-Cookie']
+    originals = {path: path.read_bytes() for path in (
+        root / 'settings.json', root / 'settings-identity.json', root / 'host-started.json',
+        root / 'jobs/001.json', root / 'host-control/configuration/bindings/000001.json',
+        root / 'control-ledger/000001.json', root / 'control-ledger/000002.json')}
+    stamp.update(at_unix=2000., at_boottime=1., boot_id='current-boot')
+
+    settings = ui.get('/instances/1/settings', host=ui.host, cookie=cookie)
+    assert settings[0] == 200 and b'href="/instances/1/configuration"' in settings[1]
+    status, body, _ = ui.get('/instances/1/configuration', host=ui.host, cookie=cookie)
+    assert status == 200
+    page = body.decode()
+    editor = re.search(r'<form id="research-config-edit-form".*?>(.*?)</form>', page, re.S).group(1)
+    fields = Controls(editor).fields
+    assert fields['cfg.budget.max_tokens'] == '54321'
+    assert fields['cfg.budget.max_seconds'] == '7654'
+    assert fields['cfg.budget.max_steps'] == '9'
+    current, original = page.split('<summary>查看创建时的原始总上限</summary>')
+    assert '54321 tokens' in current and '7654 秒' in current and '9 阶段' in current
+    assert '4000 tokens' in original and '60 秒' in original
+    fields['cfg.agent.model'] = 'next-boot-model'
+    if change_budget:
+        fields['cfg.budget.max_tokens'] = '60000'
+        fields['authorization_note'] = 'Queue more comparisons after clock recovery'
+    saved, _, headers = ui.post('/instances/1/control/configuration-update', host=ui.host,
+        origin='http://' + ui.host, cookie=cookie, content_type='application/x-www-form-urlencoded',
+        body=urlencode(fields).encode())
+    assert saved == 303 and headers['Location'] == '/instances/1/configuration'
+    state = configuration_updates.status(root)
+    assert state['pending'] and state['settings']['model'] == 'next-boot-model'
+    assert state['active_settings']['model'] == 'fixture'
+    assert state['settings']['max_tokens'] == (60000 if change_budget else 54321)
+    with pytest.raises(ValueError, match='Control clock boot changed'):
+        budget.snapshot(root)
+    with pytest.raises(ValueError, match='Control clock boot changed'):
+        configuration_updates.bind_new_job(root, 2)
+    assert all(path.read_bytes() == data for path, data in originals.items())
+    assert {path.name for path in (root / 'control-ledger').iterdir()} == {'000001.json', '000002.json'}
+    assert not (root / 'host-control/configuration/bindings/000002.json').exists()
+    assert not (root / 'jobs/002.json').exists()
+
+
+def test_configuration_update_retains_draft_and_applies_only_to_new_nodes(tmp_path):
+    from scidiscovery.research_loop import configuration_updates, contracts as c
+    from test_configuration_form import Controls
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    c.build_job(root, 1, 'H', [])
+    original_job = (root / 'jobs/001.json').read_bytes()
+    frozen = (root / 'settings.json').read_bytes()
+
+    def edit_fields():
+        markup = ui.get('/configuration', host=ui.host, cookie=cookie)[1].decode()
+        editor = re.search(r'<form id="research-config-edit-form".*?>(.*?)</form>', markup, re.S).group(1)
+        return Controls(editor).fields
+
+    fields = edit_fields()
+    fields['cfg.agent.model'] = 'next-node-model'
+    fields['cfg.permissions.web'] = 'live'
+    fields['cfg.budget.max_tokens'] = 'retain this invalid number'
+    fields['authorization_note'] = '  More comparisons <with exact originals>.  '
+    status, page, _ = post(ui, cookie, 'configuration-update', fields)
+    assert status == 422
+    retry = Controls(re.search(r'<form id="research-config-edit-form".*?>(.*?)</form>', page.decode(), re.S).group(1)).fields
+    assert retry['cfg.agent.model'] == 'next-node-model'
+    assert retry['cfg.permissions.web'] == 'live'
+    assert retry['cfg.budget.max_tokens'] == 'retain this invalid number'
+    assert retry['authorization_note'] == fields['authorization_note']
+    assert configuration_updates.status(root)['revision'] == 0
+    retry['cfg.budget.max_tokens'] = '4500'
+    assert post(ui, cookie, 'configuration-update', retry)[2]['Location'] == '/configuration'
+    state = configuration_updates.status(root)
+    assert state['pending'] and state['settings']['model'] == 'next-node-model'
+    assert state['active_settings']['model'] == 'fixture'
+    assert '配置待生效'.encode() in ui.get('/configuration', host=ui.host, cookie=cookie)[1]
+    assert (root / 'settings.json').read_bytes() == frozen
+    assert (root / 'jobs/001.json').read_bytes() == original_job
+    from test_history_handoff import finish
+    finish(root, 1, 'H', [], action='wait')
+    c.build_job(root, 2, 'H', [])
+    assert not configuration_updates.status(root)['pending']
+    assert c.read(root / 'jobs/002.json')['configuration_revision']['revision'] == 1
+
+
+def test_configuration_update_keeps_maintenance_csrf_and_revision_guards(tmp_path):
+    from scidiscovery.research_loop import configuration_updates
+    from test_configuration_form import Controls
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    page = ui.get('/configuration', host=ui.host, cookie=cookie)[1].decode()
+    fields = Controls(re.search(r'<form id="research-config-edit-form".*?>(.*?)</form>', page, re.S).group(1)).fields
+    _, _, headers = ui.get('/view?' + urlencode({'token': ui.read_token}), host=ui.host)
+    with pytest.raises(PermissionError):
+        post(ui, headers['Set-Cookie'], 'configuration-update', fields)
+    with pytest.raises(PermissionError, match='CSRF'):
+        post(ui, cookie, 'configuration-update', dict(fields, csrf='forged'))
+    assert configuration_updates.status(root)['revision'] == 0
+    state = configuration_updates.status(root)
+    newer = state['configuration']
+    newer['agent']['model'] = 'other-tab-model'
+    configuration_updates.submit(root, newer, expected_revision=state['revision'])
+    fields['cfg.agent.model'] = 'stale-draft-model'
+    status, body, _ = post(ui, cookie, 'configuration-update', fields)
+    assert status >= 400 and b'stale-draft-model' in body
+    assert configuration_updates.status(root)['settings']['model'] == 'other-tab-model'
+
+
+def test_configuration_enables_explicit_host_and_signed_endpoint_without_starting_call(tmp_path):
+    from scidiscovery.research_loop import configuration_updates, execution_authority as authority, instance_ui
+    from test_configuration_form import Controls
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    assert not ui.approvals and not (root / 'execution-authority/host-key-source.json').exists()
+    page = ui.get('/configuration', host=ui.host, cookie=cookie)[1].decode()
+    fields = Controls(re.search(r'<form id="research-config-edit-form".*?>(.*?)</form>', page, re.S).group(1)).fields
+    fields['cfg.policies.formal_review'] = 'true'
+    fields['cfg.policies.execution_authority'] = 'true'
+    with instance_ui._host_lock(root):
+        ui._serving = True
+        assert post(ui, cookie, 'configuration-update', fields)[0] == 303
+        assert configuration_updates.status(root)['pending']
+        assert ui.approvals and authority.host_secret(root) == key.read_bytes()
+        assert authority.review_url(root, 'a' * 64, ui.secret) == 'http://' + ui.host + '/requests/' + 'a' * 64
+        assert ui.get('/requests', host=ui.host, cookie=cookie)[0] == 200
+    assert not list((root / 'jobs').glob('*.json'))
+    assert not list(root.glob('**/accepted.json')) and not list(root.glob('**/submission.json'))
+    restarted, restarted_cookie = session(root, key)
+    assert restarted.approvals and restarted.get('/requests', host=restarted.host, cookie=restarted_cookie)[0] == 200
+    (root / 'host-control/configuration/revisions/000002.json').write_text('{unfinished')
+    retained, retained_cookie = session(root, key)
+    assert retained.approvals and retained.get('/requests', host=retained.host, cookie=retained_cookie)[0] == 200
+
+
+def test_configuration_disabling_host_policy_preserves_old_request_decisions_and_restart(tmp_path):
+    from scidiscovery.research_loop import configuration_updates, contracts as c, execution_authority as authority
+    from test_configuration_form import Controls
+    from test_execution_authority import declared_request
+    root, secret, arguments = declared_request(tmp_path)
+    ref = authority.create_request(root, **arguments)
+    request_id = ref['path'].split('/')[-2]
+    request_bytes = (root / ref['path']).read_bytes()
+    key = tmp_path / 'operator.key'
+    ui, cookie = session(root, key)
+    page = ui.get('/configuration', host=ui.host, cookie=cookie)[1].decode()
+    fields = Controls(re.search(r'<form id="research-config-edit-form".*?>(.*?)</form>', page, re.S).group(1)).fields
+    fields['cfg.policies.execution_authority'] = 'false'
+    assert post(ui, cookie, 'configuration-update', fields)[0] == 303
+    assert configuration_updates.current(root).get('execution_authority_policy') is None
+    assert ui.get('/requests/' + request_id, host=ui.host, cookie=cookie)[0] == 200
+    restarted, cookie = session(root, key)
+    assert restarted.approvals
+    tokens = authority.form_tokens(root, request_id, secret=secret, boot=restarted.boot,
+        browser_token=restarted._browser(cookie))
+    def decision(action, values):
+        return restarted.post('/requests/' + request_id + '/' + action, host=restarted.host,
+            origin='http://' + restarted.host, cookie=cookie, content_type='application/x-www-form-urlencoded',
+            body=urlencode(values).encode())
+    assert decision('decision', dict(tokens, selected_option=authority.OPTIONS[0], rationale='Decision on the retained original'))[0] == 303
+    assert decision('revoke', dict(tokens, rationale='Revoke the retained original'))[0] == 303
+    assert authority.status(root, request_id, secret=secret)['state'] == 'revoked'
+    assert (root / ref['path']).read_bytes() == request_bytes
+    assert c.settings(root)['execution_authority_policy'] is not None
+    # Unrelated future damage cannot lock the operator out of old decisions.
+    future = root / 'host-control/configuration/revisions/000002.json'
+    future.write_text('{unfinished')
+    again, cookie = session(root, key)
+    assert again.get('/requests/' + request_id, host=again.host, cookie=cookie)[0] == 200
+
+
+def test_workspace_mounted_child_stays_non_host_after_authority_enable(tmp_path):
+    from scidiscovery.research_loop import configuration_updates
+    root, key = prepare(tmp_path, enabled=False)
+    state = configuration_updates.status(root)
+    document = state['configuration']
+    document['policies'].update(formal_review=True, execution_authority=True)
+    configuration_updates.submit(root, document, expected_revision=state['revision'])
+    workspace = tmp_path / 'workspace'; workspace.mkdir()
+    ui = InstanceUI(workspace, secret_file=key, workspace=True, instance_roots=[root])
+    ui.host = '127.0.0.1:18754'
+    child = ui._child(1)
+    assert child.approvals_configured and not child.approvals and not child.approval_host
+    child._serving = True
+    child._refresh_approval_host()
+    assert not (root / 'execution-authority/host-key.json').exists()
+    assert not (root / 'execution-authority/host-key-source.json').exists()
+    assert not (root / 'execution-authority/ui-endpoint.json').exists()
+
+
+@pytest.mark.parametrize('overrides', [dict(target='W'), dict(scope='next'), dict(effective_step='')])
+def test_goal_change_rejects_incomplete_binding_and_keeps_escaped_draft(tmp_path, overrides):
+    from scidiscovery.research_loop import user_guidance
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    token = ui._browser(cookie)
+    draft = dict(text='Compare <script>alert(1)</script> alternatives', target='global', kind='goal_change',
+                 scope='research', effective_step='3')
+    draft.update(overrides)
+    value = dict(draft, nonce=ui.control_nonce, csrf=ui._csrf(token, 'guidance-submit', ui.control_nonce))
+    status, page, _ = post(ui, cookie, 'guidance-submit', value)
+    assert status == 422 and user_guidance.list_guidance(root) == []
+    page = page.decode()
+    assert '<script>alert(1)</script>' not in page and html.escape(draft['text']) in page
+    assert 'name="effective_step" type="number" min="1" step="1" value="' + draft['effective_step'] + '"' in page
+    for field in ('target', 'kind', 'scope'):
+        selected = re.search(r'<select name="' + field + r'">(.*?)</select>', page, re.S).group(1)
+        assert 'value="' + draft[field] + '" selected' in selected
+    # The retry uses the rotated nonce and a matching action/browser CSRF token.
+    retry = re.search(r'<form method="post" action="/control/guidance-submit">(.*?)</form>', page, re.S).group(1)
+    assert 'value="' + ui.control_nonce + '"' in retry
+    assert ui._csrf(token, 'guidance-submit', ui.control_nonce) in retry
+    value = dict(text=draft['text'], target='global', kind='goal_change', scope='research', effective_step='3',
+        nonce=ui.control_nonce, csrf=ui._csrf(token, 'guidance-submit', ui.control_nonce))
+    assert post(ui, cookie, 'guidance-submit', value)[0] == 303
+    row = user_guidance.list_guidance(root)[0]
+    assert (row['kind'], row['target'], row['scope'], row['effective_step']) == ('goal_change', 'global', 'research', 3)
+
+
+def test_guidance_read_only_csrf_bound_edits_and_future_revocation(tmp_path):
+    from scidiscovery.research_loop import contracts as c, user_guidance
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    reader = ui.get('/view?' + urlencode({'token': ui.read_token}), host=ui.host)[2]['Set-Cookie']
+    token = ui._browser(cookie)
+    row = user_guidance.submit(root, 'Retain uncertain alternatives', target='E', scope='research')
+    value = dict(text='Forged draft', target='global', kind='advice', scope='next', effective_step='',
+        nonce=ui.control_nonce, csrf=ui._csrf(token, 'guidance-submit', ui.control_nonce))
+    with pytest.raises(PermissionError):
+        post(ui, reader, 'guidance-submit', value)
+    value['csrf'] = 'invalid-csrf'
+    with pytest.raises(PermissionError):
+        post(ui, cookie, 'guidance-submit', value)
+    assert len(user_guidance.list_guidance(root)) == 1
+    # A task can already contain the advice before the application receipt is saved.
+    c.write(root / 'jobs/001.json', dict(user_guidance=[row]))
+    edit = dict(text='Preserve this <b>rejected edit</b>', guidance_id=row['guidance_id'], expected_revision='1',
+        nonce=ui.control_nonce, csrf=ui._csrf(token, 'guidance-edit', ui.control_nonce))
+    status, page, _ = post(ui, cookie, 'guidance-edit', edit)
+    assert status >= 400 and html.escape(edit['text']).encode() in page
+    assert user_guidance.list_guidance(root)[0]['text'] == row['text']
+    c.write(root / 'host-control/guidance' / (row['guidance_id'] + '.json'), dict(row, status='applied', applied_step=1, applied_role='E'))
+    user_guidance.revoke(root, row['guidance_id'], expected_revision=1)
+    page = ui.get('/guidance', host=ui.host, cookie=reader)[1].decode()
+    assert 'E · 证据' in page and '第 1 阶段' in page and '从第 2 阶段起' in page
+    assert '不表示科学结论已采纳' in page and '<form ' not in page
+
+
 @pytest.mark.process_e2e
 def test_headless_browser_executes_public_progress_poll(tmp_path, monkeypatch):
     import json
@@ -632,12 +981,16 @@ network = false
                         operation_id=operation_id, kind='controller', sequence=1, status='applied',
                         result=dict(status='native_stopped', last_step=3, reason='Private fixture diagnostic')))
         snapshot = original_snapshot(selected, **options)
-        if selected.root == root and advance.exists() and advance.read_text() in {'3-refresh', '3-outside'}:
+        if selected.root == root and advance.exists() and advance.read_text() in {'3-refresh', '3-link', '3-outside'}:
             # A display-only update exercises focus restoration without another
             # scientific stage or changing any sealed fixture original.
             import copy
             snapshot = copy.deepcopy(snapshot)
             snapshot['ui']['trail']['rounds'][0]['summary'] += ' · Browser heading update ' + advance.read_text()
+        if selected.root == root and advance.exists() and advance.read_text() == 'budget-recovery':
+            import copy
+            snapshot = copy.deepcopy(snapshot)
+            snapshot['view']['closeout'] = dict(status='final_a_completed')
         return snapshot
     monkeypatch.setattr(InstanceUI, '_snapshot', fixture_snapshot)
     original_candidates = ui_view.candidate_projection
@@ -730,7 +1083,7 @@ network = false
         profile = tmp_path / 'chrome-profile'
         browser = subprocess.Popen([chrome, '--headless', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
             '--disable-background-networking', '--disable-component-update', '--no-first-run', '--no-default-browser-check',
-            '--renderer-process-limit=2', '--disable-features=BackForwardCache',
+            '--renderer-process-limit=1', '--disable-features=BackForwardCache',
             '--remote-debugging-port=0', '--user-data-dir=' + str(profile), 'about:blank'],
             stdout=subprocess.DEVNULL, stderr=browser_stderr, env=browser_env, start_new_session=True)
         port_file = profile / 'DevToolsActivePort'
@@ -766,7 +1119,7 @@ async function evaluate(expression) {
 }
 async function waitFor(expression) {
   for (let index = 0; index < 60; index++) { await new Promise(resolve => setTimeout(resolve, 100)); if (await evaluate(expression)) return; }
-  const diagnostic = await evaluate('JSON.stringify({path:location.pathname, text:document.body?.innerText?.slice(0,4000)})');
+  const diagnostic = await evaluate('JSON.stringify({path:location.pathname, typedRowGeometry:window.typedRowGeometry, mobileTypedGeometry:window.mobileTypedGeometry, text:document.body?.innerText?.slice(0,4000)})');
   throw new Error('Browser journey did not reach expected state: ' + expression + '\nPage: ' + diagnostic);
 }
 async function screenshot(name) {
@@ -804,6 +1157,19 @@ await waitFor(`document.querySelector('[aria-current=step]')?.dataset.setupMarke
 await evaluate(`document.querySelector('[data-setup-go="1"]').click();true`);
 const returned = await evaluate(`JSON.stringify(Array.from(new FormData(document.getElementById('research-config-form'))).filter(([name])=>!['nonce','csrf','selection'].includes(name)))`);
 if (imported !== returned || !returned.includes('imported-worker-model') || !returned.includes('retained')) throw new Error('Imported nested controls changed across steps');
+// Opening more configuration preserves closed categories; imported plugin rows remain compact when expanded.
+await evaluate(`document.querySelector('[data-setup-go="2"]').click();document.querySelector('.advanced-settings').open=true;true`);
+await waitFor(`(()=>{const categories=Array.from(document.querySelectorAll('.advanced-settings details.advanced-category[data-config-group]'));return categories.length===8 && categories.every(group=>!group.open && group.querySelector('summary').checkVisibility({contentVisibilityAuto:true})) && !document.querySelector('[name="cfg.agent.backend"]').checkVisibility({contentVisibilityAuto:true})})()`);
+await evaluate(`document.querySelectorAll('.advanced-settings details.structured-setting,.advanced-settings details.expert-settings,.advanced-settings details.advanced-category').forEach(group=>group.open=true);true`);
+await waitFor(`document.querySelector('[data-parent="@extra"] .config-node').checkVisibility({contentVisibilityAuto:true})`);
+await screenshot('config-advanced-imported-before-geometry');
+await waitFor(`(()=>{const nodes=Array.from(document.querySelectorAll('[data-parent="@extra"] .config-node'));const scalar=nodes.find(node=>!node.querySelector('.config-value').hidden);const box=element=>element.getBoundingClientRect();const key=box(scalar.querySelector('.config-node-key input')),kind=box(scalar.querySelector('.config-kind')),value=box(scalar.querySelector('.config-value input')),remove=box(scalar.querySelector('.config-remove'));const composite=nodes.find(node=>!node.querySelector('.config-children').hidden && node.querySelector('.config-children').children.length);const children=box(composite.querySelector('.config-children')),parent=box(composite.querySelector('.config-node-key'));window.typedRowGeometry={key,kind,value,remove,children,parent,visible:scalar.checkVisibility({contentVisibilityAuto:true})};return window.typedRowGeometry.visible && key.width>0 && Math.abs(key.top-kind.top)<2 && Math.abs(key.top-value.top)<2 && kind.left>key.left && value.left>kind.left && remove.left>value.left && children.top>=parent.bottom})()`);
+await noOverflow(); await screenshot('config-advanced-imported-desktop');
+await call('Emulation.setDeviceMetricsOverride',{width:375,height:812,deviceScaleFactor:1,mobile:true});
+await screenshot('config-advanced-imported-mobile-before-geometry');
+await waitFor(`(()=>{const nodes=Array.from(document.querySelectorAll('.advanced-settings .config-node'));const details=node=>({id:node.dataset.node,rect:node.getBoundingClientRect(),visible:node.checkVisibility({contentVisibilityAuto:true}),controls:Array.from(node.children).filter(child=>child.matches('label,button')).map(child=>({className:child.className,rect:child.getBoundingClientRect(),control:child.querySelector('input,select')?.getBoundingClientRect()}))});window.mobileTypedGeometry={innerWidth,documentClientWidth:document.documentElement.clientWidth,documentScrollWidth:document.documentElement.scrollWidth,visualViewportWidth:visualViewport?.width,offending:nodes.filter(node=>!node.checkVisibility({contentVisibilityAuto:true}) || node.getBoundingClientRect().right>innerWidth).map(details),nodes:nodes.map(details),wideElements:Array.from(document.querySelectorAll('body *')).filter(node=>node.checkVisibility({contentVisibilityAuto:true}) && node.getBoundingClientRect().right>375).map(node=>({tag:node.tagName,className:node.className,name:node.getAttribute('name'),right:node.getBoundingClientRect().right,clientWidth:node.clientWidth,inMatrixScroll:Boolean(node.closest('.config-matrix-scroll'))})).slice(0,60)};return innerWidth<=375 && nodes.every(node=>node.checkVisibility({contentVisibilityAuto:true}) && node.getBoundingClientRect().right<=innerWidth)})()`);
+await noOverflow(); await screenshot('config-advanced-imported-mobile');
+await call('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
 // Begin a new draft from this authenticated page so Strict cookies retain a same-site initiator.
 await evaluate(`location.assign('/new');true`);
 await waitFor(`document.querySelector('[name="task_text"]')?.value === '' && document.querySelector('[aria-current=step]')?.dataset.setupMarker === '1'`);
@@ -834,6 +1200,19 @@ if (await evaluate(`document.querySelector('[name="cfg.agent.model"]').value`) !
 await screenshot('setup-error-budget-desktop');
 await evaluate(`document.querySelector('[name="cfg.budget.max_tokens"]').value='1234';true`);
 await screenshot('setup-budget-desktop');
+// User edits enable optional policy groups; explicit opt-out still wins.
+await evaluate(`(()=>{const field=document.getElementById('config-budget-role_shares-min_w_share');field.value='0.65';field.dispatchEvent(new Event('input',{bubbles:true}));return true})()`);
+if (!(await evaluate(`document.querySelector('[name="enabled.budget.role_shares"]').checked`))) throw new Error('Editing a policy field silently left its group disabled');
+await evaluate(`document.querySelector('[name="enabled.budget.role_shares"]').click();true`);
+if (await evaluate(`document.querySelector('[name="enabled.budget.role_shares"]').checked`)) throw new Error('Explicit policy opt-out was overridden');
+await evaluate(`document.querySelector('[data-config-path="budget.role_shares"] .expert-settings .config-add').click();true`);
+if (!(await evaluate(`document.querySelector('[name="enabled.budget.role_shares"]').checked`))) throw new Error('Nested expert edit failed to enable its policy group');
+await evaluate(`(()=>{const group=document.querySelector('[data-config-path="budget.role_shares"]');group.querySelector('.config-node .config-remove').click();group.querySelector('[name="enabled.budget.role_shares"]').click();document.querySelector('.advanced-settings').open=true;document.querySelector('[data-config-group="budget"]').open=true;document.querySelector('[data-config-group="agent.roles"]').open=true;return true})()`);
+await noOverflow(); await screenshot('config-role-options-desktop');
+await call('Emulation.setDeviceMetricsOverride',{width:375,height:812,deviceScaleFactor:1,mobile:true});
+await noOverflow(); await screenshot('config-role-options-mobile');
+await call('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
+await evaluate(`document.querySelector('.advanced-settings').open=false;true`);
 await evaluate(`document.querySelector('form[action="/control/configure"] button[value="preview"]').click();true`);
 await waitFor(`document.querySelector('form[action="/control/create"]') !== null && document.querySelector('[aria-current=step]')?.dataset.setupMarker === '3'`);
 if (!(await evaluate('document.body.innerText')).includes('Browser direct-form research task.')) throw new Error('Edited task missing from preview');
@@ -924,31 +1303,42 @@ await waitFor(`document.querySelector('[data-stream-status]')?.textContent.inclu
 if ((await evaluate(`document.querySelector('[data-events]').textContent`)).includes('Second phase public output')) throw new Error('Historical output followed a newer node');
 await call('Page.navigate', {url:origin+'/instances/1/'});
 await waitFor(`document.getElementById('live-hero')?.innerText.includes('第 2 阶段') && document.querySelector('[data-live-url]')?.dataset.state==='connected'`);
-if (await evaluate(`document.querySelector('details.budget-adjustment').open`)) throw new Error('Budget adjustment did not begin collapsed');
-await evaluate(`document.querySelector('details.more-actions > summary').click();true`);
-if (await evaluate(`document.querySelector('details.budget-adjustment').open`)) throw new Error('Opening more actions expanded the budget form');
+if (!(await evaluate(`!document.querySelector('form[action$="/control/budget"]') && document.querySelector('a[href$="/configuration#budget-settings"]')`))) throw new Error('Ordinary overview duplicates the canonical budget editor');
+await writeFile(process.env.SCID_TEST_ADVANCE, 'budget-recovery');
+await waitFor(`document.querySelector('#live-hero a[href$="/budget-recovery#budget"]') !== null`);
+await evaluate(`document.querySelector('#live-hero a[href$="/budget-recovery#budget"]').click();true`);
+await waitFor(`location.pathname.endsWith('/budget-recovery') && document.querySelector('details.budget-adjustment') !== null`);
+if (!(await evaluate(`document.querySelector('details.budget-adjustment > summary').textContent==='恢复前追加预算' && document.querySelector('#budget').innerText.includes('恢复仍须满足原有条件')`))) throw new Error('Exceptional recovery is not distinct from next-node settings');
+await waitFor(`document.querySelector('details.budget-adjustment').open && document.querySelector('#budget [name="max_tokens"]').checkVisibility({contentVisibilityAuto:true})`);
+// Chromium updates the details content-visibility subtree during rendering.
+await evaluate(`document.querySelector('details.budget-adjustment').open=false;true`);
+await waitFor(`!document.querySelector('details.budget-adjustment').open && !document.querySelector('#budget [name="max_tokens"]').checkVisibility({contentVisibilityAuto:true})`);
 await evaluate(`document.querySelector('details.budget-adjustment > summary').click();true`);
-if (!(await evaluate(`document.querySelector('details.budget-adjustment').open && document.querySelector('#budget [name="max_tokens"]').getClientRects().length>0`))) throw new Error('Budget summary did not reveal its form');
-if (!(await evaluate(`document.querySelectorAll('#budget textarea').length===1 && document.querySelector('#budget [name="authorization_note"]').closest('label').innerText.includes('调整说明') && !document.querySelector('#budget [name="authorization_statement"]') && document.querySelector('#budget button').textContent==='确认调整预算'`))) throw new Error('Budget form must use one adjustment explanation and explicit submit confirmation');
-await evaluate(`document.querySelector('details.budget-adjustment').open=false;document.querySelector('details.more-actions').open=false;true`);
-await call('Page.navigate', {url:origin+'/instances/1/#budget'});
-await waitFor(`document.querySelector('details.more-actions').open && document.querySelector('details.budget-adjustment').open && document.querySelector('#budget [name="max_tokens"]').getClientRects().length>0`);
-await evaluate(`(()=>{document.querySelector('details.budget-adjustment').open=false;document.querySelector('details.more-actions').open=false;const jump=document.createElement('a');jump.href='#budget';jump.textContent='Budget fragment fixture';document.body.append(jump);jump.click();jump.remove();return true})()`);
-await waitFor(`document.querySelector('details.more-actions').open && document.querySelector('details.budget-adjustment').open && document.querySelector('#budget [name="max_tokens"]').getClientRects().length>0`);
-await evaluate(`(()=>{window.liveDraftSentinel='preserved';document.querySelector('form[action="/instances/1/control/budget"] [name="max_tokens"]').value='4321';document.querySelector('form[action="/instances/1/control/budget"] [name="authorization_note"]').value='Keep this unsent budget explanation';const round=document.querySelector('#live-trail details[data-round]');window.retainedRound=round.dataset.detailsKey;round.open=false;round.querySelector('summary').focus();return true})()`);
+await waitFor(`document.querySelector('details.budget-adjustment').open && document.querySelector('#budget [name="max_tokens"]').checkVisibility({contentVisibilityAuto:true})`);
+if (!(await evaluate(`document.querySelectorAll('#budget textarea').length===1 && document.querySelector('#budget [name="authorization_note"]').closest('label').innerText.includes('调整说明') && !document.querySelector('#budget [name="authorization_statement"]') && document.querySelector('#budget button').textContent==='确认追加预算'`))) throw new Error('Budget form must use one adjustment explanation and explicit submit confirmation');
+await evaluate(`(()=>{document.querySelector('details.budget-adjustment').open=false;const jump=document.createElement('a');jump.href='#budget';jump.textContent='Budget fragment fixture';document.body.append(jump);jump.click();jump.remove();return true})()`);
+await waitFor(`document.querySelector('details.budget-adjustment').open && document.querySelector('#budget [name="max_tokens"]').checkVisibility({contentVisibilityAuto:true})`);
+await evaluate(`(()=>{window.liveDraftSentinel='preserved';document.querySelector('form[action="/instances/1/control/budget"] [name="max_tokens"]').value='4321';document.querySelector('form[action="/instances/1/control/budget"] [name="authorization_note"]').value='Keep this unsent budget explanation';document.querySelector('form[action="/instances/1/control/budget"] [name="authorization_note"]').focus();return true})()`);
 await writeFile(process.env.SCID_TEST_ADVANCE, '3');
-await waitFor(`document.getElementById('live-hero')?.innerText.includes('第 3 阶段') && document.getElementById('live-usage')?.innerText.includes('30 / 1,234') && document.getElementById('live-trail')?.innerText.includes('Third browser phase conclusion')`);
+await waitFor(`document.getElementById('live-hero')?.innerText.includes('第 3 阶段') && document.getElementById('live-usage')?.innerText.includes('30 / 1,234')`);
 if (!(await evaluate(`window.liveDraftSentinel==='preserved' && document.querySelector('form[action="/instances/1/control/budget"] [name="max_tokens"]').value==='4321' && document.querySelector('form[action="/instances/1/control/budget"] [name="authorization_note"]').value==='Keep this unsent budget explanation'`))) throw new Error('Live dashboard lost typed values or reloaded');
+if (!(await evaluate(`document.activeElement===document.querySelector('form[action="/instances/1/control/budget"] [name="authorization_note"]')`))) throw new Error('Live recovery context stole keyboard focus from typed budget explanation');
+await screenshot('live-budget-recovery-draft-preserved');
+await call('Page.navigate', {url:origin+'/instances/1/'});
+await waitFor(`document.getElementById('live-trail')?.innerText.includes('Third browser phase conclusion')`);
+await evaluate(`(()=>{const round=document.querySelector('#live-trail details[data-round]');window.retainedRound=round.dataset.detailsKey;round.open=false;round.querySelector('summary').focus();return true})()`);
+await writeFile(process.env.SCID_TEST_ADVANCE, '3-refresh');
+await waitFor(`document.getElementById('live-trail')?.innerText.includes('Browser heading update')`);
 if (!(await evaluate(`Array.from(document.querySelectorAll('#live-trail details[data-details-key]')).some(round=>round.dataset.detailsKey===window.retainedRound && !round.open && document.activeElement===round.querySelector('summary'))`))) throw new Error('Live trail lost the reader\'s collapsed round or keyboard summary focus');
 await screenshot('live-dashboard-draft-preserved');
 await evaluate(`(()=>{const round=Array.from(document.querySelectorAll('#live-trail details[data-details-key]')).find(round=>round.dataset.detailsKey===window.retainedRound);round.open=true;const link=round.querySelector('a');window.retainedLink=link.dataset.liveFocus;link.focus();return true})()`);
-await writeFile(process.env.SCID_TEST_ADVANCE, '3-refresh');
-await waitFor(`document.getElementById('live-trail')?.innerText.includes('Browser heading update')`);
+await writeFile(process.env.SCID_TEST_ADVANCE, '3-link');
+await waitFor(`document.getElementById('live-trail')?.innerText.includes('Browser heading update 3-link')`);
 if (!(await evaluate(`document.activeElement?.dataset.liveFocus===window.retainedLink && document.activeElement.isConnected`))) throw new Error('Live trail lost keyboard focus on the same stage link');
-await evaluate(`document.querySelector('form[action="/instances/1/control/budget"] [name="authorization_note"]').focus();true`);
+await evaluate(`document.querySelector('#more-actions').open=true;document.querySelector('form[action="/instances/1/control/pause"] button').focus();true`);
 await writeFile(process.env.SCID_TEST_ADVANCE, '3-outside');
 await waitFor(`document.getElementById('live-trail')?.innerText.includes('Browser heading update 3-outside')`);
-if (!(await evaluate(`document.activeElement===document.querySelector('form[action="/instances/1/control/budget"] [name="authorization_note"]')`))) throw new Error('Live trail stole keyboard focus from another form');
+if (!(await evaluate(`document.activeElement===document.querySelector('form[action="/instances/1/control/pause"] button')`))) throw new Error('Live trail stole keyboard focus from another form');
 await call('Page.navigate', {url:origin+'/'});
 await waitFor(`document.getElementById('live-instances')?.innerText.includes('第 3 阶段') && document.getElementById('live-instances')?.innerText.includes('30 / 1,234 tokens')`);
 await screenshot('live-workbench-loaded-status');
@@ -1035,6 +1425,65 @@ await screenshot('research-process-mechanisms-mobile');
 await call('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
 await call('Page.reload');
 await waitFor(`document.querySelector('.mechanism-card h3')?.textContent.startsWith('<b>译文</b>')`);
+// Settings edits subsequent research while independent creation remains available.
+await call('Page.navigate', {url:origin+'/instances/1/settings'});
+await waitFor(`document.querySelector('.settings-groups') !== null`);
+if (!(await evaluate(`(()=>{const links=Array.from(document.querySelectorAll('.settings-list a'));return links.filter(link=>link.getAttribute('href').endsWith('/configuration')).length===1 && links.filter(link=>link.getAttribute('href').endsWith('/guidance')).length===1 && links.filter(link=>link.getAttribute('href').endsWith('/reading')).length===1 && !links.some(link=>{const href=link.getAttribute('href');return ['new','instances','progress'].some(route=>href.endsWith('/'+route)) || href.includes('#budget') || href.includes('after=')})})()`))) throw new Error('Settings still duplicates workspace, research records or budget editing entries');
+
+await noOverflow();
+await screenshot('settings-desktop');
+await call('Emulation.setDeviceMetricsOverride',{width:375,height:812,deviceScaleFactor:1,mobile:true});
+await noOverflow();
+await screenshot('settings-mobile');
+await call('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
+await call('Page.navigate', {url:origin+'/instances/1/configuration'});
+await waitFor(`document.querySelector('.configuration-roles') !== null`);
+if (await evaluate(`document.querySelector('#research-config-form') !== null || document.querySelector('form[action$="/control/configure"]') !== null`)) throw new Error('Current configuration still opens the creation wizard');
+if (!(await evaluate(`document.querySelector('#budget-settings [name="cfg.budget.max_tokens"]') && document.querySelectorAll('[name="cfg.budget.max_tokens"]').length===1 && !document.querySelector('form[action$="/control/budget"]')`))) throw new Error('Research configuration does not provide one canonical budget editor');
+if (!(await evaluate(`(()=>{const matrix=document.querySelector('[data-config-group="agent.roles"] .role-settings-matrix');return matrix && matrix.querySelectorAll('tbody tr').length===4 && !document.querySelector('.role-settings-card')})()`))) throw new Error('Role controls are not consolidated into one matrix');
+await evaluate(`document.querySelector('.advanced-settings').open=true;true`);
+await waitFor(`(()=>{const categories=Array.from(document.querySelectorAll('.advanced-settings details.advanced-category[data-config-group]'));return categories.length===5 && categories.every(group=>!group.open && group.querySelector('summary').checkVisibility({contentVisibilityAuto:true})) && !document.querySelector('[name="cfg.budget.breadth.initial_calls"]').checkVisibility({contentVisibilityAuto:true})})()`);
+await evaluate(`['agent','budget','executor','policies'].forEach(prefix=>document.querySelector('.advanced-category[data-config-group="'+prefix+'"]').open=true);true`);
+await waitFor(`(()=>{const advanced=document.querySelector('.advanced-settings');const paths=['agent.backend','agent.native.features.fast_mode','budget.breadth.initial_calls','budget.correction.pause_after','budget.max_output_item_bytes','budget.role_shares.min_w_share','executor.mode','executor.config.executor','policies.formal_review','policies.resume.max_attempts','policies.resume.output_only'];return paths.every(path=>advanced.querySelector('[name="cfg.'+path+'"]').checkVisibility({contentVisibilityAuto:true}))})()`);
+await waitFor(`(()=>{const boxes=['max_w_seconds','max_w_observed_tokens','max_requested_repairs','initial_calls'].map(key=>document.querySelector('[name="cfg.budget.breadth.'+key+'"]').getBoundingClientRect());return boxes.every((box,index)=>box.width>100 && Math.abs(box.top-boxes[0].top)<2 && (!index || box.left>boxes[index-1].right))})()`);
+await noOverflow();
+await screenshot('current-configuration-desktop');
+await call('Emulation.setDeviceMetricsOverride',{width:375,height:812,deviceScaleFactor:1,mobile:true});
+await noOverflow();
+await screenshot('current-configuration-mobile');
+// A failed settings save keeps the full draft and corrected submission becomes pending.
+await evaluate(`(()=>{const form=document.getElementById('research-config-edit-form');form.elements['cfg.agent.model'].value='browser-next-model';form.elements['cfg.budget.candidate_extra_slots'].value='invalid settings budget';document.querySelector('.advanced-category[data-config-group="budget"]').open=false;document.querySelector('.advanced-settings').open=false;form.querySelector('button[type="submit"]').click();return true})()`);
+await waitFor(`document.querySelector('[role="alert"]') !== null && document.querySelector('[name="cfg.budget.candidate_extra_slots"]')?.value==='invalid settings budget'`);
+if (!(await evaluate(`document.querySelector('[name="cfg.agent.model"]').value==='browser-next-model' && !document.querySelector('[name="cfg.research.root"]') && !document.querySelector('[name="cfg.ui.approval_secret_file"]')`))) throw new Error('Settings error lost draft or exposed instance identity controls');
+if (!(await evaluate(`document.querySelector('.advanced-settings').open && document.querySelector('.advanced-category[data-config-group="budget"]').open && document.activeElement===document.querySelector('[name="cfg.budget.candidate_extra_slots"]')`))) throw new Error('Settings validation did not open and focus the failed category');
+await evaluate(`document.querySelector('.advanced-category[data-config-group="policies"]').open=true;true`);
+await waitFor(`document.querySelector('[name="cfg.budget.candidate_extra_slots"]').value==='invalid settings budget' && document.querySelector('[name="cfg.policies.resume.max_attempts"]').checkVisibility({contentVisibilityAuto:true})`);
+await noOverflow(); await screenshot('current-configuration-error-mobile');
+await evaluate(`(()=>{const form=document.getElementById('research-config-edit-form');form.elements['cfg.budget.max_tokens'].value='1234';form.elements['cfg.budget.candidate_extra_slots'].value='3';document.querySelector('.advanced-category[data-config-group="budget"]').open=false;document.querySelector('.advanced-settings').open=false;form.querySelector('button[type="submit"]').click();return true})()`);
+await waitFor(`document.querySelector('.configuration-status')?.innerText.includes('配置待生效') && document.querySelector('[name="cfg.agent.model"]')?.value==='browser-next-model'`);
+await evaluate(`document.querySelector('.advanced-settings').open=true;document.querySelector('.advanced-category[data-config-group="budget"]').open=true;true`);
+await waitFor(`document.querySelector('[name="cfg.budget.candidate_extra_slots"]').value==='3' && document.querySelector('[name="cfg.budget.candidate_extra_slots"]').checkVisibility({contentVisibilityAuto:true})`);
+await noOverflow(); await screenshot('current-configuration-pending-mobile');
+await call('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
+await call('Page.navigate', {url:origin+'/instances/1/guidance'});
+await waitFor(`document.querySelector('[data-guidance-template]') !== null`);
+await evaluate(`document.querySelector('[data-guidance-template]').click();true`);
+if (!(await evaluate(`document.querySelector('[name="text"]').value.length > 0 && document.querySelectorAll('.guidance-record').length === 0`))) throw new Error('Guidance template did not fill an unsubmitted draft');
+await evaluate(`document.querySelector('[name="text"]').value='Keep my unsent <b>draft</b>';document.querySelectorAll('[data-guidance-template]')[1].click();true`);
+if (await evaluate(`document.querySelector('[name="text"]').value`) !== 'Keep my unsent <b>draft</b>') throw new Error('Guidance template overwrote typed draft');
+await evaluate(`(()=>{const form=document.querySelector('form[action$="/control/guidance-submit"]');form.elements.kind.value='goal_change';form.elements.kind.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);
+if (!(await evaluate(`(()=>{const form=document.querySelector('form[action$="/control/guidance-submit"]'),data=new FormData(form);return data.get('kind')==='goal_change' && data.get('target')==='global' && data.get('scope')==='research' && form.elements.effective_step.required && !form.checkValidity()})()`))) throw new Error('Explicit goal change lost required global/research/step binding');
+await screenshot('guidance-goal-change-desktop');
+await evaluate(`(()=>{const form=document.querySelector('form[action$="/control/guidance-submit"]');form.elements.effective_step.value='0';form.noValidate=true;form.requestSubmit();return true})()`);
+await waitFor(`document.querySelector('[role="alert"]') !== null && document.querySelector('[name="effective_step"]')?.value==='0'`);
+if (await evaluate(`document.querySelector('[name="text"]').value`) !== 'Keep my unsent <b>draft</b>') throw new Error('Guidance validation lost original draft');
+if (await evaluate(`document.querySelector('[name="kind"]').value`) !== 'goal_change') throw new Error('Guidance failure silently converted goal change to advice');
+await noOverflow();
+await screenshot('guidance-error-desktop');
+await call('Emulation.setDeviceMetricsOverride',{width:375,height:812,deviceScaleFactor:1,mobile:true});
+await noOverflow();
+await screenshot('guidance-error-mobile');
+await call('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
 // Natural-language settings work in the browser; switching languages never generates.
 await call('Page.navigate', {url:origin+'/instances/1/reading'});
 await waitFor(`document.querySelector('[name="target_language"]') !== null`);

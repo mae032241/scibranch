@@ -33,6 +33,26 @@ def cold(tmp_path, monkeypatch):
     return root,anchor
 
 
+def test_cold_checkpoint_preserves_pending_node_configuration(cold, tmp_path):
+    from scidiscovery.research_loop import configuration_updates, research_config
+    root, anchor = cold
+    document = research_config.to_document(root, c.settings(root))
+    document['agent']['model'] = 'next-model'
+    configuration_updates.submit(root, document, expected_revision=0)
+    original = (root / 'host-control/configuration/revisions/000001.json').read_bytes()
+    archive.checkpoint_enroll(root, anchor)
+    package = tmp_path / 'configuration-checkpoint'
+    archive.checkpoint_export(root, package)
+    root.rename(tmp_path / 'previous-instance')
+    archive.checkpoint_restore(root, package)
+    assert (root / 'host-control/configuration/revisions/000001.json').read_bytes() == original
+    state = configuration_updates.status(root)
+    assert state['pending'] is True
+    assert state['active_settings']['model'] == 'fixture'
+    assert state['settings']['model'] == 'next-model'
+    assert c.settings(root, c.read(root / 'jobs/001.json'))['model'] == 'fixture'
+
+
 def test_public_cold_checkpoint_restores_complete_state_twice(cold,tmp_path,capsys,monkeypatch):
     root,anchor=cold
     assert cli.main(['checkpoint-enroll','--root',str(root),'--anchor-directory',str(anchor)])==0

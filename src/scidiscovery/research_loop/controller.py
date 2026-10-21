@@ -9,7 +9,7 @@ import uuid
 
 from . import budget, contracts, history, native, runtime, search, correction, semantic, execution, continuation, guidance, checkpoint, role_share, shortlist, engineering, worker_delivery
 from .output_repair import OutputRepairRequired
-from . import managed_wait
+from . import managed_wait, configuration_updates
 
 
 def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str], *,
@@ -39,7 +39,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
             candidate_extra_slots: int = 2,
             native_backend: str = 'codex', native_options: dict | None = None,
             ui: dict | None = None, validate_only: bool = False,
-            objective_text: str | None = None) -> dict:
+            objective_text: str | None = None, _existing_settings: dict | None = None) -> dict:
     """Freeze an explicit goal and finite launch budgets in a fresh directory."""
     from . import candidate_nominations
     nomination_limits=candidate_nominations.configuration(candidate_extra_slots)
@@ -100,9 +100,13 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     if experiment_mode=='local':
         from . import experiments
         import sys
-        frozen_execution=experiments.operator_configuration(execution_config if execution_config is not None else
-            dict(executor='local_execution:command',configuration=dict(run_argv=[sys.executable],max_seconds=min(65,max_seconds))))
-    if root.exists() or root.is_symlink():
+        if (_existing_settings is not None and _existing_settings.get('experiment_mode') == 'local'
+                and execution_config is not None and execution_config == _existing_settings.get('execution_config')):
+            frozen_execution = dict(execution_config)
+        else:
+            frozen_execution=experiments.operator_configuration(execution_config if execution_config is not None else
+                dict(executor='local_execution:command',configuration=dict(run_argv=[sys.executable],max_seconds=min(65,max_seconds))))
+    if (root.exists() or root.is_symlink()) and not (validate_only and _existing_settings is not None):
         raise ValueError("Preparation requires a fresh directory")
     if not public_root.is_dir() or (objective_text is None and not objective.is_file()):
         raise ValueError("Explicit objective file and public directory are required")
@@ -121,7 +125,8 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
         raise ValueError('Global user updates must contain original user text')
     from . import qualification
     original_globals = [objective, *[Path(path) for path in (user_updates or [])]]
-    source_facts = qualification.source_configuration(public_root, source_restrictions, original_globals)
+    source_facts = (qualification.source_configuration(public_root, source_restrictions, original_globals)
+                    if _existing_settings is None else None)
     from . import formal_review
     review_policy=formal_review.configuration(formal_review_policy)
     from . import execution_authority
@@ -491,8 +496,10 @@ def _step_numbers(root, first_step):
     from . import control_operations
     step = first_step
     while True:
-        if not (root / 'jobs' / f'{step:03d}.json').exists() and not budget.execution_blocked(root):
+        if (not (root / 'jobs' / f'{step:03d}.json').exists()
+                and not (root / 'pause.request').exists() and not budget.execution_blocked(root)):
             control_operations.apply_pending_budget(root)
+            configuration_updates.bind_new_job(root, step)
         if step > budget.historical_step_limit(root):
             return
         yield step
@@ -541,7 +548,7 @@ def _continue_wait(root, step, job, result, next_role, target):
 def _run(root, *, continue_wait=None):
     from .protocol import require_current
     require_current(root)
-    settings = contracts.settings(root)
+    settings = configuration_updates.current(root)
     started_path = root / "host-started.json"
     if not started_path.exists():
         contracts.write(started_path, budget.clock_stamp())
@@ -582,6 +589,8 @@ def _run(root, *, continue_wait=None):
             cursor['source_refs'] = [dict(step=job['step'],seal_sha256=seal_sha) for job,_,_,seal_sha in sources]
         return _start_budget_closeout(root,cutoff,step,blocked_role,reason,resume_cursor=cursor)
     for step in _step_numbers(root, first_step):
+        # Reserve pending edits once at a new-node boundary, before admission.
+        settings = configuration_updates.for_new_job(root, step)
         record = _record(root, step)
         work = contracts.workspace(root, step)
         identity = record / "result-identity.json"
@@ -828,6 +837,7 @@ def _run(root, *, continue_wait=None):
 
 def _closeout_result(root, status, *, reason=None, step=None, read_only=False):
     state = budget.closeout_state(root)
+    query_limits = budget.status_snapshot(root) if read_only else None
     begin = state['begin']
     all_actions = state['actions']
     if begin is not None and begin['mode'] == 'final':
@@ -843,7 +853,7 @@ def _closeout_result(root, status, *, reason=None, step=None, read_only=False):
     previous = history.candidate_overview(history.rebuild(root, cutoff + 1, write_cache=False))
     latest = history.candidate_overview(history.rebuild(root, max(closed, default=cutoff) + 1,
         source_cutoff=cutoff, extra_steps=closed, write_cache=False))
-    screened = shortlist.summary(root) if contracts.settings(root).get('selection_policy') else None
+    screened = shortlist.summary(root) if configuration_updates.current(root).get('selection_policy') else None
     last = max(closed, default=cutoff) or None
     confirmed = [row['outcome']['result'] for row in all_actions if row['outcome'] is not None
                  and row['intent']['action_kind'] == 'confirm' and row['outcome']['result']['status'] == 'confirmed']
@@ -887,10 +897,10 @@ def _closeout_result(root, status, *, reason=None, step=None, read_only=False):
                 'delivery_' + outcome['status'])
         elif last in closed and last_science['role']=='W':
             status='engineering_repair_review_pending'
-        elif last in closed or last == begin.get('authorization_step'):
+        elif last_science is not None and (last in closed or last == begin.get('authorization_step')):
             status = {'wait':'closeout_waiting', 'finish':'exported_unsubmitted', 'audit':'candidate_audit_pending',
                 'deliver':'closeout_preparation_pending'}.get(last_science['next_action'], 'closeout_correction_pending')
-            if last == begin.get('authorization_step') and contracts.settings(root).get('selection_policy') is not None:
+            if last == begin.get('authorization_step') and configuration_updates.current(root).get('selection_policy') is not None:
                 status = 'selection_comparison_pending'
         else:
             status = 'closeout_pending'
@@ -900,7 +910,7 @@ def _closeout_result(root, status, *, reason=None, step=None, read_only=False):
             if repair is not None:
                 try:
                     engineering.admit(root,repair,last+1)
-                    status='engineering_repair_pending' if _repair_funds(root) else 'engineering_repair_budget_unavailable'
+                    status='engineering_repair_pending' if _repair_funds(root, limits=query_limits) else 'engineering_repair_budget_unavailable'
                 except engineering.RepairUnavailable as error:status=str(error)
             elif last_science.get('next_action')=='audit':
                 receipt=candidate_audit._outcome(root,last)
@@ -917,7 +927,7 @@ def _closeout_result(root, status, *, reason=None, step=None, read_only=False):
                 if preparation is not None and preparation['candidate_id'] == last_science.get('candidate_recommendation'):
                     status, reason = 'closeout_preparation_unavailable', preparation['last_failure']
         if status in {'closeout_pending', 'closeout_correction_pending', 'candidate_audit_pending', 'delivery_reselect', 'selection_comparison_pending','engineering_repair_review_pending','candidate_audit_review_pending'} and not _closeout_funds(
-                root, preparation_seconds=begin['preparation_seconds'], step=step):
+                root, preparation_seconds=begin['preparation_seconds'], step=step, limits=query_limits):
             status = 'closeout_budget_unavailable'
     scientific_output_ref = str(execution.raw(root,last)) if last is not None else None
     limitations = last_science['limitations'] if last_science is not None else []
@@ -928,7 +938,8 @@ def _closeout_result(root, status, *, reason=None, step=None, read_only=False):
         limitations_omitted_count=len(limitations)-len(shown_limitations),
         limitations_ref=dict(path=scientific_output_ref,field='limitations') if scientific_output_ref is not None else None,
         source_cutoff=cutoff, last_step=last, completed_scientific_nodes=cutoff + len(closed),
-        used_steps=budget.used_steps(root), usage=native.usage(root), budget=budget.snapshot(root),
+        used_steps=budget.used_steps(root), usage=native.usage(root),
+        budget=query_limits if read_only else budget.snapshot(root),
         previous_submission_observation=previous['actual_submission'], existing_A_recommendation=latest['a_recommended'],
         last_confirmed=confirmed[-1] if confirmed else None,
         current_actual='unknown' if state['unresolved_operations'] or pending_confirmation else (confirmed[-1] if confirmed else None))
@@ -949,12 +960,13 @@ def _closeout_result(root, status, *, reason=None, step=None, read_only=False):
     return result
 
 
-def _closeout_funds(root, *, preparation_seconds=0., step=None, author_required=True):
-    settings = contracts.settings(root)
+def _closeout_funds(root, *, preparation_seconds=0., step=None, author_required=True, limits=None):
+    settings = configuration_updates.current(root)
     policy = settings.get('delivery_policy')
     if policy is None:
         return False
-    meter, limits = native.usage(root), budget.snapshot(root)
+    meter = native.usage(root)
+    limits = budget.snapshot(root) if limits is None else limits
     floor = budget.closeout_floor(settings, preparation_seconds=preparation_seconds)
     additional = int(author_required and not (step is not None and (root / 'jobs' / f'{step:03d}.json').exists()))
     author = policy['closeout_a'] if author_required else dict(max_observed_tokens=0,max_seconds=0)
@@ -973,7 +985,7 @@ def _final_a_result(root, job, result):
     accepted = budget.final_a_return(root, job, intent)
     if accepted is None:
         return None
-    settings = contracts.settings(root)
+    settings = contracts.settings(root, job)
     begin = budget.closeout_state(root)['begin']
     policy = settings.get('delivery_policy')
     if result.get('next_action') != 'deliver' or policy is None or policy['adapter'] is None:
@@ -1027,7 +1039,7 @@ def _budget_denied(reason):
 
 def _start_budget_closeout(root, cutoff, step, blocked_role, reason, *, resume_cursor=None):
     """One durable FINAL phase, followed only by its exact A and host delivery."""
-    settings = contracts.settings(root)
+    settings = configuration_updates.current(root)
     if settings.get('final_a_completion_policy') is None:
         return None
     begin = budget.closeout_state(root)['begin']
@@ -1056,7 +1068,7 @@ def _start_final_report(root, cutoff, step, blocked_role, reason, *, stopped_ste
 def _run_final(root, begin):
     """FINAL cannot dispatch W/E, scientific audit, correction or another A."""
     from . import delivery
-    settings = contracts.settings(root)
+    settings = configuration_updates.current(root)
     final = budget.final_a_barrier(root)
     if final is not None:
         return _collect_final_a(root, final)
@@ -1065,6 +1077,9 @@ def _run_final(root, begin):
     if (root / 'pause.request').exists() or correction.gate(root, begin['source_cutoff']) is not None:
         return _closeout_result(root, 'exported_unsubmitted', reason='original_pause_requires_release')
     step = begin['first_step']
+    revision = configuration_updates.bind_new_job(root, step)
+    prospective_job = dict(step=step, configuration_revision=revision)
+    settings = configuration_updates.for_new_job(root, step)
     accepted = []
     for path in sorted((root / 'jobs').glob('*.json')):
         number = int(path.stem)
@@ -1103,7 +1118,7 @@ def _run_final(root, begin):
         if has_worker and policy is not None and policy['adapter'] is not None:
             nodes = [dict(step=number, seal_sha256=contracts.digest(_record(root, number) / 'result-identity.json')) for number in accepted]
             try:
-                sources = delivery.catalogue_sources(root, nodes)
+                sources = delivery.catalogue_sources(root, nodes, job=prospective_job)
             except delivery.DeliveryUnresolved as error:
                 instruction += ' Candidate originals are unavailable: ' + error.code + '.'
         try:
@@ -1168,7 +1183,7 @@ def _start_closeout(root, cutoff, first_step, reason, *, export_only=False, auth
     from . import delivery
     if budget.closeout_state(root)['begin'] is not None:
         return _run_closeout(root)
-    settings = contracts.settings(root)
+    settings = configuration_updates.current(root)
     if not export_only and settings.get('final_a_completion_policy') is not None:
         return _start_budget_closeout(root, cutoff, first_step, 'A', reason)
     if (root / 'jobs' / f'{first_step:03d}.json').exists():
@@ -1180,7 +1195,7 @@ def _start_closeout(root, cutoff, first_step, reason, *, export_only=False, auth
     # Validate the exact prefix, never globally ignore a stopped scientific node.
     for step in range(1, cutoff + 1):
         contracts.validate(contracts.workspace(root, step))
-    settings = contracts.settings(root)
+    settings = configuration_updates.current(root)
     policy = settings.get('delivery_policy')
     configured = not export_only and policy is not None and policy['adapter'] is not None
     use_model = configured
@@ -1215,7 +1230,7 @@ def _start_closeout(root, cutoff, first_step, reason, *, export_only=False, auth
 def _run_delivery_actions(root, job, result):
     from . import delivery
     state = budget.closeout_state(root)
-    policy = contracts.settings(root)['delivery_policy']
+    policy = contracts.settings(root, job)['delivery_policy']
     if policy['adapter'] is None:
         return _closeout_result(root, 'exported_unsubmitted', reason='No external delivery adapter was configured')
     actions = [row for row in state['actions'] if row['intent']['decision']['step'] == job['step']]
@@ -1237,7 +1252,7 @@ def _run_delivery_actions(root, job, result):
         kind = 'submit'
     successor = root / 'jobs' / f'{job["step"]+1:03d}.json'
     if (not actions and budget.final_a_barrier(root) is None
-            and contracts.settings(root).get('final_a_completion_policy') is not None
+            and contracts.settings(root, job).get('final_a_completion_policy') is not None
             and successor.exists() and contracts.read(successor).get('role') == 'A'
             and contracts.read(successor).get('purpose') == 'closeout'):
         return _closeout_result(root, 'closeout_budget_unavailable', reason='final_author_required')
@@ -1250,7 +1265,7 @@ def _run_delivery_actions(root, job, result):
             accepted_actions = [row for row in budget.closeout_state(root)['actions']
                                 if row['intent']['decision'] == binding['decision']]
             if (not accepted_actions and budget.final_a_barrier(root) is None
-                    and contracts.settings(root).get('final_a_completion_policy') is not None
+                    and contracts.settings(root, job).get('final_a_completion_policy') is not None
                     and not meter.get('blocking_unknown_steps', meter['unknown_steps'])
                     and not budget.execution_blocked(root)):
                 return _closeout_result(root, 'closeout_budget_unavailable', reason='final_author_required')
@@ -1272,9 +1287,10 @@ def _run_delivery_actions(root, job, result):
         kind = 'confirm'  # First confirmation is explicitly reserved and accepted once.
 
 
-def _repair_funds(root):
-    settings=contracts.settings(root)
-    limits,meter=budget.snapshot(root),native.usage(root)
+def _repair_funds(root, *, limits=None):
+    settings=configuration_updates.current(root)
+    limits=budget.snapshot(root) if limits is None else limits
+    meter=native.usage(root)
     if budget.execution_blocked(root) or meter.get('blocking_unknown_steps',meter['unknown_steps']):return False
     worker=(settings.get('node_budget_policy') or {}).get('W')
     if worker is None:return False
@@ -1314,7 +1330,8 @@ def _run_closeout(root):
     initial_repair=None
     first_job=root/'jobs'/f'{begin["first_step"]:03d}.json'
     if first_job.exists():initial_repair=contracts.read(first_job).get('engineering_repair')
-    if contracts.settings(root).get('selection_policy') and not first_job.exists():
+    closeout_settings = configuration_updates.for_new_job(root, begin['first_step'])
+    if closeout_settings.get('selection_policy') and not first_job.exists():
         try:
             stopped = shortlist.screen(root, begin)  # Freeze candidate facts before the first closeout A.
         except delivery.DeliveryUnresolved as error:
@@ -1333,7 +1350,7 @@ def _run_closeout(root):
         'Use finish to decline delivery or wait to pause. Neither delivery nor finish asserts global goal completion. '
         'Explain science, limitations and unmet objectives. E only extracts scientific evidence; control resolves, packages and submits originals. '
         'Exploration is closed; continue_w/revise_h/extract require bounded clarification, never automatic dispatch.')
-    if contracts.settings(root).get('selection_policy') and shortlist.marker(root) is not None:
+    if closeout_settings.get('selection_policy') and shortlist.marker(root) is not None:
         instruction = ('Consider the complete closeout.comparison catalogue and compare relevant alternatives by the same goal criteria in scientific_result. '
             'Explicitly name candidate_recommendation and explain its scientific evidence; null supplies no delivery choice. '
             'Declared required adapter audits gate delivery; absent optional audit/smoke capabilities provide no qualification. '
@@ -1400,6 +1417,9 @@ def _run_closeout(root):
         last_step += 1  # A preserved unused repair may occupy the last granted slot.
     for step in range(begin['first_step'], last_step + 1):
         if not (root / 'jobs' / f'{step:03d}.json').exists():
+            configuration_updates.bind_new_job(root, step)
+        closeout_settings = configuration_updates.for_new_job(root, step)
+        if not (root / 'jobs' / f'{step:03d}.json').exists():
             from . import control_operations
             control_operations.apply_pending_budget(root)
         record = _record(root, step)
@@ -1451,7 +1471,7 @@ def _run_closeout(root):
                     prior = contracts.read(path)
                     if prior.get('purpose') != 'closeout' or prior.get('source_cutoff') != begin['source_cutoff'] or prior.get('direct_originals',prior['direct_refs']) != [dict(path=f'inputs/parents/{parent:03d}/conclusion.json',sha256=contracts.digest(execution.raw(root,parent))) for parent in parents]:
                         return _closeout_result(root, 'retained_job_conflict', step=step)
-                if repair is None and contracts.settings(root).get('selection_policy') is not None:
+                if repair is None and closeout_settings.get('selection_policy') is not None:
                     stopped=shortlist.screen(root,begin,before_step=step)
                     if stopped is not None:return _closeout_result(root,stopped,step=step)
                 try:
@@ -1622,7 +1642,6 @@ def worker_resume(root: Path, step: int):
 
 def _worker_resume_locked(root, step):
     """Original resume gates under an already-held controller writer."""
-    settings = contracts.settings(root)
     try:
         if type(step) is not int or not 0 < step <= budget.historical_step_limit(root):
             raise ValueError('An exact prepared node is required')

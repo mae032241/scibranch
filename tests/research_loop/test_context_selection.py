@@ -33,6 +33,19 @@ print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=N
     return root
 
 
+def indexed_rows(root, job, name):
+    """Read the complete frozen index when a compact preview is omitted."""
+    page=job['history']['view']['indexes'][name]
+    rows=[]
+    while page:
+        path=c.workspace(root,job['step'])/page
+        original=next(row for row in job['history']['files'] if row['path']==page)
+        assert c.digest(path)==original['sha256']
+        value=c.read(path)
+        rows.extend(value[name]);page=value['next_page']
+    return rows
+
+
 @pytest.mark.parametrize('role,first',[('H','A'),('W','H'),('A','W'),('E','A')])
 def test_role_material_priority_preserves_constraints_caveats_and_opportunities(tmp_path,role,first):
     root=context_scene(tmp_path)
@@ -58,22 +71,35 @@ def test_role_material_priority_preserves_constraints_caveats_and_opportunities(
     assert h['limitations']==['Original target condition is still unknown','A counterexample remains unresolved','Later caveat must survive']
     assert h['limitations_omitted_count']==1
     assert (c.workspace(root,5)/h['conclusion']).is_file()
-    mechanism=view['lineage']['mechanisms']['unfinished_plan']
-    assert mechanism['remaining_count']==4
-    assert (c.workspace(root,5)/mechanism['index']).is_file()
+    mechanisms=view['lineage']['mechanisms']
+    originals=indexed_rows(root,job,'mechanisms')
+    assert [row['mechanism_ref'] for row in originals]==[f'h001.m{index}' for index in range(1,5)]
+    assert all(row['status']=='pending' and (c.workspace(root,5)/row['original']).is_file() for row in originals)
+    if view['lineage'].get('view_omitted'):
+        assert view['lineage']['omission_reason']
+        assert mechanisms['count']==mechanisms['pending_count']==4
+    else:
+        mechanism=mechanisms['unfinished_plan']
+        assert mechanism['remaining_count']==4
+        assert (c.workspace(root,5)/mechanism['index']).is_file()
     candidates=view['lineage']['candidates']
-    assert candidates['failed_candidate_count']==candidates['unknown_candidate_count']==1
-    assert {row['candidate_id'] for row in candidates['candidate_alerts']}=={'negative','unresolved'}
-    assert 'target_best' not in candidates and candidates['coverage']=='partial'
-    assert candidates['a_recommended']['candidate_id']=='P'
+    if view['lineage'].get('view_omitted'):
+        assert candidates['coverage'] is None and candidates['a_recommended'] is None
+        assert candidates['candidate_facts']==[]
+        # The original A choice and negative observations remain readable.
+        assert c.validate(c.workspace(root,3))['candidate_recommendation']=='P'
+    else:
+        assert candidates['failed_candidate_count']==candidates['unknown_candidate_count']==1
+        assert {row['candidate_id'] for row in candidates['candidate_alerts']}=={'negative','unresolved'}
+        assert candidates['coverage']=='partial'
+        assert candidates['a_recommended']['candidate_id']=='P'
+    assert 'target_best' not in candidates
     ids=['P','negative','unresolved']
     assert [row['id'] for row in candidates['candidate_facts']]==ids[:len(candidates['candidate_facts'])]
     assert len(candidates['candidate_facts'])+candidates['candidate_facts_omitted_count']==len(ids)
-    page=view['lineage']['indexes']['candidates'];originals=[]
-    while page:
-        index=c.read(c.workspace(root,5)/page)
-        originals.extend(index['candidates']);page=index['next_page']
+    originals=indexed_rows(root,job,'candidates')
     assert [row['id'] for row in originals]==ids
+    assert {row['id']:row['status'] for row in originals}==dict(P='ok',negative='failed',unresolved='unknown')
     assert 'experiments' not in view
     assert len((json.dumps(view,ensure_ascii=False,indent=2)+'\n').encode())<12000
     assert 'BODY-CROWD '*2000 not in json.dumps(view)
@@ -127,11 +153,18 @@ def test_w_combination_view_uses_frozen_authorized_rows_not_single_focus(tmp_pat
     before=copy.deepcopy(job)
     view=c.science_view(job,root)
     scope=view['lineage']['mechanisms']
-    assert scope['focus'] is None and scope['authorized_count']==4
-    assert [row['mechanism_ref'] for row in scope['overview']]==[row['mechanism_ref'] for row in mechanisms]
-    assert scope['overview_omitted_count']==0
-    assert scope['unfinished_plan']['remaining_count']==4
-    for row in scope['overview']:
+    assert scope['focus'] is None
+    if view['lineage'].get('view_omitted'):
+        assert view['lineage']['omission_reason']
+        assert scope['count']==scope['pending_count']==len(mechanisms)==4
+        rows=indexed_rows(root,job,'mechanisms')
+    else:
+        assert scope['authorized_count']==4 and scope['overview_omitted_count']==0
+        assert scope['unfinished_plan']['remaining_count']==4
+        rows=scope['overview']
+    assert [row['mechanism_ref'] for row in rows]==[row['mechanism_ref'] for row in mechanisms]
+    assert [row['label'] for row in rows]==[row['label'] for row in mechanisms]
+    for row in rows:
         assert (c.workspace(root,5)/row['original']).is_file()
     public=json.dumps(view)
     assert 'source_h_sha256' not in public and 'baseline' not in public and 'accepted_count' not in public

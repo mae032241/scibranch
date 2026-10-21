@@ -59,7 +59,7 @@ def _proofs(root, job, assessment):
 def validate_payload(root, job, payload):
     if job.get('purpose') in {'closeout','formal_review'}:
         return
-    if job.get('handoff_protocol', 1) >= 6 and job['role'] == 'A' and c.settings(root).get('correction_policy') is not None:
+    if job.get('handoff_protocol', 1) >= 6 and job['role'] == 'A' and c.settings(root, job).get('correction_policy') is not None:
         _proofs(root, job, c.scientific_field(job,payload,'progress_assessment'))
 
 
@@ -118,12 +118,18 @@ def _trigger(root, step, seal, reason, level):
 
 
 def project(root, before_step=None):
-    settings = c.settings(root)
+    from . import configuration_updates
+    settings = (configuration_updates.for_new_job(root, before_step) if before_step is not None
+                else configuration_updates.current(root))
     limits = settings.get('correction_policy')
-    if limits is None:
+    enabled = limits is not None
+    if not enabled and not any((root / 'correction-ledger').glob('*.json')):
         return dict(enabled=False, counters=dict(no_progress=0, unknown=0), current_pause=None,
                     review_request=None, triggers=[], eligible=[], permit=None)
-    limits = policy(limits)
+    if enabled:
+        limits = policy(limits)
+    # Disabling future assessments cannot revoke an already published pause.
+    # Replay each original policy so its exact acknowledgment remains required.
     events, _ = _records(root)
     published = {event['trigger']['trigger_id']: event['trigger'] for event in events if event['kind'] == 'trigger'}
     acks = {}
@@ -179,6 +185,10 @@ def project(root, before_step=None):
                 # A result arriving after an already published pause cannot
                 # automatically erase it. Original facts still remain sealed.
                 sticky = pause['trigger_id'] in published
+        historical_limits = c.settings(root, job).get('correction_policy')
+        if historical_limits is None:
+            continue
+        limits = policy(historical_limits)
         assessment = c.scientific_field(job,payload,'progress_assessment')
         proof = _proofs(root, job, assessment)
         verdict = (assessment or {}).get('verdict', 'unknown')
@@ -239,8 +249,12 @@ def project(root, before_step=None):
         pause = dict(**pause, published=pause['trigger_id'] in published)
     pending = [value['trigger'] for value in reviews.values()
                if value is not None and value['response_h'] is None]
-    return dict(enabled=True, counters=counters, current_pause=pause, permit=permit,
-                review_request=max(pending, key=lambda item: item['step']) if pending else None,
+    if not enabled:
+        triggers = [item for item in triggers if item['trigger_id'] in published]
+        if pause is not None and not pause['published']:
+            pause = None
+    return dict(enabled=enabled, counters=counters, current_pause=pause, permit=permit,
+                review_request=max(pending, key=lambda item: item['step']) if enabled and pending else None,
                 triggers=triggers, eligible=eligible)
 
 

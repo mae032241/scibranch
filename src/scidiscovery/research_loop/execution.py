@@ -1,6 +1,7 @@
 """One immutable execution-reference seam for initial and continued native work."""
 from pathlib import Path
 
+from . import configuration_updates
 from . import contracts as c
 
 
@@ -65,7 +66,7 @@ def records(root, step):
     directory = first / 'continuations'
     if not directory.exists():return result
     if directory.resolve() != directory:raise ValueError('Native continuation directory changed')
-    settings = c.settings(root)
+    settings = configuration_updates.for_step(root, step)
     repair_limit = (settings.get('resume_policy') or {}).get('max_attempts', 0)
     job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
     from . import checkpoint
@@ -192,7 +193,7 @@ def home(root, step, attempt=0):
     current = record(root, step, attempt)
     intent = c.read(c.regular(current / 'native-intent.json'))
     base = root / 'native-homes' / f'{step:03d}'
-    policy=c.settings(root).get('resume_policy') or {}
+    policy=configuration_updates.for_step(root, step).get('resume_policy') or {}
     inherited=Path(policy['native_home']) if policy.get('output_only') and policy.get('native_home') else None
     selected = Path(intent.get('native_home', intent.get('session', {}).get('home', str(inherited or base))))
     if (selected.resolve() != selected or selected != base and selected != inherited and
@@ -230,5 +231,5 @@ def _terminal(root, step, chain, outcome):
         # records() already validated every author intent, permit, projection,
         # call inventory and code digest in this very invocation. Check the one
         # current final response once; no verdict survives this record() call.
-        science=c.science_payload(current/'science-output.json','W',c.settings(root)['handoff_protocol'])
+        science=c.science_payload(current/'science-output.json','W',configuration_updates.for_step(root, step)['handoff_protocol'])
         if science.get('stage_intent')=='continue':raise ValueError('Author closeout cannot reopen exploration')

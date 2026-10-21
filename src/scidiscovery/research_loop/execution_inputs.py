@@ -669,12 +669,12 @@ class NativeInputHost:
             if original['producer_step'] >= self.job['step']:
                 raise ValueError('Compile inputs must be preceding sealed originals')
             inputs.append(dict(slot, alias=alias, original=original, size_bytes=material['size_bytes']))
-        if c.output_quota_exceeded(c.settings(self.root), (item['size_bytes'] for item in inputs)):
+        if c.output_quota_exceeded(c.settings(self.root, self.job), (item['size_bytes'] for item in inputs)):
             raise ValueError('Scientific inputs exceed the explicit frozen handoff quota')
         raw = builder(authored, [{key: item[key] for key in item if key != 'alias'} for item in inputs])
         if type(raw) is not bytes or q._identity(source) != source_identity:
             raise q.IntegrityError('Compiler author original changed during compilation')
-        if c.output_quota_exceeded(c.settings(self.root), [len(raw)]):
+        if c.output_quota_exceeded(c.settings(self.root, self.job), [len(raw)]):
             raise ValueError('Compiled package exceeds explicit output quota')
         identity = hashlib.sha256(json.dumps(dict(output=str(output), sha256=hashlib.sha256(raw).hexdigest()),
             sort_keys=True).encode()).hexdigest()

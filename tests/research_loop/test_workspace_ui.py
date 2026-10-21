@@ -138,8 +138,9 @@ def test_workspace_structured_form_preview_create_and_open_exact_instance(tmp_pa
         assert fields['task_text'] == '' and fields['cfg.budget.max_tokens'] == ''
         assert fields['cfg.budget.max_seconds'] == '' and fields['cfg.budget.max_steps'] == ''
         assert b'config_text' not in page and b'action="/control/create"' not in page
+        # A configure token cannot authorize the distinct create action.
         assert request(connection, 'POST', '/control/create', cookie=cookie,
-            fields=dict(form(page, 'configure'), selection='unselected'), origin=origin)[0] == 422
+            fields=dict(form(page, 'configure'), selection='unselected'), origin=origin)[0] == 403
         _, page, _ = request(connection, 'GET', '/new', cookie=cookie)
         fields = controls(page)
         fields.update({'task_text': 'Research a new task directly from the form.',

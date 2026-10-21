@@ -97,6 +97,32 @@ def test_active_writer_and_unknown_native_preserve_originals_without_export(tmp_
     assert not package.exists() and material.read_bytes() == original
 
 
+def test_export_preserves_pending_configuration_and_its_dependencies(tmp_path):
+    from scidiscovery.research_loop import configuration_updates, research_config
+    root, _ = scene(tmp_path)
+    document = research_config.to_document(root, c.settings(root))
+    document['agent']['launcher'] = ['fixture-next-launcher']
+    configuration_updates.submit(root, document, expected_revision=0)
+    private = root / 'host-control/unrecognized/private.json'
+    c.write(private, {'must_not_be_copied': True})
+    original = root / 'host-control/configuration/revisions/000001.json'
+    with configuration_updates._writer(root):
+        with pytest.raises(archive.files.ArchiveError, match='owner is active'):
+            archive.archive_export(root, tmp_path / 'busy-archive')
+    package = tmp_path / 'archive'
+    archive.archive_export(root, package)
+    rows = {row['path']: row for row in entries(package)}
+    retained = rows[original.relative_to(root).as_posix()]
+    assert retained['kind'] == 'file'
+    assert (package / retained['blob']).read_bytes() == original.read_bytes()
+    assert rows['configuration.lock']['kind'] == 'excluded'
+    assert rows['host-control/unrecognized']['kind'] == 'gap'
+    assert private.relative_to(root).as_posix() not in rows
+    dependencies = archive.archive_inspect(package, section='dependencies')['entries']
+    assert any(row['owner'] == 'configuration/1/native_launcher'
+               and row['reference'] == ['fixture-next-launcher'] for row in dependencies)
+
+
 def test_copy_race_never_publishes_or_rolls_back_original_changes(tmp_path, monkeypatch):
     root, material = scene(tmp_path); package = tmp_path / 'archive'
     copy = archive.files.copy_verified

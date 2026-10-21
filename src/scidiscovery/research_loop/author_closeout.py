@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import stat
 
+from . import configuration_updates
 from . import contracts as c
 
 
@@ -255,7 +256,8 @@ def _validate_original(root, value):
     if value.get('version')!=1 or value.get('context')!='new_context' or value.get('scope')!='author_closeout_only':
         raise ValueError('Explicit finite author closeout authorization required')
     step=value['step'];origin=root/'native-evidence'/f'{step:03d}'
-    expected=dict(job=root/'jobs'/f'{step:03d}.json',settings=root/'settings.json',
+    job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
+    expected=dict(job=root/'jobs'/f'{step:03d}.json',settings=configuration_updates.settings_path(root, job),
         original_intent=origin/'native-intent.json',original_outcome=origin/'native-outcome.json',
         original_usage=origin/'usage.json',original_experiment_config=origin/'experiment-config.json')
     for key,path in expected.items():
@@ -473,7 +475,7 @@ def science_facts(root, step):
 
 def start(root, step, *, max_tokens, max_seconds, authorization_note):
     from . import budget, execution, native, profiles, runtime
-    root=Path(root);settings=c.settings(root);job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
+    root=Path(root);settings=configuration_updates.for_step(root, step);job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
     origin=execution.origin(root,step)
     if (type(max_tokens) is not int or max_tokens<=0 or type(max_seconds) not in (int,float)
             or not 0<max_seconds<float('inf') or not authorization_note.strip()):
@@ -501,7 +503,7 @@ def start(root, step, *, max_tokens, max_seconds, authorization_note):
     facts=terminal_facts(root,step)
     permit=dict(version=1,scope='author_closeout_only',context='new_context',step=step,source_attempt=0,
         max_tokens=max_tokens,max_seconds=max_seconds,authorization_note=authorization_note.strip(),
-        job=_ref(root,root/'jobs'/f'{step:03d}.json'),settings=_ref(root,root/'settings.json'),
+        job=_ref(root,root/'jobs'/f'{step:03d}.json'),settings=_ref(root,configuration_updates.settings_path(root, job)),
         original_intent=_ref(root,origin/'native-intent.json'),original_outcome=_ref(root,origin/'native-outcome.json'),
         original_usage=_ref(root,origin/'usage.json'),
         original_experiment_config=_ref(root,origin/'experiment-config.json'),calls=_calls(root,step))
@@ -655,7 +657,7 @@ def start_successor(root, step, *, max_tokens, max_seconds, authorization_note,
     paths=execution.records(root,step)
     if len(paths)==3:return native.wait_native(root,step)  # Collect exact accepted 2, never create 3.
     if len(paths)!=2:raise ValueError('Author successor requires exactly the original and first author attempts')
-    job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'));settings=c.settings(root)
+    job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'));settings=configuration_updates.for_step(root, step)
     if ((origin/'result-identity.json').exists() or (root/'pause.request').exists()
             or budget.closeout_state(root)['begin'] is not None
             or any(p.name>f'{step:03d}.json' for p in (root/'jobs').glob('*.json'))):

@@ -3,6 +3,7 @@ from pathlib import Path
 import time
 
 from scidiscovery.operations.execution import PENDING_EXECUTION_STATES, execution_status
+from . import configuration_updates
 from . import budget, contracts as c, execution, experiments as e, checkpoint, experiment_client
 
 POLL_SECONDS = 1.
@@ -55,7 +56,7 @@ def before_seal(root,job,record):
     raw=record/'science-output.json'
     if outcome.get('output_status')=='missing' or not raw.is_file() or raw.is_symlink():return
     if (type(outcome.get('returncode')) is not int or outcome.get('returncode')!=0 or outcome.get('stop_reason')
-            or outcome.get('usage',{}).get('unknown_steps') and not budget.native_completion_known(outcome, c.settings(root))
+            or outcome.get('usage',{}).get('unknown_steps') and not budget.native_completion_known(outcome, configuration_updates.for_job(root, job))
             or outcome.get('raw_sha256')!=c.digest(c.regular(record/'science-output.json'))):return
     if (record/NAME).exists():
         validate(root,job,record)

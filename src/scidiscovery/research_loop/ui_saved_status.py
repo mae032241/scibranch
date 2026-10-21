@@ -1,4 +1,6 @@
 """Display saved control records without invoking scientific admission readers."""
+import math
+
 from . import budget, contracts as c, instance_display as display, native_usage, runtime
 
 
@@ -108,33 +110,73 @@ def _budget(root, settings, events):
                 limits['max_steps'] = event['after_max_steps']
     basis = settings.get('time_budget_basis', 'elapsed')
     start = _read(root / 'host-started.json')
-    now = budget.clock_stamp()
+    now = None
+    current_known = True
     phase = 'paused' if basis == 'active' else 'unclassified'
     at = start
     durations = dict(advance=0., waiting=0., paused=0., unclassified=0.)
     def duration(before, after):
-        if before.get('boot_id') == after.get('boot_id') and 'at_boottime' in before and 'at_boottime' in after:
-            return max(0., after['at_boottime'] - before['at_boottime'])
-        return max(0., after['at_unix'] - before['at_unix'])
+        key = 'at_boottime'
+        if basis == 'elapsed' and key not in before:
+            key = 'at_unix'
+        elif not before.get('boot_id') or before.get('boot_id') != after.get('boot_id'):
+            return None
+        values = (before.get(key), after.get(key))
+        if any(type(value) not in (int, float) or not math.isfinite(value) for value in values):
+            return None
+        elapsed = values[1] - values[0]
+        if basis == 'elapsed' and key == 'at_boottime':
+            wall = (before.get('at_unix'), after.get('at_unix'))
+            if any(type(value) not in (int, float) or not math.isfinite(value) for value in wall):
+                return None
+            if wall[1] - wall[0] < 0 or wall[1] - wall[0] + .02 < elapsed:
+                return None
+        return elapsed if elapsed >= 0 else None
+    def add(phase, before, after):
+        value = duration(before, after)
+        durations[phase] = durations[phase] + value if durations[phase] is not None and value is not None else None
     for index, event in enumerate(events):
         if event['kind'] != 'clock':
             continue
         if event.get('reanchor'):
             if at is not None and index:
-                durations['paused'] += duration(at, events[index - 1])
+                add('paused', at, events[index - 1])
             phase, at = 'paused', event
             continue
         if at is not None:
-            durations[phase] += duration(at, event)
+            add(phase, at, event)
         phase, at = event['phase'], event
     if at is not None:
-        durations[phase] += duration(at, now)
-    elapsed = duration(start, now) if start is not None else 0.
-    consumed = durations['advance'] + durations['waiting'] if basis == 'active' else elapsed
+        if basis == 'active' and phase == 'paused':
+            # The open paused tail does not change recorded active consumption.
+            durations['paused'] = None
+        else:
+            now = budget.clock_stamp()
+            current_known = not events or duration(events[-1], now) is not None
+            add(phase, at, now)
+    missing_start = start is None and any(event['kind'] == 'clock' for event in events)
+    if start is None:
+        elapsed = None if missing_start else 0.
+    elif now is None or not current_known or any(event.get('reanchor') for event in events):
+        elapsed = None
+    else:
+        elapsed = duration(start, now)
+        if basis == 'elapsed' and elapsed is not None:
+            elapsed = now['at_unix'] - start['at_unix']
+    if basis == 'active':
+        anchor = start.get('at_boottime') if start is not None else None
+        anchored = start is None or (type(anchor) in (int, float) and math.isfinite(anchor)
+                                    and anchor >= 0 and bool(start.get('boot_id')))
+        consumed = (durations['advance'] + durations['waiting']
+                    if not missing_start and anchored and current_known
+                    and durations['advance'] is not None and durations['waiting'] is not None else None)
+    else:
+        consumed = elapsed
     return dict(limits, original_max_steps=settings['max_steps'], time_budget_basis=basis,
         advance_seconds=durations['advance'], waiting_seconds=durations['waiting'], paused_seconds=durations['paused'],
         unclassified_seconds=durations['unclassified'], elapsed_seconds=elapsed, consumed_seconds=consumed,
-        seconds_remaining=max(0., limits['max_seconds'] - consumed), clock_phase=phase, ledger_events=len(events))
+        seconds_remaining=max(0., limits['max_seconds'] - consumed) if consumed is not None else None,
+        time_status='recorded' if consumed is not None else 'unknown', clock_phase=phase, ledger_events=len(events))
 
 
 def _correction(root):

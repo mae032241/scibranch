@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts as c, controller, delivery, execution, native
+from scidiscovery.research_loop import budget, contracts as c, controller, delivery, execution, native, role_share
 from test_history_handoff import finish
 import test_closeout_protocol as protocol
 
@@ -212,12 +212,22 @@ def test_unknown_final_delivery_preserves_operation_and_never_resubmits(tmp_path
         calls.append((intent['action_kind'], intent['operation_id']))
         return delivery._result(intent['binding'], 'unknown', 'Original operation remains unverified')
     monkeypatch.setattr(delivery, 'invoke', unknown)
-    assert controller.closeout(root)['status'] == 'delivery_unknown'
-    assert controller.closeout(root)['status'] == 'delivery_unknown'
-    assert controller.closeout(root)['status'] == 'delivery_unknown'
-    assert [kind for kind, _ in calls] == ['submit', 'confirm']
-    assert calls[0][1] == calls[1][1]
-    assert len(budget.closeout_state(root)['actions']) == 2
+    original = None
+    for number in range(1, 4):
+        assert controller.closeout(root)['status'] == 'delivery_unknown'
+        # Each explicit request may reconcile the exact original operation once.
+        assert [kind for kind, _ in calls] == ['submit'] + ['confirm'] * (number - 1)
+        actions = budget.closeout_state(root)['actions']
+        assert len(actions) == number
+        if original is None:
+            original = actions[0]
+        assert actions[0] == original
+        assert all(row['intent']['operation_id'] == original['intent']['operation_id']
+            and row['intent']['binding'] == original['intent']['binding']
+            and row['intent']['decision'] == original['intent']['decision']
+            and row['outcome']['result']['status'] == 'unknown' for row in actions)
+        assert len({operation for _, operation in calls}) == 1
+    assert not (root/'jobs/004.json').exists()
 
 
 @pytest.mark.parametrize('boundary', ['tokens', 'wall'])
@@ -270,7 +280,7 @@ def test_role_share_only_stop_still_returns_final_report(tmp_path, monkeypatch, 
     from test_final_a_completion import instance
     original_prepare = controller.prepare
     def prepare(*args, **kwargs):
-        kwargs['role_budget_policy'] = dict(version=1, min_w_share=.99, max_thinking_share=.01,
+        kwargs['role_budget_policy'] = dict(version=1, min_w_share=.99, max_thinking_share=.00001,
             thinking_node_target_tokens=100000)
         if adapter_off_policy:
             kwargs['delivery_policy'] = dict(closeout_a=dict(max_observed_tokens=275000, max_seconds=10),
@@ -279,10 +289,20 @@ def test_role_share_only_stop_still_returns_final_report(tmp_path, monkeypatch, 
     monkeypatch.setattr(controller, 'prepare', prepare)
     root = instance(tmp_path, max_steps=6, mode='soft', route='analyze')
     assert budget.snapshot(root)['max_tokens']-native.usage(root)['observed_tokens'] > 900000
+    job = c.read(root/'jobs/001.json')
+    result = c.validate(c.workspace(root, 1))
+    assert role_share.usage(root, 1)['thinking'] == 10
+    assert role_share.reason(root, 1, job, result, 'A') == 'role_share_thinking_reached'
+    originals = {path:path.read_bytes() for path in (root/'settings.json', root/'jobs/001.json',
+        execution.record(root, 1)/'usage.json', execution.record(root, 1)/'result-identity.json')}
     result = controller.run(root)
     assert result['status'] == 'final_a_completed', json.dumps(result, indent=2)
     assert budget.final_a_barrier(root)['basis'] == 'final_state'
+    begin = budget.closeout_state(root)['begin']
+    assert begin['stop_reason'] == 'role_share_thinking_reached' and begin['source_cutoff'] == 1
+    assert (c.workspace(root, 2)/'work/launches').read_text() == 'A\n'
     assert budget.closeout_state(root)['actions'] == []
+    assert all(path.read_bytes() == raw for path, raw in originals.items())
     assert not (root/'jobs/003.json').exists()
 
 

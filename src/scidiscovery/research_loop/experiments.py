@@ -21,6 +21,7 @@ import time
 import uuid
 from functools import wraps
 
+from . import configuration_updates
 from . import instance_owner
 
 from scidiscovery.operations.execution import (AdapterCapability, ExecutionInterfaceRegistration,
@@ -517,10 +518,10 @@ def configure(root,step,executor,config,output):
     require_current(root,_contracts.read(_contracts.regular(Path(root)/'jobs'/f'{step:03d}.json')))
     from . import contracts as c, execution, budget
     root=Path(root).resolve();job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
-    versions=(c.settings(root).get('experiment_interface_version'),job.get('experiment_interface_version'))
+    versions=(configuration_updates.for_job(root, job).get('experiment_interface_version'),job.get('experiment_interface_version'))
     if any(type(value) is not int or value!=VERSION for value in versions):
         raise UnsupportedExecution('Preserved scientific instance is read-only; prepare a new registered instance')
-    versions=(c.settings(root).get('managed_admission_version'),job.get('managed_admission_version'))
+    versions=(configuration_updates.for_job(root, job).get('managed_admission_version'),job.get('managed_admission_version'))
     if any(type(value) is not int or value!=ADMISSION_VERSION for value in versions):
         raise UnsupportedExecution('Preserved scientific admission is read-only; prepare a new instance')
     c._validate_inputs(root,c.workspace(root,step),job)
@@ -528,7 +529,7 @@ def configure(root,step,executor,config,output):
     if c.read(c.regular(record/'native-intent.json')).get('task_sha256')!=c.digest(root/'jobs'/f'{step:03d}.json'):
         raise IntegrityError('Host configuration has no exact accepted scientific task')
     native_attempt=dict(number=len(execution.records(root,step))-1,execution_key=execution.identity(root,step))
-    selected=c.settings(root).get('execution_config')
+    selected=configuration_updates.for_job(root, job).get('execution_config')
     implementation={}
     if selected is not None:
         expected=dict(selected['configuration'])
@@ -565,9 +566,9 @@ def configure(root,step,executor,config,output):
                 if (not isinstance(old,dict) or set(old)!=set(client)
                         or old.get('step')!=step or old.get('worker_view_version')!=1):
                     raise IntegrityError('Frozen execution client changed')
-    if c.settings(root).get('execution_resource_policy') is not None and job['role'] == 'W':
+    if configuration_updates.for_job(root, job).get('execution_resource_policy') is not None and job['role'] == 'W':
         from . import execution_authority
-        value['host_execution_authority'] = execution_authority.contract(root)
+        value['host_execution_authority'] = execution_authority.contract(root, job)
     value=freeze(value,executor,path=output)
     updates=[]
     # Complete originals remain in the existing host-control namespace.

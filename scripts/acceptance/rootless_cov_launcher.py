@@ -172,8 +172,21 @@ def exp_wrapper(s,w):
 
 
 def native_profile(s):
-    from scidiscovery.research_loop import profiles
-    return profiles.selected({'service_tier':'default', **s}, os.environ['THIN_HWA_ROLE'])
+    from scidiscovery.research_loop import profiles, contracts as c, configuration_updates
+    declared = {'service_tier':'default', **s}
+    manifest = os.environ.get('THIN_HWA_JOB_MANIFEST')
+    if manifest is not None:
+        root = Path(s['scene_root']).absolute()
+        path = Path(manifest).absolute()
+        job = c.read(c.regular(path))
+        if job.get('configuration_revision') is not None:
+            if path != root/'jobs'/f'{job["step"]:03d}.json':
+                raise ValueError('exact_job_manifest_required')
+            base = c.settings(root)
+            if profiles.normalize(declared.get('role_profiles',{}),declared) != profiles.normalize(base.get('role_profiles',{}),base):
+                raise ValueError('launcher_role_profiles_mismatch')
+            return profiles.for_job(configuration_updates.for_job(root, job), job)
+    return profiles.selected(declared, os.environ['THIN_HWA_ROLE'])
 
 def owner_metadata(s,w):
     """Share two exact read-only originals; cold-owner anchors stay host-only.
@@ -401,7 +414,7 @@ def backend_launcher(s,w,h,materials):
 
 def accepted_attempt(s,w,output,*,resume_thread=None,schema=None):
     """Bind fresh/resumed exec to this exact already accepted native dispatch."""
-    from scidiscovery.research_loop import contracts as c,execution,continuation,runtime,profiles
+    from scidiscovery.research_loop import contracts as c,execution,continuation,runtime,profiles,configuration_updates
     from scidiscovery.research_loop.protocol import require_current
     import time
     root=Path(s['scene_root']).absolute();step=int(w.name)
@@ -411,14 +424,15 @@ def accepted_attempt(s,w,output,*,resume_thread=None,schema=None):
     job=c.read(c.regular(job_path));require_current(root,job)
     if w!=c.workspace(root,step) or os.environ['THIN_HWA_ROLE']!=job['role']:
         raise ValueError('accepted_role_workspace_mismatch')
-    frozen=c.settings(root)
+    base=c.settings(root)
+    frozen=configuration_updates.for_job(root,job)
     declared={'service_tier':'default', **s}
-    if profiles.normalize(declared.get('role_profiles',{}),declared)!=profiles.normalize(frozen.get('role_profiles',{}),frozen):
+    if profiles.normalize(declared.get('role_profiles',{}),declared)!=profiles.normalize(base.get('role_profiles',{}),base):
         raise ValueError('launcher_role_profiles_mismatch')
     profiles.for_job(frozen,job)
     continuation.validate_task(root,step)
-    if resume_thread is not None or c.settings(root).get('resume_policy') is not None:
-        continuation.validate_launcher(root)
+    if resume_thread is not None or frozen.get('resume_policy') is not None:
+        continuation.validate_launcher(root,step)
     paths=execution.records(root,step);number=len(paths)-1;record=paths[number]
     if output!=record/'result.pending.json' or output.resolve()!=output:
         raise ValueError('output_path_outside_accepted_attempt')
@@ -436,7 +450,7 @@ def accepted_attempt(s,w,output,*,resume_thread=None,schema=None):
             raise ValueError('accepted_resume_session_required')
         if intent.get('continuation_kind')=='fragment':
             if (intent.get('context_mode')!='same_session'
-                    or (c.settings(root).get('worker_fragment_policy') or {}).get('context')!='same_session'):
+                    or (frozen.get('worker_fragment_policy') or {}).get('context')!='same_session'):
                 raise ValueError('accepted_resume_context_mismatch')
         elif intent.get('continuation_kind')=='repair':
             continuation.validate_repair(root,step,intent)
@@ -450,7 +464,7 @@ def accepted_attempt(s,w,output,*,resume_thread=None,schema=None):
         from scidiscovery.research_loop import author_closeout
         author_closeout.validate_intent(root,job,intent)
     elif number and (intent.get('continuation_kind')!='fragment' or intent.get('context_mode')!='new_context'
-            or (c.settings(root).get('worker_fragment_policy') or {}).get('context')!='new_context'):
+            or (frozen.get('worker_fragment_policy') or {}).get('context')!='new_context'):
         raise ValueError('accepted_resume_command_required')
     binding=execution.identity(root,step,number)
     runner=c.read(c.regular(record/'runner-process.json'))

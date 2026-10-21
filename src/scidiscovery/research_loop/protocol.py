@@ -56,7 +56,7 @@ def require_current(root, job=None):
         _current(retained.get('handoff_protocol'), 'Retained scientific job')
         if retained != job:
             raise ValueError('Scientific job differs from its frozen original')
-    return settings
+    return c.settings(root, job) if job is not None else settings
 
 
 

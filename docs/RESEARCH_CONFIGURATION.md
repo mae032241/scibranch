@@ -14,14 +14,23 @@ an adapter or successful command does not qualify a model, browser or solver.
 The independent workspace webpage starts with a blank structured form: enter the
 task, public material directory, new instance directory and finite budgets. All
 supported declaration fields have editable controls; role, permission, execution,
-delivery and policy groups are optional advanced settings. Nested plugin settings
-use typed key/value rows with add/remove controls. No configuration file is required.
+delivery and policy groups are optional advanced settings. Role models and stage targets
+share a compact role table; related limits use grouped fields with units and expandable
+help. Role budget shares and resume options use labelled controls. Plugin
+structures retain an expandable typed editor for lossless import/edit/export. Opening
+More research settings shows separately collapsible categories. Expanding a category
+reveals compact grouped fields, including role shares and resume parameters. Plugin
+entries use compact key/type/value rows. No
+configuration file is required.
 Check the complete effective preview, explicitly create the instance, then start
 research separately. Editing the form after checking requires a new preview.
 
 独立工作台从空白结构表单开始，可直接输入任务原文、公开材料目录、新实例目录和有限预算。
-角色、权限、执行、交付与合同策略位于可展开的高级设置；插件嵌套对象通过键名、类型、值及
-添加/删除控件编辑。无需先写 TOML/JSON，也不自动读取工作区已有任务或配置。检查完整有效
+角色、权限、执行、交付与合同策略按用途分组；角色模型与阶段目标合并为紧凑的角色表，
+相关数值并排排列并直接标明单位，详细说明按需展开。角色预算份额及恢复选项使用专用
+控件。插件结构保留可展开的类型编辑器，导入和编辑不会
+丢失未知值。“更多研究配置”内各分类可独立折叠，展开后使用紧凑分组表单，包括角色份额与恢复参数；
+插件扩展按键名、类型和值紧凑排列。无需先写 TOML/JSON，也不自动读取工作区已有任务或配置。检查完整有效
 预览后明确创建，再单独开始研究；修改参数后须重新预览。
 
 TOML is an optional import/export and explicit save format. Imports populate the
@@ -49,13 +58,25 @@ instance's frozen settings. Inspect output is host-private and may contain paths
 keep it out of scientific evidence. `prepare --config` cannot mix preparation flags.
 The explicit flag form in the [CLI guide](ROOTLESS_CLI.zh-CN.md) uses the same
 defaulting and validation path. Editing TOML affects future instances only. Existing
-instances retain their original settings and identities; cumulative budget changes
-use `budget-amend`, never manual settings edits.
+instances retain their original settings and identities. Use the instance's
+configuration page for operational changes from the next new node; never edit
+`settings.json` manually. Cumulative budget amendments retain their ledger and gates.
 
 `config-check` 只校验，不建实例、不提交模型工作。`config-inspect --config` 展示生效声明，
 `--root` 展示精确实例的冻结设置；输出属宿主私有内容，可能含路径，不应作为科学证据。
 `prepare --config` 不能混入准备参数；CLI 显式参数方式走同一默认值与校验路径。
-修改 TOML 只影响未来新实例，累计预算修订须用 `budget-amend`，不能手改原设置。
+修改 TOML 只影响未来新实例；已有实例通过当前研究配置页调整后续节点，不能手改
+`settings.json`。累计预算修订沿用原账本和准入条件，也可使用 `budget-amend`。
+
+Reading the configuration and queuing edits use verified ledger ceilings, without
+calculating current time consumption. They remain available when the current clock
+cannot verify an open interval. Applying changes to a new node, actual budget
+amendments and execution still require the existing clock and budget checks;
+saving a configuration does not recover the clock or reset consumption.
+
+读取配置与排队保存修改使用经过校验的账本总上限，不计算当前时间消费；即使当前时钟
+无法核对未闭合区间，这些操作仍可使用。新节点应用配置、实际预算修订和执行仍须通过
+原有时钟与预算校验；保存配置不会恢复时钟或重置消费。
 
 ## Declaration fields / 声明字段
 
@@ -84,6 +105,19 @@ argv elements are literal native arguments, so use absolute paths for their inpu
 | `delivery` | Existing frozen delivery-policy object; optional adapter paths `adapter.adapter`, `adapter.source_roots` and path-like `adapter.launcher_argv[0]` resolve relative to TOML / 既有交付策略对象，上述路径相对 TOML |
 | `policies` | Boolean / 布尔值: `formal_review`, `execution_authority`, `candidate_audit`, `decision_contract`; existing contract objects / 既有合同对象: `selection`, `resume`, `history_observer`; `worker_context`: `same_session` or `new_context` |
 | `ui` | `port` (0–65535; default 0), `open_browser` (default false), `approval_secret_file` (host-private path reference / 宿主私有路径引用) |
+
+`budget.max_output_total_bytes` caps the aggregate collected output of each node.
+The same cap applies separately to the combined input materials handed to the next
+node; it does not accumulate output across the research lifetime. Omit it to leave
+this byte cap unset. `budget.candidate_extra_slots` caps the extras beyond the
+representatives in W's nomination preview, and applies only when search mechanism
+nominations are enabled. The complete retained candidate pool remains available to
+A. The default is 2 extras.
+
+`budget.max_output_total_bytes` 限制每个节点收集输出的合计体积；交给下一节点的输入材料
+集合也单独受同一上限约束，不累计整个研究的输出。省略时不设此字节限制。
+`budget.candidate_extra_slots` 限制 W 提名预览中代表候选之外的额外名额，仅在启用搜索
+机制提名时使用；完整保留的候选池仍可供 A 选择。默认 2 个额外名额。
 
 Codex defaults are `gpt-6.1-sol`, reasoning effort `high`, service tier `default`
 and launcher `["codex"]`. A standard single-command Codex launcher defaults to
@@ -162,6 +196,28 @@ a separate vendor harness. New harnesses need their own exact integration eviden
 原件和控制检查仍有效。adapter 只提供接入边界，不附带或证明另一厂商 harness 的资格。
 
 ## Control while running / 运行中控制
+
+The instance configuration page edits models, role profiles, permissions, node
+targets, experiment execution, delivery and optional policies. Saving queues the
+configuration for the next new node and subsequent nodes; an existing prepared or
+running node, its retries, and its original external calls keep their exact settings.
+The page distinguishes active and pending settings. A stale browser form must be
+reloaded before saving over a newer revision. Changing total budgets requires an
+adjustment note and preserves consumption and outstanding execution facts.
+
+当前研究配置页可编辑模型、角色、权限、节点目标、实验执行、交付和可选策略。
+保存后从下一个新节点开始持续生效；已经准备或运行的节点、其重试及原外部调用继续
+使用原配置。页面区分已生效与待生效配置；其他页面已保存更新时，旧表单须重新加载。
+调整总预算须填写调整说明，并保留累计消费和未决执行事实。
+
+Instance paths, original objectives and source records remain immutable. Goal and
+direction changes use guidance. Saving configuration does not launch a node, reopen
+a closed research phase, or grant an exact experiment or delivery call permission.
+Backend enforcement and existing qualification checks still apply.
+
+实例路径、原始目标和来源记录保持不变，目标与方向变化使用方向建议。保存配置不启动
+节点、不重新开启已结束的研究阶段，也不授予精确实验或交付调用的权限；后端实施限制及
+原有资格检查继续适用。
 
 `start` launches or reconnects to a detached controller under the original writer
 lock; its operation receipt survives the requesting CLI or webpage process exiting.
@@ -259,16 +315,19 @@ existing root and does not start research.
 `serve-ui --root /absolute/instance --instance-root /absolute/other-instance` adds
 explicit instance choices; repeat `--instance-root` for more. The management page
 can open another exact existing root; it never scans directories or chooses by
-recency. `/configuration` edits structured fields and checks/prepares new instances through
-the same research-configuration API. Optional explicit TOML import defines its
+recency. Inside an instance, `/configuration` edits operational settings for the next
+new node and shows active settings. `/new` prepares a separate instance;
+the independent workspace retains `/configuration` as a creation entry. Both creation
+entries use the same research-configuration API. Optional explicit TOML import defines its
 relative path base; exporting or saving keeps declared path meanings. Editing
-configuration affects future instances and does not amend frozen instances. The
+an imported declaration for creation affects only the new instance. The
 webpage also exposes queued budget changes, guidance, operation receipts, detached
 start/resume and bounded progress. CLI commands remain available independently.
 These implemented surfaces have no implied live-browser or backend qualification.
 
 `serve-ui` 可重复 `--instance-root` 添加明确实例；管理页也可按精确已有根打开，不扫描
-目录、不按新旧推断。`/configuration` 可编辑结构化参数、检查并通过相同 API
-准备新实例；TOML 为可选导入、导出及明确保存格式。导入文件目录决定其相对路径基准，
-导出与另存保留路径含义；声明编辑不修改冻结实例。网页还提供预算排队、
+目录、不按新旧推断。实例内 `/configuration` 编辑后续节点配置并展示当前生效设置；
+`/new` 独立创建新研究，工作台的 `/configuration` 保留新建入口。新建入口通过
+相同 API 检查和准备实例；TOML 为可选导入、导出及明确保存格式。导入文件目录决定其相对路径基准，
+导出与另存保留路径含义；新建声明编辑不修改已有实例。网页还提供预算排队、
 用户方向、操作回执、后台启动/恢复和有界进度。这些入口不额外授予真实浏览器或后端资格。

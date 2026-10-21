@@ -15,6 +15,7 @@ import time
 from scidiscovery.operations.execution import (AdapterCapability, ExecutionInterfaceRegistration,
     LifecycleCapabilities, LocalFileDescriptor)
 from scidiscovery.operations.runtime_plugins import RuntimePluginContribution, RuntimePluginFactory
+from . import configuration_updates
 from . import experiments as e
 
 MAX_SCAN_ENTRIES = 1024
@@ -452,7 +453,7 @@ def cleanup(root,job,*,watchdog=False):
     path=execution.record(root,job['step'])/'experiment-config.json'
     if not path.exists():return 'not_configured'
     config=c.read(c.regular(path))
-    selected=c.settings(root).get('execution_config')
+    selected=configuration_updates.for_job(root, job).get('execution_config')
     expected=selected['executor'] if selected is not None else 'local_execution:command'
     if config['scope']!=protocol.stage_scope(root,job) or config['execution_interface']['executor']!=expected:
         raise e.IntegrityError('Local cleanup escaped its frozen native owner')

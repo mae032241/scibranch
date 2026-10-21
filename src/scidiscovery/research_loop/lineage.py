@@ -4,6 +4,8 @@ This module never executes a domain experiment or imports a domain adapter.
 """
 from __future__ import annotations
 
+from . import configuration_updates
+
 import copy
 import json
 from pathlib import Path
@@ -207,7 +209,7 @@ def project(root, before_step, *, source_cutoff=None, extra_steps=()):
     from . import execution_recovery
     recovery_refs=execution_recovery.prefix(root,before_step)
     records=execution_recovery.project_records(root,history.records_from_sources(root,sources,write_cache=False),recovery_refs,sources=sources)
-    state=search.fold(root,sources,recovery_refs=recovery_refs) if c.settings(root).get('search_policy') is not None else None
+    state=search.fold(root,sources,recovery_refs=recovery_refs) if configuration_updates.for_new_job(root,before_step).get('search_policy') is not None else None
     graph=build(root,before_step,sources=sources,search_state=state)
     return dict(sources=sources,records=records,search_state=state,graph=graph,candidates=candidate_view(records),recovery_refs=recovery_refs)
 
@@ -402,7 +404,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
             row['disposition']=dict(reason=_clip(reason,160),reason_truncated=len(reason.encode())>160,
                 original=original)
     if state and 'portfolio' in state:
-        initial_calls=c.settings(root)['search_policy'].get('initial_calls',1)
+        initial_calls=configuration_updates.for_new_job(root,step)['search_policy'].get('initial_calls',1)
         for row in mechanisms:
             ref=row['mechanism_ref']
             row['accepted_calls']=state['opportunity_counts'].get(ref,0)
@@ -450,7 +452,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                 for item,name in retained:
                     if worker_view_version == 1:
                         continue  # Exact receipts remain in the private verified archive.
-                    limits=c.settings(root)
+                    limits=configuration_updates.for_new_job(root,step)
                     if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
                         raise ValueError('Retirement proof materials exceed the original input bound')
                     target=f'{prefix}/{name}'
@@ -476,7 +478,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                 for output,item in zip(outputs,scientific_outputs):
                     output['path']=f'inputs/recovered/{record["step"]:03d}/{call["call_id"]}/{item["name"]}'
                     output['historical']=output['path']
-                    limits=c.settings(root)
+                    limits=configuration_updates.for_new_job(root,step)
                     if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
                         raise ValueError('Execution recovery materials exceed the original input bound')
                     c._copy_bound(Path(root)/item['snapshot'],c.workspace(root,step)/output['path'],item['sha256'])
@@ -490,7 +492,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                     if worker_view_version == 1:
                         continue  # Do not publish host control proofs as scientific inputs.
                     item=matches[0];target=f'inputs/recovered/{record["step"]:03d}/{call["call_id"]}/originals/{number:03d}'
-                    limits=c.settings(root)
+                    limits=configuration_updates.for_new_job(root,step)
                     if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
                         raise ValueError('Execution recovery originals exceed the original input bound')
                     c._copy_bound(Path(root)/item['snapshot'],c.workspace(root,step)/target,item['sha256'])
@@ -523,7 +525,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
         raise ValueError('Unsupported frozen audit projection')
     view=brief(records,state,projection['graph'],overview,indexes,selection_protocol=selection_protocol)
     if state and 'portfolio' in state:
-        threshold = (c.settings(root).get('portfolio_policy') or {}).get('review_after_cycles')
+        threshold = (configuration_updates.for_new_job(root,step).get('portfolio_policy') or {}).get('review_after_cycles')
         # Stable identity order is navigation, never scientific ranking.
         view['mechanisms'].update(overview=mechanisms[:4], overview_omitted_count=max(0,len(mechanisms)-4),
                                   index=indexes['mechanisms'],
@@ -546,7 +548,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
             leakage_assessment='Unknown unless explicitly reported; adapter status does not establish leakage or target suitability.')
         bounded_brief(view)
     nomination_ids=None
-    if state is not None and c.settings(root).get('candidate_nomination_policy') is not None:
+    if state is not None and configuration_updates.for_new_job(root,step).get('candidate_nomination_policy') is not None:
         from . import candidate_nominations
         nominated=candidate_nominations.project(records,state)
         nomination_pages=paged(candidate_nominations.page_rows(nominated),16,'nominations',

@@ -30,8 +30,11 @@ payload={'summary':'Continued scientific finding','scientific_result':'Original 
 if role=='W':
  payload.update(mechanism_findings=None,stage_intent='review')
  task=json.loads((work/'science-task.json').read_text());assigned=task.get('lineage',{}).get('mechanisms',{})
- if assigned.get('task_action')=='screen':
-  payload['mechanism_findings']=[dict(mechanism=row['label'],basis='blocked',finding='This transport fixture retains a checkpoint but does not perform the declared scientific measurement.') for row in assigned['overview']]
+ nominations=task.get('candidate_nomination_mechanisms',[])
+ if nominations:
+  payload['candidate_nominations']=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row['mechanism_ref'],reason='This transport fixture produces no scientifically suitable candidate and preserves the retained pool for A.') for row in nominations if row['status']!='waived'])
+ if assigned.get('task_action')=='screen' or 'Screen the assigned H combination' in task.get('question',''):
+  payload['mechanism_findings']=[dict(mechanism=row['mechanism_ref'],basis='blocked',finding='The checkpoint transport fixture has no scientific measurement for this assigned mechanism.') for row in nominations if row['status']=='pending']
 if role=='H':payload.update(search_plan=None,next_action='wait',route_reason='Bounded contribution complete')
 if role=='A':payload.update(search_review=None,candidate_recommendation=None,progress_assessment=None,decision_request=None,portfolio_review=None,next_action='finish',route_reason='Independent fake conclusion')
 print(json.dumps({'type':'turn.completed','usage':{'input_tokens':20,'cached_input_tokens':5,'output_tokens':2}}),flush=True)
@@ -169,7 +172,7 @@ def test_default_without_resume_policy_retains_typed_output_error(tmp_path,monke
     with pytest.raises(OutputRepairRequired):native.execute_native(root,1)
     wait_runner(root)
     original=c.settings
-    monkeypatch.setattr(c,'settings',lambda value:dict(original(value),resume_policy=None))
+    monkeypatch.setattr(c,'settings',lambda value,job=None:dict(original(value,job),resume_policy=None))
     with pytest.raises(OutputRepairRequired):continuation.seal_or_repair(root,1)
     assert len(execution.records(root,1))==1
 
@@ -328,9 +331,14 @@ def test_original_binding_tamper_never_creates_continuation(tmp_path, mutation):
 def test_missing_meter_is_unknown_not_billing_delay(tmp_path):
     root=instance(tmp_path);first=fail(root)
     (first/'usage.json').unlink()
-    with pytest.raises((ValueError,OSError)):controller.worker_resume(root,1)
+    originals={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
+    result=controller.worker_resume(root,1)
+    assert result['status']=='worker_resume_unavailable'
+    assert result['reason']=='worker_resume_terminal_ineligible'
     assert not (first/'continuations/001/native-intent.json').exists()
     assert native.usage(root)['unknown_steps']==[1]
+    assert all(p.read_bytes()==data for p,data in originals.items())
+    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
 
 
 def test_shared_amendment_does_not_change_original_soft_target(tmp_path):

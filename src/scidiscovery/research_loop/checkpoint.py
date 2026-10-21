@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from . import configuration_updates
 from . import contracts as c, execution, history
 from .output_repair import OutputRepairRequired
 
@@ -27,7 +28,7 @@ def policy(value):
 
 
 def enabled(root, job):
-    value = c.settings(Path(root)).get('worker_fragment_policy')
+    value = configuration_updates.for_job(root, job).get('worker_fragment_policy')
     if value is None or job['role'] != 'W':
         return False
     policy(value)

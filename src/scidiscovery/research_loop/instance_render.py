@@ -5,6 +5,7 @@ import html
 import json
 
 from .configuration_form import SCRIPT_CSP as CONFIG_SCRIPT_CSP
+from .ui_guidance import SCRIPT_CSP as GUIDANCE_SCRIPT_CSP
 from . import ui_components as ui, ui_translation_client as translation_client
 
 
@@ -44,6 +45,108 @@ progress.meter{display:block;width:100%;height:8px;margin:8px 0 0;border:0;borde
 @media(max-width:560px){.stats{grid-template-columns:1fr}.overview-head{flex-direction:column;align-items:stretch;padding:16px 18px}.head-action{align-items:stretch}.head-action .primary,.head-action button{width:100%;text-align:center}.facts{grid-template-columns:1fr}.facts dd{margin-bottom:4px}.role-line{padding:10px 12px}.round>summary{padding:10px 12px}.trail{padding:14px}.material-steps{columns:1}.top-nav{gap:4px 16px}}
 .token-metrics dd.token-unavailable{font-size:.9rem;color:#7b898b;font-weight:450}
 @media(max-width:560px){.token-monitor{padding:18px}.token-monitor>header{margin-bottom:16px}.token-metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.token-metrics>div{padding:12px 14px}.token-metrics dd{font-size:1.3rem}.token-metrics .token-feature{grid-column:1/-1;padding:14px}.token-feature dd{font-size:1.4rem}.token-metrics .token-note{gap:7px}.token-note dd{font-size:.73rem}.token-metrics dd.token-unavailable{font-size:.9rem}}
+
+/* Research settings and guided configuration share the existing form controls. */
+.settings-intro{max-width:760px;color:#62777e;margin-bottom:18px}.settings-groups{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start}.settings-group{min-width:0;margin:0;padding:18px 22px}.settings-group h2{font-size:1.05rem;margin-bottom:12px}.settings-group .settings-list{margin:0}.settings-group .settings-list li{padding:10px 0;margin:0;border-top:1px solid #e5ebec}.settings-group .settings-list li:first-child{border:0;padding-top:0}.settings-group .settings-list li:last-child{padding-bottom:0}.settings-group .settings-list a{font-weight:650;font-size:.95rem}.settings-group .settings-list .note{font-size:.83rem;margin-top:6px;line-height:1.65}
+.configuration-status{padding:20px 28px;border-left:4px solid #2e8a73;background:#f2f8f5}.configuration-status h2{font-size:1.05rem;margin:0 0 6px}.configuration-status p{margin:0;color:#4f6e64}.configuration-active>summary{font-size:.92rem}.configuration-editor .advanced-settings{margin-bottom:0}#research-config-edit-form>button{margin-top:18px}.configuration-section{padding:28px 32px}.configuration-section h2{font-size:1.15rem}.configuration-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 32px;margin:0}.configuration-facts>div{min-width:0;padding:14px 0;border-bottom:1px solid #e5ebec}.configuration-facts dt{font-size:.81rem;color:#687e83;margin-bottom:4px}.configuration-facts dd{margin:0;font-size:.95rem;font-weight:550;overflow-wrap:anywhere}.configuration-roles{font-size:.85rem;min-width:540px}.configuration-section .permission-review{min-width:560px}.configuration-roles th,.configuration-roles td{padding:12px 10px}.configuration-section>.note{font-size:.84rem}
+.guidance-create{padding:30px 34px}.guidance-composer{margin-top:22px}.guidance-composer textarea[name=text]{min-height:185px;line-height:1.8}.guidance-templates{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 22px}.guidance-templates button{font-size:.81rem;padding:8px 13px;background:#f5f9f7;color:#286654;border:1px solid #d6e5df;font-weight:550}.guidance-templates button:hover{background:#e8f2ed}.guidance-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 22px}.guidance-fields>*{min-width:0}.guidance-goal-note{font-size:.84rem;padding:14px 18px;border-left:3px solid #b5cabd;background:#f3f7f4;border-radius:0 7px 7px 0}.guidance-history{margin-top:32px}.guidance-history>h2{font-size:1.15rem}.guidance-record{padding:22px 28px}.guidance-record h2,.guidance-record h3{font-size:1rem;margin:0 0 10px}.guidance-metadata{display:flex;flex-wrap:wrap;gap:6px 18px;color:#687e83;font-size:.8rem}.guidance-metadata>div{min-width:0}.guidance-metadata dt{font-size:.74rem;color:#788b90}.guidance-metadata dd{margin:2px 0 0;color:#425f65}.guidance-record+.guidance-record{border-top:1px solid #e0e8e7}.guidance-record form{margin-bottom:0}.guidance-record form button{font-size:.83rem;padding:9px 15px}
+.config-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 22px}.config-grid>.config-field{margin:14px 0}.config-example{display:block;font-size:.79rem;color:#60777d;margin-top:8px;line-height:1.65}.configured-note{font-size:.78rem;color:#3d715e;background:#edf5f0;padding:7px 11px;border-radius:6px;overflow-wrap:anywhere}.expert-settings{background:#f8fafb;border-style:dashed}.expert-settings>summary{font-size:.87rem;color:#536c72}.expert-settings .field-key{font-size:.69rem}.expert-settings .config-node{background:white}
+@media(max-width:750px){.settings-groups{grid-template-columns:minmax(0,1fr)}.settings-group{padding:18px 20px}.configuration-section,.guidance-create{padding:24px}.configuration-facts{gap:0 20px}.guidance-record{padding:21px 24px}}
+@media(max-width:480px){.configuration-facts,.guidance-fields,.config-grid{grid-template-columns:minmax(0,1fr)}.settings-group,.configuration-section,.guidance-create,.guidance-record{padding:20px}.guidance-templates{gap:8px}.guidance-templates button{font-size:.78rem;padding:8px 11px}.guidance-composer>button{width:100%}.configuration-roles{font-size:.8rem}.configuration-roles th,.configuration-roles td{padding:10px 7px}}
+
+/* Compact declaration controls are scoped to creation and research editing. */
+.compact-configuration .setup-panel{padding:24px 26px}
+.compact-configuration .section-heading{margin-bottom:18px}
+.compact-configuration .section-heading h2{font-size:1.35rem;margin-bottom:6px}
+.compact-configuration .section-heading p{font-size:.86rem}
+.compact-configuration .config-field{margin:10px 0;min-width:0}
+.compact-configuration .config-field>label{font-size:.83rem;margin:0 0 5px}
+.compact-configuration input,.compact-configuration select,.compact-configuration textarea{font-size:.86rem;padding:8px 10px;border-radius:6px}
+.compact-configuration .model-fields{grid-template-columns:2fr 1fr 1fr;gap:14px}
+.compact-configuration .budget-fields{grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.compact-configuration .config-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:0 16px}
+.compact-configuration .config-grid-four{grid-template-columns:repeat(4,minmax(0,1fr));gap:0 12px}
+.compact-configuration .config-grid>.structured-setting{grid-column:1/-1}
+.compact-configuration .config-group{min-width:0;margin:16px 0 0;padding:10px 14px 8px;border:1px solid #dce5e6;border-radius:8px;background:#fff;scroll-margin-top:20px}
+.compact-configuration .config-group>legend{padding:0 6px;font-size:.9rem;font-weight:650;color:#38595b}
+.compact-configuration .config-group .config-field{margin:6px 0}
+.compact-configuration .config-help{border:0;border-radius:0;background:transparent;padding:0;margin:5px 0 0;font-size:.8125rem;color:#60777d}
+.compact-configuration .config-help>summary{font-size:.8125rem;font-weight:450;line-height:1.6}
+.compact-configuration .config-help[open]>summary{margin-bottom:5px}
+.compact-configuration .config-help p{margin:5px 0;font-size:.8125rem;line-height:1.65}
+.compact-configuration .config-help p:last-child{margin-bottom:0}
+.compact-configuration .role-settings{padding:12px 14px}
+.compact-configuration .role-settings>summary{font-size:.9rem}
+.compact-configuration .role-settings[open]>summary{margin-bottom:12px}
+.compact-configuration .config-matrix-scroll{position:relative;width:100%;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;border:1px solid #dce5e6;border-radius:6px}
+.compact-configuration .config-matrix-scroll:focus-visible{outline:3px solid #8cbab0;outline-offset:3px}
+.compact-configuration .config-role-matrix{table-layout:fixed;min-width:760px;font-size:.8125rem}
+.compact-configuration .config-role-matrix .role-column{width:142px}
+.compact-configuration .config-role-matrix .model-column{width:180px}
+.compact-configuration .config-role-matrix th,.compact-configuration .config-role-matrix td{padding:8px 6px;vertical-align:middle}
+.compact-configuration .config-role-matrix thead th{background:#f2f7f5;color:#4d6869;line-height:1.5}
+.compact-configuration .config-role-matrix thead tr:first-child th{border-bottom-color:#d0dfdb}
+.compact-configuration .config-role-matrix tbody th{font-weight:550;background:#fafcfc;line-height:1.5}
+.compact-configuration .config-role-matrix tbody tr:last-child>*{border-bottom:0}
+.compact-configuration .config-role-matrix .config-field{margin:0}
+.compact-configuration .config-role-matrix input{padding:7px 8px;font-size:.8125rem}
+.compact-configuration .config-role-matrix .check-label{font-size:.8125rem;margin:5px 0 0}
+.compact-configuration .config-role-matrix td:nth-last-child(2),.compact-configuration .config-role-matrix thead tr:first-child th:last-child{border-left:1px solid #d0dfdb}
+.compact-configuration .config-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+.compact-configuration .role-settings-help{margin-top:8px}
+.compact-configuration .summary-note{font-size:.8125rem;margin-left:10px}
+.compact-configuration .configured-note{font-size:.8125rem;padding:3px 7px;margin-left:8px}
+.compact-configuration .permission-settings,.compact-configuration .advanced-settings{padding:13px 16px;margin-top:16px}
+.compact-configuration .advanced-category,.compact-configuration .structured-setting{padding:12px 14px;margin:10px 0}
+.compact-configuration .advanced-category>.note{margin:8px 0;font-size:.8125rem}
+.compact-configuration .permission-settings>.note{font-size:.8125rem;margin:8px 0}
+.compact-configuration .field-label{font-size:.86rem;margin:0 0 6px;font-weight:650}
+.compact-configuration .check-label{font-size:.8125rem;margin:8px 0}
+.compact-configuration .config-string-row{margin:7px 0}
+.compact-configuration .setup-actions{margin-top:20px;padding-top:16px}
+.compact-configuration .path-heading{margin-top:20px}
+@media(max-width:750px){.compact-configuration .setup-panel{padding:20px}.compact-configuration .config-grid-four{grid-template-columns:repeat(2,minmax(0,1fr))}.compact-configuration .model-fields{grid-template-columns:2fr 1fr 1fr}.compact-configuration .model-fields .config-field:first-child{grid-column:auto}.compact-configuration .budget-fields{grid-template-columns:repeat(3,minmax(0,1fr))}.compact-configuration .summary-note{display:block;margin:4px 0 0}.compact-configuration .configured-note{display:inline-block;margin:4px 0 0 8px}}
+@media(max-width:480px){.compact-configuration .setup-panel{padding:16px}.compact-configuration .model-fields,.compact-configuration .budget-fields,.compact-configuration .config-grid{grid-template-columns:minmax(0,1fr)}.compact-configuration .config-grid-four{grid-template-columns:repeat(2,minmax(0,1fr))}.compact-configuration .config-group{padding:8px 10px}.compact-configuration .permission-settings,.compact-configuration .advanced-settings{padding:12px}.compact-configuration .advanced-category,.compact-configuration .structured-setting{padding:10px}.compact-configuration .config-role-matrix{min-width:760px}.compact-configuration .config-group:target{border-color:#4b907c}}
+
+/* Categories keep advanced settings compact until the relevant group is opened. */
+.compact-configuration .advanced-settings>.note{font-size:.8125rem;margin:8px 0 14px}
+.compact-configuration .advanced-settings .advanced-category{min-width:0;border:0;border-top:1px solid #dce5e6;border-radius:0;padding:14px 0 0;margin:16px 0 0;background:transparent}
+.compact-configuration .advanced-settings .advanced-category>summary{font-size:.9rem;margin:0;color:#38595b}
+.compact-configuration .advanced-settings .advanced-category>.note{margin:4px 0 8px;font-size:.8125rem}
+.compact-configuration .advanced-settings .config-grid-four{grid-template-columns:repeat(4,minmax(0,1fr));gap:0 14px}
+.compact-configuration .advanced-settings .config-field{margin:6px 0}
+.compact-configuration .advanced-settings .config-group,.compact-configuration .advanced-settings .known-settings{min-width:0;border:0;border-top:1px solid #e2e9e8;border-radius:0;padding:7px 0 0;margin:12px 0 0;background:transparent}
+.compact-configuration .advanced-settings .config-group>legend,.compact-configuration .advanced-settings .known-settings>legend{padding:0 8px 0 0;font-size:.85rem;font-weight:650;color:#49676a}
+.compact-configuration .advanced-settings .known-settings>.check-label{margin:3px 0 7px}
+.compact-configuration .advanced-settings .known-settings>.config-help{margin-bottom:6px}
+.compact-configuration .advanced-settings .structured-setting:not(.known-settings){border:1px solid #dce5e6;background:#fff;padding:10px 12px;margin:10px 0}
+.compact-configuration .advanced-settings .structured-setting>summary{font-size:.85rem}
+.compact-configuration .advanced-settings .structured-setting[open]>summary{margin-bottom:9px}
+.compact-configuration .advanced-settings .expert-settings{padding:8px 10px;margin:8px 0;border-radius:5px}
+.compact-configuration .advanced-settings .expert-settings>summary{font-size:.8125rem}
+.compact-configuration .advanced-settings .expert-settings[open]>summary{margin-bottom:8px}
+.compact-configuration .advanced-settings .structured-setting .note,.compact-configuration .advanced-settings .expert-settings .note{font-size:.8125rem;margin:6px 0}
+.compact-configuration .advanced-settings .config-list-setting{grid-column:span 2}
+.compact-configuration .advanced-settings .config-list-setting>.field-label{margin:0 0 4px}
+.compact-configuration .advanced-settings .config-list-setting>.check-label{margin:4px 0}
+.compact-configuration .advanced-settings .config-list-setting>textarea{min-height:54px}
+.compact-configuration .advanced-settings .config-string-row textarea{min-height:38px}
+.compact-configuration .advanced-settings button{font-size:.8125rem;padding:6px 10px}
+.compact-configuration .advanced-settings .config-list-setting>.config-string-add{margin-top:6px}
+.compact-configuration .advanced-settings .config-node{display:grid;grid-template-columns:minmax(0,1fr) 112px minmax(0,1.3fr) auto;gap:5px 10px;align-items:end;padding:8px 0;margin:0;border:0;border-bottom:1px solid #e2e9e8;border-radius:0;background:transparent}
+.compact-configuration .advanced-settings .config-node>label{min-width:0;margin:0;font-size:.8125rem;font-weight:450}
+.compact-configuration .advanced-settings .config-node>label>input,.compact-configuration .advanced-settings .config-node>label>select{height:38px;line-height:1.4}
+.compact-configuration .advanced-settings .config-node>.config-node-key{grid-column:1;grid-row:1}
+.compact-configuration .advanced-settings .config-node>.config-node-type{grid-column:2;grid-row:1}
+.compact-configuration .advanced-settings .config-node>.config-value{grid-column:3;grid-row:1}
+.compact-configuration .advanced-settings .config-node>.config-remove{grid-column:4;grid-row:1;white-space:nowrap;margin-bottom:1px}
+.compact-configuration .advanced-settings .config-node>.config-children{grid-column:1/-1;margin:0 0 0 12px;min-width:0;padding-left:12px;border-left:2px solid #e1ebe7}
+.compact-configuration .advanced-settings .config-node>.config-add{grid-column:1/-1;justify-self:start}
+@media(max-width:900px){.compact-configuration .advanced-settings .config-grid-four{grid-template-columns:repeat(3,minmax(0,1fr))}.compact-configuration .advanced-settings .config-node{grid-template-columns:minmax(0,1fr) 100px minmax(0,1fr) auto;gap:5px 7px}}
+@media(max-width:650px){.compact-configuration .advanced-settings .config-grid-four{grid-template-columns:repeat(2,minmax(0,1fr))}.compact-configuration .advanced-settings .config-node{grid-template-columns:minmax(0,1fr) 100px auto}.compact-configuration .advanced-settings .config-node>.config-value{grid-column:1/3;grid-row:2}.compact-configuration .advanced-settings .config-node>.config-remove{grid-column:3;grid-row:1}.compact-configuration .advanced-settings .config-node>.config-children{margin-left:0;padding-left:8px}.compact-configuration .advanced-settings .config-node>.config-add{grid-row:auto}}
+@media(max-width:480px){.compact-configuration .advanced-settings .config-grid-four{grid-template-columns:minmax(0,1fr)}.compact-configuration .advanced-settings .config-list-setting{grid-column:auto}.compact-configuration .advanced-settings .advanced-category{padding:12px 0 0}.compact-configuration .advanced-settings .config-node{grid-template-columns:minmax(0,1fr) 84px auto;gap:5px}.compact-configuration .advanced-settings .config-node>.config-remove{padding:6px}.compact-configuration .advanced-settings .config-node input,.compact-configuration .advanced-settings .config-node select{padding:7px 6px}}
+
+
 '''
 
 PROGRESS_SCRIPT = """
@@ -240,7 +343,7 @@ for (const button of document.querySelectorAll('[data-sort-group]')) {
 """
 SCRIPT_SOURCE = "'sha256-" + base64.b64encode(hashlib.sha256(PROGRESS_SCRIPT.encode()).digest()).decode() + "'"
 STYLE_SOURCE = "'sha256-" + base64.b64encode(hashlib.sha256(CSS.encode()).digest()).decode() + "'"
-CSP = "default-src 'none'; style-src " + STYLE_SOURCE + "; script-src " + SCRIPT_SOURCE + " " + CONFIG_SCRIPT_CSP + " " + translation_client.CSP + "; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+CSP = "default-src 'none'; style-src " + STYLE_SOURCE + "; script-src " + SCRIPT_SOURCE + " " + CONFIG_SCRIPT_CSP + " " + GUIDANCE_SCRIPT_CSP + " " + translation_client.CSP + "; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 
 
 def escape(value):

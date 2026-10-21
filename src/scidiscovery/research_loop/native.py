@@ -16,17 +16,17 @@ import subprocess
 import sys
 import time
 
+from . import configuration_updates
 from . import budget as control_budget, execution, runtime, search, checkpoint, profiles, backends
 from .output_repair import OutputRepairRequired
 from .contracts import (ACTIONS, actions, ROLE_INSTRUCTIONS, digest, host_record, read,
-                        seal_result, workspace, write, settings as frozen_settings)
+                        seal_result, workspace, write)
 
 
 def usage(root: Path):
     """Sum distinct node meters, never re-add cumulative observations."""
     totals = dict(input_tokens=0, cached_input_tokens=0, output_tokens=0)
     unknown = []
-    settings = frozen_settings(root)
     for step in range(1, control_budget.historical_step_limit(root) + 1):
         for record in execution.records(root, step):
             if not (record / 'native-intent.json').exists():continue
@@ -68,7 +68,7 @@ def execute_native(root: Path, step: int, *, final_report=None):
     require_current(root)
     from . import contracts as _contracts
     require_current(root,_contracts.read(_contracts.regular(Path(root)/'jobs'/f'{step:03d}.json')))
-    settings = frozen_settings(root)
+    settings = configuration_updates.for_step(root, step)
     record = execution.record(root, step)
     record.mkdir(parents=True, exist_ok=True)
     job_path = root / "jobs" / f"{step:03d}.json"
@@ -139,7 +139,7 @@ def run_native(root: Path, step: int, attempt=0):
     require_current(root)
     from . import contracts as _contracts
     require_current(root,_contracts.read(_contracts.regular(Path(root)/'jobs'/f'{step:03d}.json')))
-    settings = frozen_settings(root)
+    settings = configuration_updates.for_step(root, step)
     work = workspace(root, step)
     job_path = root / 'jobs' / f'{step:03d}.json'
     job = read(job_path)
@@ -187,7 +187,7 @@ def run_native(root: Path, step: int, attempt=0):
     args = backend.launch(profile, work, pending, schema_path, role_instruction)
     if settings.get('resume_policy') is not None:
         from . import continuation
-        continuation.validate_launcher(root)
+        continuation.validate_launcher(root, step)
     if attempt and intent.get('context_mode') != 'new_context':
         if not backend.supports_resume:
             from .continuation import ResumeUnavailable

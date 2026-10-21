@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, controller, decision, execution, experiments, history, native, search
+from scidiscovery.research_loop import budget, contracts as c, controller, decision, execution, experiments, history, native, search
 from execution_fixtures import execution_registry
 from scidiscovery.research_loop.protocol import CURRENT, UnsupportedProtocol
 from test_breadth_science import run as run_command, findings
@@ -51,7 +51,9 @@ def worker(root, step, parents, *, observed=P):
         instruction=route_instruction(root, parents))
     assert job['role'] == 'W' and [int(Path(row['path']).parts[2]) for row in job['direct_refs']] == parents
     record = execution.record(root, step)
-    intent = dict(step=step, task_sha256=c.digest(path), search_slice=search.accept(root, job))
+    anchor = budget.accept_node(root, job)
+    intent = dict(step=step, task_sha256=c.digest(path), **(
+        dict(budget_slice=anchor) if anchor is not None else dict(search_slice=search.accept(root, job))))
     c.write(record / 'native-intent.json', intent)
     original_intent = (record / 'native-intent.json').read_bytes()
     output = root.parent / f'portfolio-execution-{step}.json'
@@ -64,7 +66,10 @@ def worker(root, step, parents, *, observed=P):
     payload = dict(summary='A retained mechanical comparison',
         scientific_result=f'Mechanical comparison at W{step}; scientific adequacy remains unknown.',
         limitations=['A tiny command is not scientific effectiveness evidence'], implementation_selection=None,
-        stage_intent='review', mechanism_findings=findings(observed, blocked=[ref for ref in assigned if ref != observed]))
+        stage_intent='review', mechanism_findings=findings(observed, blocked=[ref for ref in assigned if ref != observed]),
+        candidate_nominations=dict(representatives=[], extras=[], gaps=[dict(
+            mechanism_ref=row['mechanism_ref'], reason='The mechanical command supplies no scientifically suitable model candidate.')
+            for row in job.get('candidate_nomination_mechanisms', []) if row['status'] != 'waived']))
     c.write(record / 'science-output.json', payload)
     meter = dict(input_tokens=7, cached_input_tokens=2, output_tokens=3)
     c.write(record / 'usage.json', meter)

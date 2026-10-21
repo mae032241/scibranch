@@ -46,7 +46,8 @@ def worker(root, step, parents, *, observed=None):
     if path.exists():
         job = c.read(path)
         assert job['role'] == 'W' and [int(row['path'].split('/')[2]) for row in job['direct_refs']] == parents
-        c.write(execution.record(root, step) / 'native-intent.json', dict(task_sha256=c.digest(path)))
+        c.write(execution.record(root, step) / 'native-intent.json',
+            dict(task_sha256=c.digest(path), search_slice=search.accept(root, job)))
         output = root.parent / f'config-{step}.json'
         experiments.configure(root, step, 'local_execution:command', dict(run_argv=[sys.executable]), output)
         config = c.read(output)
@@ -66,7 +67,8 @@ def worker(root, step, parents, *, observed=None):
     if screen:
         assert selected_refs <= assigned
     return finish(root, step, 'W', parents, files={'candidate.py': 'def predict(): return 1\n'},
-        mechanism_findings=findings(*selected_refs, blocked=sorted(assigned - selected_refs)) if screen else None)
+        mechanism_findings=findings(*selected_refs, blocked=sorted(assigned - selected_refs)) if screen else None,
+        preserve_native_intent=True)
 
 
 def assess(root, step, parents, *, action='continue_w', search_choice=None):
@@ -375,7 +377,12 @@ payload=dict(summary='Scientific fixture result',scientific_result='Blocked mech
 if role=='H':
  payload.update(next_action='experiment',route_reason='Test the declared route',search_plan=dict(scope='Bounded H scope',commitments=[dict(label='Mechanism',minimal_test='Discriminating measurement',existing_ref=None)],focus=dict(label='Mechanism',action='screen')))
 elif role=='W':
- payload.update(stage_intent='review',mechanism_findings=[dict(mechanism='Mechanism',basis='blocked',finding='This transport fixture runs no managed scientific observation.')])
+ manifest=json.loads(pathlib.Path(os.environ['THIN_HWA_JOB_MANIFEST']).read_text())
+ payload.update(stage_intent='review',mechanism_findings=[dict(mechanism='Mechanism',basis='blocked',finding='This transport fixture runs no managed scientific observation.')],
+  candidate_nominations=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row['mechanism_ref'],
+   reason='This transport fixture produces no scientific candidate to compare.')
+   for row in manifest['candidate_nomination_mechanisms'] if row['status']!='waived'])
+   if manifest.get('candidate_nomination_mechanisms') else None)
 elif role=='A':
  active=bool(job.get('lineage',{}).get('mechanisms',{}).get('count'))
  again=active and step==3

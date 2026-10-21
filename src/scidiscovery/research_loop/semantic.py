@@ -15,7 +15,7 @@ def outcome(root,job,payload):
         raise ValueError('Current scientific interpretation required')
     from . import formal_review
     formal_review.validate_choice(root,job,payload)
-    enabled=c.settings(root).get('search_policy') is not None and not job.get('formal_review') and not job.get('final_report')
+    enabled=c.settings(root, job).get('search_policy') is not None and not job.get('formal_review') and not job.get('final_report')
     interpretation=search.interpret(root,job,payload) if enabled else dict(focus=None,allocation=None,diagnostics=[])
     diagnostics=interpretation['diagnostics']
     selection=[];c.selected_inputs(c.workspace(root,job['step']),payload,job,selection)
@@ -121,7 +121,7 @@ def validate_job(root, job):
     if (root_job['role'], root_payload.get('next_action')) not in {('H', 'experiment'), ('A', 'continue_w')}:
         raise ValueError('Author correction root did not request a dependent experiment')
     reason = 'implementation_unresolved' if root_seal.get('control_outcome', {}).get('selection_status') == 'unresolved' else None
-    if reason is None and c.settings(root).get('search_policy') is not None:
+    if reason is None and c.settings(root, job).get('search_policy') is not None:
         protocol = root_job.get('handoff_protocol', 1)
         reason = search.launch_reason(root, dict(step=root_step + 1, role='W', handoff_protocol=protocol,
             search=search.bind(root, root_step + 1, 'W', protocol, write_pages=False, unified=True)))
@@ -206,7 +206,7 @@ def effective_route(root, step, result, job, route):
         if repair is not None:
             engineering.admit(root, repair, step + 1)
         code = 'implementation_unresolved' if repair is None and seal.get('control_outcome', {}).get('selection_status') == 'unresolved' else None
-        if code is None and c.settings(root).get('search_policy') is not None:
+        if code is None and c.settings(root, job).get('search_policy') is not None:
             protocol = job.get('handoff_protocol', 1)
             planned = dict(step=step + 1, role='W', handoff_protocol=protocol,
                            engineering_repair=repair,

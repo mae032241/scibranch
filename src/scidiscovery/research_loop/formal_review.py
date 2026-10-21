@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import get_args
 
+from . import configuration_updates
 from ..operations import review_rules
 from . import contracts as c, execution, qualification as q
 
@@ -41,13 +42,15 @@ def _contract():
         default_inputs='exact_subject_and_global_objective_constraints_v1')
 
 
-def freeze_contract(root):
+def freeze_contract(root, directory=None):
     root = Path(root).resolve()
-    return dict(version=1, contract=q._save(root, root / 'qualification/review-contract.json', _contract()))
+    path = Path(directory) / 'review-contract.json' if directory is not None else root / 'qualification/review-contract.json'
+    return dict(version=1, contract=q._save(root, path, _contract()))
 
 
-def contract(root):
-    policy = c.settings(root).get('formal_review_policy')
+def contract(root, job=None):
+    settings = configuration_updates.for_job(root, job) if job is not None else configuration_updates.current(root)
+    policy = settings.get('formal_review_policy')
     if policy is None:
         return None
     current = _contract()
@@ -174,7 +177,7 @@ def authors(root, step, active=None, memo=None):
             if value['complete'] and 'input_sources' in value:
                 declared = execution_inputs.managed_source_contributions(root, job, q._read(root, value['accepted_ref']))
                 contributions.extend(declared['contributions'])
-        if c.settings(root).get('history_observer') is not None:
+        if configuration_updates.for_job(root, job).get('history_observer') is not None:
             from . import history
             observation = history.read_observation(root, job, seal)
             declared = history.observer_input_sources(root, job, observation) if observation is not None else None
@@ -213,12 +216,12 @@ def _subject(root, selected):
     return dict(producer_step=step, producer_seal=q._ref(root, path), material=item['material'])
 
 
-def _request_value(root, selected):
-    current = contract(root)
+def _request_value(root, selected, job):
+    current = contract(root, job)
     subject = _subject(root, selected)
     identity = authors(root, subject['producer_step']) if subject else dict(complete=False, participants=[])
     from . import backends
-    backend = backends.selected(c.settings(root))
+    backend = backends.selected(configuration_updates.for_job(root, job))
     reason = ('formal_review_subject_missing_or_ambiguous' if subject is None else
               'subject_authorship_unsupported' if not identity['complete'] else
               'reviewer_identity_unsupported' if not backend.complete_authorship else None)
@@ -234,7 +237,7 @@ def request_route(root, job, payload, parents):
     root = Path(root).resolve()
     seal_path = c.host_record(c.workspace(root, job['step'])) / 'result-identity.json'
     seal = c.read(c.regular(seal_path))
-    value = dict(_request_value(root,seal.get('selected_inputs', [])), requester_rationale=payload['route_reason'])
+    value = dict(_request_value(root,seal.get('selected_inputs', []), job), requester_rationale=payload['route_reason'])
     reason=value['reason']
     requester = dict(step=job['step'], seal=q._ref(root, seal_path))
     record = c.host_record(c.workspace(root, job['step']))
@@ -250,8 +253,9 @@ def request_route(root, job, payload, parents):
 def input_binding(root, reference):
     """Exact material and producer metadata, without mounting authored conclusions."""
     request = q._read(root, reference)
+    requester = c.read(c.regular(Path(root) / 'jobs' / f'{request["requester"]["step"]:03d}.json'))
     subject = request['subject']; seal = q._read(root, subject['producer_seal'])
-    if (request['contract'] != contract(root) or request['question'] != QUESTION
+    if (request['contract'] != contract(root, requester) or request['question'] != QUESTION
             or subject['producer_seal'] != q._ref(root, c.host_record(c.workspace(root,subject['producer_step']))/'result-identity.json')
             or subject['material'] not in seal['materials']):
         raise q.IntegrityError('Formal review inputs differ from the exact requested subject')
@@ -305,7 +309,7 @@ def unavailable_attempts(root, step, *, before_step=None):
 def choice_constraints(root, job, references=None):
     """Freeze existing failures, not a retry allowance or a second history store."""
     from . import backends
-    backend=backends.selected(c.settings(root))
+    backend=backends.selected(configuration_updates.for_job(root, job))
     if references is None:
         paths=sorted((Path(root)/'native-evidence').glob('*/formal-review-unavailable.json'),key=lambda path:int(path.parent.name))
         references=[q._ref(root,path) for path in paths if int(path.parent.name)<job['step']]
@@ -325,7 +329,7 @@ def validate_choice(root, job, payload):
         return
     from .output_repair import OutputRepairRequired
     selected=c.selected_inputs(c.workspace(root,job['step']),payload,job)
-    value=_request_value(root,selected)
+    value=_request_value(root,selected,job)
     if value['subject'] is None:
         raise OutputRepairRequired('formal_review_unavailable',
             'Select exactly one resolvable scientific implementation for formal_review, or choose another scientific action. No review was dispatched; do not repeat experiments.')
@@ -363,10 +367,11 @@ def bind_job(root, job):
     back = job.get('evidence_return') or {}
     if back.get('kind') != 'formal_review':
         return
-    if job['role'] != 'A' or contract(root) is None:
+    if job['role'] != 'A' or contract(root, job) is None:
         raise q.IntegrityError('Formal review requires its explicit frozen operator contract')
     request = q._read(root, back['request'])
-    if request['contract'] != contract(root) or request['requester']['step'] >= job['step']:
+    requester = c.read(c.regular(Path(root) / 'jobs' / f'{request["requester"]["step"]:03d}.json'))
+    if request['contract'] != contract(root, requester) or request['requester']['step'] >= job['step']:
         raise q.IntegrityError('Formal review request contract or requester changed')
     if request['requester']['seal'] != q._ref(root,c.host_record(c.workspace(root,request['requester']['step']))/'result-identity.json'):
         raise q.IntegrityError('Formal review requester differs from its exact original node')
@@ -383,7 +388,7 @@ def validate_job(root, job):
         if (expected.get('formal_review')!=job.get('formal_review') or job.get('purpose')!='formal_review'):
             raise q.IntegrityError('Formal review task differs from its frozen request')
         binding=input_binding(root,job['formal_review'])
-        if (job['instruction']!=QUESTION or job['goal_text']!=c.settings(root)['objective']
+        if (job['instruction']!=QUESTION or job['goal_text']!=configuration_updates.for_job(root, job)['objective']
                 or job['global_materials']!=c.global_materials(root) or job['direct_refs']
                 or job['direct_materials']!=binding['materials'] or job.get('selected_inputs')!=binding['selected']
                 or job['direct_entry_points'] or job['history']!=binding['history']
@@ -395,7 +400,7 @@ def validate_job(root, job):
             raise q.IntegrityError('Formal review retained default historical or requester conclusions')
     if 'formal_review_choices' in job and job['formal_review_choices']!=choice_constraints(root,job,job['formal_review_choices']['unavailable']):
         raise q.IntegrityError('Frozen formal review choice constraints changed')
-    if job.get('formal_review_version')==1 and contract(root) is None:
+    if job.get('formal_review_version')==1 and contract(root, job) is None:
         raise q.IntegrityError('Formal review task lost its operator contract')
 
 
@@ -439,7 +444,8 @@ def _qualification(root, job, payload, seal):
     subject = request['subject']
     q._read(root, subject['producer_seal'])
     current_authors = authors(root, subject['producer_step'])
-    if request['contract'] != contract(root) or request['authors'] != current_authors:
+    input_binding(root, job['formal_review'])
+    if request['authors'] != current_authors:
         raise q.IntegrityError('Formal review contract or subject authors changed')
     reviewer = participants(root, job, seal)
     independent = review_rules.independence(
@@ -484,6 +490,6 @@ def require_review(root, subject, receipt):
     c.validate(c.workspace(root, job['step']))
     seal = c.read(c.host_record(c.workspace(root, job['step'])) / 'result-identity.json')
     if (seal.get('formal_review') != receipt or proof['subject'] != subject
-            or proof['contract'] != contract(root) or proof['status'] != 'passed'):
+            or proof['contract'] != q._read(root, job['formal_review'])['contract'] or proof['status'] != 'passed'):
         raise ValueError('Exact subject has no compatible independent sealed pass')
     return receipt

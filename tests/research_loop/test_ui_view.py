@@ -178,6 +178,18 @@ def test_usage_cards_mark_overrun_unknown_usage_and_waiting():
     assert missing['tokens']['value'] == '未记录' and missing['time']['limit'] == '未记录' and missing['candidates']['value'] == '未记录'
 
 
+def test_unverifiable_time_is_explicit_without_claiming_exhaustion():
+    view = dict(budget=dict(max_tokens=100, max_seconds=60, max_steps=5,
+        consumed_seconds=None, seconds_remaining=None, time_status='unknown'),
+        usage=dict(observed_tokens=2))
+    duration = ui_view.usage_stats(view)['time']
+    assert duration['value'] == '无法核实'
+    assert duration['limit'] == '1 分'
+    assert duration['raw'] is None and duration['percent'] is None and not duration['over']
+    assert duration['notes'] == ['时钟记录不足以核实已用时间与剩余额度；已保留原有记录。']
+    assert ui_view.exhausted_limits(view, 1) == []
+
+
 def test_token_monitoring_keeps_cache_subset_and_context_independent(monkeypatch):
     monkeypatch.setattr(ui_view.time, 'time', lambda: 150)
     usage = dict(input_tokens=100, cached_input_tokens=80, output_tokens=5, observed_tokens=105,

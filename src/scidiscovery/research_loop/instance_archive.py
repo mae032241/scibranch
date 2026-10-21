@@ -21,7 +21,7 @@ FORMAT = 'scidiscovery.instance-readonly-archive.v1'
 ROOT_FILES = {'settings.json', 'settings-identity.json', 'host-started.json', 'pause.request', 'instance-owner.json'}
 ROOT_DIRS = {'jobs', 'project', 'control-ledger', 'correction-ledger', 'native-evidence',
              'host-runtime', 'host-history', 'host-delivery', 'source-provenance',
-             'qualification', 'execution-authority'}
+             'qualification', 'execution-authority', 'host-control'}
 AUTHORITY_EXCLUDED = {'host-key-source.json', 'ui-endpoint.json', 'ui.lock', 'writer.lock'}
 CALL_LOCKS = ('node.lock', 'accept.lock')
 CALL_LEASES = ('tcad-submission-', 'tcad-binding-', 'tcad-collect-', 'observation-', 'engineering-')
@@ -51,7 +51,7 @@ def _path(value):
 def _excluded(root, parts):
     if parts[0] == 'native-homes':
         return 'native_environment_sessions_caches_and_credentials'
-    if len(parts) == 1 and parts[0] in {'host-run.lock', 'control-ledger.lock'}:
+    if len(parts) == 1 and parts[0] in {'host-run.lock', 'control-ledger.lock', 'configuration.lock'}:
         return 'controller_or_budget_lock'
     if len(parts) == 2 and parts[0] == 'execution-authority' and parts[1] in AUTHORITY_EXCLUDED:
         return 'private_key_locator_or_transient_ui_or_authority_lock'
@@ -93,6 +93,7 @@ def _inventory(root):
             source_stat=[info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns])
         unknown = (parts[0] not in ROOT_FILES | ROOT_DIRS
             or len(parts) == 2 and parts[0] == 'project' and parts[1] not in {'global', 'nodes'}
+            or len(parts) == 2 and parts[0] == 'host-control' and parts[1] != 'configuration'
             or len(parts) == 2 and parts[0] == 'host-runtime' and parts[1] not in {'experiment-control', 'restore'})
         if unknown:
             yield dict(path=name, kind='gap', reason='unrecognized_framework_ownership_not_traversed', **identity)
@@ -146,6 +147,8 @@ def _owner_locks(stack, root):
     # All exporter acquisitions are nonblocking; no high-level owner reentry.
     from . import controller
     stack.enter_context(controller._writer(root))
+    if (root / 'configuration.lock').exists():
+        _lock(stack, root / 'configuration.lock')
     _lock(stack, root / 'execution-authority/ui.lock')
     for path in sorted((root / 'native-evidence').glob('*/**/native-intent.json')):
         _lock(stack, path.parent / 'runner.lock')
@@ -279,6 +282,14 @@ def _dependencies(settings):
     yield dict(owner='approval_receipt_key', reference=None, coverage='key_and_private_locator_excluded_no_signature_authority')
 
 
+def _configuration_dependencies(root, settings):
+    from . import configuration_updates
+    yield from _dependencies(settings)
+    for revision in configuration_updates.revisions(root):
+        for row in _dependencies(revision['settings']):
+            yield dict(row, owner=f'configuration/{revision["revision"]}/{row["owner"]}')
+
+
 def _stream(path, values):
     count = 0
     with path.open('xb') as stream:
@@ -342,7 +353,7 @@ def _export(root, output, *, on_locked=None):
                         counts[{'directory': 'directories', 'gap': 'gaps', 'excluded': 'excluded'}[entry['kind']]] += 1
                     yield entry
             entries = _stream(stage / 'manifest.jsonl', originals())
-            dependencies = _stream(stage / 'dependencies.jsonl', _dependencies(settings))
+            dependencies = _stream(stage / 'dependencies.jsonl', _configuration_dependencies(root, settings))
             metadata = dict(format=FORMAT, instance_id=settings['goal_id'], settings_sha256=c.digest(root / 'settings.json'),
                 restorable=False, limitations=LIMITATIONS, entries=entries, dependencies=dependencies, **counts,
                 manifest={key: value for key, value in files.hash_file(stage / 'manifest.jsonl').items() if key in {'sha256', 'size_bytes'}},
@@ -798,8 +809,12 @@ def checkpoint_restore(root, package):
             raise files.ArchiveError('Original restore transfer receipt changed')
         if not path.exists():files.durable_json(path, transfer)
         owner.verify_transition(root, checkpoint_ref, q._ref(root, path))
-        _restore_dependencies(c.settings(root))
         budget.reanchor_paused_checkpoint(root, checkpoint_ref=checkpoint_ref, transfer_ref=q._ref(root, path))
+        from . import configuration_updates
+        configuration = configuration_updates.status(root)
+        _restore_dependencies(configuration['active_settings'])
+        if configuration['pending']:
+            _restore_dependencies(configuration['settings'])
         if anchor['state'] != 'active':
             files.durable_json(root / 'pause.request', dict(reason='cold_checkpoint_restored'))
             anchor['state'] = 'active'

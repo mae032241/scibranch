@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 
+from . import configuration_updates
 from . import budget, contracts as c, delivery, execution, native
 
 SCOPE = 'Adapter-scoped qualification, not target evidence or submission.'
@@ -49,7 +50,7 @@ def _validate_request(root, intent):
     if (set(intent) - {'binding'} != stored_fields or intent['action_kind'] != 'audit'
             or intent['operation_id'] != _operation(root, decision, intent['candidate_id'])
             or intent['action_id'] != intent['operation_id']
-            or intent['max_seconds'] != c.settings(root)['delivery_policy']['submit_seconds']
+            or intent['max_seconds'] != configuration_updates.for_step(root, decision['step'])['delivery_policy']['submit_seconds']
             or type(intent['advance_seconds']) not in (int, float)
             or not math.isfinite(intent['advance_seconds']) or intent['advance_seconds'] < 0):
         raise ValueError('Candidate audit accepted budget or identity changed')
@@ -102,11 +103,12 @@ def _dispatch_binding(root,intent):
 def _validate_objects(root, intent, binding, refs):
     _validate_request(root, intent)
     require_eligibility(root,intent)
-    delivery.validate_sources(root, refs)
+    job = c.read(c.regular(root/'jobs'/f'{intent["decision"]["step"]:03d}.json'))
+    delivery.validate_sources(root, refs, job=job)
     rows = [row for row in refs['items'] if row['candidate_id'] == intent['candidate_id']]
     if (len(rows) != 1 or rows[0] != binding['source'] or binding['decision'] != intent['decision']
             or binding['operation_id'] != intent['operation_id'] or binding['candidate_id'] != intent['candidate_id']
-            or binding['target'] != delivery._adapter(root)['target']):
+            or binding['target'] != delivery._adapter(root, job)['target']):
         raise ValueError('Candidate audit no longer binds its selected original')
 
 
@@ -308,17 +310,17 @@ def execute(root, job, payload):
         _save(directory / 'outcome.json', value)
         if note=='candidate_audit_unchanged_originals_unavailable':return 'candidate_audit_originals_unavailable'
         return None if cleanup else 'candidate_audit_unknown'
-    if not enabled(c.settings(root)):
+    if not enabled(configuration_updates.for_job(root, job)):
         return finish('unavailable', 'candidate_audit_disabled')
     if chosen is None or chosen not in job['history']['candidate_ids']:
         return finish('unavailable', 'candidate_unavailable')
-    policy = c.settings(root).get('delivery_policy')
+    policy = configuration_updates.for_job(root, job).get('delivery_policy')
     if policy is None or policy['adapter'] is None:
         return finish('unavailable', 'adapter_unavailable')
     if budget.execution_blocked(root):
         return 'candidate_audit_unknown'
     meter, limits = native.usage(root), budget.snapshot(root)
-    settings = c.settings(root)
+    settings = configuration_updates.for_job(root, job)
     reserve = budget.delivery_reserve(settings)
     soft_closeout = budget.node_mode(root) == 'soft' and job.get('purpose') == 'closeout'
     if soft_closeout:
@@ -345,8 +347,8 @@ def execute(root, job, payload):
     _save(directory / 'intent.json', intent)
     try:
         if not job.get('delivery_sources'):resolved = hashlib.sha256(delivery._bytes(job['history']['nodes'])).hexdigest()
-        refs = (delivery.selected_sources(root, job['delivery_sources'], chosen, prepare=True)
-            if job.get('delivery_sources') else delivery.freeze_sources(root, job['history']['nodes'], candidate_id=chosen))
+        refs = (delivery.selected_sources(root, job['delivery_sources'], chosen, prepare=True, job=job)
+            if job.get('delivery_sources') else delivery.freeze_sources(root, job['history']['nodes'], candidate_id=chosen, job=job))
         rows = [row for row in refs['items'] if row['candidate_id'] == chosen and row['status'] == 'audit_pending']
         if len(rows)!=1:
             _save(directory/'sources.json',refs)
@@ -427,7 +429,7 @@ def project_receipts(root, records, refs):
         identities = models.get(chosen, set())
         match = ('unknown' if artifact is None or not identities else
                  'matched' if identities == {(artifact['sha256'], artifact['size_bytes'])} else 'different')
-        spec = c.settings(root).get('delivery_policy', {}).get('adapter')
+        spec = (configuration_updates.for_step(root, ref['step']).get('delivery_policy') or {}).get('adapter')
         label = Path(spec['adapter']).name if spec is not None else 'unavailable'
         rows.append(dict(candidate_id=chosen, adapter_result=result['status'], artifact_binding=match,
                          audit_step=ref['step'], adapter=label.encode()[:80].decode(errors='ignore'),

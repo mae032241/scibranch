@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import budget, cli, contracts as c, controller, correction, native
+from scidiscovery.research_loop import budget, cli, contracts as c, controller, correction, native, search
 from scidiscovery.research_loop.protocol import CURRENT, UnsupportedProtocol
 
 
@@ -33,6 +33,9 @@ def finish(root, step, role, parents, text="A bounded scientific finding", actio
             mechanism=labels[row["mechanism_ref"]], basis="blocked",
             finding="No experiments are executed in this fixture; the mechanism has no observations.")
             for row in job["search"]["coverage_obligation"]])
+        payload['candidate_nominations'] = dict(representatives=[], extras=[], gaps=[dict(
+            mechanism_ref=row['mechanism_ref'], reason='No experiments or suitable candidates are supplied by this fixture.')
+            for row in job.get('candidate_nomination_mechanisms', []) if row['status'] != 'waived'])
     if role == "H":
         payload["search_plan"] = search_choice
     if role == "A":
@@ -43,11 +46,16 @@ def finish(root, step, role, parents, text="A bounded scientific finding", actio
             progress_assessment=progress, decision_request=request, portfolio_review=None)
     if role in {"H", "A"}:
         payload.update(next_action=action, route_reason="Exact scientific question")
-    c.write(record / "native-intent.json", dict(task_sha256=c.digest(path)))
+    intent = dict(task_sha256=c.digest(path))
+    if role == 'W':
+        intent['search_slice'] = search.accept(root, job)
+    c.write(record / "native-intent.json", intent)
     c.write(record / "science-output.json", payload)
-    c.write(record / "usage.json", dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
+    meter = dict(input_tokens=7, cached_input_tokens=2, output_tokens=3)
+    c.write(record / "usage.json", meter)
     c.write(record / "native-outcome.json", dict(returncode=0, stop_reason=None,
-        usage=native.usage(root), raw_sha256=c.digest(record / "science-output.json")))
+        usage=native.usage(root), raw_sha256=c.digest(record / "science-output.json"),
+        search_slice=search.report(root, job, intent, meter)))
     c.seal_result(root, step)
     return job, work, record
 
@@ -551,3 +559,55 @@ def test_legacy_a_write_schema_is_rejected_without_mutation(scene, protocol):
         c.result_schema('A', protocol)
     assert {path: path.read_bytes() for path in scene.rglob('*') if path.is_file()} == original
     assert 'progress_assessment' in c.result_schema('A')['required']
+
+
+def test_disabling_future_corrections_preserves_published_pause_until_exact_ack(scene, monkeypatch):
+    from scidiscovery.research_loop import configuration_updates
+
+    from test_history_handoff import finish as finish_current
+
+    calls = []
+
+    def execute(root, step):
+        job = c.read(root / 'jobs' / f'{step:03d}.json')
+        role = job['role']
+        calls.append((step, role))
+        parents = [int(row['path'].split('/')[2]) for row in job['direct_refs']]
+        action = 'experiment' if role == 'H' else 'continue_w' if role == 'A' else 'wait'
+        choice = assessment = findings = None
+        if role == 'H':
+            known = job['search']['unfinished_plan']
+            choice = plan(existing_ref=known[0]['mechanism_ref'] if known else None)
+        elif role == 'A':
+            choice = dict(dispositions=[], next_focus=focus())
+            assessment = dict(verdict='no_progress')
+        elif role == 'W':
+            labels = {row['mechanism_ref']: row['label'] for row in job['search']['breadth']['mechanisms']}
+            findings = [dict(mechanism=labels[row['mechanism_ref']], basis='blocked',
+                finding='Fixture performs no experiments and retains the missing observations.')
+                for row in job['search']['coverage_obligation']]
+        # The current fixture supplies explicit candidate nomination gaps.
+        finish_current(root, step, role, parents, action=action, search_choice=choice,
+                       progress=assessment, mechanism_findings=findings)
+
+    monkeypatch.setattr(native, 'execute_native', execute)
+    trigger = published_pause(scene)
+    document = configuration_updates.status(scene)['configuration']
+    document['budget'].pop('correction')
+    configuration_updates.submit(scene, document, expected_revision=0)
+
+    state = correction.project(scene)
+    assert not state['enabled']
+    assert state['current_pause']['trigger_id'] == trigger
+    assert state['current_pause']['published']
+    assert state['review_request'] is None
+    result = controller.run(scene)
+    assert result['status'] == 'correction_paused'
+    assert result['correction_trigger']['trigger_id'] == trigger
+    assert len(calls) == 12
+    assert not (scene / 'jobs/013.json').exists()
+
+    with controller._writer(scene):
+        correction.acknowledge(scene, trigger, 'Review the exact retained pause before any further work')
+    assert correction.project(scene)['permit']['trigger_id'] == trigger
+    assert correction.gate(scene, 12) is None

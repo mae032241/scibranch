@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 import uuid
 
+from . import configuration_updates
 from . import budget, contracts as c, execution, native, runtime, checkpoint
 from .output_repair import OutputRepairRequired, WorkRepairRequired
 
@@ -38,11 +39,12 @@ def policy(value, launcher):
     return dict(value, launcher_files=files)
 
 
-def validate_launcher(root):
+def validate_launcher(root, step=None):
     from . import backends
-    if not backends.selected(c.settings(root)).supports_resume:
+    settings = configuration_updates.for_step(root, step) if step is not None else configuration_updates.current(root)
+    if not backends.selected(settings).supports_resume:
         raise ResumeUnavailable('worker_resume_unsupported_backend')
-    limits = c.settings(root).get('resume_policy')
+    limits = settings.get('resume_policy')
     if limits is None:raise ResumeUnavailable('worker_resume_unsupported')
     for proof in limits['launcher_files']:
         if Path(proof['invoked_path']).resolve() != Path(proof['path']):
@@ -76,7 +78,7 @@ def validate_session_header(line, thread, workspace):
 
 def session(root, step, record, *, home=None, session_path=None, identity_proof=False):
     from . import backends
-    if not backends.selected(c.settings(root)).supports_resume:
+    if not backends.selected(configuration_updates.for_step(root, step)).supports_resume:
         raise ResumeUnavailable('worker_resume_unsupported_backend')
     outcome = c.read(c.regular(record / 'native-outcome.json'))
     thread = outcome.get('thread_id')
@@ -143,7 +145,7 @@ def seal_or_repair(root, step):
             saved = checkpoint.validate(root, job, record)
             outcome = c.read(c.regular(record / 'native-outcome.json'))
             if (outcome.get('returncode') == 0 and not outcome.get('stop_reason')
-                    and (not outcome['usage']['unknown_steps'] or budget.native_completion_known(outcome, c.settings(root)))):
+                    and (not outcome['usage']['unknown_steps'] or budget.native_completion_known(outcome, configuration_updates.for_step(root, step)))):
                 if saved['science']['status'] != 'present':
                     # c.seal_result provides the bound output diagnosis/repair.
                     return c.seal_result(root, step)
@@ -183,7 +185,7 @@ def seal_or_repair(root, step):
         except ResumeUnavailable as error:
             return _work_exit(root,job,record,str(error))
     except OutputRepairRequired:
-        if not (c.settings(root).get('resume_policy') or {}).get('output_repair', False):
+        if not (configuration_updates.for_step(root, step).get('resume_policy') or {}).get('output_repair', False):
             raise
         return start(root, step)
 
@@ -194,7 +196,7 @@ def output_request(root, step, record, *, source_attempt=None, verify_task=True)
     outcome = c.read(c.regular(record / 'native-outcome.json'))
     if (type(outcome.get('returncode')) is not int or outcome['returncode'] != 0
             or outcome.get('stop_reason')
-            or outcome['usage']['unknown_steps'] and not budget.native_completion_known(outcome, c.settings(root))):
+            or outcome['usage']['unknown_steps'] and not budget.native_completion_known(outcome, configuration_updates.for_step(root, step))):
         raise ValueError('Output repair requires a known completed original turn')
     raw = record / 'science-output.json'
     if outcome.get('output_status') == 'missing':
@@ -229,9 +231,9 @@ def validate_repair(root, step, intent, *, prior_record=None, verify_task=True):
     request = intent.get('work_repair') or intent.get('output_repair')
     if request is None:
         return
-    if (c.settings(root).get('resume_policy') or {}).get('output_only') and intent.get('work_repair') is not None:
+    if (configuration_updates.for_step(root, step).get('resume_policy') or {}).get('output_only') and intent.get('work_repair') is not None:
         raise ValueError('Output-only policy does not authorize scientific work repair')
-    if intent.get('work_repair') is None and not validate_launcher(root).get('output_repair', False):
+    if intent.get('work_repair') is None and not validate_launcher(root, step).get('output_repair', False):
         raise ValueError('Output repair is not authorized by the frozen policy')
     prior = prior_record if prior_record is not None else execution.records(root, step)[intent['attempt'] - 1]
     expected = output_request(root, step, prior, source_attempt=intent['attempt'] - 1, verify_task=verify_task)
@@ -261,10 +263,10 @@ def validate_fragment_chain(root, step, chain):
         science = c.science_payload(prior / 'science-output.json', 'W', job.get('handoff_protocol', 1))
         if (saved['science']['status'] != 'present' or science.get('stage_intent') != 'continue'
                 or original.get('returncode') != 0 or original.get('stop_reason')
-                or original['usage']['unknown_steps'] and not budget.native_completion_known(original, c.settings(root))):
+                or original['usage']['unknown_steps'] and not budget.native_completion_known(original, configuration_updates.for_step(root, step))):
             raise ValueError('Fragment continuation has no qualified original continuing turn')
         mode = intent.get('context_mode')
-        if mode != checkpoint.policy(c.settings(root)['worker_fragment_policy'])['context']:
+        if mode != checkpoint.policy(configuration_updates.for_step(root, step)['worker_fragment_policy'])['context']:
             raise ValueError('Fragment context mode changed its frozen policy')
         if mode == 'new_context' and intent.get('native_home') != str(root / 'native-homes' / f'{step:03d}' / f'context-{number:03d}'):
             raise ValueError('Fresh native context changed its exact attempt namespace')
@@ -291,7 +293,7 @@ def _eligible_original(root, step, paths, *, successful=False, wait_runner=False
     meter = c.read(c.regular(last / 'usage.json')) if (last/'usage.json').exists() else None
     if meter is not None and native._usage_event(dict(type='turn.completed', usage=meter)) != meter:
         raise ResumeUnavailable('worker_resume_usage_unknown')
-    if meter is None and not budget.native_completion_known(outcome, c.settings(root)):
+    if meter is None and not budget.native_completion_known(outcome, configuration_updates.for_step(root, step)):
         raise ResumeUnavailable('worker_resume_terminal_ineligible')
     binding = execution.identity(root, step, len(paths) - 1)
     for name in ('runner-process.json', 'native-process.json'):
@@ -319,7 +321,7 @@ def fragment_start(root, step):
     from . import contracts as _contracts
     require_current(root,_contracts.read(_contracts.regular(Path(root)/'jobs'/f'{step:03d}.json')))
     root = Path(root)
-    if validate_launcher(root).get('output_only'):raise ResumeUnavailable('worker_resume_output_only')
+    if validate_launcher(root, step).get('output_only'):raise ResumeUnavailable('worker_resume_output_only')
     job = validate_task(root, step)
     if not checkpoint.enabled(root, job):
         raise ResumeUnavailable('worker_fragments_unavailable')
@@ -330,7 +332,7 @@ def fragment_start(root, step):
     from . import correction
     if correction.gate(root, step - 1) is not None:
         raise ResumeUnavailable('worker_resume_correction_paused')
-    settings = c.settings(root)
+    settings = configuration_updates.for_step(root, step)
     for later in range(step + 1, budget.historical_step_limit(root) + 1):
         if (execution.origin(root, later) / 'native-intent.json').exists():
             raise ResumeUnavailable('worker_resume_successor_present')
@@ -377,7 +379,7 @@ def start(root, step):
     require_current(root)
     from . import contracts as _contracts
     require_current(root,_contracts.read(_contracts.regular(Path(root)/'jobs'/f'{step:03d}.json')))
-    limits = validate_launcher(root)
+    limits = validate_launcher(root, step)
     if (execution.origin(root, step) / 'result-identity.json').exists():
         return c.validate(c.workspace(root, step))
     paths = execution.records(root, step)
@@ -420,7 +422,7 @@ def start(root, step):
         raise ResumeUnavailable('worker_resume_correction_paused')
     repairs = sum(c.read(path / 'native-intent.json').get('continuation_kind', 'repair') != 'fragment' for path in paths[1:])
     if repairs >= limits['max_attempts']:raise ResumeUnavailable('worker_resume_limit')
-    settings = c.settings(root)
+    settings = configuration_updates.for_step(root, step)
     for later in range(step + 1, budget.historical_step_limit(root) + 1):
         if (execution.origin(root, later) / 'native-intent.json').exists():
             raise ResumeUnavailable('worker_resume_successor_present')
@@ -469,7 +471,7 @@ def validate_wake(root,step,intent,prior):
 def wake_start(root,step,observations):
     """Resume one successful suspended native turn, sharing original finite authorization."""
     from . import managed_wait, experiments
-    limits=validate_launcher(root);job=validate_task(root,step);paths=execution.records(root,step);last=paths[-1]
+    limits=validate_launcher(root, step);job=validate_task(root,step);paths=execution.records(root,step);last=paths[-1]
     if limits.get('output_only'):raise ResumeUnavailable('worker_resume_output_only')
     if (execution.origin(root,step)/'result-identity.json').exists():raise ResumeUnavailable('execution_wake_stage_already_sealed')
     if (root/'pause.request').exists() or budget.closeout_state(root)['begin'] is not None:
@@ -483,8 +485,8 @@ def wake_start(root,step,observations):
     _eligible_original(root,step,paths,successful=True,wait_runner=True)
     session_ref=session(root,step,last)
     from . import profiles
-    profile_binding=profiles.binding(c.settings(root),job)
-    profiles.validate_intent(c.settings(root),job,c.read(paths[0]/'native-intent.json'))
+    profile_binding=profiles.binding(configuration_updates.for_step(root, step),job)
+    profiles.validate_intent(configuration_updates.for_step(root, step),job,c.read(paths[0]/'native-intent.json'))
     request=dict(waiting=experiments.proof(last/managed_wait.NAME),observations=observations)
     number=len(paths)
     budget.transition(root,'advance','accepted_execution_wake')

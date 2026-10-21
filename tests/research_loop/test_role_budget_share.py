@@ -235,7 +235,7 @@ def test_audit_receipt_review_remains_legal(tmp_path, monkeypatch):
     assert role_share.reason(root, 3, a, ap, 'A') == 'role_repeat_without_evidence'  # No audit policy, no receipt.
     from scidiscovery.research_loop import candidate_audit
     settings = dict(c.settings(root), candidate_audit_policy={'version': 1})
-    monkeypatch.setattr(role_share.c, 'settings', lambda root: settings)
+    monkeypatch.setattr(role_share.c, 'settings', lambda root, job=None: settings)
     monkeypatch.setattr(candidate_audit, 'receipt_ref', lambda root, step: dict(step=step) if step == 3 else None)
     assert role_share.reason(root, 3, a, ap, 'A') is None
 
@@ -262,10 +262,34 @@ def test_behavior_card_is_read_only_public_and_replays_the_frozen_share(tmp_path
     assert module.candidate_fact(pool,'run-2',before=1) is None
     assert 'best_public' not in value and 'rank' not in value['delivered']
     assert 'rank' not in module.text(value)
-    assert value['default_policy_replay']['first_refusal'] == dict(step=4, role='H', dispatch='optional',
-        thinking_before=3_400_000, refused='role_share_thinking_reached')
+    # Replay follows actual dispatch usage; a future target is not prepaid.
+    assert value['default_policy_replay']['first_refusal'] is None
     c.write(root / 'host-history/observations/003.json', dict(candidates=[dict(runs[0], official_reward=1.0)]))
     with pytest.raises(ValueError, match='Non-public'):module.card(root)
+
+
+@pytest.mark.parametrize('dimension,at_limit', [('thinking', False), ('thinking', True), ('w_floor', False), ('w_floor', True)])
+def test_behavior_card_replay_matches_actual_usage_at_exact_share_boundary(tmp_path, dimension, at_limit):
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location('behavior_card_boundary', Path(__file__).resolve().parents[2] / 'scripts/acceptance/behavior_card.py')
+    module = importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    limits = dict(role_share.DEFAULT, min_w_share=.5, max_thinking_share=.25) if dimension == 'thinking' else dict(
+        role_share.DEFAULT, min_w_share=.75, max_thinking_share=.2)
+    root = scene(tmp_path, policy=limits)
+    h_tokens = 2_500_000 - (not at_limit) if dimension == 'thinking' else 500_000
+    e_tokens = 10 if dimension == 'thinking' else 2_000_000 - (not at_limit)
+    h, _ = seal(root, 1, 'H', [], action='extract', plan=PLAN, tokens=h_tokens)
+    e, result = seal(root, 2, 'E', [1], tokens=e_tokens)
+    next_job = c.build_job(root, 3, 'H', [1, 2])
+    nodes = [dict(step=1, role='H', tokens=h_tokens, next_action='extract'),
+        dict(step=2, role='E', tokens=e_tokens, next_action=None),
+        dict(step=3, role='H', tokens=1, next_action='wait')]
+    replay = module.replay(nodes, {1:h, 2:e, 3:next_job}, c.settings(root), limits)
+    actual = role_share.reason(root, 2, e, result, 'H')
+    assert actual == (f'role_share_{dimension}_reached' if at_limit else None)
+    assert (replay['first_refusal'] or {}).get('refused') == actual
+    assert replay['dispatches'][0]['thinking_before'] == h_tokens
 
 
 def test_cli_prepare_freezes_explicit_or_default_role_shares(tmp_path, capsys):

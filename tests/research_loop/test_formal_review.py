@@ -183,12 +183,22 @@ def test_unavailable_review_does_not_force_delivery_closeout_across_extraction(t
         cleanup_seconds=0,submit_seconds=0,confirm_seconds=0,adapter=None)
     root,_=scripted(tmp_path,monkeypatch,missing=True,unavailable_route='extract',delivery_policy=policy)
     result=controller.run(root)
-    assert result['status']=='exported_unsubmitted',result
+    assert result['status']=='final_a_completed',result
+    assert result['goal_completion']=='not_asserted' and result['submission_result']['status']=='unsubmitted'
     assert [c.validate(c.workspace(root,step))['role'] for step in range(1,7)]==['H','W','A','A','E','A']
     assert [c.read(root/'jobs'/f'{step:03d}.json')['role'] for step in (4,5,6)]==['A','E','A']
+    requester=c.validate(c.workspace(root,4))
+    assert requester['next_action']=='extract'
+    assert c.read(root/'jobs/005.json')['evidence_return']==dict(role='A',step=4)
+    assert c.read(root/'jobs/006.json')['instruction']==requester['route_reason']
     state=budget.closeout_state(root)
     assert state['begin']['stop_reason']=='scientific_finish' and state['begin']['source_cutoff']==6
-    assert state['actions']==[] and not (root/'jobs/007.json').exists()
+    assert state['begin']['mode']=='final' and state['begin']['first_step']==7
+    final=c.read(root/'jobs/007.json')
+    assert final['role']=='A' and final['final_only']
+    assert final['final_report']==dict(source_cutoff=6,stopped_original=None)
+    assert budget.final_a_barrier(root)['step']==7
+    assert state['actions']==[] and not (root/'jobs/008.json').exists()
     job=c.read(root/'jobs/006.json')
     assert job['formal_review_choices']['unavailable']==c.read(root/'jobs/004.json')['formal_review_choices']['unavailable']
     assert 'author_correction' not in job
@@ -200,6 +210,13 @@ def test_unavailable_review_does_not_force_delivery_closeout_across_extraction(t
     assert limits['max_tokens']==2000 and limits['max_seconds']==60
     assert limits['consumed_seconds']>0 and limits['seconds_remaining']<60
     assert not list((root/'native-evidence').glob('*/formal-review.json'))
+    originals={path:path.read_bytes() for step in range(1,8) for path in
+        (root/'jobs'/f'{step:03d}.json',c.host_record(c.workspace(root,step))/'result-identity.json')}
+    repeated=controller.run(root)
+    assert repeated['status']=='final_a_completed' and repeated['last_step']==7
+    assert repeated['source_cutoff']==6 and repeated['submission_result']['status']=='unsubmitted'
+    assert all(path.read_bytes()==data for path,data in originals.items())
+    assert budget.closeout_state(root)['actions']==[] and not (root/'jobs/008.json').exists()
 
 
 def test_review_choice_rejects_known_failure_but_new_subject_can_use_same_output(tmp_path,monkeypatch):

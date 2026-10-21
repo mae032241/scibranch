@@ -55,15 +55,15 @@ FIELDS = [
     Field('budget.max_seconds', '总活动时间（秒）', 'number', required=True),
     Field('budget.max_steps', '总节点步数', 'integer', required=True),
     Field('budget.max_output_item_bytes', '单项输出字节上限', 'integer'),
-    Field('budget.max_output_total_bytes', '全部输出字节上限', 'integer'),
-    Field('budget.candidate_extra_slots', '候选额外名额', 'integer'),
+    Field('budget.max_output_total_bytes', '单节点输出合计字节上限', 'integer'),
+    Field('budget.candidate_extra_slots', 'W 提名预览额外名额', 'integer'),
     Field('budget.portfolio_review_after_cycles', '组合复核周期数', 'integer'),
     *[Field(f'budget.node_targets.{role}.{key}', f'{role} 节点软目标：{label}', kind)
       for role in 'HWAE' for key, label, kind in [('max_observed_tokens', 'tokens', 'integer'), ('max_seconds', '秒', 'number')]],
     Field('budget.role_shares', '角色预算份额策略', 'table'),
-    *[Field(f'budget.breadth.{key}', label, 'integer') for key, label in [
-        ('max_w_seconds', 'W 软目标秒数'), ('max_w_observed_tokens', 'W 软目标 tokens'),
-        ('max_requested_repairs', '请求修复次数'), ('initial_calls', '首次探索调用数')]],
+    *[Field(f'budget.breadth.{key}', label, kind) for key, label, kind in [
+        ('max_w_seconds', 'W 软目标秒数', 'number'), ('max_w_observed_tokens', 'W 软目标 tokens', 'integer'),
+        ('max_requested_repairs', '请求修复次数', 'integer'), ('initial_calls', '首次探索调用数', 'integer')]],
     Field('budget.correction.review_after', '补正复核阈值', 'integer'),
     Field('budget.correction.pause_after', '补正暂停阈值', 'integer'),
     Field('executor.mode', '实验执行归属', choices=('local', 'external')),
@@ -83,6 +83,29 @@ FIELDS = [
     Field('ui.open_browser', '打开浏览器', 'boolean'),
     Field('ui.approval_secret_file', '宿主操作密钥文件引用（仅路径）'),
 ]
+
+
+# These are the actual policy schemas; unknown imported keys remain in the
+# expert tree. No value is inserted merely because this section is displayed.
+GROUP_FIELDS = {
+    'budget.role_shares': [
+        Field('budget.role_shares.version', '份额规则版本', 'integer', placeholder='1'),
+        Field('budget.role_shares.min_w_share', '为实验（W）保留的最低份额', 'number', placeholder='0 到 1 之间'),
+        Field('budget.role_shares.max_thinking_share', '方向与复核（H / A）最高份额', 'number', placeholder='0 到 1 之间'),
+        Field('budget.role_shares.thinking_node_target_tokens', '单次方向 / 复核的 tokens 目标', 'integer'),
+    ],
+    'policies.resume': [
+        Field('policies.resume.max_attempts', '同一原调用最多恢复次数', 'integer', placeholder='1 或 2'),
+        Field('policies.resume.protocol', '恢复协议', choices=('codex_exec_resume',)),
+        Field('policies.resume.usage_scope', '用量计量范围', choices=('turn',)),
+        Field('policies.resume.output_repair', '允许修复输出格式', 'boolean'),
+        Field('policies.resume.output_only', '恢复时只修复输出', 'boolean'),
+        Field('policies.resume.native_home', '冻结的 Codex 主目录（绝对路径）'),
+    ],
+}
+ROLE_NAMES = dict(H='研究方向', W='实验与实现', A='综合评估', E='证据检索与提取')
+ROLE_HELP = dict(H='提出或修订研究假设与方向。', W='在已选假设下设计、实现并运行有界实验。',
+    A='独立评估证据与候选方案，决定下一步研究。', E='按明确问题检索或提取证据，保留来源与缺失信息。')
 
 
 def _get(document, path, default=None):
@@ -204,7 +227,8 @@ class _Invalid(str):
 
 def parse(fields, *, base):
     """Parse only typed visible controls, retaining all extra imported data."""
-    allowed = {'task_mode', 'task_text'} | {'cfg.'+f.path for f in FIELDS if f.kind not in ('table', 'array', 'strings')} | {'enabled.'+f.path for f in FIELDS if f.kind in ('table', 'array', 'strings')}
+    scalar_fields = FIELDS + [field for group in GROUP_FIELDS.values() for field in group]
+    allowed = {'present.'+f.path for f in scalar_fields} | {'cfg.'+f.path for group in GROUP_FIELDS.values() for f in group} | {'task_mode', 'task_text'} | {'cfg.'+f.path for f in FIELDS if f.kind not in ('table', 'array', 'strings')} | {'enabled.'+f.path for f in FIELDS if f.kind in ('table', 'array', 'strings')}
     for name in fields:
         parts = name.split('.')
         if name not in allowed and not any(name == 'cfg.'+f.path or (name.startswith('cfg.'+f.path+'.') and name[len('cfg.'+f.path+'.'):].isdecimal()) for f in FIELDS if f.kind == 'strings') and not (len(parts) == 3 and parts[0] == 'node' and parts[1].isdecimal() and parts[2] in {'kind','parent','key','value'}):
@@ -255,17 +279,28 @@ def parse(fields, *, base):
         if field.kind == 'strings':
             prefix = 'cfg.'+field.path
             items = [_single(fields, name) for name in fields if name.startswith(prefix+'.')]
-            if prefix in fields:
-                items.append(_single(fields, prefix))
-            if prefix in fields or _single(fields, 'enabled.'+field.path) == 'yes':
+            addition = _single(fields, prefix)
+            if addition:
+                items.append(addition)
+            if addition or _single(fields, 'enabled.'+field.path) == 'yes':
                 _put(result['document'], field.path, items)
             continue
         if field.kind in ('table', 'array'):
             if _single(fields, 'enabled.'+field.path) == 'yes':
-                _put(result['document'], field.path, tree('@'+field.path, field.kind))
+                value = tree('@'+field.path, field.kind)
+                for child in GROUP_FIELDS.get(field.path, []):
+                    raw = _single(fields, 'cfg.'+child.path)
+                    if raw != '' or _single(fields, 'present.'+child.path) == 'yes':
+                        key = child.path.rsplit('.', 1)[1]
+                        if key in value:
+                            raise ValueError(f'{child.label}：专用字段与扩展字段重复')
+                        if child.choices and raw not in child.choices:
+                            errors.append(f'{child.label}：请选择支持的选项')
+                        value[key] = typed(raw, child.kind, child.label)
+                _put(result['document'], field.path, value)
             continue
         raw = _single(fields, 'cfg.'+field.path)
-        if raw != '':
+        if raw != '' or _single(fields, 'present.'+field.path) == 'yes':
             if field.choices and raw not in field.choices:
                 errors.append(f'{field.label}：请选择支持的选项')
             _put(result['document'], field.path, typed(raw, field.kind, field.label))
@@ -297,6 +332,28 @@ def parse(fields, *, base):
     return result
 
 
+def parse_edit(fields, *, base, configuration):
+    """Keep instance originals and application settings outside node editing."""
+    if any(name in {'task_mode', 'task_text'} for name in fields):
+        raise ValueError('任务原件不能在研究配置中修改')
+    try:
+        result = parse(fields, base=base)
+    except FormError as error:
+        result = error.draft
+        failure = error
+    else:
+        failure = None
+    immutable = ('research', 'ui', 'version')
+    if any(key in result['document'] for key in immutable):
+        raise ValueError('实例任务、材料原件和网页应用设置不能在研究配置中修改')
+    for key in immutable:
+        if key in configuration:
+            result['document'][key] = copy.deepcopy(configuration[key])
+    if failure:
+        raise FormError(str(failure), result)
+    return result
+
+
 def _kind(value):
     if isinstance(value, _Invalid): return value.kind
     if isinstance(value, dict): return 'table'
@@ -311,11 +368,14 @@ def _kind(value):
     raise ValueError('声明包含不支持的字段类型')
 
 
-def render(draft):
+def render(draft, *, edit=False):
     """Render a guided form; hidden steps retain successful, typed controls."""
     document = draft['document']
     extras = copy.deepcopy(document)
     _delete(extras, 'research.objective_text')
+    if edit:
+        for key in ('research', 'ui', 'version'):
+            extras.pop(key, None)
     counter = [0]
     def tree(value, parent):
         contents = []
@@ -326,8 +386,8 @@ def render(draft):
             scalar = str(item).lower() if type(item) is bool else (item.isoformat() if isinstance(item, (date,time)) else str(item))
             contents.append('<div class="config-node" data-node="'+identity+'" data-error-label="'+escape(str(key),quote=True)+'"'+(' data-invalid="true"' if isinstance(item, _Invalid) else '')+'>'
                 '<input type="hidden" name="'+prefix+'parent" value="'+escape(parent, quote=True)+'">'
-                '<label>键名 <input name="'+prefix+'key" value="'+escape(str(key) if isinstance(value,dict) else '',quote=True)+'"></label>'
-                '<label>类型 <select name="'+prefix+'kind" class="config-kind">'+''.join(
+                '<label class="config-node-key">键名 <input name="'+prefix+'key" value="'+escape(str(key) if isinstance(value,dict) else '',quote=True)+'"></label>'
+                '<label class="config-node-type">类型 <select name="'+prefix+'kind" class="config-kind">'+''.join(
                     '<option value="'+k+'"'+(' selected' if k==kind else '')+'>'+label+'</option>'
                     for k,label in [('string','文本'),('integer','整数'),('number','数字'),('boolean','布尔'),('table','对象'),('array','数组'),('datetime','日期时间'),('date','日期'),('time','时间')])+'</select></label>'
                 '<label class="config-value">值 <input name="'+prefix+'value" value="'+escape(scalar if kind not in ('table','array') else '',quote=True)+'"></label>'
@@ -340,73 +400,168 @@ def render(draft):
         'research.root': '新研究保存到哪里', 'research.public_root': '研究可使用的材料目录',
         'research.objective': '任务文件路径', 'agent.model': '研究使用的模型',
         'agent.reasoning_effort': '推理力度', 'agent.service_tier': '服务档位',
-        'budget.max_tokens': '模型用量上限', 'budget.max_seconds': '研究活动时间上限',
-        'budget.max_steps': '研究阶段数上限', 'permissions.workspace': '文件读写范围',
+        'budget.max_tokens': '模型用量（tokens）', 'budget.max_seconds': '活动时间（秒）',
+        'budget.max_steps': '节点上限（步）', 'permissions.workspace': '文件读写范围',
         'permissions.network': '允许程序联网', 'permissions.web': '网页检索方式',
         'permissions.subagents': '允许创建子研究助手',
+        'budget.max_output_item_bytes': '单项输出（字节）',
+        'budget.max_output_total_bytes': '单节点输出合计（字节）',
+        'budget.candidate_extra_slots': 'W 提名预览额外名额（个）',
+        'budget.portfolio_review_after_cycles': '组合复核（周期）',
+        'budget.breadth.max_w_seconds': 'W 时间目标（秒）',
+        'budget.breadth.max_w_observed_tokens': 'W 用量目标（tokens）',
+        'budget.breadth.max_requested_repairs': '最多请求修复（次）',
+        'budget.breadth.initial_calls': '首次探索调用（次）',
+        'budget.correction.review_after': '复核阈值（次）',
+        'budget.correction.pause_after': '暂停阈值（次）',
+        'budget.role_shares.version': '规则版本',
+        'budget.role_shares.min_w_share': 'W 最低份额（0–1）',
+        'budget.role_shares.max_thinking_share': 'H / A 最高份额（0–1）',
+        'budget.role_shares.thinking_node_target_tokens': 'H / A 单次目标（tokens）',
     }
     hints = {
         'research.root': '将在服务器上新建此目录，保存任务、研究记录和结果。请选择尚不存在的目录；不能覆盖已有研究。',
         'research.public_root': '填写服务器上已存在的目录，放入允许研究使用的文件。即使暂时没有材料，也需先准备一个空目录。这里不会上传浏览器中的文件。',
         'research.objective': '读取服务器上的现有文本文件；原文会作为本次任务保存。',
-        'agent.model': '留空使用统一默认模型 '+research_config.DEFAULT_MODEL+'。各研究角色默认沿用此模型，可在高级设置中分别指定。',
-        'agent.reasoning_effort': '留空使用统一默认值 '+research_config.DEFAULT_REASONING_EFFORT+'；具体支持取决于模型。',
-        'agent.service_tier': '留空使用统一默认值 '+research_config.DEFAULT_SERVICE_TIER+'。',
+        'agent.model': 'Codex 留空使用 '+research_config.DEFAULT_MODEL+'；其他后端必须填写模型。各研究角色未单独指定时沿用此模型。',
+        'agent.reasoning_effort': 'Codex 留空使用 '+research_config.DEFAULT_REASONING_EFFORT+'。建议值仅供填写参考；也可输入所选模型支持的其他值。其他后端留空不声明。',
+        'agent.service_tier': 'Codex 留空使用 '+research_config.DEFAULT_SERVICE_TIER+'。也可输入后端支持的自定义档位；其他后端留空不声明。',
         'budget.max_tokens': '单位：tokens，模型处理文本的用量，不是金额。必须由你填写；实际费用取决于模型及服务计价。',
         'budget.max_seconds': '单位：秒。累计研究活动时间，不是从创建起计算的日历时间；暂停等待不会自动恢复预算。',
-        'budget.max_steps': '单位：阶段。每次研究角色工作算一个节点阶段，与时间、tokens 分别限制。',
-        'permissions.workspace': '选择研究助手可读写的范围。留空采用统一配置；检查时会显示实际权限与限制。',
-        'permissions.network': '控制程序的网络访问声明，与下方网页检索分别设置。实际能否限制由后端决定。',
-        'permissions.web': '禁用、仅缓存或实时检索。留空采用统一配置，确认页显示生效值。',
-        'permissions.subagents': '允许研究助手再创建子助手。留空采用统一配置；与本页面的研究角色分工不同。',
+        'budget.max_steps': '单位：步。约束研究节点及计入预算的恢复、操作、审计等工作；与时间、tokens 分别限制。',
+        'permissions.workspace': '留空声明默认的可写工作目录（workspace-write）。这是后端原生权限；检查时会显示实际权限与限制。',
+        'permissions.network': '留空默认不允许程序联网。与网页检索分别设置；实际能否限制由所选后端决定。',
+        'permissions.web': '留空默认禁用网页检索。需要在线证据时，可按本次研究范围选择缓存或实时检索。',
+        'permissions.subagents': '留空默认不允许创建子助手。这项控制角色内部再委派工作，与 H / W / A / E 分工不同。',
     }
+    hints.update({
+        'version': '当前声明格式版本为 1；新建时可留空。',
+        'research.user_updates': '服务器上的原文文件路径，每项一个文件；用于保留你对全局任务的补充。留空且不声明列表时省略。',
+        'research.source_restrictions': '声明材料原件的使用限制、定位和摘要。此项需要结构配置；无额外限制时保持未声明。',
+        'agent.backend': '留空使用 Codex。Protocol 用于已接入的自定义后端，需要明确填写模型和启动命令；不自动补推理力度或服务档位。',
+        'agent.launcher': '留空由 Codex 使用 codex。自定义时第一项是可执行程序，之后每项是一个独立参数；不按空格拆分。',
+        'agent.native.sandbox_workspace_write.writable_roots': '仅 Codex 的可写工作目录模式使用。每项是允许额外写入的服务器目录，不会自动开放其他路径。',
+        'agent.native.sandbox_workspace_write.network_access': '仅 Codex；需与上方程序联网声明一致，否则检查失败。通常直接设置上方联网权限即可。',
+        'agent.native.sandbox_workspace_write.exclude_tmpdir_env_var': '仅 Codex；允许临时目录写入时是否排除 TMPDIR 指定目录。留空由后端原生配置决定。',
+        'agent.native.sandbox_workspace_write.exclude_slash_tmp': '仅 Codex；是否从额外可写目录中排除 /tmp。留空由后端原生配置决定。',
+        'agent.native.features.fast_mode': '仅 Codex；覆盖原生 fast_mode 功能开关。留空不覆盖原生配置。',
+        'budget.max_output_item_bytes': '单位：字节，限制单项研究输出。留空不设置这项体积限制；用于防止单个文件过大。',
+        'budget.max_output_total_bytes': '单位：字节，限制每个节点收集输出的合计体积；交给下一节点的输入材料集合也单独受此上限约束。留空不设此限制。',
+        'budget.candidate_extra_slots': '单位：个，限制 W 提名预览中代表候选之外的额外名额，仅在启用搜索机制提名时使用；完整候选池仍保留。留空默认 2。',
+        'budget.portfolio_review_after_cycles': '单位：研究周期，达到次数后提醒重新比较候选组合；不自动决定换路线或触发正式审核。留空不单独声明这项策略。',
+        'budget.role_shares': '为实验保留用量，限制可选的方向讨论与复核占比。启用时须明确四项参数及全部角色阶段预算；不增加总预算。',
+        'budget.role_shares.version': '当前规则要求版本 1。填写版本仅标识规则，不会自动补预算。',
+        'budget.role_shares.min_w_share': '填 0 到 1 之间的小数，例如 0.65 表示 65%。与 H / A 最高份额相加不得超过 1。',
+        'budget.role_shares.max_thinking_share': '填 0 到 1 之间的小数，例如 0.35 表示 35%。限制可选的 H / A 工作；必要复核仍按合同进行。',
+        'budget.role_shares.thinking_node_target_tokens': '单位：tokens。设定一次 H / A 思考工作的目标；不替代角色阶段上限或总预算。',
+        'budget.breadth.max_w_seconds': '单位：秒。一次 W 探索切片的时间软目标；自定义探索策略时需同时填写 tokens 和修复次数。',
+        'budget.breadth.max_w_observed_tokens': '单位：tokens。一次 W 探索切片的用量软目标；留空整组时使用既有探索策略。',
+        'budget.breadth.max_requested_repairs': '单位：次。限制一次探索中请求修复的次数；自定义策略时必须为正整数。',
+        'budget.breadth.initial_calls': '单位：次。首次探索允许的已登记实验调用机会；可选，不能表示科学覆盖已完成。',
+        'budget.correction.review_after': '单位：次。持续未取得进展达到此阈值时复核；需与暂停阈值一起填写。',
+        'budget.correction.pause_after': '单位：次。补正达到此阈值时暂停；需与复核阈值一起填写。',
+        'executor.mode': '标准 Codex 启动留空使用本地执行；自定义启动通常由外部承担。指定插件时采用本地执行；检查页显示实际配置。实验仍需满足授权与插件条件。',
+        'executor.config.executor': '填写已安装插件公开的绑定名称，例如 plugin:binding。创建配置不会运行实验或安装插件。',
+        'executor.config.config_file': '服务器上的插件配置文件路径。通常优先使用插件提供的配置文件；相对路径按当前声明目录解析。',
+        'executor.config.configuration': '仅对明确支持内联配置的插件使用。键名与类型以该插件说明为准。',
+        'executor.resource_policy': '声明累计实验时间、存储等资源上限；需已配置实验执行授权与宿主执行插件。',
+        'delivery': '仅需通过适配器交付结果时配置；涉及明确目标、输入、阶段预算和外部接口，按对应适配器说明导入。',
+        'policies.formal_review': '是否声明正式独立复核合同。启用不会自动产生审核通过结论。',
+        'policies.execution_authority': '是否要求实验执行授权合同；启用时也必须启用正式独立复核。此开关本身不授予执行许可。',
+        'policies.candidate_audit': '是否要求候选审计；需同时配置带 audit 能力的隔离交付适配器。',
+        'policies.decision_contract': '是否声明科学决策合同；研究结论仍由科学角色作出。',
+        'policies.worker_context': 'same_session 保留同一会话，new_context 使用新上下文。此高级合同还需原调用恢复和全部角色阶段预算。',
+        'policies.selection': '用于生产交付的候选选择合同；需已配置相应执行、观察与交付条件。',
+        'policies.resume': '恢复已知原调用，不重新提交未知外部实验，不恢复已消耗预算。标准 Codex 启动通常已有恢复配置；自定义时需冻结启动程序及全部角色阶段预算。',
+        'policies.resume.max_attempts': '仅支持 1 或 2 次。次数针对同一原调用；不是重新开始研究。',
+        'policies.resume.protocol': '当前合同只支持 codex_exec_resume，且需要支持恢复的 Codex 后端。',
+        'policies.resume.usage_scope': '当前合同要求 turn：按一次调用计量用量，保留原始预算消耗。',
+        'policies.resume.output_repair': '允许在有明确失败边界时恢复以修复输出格式；不豁免其他恢复条件。',
+        'policies.resume.output_only': '启用需同时允许修复输出；恢复只修复输出，不重新执行科学工作。',
+        'policies.resume.native_home': '仅在“只修复输出”启用时使用，必须是规范绝对路径。这里只保存路径引用。',
+        'policies.history_observer': '仅为已接入的宿主历史观察插件配置；参数与路径按插件说明填写。',
+        'ui.port': '留空或 0 自动选择可用端口；指定时为 1 到 65535。',
+        'ui.open_browser': '留空默认不开浏览器；在远程服务器通常保持默认。',
+        'ui.approval_secret_file': '可选的宿主管理密钥文件路径。这里只填写路径，不读取或复制密钥内容。',
+    })
+    for role in 'HWAE':
+        for key in ('model', 'reasoning_effort', 'service_tier'):
+            hints[f'agent.roles.{role}.{key}'] = '留空沿用上方全局'+dict(model='模型', reasoning_effort='推理力度', service_tier='服务档位')[key]+'。支持的值取决于该角色选择的模型和后端。'
+        for key, unit in [('max_observed_tokens', 'tokens'), ('max_seconds', '秒')]:
+            hints[f'budget.node_targets.{role}.{key}'] = '单位：'+unit+'。'+ROLE_NAMES[role]+'单次工作的软目标；启用阶段预算时四个角色的两项都需填写，不能扩大总预算。'
     placeholders = {'research.root': '/srv/research/new-study', 'research.public_root': '/srv/research/materials',
                     'research.objective': '/srv/research/task.txt'}
     choice_labels = {'true':'允许', 'false':'不允许', 'read-only':'只读文件',
         'workspace-write':'可写工作目录', 'danger-full-access':'不限制文件访问',
-        'disabled':'禁用网页检索', 'cached':'仅使用缓存', 'live':'实时检索'}
+        'disabled':'禁用网页检索', 'cached':'仅使用缓存', 'live':'实时检索',
+        'local':'由本地执行插件执行', 'external':'由外部执行', 'codex':'Codex（默认）', 'protocol':'自定义协议后端',
+        'same_session':'沿用同一会话', 'new_context':'使用新上下文',
+        'codex_exec_resume':'Codex 原调用恢复', 'turn':'按单次调用计量'}
 
-    def control(field, *, advanced=False):
+    def control(field, *, advanced=False, matrix=False):
         value = _get(document, field.path)
         if value is not None:
             _delete(extras, field.path)
         label = escape(labels.get(field.path, field.label))
+        if field.path.startswith('budget.node_targets.'):
+            label = '单次工作 tokens 目标' if field.path.endswith('max_observed_tokens') else '单次工作时间目标（秒）'
         if field.path.startswith('agent.roles.'):
-            role = field.path.split('.')[2]
-            role_name = dict(H='提出方向', W='探索方案', A='评估复核', E='实验实现')[role]
-            label = role_name+'（'+role+'） · '+dict(model='模型', reasoning_effort='推理力度', service_tier='服务档位')[field.path.split('.')[-1]]
+            label = dict(model='模型', reasoning_effort='推理力度', service_tier='服务档位')[field.path.split('.')[-1]]
+        if matrix:
+            label = escape(field.label)
         label += ' <span class="required-mark">必填</span>' if field.required else ''
-        metadata = '<small class="field-key">'+escape(field.path)+'</small>' if advanced else ''
-        hint = '<small class="field-help">'+escape(hints[field.path])+'</small>' if field.path in hints else ''
+        metadata = ''
         identity = 'config-'+field.path.replace('.', '-')
+        help_id = identity+'-help'
+        hint = ('<details class="config-help"><summary aria-label="'+escape(field.label,quote=True)+'：填写说明">说明</summary>'
+            '<p id="'+help_id+'">'+escape(hints[field.path])+'</p></details>') if field.path in hints and not matrix else ''
+        described = ' aria-describedby="'+('role-settings-help' if matrix else help_id)+'"' if matrix or hint else ''
         attributes = ' data-config-path="'+escape(field.path,quote=True)+'" data-error-label="'+escape(field.label,quote=True)+'"'+(' data-invalid="true"' if isinstance(value, _Invalid) else '')
         if field.kind == 'strings':
             if value is not None and (not isinstance(value, list) or any(not isinstance(item, str) for item in value)):
                 raise ValueError(f'{field.label}：导入值必须为文本数组')
             entries = ''.join('<div class="config-string-row"><textarea rows="1" aria-label="'+escape(field.label,quote=True)+'第 '+str(index+1)+' 项" name="cfg.'+field.path+'.'+str(index)+'">'+escape(item)+'</textarea><button type="button" class="config-string-remove secondary-button">删除</button></div>' for index,item in enumerate(value or []))
-            return '<div class="config-field"'+attributes+'><p class="field-label">'+label+metadata+'</p><label class="check-label"><input type="checkbox" name="enabled.'+field.path+'" value="yes"'+(' checked' if value is not None else '')+'>显式声明此列表</label><div class="config-string-list" data-path="'+field.path+'">'+entries+'</div><button type="button" class="config-string-add secondary-button" data-path="'+field.path+'">添加一项</button></div>'
+            return '<div class="config-field config-list-setting"'+attributes+'><p class="field-label">'+label+metadata+'</p><label class="check-label"><input type="checkbox" name="enabled.'+field.path+'" value="yes"'+(' checked' if value is not None else '')+'>使用此列表（可保留为空）</label><div class="config-string-list" data-path="'+field.path+'">'+entries+'</div><textarea rows="2" name="cfg.'+field.path+'" placeholder="填写一项；留空不会添加。需要多项可使用下方按钮。" aria-label="'+escape(field.label,quote=True)+'新增项"></textarea><button type="button" class="config-string-add secondary-button" data-path="'+field.path+'">添加一项</button>'+hint+'</div>'
         if field.kind in ('table','array'):
             if value is not None and not isinstance(value, dict if field.kind=='table' else list):
                 raise ValueError(f'{field.label}：导入类型不正确')
-            return '<details class="structured-setting"'+attributes+'><summary>'+label+metadata+'</summary>'\
-                '<label class="check-label"><input type="checkbox" name="enabled.'+field.path+'" value="yes"'+(' checked' if value is not None else '')+'>声明此可选组（取消后整组省略）</label>'\
-                '<div class="config-children" data-parent="@'+field.path+'">'+tree(value if value is not None else ({} if field.kind=='table' else []),'@'+field.path)+'</div>'\
-                '<button type="button" class="config-add secondary-button" data-parent="@'+field.path+'">添加项</button></details>'
+            configured = '<span class="configured-note">已配置</span>' if value is not None else '<span class="summary-note">可选</span>'
+            body = value if value is not None else ({} if field.kind=='table' else [])
+            if field.path in GROUP_FIELDS:
+                remainder = copy.deepcopy(body)
+                for child in GROUP_FIELDS[field.path]:
+                    remainder.pop(child.path.rsplit('.', 1)[1], None)
+                contents = '<div class="config-grid config-grid-four">'+''.join(control(child, advanced=True) for child in GROUP_FIELDS[field.path])+'</div>'
+                contents += '<details class="expert-settings"><summary>其他已导入参数 / 专家编辑</summary><p class="note">标准参数请使用上方表单。这里保留其他键名与类型；未知字段会在检查配置时验证。</p>'
+                contents += '<div class="config-children" data-parent="@'+field.path+'">'+tree(remainder, '@'+field.path)+'</div><button type="button" class="config-add secondary-button" data-parent="@'+field.path+'">添加扩展项</button></details>'
+            else:
+                contents = '<p class="note">此结构由插件或专门合同定义。已有值会完整保留；请根据插件说明导入 TOML，或在下面按原类型编辑。无需使用时保持未声明。</p>'
+                contents += '<div class="config-children" data-parent="@'+field.path+'">'+tree(body,'@'+field.path)+'</div><button type="button" class="config-add secondary-button" data-parent="@'+field.path+'">添加项</button>'
+            known = field.path in GROUP_FIELDS
+            opening = '<fieldset class="structured-setting known-settings"'+attributes+'><legend>'+label+configured+'</legend>' if known else '<details class="structured-setting"'+attributes+'><summary>'+label+configured+'</summary>'
+            return opening+\
+                '<label class="check-label"><input type="checkbox" name="enabled.'+field.path+'" value="yes"'+(' checked' if value is not None else '')+'>使用这组自定义设置（关闭后不保存本组）</label>'+hint+'<noscript><p class="note">填写前请先启用本组；未启用时，本组内容不会保存。</p></noscript>'+contents+('</fieldset>' if known else '</details>')
         text = '' if value is None else (str(value).lower() if type(value) is bool else str(value))
         if field.choices or field.kind == 'boolean':
             choices = list(field.choices or ('true','false'))
             choices += [text] if text and text not in choices else []
-            widget = '<select id="'+identity+'" name="cfg.'+field.path+'"><option value="">沿用统一配置'+('（'+escape(field.placeholder)+'）' if field.placeholder else '')+'</option>'+''.join(
+            widget = '<select id="'+identity+'" name="cfg.'+field.path+'"'+described+'><option value="">未声明 / 沿用默认'+('（'+escape(field.placeholder)+'）' if field.placeholder else '')+'</option>'+''.join(
                 '<option value="'+escape(choice,quote=True)+'"'+(' selected' if text==choice else '')+'>'+escape(choice_labels.get(choice,choice))+'</option>' for choice in choices)+'</select>'
         else:
-            widget = '<input id="'+identity+'" name="cfg.'+field.path+'" value="'+escape(text,quote=True)+'" placeholder="'+escape(placeholders.get(field.path,field.placeholder),quote=True)+'"'+(' inputmode="decimal"' if field.kind in ('integer','number') else '')+'>'
-        return '<div class="config-field"'+attributes+'><label for="'+identity+'">'+label+metadata+'</label>'+widget+hint+'</div>'
+            suggestions = ('low','medium','high') if field.path.endswith('reasoning_effort') else ('default','priority') if field.path.endswith('service_tier') else ()
+            suggestion_id = identity+'-suggestions'
+            widget = '<input id="'+identity+'" name="cfg.'+field.path+'" value="'+escape(text,quote=True)+'" placeholder="'+escape(placeholders.get(field.path,field.placeholder),quote=True)+'"'+described+(' inputmode="decimal"' if field.kind in ('integer','number') else '')+(' list="'+suggestion_id+'"' if suggestions else '')+'>'
+            if suggestions:
+                widget += '<datalist id="'+suggestion_id+'">'+''.join('<option value="'+choice+'">' for choice in suggestions)+'</datalist>'
+        if value == '' and field.kind == 'string':
+            widget += '<label class="check-label"><input type="checkbox" name="present.'+field.path+'" value="yes" checked>保留已导入的空文本（取消则省略）</label>'
+        return '<div class="config-field"'+attributes+'><label'+(' class="config-sr-only"' if matrix else '')+' for="'+identity+'">'+label+metadata+'</label>'+widget+hint+'</div>'
 
     by_path = {field.path: field for field in FIELDS}
     def fields(paths, *, advanced=False):
         return ''.join(control(by_path[path], advanced=advanced) for path in paths)
 
-    rows = ['<noscript><p class="note">请依次填写下方任务与资源设置，再点击底部“检查配置”。</p></noscript><section class="setup-panel" data-setup-step="1" aria-labelledby="setup-task-title">'
+    rows = [] if edit else ['<noscript><p class="note">请依次填写下方任务与资源设置，再点击底部“检查配置”。</p></noscript><section class="setup-panel" data-setup-step="1" aria-labelledby="setup-task-title">'
         '<div class="section-heading"><span class="eyebrow">第一步 / 任务与材料</span><h2 id="setup-task-title" tabindex="-1">你想研究什么？</h2>'
         '<p>写清问题、期望得到的结果，以及需要遵守的限制。先准备任务和文件，再设置研究用量。</p></div>'
         '<div class="config-field task-mode"><label for="task-mode">如何提供任务</label><select id="task-mode" name="task_mode">'+''.join(
@@ -417,43 +572,96 @@ def render(draft):
         '<small class="field-help">这段原文会作为本次研究的任务保存。请不要填写密码或访问密钥。</small></div>'
         '<div data-task-panel="file">'+fields(['research.objective'])+'</div>'
         '<div class="path-heading"><h3>材料从哪里来，结果存到哪里？</h3><p class="note">以下都是运行 SciDiscovery 的服务器上的目录，不是浏览器本机目录。</p></div>'
-        +fields(['research.public_root','research.root'])+
+        +'<div class="config-grid">'+fields(['research.public_root','research.root'])+'</div>'+
         '<details class="path-base"><summary>服务器路径怎么填写？</summary><p>可填写完整绝对路径；相对路径从此服务器目录开始：<code>'+escape(draft['base'])+'</code></p></details>'
         '<div class="setup-actions"><span class="note">下一步：选择模型，填写用量上限</span><button type="button" hidden data-setup-go="2">下一步：模型与预算 →</button></div></section>']
     primary = ['agent.model','agent.reasoning_effort','agent.service_tier','budget.max_tokens','budget.max_seconds','budget.max_steps']
     permissions = ['permissions.workspace','permissions.network','permissions.web','permissions.subagents']
-    rows.append('<section class="setup-panel" data-setup-step="2" aria-labelledby="setup-limits-title">'
+    heading = ('<section class="setup-panel configuration-editor" aria-labelledby="setup-limits-title">'
+        '<div class="section-heading"><h2 id="setup-limits-title" tabindex="-1">调整后续研究配置</h2>'
+        '<p>保存后从下一个新节点生效。已经准备、正在运行或恢复的节点继续使用原配置；已消耗的用量仍保留。</p></div>' if edit else
+        '<section class="setup-panel" data-setup-step="2" aria-labelledby="setup-limits-title">'
         '<div class="section-heading"><span class="eyebrow">第二步 / 模型与预算</span><h2 id="setup-limits-title" tabindex="-1">这次研究可以使用多少资源？</h2>'
-        '<p>模型可以沿用统一默认值。三项总预算都需明确填写，达到任一限制会影响研究继续。</p></div>'
-        '<div class="model-fields">'+fields(primary[:3])+'</div>'
-        '<h3 class="subsection-title">设定本次研究的总上限</h3><div class="budget-fields">'+fields(primary[3:])+'</div>'
-        '<details class="permission-settings"><summary>研究助手可以访问什么？<span class="summary-note">权限与联网</span></summary>'
-        '<p class="note">权限沿用统一配置，检查时会列出生效值。实验执行仍需自身的授权条件。</p>'+fields(permissions)+'</details>')
+        '<p>模型可以沿用统一默认值。三项总预算都需明确填写，达到任一限制会影响研究继续。</p></div>')
+    rows.append(heading + '<fieldset class="config-group"><legend>统一模型</legend><div class="model-fields">'+fields(primary[:3])+'</div></fieldset>'
+        '<fieldset class="config-group" id="budget-settings"><legend>研究总上限</legend><div class="budget-fields">'+fields(primary[3:])+'</div></fieldset>')
     used = set(primary+permissions+['research.root','research.public_root','research.objective'])
+    role_paths = [f'agent.roles.{role}.{key}' for role in 'HWAE' for key in ('model','reasoning_effort','service_tier')]
+    target_paths = [f'budget.node_targets.{role}.{key}' for role in 'HWAE' for key in ('max_observed_tokens','max_seconds')]
+    configured = any(_get(document, path) is not None for path in role_paths+target_paths)
+    rows.append('<details class="role-settings config-group" data-config-group="agent.roles" open><summary>角色模型与单次用量'
+        + ('<span class="configured-note">已设置，折叠后仍保留</span>' if configured else '<span class="summary-note">可选，模型留空沿用统一设置</span>')
+        + '</summary><div class="config-matrix-scroll" role="region" aria-label="角色模型与单次用量，可横向滚动" tabindex="0">'
+        '<table class="config-role-matrix role-settings-matrix"><caption class="config-sr-only">四个研究角色的模型覆盖与单次工作软目标</caption><colgroup><col class="role-column"></colgroup><colgroup><col class="model-column"><col><col></colgroup><colgroup><col><col></colgroup>'
+        '<thead><tr><th rowspan="2" scope="col">研究角色</th><th colspan="3" scope="colgroup">模型设置</th><th colspan="2" scope="colgroup" data-config-group="budget.node_targets">单次工作软目标</th></tr>'
+        '<tr><th scope="col">模型</th><th scope="col">推理力度</th><th scope="col">服务档位</th><th scope="col">用量（tokens）</th><th scope="col">时间（秒）</th></tr></thead><tbody>')
+    for role in 'HWAE':
+        paths = [f'agent.roles.{role}.{key}' for key in ('model','reasoning_effort','service_tier')]
+        paths += [f'budget.node_targets.{role}.{key}' for key in ('max_observed_tokens','max_seconds')]
+        used.update(paths)
+        rows.append('<tr><th scope="row">'+role+' · '+ROLE_NAMES[role]+'</th>'+''.join('<td>'+control(by_path[path], matrix=True)+'</td>' for path in paths)+'</tr>')
+    rows.append('</tbody></table></div><details class="config-help role-settings-help"><summary>角色职责与用量说明</summary>'
+        '<div id="role-settings-help"><p>角色模型、推理力度与服务档位留空时沿用统一设置。单次用量留空时不单独声明；若自定义，请填写四个角色的全部八项。单次软目标不能扩大总预算。</p>'
+        + ''.join('<p><strong>'+role+' · '+ROLE_NAMES[role]+'</strong>：'+ROLE_HELP[role]+'</p>' for role in 'HWAE')
+        + '<p>原调用恢复、预算份额与交付等设置可能要求完整的单次用量配置。</p></div></details></details>')
+    rows.append(
+        '<details class="permission-settings"><summary>研究助手可以访问什么？<span class="summary-note">权限与联网</span></summary>'
+        '<p class="note">'+('以下为后续节点的权限声明；实验仍需满足自身的授权条件。' if edit else
+        '权限沿用统一配置，检查时会列出生效值。实验执行仍需自身的授权条件。')+'</p><div class="config-grid config-grid-four">'+fields(permissions)+'</div></details>')
+    rows.append('<details class="advanced-settings"><summary>更多研究配置<span class="summary-note">探索节奏、接入与恢复</span></summary>'
+        + ('<p class="note">探索节奏、实验执行、交付及研究合同可在下面调整。折叠后仍完整保留填写的值。</p>' if edit else
+        '<p class="note">日常创建只需上方任务、模型和总预算。下面可选配置不会自动增加权限或预算。已导入的值在折叠后仍完整保留。</p>'))
     categories = [
         ('补充任务与材料约束','research','已有全局补充原文、材料来源限制。'),
-        ('模型角色与启动方式','agent','角色分别负责提出方向、探索方案、评估复核、实验实现；未单独指定时沿用全局模型。原生设置由所选后端解释。'),
-        ('研究搜索与分阶段用量','budget','设置阶段软目标、角色份额、候选探索与输出上限；软目标不替代总预算。'),
-        ('实验执行与资源','executor','选择执行归属与插件，声明累计实验资源。配置本身不会授予实验执行许可。'),
-        ('交付与外部适配','delivery','交付策略、外部接口和相关插件参数。'),
-        ('复核与恢复规则','policies','正式复核、决策合同、原调用恢复与历史观察配置。'),
-        ('网页与本地管理','ui','实例网页端口与宿主管理文件路径。'),
+        ('后端接入与原生设置','agent','日常使用 Codex 可保持留空。更换后端、启动程序或原生环境时才需设置。'),
+        ('探索节奏与用量分配','budget','设置实验探索切片、角色份额、补正阈值与输出体积限制；这些设置不增加总预算。'),
+        ('实验执行插件与资源','executor','仅在本次研究需要实验执行时接入。配置本身不会授予实验执行许可。'),
+        ('结果交付适配器','delivery','仅在需要向明确外部目标交付时配置，按适配器说明准备。'),
+        ('独立复核与原调用恢复','policies','声明复核合同、恢复边界与已接入的历史观察插件。'),
+        ('实例网页与宿主管理','ui','实例网页端口与宿主管理文件路径。'),
         ('声明格式','version','导入配置的格式版本。'),
     ]
-    rows.append('<details class="advanced-settings"><summary>高级设置<span class="summary-note">按用途展开 · 角色、实验、交付等完整参数</span></summary>'
-        '<p class="note">只有需要覆盖统一配置或使用专门插件时才需要修改。已导入的值会完整保留；空白表示未声明。</p>')
     for title, prefix, explanation in categories:
+        if edit and prefix in {'research', 'ui', 'version'}:
+            continue
         paths = [field.path for field in FIELDS if field.path not in used and (field.path == prefix or field.path.startswith(prefix+'.'))]
-        rows.append('<details class="advanced-category"><summary>'+title+'</summary><p class="note">'+explanation+'</p>'+fields(paths, advanced=True)+'</details>')
-    rows.append('<details class="advanced-category"><summary>其他导入字段</summary><p class="note">原样保留并校验额外字段；不支持的声明会在检查时提示。</p><div class="config-children" data-parent="@extra">'+tree(extras,'@extra')+'</div><button type="button" class="config-add secondary-button" data-parent="@extra">添加扩展字段</button></details></details>'
-        '<div class="setup-actions"><button type="button" hidden class="secondary-button" data-setup-go="1">← 返回任务与材料</button><span class="note">下一步会检查配置，尚不创建或运行研究。</span></div></section>')
+        regular = [path for path in paths if by_path[path].kind not in ('table','array') or path in GROUP_FIELDS]
+        expert = [path for path in paths if path not in regular]
+        configured = any(_get(document, path) is not None for path in paths)
+        rows.append('<details class="advanced-category" data-config-group="'+prefix+'"><summary>'+title+('<span class="configured-note">已配置</span>' if configured else '')+'</summary><p class="note">'+explanation+'</p>')
+        if prefix == 'budget':
+            for group_title, group_paths in [
+                ('探索切片', [path for path in regular if path.startswith('budget.breadth.')]),
+                ('补正阈值', [path for path in regular if path.startswith('budget.correction.')]),
+                ('输出与候选', [path for path in regular if path not in {'budget.role_shares'} and not path.startswith(('budget.breadth.', 'budget.correction.'))]),
+            ]:
+                rows.append('<fieldset class="config-group"><legend>'+group_title+'</legend><div class="config-grid config-grid-four">'+fields(group_paths, advanced=True)+'</div></fieldset>')
+            rows.append(fields(['budget.role_shares'], advanced=True))
+        else:
+            rows.append('<div class="config-grid config-grid-four">'+fields(regular, advanced=True)+'</div>')
+        if expert:
+            rows.append(fields(expert, advanced=True))
+        rows.append('</details>')
+    rows.append('<details class="advanced-category"><summary>其他导入字段 / 专家编辑</summary><p class="note">原样保留并校验额外字段；不支持的声明会在检查时提示。</p><div class="config-children" data-parent="@extra">'+tree(extras,'@extra')+'</div><button type="button" class="config-add secondary-button" data-parent="@extra">添加扩展字段</button></details></details>'
+        + ('</section>' if edit else '<div class="setup-actions"><button type="button" hidden class="secondary-button" data-setup-go="1">← 返回任务与材料</button><span class="note">下一步会检查配置，尚不创建或运行研究。</span></div></section>'))
     rows.append('<script>'+SCRIPT_SOURCE+'</script>')
-    return '\n'.join(rows)
+    return '<div class="compact-configuration">'+'\n'.join(rows)+'</div>'
 
 
 SCRIPT_SOURCE = r'''
 (() => {
 document.addEventListener('DOMContentLoaded', () => {
+  const editor = document.getElementById('research-config-edit-form');
+  if (editor) {
+    const notice = document.querySelector('[role="alert"]');
+    const invalid = Array.from(editor.querySelectorAll('[data-error-label]')).find(field =>
+      field.dataset.invalid || (notice && (notice.textContent.includes(field.dataset.errorLabel) ||
+        notice.textContent.includes(field.dataset.configPath || '__no_path__'))));
+    if (invalid) {
+      for (let node=invalid; node && node!==editor; node=node.parentElement) if(node.tagName==='DETAILS') node.open=true;
+      invalid.querySelector('input:not([type="hidden"]),select,textarea')?.focus();
+    } else if (notice) notice.focus();
+  }
   const flow = document.querySelector('.setup-flow');
   if (!flow) return;
   const form = document.getElementById('research-config-form');
@@ -520,6 +728,13 @@ const invalidate = e => {
   note.textContent='参数已修改，请重新检查并预览。';
 };
 document.addEventListener('input',invalidate); document.addEventListener('change',invalidate);
+const enableEditedGroup = e => {
+  const group = e.target.closest('.structured-setting');
+  if (!group || e.target.type === 'checkbox') return;
+  const enabled = group.querySelector('input[type="checkbox"]');
+  if (enabled) enabled.checked = true;
+};
+document.addEventListener('input', enableEditedGroup); document.addEventListener('change', enableEditedGroup);
 document.addEventListener('click', e => { if (e.target.matches('.config-add,.config-remove,.config-string-add,.config-string-remove')) invalidate(e); });
 document.addEventListener('change', e => {
   if (!e.target.matches('.config-kind')) return;
@@ -537,15 +752,17 @@ document.addEventListener('click', e => {
   }
   if (e.target.matches('.config-remove')) { e.target.closest('.config-node').remove(); return; }
   if (!e.target.matches('.config-add')) return;
-  const group=e.target.closest('details'), enabled=group && group.querySelector('input[type="checkbox"]'); if(enabled) enabled.checked=true;
+  const group=e.target.closest('.structured-setting'), enabled=group && group.querySelector('input[type="checkbox"]'); if(enabled) enabled.checked=true;
   const parent = e.target.dataset.parent, id = String(++next), prefix = 'node.'+id+'.';
   const node = document.createElement('div'); node.className = 'config-node'; node.dataset.node = id;
   const hidden = document.createElement('input'); hidden.type = 'hidden'; hidden.name = prefix+'parent'; hidden.value = parent; node.append(hidden);
-  const key = document.createElement('input'); key.name = prefix+'key'; key.placeholder = '对象键名（数组项留空）'; node.append(key);
+  const keyLabel = document.createElement('label'); keyLabel.className='config-node-key'; keyLabel.textContent='键名 ';
+  const key = document.createElement('input'); key.name = prefix+'key'; key.placeholder = '对象键名（数组项留空）'; keyLabel.append(key); node.append(keyLabel);
+  const kindLabel = document.createElement('label'); kindLabel.className='config-node-type'; kindLabel.textContent='类型 ';
   const kind = document.createElement('select'); kind.name = prefix+'kind'; kind.className = 'config-kind';
   for (const [value,label] of [['string','文本'],['integer','整数'],['number','数字'],['boolean','布尔'],['table','对象'],['array','数组'],['datetime','日期时间'],['date','日期'],['time','时间']]) {
     const option = document.createElement('option'); option.value = value; option.textContent = label; kind.append(option);
-  } node.append(kind);
+  } kindLabel.append(kind); node.append(kindLabel);
   const label = document.createElement('label'); label.className='config-value'; label.textContent='值 ';
   const value=document.createElement('input'); value.name=prefix+'value'; label.append(value); node.append(label);
   const remove=document.createElement('button'); remove.type='button'; remove.className='config-remove'; remove.textContent='删除此项'; node.append(remove);

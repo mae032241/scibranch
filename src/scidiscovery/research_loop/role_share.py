@@ -25,8 +25,8 @@ def policy(value):
     return dict(value)
 
 
-def configured(root):
-    value = c.settings(root).get('role_budget_policy')
+def configured(root, job=None):
+    value = c.settings(root, job).get('role_budget_policy')
     return policy(value) if value is not None else None
 
 
@@ -54,7 +54,7 @@ def usage(root, through_step):
 def _required(root, step, job, result, role, correction_request):
     if correction_request is not None or job['role'] == 'W' and role == 'A':
         return True
-    if job['role'] == 'A' and role == 'A' and result.get('next_action') == 'audit' and c.settings(root).get('candidate_audit_policy'):
+    if job['role'] == 'A' and role == 'A' and result.get('next_action') == 'audit' and c.settings(root, job).get('candidate_audit_policy'):
         from . import candidate_audit
         return candidate_audit.receipt_ref(root, step) is not None
     return False
@@ -62,14 +62,14 @@ def _required(root, step, job, result, role, correction_request):
 
 def reason(root, step, job, result, role, correction_request=None, *, allow_repeat=False):
     """Why control refuses the proposed optional H/A node, or None."""
-    limits = configured(root)
+    limits = configured(root, job)
     if limits is None or role not in THINKING or job.get('purpose') == 'closeout':
         return None
     if _required(root, step, job, result, role, correction_request):
         return None
     if not allow_repeat and job['role'] == role and not (job.get('formal_review') or result.get('next_action')=='formal_review'):
         return 'role_repeat_without_evidence'
-    meter, total = usage(root, step), c.settings(root)['max_tokens']
+    meter, total = usage(root, step), c.settings(root, job)['max_tokens']
     if meter['thinking'] >= limits['max_thinking_share'] * total:
         return 'role_share_thinking_reached'
     if meter['thinking'] + meter['E'] >= (1 - limits['min_w_share']) * total:

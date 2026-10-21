@@ -32,10 +32,15 @@ payload={'summary':'A bounded finding','scientific_result':'Original fixture obs
 if 'implementation_selection' in task['final_response']:payload['implementation_selection']=None
 if role=='H':payload.update(next_action='wait',route_reason='No further work required',search_plan=None)
 if role=='W':
- assigned=task.get('lineage',{}).get('mechanisms',{})
- payload.update(stage_intent='review',mechanism_findings=[dict(mechanism=row['label'],basis='blocked',
+ job=json.loads(pathlib.Path(os.environ['THIN_HWA_JOB_MANIFEST']).read_text())
+ assigned=(job.get('search') or {}).get('coverage_obligation',[])
+ payload.update(stage_intent='review',mechanism_findings=[dict(mechanism=row['mechanism_ref'],basis='blocked',
   finding='This transport fixture performs no scientific experiment or managed observation.')
-  for row in assigned['overview']] if assigned.get('task_action')=='screen' else None)
+  for row in assigned] if assigned else None,
+  candidate_nominations=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row['mechanism_ref'],
+   reason='No scientific candidate was produced by this transport fixture.')
+   for row in job['candidate_nomination_mechanisms'] if row['status']!='waived'])
+   if job.get('candidate_nomination_mechanisms') else None)
 if role=='A':payload.update(next_action='finish',route_reason='A bounded conclusion',candidate_recommendation=None,
  search_review=None,progress_assessment=None,decision_request=None,portfolio_review=None)
 mode=config['mode']
@@ -358,7 +363,7 @@ def test_absent_node_policy_keeps_current_protocol_and_original_w_transport(tmp_
     assert all('budget_slice' not in row for row in status(root)['nodes'])
 
 
-def test_budget_changes_during_job_build_refuse_acceptance_without_claiming_retained_intent(tmp_path, monkeypatch):
+def test_budget_race_preserves_unaccepted_job_and_enters_durable_final(tmp_path, monkeypatch):
     root = instance(tmp_path, limits=policy(tokens=100, seconds=10), max_seconds=60)
     now = [100.]
     monkeypatch.setattr(budget.time, 'time', lambda: now[0])
@@ -372,10 +377,15 @@ def test_budget_changes_during_job_build_refuse_acceptance_without_claiming_reta
         return job
     monkeypatch.setattr(c, 'build_job', build)
     monkeypatch.setattr(native.subprocess, 'Popen', lambda *a, **kw: pytest.fail('No node was accepted'))
+    final = []
+    monkeypatch.setattr(controller, '_run_final',
+        lambda root, begin: final.append(begin) or dict(status='final_report'))
     result = controller.run(root)
-    assert result['status'] == 'node_budget_unavailable_seconds'
-    assert result['completed_steps'] == 0 and len(built) == 1
-    assert 'retained' not in json.dumps(result).lower()
+    assert result['status'] == 'final_report'
+    assert len(built) == 1
+    begin = budget.closeout_state(root)['begin']
+    assert final == [begin] and begin['mode'] == 'final'
+    assert begin['source_cutoff'] == 0 and begin['stop_reason'] == 'wall_limit'
     record = c.host_record(c.workspace(root, 1))
     assert not (record / 'native-intent.json').exists()
     assert not (record / 'native-process.json').exists()
@@ -384,9 +394,12 @@ def test_budget_changes_during_job_build_refuse_acceptance_without_claiming_reta
     assert c.settings(root)['final_a_completion_policy'] == dict(version=1)
     assert budget.protected_final_report(c.settings(root))
     assert c.read(root / 'jobs/001.json')['role'] == 'H'
-    assert controller.run(root)['status'] == 'retained_job_conflict'
+    assert controller.run(root)['status'] == 'final_report'
+    assert final == [begin, begin]
     assert len(built) == 1 and (root / 'jobs/001.json').read_bytes() == prepared
     assert not (record / 'native-intent.json').exists()
     assert not (record / 'native-process.json').exists()
     assert not (record / 'science-output.json').exists()
+    # FINAL routing is durable, but the stub has accepted no native A return.
+    assert budget.closeout_state(root)['begin'] == begin
     assert budget.final_a_barrier(root) is None

@@ -5,7 +5,9 @@
 新实例由 `scid-research` 管理，实验工具为 `scid-experiment`。没有 LLM Root、MCP 调度服务或后台 Root daemon。
 核心提供薄 CLI 与实例 UI；旧 CLI/MCP/UI、Root 宿主、平台配置生成与 legacy systemd 部署已退役。
 
-`research_config.py` 是 TOML、CLI 与宿主入口共同的准备、默认值和校验路径。新实例冻结实际生效设置；修改声明不更新已有实例。`backends.py` 将 Codex 与显式 protocol 输运隔开，不接管科学判断、预算或执行授权。protocol 权限为 launcher 提示，不证明隔离；不支持原生续接和完整作者证明，不能取得正式独审。开启子 Agent 也不证明作者或用量完整。具体字段与限制见[配置与后端参考](RESEARCH_CONFIGURATION.md)。
+`research_config.py` 是 TOML、CLI 与宿主入口共同的准备、默认值和校验路径。新实例冻结实际生效设置；修改新建声明不更新已有实例。`backends.py` 将 Codex 与显式 protocol 输运隔开，不接管科学判断、预算或执行授权。protocol 权限为 launcher 提示，不证明隔离；不支持原生续接和完整作者证明，不能取得正式独审。开启子 Agent 也不证明作者或用量完整。具体字段与限制见[配置与后端参考](RESEARCH_CONFIGURATION.md)。
+
+`configuration_updates.py` 将运行配置修订与原始设置身份分开保存。新节点构建输入前绑定精确版本；已有节点及其原调用在校验、执行和恢复时沿用各自配置。保存只排队，不启动研究。配置变化保留累计预算与资源账本、未决执行事实和 FINAL 边界。可编辑字段及已生效、待生效状态见配置参考。
 
 冻结的权限摘要分别记录请求值、实际策略、实施方式与限制；标准 Codex danger-full-access 不强制离线，read-only 不因网络请求启用联网，protocol/自定义 launcher 仅作权限提示，实际访问未知。
 

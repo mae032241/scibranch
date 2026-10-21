@@ -32,7 +32,11 @@ if role=='W':
  job=json.loads(pathlib.Path(os.environ['THIN_HWA_JOB_MANIFEST']).read_text())
  assigned=(job.get('search') or {}).get('coverage_obligation',[])
  payload.update(stage_intent='review',mechanism_findings=[dict(mechanism=item['mechanism_ref'],basis='blocked',
-  finding='This timing fixture has no managed observations; the scientific comparison remains blocked.') for item in assigned] if assigned else None)
+  finding='This timing fixture has no managed observations; the scientific comparison remains blocked.') for item in assigned] if assigned else None,
+  candidate_nominations=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=item['mechanism_ref'],
+   reason='This timing fixture produces no scientific candidate to compare.')
+   for item in job['candidate_nomination_mechanisms'] if item['status']!='waived'])
+   if job.get('candidate_nomination_mechanisms') else None)
 if role=='A':payload.update(search_review=None,candidate_recommendation=None,progress_assessment=None,decision_request=None,portfolio_review=None,next_action='finish',route_reason='Independent conclusion')
 pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))
 '''

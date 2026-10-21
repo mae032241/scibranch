@@ -17,6 +17,7 @@ import re
 import time
 
 from scidiscovery import execution_security as security
+from . import configuration_updates
 from . import contracts as c, qualification as q, formal_review as review, execution, experiment_client
 
 ID = re.compile(r'[0-9a-f]{64}\Z')
@@ -32,15 +33,16 @@ def configuration(value):
     return value
 
 
-def freeze_configuration(root):
+def freeze_configuration(root, directory=None):
     root = Path(root).resolve()
-    return dict(version=1, contract=q._save(root, root / 'execution-authority/contract.json',
+    path = Path(directory) / 'execution-authority-contract.json' if directory is not None else root / 'execution-authority/contract.json'
+    (root / 'execution-authority').mkdir(parents=True, exist_ok=True)
+    return dict(version=1, contract=q._save(root, path,
         dict(version=1, options=list(OPTIONS), scope=SCOPE,
              stage='decision_originals_resource_gate_separate')))
 
 
-def contract(root):
-    policy = c.settings(root).get('execution_authority_policy')
+def _policy_contract(root, policy):
     if policy is None:
         raise ValueError('Execution authority is unavailable for this instance')
     value = q._read(root, policy['contract'])
@@ -50,12 +52,35 @@ def contract(root):
     return policy['contract']
 
 
+def contract(root, job=None):
+    settings = configuration_updates.for_job(root, job) if job is not None else configuration_updates.current(root)
+    return _policy_contract(root, settings.get('execution_authority_policy'))
+
+
+def host_contract(root):
+    """Retained permission originals keep their explicit operator host usable.
+
+    This selects a host capability only. Calls and decisions still validate the
+    exact job's authority contract, including after a later policy disables it.
+    """
+    root = Path(root)
+    policy = c.settings(root).get('execution_authority_policy')
+    if policy is not None:
+        return _policy_contract(root, policy)
+    # A later incomplete update must not block decisions on retained originals.
+    for index, _ in enumerate(sorted((root / 'host-control/configuration/revisions').glob('*.json')), 1):
+        row = configuration_updates.revisions(root, through=index)[-1]
+        policy = row['settings'].get('execution_authority_policy')
+        if policy is not None:
+            return _policy_contract(root, policy)
+    return None
+
+
 @contextmanager
 def writer(root, *, context=None, blocking=True):
     from . import instance_owner
     root = Path(root).resolve()
     with instance_owner.lease(root):
-        contract(root)
         path = root / 'execution-authority'
         fd = os.open(path / 'writer.lock', os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
         try:
@@ -78,6 +103,8 @@ def bind_secret(root, secret, *, source=None):
     """Only the explicit operator UI startup supplies this secret; never JSON."""
     security.receipt_hmac(secret, b'')
     root = Path(root).resolve()
+    if host_contract(root) is None:
+        raise ValueError('Execution authority is unavailable for this instance')
     with writer(root):
         ref = q._save(root, root / 'execution-authority/host-key.json',
             dict(version=1, instance=c.settings(root)['goal_id'],
@@ -140,17 +167,17 @@ def _qualifications(root, job):
 
 
 def bind_job(root, job):
-    if c.settings(root).get('execution_authority_policy') is not None:
-        job['execution_authority'] = contract(root)
+    if configuration_updates.for_job(root, job).get('execution_authority_policy') is not None:
+        job['execution_authority'] = contract(root, job)
         job['execution_qualifications'] = _qualifications(root, job)
 
 
 def validate_job(root, job):
-    if c.settings(root).get('execution_authority_policy') is None:
+    if configuration_updates.for_job(root, job).get('execution_authority_policy') is None:
         if 'execution_authority' in job or 'execution_qualifications' in job:
             raise q.IntegrityError('Task invented execution authority')
         return
-    if (job.get('execution_authority') != contract(root)
+    if (job.get('execution_authority') != contract(root, job)
             or job.get('execution_qualifications') != _qualifications(root, job)):
         raise q.IntegrityError('Task execution qualifications differ from direct frozen originals')
 
@@ -166,7 +193,8 @@ def _directory(root, request_id):
 
 def _validate_binding(root, value):
     """Replay the declared permission identity, without result or admission checks."""
-    if (value['contract'] != contract(root) or value['instance'] != c.settings(root)['goal_id']
+    job = q._read(root, value['job'])
+    if (value['contract'] != contract(root, job) or value['instance'] != c.settings(root)['goal_id']
             or value.get('version') != 1 or value.get('kind') != 'execution_authorization'
             or value.get('options') != list(OPTIONS) or value.get('scope') != SCOPE):
         raise q.IntegrityError('Execution request contract or instance changed')
@@ -253,7 +281,7 @@ def create_request(root, *, step, native_intent, call_id, subject, review_ref,
         payload_binding = (previous['payload'] if previous is not None else
             {key:subject['material']['source' if key == 'path' else key] for key in ('path','sha256','size_bytes')})
     value = dict(version=1, kind='execution_authorization', instance=c.settings(root)['goal_id'],
-        contract=contract(root), job=q._ref(root, job_path), native_intent=native_intent,
+        contract=contract(root, c.read(c.regular(job_path))), job=q._ref(root, job_path), native_intent=native_intent,
         call_id=call_id, subject=subject, review=review_ref,
         payload=payload_binding, target=target, policy=policy,
         resources=resources, grant_revision=grant_revision, expires_at=expires_at,
@@ -403,7 +431,7 @@ def status(root, request_id, *, secret):
     return dict(request=ref, state='revoked' if revoked else 'expired' if time.time() >= value['expires_at']
         else 'decided' if decided is not None else 'pending',
         selected_option=decided['selected_option'] if decided else None,
-        production='trusted_resource_gate_required' if c.settings(root).get('execution_resource_policy') else 'blocked_pending_resource_gate', scope=SCOPE)
+        production='trusted_resource_gate_required' if configuration_updates.for_job(root, q._read(root, value['job'])).get('execution_resource_policy') else 'blocked_pending_resource_gate', scope=SCOPE)
 
 
 def revoke(root, request_id, *, secret, reason):
@@ -430,10 +458,10 @@ def _host_context(config):
     step = config['scope']['step']; job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
     from .protocol import stage_scope
     if (job['role'] != 'W' or config['scope'] != stage_scope(root, job)
-            or config.get('host_execution_authority') != contract(root)
-            or c.settings(root).get('execution_resource_policy') is None):
+            or config.get('host_execution_authority') != contract(root, job)
+            or configuration_updates.for_job(root, job).get('execution_resource_policy') is None):
         raise q.IntegrityError('Trusted execution services have no exact host task')
-    selected = c.settings(root)['execution_config']
+    selected = configuration_updates.for_job(root, job)['execution_config']
     if (config.get('registered_implementation') != selected.get('implementation')
             or config['execution_interface']['executor'] != selected['executor']
             or any(config.get(key) != value for key, value in selected['configuration'].items())):

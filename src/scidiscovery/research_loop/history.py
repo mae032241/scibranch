@@ -65,7 +65,7 @@ def observer_config(value):
 def observer_input_sources(root, job, observation):
     """Only the retained trusted contract/view; display coverage grants nothing."""
     from . import execution_inputs, qualification as q
-    config = c.settings(root).get('history_observer')
+    config = c.settings(root, job).get('history_observer')
     original = observation.get('input_sources')
     if config is None or config.get('source_contract') is None:
         if original is not None:
@@ -491,7 +491,7 @@ def validate_input_coverage(root, job, rows, published):
 
 def _capture(root, job, payload, materials):
     """Snapshot mechanical adapter facts once, before the scientific seal."""
-    config = c.settings(root).get('history_observer')
+    config = c.settings(root, job).get('history_observer')
     if config is None:
         config=_managed_config(job,root)
         if config is None:return None
@@ -634,7 +634,7 @@ def capture(root, job, payload, materials):
     if job.get('formal_review'):return None
     from .protocol import require_current
     require_current(root,job)
-    config = c.settings(root).get('history_observer')
+    config = c.settings(root, job).get('history_observer')
     if config is None:
         return _capture(root,job,payload,materials) if _managed_config(job,root) else None
     adapter = c.regular(Path(config['adapter']))
@@ -702,7 +702,7 @@ def direct_sources(root, job):
                 or next((row['sha256'] for row in job.get('direct_originals',job['direct_refs']) if row['path']==ref['path']),None) != seal['raw_sha256']
                 or c.read(execution.record(root, step) / 'native-intent.json')['task_sha256'] != seal['job_sha256']
                 or type(outcome.get('returncode')) is not int or outcome['returncode'] != 0 or outcome.get('stop_reason')
-                or outcome.get('usage', {}).get('unknown_steps') != [] and not budget.native_completion_known(outcome, c.settings(root))
+                or outcome.get('usage', {}).get('unknown_steps') != [] and not budget.native_completion_known(outcome, c.settings(root, source))
                 or outcome.get('raw_sha256') != seal['raw_sha256']
                 or c.read(record / 'result.json') != c.result_projection(source, payload)):
             raise ValueError('Direct scientific original or terminal identity changed')
@@ -979,7 +979,7 @@ def read_observation(root, job, seal):
         if seal.get('observations') is not None:raise ValueError('Formal review has an ordinary observer snapshot')
         return
     receipt = seal.get('observations')
-    config = c.settings(root).get('history_observer') or _managed_config(job,root)
+    config = c.settings(root, job).get('history_observer') or _managed_config(job,root)
     if config is None:
         if receipt is not None:
             raise ValueError('Unconfigured observer snapshot in scientific seal')
@@ -1001,7 +1001,7 @@ def validate_observation(root, job, seal):
     if value is None:
         return
     observer_input_sources(root, job, value)
-    config = c.settings(root).get('history_observer') or _managed_config(job,root)
+    config = c.settings(root, job).get('history_observer') or _managed_config(job,root)
     if _managed_config(job,root):
         validate_managed(root,job,value['managed_calls'])
     proofs = [proof for row in value['candidates'] for proof in row['evidence']]

@@ -63,7 +63,7 @@ def status(root: Path, *, after=0, limit=None, live_feedback=True):
     from . import delivery
     return dict(instance=str(root), goal_id=settings['goal_id'], objective=settings['objective'],
                 paused=(root / 'pause.request').exists(), nodes=nodes, usage=native.usage(root),
-                goal_completion='not_asserted', budget=budget.snapshot(root),
+                goal_completion='not_asserted', budget=budget.status_snapshot(root),
                 correction=correction.project(root, before_step=closeout['begin']['source_cutoff'] + 1 if closeout['begin'] else None),
                 closeout_preparation=delivery.preparation_status(root),
                 closeout=controller._closeout_result(root, 'closeout_status', read_only=True) if closeout['begin'] else None, **page)

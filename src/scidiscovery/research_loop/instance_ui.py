@@ -25,9 +25,9 @@ from . import instance_science as science
 from . import instance_display as display, ui_saved_status as saved_status
 from . import instance_render as render
 from . import instance_live as live
-from . import configuration_form, progress, public_output, research_config, user_guidance
+from . import budget, configuration_form, configuration_updates, progress, public_output, research_config, user_guidance
 from . import ui_components as ui
-from . import ui_mechanisms, ui_view, ui_translation, ui_errors
+from . import ui_mechanisms, ui_view, ui_translation, ui_errors, ui_guidance
 
 
 _ENTRY_SCRIPT = "location.replace('./');"
@@ -61,12 +61,12 @@ class InstanceUI:
         self.children = {}
         settings = {} if workspace else display.settings(self.root)
         self.error_settings = settings
-        self.approvals_configured = settings.get('execution_authority_policy') is not None
-        self.approvals = self.approvals_configured and approval_host
+        self.approval_host = bool(approval_host and not workspace)
+        self.approvals_configured = False
+        self.approvals = False
+        self._serving = False
+        self._approval_endpoint_origin = None
         self.secret = security.read_secret_file(secret_file, label='instance UI')
-        if self.approvals:
-            authority.contract(self.root)
-            authority.bind_secret(self.root, self.secret, source=secret_file)
         self.instance = ('workspace-' + uuid.uuid5(uuid.NAMESPACE_URL, str(self.root)).hex
                          if workspace else settings['goal_id'])
         self.boot = uuid.uuid4().hex
@@ -88,8 +88,26 @@ class InstanceUI:
         # and candidate projections keyed by the instance metadata fingerprint.
         self.view_memo = {}
         self.candidate_cache = {}
+        self._refresh_approval_host()
         self.translation = translation_service or ui_translation.TranslationService(self.root / ".scid-ui", config=translation_config)
         self.translation_nonce = secrets.token_urlsafe(32)
+
+    def _refresh_approval_host(self):
+        """Prepare the explicit UI host without changing any job permission."""
+        if self.workspace:
+            return
+        with self.control_lock:
+            self.approvals_configured = authority.host_contract(self.root) is not None
+            if not self.approval_host or not self.approvals_configured:
+                return
+            if not self.approvals:
+                authority.bind_secret(self.root, self.secret, source=self.secret_file)
+                self.approvals = True
+            if self._serving and self.host and self._approval_endpoint_origin != self.host:
+                endpoint = dict(instance=self.instance, boot=self.boot, origin='http://' + self.host)
+                endpoint['receipt_hmac'] = security.receipt_hmac(self.secret, security.canonical(endpoint))
+                c.write(self.root / 'execution-authority/ui-endpoint.json', endpoint)
+                self._approval_endpoint_origin = self.host
 
     def _browser(self, cookie, *, scope='maintenance'):
         self.browser.from_cookie(cookie, instance_id=self.instance, scope=scope)
@@ -128,7 +146,7 @@ class InstanceUI:
     def _error_response(self, error, target, *, json_response=False):
         path = target.partition('?')[0]
         context = ('translation' if '/translation/' in path else 'load-config' if path.endswith('/load-config')
-            else 'configuration' if path.endswith(('/configure', '/create', '/configuration'))
+            else 'configuration' if path.endswith(('/configure', '/create', '/configuration', '/configuration-update'))
             else 'open' if path.endswith('/open') else 'budget' if path.endswith('/budget') else 'control')
         problem = self._problem(error, context=context)
         if isinstance(error, json.JSONDecodeError) and path.endswith(('/lookup', '/start')):
@@ -139,8 +157,19 @@ class InstanceUI:
         return problem.status, self._error_page(problem, problem.markup()), {}
 
     def _control_error(self, token, action, form, error):
-        context = 'configuration' if action in {'configure', 'create', 'configuration'} else action if action in {'open', 'load-config', 'budget'} else 'control'
+        context = 'configuration' if action in {'configure', 'create', 'configuration', 'configuration-update'} else action if action in {'open', 'load-config', 'budget'} else 'control'
         problem = self._problem(error, context=context)
+        if action == 'configuration-update':
+            state = configuration_updates.status(self.root)
+            fields = {key: value for key, value in form.items() if key not in {'nonce', 'csrf', 'expected_revision', 'authorization_note'}}
+            draft = configuration_form.imported(state['configuration'], base=self.root)
+            try:
+                draft = configuration_form.parse_edit(fields, base=self.root, configuration=state['configuration'])
+            except Exception as parse_error:
+                draft = getattr(parse_error, 'draft', draft)
+            return self._configuration_page(token, draft=draft, problem=problem,
+                expected_revision=form.get('expected_revision', str(state['revision'])),
+                authorization_note=form.get('authorization_note', ''))
         if action in {'configure', 'create', 'load-config'}:
             selected = self.config_selections.get(token)
             draft = selected['draft'] if selected else configuration_form.blank(base=self.root)
@@ -168,13 +197,15 @@ class InstanceUI:
             fields += '<label>继续本次研究的说明<textarea name="authorization_note">' + html.escape(form['authorization_note']) + '</textarea></label>'
         elif action == 'resume' and isinstance(error, ui_errors.InputError):
             fields = '<label>阶段编号<textarea name="step">' + html.escape(form['step']) + '</textarea></label>'
+        elif action == 'guidance-submit':
+            return self._guidance_page(token, draft=form, problem=problem)
         elif action.startswith('guidance-'):
             for key, value in form.items():
                 if key not in {'nonce', 'csrf'}:
                     fields += '<label>' + html.escape(key) + '<textarea name="' + html.escape(key, quote=True) + '">' + html.escape(value) + '</textarea></label>'
         # Failed control receipts must first be reconciled on the operations
         # page; rendering a start/resume form here would invite blind replay.
-        body = problem.markup() + (self._form(token, action, fields, '确认调整预算' if action == 'budget' else '修改后重新提交')
+        body = problem.markup() + (self._form(token, action, fields, '确认追加预算' if action == 'budget' else '修改后重新提交')
             if fields and not isinstance(error, ui_errors.ControlFailure) else '')
         return problem.status, self._error_page(problem, body), {}
 
@@ -339,18 +370,96 @@ class InstanceUI:
         self._admin(token)
         if self.workspace:
             return self._workspace_page(token)
-        body = '<nav><a href="/">返回总览</a><a href="/configuration">创建新研究</a></nav><p>这里仅显示你明确打开的实例。</p>'
+        body = '<nav><a href="/">返回总览</a><a href="/new">创建新研究</a></nav><p>这里仅显示你明确打开的实例。</p>'
         body += '<div id="live-instances">' + self._loaded_instances() + '</div>' + self._form(token, 'open',
             '<label>已有实例的完整目录 <input name="root" required></label>', '打开此实例')
         return 200, self._page('已有实例', body), {}
 
-    def _configuration_page(self, token, *, text='', path='', result=None):
+    def _configuration_page(self, token, *, text='', path='', result=None, draft=None, problem=None, expected_revision=None, authorization_note=''):
         self._admin(token)
-        frozen = ''
-        if not self.workspace:
-            frozen = '<details><summary>此实例实际冻结的配置</summary><pre>' + html.escape(json.dumps(
-                public_output.settings_view(display.settings(self.root)), ensure_ascii=False, indent=2)) + '</pre></details>'
-        return self._new_research_page(token, frozen=frozen)
+        if self.workspace:
+            return self._new_research_page(token)
+        state = configuration_updates.status(self.root)
+        settings = state['active_settings']
+        view = public_output.settings_view(settings)
+        original_view = public_output.settings_view(display.settings(self.root))
+        clean = public_output.cleaner(self.root, settings=settings)
+        current_budget = self._guarded(budget.ceilings, self.root)
+
+        def text(value):
+            return html.escape(clean(value, limit=64000))
+
+        def facts(rows):
+            return '<dl class="configuration-facts">' + ''.join(
+                '<div><dt>' + label + '</dt><dd>' + text(value) + '</dd></div>' for label, value in rows) + '</dl>'
+
+        if draft is None:
+            draft = configuration_form.imported(state['configuration'], base=self.root)
+        revision = state['revision'] if expected_revision is None else expected_revision
+        status_note = ('已保存的配置等待下一个新节点生效。下方表单显示待生效配置；当前节点继续使用原配置。'
+            if state['pending'] else '下方表单显示当前配置。修改并保存后，从下一个新节点生效。')
+        body = (self._navigation('/settings') + '<p class="settings-intro">调整这项研究接下来使用的模型、权限、预算、实验执行与交付安排。</p>'
+            '<section class="configuration-status" role="status"><h2>' + ('配置待生效' if state['pending'] else '当前配置已生效')
+            + '</h2><p>' + status_note + '</p></section>')
+        if problem:
+            body += problem.markup()
+        fields = ('<input type="hidden" name="expected_revision" value="' + html.escape(str(revision), quote=True) + '">'
+            + configuration_form.render(draft, edit=True)
+            + '<label>调整说明<textarea name="authorization_note" rows="2">' + html.escape(authorization_note)
+            + '</textarea></label><p class="note">调整总预算时请填写原因；其他配置可留空。</p>')
+        body += self._form(token, 'configuration-update', fields, '保存，从下一个节点生效').replace(
+            '<form method="post"', '<form id="research-config-edit-form" method="post"', 1)
+        body += ('<p class="note">任务原件、研究目录及已绑定的材料保持原有身份。补充研究关注点可使用<a href="/guidance">方向建议</a>。</p>'
+            '<details class="configuration-active"><summary>查看当前生效配置与权限说明</summary>'
+            '<section class="configuration-section"><h2>模型与角色</h2>' + facts([
+                ('运行后端', view.get('native_backend', '未声明')),
+                ('全局模型', view.get('model', '未声明')),
+                ('推理力度', view.get('reasoning_effort') or '后端未指定'),
+                ('服务档位', view.get('service_tier') or '后端未指定')])
+            + '<div class="table-scroll"><table class="configuration-roles"><thead><tr><th scope="col">研究角色</th><th scope="col">模型</th><th scope="col">推理力度</th><th scope="col">服务档位</th></tr></thead><tbody>')
+        for role, label in ui_guidance.TARGETS[1:]:
+            profile = (view.get('role_profiles') or {}).get(role, {})
+            body += '<tr><th scope="row">' + label + '</th>' + ''.join('<td>' + text(value) + '</td>' for value in (
+                profile.get('model') or view.get('model', '未声明'),
+                profile.get('reasoning_effort') or view.get('reasoning_effort') or '后端未指定',
+                profile.get('service_tier') or view.get('service_tier') or '后端未指定')) + '</tr>'
+        body += ('</tbody></table></div></section><section class="configuration-section"><h2>预算与用量</h2>'
+            + ('<p class="note">当前预算暂不可读，请到总览或控制请求记录核对。</p>' if 'error' in current_budget else
+                '<h3>当前生效总上限</h3>' + facts([('模型用量上限', str(current_budget['max_tokens']) + ' tokens'),
+                    ('活动时间上限', str(current_budget['max_seconds']) + ' 秒'),
+                    ('研究阶段数上限', str(current_budget['max_steps']) + ' 阶段')]))
+            + '<details><summary>查看创建时的原始总上限</summary>'
+            + facts([('模型用量上限', str(original_view.get('max_tokens', '未声明')) + ' tokens'),
+                ('活动时间上限', str(original_view.get('max_seconds', '未声明')) + ' 秒'),
+                ('研究阶段数上限', str(original_view.get('max_steps', '未声明')) + ' 阶段')])
+            + '</details><p><a href="/#live-usage">查看已用额度</a> · <a href="/operations">核对预算调整记录</a></p></section>'
+            '<section class="configuration-section"><h2>权限与实验执行</h2>'
+            '<p>权限声明与后端生效值分别列出；执行授权仍需满足此实例的合同条件。</p>'
+            '<div class="table-scroll"><table class="permission-review"><thead><tr><th scope="col">访问项目</th><th scope="col">配置声明</th><th scope="col">后端生效值</th><th scope="col">控制方式</th></tr></thead><tbody>')
+        permissions = view.get('native_permissions', {})
+        meanings = {'read-only':'只读文件', 'workspace-write':'可写工作目录', 'danger-full-access':'不限制文件访问',
+            'disabled':'禁用', 'cached':'仅缓存', 'live':'实时检索', 'unknown':'由启动器控制，框架无法确认', True:'允许', False:'不允许'}
+        for key, label in [('workspace', '文件读写'), ('network', '程序联网'), ('web', '网页检索'), ('subagents', '子研究助手')]:
+            body += '<tr><th scope="row">' + label + '</th>' + ''.join('<td>' + text(meanings.get(value, value)) + '</td>' for value in (
+                permissions.get('requested', {}).get(key, '未声明'), permissions.get('effective', {}).get(key, 'unknown'),
+                {'hint_only':'仅为启动器提示', 'inherited_native_configuration':'沿用原生配置', 'unrestricted':'不限制',
+                    'native_sandbox':'原生访问控制', 'unsupported':'后端不支持此限制', 'native_configuration':'原生配置'}.get(
+                    permissions.get('enforcement', {}).get(key), '未声明'))) + '</tr>'
+        body += '</tbody></table></div>'
+        if permissions.get('limitations'):
+            body += '<ul class="permission-limit">' + ''.join('<li>' + text(item) + '</li>' for item in permissions['limitations']) + '</ul>'
+        body += facts([('实验模式', {'local':'本地执行', 'external':'外部执行'}.get(view.get('experiment_mode'), '未声明')),
+            ('实验执行授权合同', '已配置' if settings.get('execution_authority_policy') else '未配置'),
+            ('本次页面的执行审批入口', '可用' if self.approvals else '不可用')])
+        if self.approvals:
+            body += '<p><a href="/requests">核对实验执行请求</a></p>'
+        body += ('</section><section class="configuration-section"><h2>交付与后续调整</h2>'
+            + facts([('交付策略', '已配置' if settings.get('delivery_policy') else '未配置专用交付策略')])
+            + '<p><a href="/final-results">查看研究结果与交付状态</a> · <a href="/guidance">提交方向建议</a></p>'
+            '<p class="note">上方配置修改用于后续新节点，当前节点及原调用恢复继续沿用各自配置。</p></section>'
+            '<details class="effective-details"><summary>查看当前配置详情与后端能力</summary><pre>'
+            + text(json.dumps(view, ensure_ascii=False, indent=2)) + '</pre></details></details>')
+        return (problem.status if problem else 200), self._page('当前研究配置', body, live=False), {}
 
     def _workspace_page(self, token):
         self._admin(token)
@@ -511,7 +620,7 @@ class InstanceUI:
 
     @staticmethod
     def _navigation(current=None):
-        # Four destinations; every earlier route stays reachable (see /settings).
+        # Research navigation; workspace creation and instance selection stay at the workspace.
         items = (('/', '总览'), ('/results', '研究过程'), ('/final-results', '结果'), ('/settings', '设置'))
         return ('<nav class="top-nav"><a class="back-link" href="/instances">← 工作台</a>' + ''.join(
             '<a href="' + href + '"' + (' aria-current="page"' if href == current else '') + '>' + label + '</a>'
@@ -519,42 +628,59 @@ class InstanceUI:
 
     def _settings_page(self, token):
         manager = 'maintenance' in self.browser.verify(token, instance_id=self.instance).scopes
-        rows = [('/guidance', '方向建议', '补充关注点、约束或目标变化；建议不授予执行权限。'),
-                ('/progress', '实时进度', '自动跟随当前阶段的公开工作记录。'),
-                ('/?after=0', '全部阶段记录', '按阶段浏览原有记录页面。')]
+        groups = [('研究设置', [('/guidance', '方向建议', '补充关注点、比较选项或明确目标变化；用于尚未绑定的适用阶段。')])]
         if manager:
-            rows += [('/configuration', '高级设置', '此实例实际冻结的配置与创建新研究。'),
-                     ('/operations', '控制请求记录', '启动、暂停和预算调整请求的处理情况。')]
-        if self.approvals:
-            rows.append(('/requests', '实验执行请求', '逐项核对与决定实验执行请求。'))
-        body = self._navigation('/settings') + '<section><ul class="settings-list">' + ''.join(
-            '<li>' + ui.link(label, href) + '<p class="note">' + ui.esc(note) + '</p></li>' for href, label, note in rows)
-        body += '</ul>' + ('' if manager else '<p class="note">当前为只读查看；管理入口另有高级设置与控制请求记录。</p>')
-        return 200, self._page('设置', body + '</section>', live=False), {}
+            groups[0][1].insert(0, ('/configuration', '当前研究配置', '统一调整模型、角色、权限、预算、实验执行与交付；从下一个新节点生效。'))
+            groups.append(('阅读设置', [('/reading', '阅读与翻译', '选择阅读语言与翻译方式；在工作台内跨实例共享。')]))
+            records = [('/operations', '控制请求记录', '核对启动、暂停和预算调整的处理状态。')]
+            if self.approvals:
+                records.append(('/requests', '实验执行请求', '逐项核对与决定已有实验执行请求。'))
+            groups.append(('请求与记录', records))
+        body = self._navigation('/settings') + '<p class="settings-intro">研究配置、方向建议与阅读偏好各在一个入口维护。</p>'
+        if not manager:
+            body += '<p class="note">当前为只读查看；方向建议可查看，提交建议和管理配置需要管理会话。</p>'
+        body += '<div class="settings-groups">' + ''.join('<section class="settings-group"><h2>' + title
+            + '</h2><ul class="settings-list">' + ''.join('<li>' + ui.link(label, href) + '<p class="note">' + note
+                + '</p></li>' for href, label, note in rows) + '</ul></section>' for title, rows in groups) + '</div>'
+        return 200, self._page('设置', body, live=False), {}
 
-    def _guidance_page(self, token):
+    def _guidance_page(self, token, *, draft=None, problem=None):
         manager = 'maintenance' in self.browser.verify(token, instance_id=self.instance).scopes
-        body = self._navigation() + '<p>这里可以补充关注点、约束或目标变化。建议将在适用阶段交给研究者；建议本身不会授予实验执行权限。</p>'
+        body = (self._navigation('/settings') + '<p class="settings-intro">告诉研究者接下来优先检查什么、比较哪些方案，或明确提出目标变化。</p>'
+            '<p>当前运行或已经准备的阶段保持原样。建议会交给下一次生成的、匹配所选角色的任务；恢复原任务时仍沿用原建议。研究者会判断建议的科学合理性，建议本身不授予实验执行权限。</p>')
+        if problem:
+            body += problem.markup()
+        if manager:
+            body += '<section class="guidance-create"><h2>添加方向建议</h2>' + self._form(token, 'guidance-submit', ui_guidance.fields(draft), '提交建议') + '</section>'
+        else:
+            body += '<p class="note">当前为只读查看，提交或修改建议需要管理会话。</p>'
+        rows = user_guidance.list_guidance(self.root)
+        body += '<section class="guidance-history"><h2>已提交的建议</h2>'
+        if not rows:
+            body += '<p class="note">尚无方向建议。研究会继续按原任务推进。</p>'
         clean = public_output.cleaner(self.root)
-        statuses = {'pending': '等待采用', 'applied': '已交给研究者', 'revoked': '已撤回'}
-        for row in user_guidance.list_guidance(self.root):
-            body += '<section><h2>' + statuses.get(row['status'], html.escape(row['status'])) + '</h2>' + render.excerpt(clean(row['text']), 4000)
-            body += '<p class="note">适用范围：' + ('整个研究' if row.get('scope') == 'research' else '下一适用阶段') + '</p>'
-            hidden = ('<input type="hidden" name="guidance_id" value="' + row['guidance_id'] + '">'
+        statuses = {'pending': '等待适用阶段', 'applied': '已交给研究者', 'revoked': '已撤回'}
+        for row in reversed(rows):
+            body += '<article class="guidance-record"><h3>' + ui.esc(statuses.get(row['status'], row['status'])) + '</h3>' + render.excerpt(clean(row['text']), 4000)
+            body += '<dl class="guidance-metadata">' + ''.join('<div><dt>' + label + '</dt><dd>' + ui.esc(value) + '</dd></div>' for label, value in [
+                ('交给谁', dict(ui_guidance.TARGETS).get(row['target'], row['target'])),
+                ('类型', dict(ui_guidance.KINDS).get(row['kind'], row['kind'])),
+                ('范围', dict(ui_guidance.SCOPES).get(row['scope'], row['scope'])),
+                ('最早生效阶段', str(row.get('effective_step') or '下一适用阶段')),
+                ('首次交付阶段', '第 ' + str(row['applied_step']) + ' 阶段' if row.get('applied_step') else '尚未交付')]) + '</dl>'
+            if row['status'] == 'applied':
+                body += '<p class="note">已交付仅表示建议进入了研究任务，不表示科学结论已采纳。</p>'
+            if row.get('future_revocation'):
+                body += '<p class="note">已撤回后续建议：从第 ' + ui.esc(str(row['future_revocation']['effective_step'])) + ' 阶段起不再用于新任务；已经绑定的任务保留原建议。</p>'
+            hidden = ('<input type="hidden" name="guidance_id" value="' + ui.esc(row['guidance_id']) + '">'
                 '<input type="hidden" name="expected_revision" value="' + str(row['revision']) + '">')
             if manager and row['status'] == 'pending':
-                body += self._form(token, 'guidance-edit', hidden + '<label>修改建议<textarea name="text" required>' + html.escape(row['text']) + '</textarea></label>', '保存修改')
+                body += '<details><summary>修改待交付的文字</summary>' + self._form(token, 'guidance-edit', hidden + '<label>建议内容<textarea name="text" required>' + html.escape(row['text']) + '</textarea></label>', '保存修改') + '</details>'
             if manager and (row['status'] == 'pending' or row['status'] == 'applied' and row.get('scope') == 'research' and not row.get('future_revocation')):
                 body += self._form(token, 'guidance-revoke', hidden, '撤回后续建议')
-            body += '</section>'
-        if manager:
-            fields = ('<label>你希望研究者关注什么？<textarea name="text" rows="5" required placeholder="例如：请说明哪些结论仍缺少证据，以及下一步最值得验证的问题。"></textarea></label>'
-                '<label>交给谁<select name="target">' + ''.join('<option value="' + key + '">' + label + '</option>' for key, label in [('global','所有研究角色'), ('H','H · 假设'), ('W','W · 实验'), ('A','A · 综合评估'), ('E','E · 证据')]) + '</select></label>'
-                '<label>建议类型<select name="kind"><option value="advice">补充建议</option><option value="goal_change">修改研究目标</option></select></label>'
-                '<label>生效范围<select name="scope"><option value="next">下一适用阶段</option><option value="research">整个研究的后续阶段</option></select></label>'
-                '<label>从第几阶段生效（修改目标时必填）<input name="effective_step" type="number" min="1"></label>')
-            body += '<section><h2>添加方向建议（可选）</h2>' + self._form(token, 'guidance-submit', fields, '提交建议') + '</section>'
-        return 200, self._page('方向建议', body), {}
+            body += '</article>'
+        body += '</section>' + ('<script>' + ui_guidance.SCRIPT + '</script>' if manager else '')
+        return (problem.status if problem else 200), self._page('方向建议', body, live=False), {}
 
     def _operations_page(self, token):
         self._admin(token)
@@ -831,8 +957,11 @@ class InstanceUI:
         exhausted = ui_view.exhausted_limits(view, (snapshot.get('ui') or {}).get('used_steps'))
         if exhausted and not display['completed'] and not display['active']:
             items.append(dict(text='预算已用完：' + '、'.join(exhausted) + '。' + (
-                '调整预算需在“更多操作”中填写新上限与授权原因。' if manager else '调整预算需使用本地管理入口。'),
-                **(dict(href='#budget', action='调整预算') if manager else {})))
+                '打开恢复页面，填写新上限与调整说明。预算生效后返回总览继续研究。' if manager else '调整预算需使用本地管理入口。'),
+                **(dict(href='/budget-recovery#budget', action='恢复前追加预算') if manager else {})))
+        if view.get('closeout') is not None and display['completed'] and manager:
+            items.append(dict(text='最终评估已完成；如需继续探索，可先追加预算，再返回总览继续研究。',
+                href='/budget-recovery#budget', action='恢复前追加预算'))
         if self.approvals:
             pending = self._guarded(self._pending_requests)
             if 'error' in pending:
@@ -852,7 +981,7 @@ class InstanceUI:
         view = snapshot['view']
         links = {'waiting': ('/results/' + str((status['display']['current'] or {}).get('step')), '查看等待原因'),
                  'unknown': ('/progress', '查看原任务进度'), 'completed': ('/final-results', '查看结果'),
-                 'budget_exhausted': ('#budget', '调整预算'), 'final': ('#budget', '调整预算')}
+                 'budget_exhausted': ('/budget-recovery#budget', '恢复前追加预算'), 'final': ('/budget-recovery#budget', '恢复前追加预算')}
         if state in links:
             href, label = links[state]
             if state in {'budget_exhausted', 'final'} and not manager:
@@ -977,6 +1106,14 @@ class InstanceUI:
             current=dict(step=current['step'], role=self._role(current['role']), attempt=current.get('continuations',0),
                 url=mount + '/nodes/' + str(current['step']) + '/events?attempt=' + str(current.get('continuations',0))) if current else None)
 
+    def _budget_recovery_available(self, snapshot):
+        if 'error' in snapshot:
+            return False
+        status = self._status(snapshot, self._receipt(snapshot))
+        return snapshot['view'].get('closeout') is not None or (
+            not status['display']['active'] and bool(ui_view.exhausted_limits(
+                snapshot['view'], (snapshot.get('ui') or {}).get('used_steps'))))
+
     def _more_actions(self, browser_token, snapshot, *, step=None, open_=False):
         """Secondary controls; every form keeps its existing endpoint, CSRF and controller gates."""
         manager = 'maintenance' in self.browser.verify(browser_token, instance_id=self.instance).scopes
@@ -991,13 +1128,30 @@ class InstanceUI:
         body += '</div>'
         if step is not None:
             body += self._form(browser_token, 'resume', '<input type="hidden" name="step" value="' + str(step) + '">', '继续此阶段原任务（须满足原有条件）')
-        body += '<details class="budget-adjustment"><summary>申请调整预算</summary><div id="budget"><p>填写新上限和原因。变更在安全边界处理；已用额度保留。</p>'
-        body += self._form(browser_token, 'budget', '<label>新的 tokens 总上限<input name="max_tokens" type="number" min="1"></label><label>新的时间总上限（秒）<input name="max_seconds" type="number" step="any" min="0"></label><label>新的阶段总上限<input name="max_steps" type="number" min="1"></label><label>调整说明<textarea name="authorization_note" required></textarea></label><p class="note">提交即确认所填写的新上限；说明随变更记录保存。</p>', '确认调整预算')
-        body += '</div></details>'
+        if self._budget_recovery_available(snapshot):
+            body += '<p id="budget"><a href="/budget-recovery#budget">恢复前追加预算</a></p>'
+        else:
+            body += '<p><a href="/configuration#budget-settings">在当前研究配置中调整总预算</a></p>'
         body += '<p><a href="/operations">控制请求记录</a> · <a href="/?after=0">浏览全部阶段记录</a>'
         if self.approvals:
             body += ' · <a href="/requests">实验执行请求</a>'
         return body + '</p></details>'
+
+    def _budget_recovery_page(self, token):
+        self._admin(token)
+        snapshot = self._snapshot_or_error()
+        body = self._navigation() + '<p class="settings-intro">为预算用完或已进入最终评估的研究追加总上限，以便后续继续研究。</p>'
+        if self._budget_recovery_available(snapshot):
+            parts = self._dashboard_parts(token, snapshot)
+            for name in ('live-hero', 'live-usage'):
+                body += '<div id="' + name + '">' + parts[name] + '</div>'
+            body += '<details class="budget-adjustment"><summary>恢复前追加预算</summary><div id="budget"><p>此处的预算调整用于后续恢复研究；与下一个新节点生效的配置修改分别记录。</p>'
+            body += self._form(token, 'budget', '<label>新的 tokens 总上限<input name="max_tokens" type="number" min="1"></label><label>新的时间总上限（秒）<input name="max_seconds" type="number" step="any" min="0"></label><label>新的阶段总上限<input name="max_steps" type="number" min="1"></label><label>调整说明<textarea name="authorization_note" required></textarea></label><p class="note">提交即确认所填写的新上限；变更在安全边界处理，已用额度保留。生效后返回总览继续研究；提交本表不会启动研究。恢复仍须满足原有条件。</p>', '确认追加预算')
+            body += '</div></details>'
+        else:
+            body += '<p>当前没有需要追加预算的恢复事项。<a href="/configuration#budget-settings">在当前研究配置中调整总预算</a>。</p>'
+        body += '<p><a href="/">返回研究总览</a> · <a href="/operations">核对控制请求记录</a></p>'
+        return 200, self._page('恢复前追加预算', body), {}
 
     _OVERVIEW_NOTES = (
         '阶段结论是 H/W/A/E 研究者记录的原文；记录完成不等于科学结论已获认可。',
@@ -1254,16 +1408,16 @@ class InstanceUI:
             if parsed.query:
                 raise ValueError('Exact workspace page required')
             return self._workspace_page(browser_token)
-        if self.workspace and parsed.path == '/new':
+        if parsed.path == '/new':
             if parsed.query:
                 raise ValueError('Exact new research page required')
             return self._new_research_page(browser_token)
-        if parsed.path in {'/instances', '/configuration', '/guidance', '/operations', '/settings'}:
+        if parsed.path in {'/instances', '/configuration', '/guidance', '/operations', '/settings', '/budget-recovery'}:
             if parsed.query:
                 raise ValueError('Exact instance page required')
             return {'/instances': self._instances_page, '/configuration': self._configuration_page,
                     '/guidance': self._guidance_page, '/operations': self._operations_page,
-                    '/settings': self._settings_page}[parsed.path](browser_token)
+                    '/settings': self._settings_page, '/budget-recovery': self._budget_recovery_page}[parsed.path](browser_token)
         if parsed.path == '/progress':
             if parsed.query:
                 raise ValueError('Exact progress page required')
@@ -1414,7 +1568,7 @@ class InstanceUI:
             action = parts[1]
             schemas = {
                 'pause': set(), 'start': set(), 'resume': {'step'}, 'continue': {'ack_correction', 'authorization_note'},
-                'create': {'selection'}, 'load-config': {'config_path'}, 'configure': None,
+                'create': {'selection'}, 'load-config': {'config_path'}, 'configure': None, 'configuration-update': None,
                 'open': {'root'}, 'configuration': {'config_path', 'config_text', 'mode'},
                 'budget': {'max_tokens', 'max_seconds', 'max_steps', 'authorization_note'},
                 'guidance-submit': {'text', 'target', 'kind', 'scope', 'effective_step'},
@@ -1428,6 +1582,7 @@ class InstanceUI:
             if action == 'budget' and 'authorization_statement' in form:
                 expected = expected | {'authorization_statement'}
             if (not {'nonce', 'csrf'} <= set(form) or
+                    action == 'configuration-update' and 'expected_revision' not in form or
                     expected is not None and set(form) != expected | {'nonce', 'csrf'} or
                     any(len(values) != 1 for values in form.values())):
                 raise ValueError('Control form contains missing or duplicate fields')
@@ -1500,8 +1655,15 @@ class InstanceUI:
             location = '/operations'
         elif action.startswith('guidance-'):
             if action == 'guidance-submit':
+                if form['kind'] == 'goal_change' and (form['target'] != 'global' or form['scope'] != 'research'):
+                    raise ui_errors.InputError('kind', '修改目标必须面向所有研究角色，并用于研究的后续适用阶段。', '选择所有研究角色和研究范围，并填写明确的生效阶段。')
+                if form['kind'] == 'goal_change' and not form['effective_step'].strip():
+                    raise ui_errors.InputError('effective_step', '修改目标必须填写生效阶段。', '填写一个正整数阶段编号。')
+                effective_step = integer('effective_step', optional=True)
+                if effective_step is not None and effective_step < 1:
+                    raise ui_errors.InputError('effective_step', '生效阶段必须是正整数。', '填写大于或等于 1 的阶段编号，或为补充建议留空。')
                 user_guidance.submit(self.root, form['text'], target=form['target'], kind=form['kind'],
-                    scope=form['scope'], effective_step=integer('effective_step', optional=True))
+                    scope=form['scope'], effective_step=effective_step)
             elif action == 'guidance-edit':
                 user_guidance.edit(self.root, form['guidance_id'], form['text'], expected_revision=integer('expected_revision'))
             else:
@@ -1593,6 +1755,14 @@ class InstanceUI:
             index = self.instance_roots.index(selected_root)
             child = self._child(index)
             location = '/instances/' + str(index) + '/manage?token=' + child.management_token
+        elif action == 'configuration-update':
+            state = configuration_updates.status(self.root)
+            fields = {key: value for key, value in form.items() if key not in {'nonce', 'csrf', 'expected_revision', 'authorization_note'}}
+            draft = configuration_form.parse_edit(fields, base=self.root, configuration=state['configuration'])
+            configuration_updates.submit(self.root, draft['document'], base=self.root,
+                expected_revision=integer('expected_revision'), authorization_note=form.get('authorization_note', ''))
+            self._refresh_approval_host()
+            location = '/configuration'
         elif action == 'configuration':
             path = Path(form['config_path']).expanduser().absolute()
             if path.suffix.lower() != '.toml' or path.resolve() == self.secret_file:
@@ -1717,10 +1887,8 @@ def serve(root, *, secret_file, port=None, instance_roots=(), workspace=False, t
 
     with _host_lock(root, workspace=workspace), ThreadingHTTPServer(('127.0.0.1', port), Handler) as server:
         ui.host = '127.0.0.1:' + str(server.server_port)
-        if ui.approvals:
-            endpoint = dict(instance=ui.instance, boot=ui.boot, origin='http://' + ui.host)
-            endpoint['receipt_hmac'] = security.receipt_hmac(ui.secret, security.canonical(endpoint))
-            c.write(root / 'execution-authority/ui-endpoint.json', endpoint)
+        ui._serving = True
+        ui._refresh_approval_host()
         print(json.dumps(dict(status='ui_listening', instance=ui.instance,
             management_url='http://' + ui.host + '/manage?token=' + ui.management_token,
             read_url='http://' + ui.host + '/view?token=' + ui.read_token), ensure_ascii=False), flush=True)
@@ -1729,8 +1897,9 @@ def serve(root, *, secret_file, port=None, instance_roots=(), workspace=False, t
         except KeyboardInterrupt:
             pass
         finally:
+            ui._serving = False
             ui.live_stop.set()
             ui.translation.close()
-            if ui.approvals:
+            if ui._approval_endpoint_origin:
                 (root / 'execution-authority/ui-endpoint.json').unlink(missing_ok=True)
     return dict(status='ui_stopped')
