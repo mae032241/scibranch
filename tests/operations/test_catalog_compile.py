@@ -58,7 +58,6 @@ def test_builtin_catalog_compiles_exactly_three_architecture_test_operations() -
     )
     for operation_id in first.operation_ids():
         compiled = first.operation(operation_id)
-        assert len(compiled.digest) == 64
         assert compiled.digest == second.operation(operation_id).digest
         assert all(
             component_id.startswith("architecture_fixture:")

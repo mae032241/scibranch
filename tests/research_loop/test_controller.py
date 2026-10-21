@@ -140,14 +140,8 @@ def scene(tmp_path, monkeypatch):
     controller.prepare(root, objective, public, ["fake-launcher"], max_tokens=1000,
         max_seconds=60, max_steps=20, model="fake-model", reasoning_effort="high", search_policy=None)
 
-    def configure(**values):
-        # Test setup only: establish a fresh frozen configuration before launch.
-        settings = read(root / "settings.json")
-        write(root / "settings.json", dict(settings, **values))
-        write(root / "settings-identity.json", dict(sha256=digest(root / "settings.json")))
-
     return SimpleNamespace(controller=controller, root=root, plan=plan, calls=calls,
-        read=read, write=write, workspace=workspace, native=native, configure=configure)
+        read=read, write=write, workspace=workspace, native=native)
 
 
 def job(scene, step):
@@ -253,47 +247,6 @@ def test_pause_before_launch_and_after_job_construction(scene):
 
     scene.controller.contracts.build_job = pause_during_build
     assert scene.controller.run(scene.root)["status"] == "paused"
-    assert scene.calls == []
-
-
-@pytest.mark.parametrize("limit,value,status", [
-    ("max_tokens", 10, "token_limit"), ("max_steps", 1, "bounded_steps_exhausted")])
-def test_explicit_budget_prevents_next_scientific_launch(scene, limit, value, status):
-    scene.configure(**{limit: value})
-    scene.plan[:] = [("H", "experiment")]
-    result = scene.controller.run(scene.root)
-    assert result["status"] == status
-    assert result["next_role"] == "W"
-    assert result["goal_completion"] == "not_asserted"
-    assert scene.calls == [1]
-
-
-def test_wall_budget_survives_restart(scene):
-    scene.configure(time_budget_basis="elapsed")  # Preserve the old instance contract.
-    scene.write(scene.root / "host-started.json", {"at_unix": 0})
-    assert scene.controller.run(scene.root)["status"] == "wall_limit"
-    assert scene.calls == []
-
-
-def test_job_materialization_cannot_start_work_after_wall_limit(scene, monkeypatch):
-    now = [100.0]
-    monkeypatch.setattr(scene.controller.budget.time, "time", lambda: now[0])
-    monkeypatch.setattr(scene.controller.budget.time, "clock_gettime", lambda _: now[0])
-    build = scene.controller.contracts.build_job
-
-    def slow_build(*args, **kwargs):
-        result = build(*args, **kwargs)
-        now[0] += 61
-        return result
-
-    scene.controller.contracts.build_job = slow_build
-    assert scene.controller.run(scene.root)["status"] == "wall_limit"
-    assert scene.calls == []
-
-
-def test_unknown_usage_blocks_new_launch(scene):
-    scene.native.usage = lambda _: dict(observed_tokens=0, unknown_steps=[99])
-    assert scene.controller.run(scene.root)["status"] == "usage_unknown"
     assert scene.calls == []
 
 

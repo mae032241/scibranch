@@ -379,11 +379,14 @@ def test_same_hash_wrong_origin_and_changed_package_cannot_reuse_compiler_proof(
     root, backend, _, config, _, author, aliases = chain
     job = c.read(root / 'jobs/002.json'); original_material = job['direct_materials'][0]
     original = inputs._producer(root, original_material)
+    originals = {path:path.read_bytes() for path in (root / 'jobs/002.json',
+        Path(original_material['source']), root / original['producer_seal']['path'])}
     wrong = dict(original, producer_step=2)
     with pytest.raises(ValueError, match='frozen compiler source'):
         inputs.resolve_native_original(root, wrong, compiler_job=job)
-    with pytest.raises(ValueError, match='another instance'):
+    with pytest.raises(ValueError, match='Native input differs from its frozen compiler source'):
         inputs.resolve_native_original(root, dict(original, instance_id='another-instance'), compiler_job=job)
+    assert all(path.read_bytes() == raw for path,raw in originals.items())
     output = c.workspace(root, 2) / 'artifacts/package.json'
     e.compile_implementation(config, e.load(config), author, c.read(aliases), output)
     from scidiscovery.research_loop import experiment_client

@@ -523,12 +523,12 @@ def test_actual_nested_codex_sandbox_uses_host_bridge(tmp_path, execution_regist
     first configuration. Neither accepted configurations nor production defaults
     change. No namespace, managed execution, or original verifier is mocked.
     """
-    import importlib.metadata
     import os
     import shutil
     import subprocess
     import sys
     from scidiscovery.research_loop import budget,controller,native
+    from test_author_closeout_e2e import source_python
     monkeypatch.delenv('THIN_HWA_AUTH_SOURCE',raising=False)
     if shutil.which('bwrap') is None:pytest.skip('Actual bwrap is unavailable')
     entry=shutil.which('codex')
@@ -536,11 +536,9 @@ def test_actual_nested_codex_sandbox_uses_host_bridge(tmp_path, execution_regist
     vendor=package/'node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl'
     actual=Path(os.environ.get('SCID_TEST_CODEX_NATIVE',str(vendor/'bin/codex')))
     if not actual.is_file():pytest.skip('Explicit installed Codex native is unavailable')
-    isolated=subprocess.run([sys.executable,'-B','-I','-c',
-        'from pathlib import Path;from scidiscovery.research_loop import contracts as c;'
-        f'assert Path(c.__file__).resolve()==Path({str(Path(c.__file__).resolve())!r})'],capture_output=True,text=True)
-    if isolated.returncode:pytest.skip('The selected -I interpreter must import exact current source')
     repo=Path(__file__).resolve().parents[2];launcher=repo/'scripts/acceptance/rootless_cov_launcher.py'
+    python,scid_python,runtime_paths=source_python(tmp_path,repo)
+    bootstrap='import runpy,sys;runpy.run_path(sys.argv.pop(1),run_name="__main__")'
     comparison=tmp_path/'.trial/current-task';comparison.mkdir(parents=True)
     sibling=tmp_path/'.trial/sibling-run';sibling.mkdir()
     c.write(sibling/'A-conclusion.json',dict(conclusion='unrelated comparison canary'))
@@ -574,26 +572,26 @@ def test_actual_nested_codex_sandbox_uses_host_bridge(tmp_path, execution_regist
         f'checker.write_text({NAMESPACE_CHECKER!r})\n'
         'inner=pathlib.Path("/task-tmp/inner-runtime");inner.mkdir(mode=0o700);os.chmod("/task-tmp",0o700)\n'
         'os.environ.update(TMPDIR=str(inner),XDG_RUNTIME_DIR=str(inner))\n'
-        f'command=[{str(actual)!r},"sandbox","-P",{profile_name!r},"-C",str(work),"--",sys.executable,"-B","-I",str(checker)]\n'
+        f'command=[{str(actual)!r},"sandbox","-P",{profile_name!r},"-C",str(work),"--",{scid_python!r},"-B","-I","-c",{bootstrap!r},str(checker)]\n'
         'reply=subprocess.run(command,capture_output=True,text=True)\n'
         'assert reply.returncode==0,(reply.stdout,reply.stderr)\n'
         '(work/"artifacts/namespace-check.json").write_text(reply.stdout)\n'
         'print(json.dumps(dict(type="thread.started",thread_id="11111111-1111-4111-8111-111111111111")),flush=True)\n'
         'print(json.dumps(dict(type="turn.completed",usage=dict(input_tokens=1,cached_input_tokens=0,output_tokens=0))),flush=True)\n'
         'payload=dict(summary="Engineering transport fixture",scientific_result="No scientific efficacy measured.",limitations=["No model/provider/TCAD run."],implementation_selection=None,stage_intent="review",mechanism_findings=[dict(mechanism="Fixture mechanism",basis="observed",finding="The inert process transport completed; no scientific efficacy was measured.")])\n'
+        'task=json.loads((work/"science-task.json").read_text())\n'
+        'if task.get("candidate_nomination_mechanisms"):\n'
+        ' payload["candidate_nominations"]=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row["mechanism_ref"],reason="This inert transport fixture declares no scientifically suitable candidate.") for row in task["candidate_nomination_mechanisms"] if row["status"]!="waived"])\n'
         'pathlib.Path(args[args.index("--output-last-message")+1]).write_text(json.dumps(payload))\n')
     fake.chmod(0o555)
-    source=Path(c.__file__).resolve().parents[2]
-    metadata=Path(importlib.metadata.distribution('scidiscovery').locate_file('')).resolve()
-    dependencies=[str(Path(path).resolve()) for path in sys.path if Path(path).name in ('site-packages','dist-packages') and Path(path).is_dir()]
-    root=comparison/'instance';operator=comparison/'operator.json';python=str(Path(sys.executable).absolute())
+    root=comparison/'instance';operator=comparison/'operator.json'
     c.write(operator,dict(scene_root=str(root),public_root=str(public),public_manifest=str(manifest),runs_dir=str(root/'runs'),
         submission_dir=str(root/'submission'),native=str(fake),native_sha256=c.digest(fake),
         code_mode_host=dict(path=str(actual.parent/'codex-code-mode-host'),sha256=c.digest(actual.parent/'codex-code-mode-host')),
-        task_python=python,scid_python=python,model='no-model',reasoning_effort='high',profile=profile_name,
-        runtime_paths=list(dict.fromkeys([sys.base_prefix,str(Path(python).parent.parent),str(source),str(metadata),str(actual.parent.parent),*dependencies])),
+        task_python=python,scid_python=scid_python,model='no-model',reasoning_effort='high',profile=profile_name,
+        runtime_paths=list(dict.fromkeys([*runtime_paths,str(actual.parent.parent)])),
         cov_engineering_check_reserve_seconds=0))
-    controller.prepare(root,public/'instruction.md',public,[python,'-B','-I',str(host_wrapper),'--config',str(operator),'--'],
+    controller.prepare(root,public/'instruction.md',public,[scid_python,'-B','-I','-c',bootstrap,str(host_wrapper),'--config',str(operator),'--'],
         max_tokens=10000,max_seconds=120,max_steps=4,model='no-model',reasoning_effort='high',experiment_mode='external',
         node_budget_policy={role:dict(max_observed_tokens=1000,max_seconds=90) for role in 'HWAE'})
     c.write(root/'host-started.json',budget.clock_stamp());budget.transition(root,'advance','Zero-provider actual namespace check')

@@ -89,7 +89,7 @@ def test_last_a_local_and_shared_token_overrun_waits_for_original_pending(tmp_pa
     result=controller.run(root)
     assert result['status']=='final_a_completed',json.dumps(result,indent=2)
     event,step,record=accepted(root)
-    assert event['version']==2 and event['basis']=='final_state' and step==2
+    assert event['basis']=='final_state' and step==2
     outcome=c.read(record/'native-outcome.json')
     assert outcome['returncode']==0 and outcome['stop_reason'] is None
     assert (c.workspace(root,step)/'work/launches').read_text()=='A\n'
@@ -140,12 +140,15 @@ def test_final_a_forbidden_action_retains_raw_without_a_seal_or_followup(tmp_pat
     assert not list(root.glob('host-candidate-audits/**/intent.json'))
 
 
-def test_no_adapter_protected_report_runs_before_an_unaffordable_worker(tmp_path):
-    root=instance(tmp_path,max_tokens=325000,max_steps=6,route='experiment')
+def test_no_adapter_final_report_runs_before_worker_at_exhausted_shared_balance(tmp_path):
+    root=instance(tmp_path,max_tokens=10,max_steps=6,route='experiment')
+    settings=(root/'settings.json').read_bytes()
+    h_seal=(root/'native-evidence/001/result-identity.json').read_bytes()
+    assert native.usage(root)['observed_tokens']==budget.snapshot(root)['max_tokens']==10
     result=controller.run(root)
     assert result['status']=='final_a_completed',json.dumps(result,indent=2)
     event,step,record=accepted(root)
-    assert event['version']==2 and event['basis']=='final_state'
+    assert event['basis']=='final_state'
     assert budget.closeout_state(root)['begin']['mode']=='final'
     assert result['submission_result']['status']=='unsubmitted'
     assert event['selection']['stopped_original'] is None and step==2
@@ -154,6 +157,8 @@ def test_no_adapter_protected_report_runs_before_an_unaffordable_worker(tmp_path
     assert not (root/'host-delivery').exists()
     assert not (root/'jobs/003.json').exists()
     assert c.read(record/'science-output.json')['scientific_result'].startswith('Completed:')
+    assert (root/'settings.json').read_bytes()==settings
+    assert (root/'native-evidence/001/result-identity.json').read_bytes()==h_seal
 
 
 
@@ -194,8 +199,8 @@ def test_final_terminal_billing_mismatch_keeps_live_lower_bound_and_original_rep
 
 def external_scene(tmp_path,monkeypatch):
     import test_closeout_protocol as protocol
-    old="pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))\nprint(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))),flush=True)"
-    replacement="print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=280900,cached_input_tokens=100000,output_tokens=34))),flush=True)\ntime.sleep(.2)\npathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))"
+    old="pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))\nif item.get('pause'):(root/'pause.request').touch()\nprint(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))),flush=True)"
+    replacement="print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=280900,cached_input_tokens=100000,output_tokens=34))),flush=True)\ntime.sleep(.2)\npathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))\nif item.get('pause'):(root/'pause.request').touch()"
     assert old in protocol.NATIVE
     monkeypatch.setattr(protocol,'NATIVE',protocol.NATIVE.replace('import json,os,pathlib,sys','import json,os,pathlib,sys,time').replace(old,replacement))
     root=protocol.scene(tmp_path,[dict(action='deliver',candidate='run-1')],node_budget_mode='soft')
@@ -208,7 +213,7 @@ def test_exact_final_delivery_preserves_two_reserved_actions_despite_shared_over
     result=controller.closeout(root)
     assert result['status']=='delivery_confirmed',json.dumps(result,indent=2)
     event,step,record=accepted(root)
-    assert event['version']==2 and event['basis']=='final_state' and step==3
+    assert event['basis']=='final_state' and step==3
     assert c.read(record/'native-outcome.json')['final_a_completion']['final_overrun']['shared_tokens_over_ceiling']>0
     actions=budget.closeout_state(root)['actions']
     assert [row['intent']['action_kind'] for row in actions]==['submit','confirm']
@@ -241,7 +246,11 @@ def final_hint(tmp_path):
     root=instance(tmp_path,final=True)
     job=c.build_job(root,2,'A',[1],final_report=dict(source_cutoff=1,stopped_original=None))
     intent=dict(step=2,task_sha256=c.digest(root/'jobs/002.json'),budget_slice=budget.accept_node(root,job))
-    budget.write_node_hint(root,job,intent,budget.snapshot(root),dict(input_tokens=280900,cached_input_tokens=100000,output_tokens=34),observed=True)
+    record=c.host_record(c.workspace(root,2))
+    meter=dict(input_tokens=280900,cached_input_tokens=100000,output_tokens=34)
+    c.write(record/'native-intent.json',intent)
+    c.write(record/'usage.json',meter)
+    budget.write_node_hint(root,job,intent,budget.snapshot(root),meter,observed=True)
     return c.workspace(root,2)
 
 

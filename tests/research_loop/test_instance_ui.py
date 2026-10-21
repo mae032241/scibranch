@@ -358,11 +358,14 @@ def test_read_cookie_opens_only_sealed_science_and_attachment_members(tmp_path,m
 
 @pytest.mark.process_e2e
 def test_loopback_science_download_uses_existing_browser_scope_and_safe_headers(tmp_path,monkeypatch):
+    import base64
+    import hashlib
     import http.client
     from scidiscovery.research_loop import instance_ui
     root,key=prepare(tmp_path,enabled=False)
     authored=b'<svg onload="never execute"/>'
-    finish(root,1,'H',[],action='analyze',files={'figure.svg':authored.decode()})
+    untrusted=authored.decode()+'<script>window.untrustedFixture=true</script>'
+    finish(root,1,'H',[],action='analyze',text=untrusted,files={'figure.svg':authored.decode()})
     ui=InstanceUI(root,secret_file=key);ready=threading.Event();servers=[];errors=[]
     server_type=instance_ui.ThreadingHTTPServer
     class Server(server_type):
@@ -392,7 +395,16 @@ def test_loopback_science_download_uses_existing_browser_scope_and_safe_headers(
         assert response.status==200 and instance_render.STYLE_SOURCE in response.getheader('Content-Security-Policy')
         result_page=response.read()
         assert b'/nodes/1/science' in result_page and b'<details>' in result_page
-        assert b'<svg' not in result_page and b'<script' not in result_page
+        assert untrusted.encode() not in result_page and html.escape(untrusted).encode() in result_page
+        assert b'<svg' not in result_page
+        csp=response.getheader('Content-Security-Policy')
+        assert "'unsafe-inline'" not in csp and "'unsafe-eval'" not in csp
+        script_sources=csp.split('script-src ',1)[1].split(';',1)[0].split()
+        scripts=re.findall(rb'<script\b[^>]*>(.*?)</script>',result_page,re.S)
+        assert scripts
+        for script in scripts:
+            digest=base64.b64encode(hashlib.sha256(script).digest()).decode()
+            assert "'sha256-"+digest+"'" in script_sources
         connection.request('GET','/nodes/1/materials/1',headers={'Cookie':cookie})
         response=connection.getresponse()
         assert response.status==200 and response.getheader('Content-Disposition').startswith('attachment;')
@@ -1082,7 +1094,8 @@ network = false
         origin = 'http://' + ui.host
         profile = tmp_path / 'chrome-profile'
         browser = subprocess.Popen([chrome, '--headless', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
-            '--disable-background-networking', '--disable-component-update', '--no-first-run', '--no-default-browser-check',
+            '--disable-background-networking', '--disable-component-update', '--disable-extensions',
+            '--no-first-run', '--no-default-browser-check',
             '--renderer-process-limit=1', '--disable-features=BackForwardCache',
             '--remote-debugging-port=0', '--user-data-dir=' + str(profile), 'about:blank'],
             stdout=subprocess.DEVNULL, stderr=browser_stderr, env=browser_env, start_new_session=True)
@@ -1124,8 +1137,7 @@ async function waitFor(expression) {
 }
 async function screenshot(name) {
   if (!process.env.SCID_TEST_LOG_DIR) return;
-  const size = (await call('Page.getLayoutMetrics')).cssContentSize;
-  const shot = await call('Page.captureScreenshot', {format:'png',captureBeyondViewport:true,clip:{x:0,y:0,width:size.width,height:size.height,scale:1}});
+  const shot = await call('Page.captureScreenshot', {format:'png',captureBeyondViewport:false});
   await writeFile(join(process.env.SCID_TEST_LOG_DIR, name+'.png'), Buffer.from(shot.data,'base64'));
 }
 async function noOverflow() {

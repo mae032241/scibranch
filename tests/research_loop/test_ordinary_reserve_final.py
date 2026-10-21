@@ -31,8 +31,8 @@ def instance(tmp_path, *, remaining=211692, mode='soft', action='experiment'):
     return root
 
 
-@pytest.mark.parametrize('remaining',[211692,350000,350001])
-def test_ordinary_improve_below_old_reserve_can_accept_first_managed_call(tmp_path,monkeypatch,execution_registry,remaining):
+def test_ordinary_improve_below_old_reserve_can_accept_first_managed_call(tmp_path,monkeypatch,execution_registry):
+    remaining=211692
     root=instance(tmp_path,remaining=remaining)
     settings=(root/'settings.json').read_bytes()
     assert budget.delivery_reserve(c.settings(root))==dict(tokens=0,seconds=0.,steps=0)
@@ -60,7 +60,10 @@ def test_ordinary_improve_below_old_reserve_can_accept_first_managed_call(tmp_pa
         assert result['status']=='known_success',result
         accepted.extend(experiments.Records(config).calls())
         payload=dict(summary='Returned the authorized observation',scientific_result='Mechanical admission only; no scientific qualification.',
-            limitations=['Deterministic fixture'],implementation_selection=None,mechanism_findings=None,stage_intent='review')
+            limitations=['Deterministic fixture'],implementation_selection=None,mechanism_findings=None,stage_intent='review',
+            candidate_nominations=dict(representatives=[],extras=[],gaps=[dict(
+                mechanism_ref=row['mechanism_ref'],reason='The mechanical command produces no scientifically suitable model candidate.')
+                for row in job['candidate_nomination_mechanisms'] if row['status']!='waived']))
         c.write(record/'science-output.json',payload)
         c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
         c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,
@@ -71,6 +74,8 @@ def test_ordinary_improve_below_old_reserve_can_accept_first_managed_call(tmp_pa
     result=controller.run(root)
     assert result['status']=='paused' and result['completed_steps']==2,result
     assert len(accepted)==1 and budget.final_a_barrier(root) is None
+    assert c.read(accepted[0]/'accepted.json')['mechanism_binding']['mechanism_ref']=='h001.m1'
+    assert (execution.origin(root,2)/'result-identity.json').is_file()
     assert native.usage(root)['observed_tokens']==20
     assert (root/'settings.json').read_bytes()==settings
 

@@ -1059,7 +1059,8 @@ def _final_a_result(root, job, result):
     begin = budget.closeout_state(root)['begin']
     policy = settings.get('delivery_policy')
     if result.get('next_action') != 'deliver' or policy is None or policy['adapter'] is None:
-        has_worker = any(row.get('role') == 'W' for row in job['history']['nodes'])
+        from . import fork_runtime
+        has_worker = any(fork_runtime.source_job(root, row['step'])['role'] == 'W' for row in job['history']['nodes'])
         reason = ('accepted_worker_evidence_unavailable' if not has_worker else
                   'delivery_unavailable' if policy is None or policy['adapter'] is None else 'candidate_originals_unavailable')
         if begin is not None:
@@ -1318,7 +1319,8 @@ def _run_delivery_actions(root, job, result):
         if completed is not None and completed['result']['status'] == 'confirmed' and actions[-1]['intent']['action_kind'] == 'confirm':
             return _closeout_result(root, 'delivery_confirmed')
         if completed is not None and completed['result']['status'] in {'failed', 'rejected', 'engineering_error', 'unclassified'} and completed['result']['cleanup_confirmed']:
-            return _closeout_result(root, 'delivery_reselect' if completed['result']['status']=='rejected' else 'delivery_' + completed['result']['status'], reason=completed['result']['note'])
+            return _closeout_result(root, 'delivery_reselect' if budget.final_a_barrier(root) is None
+                and completed['result']['status']=='rejected' else 'delivery_' + completed['result']['status'], reason=completed['result']['note'])
         kind, binding = 'confirm', original['binding']
         if budget.execution_blocked(root, ignore_operation=binding['operation_id']):
             return _closeout_result(root, 'delivery_unknown', reason='Original operation remains live or unverified; never resubmit')

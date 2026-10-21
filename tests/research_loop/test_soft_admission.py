@@ -1,4 +1,4 @@
-"""Soft targets never reserve a whole next node; old protocols remain read-only."""
+"""Positive shared budget admits soft targets; actual exhaustion blocks effects."""
 import sys
 
 import pytest
@@ -7,7 +7,7 @@ from scidiscovery.research_loop import budget, contracts as c, controller, nativ
 from test_history_handoff import finish
 
 
-def fixture(tmp_path, *, mode='soft', seconds=1906, tokens=6_000_000, steps=24, spent=0):
+def fixture(tmp_path, *, mode='soft', seconds=60, tokens=6_000_000, steps=24, spent=0):
     public=tmp_path/'public';public.mkdir()
     objective=public/'objective.md';objective.write_text('Continue the scientific comparison while preserving necessary delivery resources.')
     launcher=tmp_path/'native.py'
@@ -40,11 +40,12 @@ def prefix(root):
     finish(root,5,'A',[1,4],action='continue_w')
 
 
-def test_1906_seconds_continue_w_does_not_require_old_1950_gate(tmp_path,monkeypatch):
-    root=fixture(tmp_path);prefix(root)
+def test_continue_w_uses_positive_shared_time_below_its_soft_target(tmp_path,monkeypatch):
+    root=fixture(tmp_path,seconds=60);prefix(root)
     assert c.validate(c.workspace(root,5))['next_action']=='continue_w'
-    assert budget.snapshot(root)['seconds_remaining']==pytest.approx(1906,abs=2)
-    assert budget.delivery_reserve(c.settings(root))['seconds']==450
+    assert 0<budget.snapshot(root)['seconds_remaining']<=60
+    assert c.settings(root)['node_budget_policy']['W']['max_seconds']==900
+    assert budget.delivery_reserve(c.settings(root))==dict(tokens=0,seconds=0.,steps=0)
     assert budget.exploration_admission(root,dict(step=6,role='W')) is None
     real_execute=native.execute_native
     def execute(root,step):
@@ -54,26 +55,43 @@ def test_1906_seconds_continue_w_does_not_require_old_1950_gate(tmp_path,monkeyp
     monkeypatch.setattr(native,'execute_native',execute)
     result=controller.run(root)
     assert result['status']=='paused' and result['completed_steps']==6, result
-    assert budget.closeout_state(root)['begin'] is None
+    assert budget.closeout_state(root)['begin'] is None and not budget.closeout_state(root)['actions']
     assert c.validate(c.workspace(root,6))['summary']=='W completed'
     hint=c.read(c.workspace(root,6)/'work/budget-status.json')
-    assert hint['current_work_active_seconds_available']==pytest.approx(1456,abs=3)
+    assert 0<hint['current_work_active_seconds_available']<=60
     assert hint['metering'] in {'observed_lower_bound','inflight_unknown'}
+    assert native.usage(root)['observed_tokens']==60
+    assert not (root/'jobs/007.json').exists()
 
 
-def test_soft_token_target_and_reserve_equality_are_distinct(tmp_path,monkeypatch):
-    root=fixture(tmp_path,tokens=1_500_000)
-    job=c.build_job(root,1,'H',[])
-    assert budget.node_admission(root,job) is None  # Target is 2M; available is 1.5M.
-    original=budget.snapshot(root)
-    monkeypatch.setattr(budget,'snapshot',lambda *args,**kwargs:dict(original,seconds_remaining=450))
-    assert budget.node_admission(root,job)=='closeout_reserve_seconds'
-    monkeypatch.setattr(budget,'snapshot',lambda *args,**kwargs:dict(original,max_tokens=400_000))
-    assert budget.node_admission(root,job)=='closeout_reserve_tokens'
-    monkeypatch.setattr(budget,'snapshot',lambda *args,**kwargs:dict(original,max_tokens=400_001,seconds_remaining=450.001))
-    assert budget.node_admission(root,job) is None
-
-
+@pytest.mark.parametrize('dimension',['tokens','seconds'])
+def test_soft_target_admission_still_refuses_exhausted_shared_budget(tmp_path,monkeypatch,dimension):
+    now=[100.]
+    monkeypatch.setattr(budget.time,'time',lambda:now[0])
+    monkeypatch.setattr(budget.time,'clock_gettime',lambda _:now[0])
+    root=fixture(tmp_path,tokens=11,seconds=60)
+    finish(root,1,'H',[],action='analyze')
+    job=c.build_job(root,2,'A',[1])
+    assert native.usage(root)['observed_tokens']==10
+    assert budget.node_admission(root,job) is None  # One actual token remains; the target is 2M.
+    if dimension=='tokens':
+        budget.amend(root,max_tokens=10,authorization_note='Retain consumption under this finite revised ceiling')
+    else:
+        now[0]+=60.
+    reason='node_budget_unavailable_'+dimension
+    ledger={path:path.read_bytes() for path in (root/'control-ledger').glob('*.json')}
+    originals={path:path.read_bytes() for path in (root/'settings.json',root/'jobs/001.json',root/'jobs/002.json',
+        root/'native-evidence/001/science-output.json',root/'native-evidence/001/result-identity.json',root/'native-evidence/001/usage.json')}
+    monkeypatch.setattr(native.subprocess,'Popen',lambda *a,**k:pytest.fail('Exhausted shared budget must refuse before Popen'))
+    assert budget.node_admission(root,job)==reason
+    with pytest.raises(budget.NodeBudgetUnavailable,match=reason):
+        native.execute_native(root,2)
+    assert ledger=={path:path.read_bytes() for path in (root/'control-ledger').glob('*.json')}
+    assert all(path.read_bytes()==raw for path,raw in originals.items())
+    record=c.host_record(c.workspace(root,2))
+    assert not (record/'native-intent.json').exists() and not (record/'native-process.json').exists()
+    assert not (record/'science-output.json').exists()
+    assert budget.final_a_barrier(root) is None and budget.closeout_state(root)['begin'] is None
 
 
 def test_known_failed_resume_does_not_require_unused_soft_target(tmp_path):
@@ -89,87 +107,39 @@ def test_known_failed_resume_does_not_require_unused_soft_target(tmp_path):
     assert all(path.read_bytes()==value for path,value in originals.items())
 
 
-def test_prepared_closeout_a_uses_existing_slot_and_bounded_author_plus_execution_floor(tmp_path,monkeypatch):
-    root=fixture(tmp_path,seconds=500,steps=3,spent=40)
-    # Retain the actual 300-second author plus 150-second external floor;
-    # neither soft admission nor a prepared job reserves the full 900-second target.
-    assert 450 < budget.snapshot(root)['seconds_remaining'] < 900
-    refs=dict(items=[],omitted_count=0,source_nodes=[])
-    budget.begin_closeout(root,0,1,'Explicit bounded closeout',delivery_sources=refs)
-    real_execute=native.execute_native
-    def interrupt_before_acceptance(*args,**kwargs):
-        raise RuntimeError('Fixture controller stopped after preparing A, before acceptance')
-    monkeypatch.setattr(native,'execute_native',interrupt_before_acceptance)
-    assert controller.run(root)['status']=='closeout_native_unsealed'
-    job_path=root/'jobs/001.json';original=job_path.read_bytes()
-    assert budget.used_steps(root)==1 and not (c.host_record(c.workspace(root,1))/'native-intent.json').exists()
-    assert controller._closeout_funds(root,step=1)
-    job=c.read(job_path)
-    assert budget.node_admission(root,job) is None
-    monkeypatch.setattr(native,'execute_native',real_execute)
-    result=controller.run(root)
-    assert result['status']=='final_a_completed',result
-    assert c.settings(root)['final_a_completion_policy']==dict(version=1)
-    record=c.host_record(c.workspace(root,1))
-    grant=budget.final_a_return(root,job,c.read(record/'native-intent.json'))
-    assert grant['basis']=='last_closeout_allocation' and grant['step']==1
-    assert grant['anchor']['limits']['max_seconds']==300
-    assert grant['reserve']==dict(tokens=100000,seconds=150,steps=2)
-    assert result['goal_completion']=='not_asserted'
-    assert job_path.read_bytes()==original and budget.used_steps(root)==1
-    assert c.validate(c.workspace(root,1))['next_action']=='wait'
-    hint=c.read(c.workspace(root,1)/'work/budget-status.json')
-    assert hint['reserve_scope']=='external_closeout_floor' and hint['reserve_state']=='within'
-    assert 0<hint['current_work_active_seconds_available']<=300
-    assert not (root/'jobs/002.json').exists()
-
-
-def test_closeout_audit_has_follow_a_headroom_without_full_a_target(tmp_path,monkeypatch):
+def test_ordinary_audit_refuses_exhausted_shared_time_without_external_effects(tmp_path,monkeypatch):
     from scidiscovery.research_loop import candidate_audit, delivery
-    from test_candidate_audit import audit_fixture, _seal_existing
-    original_prepare=controller.prepare
-    def prepare(*args,**kwargs):
-        kwargs['max_seconds']=500
-        kwargs['max_tokens']=1_000_000
-        kwargs['delivery_policy']=dict(kwargs['delivery_policy'],closeout_a=dict(max_observed_tokens=300000,max_seconds=300),
-            inflight_tokens=100000,cleanup_seconds=30,submit_seconds=90,confirm_seconds=30)
-        return original_prepare(*args,**kwargs)
-    monkeypatch.setattr(controller,'prepare',prepare)
+    from test_candidate_audit import audit_fixture, request
+    now=[100.]
+    monkeypatch.setattr(budget.time,'time',lambda:now[0])
+    monkeypatch.setattr(budget.time,'clock_gettime',lambda _:now[0])
     root=audit_fixture(tmp_path)
-    job,_,_=finish(root,3,'A',[1,2],action='audit',recommendation='run-1')
-    ordinary=c.validate(c.workspace(root,3))
-    assert candidate_audit.execute(root,job,ordinary) is None
-    assert candidate_audit.public_receipt(root,candidate_audit.receipt_ref(root,3))['status']=='unavailable'
-    # Ordinary audit retains a whole minimal closeout reserve (90+450 > 500).
-    nodes=[dict(step=i,seal_sha256=c.digest(c.host_record(c.workspace(root,i))/'result-identity.json')) for i in (1,2,3)]
-    refs=delivery.freeze_sources(root,nodes)
-    budget.begin_closeout(root,3,4,'Exact closeout prefix',delivery_sources=refs)
-    closeout=c.build_job(root,4,'A',[1,2,3],purpose='closeout',source_cutoff=3,delivery_sources=refs)
-    payload=dict(summary='Audit before deciding',scientific_result='A retains scientific uncertainty',limitations=['Public check only'],
-        implementation_selection=None,search_review=None,progress_assessment=None,candidate_recommendation='run-1',
-        next_action='audit',route_reason='Assess after exact public audit')
-    result=_seal_existing(root,4,payload)
-    assert candidate_audit.execute(root,closeout,result) is None
-    assert candidate_audit.public_receipt(root,candidate_audit.receipt_ref(root,4))['status']=='unavailable'
-    # 90 seconds of audit plus a 300-second follow-up A and 150-second
-    # execution floor need 540 seconds even in closeout. Neither refusal accepted work.
-    refused={path:path.read_bytes() for step in (3,4) for path in candidate_audit._directory(root,step).iterdir() if path.is_file()}
-    for step in (3,4):
-        assert not (candidate_audit._directory(root,step)/'intent.json').exists()
-        assert c.read(candidate_audit._directory(root,step)/'outcome.json')['accepted'] is False
-    before=budget.snapshot(root);used=budget.used_steps(root);meter=native.usage(root)
-    budget.amend(root,max_seconds=600,authorization_note='Fixture explicitly grants finite audit and follow-up A headroom')
-    after=budget.snapshot(root)
-    assert after['max_seconds']==600 and after['advance_seconds']>=before['advance_seconds']
+    job,payload=request(root)
+    assert not job.get('purpose') and not job.get('final_only')
+    assert budget.delivery_reserve(c.settings(root))==dict(tokens=0,seconds=0.,steps=0)
+    now[0]+=400.
+    assert budget.snapshot(root)['seconds_remaining']==0
+    originals={path:path.read_bytes() for path in (root/'settings.json',root/'jobs/003.json',
+        root/'native-evidence/003/science-output.json',root/'native-evidence/003/result-identity.json')}
+    ledger={path:path.read_bytes() for path in (root/'control-ledger').glob('*.json')}
+    used=budget.used_steps(root);meter=native.usage(root)
+    def unexpected(*a,**k):pytest.fail('Refused audit must not resolve or invoke external work')
+    monkeypatch.setattr(delivery,'freeze_sources',unexpected)
+    monkeypatch.setattr(delivery,'invoke',unexpected)
+    monkeypatch.setattr(native.subprocess,'Popen',unexpected)
+    assert candidate_audit.execute(root,job,payload) is None
+    directory=candidate_audit._directory(root,3)
+    receipt=c.read(directory/'outcome.json')
+    assert receipt['accepted'] is False
+    assert receipt['result']['status']=='unavailable' and receipt['result']['note']=='candidate_audit_reserve_unavailable'
+    original=(directory/'outcome.json').read_bytes()
+    assert candidate_audit.execute(root,job,payload) is None
+    assert (directory/'outcome.json').read_bytes()==original
+    assert not (directory/'intent.json').exists() and not list(candidate_audit.facts(root))
+    assert all(path.read_bytes()==raw for path,raw in originals.items())
+    assert ledger=={path:path.read_bytes() for path in (root/'control-ledger').glob('*.json')}
     assert budget.used_steps(root)==used and native.usage(root)==meter
-    # A new author decision owns the new audit; unavailable decisions are never replayed.
-    follow=c.build_job(root,5,'A',[4],purpose='closeout',source_cutoff=3,delivery_sources=refs)
-    follow_result=_seal_existing(root,5,payload)
-    assert 540 < budget.snapshot(root)['seconds_remaining'] < 900
-    assert candidate_audit.execute(root,follow,follow_result) is None
-    assert candidate_audit.public_receipt(root,candidate_audit.receipt_ref(root,5))['status']=='audited'
-    assert all(path.read_bytes()==original for path,original in refused.items())
-    accepted={path:path.read_bytes() for path in candidate_audit._directory(root,5).iterdir() if path.is_file()}
-    assert candidate_audit.execute(root,follow,follow_result) is None
-    assert all(path.read_bytes()==original for path,original in accepted.items())
-    assert not (root/'runs/submitted.json').exists() and budget.closeout_state(root)['actions']==[]
+    assert budget.snapshot(root)['advance_seconds']==400.
+    assert not (root/'runs/submitted.json').exists() and not (root/'jobs/004.json').exists()
+    assert not list((root/'submission').iterdir())
+    assert budget.closeout_state(root)['begin'] is None and budget.closeout_state(root)['actions']==[]

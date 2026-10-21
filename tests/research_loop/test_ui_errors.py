@@ -86,16 +86,33 @@ def test_load_missing_configuration_preserves_path_and_new_form_nonce(tmp_path):
 
 
 def test_budget_parse_failure_retains_all_fields_and_does_not_submit(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import budget
+    from test_configuration_form import Controls
+    from test_history_handoff import finish
     root, key = prepare(tmp_path, enabled=False)
+    finish(root, 1, 'H', [], action='analyze')
+    budget.amend(root, max_tokens=1, authorization_note='Exercise exhausted-budget recovery form.')
     ui, cookie = session(root, key)
     monkeypatch.setattr(instance_ui.control, 'request_budget_amendment', lambda *a, **k: pytest.fail('invalid budget submitted'))
-    fields = dict(form(ui, cookie, 'budget'), max_tokens='abc', max_seconds='120', max_steps='',
+    recovery = ui.get('/budget-recovery', host=ui.host, cookie=cookie)[1].decode()
+    markup = re.search(r'<form method="post" action="/control/budget">(.*?)</form>', recovery, re.S).group(1)
+    fields = dict(Controls(markup).fields, max_tokens='abc', max_seconds='120', max_steps='',
         authorization_note='Keep this explanation.', authorization_statement='Keep this statement.')
+    def originals():
+        paths = [path for path in root.iterdir() if path.is_file()]
+        for directory in (root / 'control-ledger', root / 'host-control/operations'):
+            if directory.exists():
+                paths.extend(path for path in directory.iterdir() if path.is_file())
+        return {path: path.read_bytes() for path in paths}
+    before = originals()
+    nonce = fields['nonce']
     status, page, _ = post(ui, cookie, 'budget', fields)
     assert status == 422 and 'tokens 上限无效'.encode() in page
-    for text in ('abc', '120', 'Keep this explanation.', 'Keep this statement.'):
-        assert text.encode() in page
+    echoed = Controls(page.decode()).fields
+    assert all(echoed[field] == fields[field] for field in (
+        'max_tokens', 'max_seconds', 'max_steps', 'authorization_note', 'authorization_statement'))
     assert b'name="csrf"' in page and b'name="nonce"' in page
+    assert echoed['nonce'] != nonce and originals() == before
     ui.translation.close()
 
 

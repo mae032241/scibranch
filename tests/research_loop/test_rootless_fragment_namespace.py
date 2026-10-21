@@ -1,6 +1,5 @@
 """Real bwrap/main/registered-cov path with two fake native turns, zero models."""
 import hashlib
-import importlib.metadata
 import json
 import os
 from pathlib import Path
@@ -10,36 +9,46 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import budget,contracts as c,controller,cov_lineage,execution,lineage,native,search
-from scidiscovery.research_loop.protocol import CURRENT
-from test_cov_lineage import BACKEND
+from execution_fixtures import execution_registry
+from scidiscovery.research_loop import budget,contracts as c,controller,cov_lineage,cov_receipt,execution,lineage,native,search
+from scidiscovery.research_loop.experiment_client import record_directory
+from test_author_closeout_e2e import source_python
+from test_worker_execution_hash_free import PUBLIC_CLI,PUBLIC_RUNNER
 
 
 FAKE_NATIVE=r'''import json,os,pathlib,subprocess,sys
-args=sys.argv[1:];sys.stdin.read()
+args=sys.argv[1:]
+if args and args[0]=='sandbox':
+ # Fake contract only: real outer bwrap and runner, no provider sandbox qualification.
+ assert len(args)==12 and args[:4]==['sandbox','-P','namespace-no-model','-C'] and args[5]=='--'
+ assert args[6:9]==[sys.executable,'-B','-I'] and args[9:]==[EXPECTED_RECEIPT,'--science-runner','/opt/exp/scid-invocation.json']
+ invocation=json.loads(pathlib.Path(args[11]).read_text())
+ assert set(invocation)=={'runner','source','output_line','output'} and invocation['runner']==EXPECTED_RUNNER
+ assert pathlib.Path(invocation['source']).parent==pathlib.Path(args[4]) and pathlib.Path(invocation['source']).is_file()
+ assert type(invocation['output_line']) is int and invocation['output_line']>0
+ assert invocation['output']=='/task-tmp/scid-receipt/row.json'
+ os.chdir(args[4]);os.execv(args[6],args[6:])
+sys.stdin.read()
 work=pathlib.Path(args[args.index('-C')+1]);home=pathlib.Path(os.environ['CODEX_HOME'])
 root=work.parents[2]
-assert (root/'jobs'/(work.name+'.json')).is_file()
-assert (root/'settings-identity.json').is_file()
-assert {p.name for p in (root/'jobs').glob('*.json')}=={work.name+'.json'}
-assert not (root/'settings.json').exists()
-assert not (root/'control-ledger').exists()
-assert not (root.parent/'private-owner-state').exists()
-for original in (root/'jobs'/(work.name+'.json'),root/'settings-identity.json'):
- try:
-  with original.open('ab'):pass
- except OSError:pass
- else:raise AssertionError('Shared owner metadata must stay read-only')
+for private in (root/'jobs',root/'settings-identity.json',root/'settings.json',root/'control-ledger',
+ root/'native-evidence',root.parent/'private-owner-state'):
+ assert not private.exists(), 'Private owner or execution metadata exposed to science view'
 task=json.loads((work/'science-task.json').read_text());role=task['role']
+assert role in ('H','W','A') and task['global']['objective']=='inputs/global/objective.md'
+assert (work/task['global']['objective']).read_text()=='Two synthetic native contexts; zero model requests.'
 search_enabled=bool(task.get('lineage',{}).get('mechanisms',{}).get('authorized_count'))
-output=pathlib.Path(args[args.index('--output-last-message')+1]);later=output.parent.parent.name=='continuations'
+output=pathlib.Path(args[args.index('--output-last-message')+1]);later='resume' in args or home.name=='context-001'
+assert output==pathlib.Path('/task-result/result.pending.json')
 assert 'resume' not in args
-assert pathlib.Path(args[args.index('--output-schema')+1]).name=='science-result.schema.json'
+schema=pathlib.Path(args[args.index('--output-schema')+1])
+assert schema==pathlib.Path('/task-result/science-result.schema.json') and json.loads(schema.read_text())['type']=='object'
 thread='22222222-2222-4222-8222-222222222222' if later else '11111111-1111-4111-8111-111111111111'
 print(json.dumps(dict(type='thread.started',thread_id=thread)),flush=True)
 session=home/'sessions/current.jsonl';session.parent.mkdir(parents=True,exist_ok=True)
 session.write_text(json.dumps(dict(type='session_meta',payload=dict(id=thread,cwd=str(work))))+'\n')
 if role=='W':
+ slot=work/'work/experiment'
  capabilities=subprocess.run([str(work/'bin/exp'),'capabilities'],capture_output=True,text=True)
  assert capabilities.returncode==0,(capabilities.stdout,capabilities.stderr)
  assert any(item['key']=='cov_single_source' for item in json.loads(capabilities.stdout)['contracts'])
@@ -50,32 +59,41 @@ if role=='W':
  status=subprocess.run([str(work/'bin/exp'),'lineage-status'],capture_output=True,text=True)
  assert status.returncode==0,(status.stdout,status.stderr)
  if not later:
-  p=work/'payload.json';p.write_text('{}')
+  p=work/'payload.py';p.write_text('print("Inert namespace transport fixture")\n')
   cmd=[str(work/'bin/exp'),'run','--script',str(p),'--new-plan']
   rejected_options=[]
-  for options in (['--experiment-dir',str(work)],['--','--seed','7']):
+  for options,expected_status,expected_error in ((['--experiment-dir',str(work)],'caller_error','invalid_arguments'),(['--','--seed','7'],'known_not_started','caller_error')):
+   before=(slot/'submit.json').read_bytes()
    rejected=subprocess.run(cmd+options,capture_output=True,text=True)
    assert rejected.returncode==2,(rejected.stdout,rejected.stderr)
    rejection=json.loads(rejected.stdout)
-   assert rejection['status']=='known_not_started' and rejection['accepted'] is False,rejection
+   assert (rejection['status'],rejection['error'],rejection['accepted'])==(expected_status,expected_error,False),rejection
    assert 'call_id' not in rejection
-   assert not list((work/'work/lineage/calls').glob('*/accepted.json'))
-   rejected_options.append(rejection)
+   if expected_status=='caller_error':
+    assert (slot/'submit.json').read_bytes()==before
+    reference=None
+   else:reference=json.loads((slot/'response.json').read_text())['submission_ref']
+   rejected_options.append(dict(result=rejection,submission_ref=reference))
   (work/'work/rejected-caller-options.json').write_text(json.dumps(rejected_options))
   result=subprocess.run(cmd+(['--mechanism','P'] if search_enabled else []),capture_output=True,text=True)
   assert result.returncode==0,(result.stdout,result.stderr)
   reply=json.loads(result.stdout);assert reply['status']=='known_success'
+  original=(slot/'response.json').read_bytes();response=json.loads(original)
+  assert response['code']==0 and response['result']==reply
+  (work/'work/original-response.json').write_bytes(original)
   if search_enabled:
    rejected=subprocess.run(cmd+['--mechanism','P'],capture_output=True,text=True)
    assert rejected.returncode!=0 and 'Other H mechanisms' in rejected.stdout+rejected.stderr,(rejected.stdout,rejected.stderr)
    other=subprocess.run(cmd+['--mechanism','Q'],capture_output=True,text=True)
    assert other.returncode==0,(other.stdout,other.stderr)
    assert json.loads(other.stdout)['status']=='known_success'
-  (work/'work/original-call.json').write_text(json.dumps(dict(call_id=reply['call_id'])))
+  (work/'work/original-call.json').write_text(json.dumps(dict(submission_ref=response['submission_ref'])))
  else:
   assert home.name=='context-001'
   assert (work/'work/science-resume.json').is_file()
-  call=json.loads((work/'work/original-call.json').read_text())['call_id']
+  original=json.loads((work/'work/original-response.json').read_text())
+  assert original['submission_ref']==json.loads((work/'work/original-call.json').read_text())['submission_ref']
+  call=original['result']['call_id']
   result=subprocess.run([str(work/'bin/exp'),'query','--call-id',call],capture_output=True,text=True)
   assert result.returncode==0,(result.stdout,result.stderr)
   assert json.loads(result.stdout)['state']=='succeeded'
@@ -86,6 +104,10 @@ payload=dict(summary='Synthetic namespace contribution',scientific_result='No sc
 if role=='W':
  payload['stage_intent']='review' if later else 'continue'
  payload['mechanism_findings']=([dict(mechanism=label,basis='observed',finding='Independent bounded interpretation; fake transport, no measured efficacy.') for label in ('P','Q')] if search_enabled else None)
+ if task.get('candidate_nomination_mechanisms'):
+  payload['candidate_nominations']=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row['mechanism_ref'],
+   reason='The public runner creates only an inert transport artifact; no scientifically suitable model was established.')
+   for row in task['candidate_nomination_mechanisms'] if row['status']!='waived'])
 if role=='H':payload.update(next_action='experiment',route_reason='Discriminate the declared mechanism',
  search_plan=dict(scope='Synthetic current search',commitments=[dict(label=label,minimal_test='One bounded experiment; prioritize competing mechanisms before fine tuning',existing_ref=None) for label in ('P','Q')],focus=dict(label=None,action='screen')))
 if role=='A':payload.update(next_action='finish',route_reason='The synthetic combination was observed',candidate_recommendation=None,
@@ -97,39 +119,29 @@ output.write_text(json.dumps(payload))
 
 def prepare_namespace(tmp_path,*,search_enabled=False,fake_source=FAKE_NATIVE,context='new_context',repair=False):
     if shutil.which('bwrap') is None:pytest.skip('Actual namespace unavailable')
-    isolated=subprocess.run([sys.executable,'-I','-c',
-        f'from pathlib import Path;from scidiscovery.research_loop.protocol import CURRENT;assert CURRENT=={CURRENT};'
-        f'from scidiscovery.research_loop import contracts;assert Path(contracts.__file__).resolve()==Path({str(Path(c.__file__).resolve())!r})'],
-        capture_output=True,text=True)
-    if isolated.returncode:pytest.skip(f'Exact current CURRENT{CURRENT} package must be importable with -I; use an explicit source bridge or matching installed interpreter')
     repo=Path(__file__).resolve().parents[2];launcher=repo/'scripts/acceptance/rootless_cov_launcher.py'
+    python,scid_python,runtime_paths=source_python(tmp_path,repo)
     (tmp_path/'private-owner-state').write_text('Host-only owner-state canary; no credentials.')
     public=tmp_path/'public';harness=public/'environment/harness';harness.mkdir(parents=True)
     (public/'instruction.md').write_text('Two synthetic native contexts; zero model requests.')
     (public/'task.toml').write_text('fixture=true\n');(public/'environment/Dockerfile').write_text('FROM fixture\n')
-    (harness/'exp_cli.py').write_text(BACKEND.replace("p.add_argument('--runs-root',type=pathlib.Path,required=True)","p.add_argument('--runs-root',type=pathlib.Path,default=pathlib.Path(__import__('os').environ['EXP_RUN_DIR']))"))
-    for name in ('runner.py','train.csv','val.csv','meta.json'):(harness/name).write_text('{}')
+    (harness/'exp_cli.py').write_text(PUBLIC_CLI);(harness/'runner.py').write_text(PUBLIC_RUNNER)
+    for name in ('train.csv','val.csv','meta.json'):(harness/name).write_text('{}')
     manifest=tmp_path/'public-manifest.json'
     c.write(manifest,dict(task_revision='d78f5eb52ad754c5ee9154741af73130a85a65b8',
         public_files_sha256={p.relative_to(public).as_posix():c.digest(p) for p in public.rglob('*') if p.is_file()}))
-    fake=tmp_path/'fake-codex';fake.write_text('#!'+sys.executable+'\n'+fake_source);fake.chmod(0o555)
-    root=tmp_path/'instance';config=tmp_path/'launcher.json';python=str(Path(sys.executable).absolute());codehost=Path('/usr/bin/true').resolve()
-    # Preserve this interpreter's explicit -I source bridge, including its
-    # selected metadata and dependency sites. This is source-entry transport
-    # coverage, not installed-wheel qualification; never mount the checkout.
-    source_root=Path(c.__file__).resolve().parents[2]
-    metadata_root=Path(importlib.metadata.distribution('scidiscovery').locate_file('')).resolve()
-    dependency_sites=[str(Path(path).resolve()) for path in sys.path
-        if Path(path).name in ('site-packages','dist-packages') and Path(path).is_dir()]
-    runtime_paths=list(dict.fromkeys([sys.base_prefix,str(Path(python).parent.parent),
-        str(source_root),str(metadata_root),*dependency_sites]))
+    fake=tmp_path/'fake-codex';fake.write_text('#!'+sys.executable+'\nEXPECTED_RECEIPT='+repr(str(Path(cov_receipt.__file__).resolve()))+
+        '\nEXPECTED_RUNNER='+repr(str(harness/'runner.py'))+'\n'+fake_source);fake.chmod(0o555)
+    root=tmp_path/'instance';config=tmp_path/'launcher.json';codehost=Path('/usr/bin/true').resolve()
     assert str(repo) not in runtime_paths
     c.write(config,dict(scene_root=str(root),public_root=str(public),public_manifest=str(manifest),
         runs_dir=str(root/'runs'),submission_dir=str(root/'submission'),native=str(fake),native_sha256=c.digest(fake),
-        code_mode_host=dict(path=str(codehost),sha256=c.digest(codehost)),task_python=python,scid_python=python,
+        code_mode_host=dict(path=str(codehost),sha256=c.digest(codehost)),task_python=python,scid_python=scid_python,
         runtime_paths=runtime_paths,
-        model='no-model',reasoning_effort='high',profile='namespace-no-model',cov_receipt_channel='backend_file'))
-    controller.prepare(root,public/'instruction.md',public,[python,str(launcher),'--config',str(config),'--'],
+        model='no-model',reasoning_effort='high',profile='namespace-no-model',cov_receipt_channel='public_runner_main'))
+    launch=[scid_python,'-B','-I','-c','import runpy,sys;runpy.run_path(sys.argv.pop(1),run_name="__main__")',
+        str(launcher),'--config',str(config),'--']
+    controller.prepare(root,public/'instruction.md',public,launch,
         max_tokens=100000,max_seconds=120,max_steps=8,model='no-model',reasoning_effort='high',search_policy=search.DEFAULT_POLICY if search_enabled else None,
         history_observer=dict(adapter=str(Path(cov_lineage.__file__).resolve()),contract_version=2,
             config=dict(runs='runs',calls='project/nodes',evaluation_key='covshift-public-val-v1')) if search_enabled else None,
@@ -140,11 +152,52 @@ def prepare_namespace(tmp_path,*,search_enabled=False,fake_source=FAKE_NATIVE,co
     return root
 
 
+def execute_namespace(root,step):
+    origin=execution.origin(root,step)
+    originals={path:path.read_bytes() for path in (root/'jobs'/f'{step:03d}.json',root/'settings.json',
+        root/'settings-identity.json',origin/'science-result.schema.json')}
+    try:
+        result=native.execute_native(root,step)
+        assert {path:path.read_bytes() for path in originals}==originals
+        return result
+    except (ValueError,RuntimeError) as error:
+        diagnostics={}
+        for record in (origin,origin/'continuations/001'):
+            for name in ('native.stderr','runner.stderr','native.jsonl','native-outcome.json','result.pending.json','science-output.json'):
+                path=record/name
+                if path.is_file():
+                    with path.open('rb') as stream:
+                        stream.seek(max(0,path.stat().st_size-8192))
+                        diagnostics[str(path.relative_to(root))]=stream.read(8192).decode(errors='replace')
+        pytest.fail(json.dumps(dict(error=str(error),diagnostics=diagnostics),ensure_ascii=False,indent=2))
+
+
+def assert_public_submission(root,step):
+    work=c.workspace(root,step);records=record_directory(root,step)
+    response_path=work/'work/original-response.json';response=c.read(response_path)
+    reference=c.read(work/'work/original-call.json')['submission_ref']
+    assert response['submission_ref']==reference
+    claim=records.parent/'worker-submissions'/reference
+    assert response_path.read_bytes()==(claim/'response.json').read_bytes()
+    assert c.read(claim/'binding.json')['attempt']==0
+    call=response['result']['call_id'];original=records/'calls'/call
+    assert c.read(original/'accepted.json')['native_attempt']['number']==0
+    evidence=c.read(claim/'outcome.json')['calls']
+    assert len(evidence)==1 and evidence[0]['call_id']==call
+    assert evidence[0]['accepted']['sha256']==c.digest(original/'accepted.json')
+    assert evidence[0]['completed']['sha256']==c.digest(original/'completed.json')
+    for rejected in c.read(work/'work/rejected-caller-options.json'):
+        assert rejected['result']['accepted'] is False and 'call_id' not in rejected['result']
+        if rejected['submission_ref'] is not None:
+            rejected_claim=records.parent/'worker-submissions'/rejected['submission_ref']
+            assert c.read(rejected_claim/'outcome.json')['calls']==[]
+
+
 @pytest.mark.parametrize('search_enabled',[False,True],ids=['no-search','sealed-h-search-w-a'])
 def test_actual_launcher_two_new_contexts_keep_original_registered_call(tmp_path,search_enabled):
     root=prepare_namespace(tmp_path,search_enabled=search_enabled)
     if search_enabled:
-        c.build_job(root,1,'H',[]);native.execute_native(root,1)
+        c.build_job(root,1,'H',[]);execute_namespace(root,1)
         assert 'exploration_order_version' not in c.settings(root)
         assert c.validate(c.workspace(root,1))['search_plan']['commitments']
     step=2 if search_enabled else 1
@@ -152,7 +205,7 @@ def test_actual_launcher_two_new_contexts_keep_original_registered_call(tmp_path
     if search_enabled:
         assert job['search']['focus']['mechanism_ref']=='h001.m1'
         assert lineage.build(root,step)['mechanisms']==search.project(root,step)['mechanisms']
-    native.execute_native(root,step)
+    execute_namespace(root,step)
     chain=execution.records(root,step)
     assert len(chain)==2 and chain[1].name=='001'
     assert c.read(chain[0]/'science-output.json')['stage_intent']=='continue'
@@ -162,14 +215,15 @@ def test_actual_launcher_two_new_contexts_keep_original_registered_call(tmp_path
     first=c.read(chain[0]/'experiment-config.json');second=c.read(chain[1]/'experiment-config.json')
     assert first['scope']==second['scope'] and first['native_attempt']!=second['native_attempt']
     work=c.workspace(root,step)
-    assert len(list((work/'work/lineage/calls').glob('*/accepted.json')))==(2 if search_enabled else 1)
+    assert len(list((record_directory(root,step)/'calls').glob('*/accepted.json')))==(2 if search_enabled else 1)
+    assert_public_submission(root,step)
     assert len(c.read(work/'work/rejected-caller-options.json'))==2
     assert c.read(work/'work/second-context-query.json')['state']=='succeeded'
     assert len(list((root/'jobs').glob('*.json')))==step
     assert c.validate(work)['stage_intent']=='review'
     if search_enabled:
         assert first['scope']['mechanism_ref'] is None
-        c.build_job(root,3,'A',[1,2]);native.execute_native(root,3)
+        c.build_job(root,3,'A',[1,2]);execute_namespace(root,3)
         assert c.validate(c.workspace(root,3))['next_action']=='finish'
         state=search.project(root,4);graph=lineage.build(root,4)
         assert graph['mechanisms']==state['mechanisms']

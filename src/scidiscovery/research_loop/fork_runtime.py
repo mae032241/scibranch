@@ -24,21 +24,35 @@ def is_fork(root):
     return path.exists() or path.is_symlink()
 
 
-def local_steps(root):
-    """Enumerate physical child jobs independently of a resource ceiling."""
+def local_steps(root, *, include_native=False):
+    """Enumerate local jobs, optionally retaining orphan native originals too."""
     from . import contracts as c
-    steps = []
+    steps = set()
     directory = Path(root) / 'jobs'
-    if not directory.exists():
-        return steps
-    for path in directory.iterdir():
+    for path in directory.iterdir() if directory.exists() else ():
         if path.suffix != '.json':
             continue
         if (not path.stem.isascii() or not path.stem.isdecimal()
                 or path.name != f'{int(path.stem):03d}.json' or int(path.stem) <= 0):
             raise ValueError('Scientific job namespace changed')
         c.regular(path)
-        steps.append(int(path.stem))
+        steps.add(int(path.stem))
+    if include_native:
+        # Only this instance's physical records count. Fork inherited objects
+        # live under host-runtime/fork and never enter local consumption/guards.
+        directory = Path(root) / 'native-evidence'
+        if directory.is_symlink():
+            raise ValueError('Native original namespace changed')
+        for path in directory.iterdir() if directory.exists() else ():
+            intent = path / 'native-intent.json'
+            if not intent.exists() and not intent.is_symlink():
+                continue
+            if (not path.name.isascii() or not path.name.isdecimal()
+                    or path.name != f'{int(path.name):03d}' or int(path.name) <= 0
+                    or path.is_symlink() or not path.is_dir()):
+                raise ValueError('Native original namespace changed')
+            c.regular(intent)
+            steps.add(int(path.name))
     return sorted(steps)
 
 

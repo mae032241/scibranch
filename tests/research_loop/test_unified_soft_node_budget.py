@@ -30,7 +30,7 @@ def prepare_cli(tmp_path, *, total_tokens=1000, node_tokens=10):
             '--node-budget-policy', str(policy), '--search-policy', str(search_policy)]
     assert cli.main(argv) == 0
     assert c.settings(root)['node_budget_mode'] == 'soft'
-    assert c.settings(root)['handoff_protocol'] == CURRENT == 23
+    assert c.settings(root)['handoff_protocol'] == CURRENT
     return root, argv
 
 

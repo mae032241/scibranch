@@ -174,7 +174,7 @@ print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=7,output_tok
 def test_launcher_rejects_configuration_mismatch_before_writes(launcher,accepted):
     root,job,record=accepted
     before={p:p.read_bytes() for p in root.rglob('*') if p.is_file()}
-    args=arguments(root,record);args[-1:-1]=['-c','service_tier="default"']
+    args=arguments(root,record)
     with pytest.raises(ValueError,match='launcher_role_profiles_mismatch'):
         launcher.native_args(dict(spec(root),role_profiles={'A':{'model':'different'}}),c.workspace(root,1),args)
     assert before=={p:p.read_bytes() for p in root.rglob('*') if p.is_file()}
@@ -222,9 +222,6 @@ def test_launcher_accepts_exact_profile_argv_for_fresh_and_resume(launcher,profi
         args=resume_arguments(root,record)
     else:
         record=first;args=arguments(root,record)
-    args[args.index('--model')+1]='gpt-6.1-sol'
-    args[args.index('-c')+1]='model_reasoning_effort="medium"'
-    args[args.index('-c'):args.index('-c')]=['-c','service_tier="priority"']
     declared=dict(spec(root),role_profiles={'W':job['native_profile']})
     result=launcher.native_args(declared,c.workspace(root,1),args)
     assert result[result.index('--model')+1]=='gpt-6.1-sol'

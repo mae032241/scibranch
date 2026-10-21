@@ -28,7 +28,7 @@ def usage(root: Path):
     totals = dict(input_tokens=0, cached_input_tokens=0, output_tokens=0)
     unknown = []
     from . import fork_runtime
-    for step in fork_runtime.local_steps(root):
+    for step in fork_runtime.local_steps(root, include_native=True):
         for record in execution.records(root, step):
             if not (record / 'native-intent.json').exists():continue
             meter = record / 'usage.json'

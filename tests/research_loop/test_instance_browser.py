@@ -25,7 +25,9 @@ def test_installed_browser_read_scope_and_pause(tmp_path, monkeypatch):
     if chrome is None:
         pytest.skip('An existing Chrome/Chromium is required; never install for this test')
     root, key = prepare(tmp_path, enabled=False)
-    finish(root, 1, 'H', [], action='analyze')
+    _, _, record = finish(root, 1, 'H', [], action='analyze')
+    originals = {path: path.read_bytes() for path in (record / 'science-output.json', record / 'result-identity.json')}
+    sealed = json.loads(originals[record / 'science-output.json'])
     ui = instance_ui.InstanceUI(root, secret_file=key)
     ready = threading.Event(); servers = []; errors = []
     server_type = instance_ui.ThreadingHTTPServer
@@ -59,6 +61,7 @@ def test_installed_browser_read_scope_and_pause(tmp_path, monkeypatch):
                  '--headless', '--no-first-run', '--no-default-browser-check',
                  '--disable-background-networking', '--disable-component-update',
                  '--disable-extensions', '--disable-sync', '--disable-dev-shm-usage',
+                 '--renderer-process-limit=1', '--disable-features=BackForwardCache',
                  '--remote-debugging-pipe', '--user-data-dir=' + browser_home.name + '/profile',
                  'about:blank'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=diagnostics, start_new_session=True,
@@ -88,7 +91,9 @@ def test_installed_browser_read_scope_and_pause(tmp_path, monkeypatch):
                         pending.extend(chunk)
                 pytest.fail('Browser command timed out: ' + method)
 
-            target = call('Target.createTarget', {'url': 'about:blank'})['targetId']
+            pages = [target for target in call('Target.getTargets')['targetInfos'] if target['type'] == 'page']
+            assert len(pages) == 1 and pages[0]['url'] == 'about:blank', pages
+            target = pages[0]['targetId']
             session = call('Target.attachToTarget', {'targetId': target, 'flatten': True})['sessionId']
 
             def evaluate(expression):
@@ -111,7 +116,17 @@ def test_installed_browser_read_scope_and_pause(tmp_path, monkeypatch):
                 controls = evaluate("document.querySelectorAll('form[action=\"/control/pause\"]').length")
                 assert controls == (1 if access == 'manage' else 0)
                 if access == 'view':
-                    assert evaluate("Boolean(document.querySelector('a[href=\"/nodes/1\"]'))")
+                    evaluate("document.querySelector('a[href=\"/results\"]').click(); true")
+                    wait_for("location.pathname === '/results' && document.readyState === 'complete' && "
+                             "Boolean(document.querySelector('a[href=\"/results/1\"]'))")
+                    assert evaluate("document.querySelectorAll('form[action=\"/control/pause\"]').length") == 0
+                    evaluate("document.querySelector('a[href=\"/results/1\"]').click(); true")
+                    wait_for("location.pathname === '/results/1' && document.readyState === 'complete' && "
+                             "Boolean(document.querySelector('details.full-text > summary'))")
+                    evaluate("document.querySelector('details.full-text > summary').click(); true")
+                    assert evaluate("Array.from(document.querySelectorAll('details.full-text[open] .finding'))"
+                                    ".some(element => element.textContent === " + json.dumps(sealed['scientific_result']) + ")")
+                    assert evaluate("document.querySelectorAll('form[action=\"/control/pause\"]').length") == 0
             assert not (root / 'pause.request').exists()
             evaluate("document.querySelector('form[action=\"/control/pause\"] button').click(); true")
             deadline = time.monotonic() + 5
@@ -119,6 +134,7 @@ def test_installed_browser_read_scope_and_pause(tmp_path, monkeypatch):
                 time.sleep(.05)
             assert (root / 'pause.request').exists()
             assert not list(root.glob('**/accepted.json'))
+            assert all(path.read_bytes() == raw for path, raw in originals.items())
     finally:
         try:
             if browser is not None:

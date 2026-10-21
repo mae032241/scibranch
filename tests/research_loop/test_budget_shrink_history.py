@@ -6,9 +6,9 @@ from urllib.parse import urlencode
 
 import pytest
 
-from scidiscovery.research_loop import (budget, checkpoint, contracts as c, continuation,
+from scidiscovery.research_loop import (backends, budget, checkpoint, contracts as c, continuation,
     controller, execution, instance_archive as archive, instance_control as control,
-    instance_science as science, native)
+    instance_science as science, native, runtime)
 from scidiscovery.research_loop.instance_ui import InstanceUI
 from test_composed_execution_results import composed_registry
 
@@ -25,10 +25,12 @@ def prepare(tmp_path, *, fragments=False):
     return root
 
 
-def finish(root, step, role, parents, *, action='wait', instruction='', artifact=False, seal=True):
-    job = c.build_job(root, step, role, parents, instruction=instruction)
+def finish(root, step, role, parents, *, action='wait', instruction='', artifact=False, seal=True, job=None, anchor=None):
+    if job is None:job = c.build_job(root, step, role, parents, instruction=instruction)
     record = execution.origin(root, step)
-    c.write(record / 'native-intent.json', dict(step=step, task_sha256=c.digest(root / 'jobs' / f'{step:03d}.json')))
+    intent = dict(step=step, task_sha256=c.digest(root / 'jobs' / f'{step:03d}.json'))
+    if anchor is not None:intent['budget_slice'] = anchor
+    c.write(record / 'native-intent.json', intent)
     payload = dict(summary='Fixture contribution', scientific_result='Retain this original contribution with its limits.',
         limitations=['Synthetic native transport; no model or scientific experiment'], implementation_selection=None)
     if role == 'W':payload.update(stage_intent='review', mechanism_findings=None)
@@ -40,8 +42,19 @@ def finish(root, step, role, parents, *, action='wait', instruction='', artifact
     c.write(record / 'science-output.json', payload)
     meter = dict(input_tokens=7, cached_input_tokens=2, output_tokens=3)
     c.write(record / 'usage.json', meter)
-    c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, cleanup='observed_group_cleaned',
-        usage=native.usage(root), raw_sha256=c.digest(record / 'science-output.json')))
+    outcome = dict(returncode=0, stop_reason=None, cleanup='observed_group_cleaned',
+        usage=native.usage(root), raw_sha256=c.digest(record / 'science-output.json'))
+    if (anchor or {}).get('final_return') is not None:
+        # Simulated terminal transport still needs the exact real FINAL receipt;
+        # it grants no scientific qualification to this fixture contribution.
+        backend = backends.selected(c.settings(root, job))
+        outcome.update(native_backend=backend.name,
+            metering=dict(coverage='terminal', reason=None, source=backend.terminal_source, tokens=meter))
+        accepted = budget.final_a_return(root, job, intent)
+        assert accepted is not None
+        outcome['final_a_completion'] = budget.final_a_receipt(accepted, intent, meter, outcome['usage'])
+        c.write(record / 'usage-observation.json', outcome['metering'])
+    c.write(record / 'native-outcome.json', outcome)
     if seal:c.seal_result(root, step)
     return job
 
@@ -68,7 +81,7 @@ def assert_originals(values):
     assert all(path.read_bytes() == value for path, value in values.items())
 
 
-def test_shrink_keeps_sealed_third_subject_usage_reads_restore_and_status_but_no_fourth_launch(tmp_path, monkeypatch):
+def test_shrink_keeps_sealed_third_subject_reads_and_allows_only_one_final_a(tmp_path, monkeypatch):
     root = prepare(tmp_path);three(root)
     package = tmp_path / 'archive';archive.archive_export(root, package)
     shrink(root)
@@ -76,38 +89,50 @@ def test_shrink_keeps_sealed_third_subject_usage_reads_restore_and_status_but_no
     assert native.usage(root)['observed_tokens'] == 30
     assert native.usage(root)['blocking_unknown_steps'] == []
     retained = originals(root)
-    with science.science(root, 3) as result:
-        assert json.load(result.stream)['scientific_result'] == 'Retain this original contribution with its limits.'
-    member = science.materials(root, 3)['items'][0]
-    material = c.workspace(root, 3) / 'artifacts/result.txt';raw = material.read_bytes();material.unlink()
-    ledger = {path: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')}
     def forbidden(*args, **kwargs):pytest.fail('Read/restore cannot sample current consumption or dispatch native work')
     with monkeypatch.context() as patch:
-        patch.setattr(budget, 'snapshot', forbidden);patch.setattr(budget, 'clock_stamp', forbidden)
-        assert archive.archive_restore_material(root, package, step=3, index=member['index'])['status'] == 'material_restored'
-    assert material.read_bytes() == raw
-    assert all(path.read_bytes() == value for path, value in ledger.items())
-    view = control.status(root, limit=2, live_feedback=False)
-    assert [row['step'] for row in view['nodes']] == [1, 2] and view['next_after'] == 2
-    assert [row['step'] for row in control.status(root, after=2, limit=2, live_feedback=False)['nodes']] == [3]
-    assert control.status(root, live_feedback=False)['budget']['max_steps'] == 2
-    key = tmp_path / 'ui.key';key.write_bytes(b'fixture-only-local-ui-secret-1234567890');key.chmod(0o600)
-    ui = InstanceUI(root, secret_file=key);ui.host = '127.0.0.1:18753'
-    _, _, headers = ui.get('/view?' + urlencode(dict(token=ui.read_token)), host=ui.host)
-    assert b'/results/3' in ui.get('/results', host=ui.host, cookie=headers['Set-Cookie'])[1]
-    assert ui.get('/results/3', host=ui.host, cookie=headers['Set-Cookie'])[0] == 200
-    with monkeypatch.context() as patch:
-        patch.setattr(native, 'execute_native', forbidden)
-        result = controller.run(root)
-    assert result['status'] == 'bounded_steps_exhausted' and result['completed_steps'] == 3
-    assert not (root / 'jobs/004.json').exists()
+        patch.setattr(native, 'execute_native', forbidden);patch.setattr(runtime, 'start', forbidden)
+        with science.science(root, 3) as result:
+            assert json.load(result.stream)['scientific_result'] == 'Retain this original contribution with its limits.'
+        member = science.materials(root, 3)['items'][0]
+        material = c.workspace(root, 3) / 'artifacts/result.txt';raw = material.read_bytes();material.unlink()
+        ledger = {path: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')}
+        with monkeypatch.context() as restore_patch:
+            restore_patch.setattr(budget, 'snapshot', forbidden);restore_patch.setattr(budget, 'clock_stamp', forbidden)
+            assert archive.archive_restore_material(root, package, step=3, index=member['index'])['status'] == 'material_restored'
+        assert material.read_bytes() == raw
+        assert all(path.read_bytes() == value for path, value in ledger.items())
+        view = control.status(root, limit=2, live_feedback=False)
+        assert [row['step'] for row in view['nodes']] == [1, 2] and view['next_after'] == 2
+        assert [row['step'] for row in control.status(root, after=2, limit=2, live_feedback=False)['nodes']] == [3]
+        assert control.status(root, live_feedback=False)['budget']['max_steps'] == 2
+        key = tmp_path / 'ui.key';key.write_bytes(b'fixture-only-local-ui-secret-1234567890');key.chmod(0o600)
+        ui = InstanceUI(root, secret_file=key);ui.host = '127.0.0.1:18753'
+        _, _, headers = ui.get('/view?' + urlencode(dict(token=ui.read_token)), host=ui.host)
+        assert b'/results/3' in ui.get('/results', host=ui.host, cookie=headers['Set-Cookie'])[1]
+        assert ui.get('/results/3', host=ui.host, cookie=headers['Set-Cookie'])[0] == 200
     assert_originals(retained)
-    # The lower-level submission front door also cannot activate a prebuilt later job.
-    c.build_job(root, 4, 'W', [1, 2, 3], instruction='Prepared, not accepted or authorized to run.')
-    with pytest.raises(budget.NodeBudgetUnavailable) as stopped:
-        native.execute_native(root, 4)
-    assert stopped.value.reason == 'step_limit'
-    assert not (execution.origin(root, 4) / 'native-intent.json').exists()
+    launches = []
+    def final_only(selected, step):
+        assert selected == root and step == 4
+        job = c.read(root / 'jobs/004.json')
+        assert job['role'] == 'A' and job['final_only'] is True
+        launches.append(step)
+        finish(root, step, 'A', [], action='finish', job=job, anchor=budget.accept_node(root, job))
+    with monkeypatch.context() as patch:
+        patch.setattr(native, 'execute_native', final_only)
+        result = controller.run(root)
+        assert result['status'] == 'final_a_completed'
+        assert controller.run(root)['status'] == 'final_a_completed'
+    assert launches == [4] and native.usage(root)['observed_tokens'] == 40
+    assert not (root / 'jobs/005.json').exists()
+    assert_originals(retained)
+    # FINAL rejects the next ordinary task before a job or native intent exists.
+    with pytest.raises(ValueError, match='Final A return permits no further scientific task'):
+        c.build_job(root, 5, 'W', [1, 2, 3], instruction='No new ordinary work is authorized.')
+    assert not (root / 'jobs/005.json').exists()
+    assert not budget.task_step_available(root, 5)
+    assert not (execution.origin(root, 5) / 'native-intent.json').exists()
     assert_originals(retained)
 
 
@@ -126,7 +151,10 @@ def test_shrink_retains_unknown_meter_even_if_original_job_is_later_missing(tmp_
     retained = originals(root)
     result = native.usage(root)
     assert result['observed_tokens'] == result['accounted_tokens'] == 37
-    assert result['unknown_steps'] == result['blocking_unknown_steps'] == [3]
+    assert result['unknown_steps'] == [3]
+    # Protected FINAL preserves billing uncertainty without a synthetic charge;
+    # the missing original job independently blocks execution and replay.
+    assert result['blocking_unknown_steps'] == []
     assert budget.execution_blocked(root)
     assert_originals(retained)
 

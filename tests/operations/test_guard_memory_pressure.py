@@ -77,7 +77,7 @@ def test_guard_process_limits_remain_effective(tmp_path,monkeypatch,scenario):
         return high
     monkeypatch.setattr(guard,'memory',memory)
     if scenario=='rss':
-        monkeypatch.setattr(guard,'_descendant_rss_kib',lambda _: (set(),config['observed_tree_rss_stop_bytes']//1024+1))
+        monkeypatch.setattr(guard,'_descendant_rss_kib',lambda _,diagnostic=None: (set(),config['observed_tree_rss_stop_bytes']//1024+1))
     if scenario=='timeout':config['timeout_seconds']=.03
     marker=tmp_path/'child_started'
     script="import sys,time;from pathlib import Path;Path(sys.argv[1]).touch();time.sleep(.25)"

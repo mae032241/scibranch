@@ -1,15 +1,14 @@
 """Real rootless fake-native closeout and audits; no model requests or training."""
-import importlib.metadata
 import json
 from pathlib import Path
-import subprocess
+import shlex
 import sys
+import sysconfig
 
 import pytest
 
 from execution_fixtures import execution_registry
 from scidiscovery.research_loop import budget,candidate_audit,contracts as c,controller,cov_lineage,execution,native
-from scidiscovery.research_loop.protocol import CURRENT
 from scidiscovery.research_loop.experiment_client import record_directory,resolve
 from test_cov_delivery_lineage import managed_scene
 
@@ -71,11 +70,44 @@ def assert_original_delivery(root):
     assert c.read(root/'runs/submitted.json')['run_id']==1
 
 
+def source_python(tmp_path,repo):
+    """Explicit source imports under real -I; no product install or test path."""
+    bridge=tmp_path/'source-runtime';bridge.mkdir()
+    metadata=bridge/'scidiscovery-0.dist-info';metadata.mkdir()
+    (metadata/'METADATA').write_text('Metadata-Version: 2.1\nName: scidiscovery\nVersion: 0\n')
+    (metadata/'entry_points.txt').write_text('[scidiscovery.execution_interfaces]\n'
+        'local_execution = scidiscovery.research_loop.local_experiments:REGISTRATION\n'
+        'cov_execution = scidiscovery.research_loop.cov_experiments:REGISTRATION\n')
+    source=repo/'src';bootstrap=bridge/'bootstrap.py'
+    bootstrap.write_text('import runpy, sys\nfrom pathlib import Path\n'
+        'assert sys.flags.isolated and sys.dont_write_bytecode\n'
+        f'sys.path[:0] = {[str(source),str(bridge)]!r}\n'
+        'from scidiscovery.research_loop import contracts as c\n'
+        f'assert Path(c.__file__).resolve() == Path({str(source/"scidiscovery/research_loop/contracts.py")!r})\n'
+        'args = sys.argv[1:]\n'
+        'while args and args[0] in ("-B", "-I"): args.pop(0)\n'
+        'if len(args) < 2 or args[0] not in ("-c", "-m"): raise SystemExit("source fixture requires -c or -m")\n'
+        'if args[0] == "-m":\n'
+        '    sys.argv = args[1:]\n'
+        '    runpy.run_module(args[1], run_name="__main__", alter_sys=True)\n'
+        'else:\n'
+        '    sys.argv = ["-c", *args[2:]]\n'
+        '    exec(compile(args[1], "<string>", "exec"), {"__name__": "__main__"})\n')
+    python=str(Path(sys.executable).absolute());shim=bridge/'python'
+    shim.write_text('#!/bin/sh\nexec '+shlex.quote(python)+' -B -I '+shlex.quote(str(bootstrap))+' "$@"\n')
+    shim.chmod(0o555)
+    paths=sysconfig.get_paths()
+    runtime_paths=list(dict.fromkeys([sys.base_prefix,str(Path(python).parent.parent),str(source),str(bridge),
+        *(str(Path(paths[key]).resolve()) for key in ('purelib','platlib'))]))
+    return python,str(shim),runtime_paths
+
+
 def scene(tmp_path,monkeypatch,mode):
-    probe=subprocess.run([sys.executable,'-I','-c',f'from pathlib import Path;from scidiscovery.research_loop import contracts as c;from scidiscovery.research_loop.protocol import CURRENT;assert CURRENT=={CURRENT};assert Path(c.__file__).resolve()==Path({str(Path("src/scidiscovery/research_loop/contracts.py").resolve())!r})'],capture_output=True,text=True)
-    if probe.returncode:pytest.skip('Exact source bridge or current installed interpreter required for real rootless entry')
     repo=Path(__file__).resolve().parents[2];config=tmp_path/'launcher.json'
-    launcher=[sys.executable,str(repo/'scripts/acceptance/rootless_cov_launcher.py'),'--config',str(config),'--']
+    python,scid_python,runtime_paths=source_python(tmp_path,repo)
+    launcher=[scid_python,'-B','-I','-c',
+        f'import runpy;runpy.run_path({str(repo/"scripts/acceptance/rootless_cov_launcher.py")!r},run_name="__main__")',
+        '--config',str(config),'--']
     fake=tmp_path/'fake-codex';fake.write_text('#!'+sys.executable+'\nMODE='+repr(mode)+'\n'+FAKE);fake.chmod(0o555)
     original_prepare=controller.prepare
     def prepare(*args,**kwargs):
@@ -112,13 +144,10 @@ def scene(tmp_path,monkeypatch,mode):
     manifest=tmp_path/'public-manifest.json'
     c.write(manifest,dict(task_revision='d78f5eb52ad754c5ee9154741af73130a85a65b8',
         public_files_sha256={p.relative_to(public).as_posix():c.digest(p) for p in public.rglob('*') if p.is_file()}))
-    python=str(Path(sys.executable).absolute());metadata=Path(importlib.metadata.distribution('scidiscovery').locate_file('')).resolve()
-    sites=[str(Path(p).resolve()) for p in sys.path if Path(p).name in ('site-packages','dist-packages') and Path(p).is_dir()]
-    runtime_paths=list(dict.fromkeys([sys.base_prefix,str(Path(python).parent.parent),str(Path(c.__file__).resolve().parents[2]),str(metadata),*sites]))
     codehost=Path('/usr/bin/true').resolve()
     c.write(config,dict(scene_root=str(root),public_root=str(public),public_manifest=str(manifest),
         runs_dir=str(root/'runs'),submission_dir=str(root/'submission'),native=str(fake),
-        code_mode_host=dict(path=str(codehost)),task_python=python,scid_python=python,
+        code_mode_host=dict(path=str(codehost)),task_python=python,scid_python=scid_python,
         runtime_paths=runtime_paths,model='fixture',reasoning_effort='high',profile='closeout-no-model',cov_receipt_channel='backend_file'))
     projection=origin/'experiment-config.json';original=projection.read_bytes();frozen=c.read(projection)
     configured=c.workspace(root,2)/'work/lineage-config.json'
@@ -131,6 +160,18 @@ def scene(tmp_path,monkeypatch,mode):
     return root,origin
 
 
+def closeout_diagnostics(root,origin):
+    diagnostics={}
+    for record in (origin/'continuations/001',root/'native-evidence/003'):
+        for name in ('native.stderr','runner.stderr','native.jsonl','native-outcome.json','result.pending.json','science-output.json'):
+            path=record/name
+            if path.is_file():
+                with path.open('rb') as stream:
+                    stream.seek(max(0,path.stat().st_size-8192))
+                    diagnostics[str(path.relative_to(root))]=stream.read(8192).decode(errors='replace')
+    return diagnostics
+
+
 @pytest.mark.parametrize('mode',['success','unknown','over','wall'])
 def test_fresh_author_closeout_seals_and_audits_or_preserves_failed_attempt(tmp_path,monkeypatch,execution_registry,mode):
     root,origin=scene(tmp_path,monkeypatch,mode)
@@ -139,12 +180,12 @@ def test_fresh_author_closeout_seals_and_audits_or_preserves_failed_attempt(tmp_
     originals={p:p.read_bytes() for p in calls.rglob('*') if p.is_file()}
     if mode in {'success','over'}:
         target_tokens=5 if mode=='over' else 1000
-        result=controller.worker_closeout(root,2,max_tokens=target_tokens,max_seconds=20,authorization_note='One fresh author-only interpretation, no experiment retry.')
+        try:
+            result=controller.worker_closeout(root,2,max_tokens=target_tokens,max_seconds=20,authorization_note='One fresh author-only interpretation, no experiment retry.')
+        except (ValueError,RuntimeError) as error:
+            pytest.fail(json.dumps(dict(error=str(error),diagnostics=closeout_diagnostics(root,origin)),ensure_ascii=False,indent=2))
         if result['status']!='delivery_confirmed':
-            diagnostics={str(p.relative_to(root)):p.read_text(errors='replace')[-16384:]
-                for p in (root/'native-evidence/003').glob('*')
-                if p.is_file() and p.name in ('native.stderr','runner.stderr','native.jsonl','native-outcome.json')}
-            pytest.fail(json.dumps(dict(result=result,diagnostics=diagnostics),ensure_ascii=False,indent=2))
+            pytest.fail(json.dumps(dict(result=result,diagnostics=closeout_diagnostics(root,origin)),ensure_ascii=False,indent=2))
         assert c.validate(c.workspace(root,2))['stage_intent']=='review'
         outcome=c.read(origin/'continuations/001/native-outcome.json')
         assert outcome['returncode']==0 and outcome['stop_reason'] is None
@@ -182,11 +223,16 @@ def test_fresh_author_closeout_seals_and_audits_or_preserves_failed_attempt(tmp_
         assert not (origin/'result-identity.json').exists()
         assert not (root/'jobs/003.json').exists()
         if mode=='unknown':
+            outcome=c.read(origin/'continuations/001/native-outcome.json')
+            assert (outcome['returncode'],outcome['stop_reason'])==(7,None),closeout_diagnostics(root,origin)
+            assert outcome['thread_id']=='99999999-2222-4333-8444-555555555555'
+            assert outcome['metering']['coverage']=='unknown'
+            assert (c.workspace(root,2)/'artifacts/author.md').read_text()=='Independent synthetic author final contribution; no new experiment.'
             assert native.usage(root)['unknown_steps']==[2]
             assert native.usage(root)['blocking_unknown_steps']==[]
         if mode=='wall':
             outcome=c.read(origin/'continuations/001/native-outcome.json')
-            assert outcome['stop_reason']=='author_closeout_wall_limit'
+            assert outcome['stop_reason']=='author_closeout_wall_limit',closeout_diagnostics(root,origin)
             assert outcome['cleanup']=='observed_group_cleaned'
     assert len(execution.records(root,2))==2
     assert (origin/'native-outcome.json').read_bytes()==old and (root/'settings.json').read_bytes()==settings

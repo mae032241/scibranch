@@ -502,7 +502,6 @@ def test_legacy_elapsed_instance_retains_its_original_deadline(clocked):
     assert value['paused_seconds'] == 25
     # Elapsed clock accounting does not remove this fresh fixture's protected
     # final A contract. Inspect admission without dispatching that final task.
-    assert settings['final_a_completion_policy'] == {'version': 1}
     assert controller._launch_limit(root, settings) == 'wall_limit'
     assert not (root / 'jobs').exists()
 

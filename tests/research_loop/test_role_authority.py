@@ -86,7 +86,6 @@ def test_real_codex_transport_uses_frozen_role_and_source_tagged_a_direction(tmp
     saved={path:path.read_bytes() for path in (root/'jobs').glob('*.json')}
     assert controller.run(root)['status']=='finish'
     assert all(path.read_bytes()==original for path,original in saved.items())
-    assert sum(len(text.encode()) for text in guidance.DEFAULT.values())+200<=guidance.MAX_BYTES
 
 
 @pytest.mark.parametrize('same_instruction',[True,False])

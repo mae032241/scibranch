@@ -4,6 +4,7 @@ Only the transport and gate dependencies are trusted stand-ins. Retirement,
 archival, W sealing/assessment and A screening use their production validators.
 No process, solver, actual authorization or independence qualification is claimed.
 """
+import hashlib
 import io
 from pathlib import Path
 
@@ -27,12 +28,17 @@ from test_worker_delivery import output, tree
 def test_retired_screen_call_seals_partial_and_cannot_be_reused_as_observed(tmp_path,execution_registry):
     root=prepare(tmp_path);h(root,labels=('P',))
     job=c.build_job(root,2,'W',[1]);record=execution.record(root,2)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json')))
+    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json'),
+        search_slice=search.accept(root,job)))
     config=dict(transport='socket',socket_path=str(tmp_path/'unused.socket'),scope=stage_scope(root,job),
         record_dir=str(experiment_client.record_directory(root,2)),breadth=job['search']['breadth'],
-        native_attempt=dict(number=0,execution_key=execution.identity(root,2)),admission=dict(version=1,mode='hard'),
-        execution_interface=dict(version=e.VERSION,code=[e.proof(Path(__file__).resolve())],
-            observation_version=1,terminal_evidence='adapter_result',result_protocol=None))
+        native_attempt=dict(number=0,execution_key=execution.identity(root,2)),admission=dict(version=1,mode='hard'))
+    # Complete trusted-DI host binding, distinct from source discovery metadata.
+    config['execution_interface']=dict(version=e.VERSION,executor='tcad_execution:tcad',
+        code=[e.proof(Path(__file__).resolve())],observation_version=e.OBSERVATION_VERSION,
+        terminal_evidence=TCADManagedExecution.terminal_evidence_kind,result_protocol=TCADManagedExecution.result_protocol,
+        config_sha256=hashlib.sha256(e.encoded(config)).hexdigest(),
+        capabilities=vars(TCADManagedExecution.lifecycle_capabilities()))
     source=c.workspace(root,2)/'work/package.json'
     source.write_bytes(canonical_json(_small_resolved_execution_package().model_dump(mode='json')))
     identity=e.proof(source)
@@ -48,6 +54,7 @@ def test_retired_screen_call_seals_partial_and_cannot_be_reused_as_observed(tmp_
         input_metadata=lambda item:(2,'application/json'),open_input=lambda item:io.BytesIO(b'{}'))
     config['execution_interface']['public_capabilities']=e._public_capabilities(wrapper)
     c.write(record/'experiment-config.json',config)
+    (record/'experiment-config.json').chmod(0o400)
     prepared=wrapper.prepare(payload,preparation_profile='research_loop.v1',exchange_directory=wrapper.records.root)
     accepted=wrapper.records.accept(prepared,wrapper.acceptance_metadata(prepared),config['execution_interface'],mechanism='P')
     wrapper.dispatch_lease(accepted)
@@ -59,9 +66,12 @@ def test_retired_screen_call_seals_partial_and_cannot_be_reused_as_observed(tmp_
     directory=wrapper.records.directory(payload.name)
     assert 'submit' not in backend.events and not (directory/'completed.json').exists()
     assert wrapper.records.external(payload.name) is None
+    originals={path:path.read_bytes() for path in (record/'native-intent.json',
+        record/'experiment-config.json',directory/'accepted.json')}
 
     record,science=output(root,findings(blocked=('P',)))
     c.seal_result(root,2)
+    assert all(path.read_bytes()==raw for path,raw in originals.items())
     facts=worker_delivery.validate(root,job,record)
     assert facts['evidence']==[] and facts['unknown']==[]
     seal=c.read(record/'result-identity.json');observation=c.read(root/seal['observations']['path'])

@@ -10,7 +10,7 @@ import sys
 import pytest
 
 from execution_fixtures import execution_registry
-from scidiscovery.research_loop import budget,checkpoint,contracts as c,continuation,controller,execution,native,runtime
+from scidiscovery.research_loop import backends,budget,checkpoint,contracts as c,continuation,controller,execution,native,profiles,runtime
 
 
 @pytest.fixture
@@ -64,15 +64,10 @@ def accepted(tmp_path,monkeypatch,request):
     return root,job,record
 
 
-def command(record):
-    return ['exec','--json','--output-last-message',str(record/'result.pending.json'),'--model','no-model',
-        '-c','model_reasoning_effort="high"','--sandbox','workspace-write','-C',str(c.workspace(record.parents[1],1)),'-']
-
-
 def arguments(root,record):
-    args=command(record)
-    args[args.index('-C')+1]=str(c.workspace(root,1))
-    return args
+    settings=c.settings(root);job=c.read(root/'jobs/001.json');backend=backends.selected(settings)
+    return backend.launch(profiles.for_job(settings,job),c.workspace(root,1),record/'result.pending.json',
+        execution.origin(root,1)/'science-result.schema.json',job.get('native_role_instruction',c.ROLE_INSTRUCTIONS['W']))[len(backend.launcher):]
 
 
 def spec(root):return dict(scene_root=str(root),model='no-model',reasoning_effort='high')
@@ -144,6 +139,40 @@ def test_exact_new_context_uses_frozen_origin_schema(launcher,accepted,monkeypat
     assert result[result.index('--output-last-message')+1]==str(record/'result.pending.json')
     assert result[result.index('--output-schema')+1]==str(first/'science-result.schema.json')
     assert '--sandbox' not in result
+    assert '--ignore-user-config' not in result
+    assert not any(value.startswith('sandbox_workspace_write=') for value in result)
+    assert 'project_doc_max_bytes=0' in result and 'features.multi_agent=false' in result
+
+
+@pytest.mark.parametrize('damage',['unknown','instructions','developer','network','web','subagents','workspace','duplicate','missing','ignore_config'])
+def test_current_backend_permission_overrides_are_exact(launcher,accepted,damage):
+    root,job,record=accepted;args=arguments(root,record)
+    if damage=='unknown':args[-1:-1]=['-c','unknown_setting=true']
+    elif damage=='duplicate':args[-1:-1]=['-c','project_doc_max_bytes=0']
+    elif damage=='missing':
+        index=args.index('project_doc_max_bytes=0');del args[index-1:index+1]
+    elif damage=='ignore_config':args.remove('--ignore-user-config')
+    elif damage=='workspace':args[args.index('--sandbox')+1]='danger-full-access'
+    else:
+        key,value={'instructions':('project_doc_max_bytes','project_doc_max_bytes=1'),
+            'developer':('developer_instructions','developer_instructions="Changed role instruction"'),
+            'network':('sandbox_workspace_write','sandbox_workspace_write={"network_access"=true}'),
+            'web':('web_search','web_search="live"'),'subagents':('features.multi_agent','features.multi_agent=true')}[damage]
+        index=next(i for i,item in enumerate(args) if item.startswith(key+'='));args[index]=value
+    before=(record/'native-intent.json').read_bytes()
+    with pytest.raises(ValueError,match='native_config_override_rejected|complete_role_profile_config_required|unexpected_legacy_sandbox'):
+        launcher.native_args(spec(root),c.workspace(root,1),args)
+    assert (record/'native-intent.json').read_bytes()==before
+
+
+@pytest.mark.parametrize('change',[dict(network=True),dict(web='live'),dict(subagents=True),dict(workspace='read-only')])
+def test_cov_namespace_rejects_unsupported_frozen_native_permissions(launcher,accepted,change):
+    root,job,record=accepted
+    settings=c.settings(root);settings['native_options'].update(change)
+    c.write(root/'settings.json',settings);c.write(root/'settings-identity.json',dict(sha256=c.digest(root/'settings.json')))
+    args=arguments(root,record)
+    with pytest.raises(ValueError,match='native_permissions_not_supported_by_cov_launcher'):
+        launcher.native_args(spec(root),c.workspace(root,1),args)
 
 
 @pytest.mark.parametrize('damage',['old_attempt','wrong_name','arbitrary_subdir','wrong_home','wrong_role','wrong_manifest','unknown_other_pid','terminal'])
@@ -197,17 +226,23 @@ def next_session(root,job,first,monkeypatch,*,repair=False):
 
 
 def resume_arguments(root,record):
-    return ['exec','-C',str(c.workspace(root,1)),'--sandbox','workspace-write',
-        '-c','model_reasoning_effort="high"','resume','--json','--model','no-model',
-        '--output-schema',str(execution.origin(root,1)/'science-result.schema.json'),
-        '--output-last-message',str(record/'result.pending.json'),THREAD,'-']
+    settings=c.settings(root);job=c.read(root/'jobs/001.json');backend=backends.selected(settings)
+    args,_=backend.resume([*backend.launcher,*arguments(root,record)],profiles.for_job(settings,job),c.workspace(root,1),
+        record/'result.pending.json',execution.origin(root,1)/'science-result.schema.json',dict(thread_id=THREAD))
+    # Custom launchers receive the exact retained schema from the namespace.
+    args[-2:-2]=['--output-schema',str(execution.origin(root,1)/'science-result.schema.json')]
+    return args[len(backend.launcher):]
 
 
 @pytest.mark.parametrize('accepted',['fragment','repair'],indirect=True)
-def test_exact_accepted_same_session_command(launcher,accepted,monkeypatch,request):
+@pytest.mark.parametrize('explicit_schema',[False,True])
+def test_exact_accepted_same_session_command(launcher,accepted,monkeypatch,request,explicit_schema):
     root,job,first=accepted
     record=next_session(root,job,first,monkeypatch,repair=request.node.callspec.params['accepted']=='repair')
-    result=launcher.native_args(spec(root),c.workspace(root,1),resume_arguments(root,record))
+    args=resume_arguments(root,record)
+    if not explicit_schema:
+        index=args.index('--output-schema');del args[index:index+2]
+    result=launcher.native_args(spec(root),c.workspace(root,1),args)
     assert result.count('resume')==1 and result[-2:]==[THREAD,'-']
     assert result.count('--output-schema')==1 and '--sandbox' not in result
     assert result[result.index('--output-last-message')+1]==str(record/'result.pending.json')
@@ -215,7 +250,7 @@ def test_exact_accepted_same_session_command(launcher,accepted,monkeypatch,reque
 
 
 @pytest.mark.parametrize('accepted',['fragment'],indirect=True)
-@pytest.mark.parametrize('damage',['last','wrong_thread','wrong_home','header','schema','missing_schema','fresh_shape',
+@pytest.mark.parametrize('damage',['last','wrong_thread','wrong_home','header','schema','schema_transport','missing_transport','fresh_shape',
     'old_output','unknown_pid','terminal','root_intent'])
 def test_resumed_dispatch_rejects_identity_changes_without_writes(launcher,accepted,monkeypatch,damage):
     root,job,first=accepted;record=next_session(root,job,first,monkeypatch);args=resume_arguments(root,record)
@@ -226,8 +261,12 @@ def test_resumed_dispatch_rejects_identity_changes_without_writes(launcher,accep
         session=execution.home(root,1)/'sessions/current.jsonl'
         session.write_text(json.dumps(dict(type='session_meta',payload=dict(id=THREAD,cwd=str(c.workspace(root,1)),changed=True)))+'\n')
     elif damage=='schema':args[args.index('--output-schema')+1]=str(record/'science-result.schema.json')
-    elif damage=='missing_schema':
+    elif damage in {'schema_transport','missing_transport'}:
         at=args.index('--output-schema');del args[at:at+2]
+        settings=c.settings(root)
+        if damage=='schema_transport':settings['native_capabilities']['response_schema_transport']='native_flag'
+        else:settings['native_capabilities'].pop('response_schema_transport')
+        c.write(root/'settings.json',settings);c.write(root/'settings-identity.json',dict(sha256=c.digest(root/'settings.json')))
     elif damage=='fresh_shape':args=arguments(root,record)
     elif damage=='old_output':args[args.index('--output-last-message')+1]=str(first/'result.pending.json')
     elif damage=='unknown_pid':

@@ -288,7 +288,6 @@ def test_actual_popen_rechecks_late_budget_before_native_submission(tmp_path, mo
     native.run_native(root, 1)
     outcome = c.read(record / 'native-outcome.json')
     assert outcome['native_started'] is False
-    assert c.settings(root)['final_a_completion_policy']==dict(version=1)
     assert budget.delivery_reserve(c.settings(root))==dict(tokens=0,seconds=0.,steps=0)
     assert outcome['stop_reason'] == 'wall_limit'
     assert not (record / 'native-process.json').exists()
@@ -391,7 +390,6 @@ def test_budget_race_preserves_unaccepted_job_and_enters_durable_final(tmp_path,
     assert not (record / 'native-process.json').exists()
     assert not (record / 'science-output.json').exists()
     prepared = (root / 'jobs/001.json').read_bytes()
-    assert c.settings(root)['final_a_completion_policy'] == dict(version=1)
     assert budget.protected_final_report(c.settings(root))
     assert c.read(root / 'jobs/001.json')['role'] == 'H'
     assert controller.run(root)['status'] == 'final_report'

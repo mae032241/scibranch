@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts as c, controller, native
+from scidiscovery.research_loop import budget, contracts as c, controller, execution, native
 from scidiscovery.research_loop.experiment_client import record_directory
 from test_audit_engineering import cli, repair_scene
 from execution_fixtures import execution_registry
@@ -48,27 +48,43 @@ def test_uncertain_usage_or_external_action_never_becomes_repair_funds(monkeypat
 
 
 
-@pytest.mark.parametrize('ordinary',[False,True])
 @pytest.mark.parametrize('crash',[False,True])
-def test_soft_repair_reaches_delivery_through_both_entries_and_continuation(tmp_path,monkeypatch,ordinary,crash):
+def test_soft_ordinary_repair_reaches_one_final_delivery_and_continuation(tmp_path,monkeypatch,crash):
     prepare=controller.prepare
     def soft_scene(*args,**kwargs):
-        kwargs.update(node_budget_mode='soft',max_seconds=720)
+        # One extra step pays for the crash case's finite same-session attempt.
+        kwargs.update(node_budget_mode='soft',max_seconds=720,max_steps=6 if crash else 5)
         kwargs['node_budget_policy']['W']=dict(max_observed_tokens=650000,max_seconds=480)
         kwargs['delivery_policy'].update(closeout_a=dict(max_observed_tokens=150000,max_seconds=120),
             inflight_tokens=200000,cleanup_seconds=60,submit_seconds=45,confirm_seconds=15)
         return prepare(*args,**kwargs)
     monkeypatch.setattr(controller,'prepare',soft_scene)
-    root,_=repair_scene(tmp_path,ordinary=ordinary,max_tokens=1000000,crash=crash)
+    root,_=repair_scene(tmp_path,ordinary=True,final_after_repair=True,max_tokens=1000000,crash=crash)
     original={p:p.read_bytes() for p in (root/'native-evidence').glob('*/result-identity.json')}
     first=cli(root)
     if crash:
-        assert first['status'] in {'closeout_native_unsealed','native_stopped'},first
+        assert first['status']=='native_stopped',first
+        stopped=execution.record(root,4)
+        stopped_originals={name:(stopped/name).read_bytes() for name in (
+            'native-intent.json','native-outcome.json','usage.json')}
+        original_job=(root/'jobs/004.json').read_bytes()
         assert cli(root,'worker-resume','--step','4')['status']=='delivery_confirmed'
+        assert (root/'jobs/004.json').read_bytes()==original_job
+        assert all((stopped/name).read_bytes()==raw for name,raw in stopped_originals.items())
     else:assert first['status']=='delivery_confirmed',first
     repair=c.read(root/'jobs/004.json')
-    assert repair.get('purpose')==(None if ordinary else 'closeout')
+    assert repair.get('purpose') is None
     assert repair['engineering_repair']['candidate_id']=='run-1'
+    attempts=execution.records(root,4)
+    assert len(attempts)==(2 if crash else 1)
+    if crash:
+        resumed=c.read(attempts[1]/'native-intent.json')
+        assert resumed['continuation_kind']=='repair'
+        assert resumed['session']['thread_id']=='11111111-2222-4333-8444-555555555555'
+    final=c.read(root/'jobs/005.json')
+    assert final['role']=='A' and final['final_only']
+    assert budget.final_a_barrier(root)['step']==5
+    assert not (root/'jobs/006.json').exists()
     assert all(p.read_bytes()==data for p,data in original.items())
     work=c.workspace(root,4)
     assert repair['worker_view_version']==1
@@ -82,4 +98,5 @@ def test_soft_repair_reaches_delivery_through_both_entries_and_continuation(tmp_
     assert not (work/'work/lineage/calls').exists()
     assert set(c.read(work/'work/experiment-config.json'))=={'worker_view_version','step','attempt'}
     assert c.settings(root)['max_tokens']==1000000 and c.settings(root)['max_seconds']==720
+    assert c.settings(root)['max_steps']==(6 if crash else 5)
     assert not any(c.read(p)['kind']=='budget_amend' for p in (root/'control-ledger').glob('*.json'))

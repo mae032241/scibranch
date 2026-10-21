@@ -179,7 +179,9 @@ def test_archive_alias_of_new_output_cannot_select_its_original_input_call(tmp_p
     archive=root/output['path']
     executed=experiments.dispatch(config,archive,new=True,mechanism='P')
     assert generated['call_id']!=executed['call_id'] and executed['status']=='known_failed'
-    finish(root,2,'W',[1],mechanism_findings=findings('P'))
+    intent=execution.record(root,2)/'native-intent.json';original_intent=intent.read_bytes()
+    finish(root,2,'W',[1],mechanism_findings=findings('P'),preserve_native_intent=True)
+    assert intent.read_bytes()==original_intent
     sealed=c.read(execution.record(root,2)/'result-identity.json')
     material=next(item for item in sealed['materials'] if item['path'].endswith('/original.py'))
     accepted=experiments.Records(config).accepted(executed['call_id'])

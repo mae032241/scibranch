@@ -35,6 +35,11 @@ def transport():
     return source.replace(
         'payload.update(stage_intent=intent,mechanism_findings=None)',
         "payload.update(stage_intent=intent,mechanism_findings=None)\n"
+        "    task=json.loads((work/'science-task.json').read_text())\n"
+        "    if task.get('candidate_nomination_mechanisms'):\n"
+        "        payload['candidate_nominations']=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row['mechanism_ref'],\n"
+        "            reason='This no-model observation fixture declares no scientifically suitable candidate.')\n"
+        "            for row in task['candidate_nomination_mechanisms'] if row['status']!='waived'])\n"
         "    if job['search']['focus']['action']=='screen':\n"
         "        payload['mechanism_findings']=[{'mechanism':'P','basis':'observed',"
         "'finding':'The registered observation is available; this transport fixture establishes no target efficacy.'}]")

@@ -45,7 +45,7 @@ def test_actual_prepared_worker_and_a_views_deliver_symmetric_choice_and_adaptiv
         supplied=dict(guidance.OPPORTUNITY if opportunity else guidance.DEFAULT)
         supplied['W']+=DOMAIN_SUFFIX
     root=prepare(tmp_path,supplied,portfolio=opportunity)
-    _,worker_view,_,judge_view=assigned_views(root)
+    worker_job,worker_view,judge_job,judge_view=assigned_views(root)
     expected=guidance.OPPORTUNITY if opportunity and supplied is guidance.DEFAULT else supplied
     assert c.settings(root)['role_guidance']==expected
     assert sum(len(text.encode()) for text in expected.values())<=guidance.MAX_BYTES==2560
@@ -54,21 +54,25 @@ def test_actual_prepared_worker_and_a_views_deliver_symmetric_choice_and_adaptiv
     assert 'unexcluded mechanisms' in expected['H']
     text=worker_view['role_guidance']
     assert text==expected['W']
-    assert 'improve allows observation-driven candidate adjustment and continued local search' in text
-    assert 'validate supplies evidence for a concrete choice with fair controls' in text
-    assert 'Neither defaults to one candidate or full validation after each candidate' in text
+    assert worker_job['native_role_instruction']==text
+    assert 'improve permits observation-driven local search' in text
+    assert 'validate informs a concrete choice with fair controls' in text
+    assert 'Neither means one candidate or full validation per candidate' in text
     assert 'breadth fairness, not local trial totals' in text
     assert 'original runtime/feedback limits apply' in text
     assert 'Query unknown calls without replay' in text
     assert 'Honor required checks' in text and 'No auxiliary agents' in text
     judge_text=judge_view['role_guidance']
     assert judge_text==expected['A']
+    assert judge_job['native_role_instruction']==judge_text
     assert 'Compare retaining and replacing candidates by the same original-goal criteria: gains, losses and unknowns' in judge_text
-    assert 'existing candidate has no default priority' in judge_text
+    assert 'Existing candidates have no default priority' in judge_text
     assert 'unknown target optimality alone cannot block replacement' in judge_text
     assert 'proxy leads do not mandate choice' in judge_text
     assert 'Missing/unbound audit remains unknown' in judge_text
-    assert 'confirmed delivery remain distinct' in judge_text
+    assert 'Distinguish recommendation, proxy, observed submission and confirmed delivery' in judge_text
+    if kind.endswith('_domain'):
+        assert text.endswith(DOMAIN_SUFFIX) and DOMAIN_SUFFIX not in judge_text
     assert worker_view['lineage']['mechanisms']['task_action']=='screen'
 
 
@@ -184,7 +188,7 @@ def test_local_improve_multiple_calls_already_share_original_scope_without_a_sin
     assert len({result['call_id'] for result in results})==3
     assert c.read(root/'jobs/004.json')==job
     text=c.read(c.workspace(root,4)/'science-task.json')['role_guidance']
-    assert 'continued local search' in text and 'original runtime/feedback limits apply' in text
+    assert 'observation-driven local search' in text and 'original runtime/feedback limits apply' in text
 
 
 @pytest.mark.parametrize('recommended',['old','new'])

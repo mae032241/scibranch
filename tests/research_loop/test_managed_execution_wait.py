@@ -27,6 +27,10 @@ p=home/'sessions/rollout.jsonl';p.parent.mkdir(parents=True,exist_ok=True)
 if not p.exists():p.write_text(json.dumps(dict(type='session_meta',payload=dict(id=thread,cwd=str(work))))+'\n')
 payload=dict(summary='Synthetic original execution',scientific_result='Only fixture engineering facts.',limitations=['No model or solver.'],implementation_selection=None)
 if role=='W':
+ task=json.loads((work/'science-task.json').read_text())
+ nominations=task.get('candidate_nomination_mechanisms',[])
+ if nominations:
+  payload['candidate_nominations']=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row['mechanism_ref'],reason='This transport fixture declares no scientifically suitable candidate; retain the missing scientific assessment.') for row in nominations if row['status']!='waived'])
  if not resume:
   options=json.loads((root/'fixture-options.json').read_text())
   config=e.configure(root,step,'composed_execution:fixture',options,work/'work/config.json')
@@ -131,11 +135,11 @@ def test_one_run_waits_without_llm_then_automatically_wakes_same_session_and_sea
     assert intent['continuation_kind']=='execution_wake' and intent['session']['thread_id']=='11111111-2222-4333-8444-555555555555'
     for proof in intent['execution_wake']['observations']:
         assert e.proof(proof['path'])==proof
-        observed=c.read(Path(proof['path']))
-        accepted=c.read(Path(observed['accepted']['path']))
-        e.verify_observation(observed,lambda item:Path(item['path']),interface=accepted['interface'])
+        observation=c.read(Path(proof['path']))
+        accepted=c.read(Path(observation['accepted']['path']))
+        e.verify_observation(observation,lambda item:Path(item['path']),interface=accepted['interface'])
         assert any(c.read(Path(item['path'])).get('native_payload')=='retained-native-terminal-only'
-            for item in observed['proofs'])
+            for item in observation['proofs'])
     seal=c.read(chain[0]/'result-identity.json');fact=c.read(root/seal['observations']['path'])
     assert fact['managed_calls'][-1]['status']==outcome and observed['calls']==(2 if multicall else 1)
     if terminal_state=='cancelled':
@@ -292,14 +296,29 @@ def test_sealed_unknown_recovery_binds_new_prefix_materials_and_resolves_origina
     recovered=index['experiments'][0]
     assert recovered['call_id']==call and recovered['execution_status']==outcome
     if collect:assert (c.workspace(root,4)/recovered['outputs'][0]['path']).read_bytes()==b'opaque original job package'
-    native_index=c.read(c.workspace(root,4)/recovered['native_originals_index'])
-    assert any(c.read(c.workspace(root,4)/item['path']).get('native_payload')=='retained-native-terminal-only' for item in native_index['originals'])
+    assert successor['worker_view_version']==1
+    assert not {'native_originals_index','native_originals','original'} & recovered.keys()
+    assert not (c.workspace(root,4)/f'inputs/recovered/002/{call}/originals').exists()
+    # Native control proofs remain reachable through the exact frozen host prefix.
+    recovery_ref=successor['history']['execution_recoveries'][0]
+    assert root/recovery_ref['path']==refs[0] and c.digest(refs[0])==recovery_ref['sha256']
+    recovery=c.read(root/recovery_ref['path']);row=recovery['row']
+    assert recovery['source_step']==2 and recovery['seal_sha256']==c.digest(old_record/'result-identity.json')
+    assert row['call_id']==call and row['status']==outcome
+    assert row['accepted']==old_fact['managed_calls'][0]['accepted'] and row['scope']==old_fact['managed_calls'][0]['scope']
+    history.validate_managed(root,job,[row])
+    observation=c.read(root/row['observation']['snapshot'])
+    native_originals=[c.read(root/'host-history/objects'/proof['sha256']) for proof in observation['proofs']]
+    assert any(item.get('native_payload')=='retained-native-terminal-only' and item['call_id']==call
+        and item['scope']==row['scope'] and item['status']==outcome for item in native_originals)
     # A fresh W interprets the appended original; no replacement managed submit.
     finish(root,4,'W',[1,2,3],mechanism_findings=[dict(mechanism='P',basis='observed',finding='Read the recovered original'),dict(mechanism='Q',basis='blocked',finding='No Q observation')])
     finish(root,5,'A',[1,4],action='continue_w',search_choice=dict(dispositions=[dict(mechanism_ref='h001.m1',status='screened',reason='Assess the new W interpretation')],next_focus=dict(mechanism_ref='h001.m1',action='improve')))
     assert search.project(root,6)['mechanisms']['h001.m1']['status']=='screened'
     next_job=c.build_job(root,6,'W',[1,4,5]);record=execution.record(root,6)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/006.json')))
+    node_anchor=budget.accept_node(root,next_job)
+    anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,next_job))
+    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/006.json'),**anchor))
     next_config=e.configure(root,6,'composed_execution:fixture',dict(synchronous=True),c.workspace(root,6)/'work/config.json')
     package=c.workspace(root,6)/'work/package';package.write_bytes(b'new scientific input')
     assert e.dispatch(next_config,package,new=True,mechanism='P')['status']=='known_success'

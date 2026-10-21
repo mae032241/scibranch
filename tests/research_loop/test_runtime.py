@@ -49,9 +49,9 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
     record = contracts.host_record(work)
     env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[2] / 'src'))
 
-    def launch():
+    def launch(command='run'):
         return subprocess.Popen([sys.executable, '-m', 'scidiscovery.research_loop.cli',
-            'run', '--root', str(root)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+            command, '--root', str(root)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
 
     def until(predicate, timeout=8):
         deadline = time.monotonic() + timeout
@@ -260,20 +260,45 @@ def test_successful_leader_exit_cleans_surviving_standard_child(local):
 def test_budget_term_leader_exit_cleans_stubborn_standard_child(local):
     root, work, record, launch, until = local
     _leave_child_alive(root)
-    # Freeze a short fixture ceiling before its first launch.
+    # Ordinary soft targets do not kill accepted work. The unique FINAL call
+    # retains an enforced finite time slice, independent of the shared target.
     settings = contracts.settings(root)
-    settings['max_seconds'] = 1
+    settings['node_budget_policy'] = {
+        role: dict(max_observed_tokens=1000, max_seconds=1 if role == 'A' else 60)
+        for role in ('H', 'W', 'A', 'E')}
     contracts.write(root / 'settings.json', settings)
     contracts.write(root / 'settings-identity.json', dict(sha256=contracts.digest(root / 'settings.json')))
-    front = launch()
+    front = launch('closeout')
     until(lambda: (work / 'work/ready').exists())
+    binding = contracts.digest(root / 'jobs/001.json')
+    child = runtime.process_identity(contracts.read(work / 'work/child.json')['pid'], binding)
+    leader = contracts.read(record / 'native-process.json')
+    assert (child['pgid'], child['sid']) == (leader['pgid'], leader['sid'])
     out, err = front.communicate(timeout=8)
-    assert json.loads(out)['status'] == 'native_stopped', out + err
+    assert front.returncode == 2, out + err
+    assert json.loads(out)['status'] == 'closeout_native_unsealed', out + err
     outcome = contracts.read(record / 'native-outcome.json')
-    assert outcome['stop_reason'] == 'wall_limit'
+    assert outcome['returncode'] == -signal.SIGTERM
+    assert outcome['stop_reason'] == 'node_slice_time_limit'
     assert outcome['cleanup'] == 'observed_group_cleaned'
     assert not (record / 'result-identity.json').exists()
-    _assert_child_dead(work, contracts.digest(root / 'jobs/001.json'))
+    assert not runtime.process_matches(child, binding)
+    _assert_child_dead(work, binding)
+    final = contracts.read(root / 'jobs/001.json')
+    assert final['role'] == 'A' and final['final_only']
+    marker = budget.final_a_barrier(root)
+    assert marker['step'] == 1
+    assert marker['anchor']['limits']['max_seconds'] == 1
+    originals = {name: (record / name).read_bytes() for name in (
+        'native-intent.json', 'native-outcome.json', 'runner-process.json', 'native-process.json')}
+    resumed = launch('closeout')
+    out, err = resumed.communicate(timeout=8)
+    assert resumed.returncode == 2, out + err
+    assert json.loads(out)['status'] == 'closeout_native_unsealed', out + err
+    assert budget.final_a_barrier(root) == marker
+    assert all((record / name).read_bytes() == raw for name, raw in originals.items())
+    assert not (root / 'jobs/002.json').exists()
+    assert (work / 'work/launches.txt').read_text() == 'launch\n'
 
 
 def test_runner_completion_stops_clock_after_controller_disconnect(local):

@@ -52,13 +52,21 @@ def test_saved_display_never_revalidates_or_samples_file_generation(tmp_path, mo
     def unexpected(*args, **kwargs):
         pytest.fail('UI saved reads must not revalidate or sample file generation')
 
+    original_stat = os.stat
+    def metadata_stat(path, *args, **kwargs):
+        # Fork classification may inspect its manifest location; saved scientific
+        # files still must not be sampled for a generation or integrity check.
+        if os.fspath(path) == str(root/'host-runtime/fork/manifest.json'):
+            return original_stat(path, *args, **kwargs)
+        return unexpected(path, *args, **kwargs)
+
     with monkeypatch.context() as patch:
         for name in ('settings', 'digest', 'regular', 'validate_seal'):
             if hasattr(c, name):
                 patch.setattr(c, name, unexpected)
         for name in ('origin', 'reference', 'record', 'records'):
             patch.setattr(execution, name, unexpected)
-        patch.setattr(os, 'stat', unexpected)
+        patch.setattr(os, 'stat', metadata_stat)
         patch.setattr(os, 'fstat', unexpected)
         assert display.settings(root) == dict(goal='saved goal')
         node = display.node(root, 1)

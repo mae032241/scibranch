@@ -51,8 +51,9 @@ def test_author_closeout_prompt_defers_requirement_judgment_to_worker(tmp_path, 
     assert 'candidate_audit_policy' not in c.settings(root)
     assert 'delivery_policy' not in c.settings(root)
 
-    # Supply accepted attempt facts; authorization/chain validation has its own
-    # tests. Keep the real task, profile, budgets, prompt assembly and stdin path.
+    # Capture prompts after the eligibility boundary; authorization/chain
+    # validation has its own tests. Keep the real task, profile, budgets,
+    # prompt assembly and stdin path without constructing a synthetic grant.
     origin = execution.origin(root, 1)
     chain = [origin, *[origin / 'continuations' / f'{number:03d}' for number in range(1, attempt + 1)]]
     anchor = dict(task_sha256=c.digest(root / 'jobs/001.json'), role=role,
@@ -63,7 +64,8 @@ def test_author_closeout_prompt_defers_requirement_judgment_to_worker(tmp_path, 
     for number, record in enumerate(chain):
         intent = dict(task_sha256=anchor['task_sha256'], budget_slice=anchor)
         if number:
-            intent.update(attempt=number, continuation_kind='author_closeout', context_mode='new_context')
+            intent.update(attempt=number, continuation_kind='author_closeout', context_mode='new_context',
+                root_intent_sha256=c.digest(origin / 'native-intent.json'), previous=execution.proof(chain[number - 1]))
         c.write(record / 'native-intent.json', intent)
         c.write(record / 'runner-process.json', dict(fixture='no runner process'))
         if number < attempt:
@@ -72,7 +74,7 @@ def test_author_closeout_prompt_defers_requirement_judgment_to_worker(tmp_path, 
                 advance_seconds=0., **meter, observed_tokens=0, dispatches=number + 1,
                 limits=nodes[role], usage_observed=True)))
     monkeypatch.setattr(execution, 'records', lambda root, step: chain if step == 1 else [execution.origin(root, step)])
-    monkeypatch.setattr(author_closeout, 'validate_intent', lambda *args: dict(max_tokens=1000, max_seconds=60))
+    monkeypatch.setattr(author_closeout, 'require_intent_eligibility', lambda *args: dict(max_tokens=1000, max_seconds=60))
 
     prompts = []
 

@@ -739,11 +739,11 @@ def execution_blocked(root, *, ignore_operation=None, include_managed=True, igno
     if any(op != ignore_operation for op in state['unresolved_operations']):
         return True
     from . import fork_runtime
-    for step in fork_runtime.local_steps(root):
-        record = execution.record(root, step)
-        if not (record / 'native-intent.json').exists():
-            continue
+    for step in fork_runtime.local_steps(root, include_native=True):
         try:
+            record = execution.record(root, step)
+            if not (record / 'native-intent.json').exists():
+                continue
             binding = contracts.digest(root / 'jobs' / f'{step:03d}.json')
             if contracts.read(record / 'native-intent.json')['task_sha256'] != binding:
                 return True

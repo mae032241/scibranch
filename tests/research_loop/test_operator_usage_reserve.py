@@ -114,9 +114,14 @@ def test_historical_reserve_never_estimates_new_unknown_in_same_step(unknown_ori
 def test_step_amendment_is_finite_audited_and_preserves_settings(unknown_original, capsys):
     root, record, session = unknown_original
     original = (root / 'settings.json').read_bytes()
+    originals = {path:path.read_bytes() for path in [session, *record.iterdir()] if path.is_file()}
     assert main(['budget-amend', '--root', str(root), '--max-tokens', '2000', '--max-steps', '24',
         '--authorization-note', 'Permit finite review and audit steps.', '--authorization-statement', 'Finish this task.']) == 0
-    result = json.loads(capsys.readouterr().out)
+    operation = json.loads(capsys.readouterr().out)
+    assert operation['status'] == 'applied' and operation['kind'] == 'budget_amend'
+    assert operation == contracts.read(root / 'host-control/operations' / f'{operation["operation_id"]}.json')
+    result = operation['result']
+    assert result['status'] == 'budget_amended' and result['consumption'] == 'retained'
     assert result['before_max_steps'] == 5
     assert result['after_max_steps'] == 24
     assert result['max_steps_delta'] == 19
@@ -125,11 +130,20 @@ def test_step_amendment_is_finite_audited_and_preserves_settings(unknown_origina
     assert budget.snapshot(root)['max_seconds'] == 200
     assert budget.used_steps(root) == 1
     assert (root / 'settings.json').read_bytes() == original
+    assert all(path.read_bytes() == raw for path,raw in originals.items())
+    assert native.usage(root)['observed_tokens'] == native.usage(root)['accounted_tokens'] == 120
+    assert native.usage(root)['unknown_steps'] == [1]
     event = contracts.read(root / 'control-ledger/000001.json')
+    assert event['seq'] == result['amendment_seq']
+    assert event['operation_id'] == operation['operation_id']
+    assert event['before'] == dict(max_tokens=1000, max_seconds=200)
+    assert event['after'] == dict(max_tokens=2000, max_seconds=200)
     assert event['authorization_statement'] == 'Finish this task.'
     assert event['max_steps_delta'] == 19
+    ledger = {path:path.read_bytes() for path in (root/'control-ledger').glob('*.json')}
     with pytest.raises(ValueError, match='positive integer'):
         budget.amend(root, max_steps=True, authorization_note='Invalid finite count')
+    assert ledger == {path:path.read_bytes() for path in (root/'control-ledger').glob('*.json')}
 
 
 def test_step_revision_requires_original_statement_without_appending(unknown_original):

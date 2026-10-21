@@ -128,7 +128,8 @@ def test_author_digest_cache_reuses_only_the_same_file_generation(tmp_path,monke
     with pytest.raises(ValueError,match='original regular file'):
         author_closeout._check(tmp_path,expected)
     assert reads==[path,path,path]
-    assert author_closeout._generation_digest.cache_info().maxsize==4096
+    maxsize=author_closeout._generation_digest.cache_info().maxsize
+    assert isinstance(maxsize,int) and maxsize>0
 
 
 @pytest.mark.parametrize('worker_view_version',[None,1])

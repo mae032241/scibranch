@@ -22,13 +22,26 @@ REPO = Path(__file__).resolve().parents[2]
 LAUNCHER = REPO / 'scripts/acceptance/rootless_cov_launcher.py'
 MAX_VERDICT_BYTES = 64 * 1024
 CHAIN = [('H', None, 'experiment'), ('W', None, 'review'), ('A', None, 'audit'), ('A', None, 'continue_w'),
-         ('W', None, 'review'), ('A', None, 'finish'), ('A', 'closeout', 'audit'), ('A', 'closeout', 'deliver')]
+         ('W', None, 'review'), ('A', None, 'finish'), ('A', 'closeout', 'deliver')]
 
 FAKE_NATIVE = r'''import json,os,pathlib,re,subprocess,sys,uuid
-args=sys.argv[1:];sys.stdin.read()
+args=sys.argv[1:]
+if args and args[0]=='sandbox':
+ # Transport fixture only: outer bwrap is real; no provider sandbox qualification.
+ assert len(args)==12 and args[:2]==['sandbox','-P'] and args[3]=='-C' and args[5]=='--'
+ assert args[7:9]==['-B','-I'] and pathlib.Path(args[9]).name=='cov_receipt.py'
+ assert args[10:]==['--science-runner','/opt/exp/scid-invocation.json']
+ invocation=json.loads(pathlib.Path(args[11]).read_text())
+ assert set(invocation)=={'runner','source','output_line','output'}
+ source=pathlib.Path(invocation['source']);cwd=pathlib.Path(args[4])
+ assert source.is_relative_to(cwd) and source.is_file()
+ assert type(invocation['output_line']) is int and invocation['output_line']>0
+ assert invocation['output']=='/task-tmp/scid-receipt/row.json'
+ os.chdir(args[4]);os.execv(args[6],args[6:])
+sys.stdin.read()
 work=pathlib.Path(args[args.index('-C')+1]);home=pathlib.Path(os.environ['CODEX_HOME'])
 task=json.loads((work/'science-task.json').read_text());role=task['role']
-output=pathlib.Path(args[args.index('--output-last-message')+1]);later=output.parent.parent.name=='continuations'
+output=pathlib.Path(args[args.index('--output-last-message')+1]);later=output.parent.parent.name=='continuations' or home.name.startswith('context-')
 assert 'resume' not in args and pathlib.Path(args[args.index('--output-schema')+1]).name=='science-result.schema.json'
 thread=str(uuid.uuid4());FAULT=None  # Replaced for an explicit negative control.
 print(json.dumps(dict(type='thread.started',thread_id=thread)),flush=True)
@@ -44,15 +57,30 @@ def train(train_df,val_df):
 """
 def exp(*items,expected=0):
  result=subprocess.run([str(work/'bin/exp'),*map(str,items)],capture_output=True,text=True)
- assert (result.returncode==0)==(expected==0),(items,result.returncode,result.stdout[-2000:],result.stderr[-2000:])
+ assert (result.returncode==0)==(expected==0),json.dumps(dict(arguments=list(map(str,items)),returncode=result.returncode,
+  stderr=result.stderr[-384:],reply=reply_summary(result.stdout)))
  return result
+def reply_summary(text):
+ try:value=json.loads(text)
+ except (ValueError,TypeError):return dict(unparsed=text[:512])
+ if not isinstance(value,dict):return dict(unexpected_type=type(value).__name__)
+ summary={key:str(value[key])[:256] for key in ('status','note','error','call_id','returncode','cleanup_confirmed','transport_complete') if key in value}
+ for key in ('runner','engineering_check'):
+  if isinstance(value.get(key),dict):summary[key]={field:str(value[key][field])[:192] for field in ('status','note','error','returncode','cleanup_confirmed') if field in value[key]}
+ return summary
 def run(name,alpha,*choice):
  script=work/'work'/(name+'.py');script.write_text(TRAIN.replace('ALPHA',repr(alpha)))
- reply=json.loads(exp('run','--script',script,*choice).stdout);assert reply['status']=='known_success',reply
+ reply=json.loads(exp('run','--script',script,*choice).stdout);assert reply['status']=='known_success',reply_summary(json.dumps(reply))
  return reply
 def ids():
- page=json.loads((work/'inputs/history/candidates/0001.json').read_text())
- return sorted((row['id'] for row in page['candidates']),key=lambda value:int(value.split('-')[1]))
+ path=task['lineage']['indexes']['candidates'];rows=[];seen=set()
+ assert path is not None,dict(reason='No frozen public candidate index',candidates=task['lineage'].get('candidates'))
+ while path is not None:
+  logical=pathlib.Path(path)
+  assert not logical.is_absolute() and '..' not in logical.parts and logical.parts[0]=='inputs' and path not in seen
+  seen.add(path);page=json.loads((work/logical).read_text());rows.extend(page['candidates']);path=page.get('next_page')
+ assert rows,'The frozen public candidate index declares no candidate'
+ return [row['id'] for row in rows]
 payload=dict(summary='Synthetic pre-live '+role+' contribution',scientific_result='No scientific efficacy was measured; fake native transport.',
  limitations=['Fake native transport, not a model; public validation only.'],implementation_selection=None)
 unit=task.get('question','')
@@ -71,7 +99,7 @@ elif role=='W' and 'Work unit: Screen' in unit:
   finding='One bounded registered call completed; fake transport, adequacy not asserted.') for label in ('P','Q')])
 elif role=='W':
  if not later:
-  parent=json.loads((work/'inputs/history/candidates/0001.json').read_text())['candidates'][0]['id']
+  parent=ids()[0]
   first=run('improve-1',0.5,'--parent-plan',parent,'--change-intent','Lower ridge strength','--mechanism','P')
   (work/'work/improve-first.json').write_text(json.dumps(dict(call_id=first['call_id'],candidate_id=first['candidate_id'])))
   payload.update(stage_intent='continue',mechanism_findings=None)
@@ -96,14 +124,13 @@ else:
   rows=[dict(candidate_id=row['candidate_id'],key_risk='Public validation only; fake transport, no target evidence.',
    decision='keep' if row['candidate_id']==chosen else 'replace') for row in table['rows']]
   # The fixture author explicitly names a candidate before qualification and delivery.
-  payload.update(none,next_action='deliver' if audit else 'audit',candidate_recommendation=chosen,
-   candidate_comparison=dict(rows=rows,rationale='The fixture author retains this exact observed candidate.',evidence_steps=[2]) if audit else None,
-   route_reason='Deliver the explicitly chosen candidate after its receipt' if audit else 'Audit the explicitly chosen candidate before delivery')
+  payload.update(none,next_action='deliver',candidate_recommendation=chosen,
+   candidate_comparison=dict(rows=rows,rationale='The fixture author retains this exact observed candidate.',evidence_steps=[2]),
+   route_reason='Authorize delivery of the explicit original choice; control must perform its host audit')
  elif closeout is not None:
-  available=[row['candidate_id'] for row in closeout['sources']['items'] if row['availability']=='available']
-  latest=max(available,key=lambda value:int(value.split('-')[1]))
-  payload.update(none,next_action='deliver' if audit else 'audit',candidate_recommendation=audit['candidate_id'] if audit else latest,
-   route_reason='Deliver the audited choice' if audit else 'Audit the exact latest choice before delivery')
+  chosen=audit['candidate_id'] if audit else ids()[-1]
+  payload.update(none,next_action='deliver',candidate_recommendation=chosen,
+   route_reason='Authorize the explicit public fixture index choice within stated limitations; control must validate its exact originals and perform the host audit. No scientific efficacy is asserted.')
  elif improved:
   payload.update(none,next_action='finish',candidate_recommendation=ids()[-1],route_reason='Close the bounded synthetic search')
  elif audit:
@@ -114,6 +141,13 @@ else:
   payload.update(next_action='audit',candidate_recommendation=ids()[0],route_reason='Audit the exact provisional choice',
    search_review=dict(dispositions=[dict(mechanism_ref=ref,status='screened',reason='The exact final W screened this mechanism.') for ref in ('h001.m1','h001.m2')],next_focus=None),
    progress_assessment=dict(verdict='progress'),decision_request=None,portfolio_review=None)
+if role=='W' and task.get('candidate_nomination_mechanisms'):
+ payload['candidate_nominations']=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row['mechanism_ref'],
+  reason='Synthetic transport observations establish no scientifically suitable representative; all retained candidates remain available to A.')
+  for row in task['candidate_nomination_mechanisms'] if row['status']!='waived'])
+if isinstance(payload.get('candidate_recommendation'),str):
+ payload['selection_explanation']=dict(criteria='Compare exact public fixture candidates by their declared validation and limitations, preserving original checks; no scientific qualification is asserted.',
+  criteria_change=dict(status='unchanged',prior_criteria=None,changes=None,evidence=None,accepted_tradeoffs=None))
 print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=1000,cached_input_tokens=0,output_tokens=10))),flush=True)
 output.write_text(json.dumps(payload))
 '''
@@ -174,10 +208,51 @@ def source_files(settings_path, config, manifest):
     return {str(path): sha(path) for path in files if path.is_file()}
 
 
+def _source_proof(root):
+    """Read exact retained declarations and globals; paths alone establish no identity."""
+    from scidiscovery.research_loop import contracts as c, qualification
+    root = Path(root).absolute()
+    settings = c.settings(root)
+    if settings.get('source_provenance') is None:
+        raise ValueError('Current prelive source requires its exact source proof')
+    proof = qualification._sources(root)
+    if (set(proof) != {'version', 'declarations', 'globals', 'scope'}
+            or proof['version'] != 1 or proof['scope'] != qualification.SCOPE
+            or [row['material'] for row in proof['globals']] != settings['global_materials']):
+        raise ValueError('Prelive source proof differs from its frozen global mapping')
+    def original(relative, digest, size):
+        path = root / relative
+        if Path(relative).is_absolute() or path.resolve() != path or not path.is_relative_to(root):
+            raise ValueError('Prelive retained source escaped its exact instance')
+        path = c.regular(path)
+        if sha(path) != digest or path.stat().st_size != size:
+            raise ValueError('Prelive retained source bytes differ from their declaration')
+    for row in proof['declarations']:
+        if set(row) != {'origin', 'restriction', 'retained'} or row['restriction'] not in {'clear', 'restricted'}:
+            raise ValueError('Prelive source declaration is malformed')
+        origin, retained = row['origin'], row['retained']
+        if (not Path(origin['path']).is_absolute() or '..' in Path(origin['path']).parts
+                or (retained['sha256'], retained['size_bytes']) != (origin['sha256'], origin['size_bytes'])):
+            raise ValueError('Prelive source identity differs from its retained original')
+        original(retained['path'], retained['sha256'], retained['size_bytes'])
+    for row in proof['globals']:
+        origin, material = row['origin'], row['material']
+        if material['sha256'] != origin['sha256']:
+            raise ValueError('Prelive global mapping changed original bytes')
+        original(material['source'], origin['sha256'], origin['size_bytes'])
+    return proof
+
+
+def source_provenance_equal(source, target, maps):
+    """Compare complete verified facts after only explicit controlled path rebinding."""
+    return _map(_source_proof(source), maps) == _source_proof(target)
+
+
 def rebind(settings_path, launcher_path, work, scid_python, fault=None):
     """Fresh scratch inputs; the source run is read, hashed and never written."""
     from scidiscovery.research_loop import cov_delivery, cov_lineage
     settings = json.loads(settings_path.read_bytes());config = json.loads(launcher_path.read_bytes())
+    proof = _source_proof(settings_path.parent)
     manifest = json.loads(Path(config['public_manifest']).read_bytes())
     source_root, source_public = str(settings_path.parent.absolute()), settings['public_root']
     root, public = work / 'instance', work / 'public'
@@ -199,11 +274,15 @@ def rebind(settings_path, launcher_path, work, scid_python, fault=None):
     maps = [(source_root, str(root)), (source_public, str(public)), (config['runs_dir'], str(root / 'runs')),
             (config['submission_dir'], str(root / 'submission'))]
     objective = work / 'objective.md';objective.write_text(settings['objective'], encoding='utf-8')
+    origins = {row['material']['path']: row['origin']['path'] for row in proof['globals']}
+    global_maps = [(origins['inputs/global/objective.md'], str(objective))]
     updates = []
-    for item in settings['global_materials']:
+    for index, item in enumerate(settings['global_materials']):
         if item['path'] != 'inputs/global/objective.md':
-            target = work / 'updates' / Path(item['source']).name;target.parent.mkdir(exist_ok=True)
+            target = work / 'updates' / f'{index:03d}.md';target.parent.mkdir(exist_ok=True)
             shutil.copyfile(settings_path.parent / item['source'], target);updates.append(target)
+            global_maps.append((origins[item['path']], str(target)))
+    maps = global_maps + maps
     kwargs = {key: settings[key] for key in ('max_tokens', 'max_seconds', 'max_steps', 'model', 'reasoning_effort', 'service_tier',
         'max_output_item_bytes', 'max_output_total_bytes', 'node_budget_mode') if key in settings}
     for key in ('search_policy', 'correction_policy', 'node_budget_policy', 'role_guidance', 'candidate_audit_policy',
@@ -211,6 +290,15 @@ def rebind(settings_path, launcher_path, work, scid_python, fault=None):
                 'handoff_authority_version', 'decision_contract_version', 'role_budget_policy', 'selection_policy', 'role_profiles'):
         kwargs[key] = settings.get(key)
     adopted = []
+    restrictions = []
+    for row in proof['declarations']:
+        target = Path(_map(row['origin']['path'], maps))
+        if target not in [objective, *updates] and not target.is_relative_to(public):
+            raise ValueError('Prelive source has no explicit controlled copy binding')
+        if not target.is_file() or sha(target) != row['origin']['sha256'] or target.stat().st_size != row['origin']['size_bytes']:
+            raise ValueError('Prelive rebound source differs from the exact declared bytes')
+        restrictions.append(dict(source=str(target), sha256=row['origin']['sha256'], restriction=row['restriction']))
+    kwargs['source_restrictions'] = restrictions
     if settings.get('history_observer') is not None:
         observer = settings['history_observer']
         kwargs['history_observer'] = dict(adapter=str(Path(cov_lineage.__file__).resolve()), config=observer['config'],
@@ -246,7 +334,7 @@ def _chain(root):
 
 
 def _checks(root, chain, result):
-    from scidiscovery.research_loop import candidate_audit, contracts as c, execution, native, cli
+    from scidiscovery.research_loop import budget, candidate_audit, contracts as c, delivery, execution, native, cli
     from scidiscovery.research_loop.experiment_client import record_directory
     checks = {}
     checks['delivery_confirmed'] = result.get('status') == 'delivery_confirmed'
@@ -264,26 +352,51 @@ def _checks(root, chain, result):
     checks['improve_two_new_context_fragments'] = (intents == ['continue', 'review'] and len(threads) == 2
         and c.read(records[1] / 'native-intent.json').get('context_mode') == 'new_context')
     checks['improve_focus'] = chain[4]['focus'] == dict(mechanism_ref='h001.m1', action='improve')
-    receipts = [candidate_audit._outcome(root, chain[index]['step']) for index in (2, 6)]
+    receipts = [candidate_audit._outcome(root, chain[2]['step'])]
     checks['candidate_audits_audited'] = all(row is not None and row['result']['status'] == 'audited' for row in receipts)
+    final = chain[6]
+    job = c.read(root / 'jobs' / f'{final["step"]:03d}.json')
+    checks['one_final_author'] = job.get('final_only') is True and candidate_audit._outcome(root, final['step']) is None
+    actions = budget.closeout_state(root)['actions']
+    checks['original_delivery_actions'] = (len(actions) == 2
+        and [row['intent']['action_kind'] for row in actions] == ['submit', 'confirm']
+        and len({row['intent']['operation_id'] for row in actions}) == 1
+        and all(row['intent']['binding'] == actions[0]['intent']['binding']
+            and row['intent']['decision']['step'] == final['step']
+            and row['outcome'] is not None and row['outcome']['result']['status'] == 'confirmed' for row in actions))
+    process_checks = []
+    if checks['original_delivery_actions']:
+        for action, phase in ((actions[0], 'audit'), (actions[0], 'promote'), (actions[1], 'confirm')):
+            intent = action['intent']
+            path = root / 'host-delivery/action-processes' / (intent['action_id'] + '-' + phase + '.json')
+            process = c.read(path) if path.is_file() else {}
+            process_checks.append((process.get('action_id'), process.get('operation_id'), process.get('phase')) == (
+                intent['action_id'], intent['operation_id'], phase)
+                and (process.get('identity') or {}).get('task_sha256') == intent['operation_id'])
+        final_leaf = delivery.leaf_refs(root, actions[0]['intent']['operation_id'])
+        final_phases = {c.read(root / item['path'])['phase'] for item in final_leaf}
+        checks['final_host_leaf_output'] = {'audit', 'promote', 'confirm'} <= final_phases
+    else:
+        checks['final_host_leaf_output'] = False
+    checks['final_host_audit_original'] = bool(process_checks) and all(process_checks)
     confirmed = result.get('last_confirmed') or {}
     screen = c.read(root / 'host-delivery/selection/screen.json') if (root / 'host-delivery/selection/screen.json').is_file() else None
     if c.settings(root).get('selection_policy') is not None:
-        chosen = chain[7]['candidate']
+        chosen = final['candidate']
         rows = (screen or {}).get('rows', [])
-        checks['delivered_closeout_choice'] = confirmed.get('candidate_id') == chosen == chain[6]['candidate']
+        checks['delivered_closeout_choice'] = confirmed.get('candidate_id') == chosen
         checks['selection_catalogue_frozen'] = bool(rows) and 'default' not in screen
         checks['selection_catalogue_no_domain_calls'] = not list((root / 'host-delivery/selection').rglob('*.intent.json'))
-        final = c.read(execution.raw(root, chain[7]['step'])).get('candidate_comparison') or {}
-        compared = final.get('rows', [])
+        comparison = c.read(execution.raw(root, final['step'])).get('candidate_comparison') or {}
+        compared = comparison.get('rows', [])
         known = {row['candidate_id'] for row in rows}
-        checks['selection_comparison_sealed'] = (bool(final.get('rationale')) and bool(final.get('evidence_steps'))
+        checks['selection_comparison_sealed'] = (bool(comparison.get('rationale')) and bool(comparison.get('evidence_steps'))
             and all(row['candidate_id'] in known for row in compared)
             and len({row['candidate_id'] for row in compared}) == len(compared)
             and [row['candidate_id'] for row in compared if row['decision'] == 'keep'] == [chosen])
     else:
         checks['selection_disabled_preserved'] = screen is None
-        checks['delivered_closeout_choice'] = confirmed.get('candidate_id') == chain[6]['candidate'] == chain[7]['candidate']
+        checks['delivered_closeout_choice'] = confirmed.get('candidate_id') == final['candidate']
     submitted = root / 'submission/model.pkl'
     checks['submission_bytes_match'] = submitted.is_file() and sha(submitted) == confirmed.get('artifact_sha256')
     checks['usage_known'] = native.usage(root)['unknown_steps'] == []
@@ -357,11 +470,20 @@ def run_gate(settings_path, launcher_path, work, *, scid_python=None, fault=None
         _, _, _, maps, adopted, kwargs = rebind(settings_path, launcher_path, work, scid_python, fault)
         controller.prepare(**kwargs)
         root = kwargs['root']
-        diff = differences(normalized(settings, maps), normalized(json.loads((root / 'settings.json').read_bytes())))
+        rebound_settings = json.loads((root / 'settings.json').read_bytes())
+        checks['source_provenance_equal_after_rebind'] = source_provenance_equal(settings_path.parent, root, maps)
+        expected = normalized(settings, maps)
+        if checks['source_provenance_equal_after_rebind']:
+            # A proof hash includes its explicit source paths. Replace only after
+            # independently verifying every original, restriction and mapping.
+            expected['source_provenance'] = rebound_settings['source_provenance']
+        diff = differences(expected, normalized(rebound_settings))
         verdict['adopted_defaults'] = ['/' + key for key in adopted]
         diff = [path for path in diff if path not in verdict['adopted_defaults']]
         checks['settings_equal_except_rebound'] = not diff
         verdict['settings_differences'] = diff[:32];verdict['rebound'] = ['/'.join(path) for path in REBOUND]
+        if diff or not checks['source_provenance_equal_after_rebind']:
+            raise ValueError('Prelive source rebinding changed frozen configuration or source facts; no native work launched')
         result = controller.run(root)
         chain = _chain(root)
         verdict.update(status=result.get('status'), reason=str(result.get('reason', ''))[:400], chain=chain[:16],

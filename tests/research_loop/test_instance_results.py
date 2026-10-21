@@ -11,6 +11,7 @@ from test_execution_authority import prepare
 from test_history_handoff import finish
 from test_instance_ui import session
 from test_instance_science import read
+from ui_html import element_texts
 
 
 def test_result_cards_preserve_exact_ties_and_do_not_replace_empty_a_recommendation():
@@ -30,20 +31,22 @@ def test_result_cards_preserve_exact_ties_and_do_not_replace_empty_a_recommendat
         candidate_recommendation=None,limitations=['Bounded evidence.'],next_action='finish')
     page=render.result(3,job,payload,dict(materials=[])).decode()
     assert str(metric) in page and 'candidate-a' in page and 'candidate-b' in page
-    assert '3 candidate facts omitted' in page
+    assert element_texts(page,'p',cls='metric').count(str(metric))==2
+    assert '3条候选方案观察未在摘要中展开' in page
     assert 'unknown_candidate_count' in page and 'candidate-unknown' in page
-    assert 'input boundary' in page and 'later evidence is not included' in page
-    assert 'This sealed A makes no candidate recommendation' in page
-    assert 'This sealed A recommends:' not in page and 'Earlier A recommendation' in page
+    assert '本阶段开始时已有的观察，后续证据未计入' in page
+    assert '本次综合评估未推荐候选方案' in page
+    assert '本阶段综合评估建议：' not in page and '本阶段开始前的综合评估建议' in page
     assert '<details>' in page and '/nodes/3/science' in page
-    assert '<script>' not in page and '&lt;script&gt;' in page and 'DO-NOT-RENDER' not in page
+    assert element_texts(page,'script')==[render.translation_client.SCRIPT]
+    assert '&lt;script&gt;' in page and 'DO-NOT-RENDER' not in page
     assert '<iframe' not in page and '<img' not in page
     digest=base64.b64encode(hashlib.sha256(render.CSS.encode()).digest()).decode()
     assert render.STYLE_SOURCE=="'sha256-"+digest+"'" and 'unsafe-inline' not in render.CSP
     formal=render.result(4,dict(job,formal_review=True),dict(payload,verdict='pass'),dict(materials=[])).decode()
-    assert 'not an ordinary A recommendation' in formal
+    assert '此阶段没有普通综合评估的候选推荐' in formal
     empty=render.result(5,dict(role='W'),payload,dict(materials=[])).decode()
-    assert 'No candidate facts are displayed' in empty and 'Observation coverage: unknown' in empty
+    assert '本阶段的输入摘要未列出候选方案观察' in empty and '观察覆盖范围：unknown' in empty
 
 
 def test_result_routes_are_read_only_exact_and_independent_of_live_clock(tmp_path,monkeypatch):
@@ -54,11 +57,13 @@ def test_result_routes_are_read_only_exact_and_independent_of_live_clock(tmp_pat
     _,_,headers=ui.get('/view?'+urlencode({'token':ui.read_token}),host=ui.host)
     cookie=headers['Set-Cookie']
     before={p.relative_to(root):p.read_bytes() for p in root.rglob('*') if p.is_file()}
-    def forbidden(*args,**kwargs):pytest.fail('Results must not sample clocks or rebuild historical projections')
+    def forbidden(*args,**kwargs):pytest.fail('Saved results must not sample clocks, rehash originals or rebuild historical projections')
     monkeypatch.setattr(budget,'clock_stamp',forbidden)
     monkeypatch.setattr(control,'status',forbidden)
     monkeypatch.setattr(history,'rebuild',forbidden)
     monkeypatch.setattr(selection,'project',forbidden)
+    monkeypatch.setattr(c,'digest',forbidden)
+    monkeypatch.setattr(c,'validate',forbidden)
     index=ui.get('/results',host=ui.host,cookie=cookie)[1]
     assert b'/results/1' in index and b'/results/2' not in index
     assert b'/results/1' not in ui.get('/results?after=1',host=ui.host,cookie=cookie)[1]
@@ -69,14 +74,8 @@ def test_result_routes_are_read_only_exact_and_independent_of_live_clock(tmp_pat
     assert headers['Content-Type'].startswith('application/json') and b'<script>scientific text</script>' in read(raw)
     _,artifact,headers=ui.get('/nodes/1/materials/1',host=ui.host,cookie=cookie)
     assert headers['Content-Disposition'].startswith('attachment;') and read(artifact)==b'<script>attachment only</script>'
-    assert before=={p.relative_to(root):p.read_bytes() for p in root.rglob('*') if p.is_file()}
     for target in ('/results?after=0&after=1','/results/../operator.key','/results/1?path=operator.key','/results/2'):
         with pytest.raises(ValueError):ui.get(target,host=ui.host,cookie=cookie)
     with pytest.raises(PermissionError):ui.get('/results/1',host=ui.host)
     with pytest.raises(PermissionError):ui.get('/results',host='other.invalid',cookie=cookie)
-    path=root/'jobs/001.json';raw=path.read_bytes();mode=path.stat().st_mode&0o777
-    path.chmod(0o600);path.write_bytes(raw+b'\n')
-    with pytest.raises(ValueError,match='changed'):ui.get('/results/1',host=ui.host,cookie=cookie)
-    path.write_bytes(raw);path.chmod(mode)
-    original=root/'native-evidence/001/science-output.json';original.chmod(0o600);original.write_bytes(b'{}')
-    with pytest.raises(ValueError,match='changed'):ui.get('/results/1',host=ui.host,cookie=cookie)
+    assert before=={p.relative_to(root):p.read_bytes() for p in root.rglob('*') if p.is_file()}

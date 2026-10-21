@@ -48,7 +48,13 @@ def seal(root,step,role,parents,*,action='wait',choice=None,question='What targe
     if role in {'H','A'}:
         payload.update(next_action=action,route_reason='Prioritize a decision-changing target discrimination')
         payload['search_plan' if role=='H' else 'search_review']=choice
-    if role=='W':payload.update(stage_intent=stage_intent,mechanism_findings=mechanism_findings)
+    if role=='W':
+        payload.update(stage_intent=stage_intent,mechanism_findings=mechanism_findings)
+        task=c.read(c.workspace(root,step)/'science-task.json')
+        if task.get('candidate_nomination_mechanisms'):
+            payload['candidate_nominations']=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row['mechanism_ref'],
+                reason='This no-model observation fixture declares no scientifically suitable candidate.')
+                for row in task['candidate_nomination_mechanisms'] if row['status']!='waived'])
     if role=='A':payload.update(candidate_recommendation=None,progress_assessment=None,portfolio_review=None,
         decision_request=dict(decision='mechanism',question=question,change_criterion='A conflicting qualified target observation') if action in decision.ACTIONS else None)
     record=execution.record(root,step)

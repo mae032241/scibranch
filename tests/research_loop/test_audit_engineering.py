@@ -85,7 +85,7 @@ def cli(root,action='run',*extra):
     return json.loads(done.stdout)
 
 
-def repair_scene(tmp_path,*,ordinary=False,reason='dependency',always_fail=False,max_tokens=100000,crash=False,output_capacity=None,audit_after_repair=False,pause_after_author=False,deliver_after_unavailable=False,initial_action=None):
+def repair_scene(tmp_path,*,ordinary=False,reason='dependency',always_fail=False,max_tokens=100000,crash=False,output_capacity=None,audit_after_repair=False,pause_after_author=False,deliver_after_unavailable=False,initial_action=None,legacy=False,final_after_repair=False):
     backend=tmp_path/'repair-backend.py';backend.write_text(BACKEND)
     program=NATIVE
     if audit_after_repair:
@@ -99,7 +99,24 @@ def repair_scene(tmp_path,*,ordinary=False,reason='dependency',always_fail=False
     if always_fail:harness=harness.replace("spec['revision']=='P'","spec['revision']!='Q'")
     note='audit failed during training: ModuleNotFoundError: No module named fixture_helper' if reason=='dependency' else 'audit timed out after 45s (audit exceeded 45s budget)'
     harness=harness.replace("else 'audit skipped'",'else '+repr(note))
-    root,*rest=managed_scene(tmp_path,launcher=[sys.executable,str(native)],harness=harness,audit=ordinary or audit_after_repair,max_tokens=max_tokens,output_capacity=output_capacity,resume_policy=dict(max_attempts=1,protocol='codex_exec_resume',usage_scope='turn',output_repair=False) if crash else None)
+    with pytest.MonkeyPatch.context() as patch:
+        if legacy or final_after_repair:
+            from scidiscovery.research_loop import controller
+            prepare=controller.prepare
+            def frozen_prepare(*args,**kwargs):
+                if final_after_repair:
+                    # H/W/A + one ordinary audit + repaired W exhaust this grant.
+                    kwargs['max_steps']=5
+                value=prepare(*args,**kwargs)
+                if legacy:
+                    root=Path(args[0])
+                    assert not list((root/'control-ledger').glob('*.json')) and not list((root/'jobs').glob('*.json'))
+                    value.pop('final_a_completion_policy')
+                    c.write(root/'settings.json',value)
+                    c.write(root/'settings-identity.json',dict(sha256=c.digest(root/'settings.json')))
+                return value
+            patch.setattr(controller,'prepare',frozen_prepare)
+        root,*rest=managed_scene(tmp_path,launcher=[sys.executable,str(native)],harness=harness,audit=ordinary or audit_after_repair,max_tokens=max_tokens,output_capacity=output_capacity,resume_policy=dict(max_attempts=1,protocol='codex_exec_resume',usage_scope='turn',output_repair=False) if crash else None)
     if initial_action:
         finish(root,3,'A',[1,2],action=initial_action)
     elif ordinary:
@@ -109,17 +126,17 @@ def repair_scene(tmp_path,*,ordinary=False,reason='dependency',always_fail=False
     return root,rest
 
 
-@pytest.mark.parametrize('ordinary',[False,True])
 @pytest.mark.parametrize('reason',['dependency','timeout'])
-def test_exact_worker_repair_creates_new_candidate_and_requires_new_authorization(tmp_path,ordinary,reason):
-    root,rest=repair_scene(tmp_path,ordinary=ordinary,reason=reason)
+def test_exact_worker_repair_creates_new_candidate_and_requires_new_authorization(tmp_path,reason):
+    root,rest=repair_scene(tmp_path,ordinary=True,reason=reason)
     seals={n:(root/f'native-evidence/{n:03d}/result-identity.json').read_bytes() for n in (1,2,3)}
     result=cli(root)
     assert result['status']=='delivery_confirmed',(result,[(str(p),p.read_text()[-4000:]) for p in (root/'native-evidence').rglob('native.stderr')])
     jobs=[c.read(path) for path in sorted((root/'jobs').glob('*.json'))]
-    assert [job['role'] for job in jobs]==['H','W','A','W','A']
+    assert [job['role'] for job in jobs]==['H','W','A','W','A','A']
     assert jobs[3]['engineering_repair']['candidate_id']=='run-1'
-    assert jobs[3].get('purpose')==(None if ordinary else 'closeout')
+    assert jobs[3].get('purpose') is None and jobs[4].get('purpose') is None
+    assert jobs[5]['final_only'] and not (root/'jobs/007.json').exists()
     assert len(list((record_directory(root,4)/'calls').iterdir()))==1
     assert result['last_confirmed']['candidate_id']=='run-3'
     assert (root/'submission/model.pkl').read_bytes()!=rest[-1]
@@ -128,6 +145,30 @@ def test_exact_worker_repair_creates_new_candidate_and_requires_new_authorizatio
     before=budget.used_steps(root)
     assert cli(root)['status']=='delivery_confirmed' and budget.used_steps(root)==before
     assert cli(root,'status')['closeout']['status']=='delivery_confirmed'
+
+
+def test_final_engineering_fault_retains_original_without_new_worker(tmp_path,monkeypatch):
+    program=NATIVE.replace("assert task['role']=='A' and 'run-3' in json.dumps(task)",
+        "assert task['role']=='A' and 'run-1' in json.dumps(task)")
+    program=program.replace("next_action='deliver',candidate_recommendation='run-3'",
+        "next_action='deliver',candidate_recommendation='run-1'")
+    monkeypatch.setattr(sys.modules[__name__],'NATIVE',program)
+    root,_=repair_scene(tmp_path)
+    originals={root/f'native-evidence/{step:03d}/result-identity.json':
+        (root/f'native-evidence/{step:03d}/result-identity.json').read_bytes() for step in (1,2,3)}
+    result=cli(root)
+    assert result['status']=='delivery_engineering_error',result
+    jobs=[c.read(path) for path in sorted((root/'jobs').glob('*.json'))]
+    assert [job['role'] for job in jobs]==['H','W','A','A'] and jobs[3]['final_only']
+    assert all(job.get('engineering_repair') is None for job in jobs)
+    actions=budget.closeout_state(root)['actions']
+    assert [row['intent']['action_kind'] for row in actions]==['submit']
+    assert actions[0]['intent']['decision']['step']==4
+    assert actions[0]['outcome']['result']['note']=='audit_dependency_missing'
+    assert not (root/'submission/model.pkl').exists()
+    assert cli(root)['status']=='delivery_engineering_error' and budget.closeout_state(root)['actions']==actions
+    assert all(path.read_bytes()==raw for path,raw in originals.items())
+    assert not (root/'jobs/005.json').exists()
 
 
 @pytest.mark.parametrize('unresolved_selection',[False,True])
@@ -148,6 +189,17 @@ def test_default_search_routes_exact_repair_with_no_active_scientific_focus(tmp_
     def initial_mechanism(*args,**kwargs):
         return run(*args,**dict(kwargs,mechanism='P'))
     monkeypatch.setattr(cov_lineage,'run',initial_mechanism)
+    # Compact lineage keeps the complete candidate pool in its public pages.
+    indexed_candidate="""assert task['role']=='A'
+ pool=[];page=task['lineage']['indexes']['candidates']
+ while page:
+  part=json.loads((work/page).read_text());pool.extend(part['candidates']);page=part['next_page']
+ repaired=[row for row in pool if row['id']=='run-3']
+ assert len(repaired)==1,repaired
+ assert repaired[0]['parent_candidate']=='run-1' and repaired[0]['observation_step']==6,repaired
+ assert repaired[0]['derivation']=='declared' and repaired[0]['execution_status']=='known_success',repaired"""
+    monkeypatch.setattr(sys.modules[__name__],'NATIVE',NATIVE.replace(
+        "assert task['role']=='A' and 'run-3' in json.dumps(task)",indexed_candidate))
     root,_=repair_scene(tmp_path,ordinary=True,initial_action='revise_h')
     c.build_job(root,4,'H',[1,2,3],instruction='Exact scientific question')
     finish(root,4,'H',[1,2,3],action='analyze')
@@ -260,14 +312,17 @@ def test_insufficient_original_budget_stops_before_new_worker(tmp_path,monkeypat
 
 
 def test_same_fault_lineage_cannot_automatically_spawn_workers_forever(tmp_path):
-    root,_=repair_scene(tmp_path,always_fail=True)
+    root,_=repair_scene(tmp_path,ordinary=True,always_fail=True,audit_after_repair=True)
     result=cli(root)
     assert result['status']=='engineering_repair_exhausted',result
     assert len(list((root/'jobs').glob('*.json')))==5
+    assert c.read(root/'native-evidence/005/science-output.json')['next_action']=='audit'
+    assert not budget.closeout_state(root)['actions']
     assert len([c.read(p) for p in (root/'jobs').glob('*.json') if c.read(p).get('engineering_repair')])==1
     assert not (root/'submission/model.pkl').exists()
-    assert cli(root,'status')['closeout']['status']==result['status']
+    assert cli(root,'status')['closeout'] is None
     assert cli(root)['status']==result['status']
+    assert len(list((root/'jobs').glob('*.json')))==5
 
 
 def test_accepted_control_recovery_without_outcome_is_never_replayed(tmp_path,monkeypatch):
@@ -304,7 +359,7 @@ def test_unselected_candidate_fault_cannot_launch_screen_repair(tmp_path,monkeyp
     monkeypatch.setattr(delivery,'leaf_phase',lambda *args,**kwargs:pytest.fail('No domain call before explicit candidate choice'))
     calls=closeout_author(monkeypatch,lambda task:dict(next_action='finish',candidate_recommendation=None,candidate_comparison=None))
     result=controller.closeout(root)
-    assert result['status']=='exported_unsubmitted',result
+    assert result['status']=='closeout_native_unsealed',result
     assert [task['role'] for _,task in calls]==['A']
     assert not list((root/'host-delivery/selection').rglob('*.intent.json'))
     assert not (root/'jobs/005.json').exists() and not (root/'submission/model.pkl').exists()
@@ -317,18 +372,16 @@ def test_known_unsealed_repair_worker_resumes_exact_session_without_rewriting_se
     def node_mode(*args,**kwargs):
         return prepare(*args,**dict(kwargs,node_budget_mode=mode))
     monkeypatch.setattr(controller,'prepare',node_mode)
-    root,_=repair_scene(tmp_path,crash=True,max_tokens=3500)
+    root,_=repair_scene(tmp_path,ordinary=True,crash=True,max_tokens=3500)
     result=cli(root)
-    assert result['status']=='closeout_native_unsealed',result
+    assert result['status']=='native_stopped',result
+    assert budget.closeout_state(root)['begin'] is None
     original=(root/'jobs/004.json').read_bytes()
     assert not (root/'native-evidence/004/result-identity.json').exists()
     from scidiscovery.research_loop import execution,native
     job=c.read(root/'jobs/004.json');paths=execution.records(root,4)
-    tokens,_=budget._attempt_consumption(root,job,paths)
-    settings=c.settings(root);limits=budget.snapshot(root);meter=native.usage(root)
-    floor=budget.closeout_floor(settings,preparation_seconds=budget.closeout_state(root)['begin']['preparation_seconds'])
-    needed=0
-    remaining=needed+floor['tokens']+settings['delivery_policy']['closeout_a']['max_observed_tokens']-1
+    limits=budget.snapshot(root);meter=native.usage(root)
+    remaining=0  # Current ordinary repair resumes only with positive shared balance.
     with monkeypatch.context() as patch:
         observed=limits['max_tokens']-remaining
         assert observed-meter['output_tokens']>=meter['cached_input_tokens']
@@ -336,7 +389,7 @@ def test_known_unsealed_repair_worker_resumes_exact_session_without_rewriting_se
             observed_tokens=observed,accounted_tokens=observed+meter.get('reserved_tokens',0)))
         with pytest.raises(budget.NodeBudgetUnavailable,match='worker_resume_budget_unavailable'):
             budget.accept_continuation(root,job,paths)
-    assert len(execution.records(root,4))==1  # A future author is still reserved; no attempt accepted.
+    assert len(execution.records(root,4))==1  # No continuation was accepted at zero balance.
     result=cli(root,'worker-resume','--step','4')
     assert result['status']=='delivery_confirmed',result
     assert (root/'jobs/004.json').read_bytes()==original
@@ -392,7 +445,7 @@ def test_catalogue_does_not_interpret_faults_of_unselected_candidates(tmp_path,m
     monkeypatch.setattr(delivery,'leaf_phase',lambda *args,**kwargs:pytest.fail('Catalogue cannot invoke an unselected audit'))
     closeout_author(monkeypatch,lambda task:dict(next_action='finish',candidate_recommendation=None,candidate_comparison=None))
     result=controller.closeout(root)
-    assert result['status']=='exported_unsubmitted',result
+    assert result['status']=='closeout_native_unsealed',result
     assert cli(root,'status')['closeout']['status']==cli(root)['status']==result['status']
     assert len(list((root/'jobs').glob('*.json')))==4 and not (root/'submission/model.pkl').exists()
 
@@ -435,26 +488,34 @@ def test_original_managed_output_capacity_blocks_initial_seal_before_repair(tmp_
     assert not (root/'submission/model.pkl').exists()
 
 
-def test_repaired_closeout_author_can_audit_then_deliver_and_resume(tmp_path):
-    root,_=repair_scene(tmp_path,audit_after_repair=True)
+def test_ordinary_repair_then_one_final_author_uses_host_audit_and_resumes(tmp_path):
+    root,_=repair_scene(tmp_path,ordinary=True,final_after_repair=True)
+    originals={root/f'native-evidence/{step:03d}/result-identity.json':
+        (root/f'native-evidence/{step:03d}/result-identity.json').read_bytes() for step in (1,2,3)}
     result=cli(root)
     assert result['status']=='delivery_confirmed',result
-    assert [c.read(path)['role'] for path in sorted((root/'jobs').glob('*.json'))]==['H','W','A','W','A','A']
-    assert c.read(root/'native-evidence/005/science-output.json')['next_action']=='audit'
-    assert c.read(root/'native-evidence/006/science-output.json')['next_action']=='deliver'
-    receipt=candidate_audit._outcome(root,5)
-    assert receipt['result']['status']=='audited' and receipt['process_sha256']
-    assert (candidate_audit._directory(root,5)/'dispatch.json').is_file()
-    job=c.read(root/'jobs/005.json')
-    assert job['delivery_sources']==engineering.sources(root,5)
-    assert job['delivery_sources']!=budget.closeout_state(root)['begin']['delivery_sources']
+    jobs=[c.read(path) for path in sorted((root/'jobs').glob('*.json'))]
+    assert [job['role'] for job in jobs]==['H','W','A','W','A']
+    assert all(job.get('purpose') is None for job in jobs[:4]) and jobs[4]['final_only']
+    assert c.read(root/'native-evidence/005/science-output.json')['next_action']=='deliver'
+    assert candidate_audit._outcome(root,5) is None
+    assert not candidate_audit._directory(root,5).exists()
+    actions=budget.closeout_state(root)['actions']
+    assert [row['intent']['action_kind'] for row in actions]==['submit','confirm']
+    assert all(row['intent']['decision']['step']==5 and row['intent']['binding']['candidate_id']=='run-3' for row in actions)
+    phases=[c.read(path)['phase'] for path in (root/'host-delivery/leaf-output').glob(actions[0]['intent']['operation_id']+'-*.json')]
+    assert sorted(phases)==['audit','confirm','promote']
+    assert all(path.read_bytes()==raw for path,raw in originals.items())
     steps=budget.used_steps(root)
     assert cli(root)['status']=='delivery_confirmed' and budget.used_steps(root)==steps
     assert cli(root,'status')['closeout']['status']=='delivery_confirmed'
+    assert not (root/'jobs/006.json').exists()
+    assert all(path.read_bytes()==raw for path,raw in originals.items())
 
 
 def _pending_repaired_audit(tmp_path,*,deliver_after_unavailable=False):
-    root,_=repair_scene(tmp_path,audit_after_repair=True,pause_after_author=True,deliver_after_unavailable=deliver_after_unavailable)
+    # Retained pre-FINAL audit originals need the historical policy frozen before ledger creation.
+    root,_=repair_scene(tmp_path,audit_after_repair=True,pause_after_author=True,deliver_after_unavailable=deliver_after_unavailable,legacy=True)
     assert cli(root)['status']=='paused'
     (root/'pause.request').unlink()
     job=c.read(root/'jobs/005.json');payload=c.validate(c.workspace(root,5))
@@ -491,13 +552,14 @@ def test_invalid_closeout_source_preflight_does_not_accept_an_intent(tmp_path,mo
 
 @pytest.mark.parametrize('partial_result',[False,True])
 def test_legacy_preflight_settles_without_replaying_old_audit_or_rewriting_science(tmp_path,partial_result):
-    root,job,payload=_pending_repaired_audit(tmp_path,deliver_after_unavailable=partial_result)
+    root,job,payload=_pending_repaired_audit(tmp_path,deliver_after_unavailable=True)
     directory,intent,binding=_legacy_preflight(root,job)
     originals={path:path.read_bytes() for path in [*directory.iterdir(),root/'jobs/005.json',root/'native-evidence/005/result-identity.json']}
     before=budget.used_steps(root)
     if partial_result:
         candidate_audit._save(directory/'adapter-result.json',dict(status='unavailable',note='candidate_audit_legacy_preflight_not_dispatched',cleanup_confirmed=True,
             operation_id=intent['operation_id'],candidate_id='run-3',artifact_sha256=binding['source']['objects']['artifact']['sha256']))
+        originals[directory/'adapter-result.json']=(directory/'adapter-result.json').read_bytes()
     snapshot={p.name:p.read_bytes() for p in directory.iterdir()}
     assert cli(root,'status')['closeout']['status']=='candidate_audit_unknown'
     assert {p.name:p.read_bytes() for p in directory.iterdir()}==snapshot  # Queries never settle.
@@ -509,16 +571,15 @@ def test_legacy_preflight_settles_without_replaying_old_audit_or_rewriting_scien
     assert old['result']['status']=='unavailable' and old['process_sha256'] is None and old['leaf_output']==[]
     assert candidate_audit.public_receipt(root,candidate_audit.receipt_ref(root,5))['qualification']=='not_completed'
     assert not (directory/'dispatch.json').exists() and not list(delivery.leaf_output(root).glob(intent['operation_id']+'-*'))
-    assert c.read(root/'native-evidence/006/science-output.json')['next_action']==('deliver' if partial_result else 'audit')
-    if partial_result:
-        assert candidate_audit._outcome(root,6) is None
-        assert (root/'submission/model.pkl').is_file()  # New A authorizes; control really audits before promotion.
-    else:
-        # Skipping the unchanged Worker-fault retry leaves one real action slot.
-        assert candidate_audit._outcome(root,6)['result']['status']=='audited'
-        assert c.read(root/'native-evidence/007/science-output.json')['next_action']=='deliver'
-        assert (root/'submission/model.pkl').is_file()
-    assert budget.used_steps(root)>before
+    assert c.read(root/'native-evidence/006/science-output.json')['next_action']=='deliver'
+    assert candidate_audit._outcome(root,6) is None
+    actions=[row for row in budget.closeout_state(root)['actions'] if row['intent']['decision']['step']==6]
+    assert [row['intent']['action_kind'] for row in actions]==['submit','confirm']
+    assert all(row['intent']['binding']['candidate_id']=='run-3' for row in actions)
+    phases=[c.read(path)['phase'] for path in delivery.leaf_output(root).glob(actions[0]['intent']['operation_id']+'-*.json')]
+    assert sorted(phases)==['audit','confirm','promote']
+    assert (root/'submission/model.pkl').is_file() and not (root/'jobs/007.json').exists()
+    assert budget.used_steps(root)==before+3  # One new A and its two actions; old costs remain consumed.
     after=budget.used_steps(root)
     assert cli(root)['status']==expected and budget.used_steps(root)==after
 

@@ -7,14 +7,14 @@ import pytest
 
 from scidiscovery.research_loop import budget, candidate_audit, contracts as c, delivery, shortlist
 from test_candidate_audit import _seal_existing
-from test_closeout_protocol import command, scene
+from test_closeout_protocol import NATIVE, command, scene
 from test_control_selection import scene as selection_scene
 
 
 def test_disabled_audit_with_adapter_returns_unavailable_without_external_execution(tmp_path):
     root=scene(tmp_path,[dict(action='audit',candidate='run-1'),dict(action='wait',candidate='run-1')],audit=False)
-    result=command(root)
-    assert result['status']=='closeout_waiting',result
+    result=command(root,'run')
+    assert result['status']=='wait',result
     receipt=c.read(candidate_audit._directory(root,3)/'outcome.json')
     assert receipt['accepted'] is False
     assert receipt['result']['status']=='unavailable' and receipt['result']['note']=='candidate_audit_disabled'
@@ -26,6 +26,12 @@ def test_disabled_audit_with_adapter_returns_unavailable_without_external_execut
     options=json.loads(re.search(r'"next_action_options": (\[[^\]]*\])',prompt).group(1))
     assert 'audit' not in options
     assert c.read(c.workspace(root,4)/'science-task.json')['candidate_audit']['status']=='unavailable'
+    assert budget.closeout_state(root)['begin'] is None and not budget.closeout_state(root)['actions']
+    assert not (root/'submission/model.pkl').exists() and not (root/'runs/submitted.json').exists()
+    original=(candidate_audit._directory(root,3)/'outcome.json').read_bytes()
+    assert command(root,'run')['status']=='wait'
+    assert (candidate_audit._directory(root,3)/'outcome.json').read_bytes()==original
+    assert not list(candidate_audit.facts(root)) and budget.used_steps(root)==4
 
 
 @pytest.mark.parametrize('low_budget',[False,True])
@@ -90,9 +96,28 @@ def test_ordinary_deliver_with_selection_policy_cannot_bypass_frozen_comparison(
     assert len(list((root/'jobs').glob('*.json')))==4
 
 
-def test_ordinary_deliver_without_selection_policy_keeps_direct_three_node_path(tmp_path):
-    launcher=tmp_path/'forbidden.py';launcher.write_text('raise AssertionError("No extra author without selection policy")\n')
+def test_ordinary_deliver_without_selection_policy_requires_one_explicit_final_choice(tmp_path):
+    launcher=tmp_path/'author.py'
+    launcher.write_text("SCENARIO="+repr([dict(action='deliver',candidate='run-2')])+"\nFIRST_STEP=4\n"+NATIVE)
     root=selection_scene(tmp_path,policy=None,launcher=[sys.executable,str(launcher)],author_action='deliver')
+    originals={path:path.read_bytes() for path in (root/'jobs/003.json',root/'native-evidence/003/science-output.json',
+        root/'native-evidence/003/result-identity.json',c.workspace(root,2)/'artifacts/train.py')}
+    assert c.read(root/'native-evidence/003/science-output.json')['candidate_recommendation']=='run-3'
+    assert not budget.closeout_state(root)['actions'] and not (root/'submission/model.pkl').exists()
     result=command(root,'run')
-    assert result['status']=='delivery_confirmed' and result['last_confirmed']['candidate_id']=='run-3',result
-    assert len(list((root/'jobs').glob('*.json')))==3 and not list((root/'host-delivery/selection').rglob('*.intent.json'))
+    assert result['status']=='delivery_confirmed' and result['last_confirmed']['candidate_id']=='run-2',result
+    jobs=[c.read(path) for path in sorted((root/'jobs').glob('*.json'))]
+    assert [job['role'] for job in jobs]==['H','W','A','A']
+    assert all(job.get('purpose') is None for job in jobs[:3]) and jobs[3]['final_only']
+    assert 'selection' not in jobs[3] and shortlist.marker(root) is None
+    assert 'comparison' not in c.read(c.workspace(root,4)/'science-task.json')['closeout']
+    assert not list((root/'host-delivery/selection').rglob('*.intent.json'))
+    actions=budget.closeout_state(root)['actions']
+    assert [row['intent']['action_kind'] for row in actions]==['submit','confirm']
+    assert all(row['intent']['decision']['step']==4 and row['intent']['binding']['candidate_id']=='run-2' for row in actions)
+    source=actions[0]['intent']['binding']['source']
+    assert source['objects']['source.py']['sha256']==c.digest(c.workspace(root,2)/'artifacts/train.py')
+    assert source['objects']['artifact']['sha256']==c.digest(root/'runs/model-2.pkl')
+    assert all(path.read_bytes()==raw for path,raw in originals.items())
+    assert command(root,'run')['status']=='delivery_confirmed' and budget.closeout_state(root)['actions']==actions
+    assert all(path.read_bytes()==raw for path,raw in originals.items()) and not (root/'jobs/005.json').exists()

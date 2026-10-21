@@ -656,11 +656,16 @@ def compiled_payload(root, material, *, source=None):
             raise q.IntegrityError('Original native client has no exact sealed compiler')
         return verify_compilation(root, found[0]['compiler'], material=material,
             client_binding=found[0].get('client_binding'), source=owner)['output']
-    if _implementation_client(material, root=root) is None:
-        identity = q._identity(originals.material_path(root, material))
-        if any(identity[field] != material[field] for field in ('sha256', 'size_bytes')):
-            raise q.IntegrityError('Execution material differs from its exact source')
-        return identity
+    try:
+        if _implementation_client(material, root=root) is None:
+            identity = q._identity(originals.material_path(root, material))
+            if any(identity[field] != material[field] for field in ('sha256', 'size_bytes')):
+                raise q.IntegrityError('Execution material differs from its exact source')
+            return identity
+    except q.IntegrityError:
+        raise
+    except ValueError as exc:
+        raise q.IntegrityError('Execution material differs from its exact source') from exc
     original = _producer(Path(root).resolve(), material)
     seal = q._read(root, original['producer_seal'])
     found = [row for row in seal.get('compiled_implementations', []) if row['material'] == material]

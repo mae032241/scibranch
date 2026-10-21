@@ -13,7 +13,7 @@ def final_job(root):
     state = budget.closeout_state(root)
     assert state['begin']['mode'] == 'final'
     event = budget.final_a_barrier(root)
-    assert event['version'] == 2 and event['basis'] == 'final_state'
+    assert event['basis'] == 'final_state'
     job = c.read(root/'jobs'/f'{event["step"]:03d}.json')
     assert job['role'] == 'A' and job['final_only']
     assert not (root/'jobs'/f'{event["step"]+1:03d}.json').exists()
@@ -79,16 +79,34 @@ def test_unknown_billing_does_not_clear_unresolved_native_execution(tmp_path, mo
 
 
 def test_plain_host_action_still_rejects_actual_shared_token_exhaustion(tmp_path, monkeypatch):
+    from test_candidate_audit import _seal_existing
     root = external_scene(tmp_path, monkeypatch)
     cleaned_unknown_author(root)
     nodes = [dict(step=step, seal_sha256=c.digest(execution.origin(root, step)/'result-identity.json')) for step in (1, 2)]
-    budget.begin_closeout(root, 2, 4, 'Ordinary model closeout', delivery_sources=delivery.catalogue_sources(root, nodes))
+    refs = delivery.catalogue_sources(root, nodes)
+    budget.begin_closeout(root, 2, 4, 'Ordinary model closeout', delivery_sources=refs)
+    job = c.build_job(root, 4, 'A', [1, 2], purpose='closeout', source_cutoff=2, delivery_sources=refs)
+    payload = dict(summary='Choose the exact retained candidate', scientific_result='Original public evidence only.',
+        limitations=['No scientific qualification is asserted.'], implementation_selection=None,
+        search_review=None, progress_assessment=None, candidate_recommendation='run-1',
+        next_action='deliver', route_reason='Explicit original choice within the retained model boundary')
+    _seal_existing(root, 4, payload)
+    binding = delivery.prepare_binding(root, job, c.validate(c.workspace(root, 4)))
+    assert not job.get('final_only') and binding['decision']['step'] == 4 and binding['candidate_id'] == 'run-1'
     assert budget.final_a_barrier(root) is None and not budget.execution_blocked(root)
     usage=native.usage(root)
     assert usage['accounted_tokens']==usage['observed_tokens']>=budget.snapshot(root)['max_tokens']
+    ledger = {path:path.read_bytes() for path in (root/'control-ledger').glob('*.json')}
+    leaves = {path:path.read_bytes() for path in delivery.leaf_output(root).glob('*.json')}
+    originals = {path:path.read_bytes() for path in (root/'jobs/004.json', execution.raw(root, 4),
+        execution.origin(root, 4)/'result-identity.json', execution.origin(root, 3)/'native-outcome.json')}
     with pytest.raises(budget.NodeBudgetUnavailable, match='closeout_budget_unavailable'):
-        budget.accept_action(root, 'submit', 'not-submitted', {}, {}, 20)
+        budget.accept_action(root, 'submit', binding['operation_id'], binding['decision'], binding, 20)
     assert budget.closeout_state(root)['actions'] == []
+    assert {path:path.read_bytes() for path in (root/'control-ledger').glob('*.json')} == ledger
+    assert {path:path.read_bytes() for path in delivery.leaf_output(root).glob('*.json')} == leaves
+    assert all(path.read_bytes() == raw for path,raw in originals.items())
+    assert not (root/'host-delivery/action-processes').exists() and not (root/'submission/model.pkl').exists()
     assert native.usage(root)['unknown_steps'] == [3] and native.usage(root)['blocking_unknown_steps'] == []
 
 

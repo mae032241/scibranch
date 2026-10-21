@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts as c, controller, correction, execution, experiments, native, search, semantic
+from scidiscovery.research_loop import backends, budget, contracts as c, controller, correction, execution, experiments, native, search, semantic
 from execution_fixtures import execution_registry
 from scidiscovery.research_loop.protocol import CURRENT, UnsupportedProtocol
 from test_breadth_science import run as run_command, findings
@@ -38,7 +38,8 @@ def finish(root, step, role, parents, text='A bounded scientific finding', actio
     path = root / 'jobs' / f'{step:03d}.json'
     previous = c.read(path) if path.exists() else {}
     job = c.build_job(root, step, role, parents, previous.get('instruction', ''),
-        previous.get('evidence_return'), previous.get('correction_request'), previous.get('author_correction'))
+        previous.get('evidence_return'), previous.get('correction_request'), previous.get('author_correction'),
+        **(dict(final_report=previous['final_report']) if 'final_report' in previous else {}))
     work = c.workspace(root, step);record = execution.record(root, step)
     original_intent = native_intent(root, job)
     payload = dict(summary=summary, scientific_result=text,
@@ -50,6 +51,11 @@ def finish(root, step, role, parents, text='A bounded scientific finding', actio
                 finding='This mechanical fixture has no experiments or observations for the mechanism.')
                 for row in job['search']['coverage_obligation']]
         payload.update(stage_intent='review', mechanism_findings=mechanism_findings)
+        task=c.read(work/'science-task.json')
+        if task.get('candidate_nomination_mechanisms'):
+            payload['candidate_nominations']=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row['mechanism_ref'],
+                reason='This no-model recovery fixture declares no scientifically suitable candidate.')
+                for row in task['candidate_nomination_mechanisms'] if row['status']!='waived'])
     if role == 'H':
         payload['search_plan'] = search_choice
     if role == 'A':
@@ -63,9 +69,19 @@ def finish(root, step, role, parents, text='A bounded scientific finding', actio
         target.write_text(contents)
     if isinstance(payload.get('candidate_recommendation'),str):payload['selection_explanation']=selection_explanation()
     c.write(record / 'science-output.json', payload)
-    c.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
-    c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None,
-        usage=native.usage(root), raw_sha256=c.digest(record / 'science-output.json')))
+    meter=dict(input_tokens=7,cached_input_tokens=2,output_tokens=3)
+    c.write(record / 'usage.json',meter)
+    terminal=dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_sha256=c.digest(record/'science-output.json'))
+    intent=c.read(record/'native-intent.json')
+    if (intent.get('budget_slice') or {}).get('final_return') is not None:
+        backend=backends.selected(c.settings(root,job))
+        terminal.update(cleanup='observed_group_cleaned',native_backend=backend.name,
+            metering=dict(coverage='terminal',reason=None,source=backend.terminal_source,tokens=meter))
+        accepted=budget.final_a_return(root,job,intent)
+        assert accepted is not None
+        terminal['final_a_completion']=budget.final_a_receipt(accepted,intent,meter,terminal['usage'])
+        c.write(record/'usage-observation.json',terminal['metering'])
+    c.write(record/'native-outcome.json',terminal)
     c.seal_result(root, step)
     assert (record / 'native-intent.json').read_bytes() == original_intent
     return job, work, record
@@ -166,7 +182,6 @@ def test_h_adds_fifth_mechanism_without_repeating_four_screened_originals(scene)
     assert {ref: row['status'] for ref, row in state['mechanisms'].items()} == {
         **{f'h001.m{i}': 'screened' for i in range(1, 5)}, 'h010.m1': 'pending'}
     assert state['focus']['mechanism_ref'] == 'h010.m1'
-    assert c.result_schema('H')['properties']['search_plan']['properties']['commitments']['maxItems'] == 4
     assert len(state['mechanisms']) == 5
     assert all((c.host_record(c.workspace(scene, step)) / 'science-output.json').read_bytes() == raw
                for step, raw in originals.items())
@@ -318,24 +333,42 @@ def test_author_correction_cap_survives_new_prose_error_kind_and_restart(scene, 
     assert_original_bytes(originals)
 
 
-@pytest.mark.parametrize('limit,expected', [('tokens', 'token_limit'), ('steps', 'bounded_steps_exhausted')])
+@pytest.mark.parametrize('limit,expected', [('tokens', 'closeout_reserve_tokens'), ('steps', 'bounded_steps_exhausted')])
 def test_author_corrections_consume_original_token_and_node_budget(tmp_path, monkeypatch, limit, expected):
     root = prepare_scene(tmp_path, max_tokens=20 if limit == 'tokens' else 100_000,
                          max_steps=2 if limit == 'steps' else 32)
-    calls = []
+    calls = [];spent={};originals={}
     def execute(root, step):
         calls.append(step)
-        finish_bound(root, step, action='experiment', search_choice=plan([commitment('Declared')], 'Undeclared'))
+        job=c.read(root/'jobs'/f'{step:03d}.json')
+        if job.get('final_only'):
+            assert step==3 and job['role']=='A' and spent==dict(tokens=20,nodes=2)
+            assert native.usage(root)['observed_tokens']==20
+            originals.update(original_bytes(root,[1,2]))
+            finish_bound(root,step,action='finish',text='The original author corrections consumed the exploration budget; no accepted W evidence or external submission is available.')
+        else:
+            finish_bound(root, step, action='experiment', search_choice=plan([commitment('Declared')], 'Undeclared'))
+            if step==2:spent.update(tokens=native.usage(root)['observed_tokens'],nodes=budget.used_steps(root))
     monkeypatch.setattr(native, 'execute_native', execute)
     settings = (root / 'settings.json').read_bytes()
     result = controller.run(root)
-    assert result['status'] == expected
-    assert result['completed_steps'] == 2 and result['usage']['observed_tokens'] == 20
-    assert calls == [1, 2]
-    assert not (root / 'jobs/003.json').exists()
+    assert result['status']=='final_a_completed'
+    assert budget.closeout_state(root)['begin']['stop_reason']==expected
+    assert result['completed_scientific_nodes']==3 and result['usage']['observed_tokens']==30
+    assert result['submission_result']['status']=='unsubmitted' and budget.closeout_state(root)['actions']==[]
+    assert calls==[1,2,3] and [c.read(root/'jobs'/f'{step:03d}.json')['role'] for step in calls]==['H','H','A']
+    final=budget.final_a_barrier(root)
+    assert final['step']==3 and final['selection']['accounted_tokens']==20
+    record=execution.origin(root,3)
+    assert c.read(record/'native-outcome.json')['final_a_completion']['final_return']==c.read(record/'native-intent.json')['budget_slice']['final_return']
+    assert c.validate(c.workspace(root,3))['next_action']=='finish'
+    assert not (root / 'jobs/004.json').exists()
     assert (root / 'settings.json').read_bytes() == settings
-    assert controller.run(root)['status'] == expected
-    assert calls == [1, 2]
+    assert_original_bytes(originals)
+    originals.update(original_bytes(root,[3]))
+    assert controller.run(root)['status']=='final_a_completed'
+    assert calls==[1,2,3]
+    assert_original_bytes(originals)
 
 
 def test_a_returns_to_its_author_and_only_legal_correction_permits_next_w(scene, monkeypatch):

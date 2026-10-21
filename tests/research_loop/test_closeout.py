@@ -59,6 +59,25 @@ def real_chain(tmp_path, *, max_steps=5, launcher_text=FAKE_NATIVE, pause_after_
     return root
 
 
+@pytest.fixture
+def historical_delivery_reserve(monkeypatch):
+    """Freeze the pre-FINAL soft reserve before any original job or ledger fact."""
+    prepare = controller.prepare
+    def prepare_historical(root, *args, **kwargs):
+        prepare(root, *args, **kwargs)
+        assert not list((root/'control-ledger').glob('*.json'))
+        assert not list((root/'jobs').glob('*.json'))
+        settings = c.settings(root)
+        settings.pop('final_a_completion_policy')
+        c.write(root/'settings.json', settings)
+        c.write(root/'settings-identity.json', dict(sha256=c.digest(root/'settings.json')))
+        assert settings['node_budget_mode']=='soft'
+        assert budget.delivery_reserve(settings)==dict(tokens=1100, seconds=65., steps=3)
+        assert budget.closeout_floor(settings)==dict(tokens=100, seconds=35., steps=2)
+        return settings
+    monkeypatch.setattr(controller, 'prepare', prepare_historical)
+
+
 def native_diagnostics(root):
     names={'native.stderr','runner.stderr','native-outcome.json'}
     paths=sorted(path for path in (root/'native-evidence').rglob('*') if path.is_file() and path.name in names)
@@ -160,7 +179,7 @@ def test_exhausted_total_tokens_blocks_zero_model_delivery(tmp_path, monkeypatch
     assert {p.name:p.read_bytes() for p in (root/'control-ledger').glob('*.json')}==before
 
 
-def test_actual_popen_protects_reserve_with_original_anchor(tmp_path, monkeypatch):
+def test_historical_actual_popen_protects_reserve_with_original_anchor(tmp_path, monkeypatch, historical_delivery_reserve):
     root = real_chain(tmp_path)
     now = [100.]
     monkeypatch.setattr(budget.time, 'time', lambda:now[0])
@@ -170,15 +189,20 @@ def test_actual_popen_protects_reserve_with_original_anchor(tmp_path, monkeypatc
     job = c.build_job(root,1,'H',[])
     record = c.host_record(c.workspace(root,1))
     c.write(record/'native-intent.json',dict(step=1,task_sha256=c.digest(root/'jobs/001.json'),budget_slice=budget.accept_node(root,job)))
+    original=(record/'native-intent.json').read_bytes()
+    prepared=(root/'jobs/001.json').read_bytes()
     now[0]=340.  # 60 seconds remain: below the minimal soft closeout reserve=65.
     monkeypatch.setattr(native.subprocess,'Popen',lambda *a,**k:pytest.fail('Protected reserve must stop actual submission'))
     native.run_native(root,1)
     outcome=c.read(record/'native-outcome.json')
     assert outcome['native_started'] is False and outcome['stop_reason']=='closeout_reserve_seconds'
+    assert (record/'native-intent.json').read_bytes()==original
+    assert (root/'jobs/001.json').read_bytes()==prepared
+    assert budget.snapshot(root)['advance_seconds']==240.
     assert not (record/'native-process.json').exists()
 
 
-def test_build_time_reserve_refusal_keeps_prepared_job_without_intent(tmp_path, monkeypatch):
+def test_historical_build_time_reserve_refusal_keeps_prepared_job_without_intent(tmp_path, monkeypatch, historical_delivery_reserve):
     root = real_chain(tmp_path)
     now=[100.]
     monkeypatch.setattr(budget.time,'time',lambda:now[0])
@@ -192,6 +216,7 @@ def test_build_time_reserve_refusal_keeps_prepared_job_without_intent(tmp_path, 
         native.execute_native(root,1)
     assert (root/'jobs/001.json').read_bytes()==before
     assert not (c.host_record(c.workspace(root,1))/'native-intent.json').exists()
+    assert budget.snapshot(root)['advance_seconds']==240.
     assert controller.run(root)['status']=='retained_job_conflict'
     assert budget.closeout_state(root)['begin'] is None
     assert controller.closeout(root,export_only=True)['status']=='exported_unsubmitted'
@@ -220,7 +245,7 @@ def test_export_only_does_not_seal_retained_success_or_write_status_cache(tmp_pa
     assert before=={str(p):p.read_bytes() for p in root.rglob('*') if p.is_file()}
 
 
-def test_no_adapter_exports_empty_prefix_without_science(tmp_path, monkeypatch):
+def test_explicit_export_without_adapter_keeps_empty_prefix_without_science(tmp_path, monkeypatch):
     public=tmp_path/'public';public.mkdir()
     objective=public/'objective.md';objective.write_text('Original objective')
     root=tmp_path/'instance'
@@ -231,13 +256,17 @@ def test_no_adapter_exports_empty_prefix_without_science(tmp_path, monkeypatch):
         delivery_policy=policy,search_policy=None)
     monkeypatch.setattr(native,'execute_native',lambda *a:pytest.fail('No adapter only exports'))
     monkeypatch.setattr(delivery,'freeze_sources',lambda *a:pytest.fail('No adapter has no provider resolver'))
-    result=controller.closeout(root)
+    monkeypatch.setattr(delivery,'catalogue_sources',lambda *a,**k:pytest.fail('Pure export never resolves candidates'))
+    monkeypatch.setattr(delivery,'invoke',lambda *a,**k:pytest.fail('Pure export never invokes external delivery'))
+    assert c.settings(root)['final_a_completion_policy']==dict(version=1)
+    result=controller.closeout(root,export_only=True)
     assert result['status']=='exported_unsubmitted' and result['source_cutoff']==0 and result['last_step'] is None
     assert not budget.closeout_state(root)['actions'] and not list((root/'jobs').glob('*.json'))
+    assert budget.final_a_barrier(root) is None
 
 
 @pytest.mark.parametrize('boundary', ['accept', 'popen'])
-def test_closeout_a_keeps_execution_floor_after_preparation(tmp_path, monkeypatch, boundary):
+def test_historical_closeout_a_keeps_execution_floor_after_preparation(tmp_path, monkeypatch, boundary, historical_delivery_reserve):
     now=[100.]
     monkeypatch.setattr(budget.time,'time',lambda:now[0])
     monkeypatch.setattr(budget.time,'clock_gettime',lambda _:now[0])
@@ -328,28 +357,3 @@ def test_dead_promote_leader_with_live_child_blocks_confirm_admission(tmp_path):
                 time.sleep(.01)
             try:os.waitpid(child_id['pid'],os.WNOHANG)
             except ChildProcessError:pass
-
-
-def test_controller_reports_unaccepted_closeout_floor_without_retained_intent(tmp_path, monkeypatch):
-    now=[100.]
-    monkeypatch.setattr(budget.time,'time',lambda:now[0])
-    monkeypatch.setattr(budget.time,'clock_gettime',lambda _:now[0])
-    root, _, nodes=prepare_fixture(tmp_path)
-    refs=delivery.freeze_sources(root,nodes)
-    budget.begin_closeout(root,2,3,'Original reserve boundary',delivery_sources=refs)
-    original=c.build_job
-    def slow_build(*a,**kw):
-        job=original(*a,**kw)
-        now[0]=366.  # 34 remains: below the mechanical execution floor=35, irrespective of A's target.
-        return job
-    monkeypatch.setattr(c,'build_job',slow_build)
-    monkeypatch.setattr(native.subprocess,'Popen',lambda *a,**kw:pytest.fail('A was not accepted'))
-    result=controller._run_closeout(root)
-    assert result['status']=='closeout_budget_unavailable' and result['attempt_step']==3
-    assert 'retained' not in json.dumps(result).lower()
-    record=c.host_record(c.workspace(root,3))
-    assert (root/'jobs/003.json').exists() and not (record/'native-intent.json').exists()
-    assert not (record/'native-process.json').exists()
-    before=(root/'jobs/003.json').read_bytes()
-    assert controller._run_closeout(root)['status']=='closeout_budget_unavailable'
-    assert (root/'jobs/003.json').read_bytes()==before

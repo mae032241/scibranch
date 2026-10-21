@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, controller, execution, experiments as e, history, native, search
+from scidiscovery.research_loop import budget, contracts as c, controller, execution, experiments as e, history, native, search
 from test_history_handoff import finish
 
 
@@ -142,8 +142,10 @@ def test_async_without_collect_reconciles_same_call_before_seal(tmp_path,compose
     c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_sha256=c.digest(record/'science-output.json')))
     c.seal_result(root,3)
     assert search.project(root,4)['mechanisms']['h001.m1']['status']=='screened'
-    c.build_job(root,4,'W',[1,2,3]);record=execution.record(root,4)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/004.json')))
+    successor_job=c.build_job(root,4,'W',[1,2,3]);record=execution.record(root,4)
+    node_anchor=budget.accept_node(root,successor_job)
+    anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,successor_job))
+    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/004.json'),**anchor))
     successor=e.configure(root,4,'composed_execution:fixture',dict(synchronous=True),c.workspace(root,4)/'work/config.json')
     assert not successor['breadth']['prior_unknown']
     package=c.workspace(root,4)/'work/package';package.write_bytes(b'new opaque input')

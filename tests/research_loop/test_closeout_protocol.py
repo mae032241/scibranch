@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import budget, cli, contracts as c, controller, delivery, native
+from scidiscovery.research_loop import budget, candidate_audit, cli, contracts as c, controller, delivery, native
 from test_delivery import FAKE_HARNESS, descriptor, delivery_policy
 from test_history_handoff import finish
 
@@ -44,11 +44,12 @@ payload=dict(summary='A bounded choice',scientific_result='Exact public evidence
  next_action=item['action'],candidate_recommendation=item.get('candidate'),route_reason='Scientific selection within original authorization')
 if isinstance(payload.get('candidate_recommendation'),str):payload['selection_explanation']=dict(criteria='Compare the declared public fixture evidence and retain its stated limitations.',criteria_change=dict(status='unchanged',prior_criteria=None,changes=None,evidence=None,accepted_tradeoffs=None))
 pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))
+if item.get('pause'):(root/'pause.request').touch()
 print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))),flush=True)
 '''
 
 
-def scene(tmp_path, actions, *, count=2, audit=True, selective_failure=False, max_tokens=100000, max_seconds=600,node_budget_mode='soft'):
+def scene(tmp_path, actions, *, count=2, audit=True, selective_failure=False, max_tokens=100000, max_seconds=600,node_budget_mode='soft',legacy=False):
     if shutil.which('bwrap') is None:
         pytest.skip('Actual isolated adapter required')
     root=tmp_path/'instance';public=tmp_path/'public';(public/'harness').mkdir(parents=True)
@@ -68,6 +69,13 @@ def scene(tmp_path, actions, *, count=2, audit=True, selective_failure=False, ma
         history_observer=dict(adapter=str(Path(__file__).resolve().parents[2]/'scripts/observe_covshift_candidates.py'),
             config=dict(runs='runs',evaluation_key='fixture-public')),
         delivery_policy=delivery_policy(descriptor(root,public)))
+    if legacy:
+        # Freeze retained pre-FINAL behavior before any task or ledger original.
+        settings=c.settings(root)
+        assert not list((root/'control-ledger').glob('*.json')) and not list((root/'jobs').glob('*.json'))
+        settings.pop('final_a_completion_policy')
+        c.write(root/'settings.json',settings)
+        c.write(root/'settings-identity.json',dict(sha256=c.digest(root/'settings.json')))
     (root/'runs').mkdir();(root/'submission').mkdir()
     (root/'runs/model.bin').write_bytes(b'exact original fixture model')
     finish(root,1,'H',[],action='experiment')
@@ -129,46 +137,33 @@ def test_empty_export_has_no_scientific_limitations_original(tmp_path):
     assert result['scientific_output_ref'] is None and result['limitations_ref'] is None
 
 
-@pytest.mark.parametrize('action',['extract','continue_w','revise_h'])
-def test_closeout_legal_role_action_is_corrected_before_explicit_delivery(tmp_path,action):
-    root=scene(tmp_path,[dict(action=action,candidate='run-1'),dict(action='deliver',candidate='run-1')])
-    result=command(root)
-    assert result['status']=='delivery_confirmed',result
-    assert [c.read(p)['role'] for p in sorted((root/'jobs').glob('*.json'))]==['H','W','A','A']
-    assert c.read(root/'jobs/004.json')['author_correction']['reason']=='delivery_authorization_required'
-    assert result['goal_completion']=='not_asserted'
-    assert command(root,'status')['closeout']['status']==result['status']
-    assert len(budget.closeout_state(root)['actions'])==2
-
-
-def test_normal_audits_do_not_consume_author_corrections(tmp_path):
-    root=scene(tmp_path,[*[dict(action='audit',candidate=f'run-{n}') for n in (1,2,3)],dict(action='deliver',candidate='run-2')],count=3)
-    result=command(root)
-    assert result['status']=='delivery_confirmed',result
-    assert result['existing_A_recommendation']==dict(candidate_id='run-2',author_step=6)
-    assert all(c.read(root/'jobs'/f'{step:03d}.json').get('author_correction') is None for step in (3,4,5,6))
-    assert c.read(c.workspace(root,4)/'science-task.json')['candidate_audit']['qualification']=='passed'
-    assert len(budget.closeout_state(root)['actions'])==2
-
-
-def test_known_audit_failure_can_reselect_within_same_budget(tmp_path):
-    root=scene(tmp_path,[dict(action='deliver',candidate='run-1'),dict(action='deliver',candidate='run-2')],selective_failure=True)
+def test_final_host_audit_failure_retains_original_without_reselection(tmp_path):
+    root=scene(tmp_path,[dict(action='deliver',candidate='run-1')],selective_failure=True)
     original=(root/'settings.json').read_bytes()
     result=command(root)
-    assert result['status']=='delivery_confirmed',result
+    assert result['status']=='delivery_rejected',result
     actions=budget.closeout_state(root)['actions']
-    assert [row['intent']['action_kind'] for row in actions]==['submit','submit','confirm']
+    assert [row['intent']['action_kind'] for row in actions]==['submit']
     assert actions[0]['outcome']['result']['failure_phase']=='audit'
-    assert c.read(root/'runs/submitted.json')['run_id']==2
-    assert result['existing_A_recommendation']==dict(candidate_id='run-2',author_step=4)
+    assert actions[0]['intent']['decision']['step']==3 and actions[0]['intent']['binding']['candidate_id']=='run-1'
+    assert c.read(root/'jobs/003.json')['final_only']
+    retained={path:path.read_bytes() for path in (root/'jobs/003.json',
+        root/'native-evidence/003/science-output.json',root/'native-evidence/003/result-identity.json')}
+    assert result['existing_A_recommendation']==dict(candidate_id='run-1',author_step=3)
     assert (root/'settings.json').read_bytes()==original
-    assert command(root,'run')['status']=='delivery_confirmed'
-    assert len(budget.closeout_state(root)['actions'])==3
+    leaf_originals={path:path.read_bytes() for path in (root/'host-delivery/leaf-output').glob('*.json')}
+    assert sorted(c.read(path)['phase'] for path in leaf_originals)==['audit','resolve']
+    assert command(root,'run')['status']=='delivery_rejected'
+    assert command(root,'status')['closeout']['status']=='delivery_rejected'
+    assert budget.closeout_state(root)['actions']==actions
+    assert all(path.read_bytes()==raw for path,raw in retained.items())
+    assert not (root/'jobs/004.json').exists() and not (root/'submission/model.pkl').exists()
+    assert {path:path.read_bytes() for path in (root/'host-delivery/leaf-output').glob('*.json')}==leaf_originals
 
 
 @pytest.mark.parametrize('mode',['soft'])
-def test_known_closeout_abort_resumes_exact_session(tmp_path,mode):
-    root=scene(tmp_path,[dict(action='deliver',candidate='run-1',crash=True)],max_tokens=3500,node_budget_mode=mode)
+def test_legacy_known_closeout_abort_resumes_exact_session(tmp_path,mode):
+    root=scene(tmp_path,[dict(action='deliver',candidate='run-1',crash=True)],max_tokens=3500,node_budget_mode=mode,legacy=True)
     settings=(root/'settings.json').read_bytes()
     assert command(root)['status']=='closeout_native_unsealed'
     original=(root/'jobs/003.json').read_bytes()
@@ -184,9 +179,9 @@ def test_known_closeout_abort_resumes_exact_session(tmp_path,mode):
 
 
 @pytest.mark.parametrize('mode',['soft'])
-def test_closeout_resume_retains_original_node_allowance_and_delivery_floor(tmp_path,monkeypatch,mode):
+def test_legacy_closeout_resume_retains_original_node_allowance_and_delivery_floor(tmp_path,monkeypatch,mode):
     from scidiscovery.research_loop import execution
-    root=scene(tmp_path,[dict(action='deliver',candidate='run-1',crash=True)],node_budget_mode=mode)
+    root=scene(tmp_path,[dict(action='deliver',candidate='run-1',crash=True)],node_budget_mode=mode,legacy=True)
     assert command(root)['status']=='closeout_native_unsealed'
     job=c.read(root/'jobs/003.json');paths=execution.records(root,3)
     tokens,seconds=budget._attempt_consumption(root,job,paths)
@@ -241,8 +236,8 @@ def test_transient_selected_preparation_failure_is_retryable_without_new_author(
         raise delivery.DeliveryUnresolved('delivery_source_time_limit')
     monkeypatch.setattr(delivery,'freeze_sources',unavailable)
     result=controller.closeout(root)
-    assert result['status']=='closeout_preparation_unavailable' and calls==['run-1']
-    assert budget.closeout_state(root)['begin']['mode']=='model'
+    assert result['status']=='closeout_unresolved' and result['reason']=='delivery_source_time_limit' and calls==['run-1']
+    assert budget.closeout_state(root)['begin']['mode']=='final'
     assert not budget.closeout_state(root)['actions']
     assert cli.status(root)['closeout_preparation']['last_failure']=='delivery_source_time_limit'
     original_job=(root/'jobs/003.json').read_bytes()
@@ -268,34 +263,45 @@ def test_unknown_submission_never_replays_or_selects_a_new_candidate(tmp_path,mo
     assert not (root/'runs/submitted.json').exists()
 
 
-@pytest.mark.parametrize('action,status',[('finish','exported_unsubmitted'),('wait','closeout_waiting')])
-def test_scientific_stop_and_wait_do_not_authorize_delivery(tmp_path,action,status):
+@pytest.mark.parametrize('action',['finish','wait'])
+def test_final_stop_and_wait_do_not_implicitly_authorize_delivery(tmp_path,action):
     root=scene(tmp_path,[dict(action=action,candidate='run-1')])
     result=command(root)
-    assert result['status']==status and result['goal_completion']=='not_asserted'
-    assert command(root,'run')['status']==status
-    assert command(root,'status')['closeout']['status']==status
+    assert result['status']=='closeout_native_unsealed' and result['goal_completion']=='not_asserted',result
+    record=root/'native-evidence/003'
+    assert c.read(record/'science-result.schema.json')['properties']['next_action']['enum']==['deliver']
+    raw=(record/'science-output.json').read_bytes()
+    assert c.read(record/'science-output.json')['next_action']==action
+    assert command(root,'run')['status']=='closeout_native_unsealed'
+    assert command(root,'status')['closeout']['status']=='closeout_native_unsealed'
+    assert (record/'science-output.json').read_bytes()==raw
+    assert not (record/'result-identity.json').exists() and not (record/'continuations').exists()
+    assert not (root/'jobs/004.json').exists()
     assert not budget.closeout_state(root)['actions'] and not (root/'runs/submitted.json').exists()
 
 
-def test_unsupported_action_has_finite_correction_without_implicit_extract_delivery(tmp_path):
-    root=scene(tmp_path,[dict(action='extract',candidate='run-1') for _ in range(3)])
-    result=command(root)
-    assert result['status']=='closeout_unresolved' and result['reason']=='semantic_correction_limit',result
-    assert len(list((root/'jobs').glob('*.json')))==5  # Initial invalid A and two author clarifications.
-    assert not budget.closeout_state(root)['actions'] and not (root/'runs/submitted.json').exists()
-    assert command(root,'run')['reason']=='semantic_correction_limit'
-
-
-def test_initial_preparation_failure_retains_failure_without_freezing_export(tmp_path,monkeypatch):
-    root=scene(tmp_path,[dict(action='deliver',candidate='run-1')])
+def test_final_catalogue_failure_cannot_implicitly_authorize_delivery(tmp_path,monkeypatch):
+    root=scene(tmp_path,[dict(action='finish',candidate=None)])
+    worker_originals={path:path.read_bytes() for path in (root/'jobs/002.json',
+        root/'native-evidence/002/science-output.json',root/'native-evidence/002/result-identity.json')}
+    calls=[]
     def unavailable(*args,**kwargs):
+        calls.append(True)
         raise delivery.DeliveryUnresolved('delivery_catalogue_capacity')
     monkeypatch.setattr(delivery,'catalogue_sources',unavailable)
-    assert controller.closeout(root)['status']=='closeout_preparation_unavailable'
-    assert budget.closeout_state(root)['begin'] is None
-    assert cli.status(root)['closeout_preparation']['last_failure']=='delivery_catalogue_capacity'
-    assert command(root)['status']=='delivery_confirmed'
+    result=controller.closeout(root)
+    assert result['status']=='final_a_completed' and result['reason']=='candidate_originals_unavailable',result
+    job=c.read(root/'jobs/003.json')
+    assert job['final_only'] and 'delivery_catalogue_capacity' in job['instruction']
+    assert c.read(root/'jobs/002.json')['role']=='W'
+    assert [row['step'] for row in job['history']['nodes']]==[1,2]
+    assert result['submission_result']['status']=='unsubmitted' and result['submission_result']['note']==result['reason'] and calls==[True]
+    assert not budget.closeout_state(root)['actions'] and not (root/'runs/submitted.json').exists()
+    original=(root/'native-evidence/003/result-identity.json').read_bytes()
+    assert command(root)['status']=='final_a_completed'
+    assert (root/'native-evidence/003/result-identity.json').read_bytes()==original
+    assert all(path.read_bytes()==raw for path,raw in worker_originals.items())
+    assert not (root/'jobs/004.json').exists()
 
 
 def test_unknown_resolver_cleanup_blocks_repreparation(tmp_path,monkeypatch):
@@ -310,23 +316,24 @@ def test_unknown_resolver_cleanup_blocks_repreparation(tmp_path,monkeypatch):
     assert not budget.closeout_state(root)['actions']
 
 
-def test_ordinary_a_deliver_uses_exact_w_source_without_another_scientific_author(tmp_path):
+def test_ordinary_a_deliver_requires_one_final_author_with_exact_w_source(tmp_path):
     from test_closeout import FAKE_NATIVE, real_chain
     launcher=FAKE_NATIVE.replace(";assert task['closeout']['source_cutoff']==2", "")
     root=real_chain(tmp_path,max_steps=8,launcher_text=launcher)
     result=command(root,'run')
     assert result['status']=='delivery_confirmed',result
     jobs=[c.read(path) for path in sorted((root/'jobs').glob('*.json'))]
-    assert [job['role'] for job in jobs]==['H','W','A']
-    assert all(job.get('purpose') is None for job in jobs)
-    assert result['used_steps']==5 and result['goal_completion']=='not_asserted'
-    assert budget.closeout_state(root)['begin']['authorization_step']==3
+    assert [job['role'] for job in jobs]==['H','W','A','A']
+    assert all(job.get('purpose') is None for job in jobs[:3]) and jobs[3]['final_only']
+    assert result['used_steps']==6 and result['goal_completion']=='not_asserted'
+    assert budget.closeout_state(root)['begin']['mode']=='final'
+    assert budget.closeout_state(root)['begin']['source_cutoff']==3
     binding=budget.closeout_state(root)['actions'][0]['intent']['binding']
     assert binding['source']['objects']['source.py']['sha256']==c.digest(c.workspace(root,2)/'artifacts/train.py')
     phases=[c.read(path)['phase'] for path in (root/'host-delivery/leaf-output').glob('*.json')]
     assert phases.count('audit')==1 and phases.count('promote')==1 and phases.count('confirm')==1
     assert command(root,'run')['status']=='delivery_confirmed'
-    assert len(list((root/'jobs').glob('*.json')))==3
+    assert len(list((root/'jobs').glob('*.json')))==4
 
 
 def test_ordinary_extract_keeps_e_scientific_evidence_role_before_direct_delivery(tmp_path):
@@ -338,43 +345,63 @@ def test_ordinary_extract_keeps_e_scientific_evidence_role_before_direct_deliver
     result=command(root,'run')
     assert result['status']=='delivery_confirmed',result
     jobs=[c.read(path) for path in sorted((root/'jobs').glob('*.json'))]
-    assert [job['role'] for job in jobs]==['H','W','A','E','A']
+    assert [job['role'] for job in jobs]==['H','W','A','E','A','A']
+    assert jobs[-1]['final_only']
     assert jobs[3]['evidence_return']==dict(role='A',step=3)
     assert not list((c.workspace(root,4)/'artifacts').iterdir())
     assert c.read(root/'runs/submitted.json')['run_id']==1
     assert len(budget.closeout_state(root)['actions'])==2
 
 
-def test_ordinary_delivery_missing_choice_uses_bounded_author_clarification(tmp_path):
-    root=scene(tmp_path,[dict(action='deliver',candidate=None),dict(action='deliver',candidate='run-1')])
+def test_ordinary_delivery_missing_choice_requires_explicit_final_author(tmp_path):
+    root=scene(tmp_path,[dict(action='deliver',candidate=None,pause=True),dict(action='deliver',candidate='run-1')])
     result=command(root,'run')
-    assert result['status']=='delivery_confirmed',result
+    assert result['status']=='exported_unsubmitted',result
+    original={path:path.read_bytes() for path in (root/'jobs/003.json',root/'native-evidence/003/result-identity.json',
+        root/'native-evidence/003/science-output.json')}
     assert c.read(root/'jobs/003.json').get('purpose') is None
-    corrected=c.read(root/'jobs/004.json')
-    assert corrected['purpose']=='closeout' and corrected['author_correction']['root']['step']==3
-    assert corrected['author_correction']['reason']=='delivery_no_decision'
-    assert len(budget.closeout_state(root)['actions'])==2
+    assert c.read(root/'native-evidence/003/science-output.json')['candidate_recommendation'] is None
+    assert not budget.closeout_state(root)['actions'] and not (root/'runs/submitted.json').exists()
+    assert not (root/'jobs/004.json').exists()
+    (root/'pause.request').unlink()
+    assert command(root,'run')['status']=='delivery_confirmed'
+    final=c.read(root/'jobs/004.json')
+    assert final['final_only'] and final.get('author_correction') is None
+    assert [row['intent']['action_kind'] for row in budget.closeout_state(root)['actions']]==['submit','confirm']
+    assert all(row['intent']['decision']['step']==4 for row in budget.closeout_state(root)['actions'])
+    assert all(path.read_bytes()==raw for path,raw in original.items())
+    assert not (root/'jobs/005.json').exists()
 
 
-def test_ordinary_delivery_audit_failure_reselects_without_e_or_repeated_original_author(tmp_path):
-    root=scene(tmp_path,[dict(action='deliver',candidate='run-1'),dict(action='deliver',candidate='run-2')],selective_failure=True)
+def test_ordinary_audit_failure_reselects_before_one_final_delivery_without_e(tmp_path):
+    root=scene(tmp_path,[dict(action='audit',candidate='run-1'),dict(action='deliver',candidate='run-2',pause=True),
+        dict(action='deliver',candidate='run-2')],selective_failure=True)
+    result=command(root,'run')
+    assert result['status']=='exported_unsubmitted',result
+    rejected=candidate_audit._outcome(root,3)
+    assert rejected['result']['status']=='rejected' and rejected['process_sha256']
+    originals={path:path.read_bytes() for path in (root/'jobs/003.json',root/'native-evidence/003/result-identity.json',
+        root/'native-evidence/003/science-output.json',candidate_audit._directory(root,3)/'outcome.json')}
+    assert not budget.closeout_state(root)['actions'] and not (root/'submission/model.pkl').exists()
+    (root/'pause.request').unlink()
     result=command(root,'run')
     assert result['status']=='delivery_confirmed',result
     jobs=[c.read(path) for path in sorted((root/'jobs').glob('*.json'))]
-    assert [job['role'] for job in jobs]==['H','W','A','A']
-    assert jobs[2].get('purpose') is None and jobs[3]['purpose']=='closeout'
-    assert jobs[3].get('author_correction') is None
-    assert [row['intent']['action_kind'] for row in budget.closeout_state(root)['actions']]==['submit','submit','confirm']
+    assert [job['role'] for job in jobs]==['H','W','A','A','A']
+    assert all(job.get('purpose') is None for job in jobs[:4]) and jobs[4]['final_only']
+    assert all(job.get('author_correction') is None for job in jobs)
+    actions=budget.closeout_state(root)['actions']
+    assert [row['intent']['action_kind'] for row in actions]==['submit','confirm']
+    assert all(row['intent']['decision']['step']==5 and row['intent']['binding']['candidate_id']=='run-2' for row in actions)
     assert c.read(root/'runs/submitted.json')['run_id']==2
+    assert all(path.read_bytes()==raw for path,raw in originals.items())
+    assert command(root,'run')['status']=='delivery_confirmed' and not (root/'jobs/006.json').exists()
 
 
 def test_legacy_budget_shortage_keeps_pending_closeout_distinct_from_operator_export(tmp_path):
     # The frozen reserve fits at prepare. The two retained scientific nodes use
     # twenty tokens, so a new full A plus the external floor no longer fits.
-    root=scene(tmp_path,[dict(action='deliver',candidate='run-1')],max_tokens=1100)
-    settings=c.settings(root);settings.pop('final_a_completion_policy')
-    c.write(root/'settings.json',settings)
-    c.write(root/'settings-identity.json',dict(sha256=c.digest(root/'settings.json')))
+    root=scene(tmp_path,[dict(action='deliver',candidate='run-1')],max_tokens=1100,legacy=True)
     result=command(root)
     assert result['status']=='closeout_budget_unavailable',result
     begin=budget.closeout_state(root)['begin']

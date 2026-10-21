@@ -414,7 +414,7 @@ def backend_launcher(s,w,h,materials):
 
 def accepted_attempt(s,w,output,*,resume_thread=None,schema=None):
     """Bind fresh/resumed exec to this exact already accepted native dispatch."""
-    from scidiscovery.research_loop import contracts as c,execution,continuation,runtime,profiles,configuration_updates
+    from scidiscovery.research_loop import backends,contracts as c,execution,continuation,runtime,profiles,configuration_updates
     from scidiscovery.research_loop.protocol import require_current
     import time
     root=Path(s['scene_root']).absolute();step=int(w.name)
@@ -458,6 +458,11 @@ def accepted_attempt(s,w,output,*,resume_thread=None,schema=None):
         original=continuation.session(root,step,paths[number-1])
         if intent['session']!=original or resume_thread!=original['thread_id']:
             raise ValueError('accepted_resume_session_mismatch')
+        if schema is None:
+            if (frozen.get('native_capabilities',{}).get('response_schema_transport')!='scientific_task'
+                    or backends.selected(frozen).schema_transport!='scientific_task'):
+                raise ValueError('accepted_resume_schema_mismatch')
+            schema=expected_schema
         if schema!=expected_schema or schema.resolve()!=schema:
             raise ValueError('accepted_resume_schema_mismatch')
     elif number and intent.get('continuation_kind')=='author_closeout':
@@ -478,10 +483,31 @@ def accepted_attempt(s,w,output,*,resume_thread=None,schema=None):
         raise ValueError('unknown_native_dispatch_cannot_be_replayed')
     return expected_schema
 
+def native_configs(s,w,profile):
+    """Exact backend-owned argv values; this namespace supports offline defaults."""
+    from scidiscovery.research_loop import backends,contracts as c,configuration_updates
+    root=Path(s['scene_root']);job=c.read(c.regular(Path(os.environ['THIN_HWA_JOB_MANIFEST'])))
+    frozen=configuration_updates.for_job(root,job)
+    backend=backends.selected(frozen)
+    if backend.name!='codex':raise ValueError('cov_launcher_requires_codex_backend')
+    defaults=backends.configuration('codex',frozen['native_launcher_argv'],{})['native_options']
+    if frozen.get('native_options') is not None and frozen['native_options']!=defaults:
+        raise ValueError('native_permissions_not_supported_by_cov_launcher')
+    instruction=job.get('native_role_instruction',c.ROLE_INSTRUCTIONS[job['role']])
+    if job['role']=='A' and not job.get('formal_review'):
+        instruction+='\n'+c.AUTHOR_EVIDENCE_GUIDANCE
+    if job.get('formal_review'):
+        from scidiscovery.research_loop import formal_review
+        instruction=formal_review.public(root,job)['review']['instruction']
+    declared=backend.launch(profile,w,w/'unused-output',w/'unused-schema',instruction)[len(backend.launcher):]
+    configs={declared[i+1].split('=',1)[0]:declared[i+1] for i,value in enumerate(declared) if value=='-c'}
+    return configs,'--ignore-user-config' in declared
+
 def native_args(s,w,args):
     # Resume is an exact accepted session, never selection by name or recency.
     if not args or args[0]!='exec':raise ValueError('fresh_native_exec_required')
     profile=native_profile(s)
+    expected,ignore_user_config=native_configs(s,w,profile)
     result=['exec'];i=1;seen=set();configs=set();output=None;schema=None;resuming=False;thread=None
     while i<len(args):
         x=args[i]
@@ -491,6 +517,10 @@ def native_args(s,w,args):
             resuming=True;result.append(x);i+=1;continue
         if x in ['--json','--skip-git-repo-check']:
             result.append(x);i+=1;continue
+        if x=='--ignore-user-config':
+            if not ignore_user_config or x in seen or resuming:raise ValueError('native_config_override_rejected')
+            seen.add(x);i+=1
+            continue  # The exact generated home owns the named isolation profile.
         if x=='-' and i==len(args)-1:result.append(x);i+=1;continue
         if resuming and not x.startswith('-'):
             import uuid
@@ -513,10 +543,10 @@ def native_args(s,w,args):
         if x=='--model' and v!=profile['model']:raise ValueError('model_profile_mismatch')
         if x=='-c':
             key=v.split('=',1)[0]
-            expected={'model_reasoning_effort':profile['reasoning_effort'],'service_tier':profile['service_tier']}
-            if key not in expected or v!=key+'='+json.dumps(expected[key]) or key in configs:
+            if expected.get(key)!=v or key in configs:
                 raise ValueError('native_config_override_rejected')
             configs.add(key)
+            if key=='sandbox_workspace_write':continue  # Replaced by the exact rootless profile, like --sandbox.
         if x=='--output-last-message':
             p=Path(v).absolute()
             output=p
@@ -524,14 +554,16 @@ def native_args(s,w,args):
         result.extend([x,v])
     if not {'--output-last-message','--model','-c','-C'}.issubset(seen) or result[-1]!='-':
         raise ValueError('complete_stdin_role_command_required')
-    if 'model_reasoning_effort' not in configs or s.get('role_profiles') is not None and 'service_tier' not in configs:
+    if configs!=set(expected) or ('--ignore-user-config' in seen)!=ignore_user_config:
         raise ValueError('complete_role_profile_config_required')
     if '--skip-git-repo-check' not in result:result.insert(1,'--skip-git-repo-check')
-    if resuming and (thread is None or schema is None):
+    if resuming and thread is None:
         raise ValueError('complete_resume_session_schema_required')
+    explicit_schema=schema is not None
     schema=accepted_attempt(s,w,output,resume_thread=thread if resuming else None,schema=schema)
     regular(schema)  # The frozen origin schema is mandatory for every context.
     if not resuming:result[-1:-1]=['--output-schema',str(schema)]
+    elif not explicit_schema:result[-2:-2]=['--output-schema',str(schema)]
     return result
 
 def main():

@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, controller, correction, execution, experiments, history, search, protocol
+from scidiscovery.research_loop import budget, contracts as c, controller, correction, execution, experiments, history, search, protocol, semantic
 from execution_fixtures import execution_registry
 from test_history_handoff import finish
 
@@ -88,7 +88,11 @@ def original_worker(root):
 def registered_worker(root,step,parents,*,text='Exact managed scientific contribution'):
     job=c.build_job(root,step,'W',parents)
     record=execution.record(root,step)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs'/f'{step:03d}.json')))
+    node_anchor=budget.accept_node(root,job)
+    anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,job))
+    c.write(record/'native-intent.json',dict(step=step,task_sha256=c.digest(root/'jobs'/f'{step:03d}.json'),**anchor))
+    c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
+    original_intent=(record/'native-intent.json').read_bytes()
     output=root/f'local-config-{step}.json'
     config=experiments.configure(root,step,'local_execution:command',dict(run_argv=[sys.executable]),output)
     script=c.workspace(root,step)/'work/managed-input.py';script.write_text('print("bounded fixture observation")\n')
@@ -98,7 +102,9 @@ def registered_worker(root,step,parents,*,text='Exact managed scientific contrib
     assert binding['mechanism_ref']=='h001.m1' and binding['source_h']==1
     assert binding['source_h_sha256']==c.digest(execution.origin(root,1)/'result-identity.json')
     sealed=finish(root,step,'W',parents,text=text,mechanism_findings=[dict(mechanism='Mechanism',
-        basis='observed',finding='The managed fixture produced an observation; target-condition validity is untested.')])
+        basis='observed',finding='The managed fixture produced an observation; target-condition validity is untested.')],
+        preserve_native_intent=True)
+    assert (record/'native-intent.json').read_bytes()==original_intent
     observation=c.read(root/c.read(sealed[2]/'result-identity.json')['observations']['path'])
     assert len(observation['managed_calls'])==1
     assert observation['managed_calls'][0]['mechanism_binding']==binding
@@ -239,14 +245,20 @@ def test_repair_without_a_unique_bound_worker_stops_new_dispatch(registered_scen
         registered_worker(scene,4,[1,2,3],text='Other same-mechanism worker')
         a_step, parents = 5, [1, 2, 4]
     else:
-        finish(scene, 1, 'H', [], action='analyze', search_choice=plan())
-        a_step, parents = 2, [1]
-    finish(scene, a_step, 'A', parents, action='continue_w',
-           search_choice=dict(dispositions=[], next_focus=focus('repair')))
-    job = c.build_job(scene, a_step + 1, 'W', [*parents, a_step])
-    assert job['search']['repair_binding'] == binding
-    assert job['search']['repair_root'] is None
-    assert search.launch_reason(scene, job) == 'search_repair_source_' + binding
+        original_worker(scene)  # A direct W exists, but no exact managed observation can be repaired.
+        a_step, parents = 3, [1, 2]
+    job,work,record=finish(scene, a_step, 'A', parents, action='continue_w',
+        search_choice=dict(dispositions=[], next_focus=focus('repair')))
+    outcome=c.read(record/'result-identity.json')['control_outcome']
+    reason='search_repair_source_' + binding
+    assert outcome['search_status']=='unresolved'
+    assert outcome['diagnostics']==[dict(code=reason,subject='h001.m1')]
+    payload=c.validate(work)
+    assert payload['search_review']['next_focus']==focus('repair')
+    route=semantic.effective_route(scene,a_step,payload,job,
+        (*controller._route(scene,a_step,'A',payload,job,1,parents[-1]),None))
+    assert route[0]=='A' and route[-1]['reason']==reason
+    assert not (scene/'jobs'/f'{a_step+1:03d}.json').exists()
     assert not (c.host_record(c.workspace(scene, a_step + 1)) / 'native-intent.json').exists()
 
 
@@ -258,6 +270,10 @@ def test_repair_requests_bind_original_root_without_role_paths(registered_scene)
                search_choice=dict(dispositions=[], next_focus=focus('repair')))
         job, _, _ = registered_worker(scene,w_step,[1,source,a_step])
         assert job['search']['repair_root'] == 2
+        assert job['search']['repair_source']['step']==source
+        assert job['search']['repair_source']['call']['scope']['step']==source
+        assert job['search']['repair_source']['call']['mechanism_binding']['mechanism_ref']=='h001.m1'
+        assert job['search']['repair_authorization']['step']==a_step
     finish(scene, 7, 'A', [1, 6], action='continue_w',
            search_choice=dict(dispositions=[], next_focus=focus('repair')))
     job = c.build_job(scene, 8, 'W', [1, 6, 7])

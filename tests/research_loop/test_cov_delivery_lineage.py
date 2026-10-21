@@ -123,6 +123,9 @@ def test_legacy_v1_snapshot_is_explicitly_limited_and_still_works(tmp_path):
 @pytest.mark.parametrize('rewrite_script',[False,True])
 def test_direct_delivery_audits_frozen_w_scratch_without_mounting_old_workspace(tmp_path,monkeypatch,rewrite_script):
     """Counterfactual original absolute path fails; adapter-bound original succeeds."""
+    from scidiscovery.research_loop import backends, native
+    from test_history_handoff import selection_explanation
+
     checked = FAKE_HARNESS.replace("# This subprocess is inside the audit namespace.",
         "assert not (pathlib.Path(meta['control_path']).parent/'project/nodes/002/work/train.py').exists()\n"
         "assert row['script']=='/inputs/source.py' and pathlib.Path(row['script']).is_file()\n"
@@ -133,7 +136,35 @@ def test_direct_delivery_audits_frozen_w_scratch_without_mounting_old_workspace(
     # supplies the script; neither E nor the adapter mounts that old workspace.
     script.write_text('Unrelated mutable W scratch after the sealed call\n')
     assert script.is_file() and script.read_bytes()!=source_p
-    finish(root,3,'A',[1,2],action='deliver',recommendation=first['candidate_id'])
+    def complete_final(selected,step):
+        assert selected==root and step==3
+        job=c.read(root/'jobs/003.json')
+        assert job['role']=='A' and job['final_only'] and job['purpose']=='closeout'
+        record=c.host_record(c.workspace(root,step))
+        intent=dict(step=step,task_sha256=c.digest(root/'jobs/003.json'),budget_slice=budget.accept_node(root,job))
+        c.write(record/'native-intent.json',intent)
+        c.write(record/'science-output.json',dict(summary='Select the exact original P candidate',
+            scientific_result='Retain synthetic P evidence; target applicability remains unresolved.',
+            limitations=['Synthetic native transport; no scientific efficacy claim'],implementation_selection=None,
+            candidate_recommendation=first['candidate_id'],selection_explanation=selection_explanation(),
+            next_action='deliver',route_reason='Authorize only the selected frozen original'))
+        meter=dict(input_tokens=7,cached_input_tokens=2,output_tokens=3)
+        c.write(record/'usage.json',meter)
+        backend=backends.selected(c.settings(root,job))
+        observation=dict(coverage='terminal',reason=None,source=backend.terminal_source,tokens=meter)
+        c.write(record/'usage-observation.json',observation)
+        usage=native.usage(root)
+        accepted=budget.final_a_return(root,job,intent)
+        assert accepted is not None
+        c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,cleanup='observed_group_cleaned',
+            native_backend=backend.name,metering=observation,usage=usage,
+            raw_sha256=c.digest(record/'science-output.json'),
+            final_a_completion=budget.final_a_receipt(accepted,intent,meter,usage)))
+        c.seal_result(root,step)
+    # Complete the controller's exact FINAL job; an ordinary legacy A fixture
+    # lacks its authorization/terminal receipt and stops before the audit.
+    budget.begin_closeout(root,2,3,'Frozen W original delivery regression',final_only=True)
+    monkeypatch.setattr(native,'execute_native',complete_final)
     if rewrite_script:
         result=controller.run(root)
         assert result['status']=='delivery_confirmed',result

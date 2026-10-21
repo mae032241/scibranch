@@ -6,16 +6,21 @@ import pytest
 from execution_fixtures import execution_registry, remote_registry
 from test_composed_execution_results import composed_registry
 from test_nonlocal_execution_observation import case, run
-from scidiscovery.research_loop import contracts as c, execution, experiments as e
+from scidiscovery.research_loop import budget, contracts as c, execution, experiments as e
 
 
 def advance(root,executor,options):
     origin=execution.origin(root,2)
-    c.write(origin/'usage.json',dict(input_tokens=0,cached_input_tokens=0,output_tokens=0))
-    c.write(origin/'native-outcome.json',dict(returncode=1,stop_reason='synthetic original turn ended'))
+    job=c.read(root/'jobs/002.json')
+    meter=dict(input_tokens=7,cached_input_tokens=2,output_tokens=3)
+    c.write(origin/'usage.json',meter)
+    report=dict(budget.node_report(root,job,c.read(origin/'native-intent.json'),meter),usage_observed=True)
+    c.write(origin/'native-outcome.json',dict(returncode=1,stop_reason='synthetic original turn ended',budget_slice=report))
+    anchor=budget.accept_continuation(root,job,[origin])
+    assert anchor['previous_tokens']==10
     later=origin/'continuations/001';later.mkdir(parents=True)
     c.write(later/'native-intent.json',dict(attempt=1,task_sha256=c.digest(root/'jobs/002.json'),
-        previous=execution.proof(origin),root_intent_sha256=c.digest(origin/'native-intent.json')))
+        previous=execution.proof(origin),root_intent_sha256=c.digest(origin/'native-intent.json'),budget_slice=anchor))
     path=c.workspace(root,2)/'work/current-config.json'
     return e.configure(root,2,executor,options,path),path
 

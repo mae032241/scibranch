@@ -113,6 +113,10 @@ def test_h_revision_rename_and_omission_preserve_unserved_commitment(tmp_path):
 
 def test_actual_brief_separates_completed_and_pending_and_preserves_full_readonly_index(tmp_path):
     root = three_branches(tmp_path)
+    originals = {path:path.read_bytes() for step in range(1,7) for path in (
+        root/'jobs'/f'{step:03d}.json',
+        c.host_record(c.workspace(root,step))/'science-output.json',
+        c.host_record(c.workspace(root,step))/'result-identity.json')}
     job = c.build_job(root, 7, 'A', [1, 6], instruction=route_instruction(root, [1, 6]))
     work = c.workspace(root, 7)
     view = c.read(work / 'science-task.json')
@@ -125,12 +129,18 @@ def test_actual_brief_separates_completed_and_pending_and_preserves_full_readonl
     assert portfolio['review_after_cycles'] == 3 and portfolio['overdue_count_if_assessed'] == 1
     assert portfolio['completed_cycles'] == 0 and portfolio['cycles_if_assessed'] == 1
     assert portfolio['review_reminder'] is True
-    assert 0 < len(mechanism_view['overview']) <= 4
+    # Navigation excerpts may all be omitted to preserve the compact byte bound.
+    assert len(mechanism_view['overview']) <= 4
     assert len(mechanism_view['overview']) + mechanism_view['overview_omitted_count'] == 4
     assert [row['mechanism_ref'] for row in mechanism_view['overview']]==[P,Q,R,S][:len(mechanism_view['overview'])]
     page_path = work / mechanism_view['index']
     assert page_path.stat().st_mode & 0o222 == 0
-    assert {row['mechanism_ref'] for row in c.read(page_path)['mechanisms']} == {P, Q, R, S}
+    index = c.read(page_path)
+    assert [row['mechanism_ref'] for row in index['mechanisms']] == [P, Q, R, S]
+    rows = {row['mechanism_ref']:row for row in index['mechanisms']}
+    assert rows[R]['completed_cycles'] == 0
+    assert rows[S]['unserved_cycles'] == 2 and rows[S]['unserved_cycles_if_assessed'] == 3
+    assert all(path.read_bytes() == raw for path,raw in originals.items())
     page_path.chmod(0o600)
     page_path.write_text('{}\n')
     with pytest.raises(ValueError):

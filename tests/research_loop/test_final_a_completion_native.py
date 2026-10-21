@@ -251,12 +251,10 @@ def test_final_native_terminal_with_unknown_cleanup_never_seals_or_relaunches(tm
 @pytest.mark.process_e2e
 def test_final_native_unknown_billing_preserves_explicit_exact_submit_and_confirm(tmp_path, monkeypatch):
     import test_closeout_protocol as protocol
-    old = ("pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))\n"
-        "print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))),flush=True)")
-    replacement = ("pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))\n"
-        "print(json.dumps(dict(type='turn.completed')),flush=True)\n"
-        "(work/'work/terminal-emitted').touch()")
-    assert old in protocol.NATIVE
+    old = "\nprint(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))),flush=True)\n"
+    replacement = ("\nprint(json.dumps(dict(type='turn.completed')),flush=True)\n"
+        "(work/'work/terminal-emitted').touch()\n")
+    assert protocol.NATIVE.count(old) == 1
     # The scenario freezes this fake native process before preparation; the
     # existing real namespace adapter and its exact candidate remain in path.
     monkeypatch.setattr(protocol, 'NATIVE', protocol.NATIVE.replace(old, replacement))

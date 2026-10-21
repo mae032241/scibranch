@@ -1,11 +1,13 @@
 """Overview, result and workspace pages: read-only display, unchanged controls."""
+import base64
+import copy
+import hashlib
 import re
 from urllib.parse import urlencode
 
 import pytest
 
 from scidiscovery.research_loop import instance_render as render
-from scidiscovery.research_loop.configuration_form import SCRIPT_CSP as CONFIG_SCRIPT_CSP
 from test_execution_authority import prepare
 from test_history_handoff import finish
 from test_instance_ui import session
@@ -29,7 +31,8 @@ def test_overview_answers_state_action_usage_and_rounds_for_manager_and_reader(t
     head = re.search(r'<div class="head-action">(.*?)</div></section>', page, re.S).group(1)
     assert head.count('<form') == 1 and 'action="/control/start"' in head
     assert page.count('<section class="stat') == 4 and '还没有开始研究' in page
-    assert '更多操作' in page and '如何理解这些结果' in page and 'id="budget"' in page
+    assert '更多操作' in page and '如何理解这些结果' in page
+    assert 'href="/configuration#budget-settings"' in page and 'action="/control/budget"' not in page
     assert 'nav class="top-nav"' in page and '研究过程' in page and 'href="/settings"' in page
     finish(root, 1, 'H', [], action='experiment', summary='Plan <script>x</script>')
     finish(root, 2, 'A', [1], action='revise_h', summary='Revise')
@@ -82,24 +85,50 @@ def test_overview_and_live_usage_share_weighted_cache_and_latest_exact_context(t
 
 
 @pytest.mark.parametrize('state', ['ready', 'budget_exhausted', 'final'])
-def test_budget_adjustment_starts_collapsed_even_when_more_actions_opens(tmp_path, monkeypatch, state):
+def test_budget_recovery_editor_is_contextual_and_starts_collapsed(tmp_path, monkeypatch, state):
     root, key = prepare(tmp_path, enabled=False)
+    if state != 'ready':
+        finish(root, 1, 'H', [], action='analyze')
     ui, cookie = session(root, key)
-    original_status = ui._status
-    monkeypatch.setattr(ui, '_status', lambda *args, **options: dict(original_status(*args, **options), state=state))
+    snapshot = copy.deepcopy(ui._snapshot())
+    if state == 'budget_exhausted':
+        snapshot['view']['budget']['max_tokens'] = 1
+        snapshot['view']['usage']['accounted_tokens'] = 2
+    elif state == 'final':
+        snapshot['view']['closeout'] = dict(status='final_only')
+    monkeypatch.setattr(ui, '_snapshot_or_error', lambda **options: snapshot)
     page = text(ui.get('/', host=ui.host, cookie=cookie)[1])
     outer = re.search(r'<details class="more-actions"[^>]*>', page).group(0)
     assert (' open' in outer) == (state in {'budget_exhausted', 'final'})
-    budget = re.search(r'<details class="budget-adjustment"(.*?)</details>', page, re.S).group(0)
-    assert budget.startswith('<details class="budget-adjustment"><summary>申请调整预算</summary><div id="budget">')
-    assert 'action="/control/budget"' in budget
-    assert all('name="' + field + '"' in budget for field in (
-        'max_tokens', 'max_seconds', 'max_steps', 'authorization_note', 'csrf', 'nonce'))
-    assert budget.count('<textarea') == 1 and 'name="authorization_statement"' not in budget
-    assert '调整说明' in budget and '确认调整预算' in budget
-    assert '提交即确认所填写的新上限；说明随变更记录保存。' in budget
-    if state != 'ready':
-        assert 'href="#budget"' in page
+    assert 'action="/control/budget"' not in page and 'class="budget-adjustment"' not in page
+    recovery = text(ui.get('/budget-recovery', host=ui.host, cookie=cookie)[1])
+    if state == 'ready':
+        assert 'href="/configuration#budget-settings"' in page and 'href="/configuration#budget-settings"' in recovery
+        assert 'action="/control/budget"' not in recovery
+        configuration = text(ui.get('/configuration', host=ui.host, cookie=cookie)[1])
+        assert 'action="/control/configuration-update"' in configuration
+        assert configuration.count('name="cfg.budget.max_tokens"') == 1
+        assert 'action="/control/budget"' not in configuration
+    else:
+        assert 'href="/budget-recovery#budget"' in page
+        budget = re.search(r'<details class="budget-adjustment"(.*?)</details>', recovery, re.S).group(0)
+        assert budget.startswith('<details class="budget-adjustment"><summary>恢复前追加预算</summary><div id="budget">')
+        assert re.findall(r'<form\b[^>]*action="(/control/[^"]+)"', recovery) == ['/control/budget']
+        assert all('name="' + field + '"' in budget for field in (
+            'max_tokens', 'max_seconds', 'max_steps', 'authorization_note', 'csrf', 'nonce'))
+        assert budget.count('<textarea') == 1 and 'name="authorization_statement"' not in budget
+        assert '调整说明' in budget and '确认追加预算' in budget
+        assert '已用额度保留' in budget and '生效后返回总览继续研究；提交本表不会启动研究。' in budget
+        assert '恢复仍须满足原有条件' in budget
+        assert not any('action="/control/' + action + '"' in budget for action in ('start', 'continue', 'resume'))
+    _, _, headers = ui.get('/view?' + urlencode({'token': ui.read_token}), host=ui.host)
+    reader = headers['Set-Cookie']
+    readonly = text(ui.get('/', host=ui.host, cookie=reader)[1])
+    assert 'action="/control/' not in readonly and 'href="/budget-recovery#budget"' not in readonly
+    for path in ('/budget-recovery', '/configuration'):
+        with pytest.raises(PermissionError):
+            ui.get(path, host=ui.host, cookie=reader)
+    ui.translation.close()
 
 
 def test_status_matrix_primary_actions_follow_state_without_new_controls(tmp_path):
@@ -113,7 +142,8 @@ def test_status_matrix_primary_actions_follow_state_without_new_controls(tmp_pat
     assert 'action="/control/continue"' in primary('paused')
     assert primary('pause_requested') is None and primary('error') is None  # No cancellation exists.
     assert 'href="/results/4"' in primary('waiting') and 'href="/progress"' in primary('unknown')
-    assert 'href="/final-results"' in primary('completed') and 'href="#budget"' in primary('budget_exhausted')
+    assert 'href="/final-results"' in primary('completed')
+    assert all('href="/budget-recovery#budget"' in primary(state) for state in ('budget_exhausted', 'final'))
     assert all('<form' not in (primary(state, False) or '') for state in ('ready', 'active', 'paused', 'final'))
     assert '只读查看' in primary('active', False)
 
@@ -185,10 +215,26 @@ def test_result_pages_lead_with_the_conclusion_and_keep_the_original(tmp_path):
         ui.get('/results/3', host=ui.host, cookie=cookie)
 
 
-def test_csp_keeps_hash_only_inline_sources():
+def test_csp_keeps_hash_only_inline_sources(tmp_path):
     assert "'unsafe-inline'" not in render.CSP and "'unsafe-eval'" not in render.CSP
-    assert render.CSP == ("default-src 'none'; style-src " + render.STYLE_SOURCE + "; script-src " + render.SCRIPT_SOURCE
-                          + " " + CONFIG_SCRIPT_CSP + " " + render.translation_client.CSP + "; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+    directives = dict((parts[0], set(parts[1:])) for directive in render.CSP.split(';') if (parts := directive.split()))
+    assert {key: value for key, value in directives.items() if key not in {'script-src', 'style-src'}} == {
+        'default-src': {"'none'"}, 'connect-src': {"'self'"}, 'form-action': {"'self'"},
+        'frame-ancestors': {"'none'"}, 'base-uri': {"'none'"}}
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    sources = {'script': set(), 'style': set()}
+    for path in ('/', '/configuration', '/guidance'):
+        status, body, _ = ui.get(path, host=ui.host, cookie=cookie)
+        page = text(body)
+        assert status == 200 and not re.search(r'<script\b[^>]*\bsrc\s*=', page, re.I)
+        for tag in sources:
+            for inline in element_texts(page, tag):
+                digest = base64.b64encode(hashlib.sha256(inline.encode()).digest()).decode()
+                sources[tag].add("'sha256-" + digest + "'")
+    for tag, hashes in sources.items():
+        assert hashes and directives[tag + '-src'] == hashes
+    ui.translation.close()
 
 
 def test_final_gap_page_keeps_candidates_metrics_sources_and_exact_downloads(tmp_path, monkeypatch):

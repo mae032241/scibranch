@@ -1,37 +1,45 @@
-"""A protected final return cannot spend an unavailable optional-audit follow-up."""
-import pytest
-
+"""The unique FINAL cannot dispatch optional audits or their follow-up author."""
 from scidiscovery.research_loop import budget, candidate_audit, contracts as c, native
 from test_closeout_protocol import command, scene
 
 
-@pytest.mark.parametrize('dimension',['tokens','seconds'])
-def test_optional_audit_keeps_followup_author_budget(tmp_path,dimension):
-    max_tokens=1120 if dimension=='tokens' else 100000
-    max_seconds=75 if dimension=='seconds' else 600
-    root=scene(tmp_path,[dict(action='audit',candidate='run-1'),dict(action='deliver',candidate='run-1')],
-        max_tokens=max_tokens,max_seconds=max_seconds)
+def test_final_audit_request_preserves_original_without_audit_or_followup_author(tmp_path):
+    root=scene(tmp_path,[dict(action='audit',candidate='run-1'),dict(action='deliver',candidate='run-1')])
     settings=(root/'settings.json').read_bytes()
+    assert c.settings(root)['candidate_audit_policy']==dict(version=1)
+    originals={path:path.read_bytes() for path in (root/'jobs/002.json',
+        root/'native-evidence/002/result-identity.json',root/'native-evidence/002/science-output.json')}
+    assert c.read(root/'jobs/002.json')['role']=='W' and native.usage(root)['observed_tokens']==20
     result=command(root)
-    # A last-allocation return preserves the authored audit request as science;
-    # it cannot start an optional audit that would require another A.
-    assert result['status']=='final_a_completed' and result['goal_completion']=='not_asserted',result
+    assert result['status']=='closeout_native_unsealed' and result['goal_completion']=='not_asserted',result
+    phase=budget.closeout_state(root)['begin']
+    assert phase['mode']=='final' and phase['source_cutoff']==2 and phase['first_step']==3
     grant=budget.final_a_barrier(root)
-    assert grant['step']==3 and grant['basis']=='last_closeout_allocation'
-    assert grant['anchor']['shared_limits']==dict(max_tokens=max_tokens,max_seconds=max_seconds)
-    science=c.host_record(c.workspace(root,3))/'science-output.json'
+    assert grant['step']==3 and grant['basis']=='final_state'
+    assert grant['anchor']['shared_limits']==dict(max_tokens=100000,max_seconds=600)
+    job=c.read(root/'jobs/003.json')
+    assert job['role']=='A' and job['final_only'] and [row['step'] for row in job['history']['nodes']]==[1,2]
+    prepared=(root/'jobs/003.json').read_bytes()
+    record=c.host_record(c.workspace(root,3))
+    assert c.read(record/'science-result.schema.json')['properties']['next_action']['enum']==['deliver']
+    science=record/'science-output.json'
     original=science.read_bytes()
     assert c.read(science)['next_action']=='audit' and c.read(science)['candidate_recommendation']=='run-1'
+    assert not (record/'result-identity.json').exists() and not (record/'continuations').exists()
     assert not (candidate_audit._directory(root,3)/'intent.json').exists()
     assert not (candidate_audit._directory(root,3)/'outcome.json').exists()
     assert not list(candidate_audit.facts(root))
     assert [c.read(path)['role'] for path in sorted((root/'jobs').glob('*.json'))]==['H','W','A']
-    assert not budget.closeout_state(root)['actions'] and not (root/'submission/model.pkl').exists()
+    assert not budget.closeout_state(root)['actions'] and not (root/'submission/model.pkl').exists() and not (root/'runs/submitted.json').exists()
     assert native.usage(root)['observed_tokens']==30 and budget.used_steps(root)==3
-    assert command(root)['status']=='final_a_completed'
+    assert command(root,'run')['status']=='closeout_native_unsealed'
     assert science.read_bytes()==original and (root/'settings.json').read_bytes()==settings
+    assert (root/'jobs/003.json').read_bytes()==prepared
+    assert all(path.read_bytes()==raw for path,raw in originals.items())
     assert native.usage(root)['observed_tokens']==30 and budget.used_steps(root)==3
-    assert budget.final_a_barrier(root)==grant
+    assert budget.final_a_barrier(root)==grant and budget.closeout_state(root)['begin']==phase
+    assert not (record/'result-identity.json').exists() and not (record/'continuations').exists()
+    assert not budget.closeout_state(root)['actions'] and not (root/'runs/submitted.json').exists()
     assert not (root/'jobs/004.json').exists() and not list(candidate_audit.facts(root))
 
 

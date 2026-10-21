@@ -39,6 +39,10 @@ if role in {'H','A'}:
 if role == 'W':
     payload.update(stage_intent='review',mechanism_findings=[{'mechanism':'Fixture mechanism',
       'basis':'blocked','finding':'No managed scientific observation in this transport fixture.'}])
+    payload['candidate_nominations']={'representatives':[],'extras':[],
+      'gaps':[{'mechanism_ref':row['mechanism_ref'],
+        'reason':'No managed scientific candidate was produced by this transport fixture.'}
+        for row in job['candidate_nomination_mechanisms'] if row['status']!='waived']}
 if role == 'A':
     judgment=job['scientific_judgment']
     assert judgment in prompt
@@ -314,7 +318,13 @@ def test_next_role_receives_science_without_parent_bindings(instance):
     work = contracts.workspace(instance, 3)
     value = contracts.read(work / 'inputs/parents/002/conclusion.json')
     assert set(value) == {'summary', 'scientific_result', 'limitations', 'implementation_selection',
-                          'stage_intent', 'mechanism_findings'}
+                          'stage_intent', 'mechanism_findings', 'candidate_nominations'}
+    nominations = value['candidate_nominations']
+    assert nominations['representatives'] == [] and nominations['extras'] == []
+    worker_task = contracts.read(contracts.workspace(instance, 2) / 'science-task.json')
+    assert {row['mechanism_ref'] for row in nominations['gaps']} == {
+        row['mechanism_ref'] for row in worker_task['candidate_nomination_mechanisms']
+        if row['status'] != 'waived'}
     task = contracts.read(work / 'science-task.json')
     assert all(set(item) == {'conclusion', 'artifacts', 'role', 'limitations', 'limitations_omitted_count'}
                for item in task['parents'])

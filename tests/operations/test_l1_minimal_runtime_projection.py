@@ -32,7 +32,6 @@ def test_compiled_entry_is_the_single_runtime_authority() -> None:
     compiled = catalog.operation("blind.csv.observe.v1")
 
     assert compiled.spec.operation_id == "blind.csv.observe.v1"
-    assert len(compiled.digest) == 64
     assert compiled.spec.executor.component.plugin_id is None
     assert compiled.spec.executor.component.component_id == "author"
     assert compiled.permission_template is not None

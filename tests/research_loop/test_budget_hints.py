@@ -45,7 +45,6 @@ def advice(tmp_path, monkeypatch):
 def test_soft_advice_uses_actual_shared_balance(advice,charged,expected):
     root,_,_,_,shared,published,publish=advice(delivery=True)
     frozen=c.settings(root)
-    assert frozen['final_a_completion_policy']==dict(version=1)
     assert budget.delivery_reserve(frozen)==dict(tokens=0,seconds=0.,steps=0)
     settings=(root/'settings.json').read_bytes();shared.update(observed_tokens=charged,accounted_tokens=charged)
     hint=publish()
@@ -76,7 +75,6 @@ def test_unreported_continuation_keeps_previous_consumption_and_unknown(advice,m
 def test_soft_target_remains_advisory_and_shared_balance_is_not_a_fresh_grant(advice):
     root,_,_,_,shared,published,publish=advice(mode='soft')
     frozen=c.settings(root)
-    assert frozen['final_a_completion_policy']==dict(version=1)
     assert budget.delivery_reserve(frozen)==dict(tokens=0,seconds=0.,steps=0)
     shared.update(observed_tokens=250,accounted_tokens=250)
     hint=publish(dict(input_tokens=200,cached_input_tokens=190,output_tokens=50))
@@ -89,7 +87,6 @@ def test_soft_target_remains_advisory_and_shared_balance_is_not_a_fresh_grant(ad
 def test_author_advice_uses_verified_attempt_allowance_not_reused_w_cap(advice,monkeypatch,mode):
     root,_,intent,_,shared,_,publish=advice(mode=mode,node_tokens=200)
     frozen=c.settings(root)
-    assert frozen['final_a_completion_policy']==dict(version=1)
     assert budget.delivery_reserve(frozen)==dict(tokens=0,seconds=0.,steps=0)
     assert intent['budget_slice']['limits']['max_observed_tokens']==200
     intent.update(continuation_kind='author_closeout')

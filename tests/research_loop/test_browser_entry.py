@@ -35,9 +35,10 @@ def test_entry_document_keeps_strict_cookie_and_a_secret_free_child_fallback(tmp
         assert headers['Referrer-Policy'] == 'no-referrer'
         assert 'HttpOnly' in headers['Set-Cookie'] and 'SameSite=Strict' in headers['Set-Cookie']
         scripts = re.findall(rb'<script>(.*?)</script>', body, re.S)
-        assert len(scripts) == 1
-        digest = base64.b64encode(hashlib.sha256(scripts[0]).digest()).decode()
-        assert "'sha256-" + digest + "'" in headers['Content-Security-Policy']
+        assert b"location.replace('./');" in scripts
+        for script in scripts:
+            digest = base64.b64encode(hashlib.sha256(script).digest()).decode()
+            assert "'sha256-" + digest + "'" in headers['Content-Security-Policy']
         assert "'unsafe-inline'" not in headers['Content-Security-Policy']
     restarted = instance_ui.InstanceUI(workspace, secret_file=key, workspace=True, instance_roots=[root])
     restarted.host = ui.host

@@ -194,9 +194,18 @@ def test_default_cli_repair_retains_execution_boundary_and_finite_attempts(tmp_p
 
 
 def test_default_cli_policy_cannot_authorize_scientific_work_repair(tmp_path):
-    root,_,_=prepare_cli(tmp_path)
+    root,home,_=prepare_cli(tmp_path)
+    c.build_job(root,1,'W',[])
+    work=c.workspace(root,1);record=execution.origin(root,1)
+    originals={path:path.read_bytes() for path in (root/'settings.json',root/'settings-identity.json',
+        root/'jobs/001.json',work/'science-task.json',record/'science-result.schema.json',
+        home/'config.toml',home/'auth.json')}
     with pytest.raises(ValueError,match='does not authorize scientific work repair'):
         continuation.validate_repair(root,1,dict(work_repair=dict(code='worker_delivery_incomplete')))
+    assert all(path.read_bytes()==raw for path,raw in originals.items())
+    assert not (work/'work/launches').exists()
+    assert all(not (record/name).exists() for name in ('native-intent.json','runner-process.json',
+        'native-process.json','native-outcome.json','result-identity.json','continuations'))
 
 
 def test_default_cli_incomplete_w_retains_partial_exit_and_reaches_a(tmp_path):
