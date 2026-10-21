@@ -9,12 +9,125 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import uuid
 
 from scidiscovery import archive_io as files
 
 BINDING = 'instance-owner.json'
 _held = ContextVar('instance_owner_held', default={})
+_gates = ContextVar('instance_owner_gates', default={})
+
+
+def _gate_directory():
+    # Deliberately independent of TMPDIR and other caller-selected environments.
+    return Path('/tmp') / f'scidiscovery-owner-gates-{os.geteuid()}'
+
+
+def _gate_root(root):
+    root = files.check_path(Path(root).absolute())
+    if root.resolve() != root or not root.is_dir():
+        raise files.ArchiveError('Host owner gate requires the exact canonical instance directory')
+    return root, _identity(root)
+
+
+def _same_gate_root(root, identity):
+    if _gate_root(root)[1] != identity:
+        raise files.ArchiveError('Host owner gate lost its original instance directory')
+
+
+def _private_stat(info, *, directory):
+    kind = stat.S_ISDIR if directory else stat.S_ISREG
+    mode = 0o700 if directory else 0o600
+    if (not kind(info.st_mode) or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != mode or (not directory and info.st_nlink != 1)):
+        raise files.ArchiveError('Unsafe host owner gate directory or lock')
+
+
+def _same_gate_path(path, descriptor, *, directory):
+    actual = path.lstat()
+    opened = os.fstat(descriptor)
+    _private_stat(actual, directory=directory)
+    _private_stat(opened, directory=directory)
+    if (actual.st_dev, actual.st_ino) != (opened.st_dev, opened.st_ino):
+        raise files.ArchiveError('Host owner gate path changed while held')
+
+
+@contextmanager
+def _host_gate(root, *, exclusive, create=True, cold=False, allow_missing=False):
+    root = files.check_path(Path(root).absolute())
+    # Cold restore may own an absent destination using its existing anchor.
+    # Every lock here and at that anchor is nonblocking: no waiting lock cycle.
+    if allow_missing and not root.exists():
+        if root.resolve() != root:
+            raise files.ArchiveError('Cold owner root must remain canonical')
+        yield None
+        return
+    root, identity = _gate_root(root)
+    previous = _gates.get()
+    held = previous.get(str(root))
+    if held is not None:
+        _same_gate_root(root, held['identity'])
+        if exclusive or (held['exclusive'] and not held['cold']):
+            raise files.ArchiveError('Source read guard cannot be entered as an effect lease')
+        yield held
+        _same_gate_root(root, held['identity'])
+        return
+    directory = files.check_path(_gate_directory())
+    if create:
+        directory.mkdir(mode=0o700, exist_ok=True)
+    elif not directory.exists():
+        yield None
+        _same_gate_root(root, identity)
+        return
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    fd = None
+    try:
+        _same_gate_path(directory, directory_fd, directory=True)
+        key = hashlib.sha256(files.canonical(dict(root=str(root), **identity))).hexdigest() + '.lock'
+        try:
+            fd = os.open(key, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+                | (os.O_CREAT if create else 0), 0o600, dir_fd=directory_fd)
+        except FileNotFoundError:
+            if create:
+                raise
+            yield None
+            _same_gate_root(root, identity)
+            return
+        _same_gate_path(directory / key, fd, directory=False)
+        try:
+            fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise files.ArchiveError('An instance effect is still active or source read guard is active') from error
+        _same_gate_path(directory, directory_fd, directory=True)
+        _same_gate_path(directory / key, fd, directory=False)
+        _same_gate_root(root, identity)
+        value = dict(fd=fd, identity=identity, exclusive=exclusive, cold=cold)
+        token = _gates.set({**previous, str(root): value})
+        try:
+            yield value
+        finally:
+            _gates.reset(token)
+            _same_gate_root(root, identity)
+            _same_gate_path(directory, directory_fd, directory=True)
+            _same_gate_path(directory / key, fd, directory=False)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(directory_fd)
+
+
+@contextmanager
+def source_lease(root, *, create=True):
+    """Host-private EX fork guard; create=False probes without creating files.
+
+    This is same-user cooperation, not authorization or a sandbox. Gate files
+    are never removed or rotated: external deletion (including /tmp cleanup)
+    while any process lives invalidates the coordination guarantee. Existing
+    local locks/quiescence remain necessary for pre-upgrade running processes.
+    """
+    with _host_gate(root, exclusive=True, create=create) as value:
+        yield value
 
 
 def _read(path):
@@ -90,14 +203,21 @@ def require_owner(root):
 @contextmanager
 def lease(root):
     root = Path(root).absolute()
+    with _host_gate(root, exclusive=False):
+        with _owner_lease(root) as value:
+            yield value
+
+
+@contextmanager
+def _owner_lease(root):
     binding = _binding(root)
-    if binding is None:
-        yield None
-        return
     previous = _held.get()
     if str(root) in previous:
         require_owner(root)
         yield previous[str(root)]
+        return
+    if binding is None:
+        yield None
         return
     directory, _ = _anchor(binding)
     fd = os.open(directory / 'writer.lock', os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -217,6 +337,13 @@ def exclusive(root, *, binding=None):
     binding = _binding(root) if binding is None else binding
     if binding is None or str(root) in _held.get():
         raise files.ArchiveError('Explicit enrolled cold owner required, outside an effect lease')
+    with _host_gate(root, exclusive=True, cold=True, allow_missing=True):
+        with _exclusive_owner(root, binding) as value:
+            yield value
+
+
+@contextmanager
+def _exclusive_owner(root, binding):
     directory, _ = _anchor(binding)
     fd = os.open(directory / 'writer.lock', os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
