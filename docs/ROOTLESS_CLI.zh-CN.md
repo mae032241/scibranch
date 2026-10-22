@@ -704,6 +704,7 @@ W 的 `science-task.json` 会报告 `managed_execution_wait.wake_authorized`。
 
 `exp run/query/lookup/collect/reconcile/cancel` 的回执增加宿主生成的 `handoff` 投影，
 与宿主等待使用同一状态判定规则，不改原 accepted/terminal/seal：
+阻塞式执行器在调用内等待后返回回执，W 仍按返回的 `handoff` 行动，无需另选阻塞分支。
 `action=return_control` 表示原调用可查且已冻结唤醒能力，W 正常交回当前科学 JSON；
 `poll_original` 要求在同一 native turn 按 `poll_interval_seconds`（默认 1 秒）持续等待、
 查询同一原 ID；仍 pending 且可查时持续到交接指示改变，或实际原预算、时间、宿主停止

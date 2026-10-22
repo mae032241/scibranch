@@ -173,7 +173,7 @@ def test_default_cli_wakes_original_output_only_w_and_cannot_start_another_manag
     config,call=stop_at_waiting(root)
     work=c.workspace(root,2)
     capability=c.read(work/'science-task.json')['managed_execution_wait']
-    assert capability['wake_authorized'] is True and 'normal scientific JSON' in capability['instruction']
+    assert capability['wake_authorized'] is True and 'handoff.action and instruction' in capability['instruction']
     handoff=c.read(work/'work/executor-handoff.json')
     assert handoff['action']=='return_control' and handoff['call_id']==call
     assert str(home) not in json.dumps(capability)
@@ -414,8 +414,8 @@ def test_executor_handoff_without_wake_polls_past_three_until_same_call_terminal
     instruction=c.read(work/'science-task.json')['managed_execution_wait']['instruction']
     if retained_guidance:
         assert instruction==old_instruction
-        assert 'latest host-generated handoff rather than any older frozen query-count advice' in prompt
-        assert 'no frozen wake permission, original call identity or original budget' in prompt
+        assert 'Polling instructions supersede older query-count advice only' in prompt
+        assert 'frozen wake permission, original identity and budget remain binding' in prompt
         assert all(path.read_bytes()==raw for path,raw in originals.items())
     else:
         assert 'max_queries' not in instruction

@@ -293,16 +293,13 @@ def run_native(root: Path, step: int, attempt=0):
     # External W can configure its managed call after receiving this prompt.
     # A wake may consume an external original without configuring a new run.
     if job['role'] == 'W' and ('managed_execution_wait' in job or experiment_config is not None or intent.get('execution_wake')):
-        prompt += ('\nAfter every managed execution response, follow its host-generated handoff.action. '
-            'For polling instructions, follow the latest host-generated handoff rather than any older frozen query-count advice in science-task.json. '
-            'This changes no frozen wake permission, original call identity or original budget. '
-            'return_control means return your normal final scientific JSON now, explaining the pending original call and limitations; '
-            'the host monitors that original call without model polling and applies its frozen wake permission. Do not keep this native turn alive when instructed to return_control. '
-            'poll_original means keep waiting and querying only the exact original call in this native turn at the supplied '
-            'poll_interval_seconds while it remains pending and queryable. Continue until the handoff changes or an actual original budget, time or host-stop limit is reached; '
-            'there is no query-count limit. At an actual stop limit, return normal scientific JSON with the pending limitation. '
-            'consume_terminal means read the retained original outputs and finish your scientific interpretation. '
-            'reconcile_or_stop means preserve the original identity and reconcile once or report the blocker; a terminal status string alone is not verified consumption authority. Do not blindly poll or resubmit.\n')
+        prompt += ('\nFollow the latest executor response\'s host-generated handoff.action and instruction. '
+            'Polling instructions supersede older query-count advice only; frozen wake permission, original identity and budget remain binding. '
+            'return_control: return scientific JSON now with pending limitations. '
+            'poll_original: wait and query only that original call in this turn at poll_interval_seconds while pending and queryable, '
+            'until handoff changes or an actual original budget, time or host-stop limit is reached; no query-count cap. '
+            'consume_terminal: read original outputs and interpret the verified terminal result. '
+            'reconcile_or_stop: reconcile the same call once or report the obstacle; never blindly poll or resubmit.\n')
     if job['role'] == 'W' and not output_only_wake:
         prompt += ('\nAn optional engineering_check may follow a confirmed managed call while you remain in this task. Read its compact feedback and repair source in this same session when useful. '
             'sample_replay_ok covers only its declared sample path, never full training or audit qualification. Small-sample or bounded-check failures may be inconclusive. '
