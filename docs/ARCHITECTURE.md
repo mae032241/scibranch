@@ -328,10 +328,13 @@ preserving the original checkpoint and call.
 Executor receipts carry a compact host-generated `handoff.action`: `return_control`,
 `poll_original`, `consume_terminal`, or `reconcile_or_stop`. The same pure decision
 rule drives host waiting. Consumption requires a verified original terminal,
-not a returned status string. Polling advice specifies a one-second interval and
-three queries total for the same call in this turn, within the original budget;
-later receipts do not reset that bound. This is a Worker handoff contract and
-advice, not a forced scheduler or an added execution grant. New tasks freeze the
+not a returned status string. `poll_original` requires waiting and querying the
+same original call in the same native turn at a one-second interval while it is
+pending and queryable, until the handoff changes or an actual original budget,
+time or host-stop limit is reached. It has no query-count limit. Terminal status
+strings require same-call reconciliation before consumption; unknown or unavailable
+facts require reconciliation or an explicit obstacle instead of blind polling.
+This is a Worker handoff contract, not a forced scheduler or an added execution grant. New tasks freeze the
 handoff explanation literally; existing task and call originals remain unchanged.
 
 New `prepare` freezes `final_a_completion_policy` version 1. Each ordinary state

@@ -52,10 +52,15 @@ def test_narrow_wake_permission_preserves_legacy_full_resume():
 
 @pytest.mark.parametrize('state,bound,query,wake,verified,expected',[
     ('running',True,True,True,False,'return_control'),
+    ('running',True,True,False,False,'poll_original'),
+    ('accepted',True,True,False,False,'poll_original'),
+    ('submitted',True,True,False,False,'poll_original'),
     ('queued',True,True,False,False,'poll_original'),
     ('cancelling',True,True,False,False,'poll_original'),
     ('running',False,True,True,False,'reconcile_or_stop'),
     ('running',True,False,True,False,'reconcile_or_stop'),
+    ('running',True,False,False,False,'reconcile_or_stop'),
+    ('unknown',True,True,False,False,'reconcile_or_stop'),
     ('unknown',True,True,True,False,'reconcile_or_stop'),
     ('unknown',True,True,True,True,'reconcile_or_stop'),
     ('known_success',True,True,True,False,'reconcile_or_stop'),
@@ -66,6 +71,8 @@ def test_narrow_wake_permission_preserves_legacy_full_resume():
     ('known_failed',True,True,True,True,'consume_terminal'),
     ('failed',True,True,True,True,'consume_terminal'),
     ('cancelled',True,True,True,True,'consume_terminal'),
+    ('cancelled',True,True,False,False,'reconcile_or_stop'),
+    ('cancelled',True,True,False,True,'consume_terminal'),
 ])
 def test_executor_and_host_share_handoff_rules(state,bound,query,wake,verified,expected):
     from scidiscovery.research_loop import managed_wait

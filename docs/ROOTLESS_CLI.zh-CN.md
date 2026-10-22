@@ -705,13 +705,13 @@ W 的 `science-task.json` 会报告 `managed_execution_wait.wake_authorized`。
 `exp run/query/lookup/collect/reconcile/cancel` 的回执增加宿主生成的 `handoff` 投影，
 与宿主等待使用同一状态判定规则，不改原 accepted/terminal/seal：
 `action=return_control` 表示原调用可查且已冻结唤醒能力，W 正常交回当前科学 JSON；
-`poll_original` 只允许按 `poll_interval_seconds` 查询同一原 ID，
-当前 turn 对同一调用累计最多 `max_queries` 次（默认 1 秒、3 次），后续回执不重置计数，
-且仍须在原预算内；达到上限后交回 pending 限制。
+`poll_original` 要求在同一 native turn 按 `poll_interval_seconds`（默认 1 秒）持续等待、
+查询同一原 ID；仍 pending 且可查时持续到交接指示改变，或实际原预算、时间、宿主停止
+限制触发。没有查询次数上限，也不因查询达到任意次数而交回；实际限制触发时正常交回并保留 pending 限制。
 `consume_terminal` 仅在原终态已核验时要求消费原结果；
 `reconcile_or_stop` 要求核对同一原调用或报告障碍，禁止盲轮询和重提交。
 终态字符串本身不会得到消费指示；尚未核验时先用原 ID reconcile。
-这些是执行器与 W 的交接合同及有界建议，不是新的执行许可、额度或对任意模型的强制调度保证。
+这些是执行器与 W 的交接合同，不是新的执行许可、额度或对任意模型的强制调度保证。
 
 显式策略文件优先，包括 `output_repair: false` 或 JSON null 关闭默认补填。
 若需要已知失败后的普通 Worker 原线程续接，新 `prepare` 须同时传

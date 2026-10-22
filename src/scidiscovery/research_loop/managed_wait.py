@@ -25,8 +25,8 @@ def capability(root,job):
         unavailable_reason=None if allowed else ('worker_resume_unsupported' if limits is None else 'worker_execution_wake_unauthorized'),
         instruction=('Follow each executor response handoff.action; pending/running/queued/cancelling is not a terminal result. '
             'return_control means return your normal scientific JSON now with the original call and remaining limitations so the host can monitor the same call without a native turn. '
-            'poll_original permits only that call, at handoff.poll_interval_seconds and at most handoff.max_queries queries total for this call in this turn; later replies do not reset that bound. '
-            'Stop polling within the original budget; at the bound return the pending limitation normally. consume_terminal means interpret the original terminal result; reconcile_or_stop means preserve the original identity and reconcile once or report the unresolved obstacle, never blind polling or resubmission. '
+            'poll_original means keep waiting and querying only that same original call in this native turn at handoff.poll_interval_seconds while it remains pending and queryable, until the handoff changes or an actual original budget, time or host-stop limit is reached; there is no query-count limit. '
+            'At an actual stop limit, report the pending limitation normally. consume_terminal means interpret the verified original terminal result; reconcile_or_stop means preserve the original identity and reconcile once or report the unresolved obstacle, never blind polling or resubmission. '
             'If wake is authorized, verified original terminal facts may resume this same W session within its original attempts, permissions and budget; session availability is still checked at runtime. '
             'A narrow output-only wake interprets retained results and finalizes the response; it authorizes no new experiments or training. '
             'If wake is unavailable, report that limitation before choosing asynchronous work. Unknown submissions require same-call reconciliation, never resubmission.'))
@@ -99,8 +99,8 @@ def handoff(config,result,command,call_id=None):
                 'Return your normal scientific JSON now with this pending original call and its limitations. The host will preserve the unsealed checkpoint and monitor this same call without another native turn; terminal wake still requires the original session and budget.')
         if action=='reconcile_or_stop':return stop('original_terminal_unverified' if state in {'known_success','known_failed'} else 'original_state_or_query_unavailable')
         return hint(action,'host_wake_unavailable',
-            'Query only this original call at the stated interval, at most max_queries total for this call in this turn; later replies do not reset the bound. Stay within the original budget. At the bound return normal scientific JSON retaining the pending limitation; never resubmit.',
-            poll_interval_seconds=POLL_SECONDS,max_queries=3)
+            'Keep waiting and querying only this same original call in this native turn at the stated interval while it remains pending and queryable. Follow each new handoff until the original terminal is verified and consumed, or an actual original budget, time or host-stop limit requires returning the pending limitation. There is no query-count limit; unknown or unavailable facts require same-call reconciliation or reporting the obstacle, never blind polling or resubmission.',
+            poll_interval_seconds=POLL_SECONDS)
     except (OSError,ValueError,KeyError,TypeError):
         return stop('original_handoff_unverified')
 

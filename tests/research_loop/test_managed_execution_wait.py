@@ -16,7 +16,7 @@ from scidiscovery.research_loop import budget, contracts as c, controller, execu
 pytestmark = pytest.mark.process_e2e
 
 LAUNCHER = r'''import json,os,pathlib,subprocess,sys,time
-from scidiscovery.research_loop import experiments as e
+from scidiscovery.research_loop import budget,experiments as e
 args=sys.argv[1:];prompt=sys.stdin.read();work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE'])
 home=pathlib.Path(os.environ['THIN_HWA_NATIVE_HOME']);role=os.environ['THIN_HWA_ROLE']
 root=work.parents[2];step=int(work.name);resume='resume' in args
@@ -32,6 +32,7 @@ if role=='W':
  if nominations:
   payload['candidate_nominations']=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row['mechanism_ref'],reason='This transport fixture declares no scientifically suitable candidate; retain the missing scientific assessment.') for row in nominations if row['status']!='waived'])
  if not resume:
+  (work/'work/initial-prompt').write_text(prompt)
   options=json.loads((root/'fixture-options.json').read_text())
   config=e.configure(root,step,'composed_execution:fixture',options,work/'work/config.json')
   package=work/'work/package';package.write_bytes(b'opaque original job package')
@@ -45,16 +46,42 @@ if role=='W':
   (work/'work/original-call').write_text(result['call_id'])
   (work/'work/executor-handoff.json').write_text(json.dumps(result['handoff']))
   if options.get('follow_handoff') and result['handoff']['action']=='poll_original':
-   handoff=result['handoff'];queries=0
-   while queries<handoff['max_queries']:
-    time.sleep(handoff['poll_interval_seconds'])
+   handoff=result['handoff'];queries=[]
+   while handoff['action']=='poll_original':
+    assert 'max_queries' not in handoff
+    remaining=budget.snapshot(root)['seconds_remaining']
+    if remaining<=0:
+     (work/'work/poll-stop').write_text('shared_wall_budget')
+     break
+    time.sleep(min(handoff['poll_interval_seconds'],remaining))
+    if budget.snapshot(root)['seconds_remaining']<=0:
+     (work/'work/poll-stop').write_text('shared_wall_budget')
+     break
+    # Synthetic backend events occur only after several real same-call CLI queries.
+    number=len(queries)+1
+    if number==options.get('terminal_at_query'):e.load(config).complete(result['call_id'])
+    if number==options.get('unknown_at_query'):
+     path=e.Records(config).directory(result['call_id'])/'backend-accepted.json'
+     backend=json.loads(path.read_text());backend['state']='unknown';path.write_text(json.dumps(backend))
     query=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(work/'work/config.json'),'query','--call-id',result['call_id']],capture_output=True,text=True)
     assert query.returncode==0,(query.stdout,query.stderr)
-    next_handoff=json.loads(query.stdout)['handoff']
-    assert next_handoff['action']=='poll_original' and next_handoff['max_queries']==handoff['max_queries']
-    assert next_handoff['call_id']==result['call_id']
-    queries+=1
-   (work/'work/poll-count').write_text(str(queries))
+    handoff=json.loads(query.stdout)['handoff']
+    assert handoff['call_id']==result['call_id']
+    queries.append(handoff['call_id'])
+    (work/'work/poll-queries.json').write_text(json.dumps(queries))
+   if handoff['action']=='reconcile_or_stop':
+    reconciled=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(work/'work/config.json'),'reconcile','--call-id',result['call_id']],capture_output=True,text=True)
+    assert reconciled.returncode in (0,2),(reconciled.stdout,reconciled.stderr)
+    terminal=json.loads(reconciled.stdout);handoff=terminal['handoff']
+    assert handoff['call_id']==result['call_id']
+    (work/'work/reconciled-call').write_text(result['call_id'])
+    if handoff['action']=='consume_terminal':
+     observed=json.loads((e.Records(config).directory(result['call_id'])/'execution-observation.json').read_text())
+     outputs=e.scientific_outputs(config,observed)
+     for item in outputs:assert pathlib.Path(item.local_path).read_bytes()==b'opaque original job package'
+     (work/'work/consumed-output-count').write_text(str(len(outputs)))
+     (work/'work/consumed-result').write_text(terminal['status'])
+   (work/'work/final-handoff.json').write_text(json.dumps(handoff))
  else:
   assert thread in args and (work/'work/original-call').exists()
   assert 'original managed execution has finished' in prompt
@@ -77,7 +104,8 @@ if role=='W':
    denied=json.loads(forbidden.stdout)
    assert denied['status']=='unavailable' and 'Output-only execution wake' in denied['note']
    (work/'work/new-call-denied').write_text(denied['status'])
- payload.update(stage_intent='review' if resume else options.get('stage_intent','review'),mechanism_findings=[dict(mechanism='P',basis='observed' if resume else 'blocked',finding='Read exact original terminal' if resume else 'Original accepted execution still running'),dict(mechanism='Q',basis='blocked',finding='No Q experiment requested in this fixture')])
+ consumed=(work/'work/consumed-result').exists()
+ payload.update(stage_intent='review' if resume else options.get('stage_intent','review'),mechanism_findings=[dict(mechanism='P',basis='observed' if consumed else 'blocked',finding='Read exact original terminal' if consumed else 'Original accepted execution has no consumed terminal'),dict(mechanism='Q',basis='blocked',finding='No Q experiment requested in this fixture')])
 elif role=='A':
  payload.update(candidate_recommendation=None,progress_assessment=None,portfolio_review=None,search_review=dict(dispositions=[dict(mechanism_ref='h001.m1',status='screened',reason='Review original W result')],next_focus=dict(mechanism_ref='h001.m1',action='improve')),next_action='wait',route_reason='Bounded engineering test complete',decision_request=dict(decision='mechanism',question='What changes the mechanism?',change_criterion='A discriminating observation'))
 print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=10,cached_input_tokens=2,output_tokens=2))),flush=True)
@@ -350,17 +378,83 @@ def test_missing_session_capability_retains_checkpoint_without_fabricated_wake(t
     assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
 
 
-def test_executor_handoff_without_wake_uses_bounded_same_call_queries_then_returns(tmp_path,composed_registry):
-    root=instance(tmp_path,dict(collect=False,follow_handoff=True),resume=False)
-    result=json.loads(run_cli(root).stdout)
-    assert result['status']=='output_repair_unavailable' and result['reason']=='worker_resume_unsupported'
+@pytest.mark.parametrize('outcome,terminal_state,retained_guidance',[
+    ('known_success',None,False),('known_failed','failed',False),('known_failed','cancelled',False),
+    ('known_success',None,True),
+])
+def test_executor_handoff_without_wake_polls_past_three_until_same_call_terminal(tmp_path,monkeypatch,composed_registry,outcome,terminal_state,retained_guidance):
+    options=dict(collect=True,follow_handoff=True,terminal_at_query=5,terminal_status=outcome)
+    if terminal_state:options['terminal_state']=terminal_state
+    root=instance(tmp_path,options,resume=False)
+    originals={}
+    if retained_guidance:
+        from scidiscovery.research_loop import managed_wait
+        current_capability=managed_wait.capability
+        old_instruction=('poll_original permits only that call, at handoff.poll_interval_seconds and at most handoff.max_queries queries total for this call in this turn; later replies do not reset that bound.')
+        def old_capability(*args):
+            return dict(current_capability(*args),instruction=old_instruction)
+        source_job=c.read(root/'jobs/001.json');source_result=c.validate(c.workspace(root,1))
+        role,parents,instruction,evidence_return,_,_=controller._route(root,1,'H',source_result,source_job,None,None)
+        with monkeypatch.context() as patch:
+            patch.setattr(managed_wait,'capability',old_capability)
+            frozen=c.build_job(root,2,role,parents,instruction=instruction,evidence_return=evidence_return)
+        paths=(root/'jobs/002.json',c.workspace(root,2)/'science-task.json')
+        originals={path:path.read_bytes() for path in paths}
+        assert c.build_job(root,2,role,parents,instruction=instruction,evidence_return=evidence_return)==frozen
+        assert frozen['managed_execution_wait']['wake_authorized'] is False
+        assert all(path.read_bytes()==raw for path,raw in originals.items())
+    reply=run_cli(root);result=json.loads(reply.stdout)
+    assert reply.returncode==0 and result['status']=='wait',(reply.stdout,reply.stderr)
     work=c.workspace(root,2);handoff=c.read(work/'work/executor-handoff.json')
     assert handoff['action']=='poll_original' and handoff['poll_interval_seconds']==1
-    assert int((work/'work/poll-count').read_text())==handoff['max_queries']==3
-    config=c.read(execution.origin(root,2)/'experiment-config.json')
+    assert 'max_queries' not in handoff
+    prompt=(work/'work/initial-prompt').read_text()
+    assert 'handoff.action' in prompt and 'poll_original' in prompt and 'poll_interval_seconds' in prompt
+    assert 'max_queries' not in prompt
+    instruction=c.read(work/'science-task.json')['managed_execution_wait']['instruction']
+    if retained_guidance:
+        assert instruction==old_instruction
+        assert 'latest host-generated handoff rather than any older frozen query-count advice' in prompt
+        assert 'no frozen wake permission, original call identity or original budget' in prompt
+        assert all(path.read_bytes()==raw for path,raw in originals.items())
+    else:
+        assert 'max_queries' not in instruction
+    call=(work/'work/original-call').read_text()
+    assert c.read(work/'work/poll-queries.json')==[call]*5
+    assert (work/'work/reconciled-call').read_text()==call
+    assert c.read(work/'work/final-handoff.json')['action']=='consume_terminal'
+    assert (work/'work/consumed-result').read_text()==outcome
+    assert (work/'work/consumed-output-count').read_text()=='1'
+    record=execution.origin(root,2);config=c.read(record/'experiment-config.json')
     assert len(e.Records(config).calls())==len(execution.records(root,2))==1
-    assert (execution.origin(root,2)/'execution-wait.json').exists()
-    assert not (execution.origin(root,2)/'result-identity.json').exists()
+    assert (work/'work/launches').read_text()=='exec\n'
+    assert not (record/'execution-wait.json').exists() and (record/'result-identity.json').exists()
+    observed=c.read(e.Records(config).directory(call)/'execution-observation.json')
+    e.verify_observation(observed,lambda item:Path(item['path']),interface=config['execution_interface'])
+    if terminal_state:assert observed['native_state']==terminal_state
+    seal=c.read(record/'result-identity.json');fact=c.read(root/seal['observations']['path'])
+    assert fact['managed_calls'][0]['status']==outcome
+    assert json.loads(run_cli(root).stdout)['status']=='wait'
+    assert len(e.Records(config).calls())==len(execution.records(root,2))==1
+    assert all(path.read_bytes()==raw for path,raw in originals.items())
+
+
+def test_executor_handoff_without_wake_stops_on_unknown_same_call_after_three_queries(tmp_path,composed_registry):
+    root=instance(tmp_path,dict(collect=False,follow_handoff=True,unknown_at_query=5),resume=False)
+    reply=run_cli(root)
+    assert reply.returncode==0,(reply.stdout,reply.stderr)
+    work=c.workspace(root,2);call=(work/'work/original-call').read_text()
+    assert c.read(work/'work/poll-queries.json')==[call]*5
+    assert (work/'work/reconciled-call').read_text()==call
+    assert c.read(work/'work/final-handoff.json')['action']=='reconcile_or_stop'
+    assert not (work/'work/consumed-result').exists()
+    record=execution.origin(root,2);config=c.read(record/'experiment-config.json')
+    assert len(e.Records(config).calls())==len(execution.records(root,2))==1
+    assert (work/'work/launches').read_text()=='exec\n'
+    assert not (record/'execution-wait.json').exists()
+    seal=c.read(record/'result-identity.json');fact=c.read(root/seal['observations']['path'])
+    assert fact['managed_calls'][0]['status']=='unknown'
+    assert not (e.Records(config).directory(call)/'execution-observation.json').exists()
 
 
 def test_bridge_cached_pending_response_requests_reconciliation_without_rewriting_originals(tmp_path,composed_registry,monkeypatch):
