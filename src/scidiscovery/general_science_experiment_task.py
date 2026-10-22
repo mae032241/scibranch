@@ -594,7 +594,8 @@ GOAL_VALIDATOR = CallableComponent("validator", validate_goal_inputs)
 from .operations.workspace import WorkspaceFinalizer
 from .plugin_runtime.results import result_draft_schema, RESULT_PROJECTION_VERSION
 FINALIZER = CallableComponent("workspace_finalizer", WorkspaceFinalizer(
-    finalize, result_draft_schema, RESULT_PROJECTION_VERSION))
+    finalize, result_draft_schema, RESULT_PROJECTION_VERSION,
+    predecessor=("scidiscovery.general_science_experiment_task:FINALIZER", "4")))
 STAGE_TOOL = WorkerToolDefinition(name="worker_experiment_stage",
     description="Seal a stage conclusion and exact scientific materials. Reuse conclusion, remaining_question and materials to explain the question, change, observation and its effect on the next trial or handoff; no submission is required for each exp run. Optional design prediction_declaration freezes a prediction/criterion/conditions; optional validity comparison reads that exact declaration and actual observations. Handler checks structure and exact bindings; original declaration receipt is additionally checked when the final report adopts the comparison (bind the declaration as scientific_materials). Sealing alone is a preview, not scientific correctness or final validation; not_run does not test a prediction. Returns a local reference and immutable artifact_name; continue working after sealing.",
     input_model=DraftStageSubmission, capability="experiment.stage", contextual_handler=submit_stage, owner_only=True,

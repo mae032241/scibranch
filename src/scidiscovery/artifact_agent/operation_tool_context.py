@@ -84,9 +84,9 @@ class OperationToolContext:
             raise ValueError("tool has no source descriptor projection")
         return self._source_descriptor(name)
 
-    def complete_calculation(self, record, *, diagnostics=(), summary=False) -> dict:
+    def complete_calculation(self, record, *, diagnostics=(), public_result=None) -> dict:
         from ..operations.analysis_artifacts import complete_calculation
-        return complete_calculation(self, record, diagnostics=diagnostics, summary=summary)
+        return complete_calculation(self, record, diagnostics=diagnostics, public_result=public_result)
 
     def publish_analysis_file(self, raw, *, media_type, kind, sources, suffix, metadata=None) -> dict:
         from ..operations.analysis_artifacts import publish_analysis_file

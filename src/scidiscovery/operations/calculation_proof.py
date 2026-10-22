@@ -18,17 +18,24 @@ class ControlledCalculationRecord(CalculationResult):
     diagnostics: tuple[ContractDiagnostic, ...] = Field(default=(), max_length=8)
 
 
-def scientific_calculation(record):
+def _is_projection(public, original):
+    """A registered tool may omit fields, never alter scientific values."""
+    if isinstance(original, dict):
+        return isinstance(public, dict) and all(
+            key in original and _is_projection(value, original[key]) for key, value in public.items())
+    if isinstance(original, list):
+        return isinstance(public, list) and len(public) == len(original) and all(
+            _is_projection(value, source) for value, source in zip(public, original))
+    return canonical_json(public) == canonical_json(original)
+
+
+def scientific_calculation(record, *, public_result=None):
     """Project this declared record; user science dictionaries are not filtered."""
     value = record.model_dump(mode="json", exclude={"input_digests", "attempt", "diagnostics"})
-    result = value.get("result")
-    if isinstance(result, dict):
-        # These keys belong to the registered curve algorithms' identity envelope.
-        if record.algorithm_version.startswith(("analysis-curve-", "tcad-")):
-            for target in (result, result.get("metric_report"), result.get("localization")):
-                if isinstance(target, dict):
-                    for key in ("curve_bundle_sha256", "comparison_spec_sha256", "validation_plan_sha256"):
-                        target.pop(key, None)
+    if public_result is not None:
+        if not _is_projection(public_result, value.get("result")):
+            raise ValueError("calculation public result must only omit fields from the recorded result")
+        value["result"] = public_result
     return value
 
 
@@ -39,8 +46,21 @@ def controlled_calculation(raw, receipt):
         raise ValueError("calculation has no sealed control proof")
     record = ControlledCalculationRecord.model_validate_json(canonical_json(proof))
     import json
-    if canonical_json(scientific_calculation(record)) != canonical_json(json.loads(raw)):
+    actual = json.loads(raw)
+    expected = scientific_calculation(record)
+    if (not isinstance(actual, dict) or "result" not in actual
+            or not _is_projection(actual["result"], expected.get("result"))
+            or canonical_json({**actual, "result": expected.get("result")}) != canonical_json(expected)):
         raise ValueError("calculation scientific material differs from its sealed proof")
+    public_digest = receipt.get("metadata", {}).get("calculation_public_sha256")
+    if public_digest is None and canonical_json(actual) != canonical_json(expected):
+        # Historical receipts sealed the public file identity with the complete
+        # record, before explicit public projections had their own digest.
+        public_digest = receipt.get("artifact_ref", {}).get("sha256")
+        if public_digest is None:
+            raise ValueError("calculation public projection has no sealed original identity")
+    if public_digest is not None and hashlib.sha256(raw).hexdigest() != public_digest:
+        raise ValueError("calculation scientific material differs from its sealed public identity")
     return record
 
 

@@ -56,6 +56,34 @@ def test_generic_score_replays_exact_values_without_contract():
         replay_calculation(record, {'curve_bundle': sources['curve_bundle'] + b' '})
 
 
+def test_curve_plugin_keeps_historical_public_bytes_and_complete_private_result(tmp_path):
+    from types import SimpleNamespace
+    from curve_score.analysis_tool import complete_curve_calculation
+    from scidiscovery.operations.analysis_artifacts import complete_calculation
+    from scidiscovery.operations.calculation_proof import controlled_calculation
+    sources, request = score_inputs()
+    record = evaluate_analysis_request(record_key='score', request=request, sources=sources)
+    assert record.status == 'computed'
+    saved = {}
+    def accept_evidence(**kwargs):
+        saved.update(kwargs)
+        return {'alias': 'saved_calculation'}
+    context = SimpleNamespace(workspace=tmp_path, accept_evidence=accept_evidence,
+        finish_attempt=lambda **kwargs: None, input_names_for_port=lambda port: ())
+    context.complete_calculation = lambda record, **kwargs: complete_calculation(context, record, **kwargs)
+    reply = complete_curve_calculation(context, record)
+    expected = record.model_dump(mode='json', exclude={'input_digests', 'diagnostics'})
+    for key in ('curve_bundle_sha256', 'comparison_spec_sha256', 'validation_plan_sha256'):
+        expected['result'].pop(key, None)
+    assert saved['raw'] == canonical_json(expected)
+    restored = controlled_calculation(saved['raw'], {'metadata': saved['metadata']})
+    assert restored.result == record.result
+    assert reply['calculation_ref'] == 'saved_calculation'
+    assert reply['summary']['comparison_count'] == len(record.result['comparisons'])
+    assert reply['summary']['interpretation_boundary'] == 'deterministic_metrics_only_no_physical_interpretation'
+    assert 'result' not in reply
+
+
 @pytest.mark.parametrize('change', ['metric', 'samples', 'work'])
 def test_invalid_comparisons_are_rejected_before_calculation(change):
     sources, request = score_inputs()

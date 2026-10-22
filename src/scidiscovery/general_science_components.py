@@ -404,7 +404,8 @@ class Components:
 from .plugin_runtime.results import finalize_general_result, result_draft_schema, RESULT_PROJECTION_VERSION
 from .operations.workspace import WorkspaceFinalizer
 RESULT_FINALIZER = CallableComponent("workspace_finalizer", WorkspaceFinalizer(
-    finalize_general_result, result_draft_schema, RESULT_PROJECTION_VERSION))
+    finalize_general_result, result_draft_schema, RESULT_PROJECTION_VERSION,
+    predecessor=("scidiscovery.general_science_components:RESULT_FINALIZER", "4")))
 WORKSPACE = WorkspaceContract()
 
 

@@ -134,10 +134,18 @@ class WorkspaceFinalizer:
     # including hidden inputs. This is a trusted control hook: it must project
     # scientific content without exposing private input aliases or bindings.
     draft_input_ports: tuple[str, ...] = ()
+    # One exact pre-migration identity, interpreted read-only by the catalog.
+    # The old implementation path and projection version are not executable
+    # aliases for this hook and do not grant recovery to a different contract.
+    predecessor: tuple[str, str] | None = None
 
     def __post_init__(self) -> None:
         if not callable(self.implementation) or not callable(self.draft_schema) or not self.projection_version:
             raise ValueError("finalizer projection requires both implementations and a version")
+        if self.predecessor is not None and (not isinstance(self.predecessor, tuple)
+                or len(self.predecessor) != 2
+                or any(not isinstance(value, str) or not value for value in self.predecessor)):
+            raise ValueError("finalizer predecessor requires an implementation path and projection version")
 
     def __call__(self, request: WorkspaceFinalizationRequest) -> bytes:
         return self.implementation(request)

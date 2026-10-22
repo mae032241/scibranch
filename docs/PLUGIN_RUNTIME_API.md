@@ -151,7 +151,7 @@ setting its underscore-prefixed callback fields:
 | Declared inputs | `input_names_for_port(port)`, `read_input(name)`, `input_path(name)`, `input_media_type(name)`, `input_ref(name)`, `source_descriptor(name)`, read-only `prior_source_bindings` |
 | Declared services and access | `require_service(name)` over the supplied read-only `services`; `read_reference(request)`, `reserve_network_request(url)`. Missing permissions reject access; importing the context grants none. |
 | Evidence collection | `io_budget(**values)`, `evidence()`, `read_evidence(name)`, `accept_evidence(**values)`, `adopt_bound_evidence(manifest_alias)`, `publish_files(request)`. Budget/registration arguments follow the declared tool's collection contract; adoption verifies the exact bound family. |
-| Scientific calculation | `complete_calculation(record, *, diagnostics=(), summary=False)`, `publish_analysis_file(raw, *, media_type, kind, sources, suffix, metadata=None)`, `publish_calculation_checkpoint(raw, *, algorithm_version, record_key, sources, numerical_identity)`, `read_calculation_checkpoint(alias, *, algorithm_version, tool_names, sources, max_bytes)` |
+| Scientific calculation | `complete_calculation(record, *, diagnostics=(), public_result=None)`, `publish_analysis_file(raw, *, media_type, kind, sources, suffix, metadata=None)`, `publish_calculation_checkpoint(raw, *, algorithm_version, record_key, sources, numerical_identity)`, `read_calculation_checkpoint(alias, *, algorithm_version, tool_names, sources, max_bytes)` |
 
 `run_id`, `operation_id`, `tool_attempts`, `finish_attempt`, `execution_scope` and
 `recovery_authorized` are control/host plumbing on that object, not general plugin
@@ -397,7 +397,19 @@ Algorithms return `CalculationResult`: scientific request/result/status, exact n
 input hashes and bounded safe diagnostics. Existing hashes support numerical replay;
 they are not Agent fields or private receipts. `complete_calculation` on the supplied
 tool context creates the actual attempt result and seals the private record. Control
-checks those hashes against sources actually read. `verified_calculations(report)` on
+checks those hashes against sources actually read. A plugin may pass `public_result`
+as an explicit projection of `record.result`: dictionaries may omit fields, while
+retained values and list lengths/order must remain exact. The plugin owns scientific
+summaries and domain-private field removal. Control verifies this omission-only
+projection, retains the complete private record and binds the exact public bytes.
+The former `summary` flag is removed. Historical projected records require their
+original artifact SHA when they lack an explicit public-byte digest; a receipt
+without that identity is rejected rather than reinterpreted by domain prefixes.
+`WorkspaceFinalizer.predecessor` retains the exact prior finalizer path and
+projection identity for read-only historical contract interpretation. It does not
+provide historical draft projection, execution or automatic recovery into the
+current contract; those actions reject the historical finalizer explicitly.
+`verified_calculations(report)` on
 the validation sources verifies receipts/origins before returning result values; it
 never returns attempts or recovery state. Both contexts implement the public structural
 protocols without a second service registry.

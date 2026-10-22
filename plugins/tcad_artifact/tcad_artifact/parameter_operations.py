@@ -1,5 +1,6 @@
 """One complete parameter evidence task with optional deterministic checks."""
 from __future__ import annotations
+from copy import deepcopy
 import json
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,33 @@ from .device_parameters import (DeviceParameterCoverageReport, DeviceParameterRe
     EvidenceSourceCatalog, evaluate_device_parameter_coverage, project_parameter_uncertainty)
 
 EXTRACT_OPERATION = "tcad.parameter.evidence.extract.v1"
+PARAMETER_RESULT_COPIES = {
+    '/payload/scientific_intake/problem_frame/objective': '/payload/scientific_intake/scientific_foundation/objective',
+    '/payload/scientific_intake/scientific_foundation/objective_contract/statement': '/payload/scientific_intake/scientific_foundation/objective',
+    '/handoff/summary': '/payload/scientific_intake/scientific_foundation/summary',
+    '/handoff/missing_inputs': '/payload/scientific_intake/scientific_foundation/missing_inputs',
+    '/handoff/assumptions': '/payload/scientific_intake/problem_frame/assumptions',
+}
+
+
+def parameter_draft_schema(envelope, schema_id, ports=None):
+    from scidiscovery.plugin_runtime.results import result_draft_schema
+    if schema_id != "scidiscovery.parameter-evidence-package.v1":
+        return result_draft_schema(envelope, schema_id, ports)
+    result = result_draft_schema(envelope, schema_id, ports, copies=PARAMETER_RESULT_COPIES)
+    payload = result['properties']['payload']
+    payload['properties'].pop('coverage', None)
+    payload['required'] = [name for name in payload.get('required', ()) if name != 'coverage']
+    definitions = payload['$defs']
+    entry = definitions['EvidenceSourceCatalogEntry']
+    with_doi, without_doi = deepcopy(entry), deepcopy(entry)
+    with_doi['properties'].pop('work_key')
+    with_doi['required'] = [name for name in with_doi['required'] if name != 'work_key'] + ['doi']
+    with_doi['properties']['doi'] = {'type': 'string', 'minLength': 3, 'maxLength': 512}
+    without_doi['properties']['doi'] = {'type': 'null'}
+    without_doi['properties']['work_key']['description'] = 'Scientific identity of one underlying work without a DOI; group mirrors and pages from that same work.'
+    definitions['EvidenceSourceCatalogEntry'] = {'oneOf': [with_doi, without_doi]}
+    return result
 
 def _schema(model: type[BaseModel], schema_id: str) -> str:
     value = model.model_json_schema(mode="validation")
@@ -57,7 +85,7 @@ def _materialize_parameter_draft(payload):
 
 def _finalize_parameter_result(request):
     from scidiscovery.plugin_runtime.results import (
-        finalize_result, materialize_general_result, validate_finalizer_payload,
+        finalize_result, materialize_general_result, project_result_copies, validate_finalizer_payload,
     )
     def project(value):
         materialize_general_result(value, request.output_schema_id)
@@ -68,6 +96,7 @@ def _finalize_parameter_result(request):
         package = validate_finalizer_payload(ParameterEvidencePackage, payload)
         payload["coverage"] = evaluate_device_parameter_coverage(package.parameter_requirements,
             package.device_parameters, package.source_catalog).model_dump(mode="json")
+        project_result_copies(value, request.output_schema_id, copies=PARAMETER_RESULT_COPIES)
     return finalize_result(request, project)
 
 def _strict(model: type[BaseModel]):
@@ -161,9 +190,10 @@ def check_parameters(request, context):
         "interpretation": "Deterministic parameter checks; no qualification or scientific approval."}
 
 from scidiscovery.operations.workspace import WorkspaceFinalizer
-from scidiscovery.plugin_runtime.results import result_draft_schema, RESULT_PROJECTION_VERSION
+from scidiscovery.plugin_runtime.results import RESULT_PROJECTION_VERSION
 PARAMETER_RESULT_FINALIZER = CallableComponent("workspace_finalizer", WorkspaceFinalizer(
-    _finalize_parameter_result, result_draft_schema, RESULT_PROJECTION_VERSION))
+    _finalize_parameter_result, parameter_draft_schema, RESULT_PROJECTION_VERSION + ".tcad-parameters-1",
+    predecessor=("tcad_artifact.parameter_operations:PARAMETER_RESULT_FINALIZER", "4")))
 PARAMETER_PACKAGE_SCHEMA = _schema(ParameterEvidencePackage, "scidiscovery.parameter-evidence-package.v1")
 PACKAGE_VALIDATOR = CallableComponent("validator", _strict(ParameterEvidencePackage))
 EXTRACT_CONTEXT_VALIDATOR = CallableComponent("validator", validate_extract_context)

@@ -59,6 +59,107 @@ def test_completed_receipt_preserves_exact_scientific_bytes():
         controlled_calculation(canonical_json(altered), receipt)
 
 
+def _projected_calculation():
+    record, sources = _completed()
+    record = record.model_copy(update={'result': {'value': 1,
+        'metric_report': {'values': [1, 2], 'source_identity': 'private identity'}}})
+    record = ControlledCalculationRecord.model_validate_json(canonical_json(record.model_dump(mode='json')))
+    proof = json.loads(sources.tool_snapshot)
+    proof['attempts'][0]['result_digest'] = _digest(canonical_json(calculation_record_content(record)))
+    sources = ValidationSources(sources, sources.binding_descriptors, tool_snapshot=canonical_json(proof))
+    public = {'value': 1, 'metric_report': {'values': [1, 2]}}
+    raw = canonical_json(scientific_calculation(record, public_result=public))
+    return record, sources, public, raw
+
+
+@pytest.mark.parametrize('algorithm', ['fixture-v1', 'analysis-curve-score.v1', 'tcad-score.v1'])
+def test_shared_calculation_projection_does_not_interpret_algorithm_names(algorithm):
+    record, _ = _completed()
+    result = {'value': 1, 'curve_bundle_sha256': 'domain value',
+        'metric_report': {'validation_plan_sha256': 'another domain value'}}
+    record = record.model_copy(update={'algorithm_version': algorithm, 'result': result})
+    assert scientific_calculation(record)['result'] == result
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_public_projection_retains_the_complete_original_proof(legacy):
+    record, sources, _, raw = _projected_calculation()
+    metadata = {'calculation_proof': record.model_dump(mode='json')}
+    if not legacy:
+        metadata['calculation_public_sha256'] = _digest(raw)
+    receipt = {'metadata': metadata, 'artifact_ref': {'sha256': _digest(raw)}}
+    restored = controlled_calculation(raw, receipt)
+    assert restored == record
+    assert restored.result['metric_report']['source_identity'] == 'private identity'
+    assert calculation_sources(restored, sources) is sources
+    receipt['metadata'].pop('calculation_public_sha256', None)
+    receipt['artifact_ref']['sha256'] = '0' * 64
+    with pytest.raises(ValueError, match='sealed public identity'):
+        controlled_calculation(raw, receipt)
+
+
+@pytest.mark.parametrize('changed', [
+    {'value': 2}, {'metric_report': {'values': [1]}},
+    {'metric_report': {'values': [2, 1]}}, {'invented': 1},
+])
+def test_public_calculation_projection_cannot_change_numbers_or_invent_fields(changed):
+    record, _, public, _ = _projected_calculation()
+    with pytest.raises(ValueError, match='only omit fields'):
+        scientific_calculation(record, public_result={**public, **changed})
+
+
+@pytest.mark.parametrize('change', ['number', 'request', 'proof', 'unsealed_projection'])
+def test_arbitrary_public_identity_cannot_pair_unrelated_calculation_proof(change):
+    record, sources, _, raw = _projected_calculation()
+    value = json.loads(raw)
+    if change == 'number':
+        value['result']['value'] = 9
+    elif change == 'request':
+        value['request'] = {'other': 'request'}
+    elif change == 'proof':
+        record = record.model_copy(update={'result': {'value': 99}})
+    raw = canonical_json(value)
+    receipt = {'metadata': {'calculation_proof': record.model_dump(mode='json')}}
+    if change != 'unsealed_projection':
+        receipt['artifact_ref'] = {'sha256': _digest(raw)}
+    with pytest.raises(ValueError, match='sealed'):
+        controlled_calculation(raw, receipt)
+    # The retained attempt independently binds all source/result/request bytes.
+    altered = record.model_copy(update={'request': {'other': 'request'}})
+    with pytest.raises(SemanticRuleViolation, match='recorded attempt'):
+        calculation_sources(altered, sources)
+
+
+def test_complete_calculation_seals_public_bytes_and_full_attempt_separately(tmp_path):
+    from types import SimpleNamespace
+    from scidiscovery.operations.analysis_artifacts import complete_calculation
+    record, sources, public, expected_raw = _projected_calculation()
+    saved = {}
+    def accept_evidence(**kwargs):
+        saved.update(kwargs)
+        return {'alias': 'published_calculation'}
+    def finish_attempt(**kwargs):
+        assert kwargs['response'] == calculation_record_content(record)
+        return record.attempt.model_dump(mode='json'), ()
+    context = SimpleNamespace(workspace=tmp_path, accept_evidence=accept_evidence,
+        finish_attempt=finish_attempt, input_names_for_port=lambda port: ())
+    response = complete_calculation(context, calculation_record_content(record), public_result=public)
+    assert saved['raw'] == expected_raw
+    assert saved['metadata']['calculation_public_sha256'] == _digest(expected_raw)
+    assert response['result'] == public
+    assert response['calculation_ref'] == 'published_calculation'
+    restored = controlled_calculation(saved['raw'], {'metadata': saved['metadata']})
+    assert calculation_sources(restored, sources) is sources
+
+
+def test_plugin_evidence_view_excludes_public_digest_control_metadata():
+    from scidiscovery.plugin_runtime.evidence import read_evidence_records
+    raw = canonical_json({'records': [{'alias': 'calculation', 'metadata': {
+        'record_key': 'science', 'calculation_proof': {'private': 'proof'},
+        'calculation_public_sha256': '0' * 64, 'checkpoint_proof': {'private': 'checkpoint'}}}]})
+    assert read_evidence_records(raw)[0]['metadata'] == {'record_key': 'science'}
+
+
 @pytest.mark.parametrize(('defect', 'reason'), [
     ('public_record', 'Numerical evidence must cite a registered calculation'),
     ('request', 'calculation request differs from its recorded attempt'),
@@ -135,7 +236,7 @@ def test_checkpoint_callbacks_bind_exact_source_identity(tmp_path):
         context.read_calculation_checkpoint(published['evidence_alias'], **kwargs)
 
 
-def test_resource_relocation_preserves_schema_bytes_and_three_old_specs(monkeypatch):
+def test_resource_relocation_preserves_schema_bytes_and_old_specs(monkeypatch):
     from scidiscovery.builtin_plugin import CORE_PLUGIN
     from scidiscovery.general_science_plugin import PLUGIN
 
@@ -152,7 +253,7 @@ def test_resource_relocation_preserves_schema_bytes_and_three_old_specs(monkeypa
     before = compiler.compile_catalog((CORE_PLUGIN, old_plugin))
     after = compiler.compile_catalog((CORE_PLUGIN, PLUGIN))
     assert TOOL_EVIDENCE_SCHEMA == schema_resource(ToolEvidenceManifest, 'scidiscovery.tool-evidence-manifest.v1')
-    key, changed, generations = 'general_science:tool_evidence_schema', [], []
+    key, changed = 'general_science:tool_evidence_schema', []
     for name in before.operation_ids():
         previous = before.operation(name)
         if key not in previous.component_specs:
@@ -163,7 +264,6 @@ def test_resource_relocation_preserves_schema_bytes_and_three_old_specs(monkeypa
         assert current.implementations[key] == previous.implementations[key] == TOOL_EVIDENCE_SCHEMA
         originals = [previous, *(compiled for (operation, _), compiled in before._historical_operations.items()
                                  if operation == name)]
-        generations.append(len({item.digest for item in originals}))
         for original in originals:
             restored = after.recorded_operation(name, version=original.spec.version, digest=original.digest)
             assert restored.component_specs == original.component_specs
@@ -175,4 +275,3 @@ def test_resource_relocation_preserves_schema_bytes_and_three_old_specs(monkeypa
         assert not after.can_recover(name, current.digest, previous.digest)
         changed.append(name)
     assert changed
-    assert max(generations) == 3

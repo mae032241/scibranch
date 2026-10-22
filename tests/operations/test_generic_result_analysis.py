@@ -10,6 +10,7 @@ from scidiscovery.operation_contract import SemanticRuleViolation
 from scidiscovery.operations.input_validation import ValidationSources
 from scidiscovery.operations.workspace import WorkspaceFinalizationRequest, WorkspaceProtocolError
 from scidiscovery.plugin_runtime.results import finalize_general_result, result_draft_schema
+from curve_score.analysis_workspace import analysis_draft_schema
 from tests.operations.test_hypothesis_objective_boundary import _proposal
 
 
@@ -156,12 +157,13 @@ def test_structured_objective_assessment_still_requires_exact_key(key):
     assert caught.value.details[0]['path'] == '$.objective_assessment.objective_key'
 
 
-@pytest.mark.parametrize('ports, authored_key', [
-    ({'portfolio': 'hypothesis_portfolio'}, False),
-    ({'plan': 'experiment_plan'}, True),
-    ({'package': 'curve_analysis_package'}, True),
+@pytest.mark.parametrize('project, ports, authored_key', [
+    (result_draft_schema, {'portfolio': 'hypothesis_portfolio'}, False),
+    (result_draft_schema, {'plan': 'experiment_plan'}, True),
+    (result_draft_schema, {'package': 'curve_analysis_package'}, False),
+    (analysis_draft_schema, {'package': 'curve_analysis_package'}, True),
 ])
-def test_only_generic_analysis_projects_objective_identity_from_authoring_schema(ports, authored_key):
+def test_analysis_owner_projects_objective_identity_from_authoring_schema(project, ports, authored_key):
     from scidiscovery.artifact_agent.schema.layered_diagnosis import LayeredDiagnosisReport
     from scidiscovery.artifact_agent.schema.role_result import RoleHandoff
     resource = LayeredDiagnosisReport.model_json_schema()
@@ -169,9 +171,27 @@ def test_only_generic_analysis_projects_objective_identity_from_authoring_schema
     envelope = {'$defs': {'RoleHandoff': RoleHandoff.model_json_schema()},
         'properties': {'payload': resource, 'handoff': {'$ref': '#/$defs/RoleHandoff'}},
         'required': ['payload', 'handoff']}
-    draft = result_draft_schema(envelope, 'scidiscovery.layered-diagnosis.v1', ports)
+    draft = project(envelope, 'scidiscovery.layered-diagnosis.v1', ports)
     assessment = draft['properties']['payload']['$defs']['ObjectiveDiagnosisAssessment']
     assert ('objective_key' in assessment['properties']) is authored_key
     assert {'status', 'summary'} <= set(assessment['required'])
     assert 'evidence_keys' in assessment['properties']
     assert 'objective_key' in envelope['properties']['payload']['$defs']['ObjectiveDiagnosisAssessment']['properties']
+
+
+def test_curve_finalizer_keeps_package_plan_identities_without_a_generic_portfolio(tmp_path):
+    from curve_score.analysis_workspace import finalize_analysis_result
+    value = dict(payload=payload(plan_key='exact_plan', experiment_key='exact_experiment',
+        objective_assessment=dict(objective_key='exact_objective', status='inconclusive',
+            summary='No full objective verdict.')))
+    path = tmp_path / 'output' / 'result.json'
+    path.parent.mkdir()
+    original = canonical_json(value)
+    path.write_bytes(original)
+    request = WorkspaceFinalizationRequest(operation_id='fixture', workspace=tmp_path,
+        input_paths={}, output_limit_bytes=65536, output_schema_id='scidiscovery.layered-diagnosis.v1',
+        binding_descriptors={'package': SimpleNamespace(port_name='curve_analysis_package')})
+    result = json.loads(finalize_analysis_result(request))
+    assert result['payload'] == value['payload']
+    assert result['handoff']['verdict'] == 'inconclusive'
+    assert path.read_bytes() == original

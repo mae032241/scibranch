@@ -96,10 +96,14 @@ class CompiledCatalog:
 
     def can_recover(self, operation_id: str, source_digest: str, target_digest: str) -> bool:
         # Only explicitly reconstructed resource/reader/evidence-limit predecessors may
-        # advance to today's contract. No arbitrary digest aliases or downgrade.
+        # advance to today's contract. A changed finalizer is read-only, not a
+        # recovery promise or an executable alias for its installed successor.
+        historical = self._historical_operations.get((operation_id, source_digest))
         return (source_digest == target_digest or
-            ((operation_id, source_digest) in self._historical_operations
-             and self._operations[operation_id].digest == target_digest))
+            (historical is not None and self._operations[operation_id].digest == target_digest
+             and not any(spec.kind == 'workspace_finalizer'
+                 and getattr(historical.implementations[key], 'implementation', None) is _historical_finalizer_unavailable
+                 for key, spec in historical.component_specs.items())))
     def operation_ids(self) -> tuple[str, ...]: return tuple(self._operations)
     def scheduler_projection(self) -> tuple[SchedulerOperationView, ...]: return tuple(scheduler_operation_view(item.spec) for item in self._operations.values())
     def runtime_factory(self, plugin_id: str) -> RuntimePluginFactory:
@@ -967,6 +971,72 @@ def _build_compiled_catalog(plugin_map: Mapping[str, PluginDefinition], componen
         runtime_configuration_digests,
         runtime_identity_digests,
     )
+def _historical_finalizer_unavailable(*args, **kwargs):
+    from .workspace import WorkspaceProtocolError
+    raise WorkspaceProtocolError('Historical finalizer contracts are read-only; use an explicitly selected current contract for new drafts.')
+
+
+def _finalizer_predecessors(components):
+    """Reconstruct declared identities without executing successor behavior."""
+    from .workspace import WorkspaceFinalizer
+    previous = dict(components)
+    changed = False
+    for key, component in components.items():
+        hook = component.implementation
+        if component.spec.kind != 'workspace_finalizer' or not isinstance(hook, WorkspaceFinalizer) or hook.predecessor is None:
+            continue
+        path, version = hook.predecessor
+        spec = component.spec.model_copy(update={'implementation': path})
+        if spec == component.spec and version == hook.projection_version:
+            continue
+        historical_hook = replace(hook, implementation=_historical_finalizer_unavailable,
+            draft_schema=_historical_finalizer_unavailable, projection_version=version, predecessor=None)
+        previous[key] = replace(component, spec=spec, implementation=historical_hook,
+            resource_digest=_resource_digest(spec, historical_hook, component.plugin_id))
+        changed = True
+    return previous if changed else None
+
+
+def _historical_component_sets(components):
+    """The retained resource/reader predecessors, with their actual old Specs."""
+    yield components
+    historical_components = dict(components)
+    for key, component in components.items():
+        if component.spec.implementation == 'scidiscovery.general_science_resources:TOOL_EVIDENCE_SCHEMA':
+            old_spec = component.spec.model_copy(update={
+                'implementation': 'scidiscovery.artifact_agent.service.tool_evidence:TOOL_EVIDENCE_SCHEMA'})
+            historical_components[key] = replace(component, spec=old_spec)
+    yield historical_components
+    from ..reference_tools import LEGACY_REFERENCE_HISTORY_DESCRIPTION
+    legacy_components = dict(historical_components)
+    for key, component in historical_components.items():
+        tool = component.implementation
+        if component.spec.kind != 'worker_tool' or tool.name != 'worker_reference_read':
+            continue
+        schema = json.loads(json.dumps(tool.schema()['inputSchema']))
+        schema['properties']['history_task']['description'] = LEGACY_REFERENCE_HISTORY_DESCRIPTION
+        legacy_tool = replace(tool, _input_schema=freeze_json(schema))
+        legacy_components[key] = replace(component, implementation=legacy_tool,
+            resource_digest=_resource_digest(component.spec, legacy_tool, component.plugin_id))
+    yield legacy_components
+    previous_components = dict(legacy_components)
+    changed = False
+    for key, component in legacy_components.items():
+        if component.spec.implementation != 'scidiscovery.artifact_agent.service.tool_evidence:TOOL_EVIDENCE_SCHEMA':
+            continue
+        schema = json.loads(component.implementation)
+        for node in (schema, *schema.get('$defs', {}).values()):
+            binding = node.get('properties', {}).get('bindings')
+            if binding is not None and 'maxProperties' not in binding:
+                binding['maxProperties'] = 128
+                changed = True
+        resource = json.dumps(schema, ensure_ascii=False, separators=(',', ':'), sort_keys=True)
+        previous_components[key] = replace(component, implementation=resource,
+            resource_digest=_resource_digest(component.spec, resource, component.plugin_id))
+    if changed:
+        yield previous_components
+
+
 def compile_catalog(plugins: Iterable[PluginDefinition], *, capability_selections: Mapping[str, str] | None = None) -> CompiledCatalog:
     plugin_map, components = _normalize_declarations(plugins)
     # Formal reviewer independence derives from the same declared review edges.
@@ -1026,56 +1096,20 @@ def compile_catalog(plugins: Iterable[PluginDefinition], *, capability_selection
                 ComponentRef(component.spec.component_id), "experiment_capability")
     approval_provider_ids = _validate_review_graph(plugin_map, components, compiled_parts, used)
     current = _build_compiled_catalog(plugin_map, components, compiled_parts, approval_provider_ids, runtime_factories, runtime_configuration_digests, runtime_identity_digests, used)
-    # Reconstruct the pre-extraction Spec, not an alias for today's digest.
-    # Only the resource owner moved; its schema bytes remain unchanged. The
-    # old current contract and its two existing predecessors retain their exact
-    # implementation paths in immutable historical component specifications.
-    historical_components = dict(components)
-    for key, component in components.items():
-        if component.spec.implementation == 'scidiscovery.general_science_resources:TOOL_EVIDENCE_SCHEMA':
-            old_spec = component.spec.model_copy(update={
-                'implementation': 'scidiscovery.artifact_agent.service.tool_evidence:TOOL_EVIDENCE_SCHEMA'})
-            historical_components[key] = replace(component, spec=old_spec)
-    historical_current = _build_compiled_catalog(plugin_map, historical_components, compiled_parts,
-        approval_provider_ids, runtime_factories, runtime_configuration_digests, runtime_identity_digests, used)
-    historical = {(key, historical_current.operation(key).digest): historical_current.operation(key)
-        for key in current.operation_ids() if current.operation(key).digest != historical_current.operation(key).digest}
-    # Retain the exact pre-parent-reader contract and its already supported
-    # binding-limit predecessor. Reconstruct resources, never alias digests.
-    from ..reference_tools import LEGACY_REFERENCE_HISTORY_DESCRIPTION
-    legacy_components = dict(historical_components)
-    for key, component in historical_components.items():
-        tool = component.implementation
-        if component.spec.kind != 'worker_tool' or tool.name != 'worker_reference_read':
-            continue
-        schema = json.loads(json.dumps(tool.schema()['inputSchema']))
-        schema['properties']['history_task']['description'] = LEGACY_REFERENCE_HISTORY_DESCRIPTION
-        legacy_tool = replace(tool, _input_schema=freeze_json(schema))
-        legacy_components[key] = replace(component, implementation=legacy_tool,
-            resource_digest=_resource_digest(component.spec, legacy_tool, component.plugin_id))
-    legacy = _build_compiled_catalog(plugin_map, legacy_components, compiled_parts, approval_provider_ids,
-        runtime_factories, runtime_configuration_digests, runtime_identity_digests, used)
-    historical.update({(key, legacy.operation(key).digest): legacy.operation(key) for key in current.operation_ids()
-        if current.operation(key).digest != legacy.operation(key).digest})
-    previous_components = dict(legacy_components)
-    changed = False
-    for key, component in legacy_components.items():
-        if component.spec.implementation != 'scidiscovery.artifact_agent.service.tool_evidence:TOOL_EVIDENCE_SCHEMA':
-            continue
-        schema = json.loads(component.implementation)
-        for node in (schema, *schema.get('$defs', {}).values()):
-            binding = node.get('properties', {}).get('bindings')
-            if binding is not None and 'maxProperties' not in binding:
-                binding['maxProperties'] = 128
-                changed = True
-        resource = json.dumps(schema, ensure_ascii=False, separators=(',', ':'), sort_keys=True)
-        previous_components[key] = replace(component, implementation=resource,
-            resource_digest=_resource_digest(component.spec, resource, component.plugin_id))
-    if changed:
-        previous = _build_compiled_catalog(plugin_map, previous_components, compiled_parts, approval_provider_ids,
-            runtime_factories, runtime_configuration_digests, runtime_identity_digests, used)
-        historical.update({(key, previous.operation(key).digest): previous.operation(key) for key in current.operation_ids()
-            if current.operation(key).digest != previous.operation(key).digest})
+    # Exact pre-migration finalizer identities and the existing resource/reader
+    # generations are reconstructed independently. Never alias a recorded digest
+    # to the installed finalizer or infer executable compatibility from its name.
+    predecessor_components = _finalizer_predecessors(components)
+    bases = (components,) if predecessor_components is None else (components, predecessor_components)
+    historical = {}
+    for base in bases:
+        for historical_components in _historical_component_sets(base):
+            if historical_components is components:
+                continue
+            previous = _build_compiled_catalog(plugin_map, historical_components, compiled_parts, approval_provider_ids,
+                runtime_factories, runtime_configuration_digests, runtime_identity_digests, used)
+            historical.update({(key, previous.operation(key).digest): previous.operation(key) for key in current.operation_ids()
+                if current.operation(key).digest != previous.operation(key).digest})
     return CompiledCatalog(current._operations, runtime_factories, runtime_configuration_digests,
         runtime_identity_digests, historical)
 def compile_installed_catalog(*, capability_selections: Mapping[str, str] | None = None) -> CompiledCatalog:

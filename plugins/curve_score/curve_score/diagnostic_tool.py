@@ -21,6 +21,7 @@ from .analysis_tool import (
     AnalysisCurveComparison, AnalysisCurveComparisonSpec, AnalysisScoreInput,
     AnalysisScoreRequest, ScoreLimitError, UnsupportedSourceError, _aliases,
     bundle_from_sources, check_deadline, evaluate_analysis_request,
+    complete_curve_calculation,
 )
 from .schema import CurveConsistencyReport, CurveOperatorSpec
 
@@ -235,7 +236,7 @@ def run_diagnostic_tool(
         diagnostics = (contract_diagnostic(record.reason_code or record.status,
             phase="tool_execution", affected_action="tool_call",
             message="The diagnostic is unavailable; retain the reason and submit any supported finite analysis."),)
-    return {"record": context.complete_calculation(record, diagnostics=diagnostics, summary=True), "images": images,
+    return {"record": complete_curve_calculation(context, record, diagnostics=diagnostics), "images": images,
             "details": details, "checkpoint": checkpoint}
 
 

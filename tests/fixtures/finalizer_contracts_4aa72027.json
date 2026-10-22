@@ -1,0 +1,257 @@
+{
+  "contracts": [
+    {
+      "digest": "ff9b505857a5ee2ccb014a086aad883363298b4095b5096ffbb45c3134276087",
+      "finalizers": {
+        "general_science:result_finalizer": {
+          "projection_version": "4",
+          "spec": {
+            "component_id": "result_finalizer",
+            "configuration_identity": "general.result-finalizer.v4:boundary-attribution",
+            "extends": null,
+            "implementation": "scidiscovery.general_science_components:RESULT_FINALIZER",
+            "kind": "workspace_finalizer",
+            "protocol_version": "1",
+            "public": false,
+            "resources": []
+          }
+        }
+      },
+      "operation_id": "science.hypothesis.propose.v1",
+      "operation_spec_sha256": "c5228993979820c4691bf49e2a88cf93b1b284edd12a782e98a5b3d2110942fe",
+      "version": "2"
+    },
+    {
+      "digest": "a9b21811355b86cbb6fadc7b9b64a4d92753be49b27e940f927790cfe04dfb11",
+      "finalizers": {
+        "general_science:result_finalizer": {
+          "projection_version": "4",
+          "spec": {
+            "component_id": "result_finalizer",
+            "configuration_identity": "general.result-finalizer.v4:boundary-attribution",
+            "extends": null,
+            "implementation": "scidiscovery.general_science_components:RESULT_FINALIZER",
+            "kind": "workspace_finalizer",
+            "protocol_version": "1",
+            "public": false,
+            "resources": []
+          }
+        }
+      },
+      "operation_id": "science.hypothesis.propose.v1",
+      "operation_spec_sha256": "c5228993979820c4691bf49e2a88cf93b1b284edd12a782e98a5b3d2110942fe",
+      "version": "2"
+    },
+    {
+      "digest": "458082aea6030b774165517fadb6ee5ae892ebcc4ea3b29d24a2707b043ede5f",
+      "finalizers": {
+        "general_science:result_finalizer": {
+          "projection_version": "4",
+          "spec": {
+            "component_id": "result_finalizer",
+            "configuration_identity": "general.result-finalizer.v4:boundary-attribution",
+            "extends": null,
+            "implementation": "scidiscovery.general_science_components:RESULT_FINALIZER",
+            "kind": "workspace_finalizer",
+            "protocol_version": "1",
+            "public": false,
+            "resources": []
+          }
+        }
+      },
+      "operation_id": "science.hypothesis.propose.v1",
+      "operation_spec_sha256": "c5228993979820c4691bf49e2a88cf93b1b284edd12a782e98a5b3d2110942fe",
+      "version": "2"
+    },
+    {
+      "digest": "545599ec796f90a2965a3f7fb85decac5aea500011d0a69ddecf527f7fd0a734",
+      "finalizers": {
+        "general_science:result_finalizer": {
+          "projection_version": "4",
+          "spec": {
+            "component_id": "result_finalizer",
+            "configuration_identity": "general.result-finalizer.v4:boundary-attribution",
+            "extends": null,
+            "implementation": "scidiscovery.general_science_components:RESULT_FINALIZER",
+            "kind": "workspace_finalizer",
+            "protocol_version": "1",
+            "public": false,
+            "resources": []
+          }
+        }
+      },
+      "operation_id": "science.hypothesis.propose.v1",
+      "operation_spec_sha256": "c5228993979820c4691bf49e2a88cf93b1b284edd12a782e98a5b3d2110942fe",
+      "version": "2"
+    },
+    {
+      "digest": "f6831e26fe174cd0057ec3753dbc53b964635209c292b34a0eb56e61d13f15f8",
+      "finalizers": {
+        "curve_score:analysis_finalizer": {
+          "projection_version": "4",
+          "spec": {
+            "component_id": "analysis_finalizer",
+            "configuration_identity": null,
+            "extends": null,
+            "implementation": "scidiscovery.general_science_components:RESULT_FINALIZER",
+            "kind": "workspace_finalizer",
+            "protocol_version": "1",
+            "public": false,
+            "resources": []
+          }
+        }
+      },
+      "operation_id": "science.result.diagnose.v1",
+      "operation_spec_sha256": "6994b0e94225f1ce0bb4a4134c05e0d9ff941feae58be8cc2803602ca843acd0",
+      "version": "4"
+    },
+    {
+      "digest": "76e7e3056673406dc03a6ebac3a1e6cd4207f53076b3a9de1a8c2117b457e8eb",
+      "finalizers": {
+        "curve_score:analysis_finalizer": {
+          "projection_version": "4",
+          "spec": {
+            "component_id": "analysis_finalizer",
+            "configuration_identity": null,
+            "extends": null,
+            "implementation": "scidiscovery.general_science_components:RESULT_FINALIZER",
+            "kind": "workspace_finalizer",
+            "protocol_version": "1",
+            "public": false,
+            "resources": []
+          }
+        }
+      },
+      "operation_id": "science.result.diagnose.v1",
+      "operation_spec_sha256": "6994b0e94225f1ce0bb4a4134c05e0d9ff941feae58be8cc2803602ca843acd0",
+      "version": "4"
+    },
+    {
+      "digest": "4587141078f305f14984388e610cd449fff473b2b673887111ff9025318c40e2",
+      "finalizers": {
+        "curve_score:analysis_finalizer": {
+          "projection_version": "4",
+          "spec": {
+            "component_id": "analysis_finalizer",
+            "configuration_identity": null,
+            "extends": null,
+            "implementation": "scidiscovery.general_science_components:RESULT_FINALIZER",
+            "kind": "workspace_finalizer",
+            "protocol_version": "1",
+            "public": false,
+            "resources": []
+          }
+        }
+      },
+      "operation_id": "science.result.diagnose.v1",
+      "operation_spec_sha256": "6994b0e94225f1ce0bb4a4134c05e0d9ff941feae58be8cc2803602ca843acd0",
+      "version": "4"
+    },
+    {
+      "digest": "25d2d9848a0fd8c918757271c946b3a247b2d64305770fc36be5feab8d774aa3",
+      "finalizers": {
+        "curve_score:analysis_finalizer": {
+          "projection_version": "4",
+          "spec": {
+            "component_id": "analysis_finalizer",
+            "configuration_identity": null,
+            "extends": null,
+            "implementation": "scidiscovery.general_science_components:RESULT_FINALIZER",
+            "kind": "workspace_finalizer",
+            "protocol_version": "1",
+            "public": false,
+            "resources": []
+          }
+        }
+      },
+      "operation_id": "science.result.diagnose.v1",
+      "operation_spec_sha256": "6994b0e94225f1ce0bb4a4134c05e0d9ff941feae58be8cc2803602ca843acd0",
+      "version": "4"
+    },
+    {
+      "digest": "eb7997ef2620619d57c69dac87a0438ea176ec44985e7402183feb0ffd2dad82",
+      "finalizers": {
+        "tcad_artifact:parameter_result_finalizer": {
+          "projection_version": "4",
+          "spec": {
+            "component_id": "parameter_result_finalizer",
+            "configuration_identity": null,
+            "extends": null,
+            "implementation": "tcad_artifact.parameter_operations:PARAMETER_RESULT_FINALIZER",
+            "kind": "workspace_finalizer",
+            "protocol_version": "1",
+            "public": false,
+            "resources": []
+          }
+        }
+      },
+      "operation_id": "tcad.parameter.evidence.extract.v1",
+      "operation_spec_sha256": "bf8bc03b340357c91bd9b617963c9d50718a4629e794b06b265620011ce17a28",
+      "version": "1"
+    },
+    {
+      "digest": "a99161c121e1bdd6f727e87011715dcd14ac08292cf42d6fd05dde665d3e3ade",
+      "finalizers": {
+        "tcad_artifact:parameter_result_finalizer": {
+          "projection_version": "4",
+          "spec": {
+            "component_id": "parameter_result_finalizer",
+            "configuration_identity": null,
+            "extends": null,
+            "implementation": "tcad_artifact.parameter_operations:PARAMETER_RESULT_FINALIZER",
+            "kind": "workspace_finalizer",
+            "protocol_version": "1",
+            "public": false,
+            "resources": []
+          }
+        }
+      },
+      "operation_id": "tcad.parameter.evidence.extract.v1",
+      "operation_spec_sha256": "bf8bc03b340357c91bd9b617963c9d50718a4629e794b06b265620011ce17a28",
+      "version": "1"
+    },
+    {
+      "digest": "55dd90908f80220665706470ab0b7e91ff3d363570afc04108a319f7ca85a7b1",
+      "finalizers": {
+        "tcad_artifact:parameter_result_finalizer": {
+          "projection_version": "4",
+          "spec": {
+            "component_id": "parameter_result_finalizer",
+            "configuration_identity": null,
+            "extends": null,
+            "implementation": "tcad_artifact.parameter_operations:PARAMETER_RESULT_FINALIZER",
+            "kind": "workspace_finalizer",
+            "protocol_version": "1",
+            "public": false,
+            "resources": []
+          }
+        }
+      },
+      "operation_id": "tcad.parameter.evidence.extract.v1",
+      "operation_spec_sha256": "bf8bc03b340357c91bd9b617963c9d50718a4629e794b06b265620011ce17a28",
+      "version": "1"
+    },
+    {
+      "digest": "2668becadc6652fa8e240e13e2883490ddca929c51ddf184ef59e40dced719d0",
+      "finalizers": {
+        "tcad_artifact:parameter_result_finalizer": {
+          "projection_version": "4",
+          "spec": {
+            "component_id": "parameter_result_finalizer",
+            "configuration_identity": null,
+            "extends": null,
+            "implementation": "tcad_artifact.parameter_operations:PARAMETER_RESULT_FINALIZER",
+            "kind": "workspace_finalizer",
+            "protocol_version": "1",
+            "public": false,
+            "resources": []
+          }
+        }
+      },
+      "operation_id": "tcad.parameter.evidence.extract.v1",
+      "operation_spec_sha256": "bf8bc03b340357c91bd9b617963c9d50718a4629e794b06b265620011ce17a28",
+      "version": "1"
+    }
+  ],
+  "source_commit": "4aa720270a76aed29ee9a17656a58b7f9bae46ca"
+}

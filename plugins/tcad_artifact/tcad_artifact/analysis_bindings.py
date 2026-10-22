@@ -340,7 +340,8 @@ from scidiscovery.operations.workspace import WorkspaceFinalizer
 from scidiscovery.plugin_runtime.results import result_draft_schema, RESULT_PROJECTION_VERSION
 FINALIZER = CallableComponent("workspace_finalizer", WorkspaceFinalizer(
     finalize, analysis_draft_schema, RESULT_PROJECTION_VERSION + ".tcad-plan-2",
-    draft_input_ports=("execution_package", "experiment_plan")))
+    draft_input_ports=("execution_package", "experiment_plan"),
+    predecessor=("tcad_artifact.analysis_bindings:FINALIZER", "4.tcad-plan-2")))
 
 WORKSPACE = analysis_workspace.WORKSPACE
 SNAPSHOTTER = analysis_workspace.SNAPSHOTTER

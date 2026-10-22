@@ -12,7 +12,10 @@ from scidiscovery.plugin_runtime.workspace import (
 )
 from scidiscovery.plugin_runtime import observation
 from scidiscovery.operations.spec import CallableComponent, WorkspaceContract
-from scidiscovery.operations.workspace import WorkspaceMaterializationResult, WorkspaceSnapshotFile
+from scidiscovery.operations.workspace import WorkspaceFinalizer, WorkspaceMaterializationResult, WorkspaceSnapshotFile
+from scidiscovery.plugin_runtime.results import (
+    RESULT_PROJECTION_VERSION, finalize_result, materialize_analysis_handoff, result_draft_schema,
+)
 
 
 FORMAT = "analysis-work-v1"
@@ -312,6 +315,26 @@ def snapshot(root):
     return tuple(files)
 
 
+def analysis_draft_schema(envelope, schema_id, ports=None):
+    effective = None if ports is None else {
+        alias: "experiment_plan" if port == "curve_analysis_package" else port
+        for alias, port in ports.items()}
+    return result_draft_schema(envelope, schema_id, effective)
+
+
+def finalize_analysis_result(request):
+    def project(value):
+        ports = {descriptor.port_name for descriptor in request.binding_descriptors.values()}
+        if not {"experiment_plan", "curve_analysis_package"} & ports:
+            value["payload"].pop("plan_key", None)
+            value["payload"].pop("experiment_key", None)
+        materialize_analysis_handoff(value)
+    return finalize_result(request, project)
+
+
+FINALIZER = CallableComponent("workspace_finalizer", WorkspaceFinalizer(
+    finalize_analysis_result, analysis_draft_schema, RESULT_PROJECTION_VERSION + ".curve-analysis-1",
+    predecessor=("scidiscovery.general_science_components:RESULT_FINALIZER", "4")))
 WORKSPACE = WorkspaceContract()
 MATERIALIZER = CallableComponent("workspace_materializer", materialize)
 SNAPSHOTTER = CallableComponent("workspace_snapshotter", snapshot)

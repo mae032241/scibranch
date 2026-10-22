@@ -27,5 +27,5 @@ def _record_view(record):
     """Project shared record fields, excluding core-owned calculation proof metadata."""
     value = {key: record[key] for key in _RECORD_FIELDS if key in record}
     value["metadata"] = {key: item for key, item in record.get("metadata", {}).items()
-                         if key not in {"calculation_proof", "checkpoint_proof"}}
+                         if key not in {"calculation_proof", "calculation_public_sha256", "checkpoint_proof"}}
     return value

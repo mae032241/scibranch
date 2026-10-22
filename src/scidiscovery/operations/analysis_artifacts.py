@@ -23,36 +23,21 @@ def publish_analysis_file(context, raw, *, media_type, kind, sources, suffix, me
     return {"evidence_alias": accepted["alias"]}
 
 
-def retain_calculation(context, response, *, summary=False):
+def retain_calculation(context, response, *, public_result=None):
     """Keep the existing tool reply readable, but remove the need to copy it.
 
     The complete record is a tool output. The added alias is a transport hint,
     excluded by CalculationRecord from receipt identity and historical replay.
     """
     record = CalculationRecord.model_validate_json(canonical_json(response))
-    saved = publish_analysis_file(context, canonical_json(scientific_calculation(record)), media_type="application/json",
+    response = scientific_calculation(record, public_result=public_result)
+    raw = canonical_json(response)
+    saved = publish_analysis_file(context, raw, media_type="application/json",
         kind="calculation_record", sources=tuple(record.input_digests) or context.input_names_for_port("experiment_results") or context.input_names_for_port("execution_result"),
-        suffix=".json", metadata={"record_key": record.record_key, "calculation_proof": record.model_dump(mode="json")})
-    response = scientific_calculation(record)
-    if not summary:
-        return {**response, "calculation_ref": saved["evidence_alias"]}
-    result = {key: response[key] for key in
-              ("record_key", "status", "reason_code", "algorithm_version", "diagnostics") if key in response}
-    report = response.get("result") or {}
-    metric_report = report.get("metric_report", report)
-    comparisons = metric_report.get("comparisons", [])
-    result["summary"] = {
-        "aggregate_status": metric_report.get("aggregate_status"),
-        "comparison_count": len(comparisons),
-        "comparisons": [{"comparison_key": item["comparison_key"], "status": item["status"],
-            "metrics": [{key: metric[key] for key in ("operator_key", "kind", "status", "value", "unit", "reason_code") if key in metric}
-                        for metric in item.get("metrics", [])[:4]],
-            "omitted_metrics": max(0, len(item.get("metrics", []))-4)} for item in comparisons[:4]],
-        "omitted_comparisons": max(0, len(comparisons)-4),
-        "interpretation_boundary": "deterministic_metrics_only_no_physical_interpretation",
-        "limitations": report.get("limitations", []),
-    }
-    return {**result, "calculation_ref": saved["evidence_alias"]}
+        suffix=".json", metadata={"record_key": record.record_key,
+            "calculation_proof": record.model_dump(mode="json"),
+            "calculation_public_sha256": hashlib.sha256(raw).hexdigest()})
+    return {**response, "calculation_ref": saved["evidence_alias"]}
 
 
 def analysis_calculations(report, sources):
@@ -126,10 +111,12 @@ def analysis_calculations(report, sources):
     return tuple(records)
 
 
-def complete_calculation(context, result, *, diagnostics=(), summary=False):
+def complete_calculation(context, result, *, diagnostics=(), public_result=None):
     """Own attempt finalization and private receipt construction, never the plugin."""
     # Revalidate the public shape so a caller cannot inject an attempt/receipt.
     public = CalculationResult.model_validate_json(canonical_json(result))
+    # Reject an invalid projection before sealing the attempt's terminal result.
+    scientific_calculation(public, public_result=public_result)
     response = public.model_dump(mode="json", exclude={"diagnostics"})
     diagnostics = diagnostics or tuple(item.model_dump(mode="json") for item in public.diagnostics)
     finished = context.finish_attempt(result_status=public.status, reason_code=public.reason_code,
@@ -137,7 +124,7 @@ def complete_calculation(context, result, *, diagnostics=(), summary=False):
     if finished is not None:
         attempt, controlled_diagnostics = finished
         response.update(attempt=attempt, diagnostics=list(controlled_diagnostics))
-    return retain_calculation(context, response, summary=summary)
+    return retain_calculation(context, response, public_result=public_result)
 
 
 def verified_calculations(report, sources):

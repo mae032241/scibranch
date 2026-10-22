@@ -118,6 +118,28 @@ def test_parameter_doi_and_objective_draft_copies_finalize_and_check(tmp_path):
     assert result['handoff']['summary'] == payload['scientific_intake']['scientific_foundation']['summary']
 
 
+def test_parameter_plugin_owns_doi_and_coverage_authoring_contract():
+    from scidiscovery.artifact_agent.schema.role_result import RoleHandoff
+    from scidiscovery.plugin_runtime.results import result_draft_schema
+    from tcad_artifact.parameter_operations import ParameterEvidencePackage, parameter_draft_schema
+    schema_id = 'scidiscovery.parameter-evidence-package.v1'
+    resource = ParameterEvidencePackage.model_json_schema()
+    resource['$id'] = 'urn:test:parameter-package'
+    envelope = {'$defs': {'RoleHandoff': RoleHandoff.model_json_schema()},
+        'properties': {'payload': resource, 'handoff': {'$ref': '#/$defs/RoleHandoff'}},
+        'required': ['payload', 'handoff']}
+    assert result_draft_schema(envelope, schema_id) == envelope
+    draft = parameter_draft_schema(envelope, schema_id)
+    payload = draft['properties']['payload']
+    assert 'coverage' not in payload['properties']
+    with_doi, without_doi = payload['$defs']['EvidenceSourceCatalogEntry']['oneOf']
+    assert 'work_key' not in with_doi['properties']
+    assert 'doi' in with_doi['required']
+    assert 'work_key' in without_doi['required']
+    assert without_doi['properties']['doi'] == {'type': 'null'}
+    assert 'coverage' in envelope['properties']['payload']['properties']
+
+
 @pytest.mark.parametrize('schema_id,operation,payload', [
     ('scidiscovery.experiment-report.v1', 'science.experiment.v1', dict(summary='Unavailable observation.', outcome='inconclusive', remaining_question='Which source is needed?')),
     ('scidiscovery.experiment-review.v1', 'science.object.review.v1', dict(summary='Missing support.', verdict='inconclusive')),

@@ -21,19 +21,12 @@ RESULT_COPIES = {
         '/handoff/assumptions': '/payload/problem_frame/assumptions',
     },
     'scidiscovery.layered-diagnosis.v1': {'/handoff/summary': '/payload/summary'},
-    'scidiscovery.parameter-evidence-package.v1': {
-        '/payload/scientific_intake/problem_frame/objective': '/payload/scientific_intake/scientific_foundation/objective',
-        '/payload/scientific_intake/scientific_foundation/objective_contract/statement': '/payload/scientific_intake/scientific_foundation/objective',
-        '/handoff/summary': '/payload/scientific_intake/scientific_foundation/summary',
-        '/handoff/missing_inputs': '/payload/scientific_intake/scientific_foundation/missing_inputs',
-        '/handoff/assumptions': '/payload/scientific_intake/problem_frame/assumptions',
-    },
     'scidiscovery.scientific-review.v1': {'/handoff/summary': '/payload/summary',
         '/handoff/next_actions': '/payload/next_actions'},
     'scidiscovery.experiment-report.v1': {'/handoff/summary': '/payload/summary'},
     'scidiscovery.experiment-review.v1': {'/handoff/summary': '/payload/summary'},
 }
-RESULT_PROJECTION_VERSION = '4'
+RESULT_PROJECTION_VERSION = '5'
 
 VERDICT_PROJECTIONS = {
     'scidiscovery.layered-diagnosis.v1', 'scidiscovery.scientific-review.v1',
@@ -49,9 +42,9 @@ def _projection_error(path: str, message: str) -> None:
         path='$' + path.replace('/', '.'), message=message, repairable=True),))
 
 
-def project_result_copies(value: dict, schema_id: str) -> None:
+def project_result_copies(value: dict, schema_id: str, *, copies=None) -> None:
     value['schema_version'] = 1
-    for destination, source in RESULT_COPIES.get(schema_id, {}).items():
+    for destination, source in (RESULT_COPIES.get(schema_id, {}) if copies is None else copies).items():
         current = value
         for part in source.strip('/').split('/'):
             current = current.get(part) if isinstance(current, dict) else None
@@ -77,10 +70,10 @@ def project_result_copies(value: dict, schema_id: str) -> None:
             parent[parts[-1]] = deepcopy(current)
 
 
-def result_draft_schema(envelope: dict, schema_id: str, input_source_ports=None) -> dict:
+def result_draft_schema(envelope: dict, schema_id: str, input_source_ports=None, *, copies=None) -> dict:
     """Project the existing sealed schema; never create a second payload model."""
     envelope = deepcopy(envelope)
-    if schema_id not in RESULT_COPIES and schema_id not in VERDICT_PROJECTIONS:
+    if copies is None and schema_id not in RESULT_COPIES and schema_id not in VERDICT_PROJECTIONS:
         return envelope
     # Each payload resource has its own local $defs and is embedded as a resource.
     def remove(path):
@@ -106,29 +99,17 @@ def result_draft_schema(envelope: dict, schema_id: str, input_source_ports=None)
             node = properties[part]
             if '$id' in node:
                 root = node
-    for path in RESULT_COPIES.get(schema_id, {}):
+    for path in (RESULT_COPIES.get(schema_id, {}) if copies is None else copies):
         remove(path)
     if schema_id in VERDICT_PROJECTIONS:
         remove('/handoff/verdict')
     if schema_id == 'scidiscovery.layered-diagnosis.v1':
         remove('/handoff/next_actions')
-    if schema_id == 'scidiscovery.parameter-evidence-package.v1':
-        remove('/payload/coverage')
-        definitions = envelope['properties']['payload']['$defs']
-        entry = definitions['EvidenceSourceCatalogEntry']
-        with_doi, without_doi = deepcopy(entry), deepcopy(entry)
-        with_doi['properties'].pop('work_key')
-        with_doi['required'] = [name for name in with_doi['required'] if name != 'work_key'] + ['doi']
-        with_doi['properties']['doi'] = {'type': 'string', 'minLength': 3, 'maxLength': 512}
-        without_doi['properties']['doi'] = {'type': 'null'}
-        without_doi['properties']['work_key']['description'] = 'Scientific identity of one underlying work without a DOI; group mirrors and pages from that same work.'
-        definitions['EvidenceSourceCatalogEntry'] = {'oneOf': [with_doi, without_doi]}
-
     if schema_id == 'scidiscovery.hypothesis-proposal.v2':
         remove('/payload/research_objective_key')
         envelope['properties']['boundary_declarations']['maxItems'] = 32
         envelope['properties']['boundary_declarations']['description'] = 'At most 32 authored declarations. Control retains unassociated hypothesis scope/parameter basis as attributed unverified prose within the shared sealed limit.'
-    if schema_id == 'scidiscovery.layered-diagnosis.v1' and input_source_ports is not None and not {'experiment_plan', 'curve_analysis_package'} & set(input_source_ports.values()):
+    if schema_id == 'scidiscovery.layered-diagnosis.v1' and input_source_ports is not None and 'experiment_plan' not in input_source_ports.values():
         remove('/payload/plan_key')
         remove('/payload/experiment_key')
         remove('/payload/objective_assessment/objective_key')
@@ -345,7 +326,7 @@ def finalize_general_result(request: WorkspaceFinalizationRequest) -> bytes:
                 raise WorkspaceProtocolError('The exact scientific foundation binding is ambiguous; repair the task inputs.')
         if request.output_schema_id == 'scidiscovery.layered-diagnosis.v1':
             ports = {descriptor.port_name for descriptor in request.binding_descriptors.values()}
-            if not {'experiment_plan', 'curve_analysis_package'} & ports:
+            if 'experiment_plan' not in ports:
                 value['payload'].pop('plan_key', None)
                 value['payload'].pop('experiment_key', None)
                 assessment = value['payload'].get('objective_assessment')

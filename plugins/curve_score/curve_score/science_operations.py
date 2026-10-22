@@ -596,7 +596,7 @@ def component_specs() -> tuple[ComponentSpec, ...]:
     values = [
         ComponentSpec("analysis_workspace", "workspace", "curve_score.analysis_workspace:WORKSPACE", public=True,
             resources=(ComponentRef("analysis_materializer"), ComponentRef("analysis_snapshotter"), ComponentRef("analysis_finalizer"))),
-        ComponentSpec("analysis_finalizer", "workspace_finalizer", "scidiscovery.general_science_components:RESULT_FINALIZER"),
+        ComponentSpec("analysis_finalizer", "workspace_finalizer", "curve_score.analysis_workspace:FINALIZER"),
         ComponentSpec("analysis_materializer", "workspace_materializer", "curve_score.analysis_workspace:MATERIALIZER", configuration_identity="analysis.scientific-context:v2"),
         ComponentSpec("analysis_snapshotter", "workspace_snapshotter", "curve_score.analysis_workspace:SNAPSHOTTER"),
         ComponentSpec("diagnosis_inputs", "validator", "curve_score.science_operations:Components.diagnosis_inputs", configuration_identity="historical-analysis-r4:v1"),

@@ -301,6 +301,34 @@ def replay_calculation(record: CalculationRecord, sources: Mapping[str, bytes], 
     raise SemanticRuleViolation("calculation record differs from deterministic replay")
 
 
+def complete_curve_calculation(context, record, *, diagnostics=()):
+    """Keep curve identity in the sealed receipt and publish bounded metrics."""
+    public_result = json.loads(canonical_json(record.result))
+    if isinstance(public_result, dict):
+        for target in (public_result, public_result.get("metric_report"), public_result.get("localization")):
+            if isinstance(target, dict):
+                for key in ("curve_bundle_sha256", "comparison_spec_sha256", "validation_plan_sha256"):
+                    target.pop(key, None)
+    response = context.complete_calculation(record, diagnostics=diagnostics, public_result=public_result)
+    result = {key: response[key] for key in
+              ("record_key", "status", "reason_code", "algorithm_version", "diagnostics") if key in response}
+    report = response.get("result") or {}
+    metric_report = report.get("metric_report", report)
+    comparisons = metric_report.get("comparisons", [])
+    result["summary"] = {
+        "aggregate_status": metric_report.get("aggregate_status"),
+        "comparison_count": len(comparisons),
+        "comparisons": [{"comparison_key": item["comparison_key"], "status": item["status"],
+            "metrics": [{key: metric[key] for key in ("operator_key", "kind", "status", "value", "unit", "reason_code") if key in metric}
+                        for metric in item.get("metrics", [])[:4]],
+            "omitted_metrics": max(0, len(item.get("metrics", []))-4)} for item in comparisons[:4]],
+        "omitted_comparisons": max(0, len(comparisons)-4),
+        "interpretation_boundary": "deterministic_metrics_only_no_physical_interpretation",
+        "limitations": report.get("limitations", []),
+    }
+    return {**result, "calculation_ref": response["calculation_ref"]}
+
+
 def run_score_tool(request: AnalysisScoreInput, context: OperationToolContext,
                    evaluate: Callable[..., CalculationRecord]) -> dict[str, Any]:
     deadline = time.monotonic() + context.remaining_seconds / 2
@@ -332,7 +360,7 @@ def run_score_tool(request: AnalysisScoreInput, context: OperationToolContext,
         result.reason_code or result.status, phase="tool_execution", affected_action="tool_call",
         message="The tool returned no numeric result; retain its specific reason and limitations.",
     ),)
-    return context.complete_calculation(result, diagnostics=diagnostics, summary=True)
+    return complete_curve_calculation(context, result, diagnostics=diagnostics)
 
 
 def _planned_validation(context, record):
