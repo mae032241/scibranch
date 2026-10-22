@@ -36,6 +36,7 @@ def setup(tmp_path, *, incomplete=False):
     return module, request, runner, config
 
 
+@pytest.mark.process_e2e
 def test_remote_upgrade_and_outer_failure_restore_exact_files(tmp_path):
     module, request, runner, config = setup(tmp_path)
     before = (runner.read_bytes(), config.read_bytes())
@@ -49,6 +50,7 @@ def test_remote_upgrade_and_outer_failure_restore_exact_files(tmp_path):
     assert config.stat().st_mode & 0o777 == 0o640
 
 
+@pytest.mark.process_e2e
 def test_incompatible_remote_policy_never_replaces_working_files(tmp_path):
     module, request, runner, config = setup(tmp_path, incomplete=True)
     before = (runner.read_bytes(), config.read_bytes())
@@ -68,6 +70,7 @@ def test_active_job_prevents_remote_replacement(tmp_path):
     assert runner.read_bytes() == b"old runner bytes\n"
 
 
+@pytest.mark.process_e2e
 def test_administrator_change_between_phases_is_not_overwritten(tmp_path):
     module, request, runner, config = setup(tmp_path)
     module.deploy(request)
@@ -78,6 +81,7 @@ def test_administrator_change_between_phases_is_not_overwritten(tmp_path):
     assert runner.read_bytes() == b"newer administrator version"
 
 
+@pytest.mark.process_e2e
 def test_explicit_configuration_is_validated_and_rolled_back(tmp_path):
     module, request, runner, config = setup(tmp_path)
     before=config.read_bytes()
@@ -91,6 +95,7 @@ def test_explicit_configuration_is_validated_and_rolled_back(tmp_path):
     assert config.read_bytes()==before
 
 
+@pytest.mark.process_e2e
 def test_partial_activation_restores_both_targets(tmp_path, monkeypatch):
     module, request, runner, config = setup(tmp_path)
     before = (runner.read_bytes(), config.read_bytes())
@@ -112,6 +117,7 @@ def test_partial_activation_restores_both_targets(tmp_path, monkeypatch):
     assert (runner.read_bytes(), config.read_bytes()) == before
 
 
+@pytest.mark.process_e2e
 def test_finish_cannot_accept_a_different_deployed_version(tmp_path):
     module, request, runner, config = setup(tmp_path)
     module.deploy(request)
@@ -121,6 +127,7 @@ def test_finish_cannot_accept_a_different_deployed_version(tmp_path):
         module.deploy(dict(request, phase="finish"))
 
 
+@pytest.mark.process_e2e
 def test_remote_runtime_cli_composes_transport_and_transaction(tmp_path):
     _, _, runner, config = setup(tmp_path)
     ssh = tmp_path / "ssh"
@@ -146,6 +153,7 @@ def test_remote_runtime_cli_composes_transport_and_transaction(tmp_path):
     assert runner.read_bytes()==SOURCE.read_bytes()
 
 
+@pytest.mark.process_e2e
 def test_upgrade_adds_configured_cumulative_limit_and_preserves_single_limit(tmp_path):
     module, request, runner, config = setup(tmp_path)
     prior = json.loads(config.read_bytes())

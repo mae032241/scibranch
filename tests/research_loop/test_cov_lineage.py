@@ -97,6 +97,7 @@ def wrapper(tmp_path,execution_registry):
     return fixture
 
 
+@pytest.mark.process_e2e
 def test_same_node_new_parent_branch_and_backtrack_without_carry(wrapper):
     p = wrapper.run('P', 'success', '--new-plan')
     q = wrapper.run('Q', 'success', '--parent-plan', p['candidate_id'], '--change-intent', 'Improve P')
@@ -115,6 +116,7 @@ def test_same_node_new_parent_branch_and_backtrack_without_carry(wrapper):
     assert before == {p: p.read_bytes() for p in wrapper.root.rglob('*') if p.is_file()}
 
 
+@pytest.mark.process_e2e
 def test_exact_failed_receipt_preserves_known_failure_and_allows_new_repair(wrapper):
     p = wrapper.run('P', 'success', '--new-plan')
     failed = wrapper.run('failed', 'failed', '--parent-plan', p['candidate_id'], expected=1)
@@ -127,6 +129,7 @@ def test_exact_failed_receipt_preserves_known_failure_and_allows_new_repair(wrap
     assert (wrapper.directory(failed) / 'completed.json').read_bytes() == original
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('mode', ['missing_receipt', 'wrong_script', 'wrong_metric'])
 def test_missing_or_mismatched_independent_receipt_never_guesses_or_replays(wrapper, mode):
     unknown = wrapper.run('uncertain', mode, '--new-plan', expected=2)
@@ -145,6 +148,7 @@ def test_missing_or_mismatched_independent_receipt_never_guesses_or_replays(wrap
     assert wrapper.calls() == original_calls and wrapper.accepted() == original_accepts
 
 
+@pytest.mark.process_e2e
 def test_unmanaged_public_row_does_not_create_a_selectable_declared_parent(wrapper):
     source = wrapper.script('ordinary-unmanaged')
     subprocess.run([sys.executable, str(wrapper.backend), '--runs-root', str(wrapper.runs),
@@ -157,6 +161,7 @@ def test_unmanaged_public_row_does_not_create_a_selectable_declared_parent(wrapp
     assert omitted['status'] == 'known_success' and omitted['parent']['status'] == 'unknown'
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('name', ['model.pkl', 'source.py', 'stdout.raw', 'row.json', 'receipt.json', 'accepted.json'])
 def test_retained_call_asset_tamper_is_hard_error_and_blocks_new_execution(wrapper, name):
     result = wrapper.run('P', 'success', '--new-plan')
@@ -179,6 +184,7 @@ def test_retained_call_asset_tamper_is_hard_error_and_blocks_new_execution(wrapp
     assert wrapper.calls() == before and len(wrapper.accepted()) == 1
 
 
+@pytest.mark.process_e2e
 def test_public_stdout_and_stderr_exact_aggregate_bound_is_allowed(wrapper):
     result = wrapper.run('exact-byte-bound', 'exact_stdio', '--new-plan')
     assert result['status'] == 'known_success'
@@ -186,6 +192,7 @@ def test_public_stdout_and_stderr_exact_aggregate_bound_is_allowed(wrapper):
     assert (directory / 'stdout.raw').stat().st_size + (directory / 'stderr.raw').stat().st_size == cov_lineage.MAX_BYTES
 
 
+@pytest.mark.process_e2e
 def test_incomplete_transport_rejects_even_exact_successful_receipt(wrapper):
     result = wrapper.run('complete-original', 'success', '--new-plan')
     directory = wrapper.directory(result)
@@ -203,6 +210,7 @@ def test_incomplete_transport_rejects_even_exact_successful_receipt(wrapper):
     assert original == {path: path.read_bytes() for path in directory.iterdir() if path.is_file()}
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('mode', ['stdout_overflow', 'stderr_overflow'])
 def test_large_stdio_is_fully_retained_without_losing_known_completion(wrapper, mode):
     result=wrapper.run('over-bound',mode,'--new-plan')
@@ -212,6 +220,7 @@ def test_large_stdio_is_fully_retained_without_losing_known_completion(wrapper, 
     assert next(row for row in wrapper.cli('lineage-status')['calls'] if row['call_id']==result['call_id'])['status']=='known_success'
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('mode',['noise','json_shaped_logs'])
 def test_ordinary_and_json_shaped_logs_do_not_replace_independent_receipt(wrapper,mode):
     result=wrapper.run('independent-receipt',mode,'--new-plan')

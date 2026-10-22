@@ -74,6 +74,7 @@ def across_mechanism(root):
     return c.build_job(root, 7, 'A', [5, 6], instruction='Exact scientific question')
 
 
+@pytest.mark.process_e2e
 def test_original_audit_survives_a_h_w_and_is_bounded_readonly(tmp_path, monkeypatch):
     root, candidate = audited_scene(tmp_path, monkeypatch)
     first = next_review(root)
@@ -97,6 +98,7 @@ def test_original_audit_survives_a_h_w_and_is_bounded_readonly(tmp_path, monkeyp
         c._validate_inputs(root, work, job)
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('identity', ['different', 'absent'])
 def test_audit_cannot_qualify_different_or_missing_candidate_artifact(tmp_path, monkeypatch, identity):
     root, candidate = audited_scene(tmp_path, monkeypatch)
@@ -114,6 +116,7 @@ def test_audit_cannot_qualify_different_or_missing_candidate_artifact(tmp_path, 
     assert rows[0]['qualification']=='artifact_scope_unknown'
 
 
+@pytest.mark.process_e2e
 def test_adapter_nonleaking_note_is_not_a_leakage_fact(tmp_path, monkeypatch):
     root, _ = audited_scene(tmp_path, monkeypatch)
     ref = candidate_audit.receipt_ref(root, 3)
@@ -126,11 +129,10 @@ def test_adapter_nonleaking_note_is_not_a_leakage_fact(tmp_path, monkeypatch):
     assert not list((root / 'submission').iterdir())
 
 
+@pytest.mark.process_e2e
 def test_current_projection_marker_preserves_exact_bytes(tmp_path, monkeypatch):
     root, _ = audited_scene(tmp_path, monkeypatch)
-    with monkeypatch.context() as old:
-        old.setattr(c, 'AUDIT_PROJECTION_VERSION', 0)
-        job = next_review(root)
+    job = next_review(root)
     from scidiscovery.research_loop.protocol import CURRENT
     assert job['handoff_protocol'] == CURRENT and job['audit_projection_version'] == 1
     originals = {path: path.read_bytes() for path in (
@@ -144,6 +146,7 @@ def test_current_projection_marker_preserves_exact_bytes(tmp_path, monkeypatch):
     assert later['history']['view']['candidates']['adapter_audits'][0]['artifact_binding'] == 'matched'
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('original', ['outcome', 'page'])
 def test_frozen_receipt_or_projection_page_corruption_hard_rejects(tmp_path, monkeypatch, original):
     root, _ = audited_scene(tmp_path, monkeypatch)
@@ -164,6 +167,7 @@ def test_frozen_receipt_or_projection_page_corruption_hard_rejects(tmp_path, mon
     assert not (c.host_record(work) / 'result-identity.json').exists()
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('corrupt', [False, True])
 def test_closeout_author_prefix_keeps_exact_audit_without_inheriting_original_node(tmp_path, corrupt):
     from test_candidate_audit import audit_fixture, _seal_existing

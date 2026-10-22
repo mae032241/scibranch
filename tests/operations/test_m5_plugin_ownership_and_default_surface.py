@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from curve_figure_evidence.plugin import PLUGIN as FIGURE_PLUGIN
 from curve_score.plugin import PLUGIN as CURVE_PLUGIN
 from scidiscovery.builtin_plugin import CORE_PLUGIN
@@ -59,6 +61,7 @@ def test_project_and_execution_resource_contracts_share_one_type() -> None:
     assert ProjectResourceLimits is ResourceLimits
 
 
+@pytest.mark.process_e2e
 def test_tcad_runtime_loads_only_the_selected_transport(tmp_path: Path) -> None:
     command_config = tmp_path / "command.json"
     command_config.write_text(

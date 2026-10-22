@@ -70,6 +70,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         until(lambda: not runtime.process_matches(owner, owner['task_sha256']))
 
 
+@pytest.mark.process_e2e
 def test_controller_kill_rejoins_same_native_execution(local):
     root, work, record, launch, until = local
     first = launch()
@@ -97,6 +98,7 @@ def test_controller_kill_rejoins_same_native_execution(local):
     assert contracts.read(record / 'native-outcome.json')['thread_id'] == 'exact-local-thread'
 
 
+@pytest.mark.process_e2e
 def test_runner_loss_cleans_observed_group_and_never_replays(local):
     root, work, record, launch, until = local
     front = launch()
@@ -116,6 +118,7 @@ def test_runner_loss_cleans_observed_group_and_never_replays(local):
     assert (work / 'work/launches.txt').read_text() == 'launch\n'
 
 
+@pytest.mark.process_e2e
 def test_identity_mismatch_is_unknown_without_killing_original(local):
     root, work, record, launch, until = local
     front = launch()
@@ -147,6 +150,7 @@ def test_intent_before_runner_start_is_unknown_and_never_replayed(local):
     assert not (work / 'work/launches.txt').exists()
 
 
+@pytest.mark.process_e2e
 def test_stale_identity_never_signals_an_unrelated_process(local):
     root, work, record, launch, until = local
     contracts.build_job(root, 1, 'H', [])
@@ -165,6 +169,7 @@ def test_stale_identity_never_signals_an_unrelated_process(local):
         outsider.wait(timeout=3)
 
 
+@pytest.mark.process_e2e
 def test_pause_recovery_collects_accepted_node_before_stopping(local):
     root, work, record, launch, until = local
     settings = contracts.settings(root)
@@ -186,6 +191,7 @@ def test_pause_recovery_collects_accepted_node_before_stopping(local):
     assert (work / 'work/launches.txt').read_text() == 'launch\n'
 
 
+@pytest.mark.process_e2e
 def test_direct_runner_entry_rejects_duplicate_and_retained_execution(local):
     root, work, record, launch, until = local
     front = launch()
@@ -244,6 +250,7 @@ def _assert_child_dead(work, binding):
     assert not runtime.process_matches(child, binding)
 
 
+@pytest.mark.process_e2e
 def test_successful_leader_exit_cleans_surviving_standard_child(local):
     root, work, record, launch, until = local
     _leave_child_alive(root)
@@ -257,6 +264,7 @@ def test_successful_leader_exit_cleans_surviving_standard_child(local):
     _assert_child_dead(work, contracts.digest(root / 'jobs/001.json'))
 
 
+@pytest.mark.process_e2e
 def test_budget_term_leader_exit_cleans_stubborn_standard_child(local):
     root, work, record, launch, until = local
     _leave_child_alive(root)
@@ -301,6 +309,7 @@ def test_budget_term_leader_exit_cleans_stubborn_standard_child(local):
     assert (work / 'work/launches.txt').read_text() == 'launch\n'
 
 
+@pytest.mark.process_e2e
 def test_runner_completion_stops_clock_after_controller_disconnect(local):
     root, work, record, launch, until = local
     front = launch()
@@ -321,6 +330,7 @@ def test_runner_completion_stops_clock_after_controller_disconnect(local):
     assert (work / 'work/launches.txt').read_text() == 'launch\n'
 
 
+@pytest.mark.process_e2e
 def test_budget_amend_refuses_live_runner_even_after_controller_disconnect(local):
     root, work, record, launch, until = local
     front = launch()

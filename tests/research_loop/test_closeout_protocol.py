@@ -101,6 +101,7 @@ def command(root, action='closeout', *extra):
     return json.loads(result.stdout)
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('limitations,shown',[
     ([],[]),
     (['A whole caveat'],['A whole caveat']),
@@ -124,6 +125,7 @@ def test_public_closeout_limitations_are_bounded_and_link_complete_original(tmp_
         assert 'limitations_omitted_count' not in original and 'limitations_ref' not in original
 
 
+@pytest.mark.process_e2e
 def test_empty_export_has_no_scientific_limitations_original(tmp_path):
     public=tmp_path/'public';public.mkdir();goal=public/'goal';goal.write_text('Bounded export fixture.')
     root=tmp_path/'instance'
@@ -137,6 +139,7 @@ def test_empty_export_has_no_scientific_limitations_original(tmp_path):
     assert result['scientific_output_ref'] is None and result['limitations_ref'] is None
 
 
+@pytest.mark.process_e2e
 def test_final_host_audit_failure_retains_original_without_reselection(tmp_path):
     root=scene(tmp_path,[dict(action='deliver',candidate='run-1')],selective_failure=True)
     original=(root/'settings.json').read_bytes()
@@ -161,6 +164,7 @@ def test_final_host_audit_failure_retains_original_without_reselection(tmp_path)
     assert {path:path.read_bytes() for path in (root/'host-delivery/leaf-output').glob('*.json')}==leaf_originals
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('mode',['soft'])
 def test_legacy_known_closeout_abort_resumes_exact_session(tmp_path,mode):
     root=scene(tmp_path,[dict(action='deliver',candidate='run-1',crash=True)],max_tokens=3500,node_budget_mode=mode,legacy=True)
@@ -178,6 +182,7 @@ def test_legacy_known_closeout_abort_resumes_exact_session(tmp_path,mode):
     assert not any(c.read(path)['kind']=='budget_amend' for path in (root/'control-ledger').glob('*.json'))
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('mode',['soft'])
 def test_legacy_closeout_resume_retains_original_node_allowance_and_delivery_floor(tmp_path,monkeypatch,mode):
     from scidiscovery.research_loop import execution
@@ -216,6 +221,7 @@ def test_legacy_closeout_resume_retains_original_node_allowance_and_delivery_flo
     assert not (paths[0]/'continuations').exists()
 
 
+@pytest.mark.process_e2e
 def test_late_candidate_is_locatable_and_resolved_without_historical_pack(tmp_path):
     root=scene(tmp_path,[dict(action='deliver',candidate='run-140')],count=140)
     result=command(root)
@@ -227,6 +233,7 @@ def test_late_candidate_is_locatable_and_resolved_without_historical_pack(tmp_pa
     assert c.read(root/'runs/submitted.json')['run_id']==140
 
 
+@pytest.mark.process_e2e
 def test_transient_selected_preparation_failure_is_retryable_without_new_author(tmp_path,monkeypatch):
     root=scene(tmp_path,[dict(action='deliver',candidate='run-1')])
     original=delivery.freeze_sources
@@ -247,6 +254,7 @@ def test_transient_selected_preparation_failure_is_retryable_without_new_author(
     assert (c.workspace(root,3)/'work/launches').read_text()=='exec\n'
 
 
+@pytest.mark.process_e2e
 def test_unknown_submission_never_replays_or_selects_a_new_candidate(tmp_path,monkeypatch):
     root=scene(tmp_path,[dict(action='deliver',candidate='run-1')])
     def unknown(root,intent,*args,**kwargs):
@@ -263,6 +271,7 @@ def test_unknown_submission_never_replays_or_selects_a_new_candidate(tmp_path,mo
     assert not (root/'runs/submitted.json').exists()
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('action',['finish','wait'])
 def test_final_stop_and_wait_do_not_implicitly_authorize_delivery(tmp_path,action):
     root=scene(tmp_path,[dict(action=action,candidate='run-1')])
@@ -280,6 +289,7 @@ def test_final_stop_and_wait_do_not_implicitly_authorize_delivery(tmp_path,actio
     assert not budget.closeout_state(root)['actions'] and not (root/'runs/submitted.json').exists()
 
 
+@pytest.mark.process_e2e
 def test_final_catalogue_failure_cannot_implicitly_authorize_delivery(tmp_path,monkeypatch):
     root=scene(tmp_path,[dict(action='finish',candidate=None)])
     worker_originals={path:path.read_bytes() for path in (root/'jobs/002.json',
@@ -304,6 +314,7 @@ def test_final_catalogue_failure_cannot_implicitly_authorize_delivery(tmp_path,m
     assert not (root/'jobs/004.json').exists()
 
 
+@pytest.mark.process_e2e
 def test_unknown_resolver_cleanup_blocks_repreparation(tmp_path,monkeypatch):
     root=scene(tmp_path,[dict(action='deliver',candidate='run-1')])
     def unknown(*args,**kwargs):
@@ -316,6 +327,7 @@ def test_unknown_resolver_cleanup_blocks_repreparation(tmp_path,monkeypatch):
     assert not budget.closeout_state(root)['actions']
 
 
+@pytest.mark.process_e2e
 def test_ordinary_a_deliver_requires_one_final_author_with_exact_w_source(tmp_path):
     from test_closeout import FAKE_NATIVE, real_chain
     launcher=FAKE_NATIVE.replace(";assert task['closeout']['source_cutoff']==2", "")
@@ -336,6 +348,7 @@ def test_ordinary_a_deliver_requires_one_final_author_with_exact_w_source(tmp_pa
     assert len(list((root/'jobs').glob('*.json')))==4
 
 
+@pytest.mark.process_e2e
 def test_ordinary_extract_keeps_e_scientific_evidence_role_before_direct_delivery(tmp_path):
     from test_closeout import FAKE_NATIVE, real_chain
     launcher=FAKE_NATIVE.replace(";assert task['closeout']['source_cutoff']==2", "")
@@ -353,6 +366,7 @@ def test_ordinary_extract_keeps_e_scientific_evidence_role_before_direct_deliver
     assert len(budget.closeout_state(root)['actions'])==2
 
 
+@pytest.mark.process_e2e
 def test_ordinary_delivery_missing_choice_requires_explicit_final_author(tmp_path):
     root=scene(tmp_path,[dict(action='deliver',candidate=None,pause=True),dict(action='deliver',candidate='run-1')])
     result=command(root,'run')
@@ -373,6 +387,7 @@ def test_ordinary_delivery_missing_choice_requires_explicit_final_author(tmp_pat
     assert not (root/'jobs/005.json').exists()
 
 
+@pytest.mark.process_e2e
 def test_ordinary_audit_failure_reselects_before_one_final_delivery_without_e(tmp_path):
     root=scene(tmp_path,[dict(action='audit',candidate='run-1'),dict(action='deliver',candidate='run-2',pause=True),
         dict(action='deliver',candidate='run-2')],selective_failure=True)
@@ -398,6 +413,7 @@ def test_ordinary_audit_failure_reselects_before_one_final_delivery_without_e(tm
     assert command(root,'run')['status']=='delivery_confirmed' and not (root/'jobs/006.json').exists()
 
 
+@pytest.mark.process_e2e
 def test_legacy_budget_shortage_keeps_pending_closeout_distinct_from_operator_export(tmp_path):
     # The frozen reserve fits at prepare. The two retained scientific nodes use
     # twenty tokens, so a new full A plus the external floor no longer fits.

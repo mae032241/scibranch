@@ -2,6 +2,8 @@
 import http.client
 import json
 import threading
+
+import pytest
 from urllib.parse import urlsplit
 
 from scidiscovery.research_loop import instance_live as live
@@ -30,6 +32,7 @@ def snapshot(response):
             return json.loads(line[6:])
 
 
+@pytest.mark.process_e2e
 def test_http_sse_initial_change_reconnect_and_exact_read_scope(tmp_path):
     root, key = prepare(tmp_path, enabled=False)
     with host(root, key, workspace=False) as (connection, url, endpoint):
@@ -78,6 +81,7 @@ def test_http_sse_initial_change_reconnect_and_exact_read_scope(tmp_path):
             response.close(); client.close()
 
 
+@pytest.mark.process_e2e
 def test_workspace_loaded_state_and_mounted_stream(tmp_path):
     root, key = prepare(tmp_path, enabled=False)
     workspace = tmp_path / 'workbench'; workspace.mkdir()

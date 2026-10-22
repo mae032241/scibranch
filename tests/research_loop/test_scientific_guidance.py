@@ -63,6 +63,7 @@ def cli(wrapper,*args,default=None,expected=0):
     return json.loads(reply.stdout)
 
 
+@pytest.mark.process_e2e
 def test_implicit_default_and_explicit_override_use_same_call_receipts(wrapper):
     default=wrapper.script('default-source');explicit=wrapper.script('explicit-source')
     first=cli(wrapper,'run','--new-plan',default=default)
@@ -82,12 +83,14 @@ def test_implicit_default_and_explicit_override_use_same_call_receipts(wrapper):
     assert query[0]['evaluation_key']==first['evaluation_key'] and query[0]['status']=='known_success'
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('default',[None,'relative-script.py'])
 def test_missing_or_relative_default_cannot_accept_an_experiment(wrapper,default):
     result=cli(wrapper,'run','--new-plan',default=default,expected=2)
     assert result['status']=='unresolved' and not wrapper.accepted() and not wrapper.calls()
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('mode',['exact','mismatch','missing'])
 def test_observer_retains_public_actual_without_granting_audit_or_confirmation(tmp_path,mode):
     from test_lineage import scene

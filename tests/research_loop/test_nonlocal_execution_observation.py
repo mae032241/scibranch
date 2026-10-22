@@ -52,6 +52,7 @@ def run(root,cli,label,outcome='known_success'):
     return result
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('outcome,state',[('known_success','succeeded'),('known_failed','failed')])
 def test_remote_cli_terminal_collect_history_worker_a_and_successor_admission(tmp_path,remote_registry,monkeypatch,outcome,state):
     root,job,config,cli=case(tmp_path,monkeypatch,outcome)
@@ -146,6 +147,7 @@ def test_remote_cli_terminal_collect_history_worker_a_and_successor_admission(tm
     assert before=={p:p.read_bytes() for p in root.rglob('*') if p.is_file()}
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('fault',['missing-observation','accepted','completed','external-id','native-proof','collected'])
 def test_remote_terminal_missing_or_tampered_originals_never_become_known(tmp_path,remote_registry,monkeypatch,fault):
     root,job,config,cli=case(tmp_path,monkeypatch)
@@ -175,6 +177,7 @@ def test_remote_terminal_missing_or_tampered_originals_never_become_known(tmp_pa
         history.managed_calls(root,job)
 
 
+@pytest.mark.process_e2e
 def test_remote_unknown_is_preserved_without_replay_or_worker_qualification(tmp_path,remote_registry,monkeypatch):
     root,job,config,cli=case(tmp_path,monkeypatch,'unknown')
     result=run(root,cli,'P','unknown')
@@ -188,6 +191,7 @@ def test_remote_unknown_is_preserved_without_replay_or_worker_qualification(tmp_
     assert not worker_delivery._candidate(root,accepted,completed,None)
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('fault',['cleanup','transport','returncode','status','masquerade'])
 def test_local_control_observation_keeps_local_terminal_guarantees(tmp_path,execution_registry,monkeypatch,fault):
     root,job,config,cli=case(tmp_path,monkeypatch,executor='local_execution:command')
@@ -209,6 +213,7 @@ def test_local_control_observation_keeps_local_terminal_guarantees(tmp_path,exec
         e.verify_observation(observed,lambda item:e.read(item['path'],e.MAX_ASSET),interface=config['execution_interface'])
 
 
+@pytest.mark.process_e2e
 def test_legacy_local_receipts_remain_readable_without_creating_control_facts(tmp_path,execution_registry,monkeypatch):
     root,job,config,cli=case(tmp_path,monkeypatch,executor='local_execution:command')
     source=c.workspace(root,2)/'work/local.py';source.write_text('pass\n')
@@ -225,6 +230,7 @@ def test_legacy_local_receipts_remain_readable_without_creating_control_facts(tm
     assert not (directory/'execution-observation.json').exists()
 
 
+@pytest.mark.process_e2e
 @pytest.mark.skipif(os.environ.get('SCID_NONLOCAL_INSTALLED')=='1',reason='Legacy cov fixture runs in the source compatibility lane')
 def test_legacy_cov_receipts_keep_original_terminal_authority(tmp_path,execution_registry):
     from test_breadth_science import prepare,h,worker,run
@@ -241,6 +247,7 @@ def test_legacy_cov_receipts_keep_original_terminal_authority(tmp_path,execution
     assert rows[0]['status']=='known_success' and 'observation' not in rows[0]
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('extra',[dict(collect_name='artifact/../../escape'),dict(collect_name='artifact/'),dict(duplicate_collection=True)])
 def test_remote_collection_names_cannot_escape_or_alias_deliverable_paths(tmp_path,remote_registry,monkeypatch,extra):
     root,job,config,cli=case(tmp_path,monkeypatch,extra=extra)
@@ -252,6 +259,7 @@ def test_remote_collection_names_cannot_escape_or_alias_deliverable_paths(tmp_pa
     assert not (root/'escape').exists()
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('include_result',[False,True])
 def test_retained_remote_proof_outside_instance_survives_native_source_removal(tmp_path,remote_registry,monkeypatch,include_result):
     outside=tmp_path/'backend-state'

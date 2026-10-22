@@ -16,6 +16,7 @@ def test_busy_remote_retirement_returns_actionable_error(tmp_path):
     assert not (tmp_path / 'retired_submissions').exists()
 
 
+@pytest.mark.process_e2e
 def test_deployment_rejects_old_runner_even_with_capabilities_and_policy(tmp_path):
     from tests.artifact_agent.test_remote_tcad_deployment import setup, SOURCE
     module, request, runner, config = setup(tmp_path)

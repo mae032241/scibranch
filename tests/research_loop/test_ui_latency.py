@@ -101,6 +101,7 @@ def test_saved_final_return_selects_only_the_new_active_final_cycle(tmp_path):
     assert ui_saved_status.final_return(tmp_path, [legacy, dict(kind='closeout_resume')]) == legacy
 
 
+@pytest.mark.process_e2e
 def test_saved_audit_nodes_do_not_erase_the_prior_scientific_recommendation(tmp_path):
     from test_candidate_audit import audit_fixture
     root = audit_fixture(tmp_path, candidate_count=2)

@@ -66,6 +66,7 @@ def assert_no_accept(managed):
     assert not list(managed.records.glob('.prepared-*'))
 
 
+@pytest.mark.process_e2e
 def test_pending_new_accept_has_no_formal_call_or_external_effect(managed):
     config=soft(managed)
     with experiments.Records(config).lease('accept.lock'):publish(config,pending=True)
@@ -109,6 +110,7 @@ def test_host_soft_target_keeps_new_managed_execution_available(managed, target)
     assert managed.cli('collect','--call-id',result['call_id'])['feedback']['review']['enforced'] is False
 
 
+@pytest.mark.process_e2e
 def test_soft_target_cannot_mask_expired_original_shared_window(managed):
     config=soft(managed);publish(config,pending=True,reason='target_tokens_reached')
     path=Path(config['admission']['directory'])/'review.json';value=c.read(path)
@@ -161,6 +163,7 @@ def test_managed_call_keeps_finite_execution_limit_after_soft_target(managed, mo
     assert terminal['cleanup_confirmed'] is True
 
 
+@pytest.mark.process_e2e
 def test_accepted_work_crosses_boundary_and_original_operations_remain_available(managed):
     config=soft(managed);publish(config)
     process=spawn(managed,managed.source(slow=True))
@@ -183,6 +186,7 @@ def test_accepted_work_crosses_boundary_and_original_operations_remain_available
     finally:stop(process)
 
 
+@pytest.mark.process_e2e
 def test_host_publication_before_accept_linearizes_rejection(managed):
     config=soft(managed);publish(config)
     source=managed.source()
@@ -201,6 +205,7 @@ def test_host_publication_before_accept_linearizes_rejection(managed):
     finally:stop(process)
 
 
+@pytest.mark.process_e2e
 def test_unavailable_contract_never_grants_new_accept(managed):
     value=json.loads(managed.config.read_text());value.pop('execution_interface')
     value['admission']=dict(version=1,mode='unavailable')
@@ -210,6 +215,7 @@ def test_unavailable_contract_never_grants_new_accept(managed):
     assert_no_accept(managed)
 
 
+@pytest.mark.process_e2e
 def test_bad_current_feedback_preserves_original_collect_and_rejects_new_accept(managed):
     config=soft(managed);publish(config)
     result=managed.cli('run','--script',managed.source())

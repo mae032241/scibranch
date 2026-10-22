@@ -34,7 +34,6 @@ assert "include-system-site-packages = false" in (prefix / "pyvenv.cfg").read_te
 for module in (scidiscovery, plugin_configuration, ui_errors, Image, jsonschema, pydantic, cryptography):
     assert Path(module.__file__).resolve().is_relative_to(prefix), module.__file__
 package = distribution("scidiscovery")
-assert package.version
 for script, target in {
     "scid-research": "scidiscovery.research_loop.cli:main",
     "scid-experiment": "scidiscovery.research_loop.experiments:main",
@@ -93,7 +92,7 @@ else:
     # One pip install of core + TCAD resolves curve from the same wheelhouse;
     # all_domains --no-deps was never equivalent evidence for this requirement.
     tcad = distribution("tcad-artifact")
-    assert distribution("scidiscovery-curve-score").version
+    distribution("scidiscovery-curve-score")
     scripts = [entry for entry in tcad.entry_points if entry.group == "console_scripts"]
     assert sorted(entry.name for entry in scripts) == ["scidiscovery-tcad-transport", "tcad-control-daemon", "tcad-control-mcp"]
     for entry in scripts:

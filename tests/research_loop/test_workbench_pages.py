@@ -273,6 +273,7 @@ def test_final_gap_page_keeps_candidates_metrics_sources_and_exact_downloads(tmp
     assert files(root) == before and (root / 'jobs/003.json').read_bytes() == stopped
 
 
+@pytest.mark.process_e2e
 def test_audit_page_marks_only_prior_scientific_recommendation(tmp_path):
     from scidiscovery.research_loop import ui_view
     from test_candidate_audit import audit_fixture

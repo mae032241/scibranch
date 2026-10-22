@@ -15,6 +15,7 @@ import pytest
     ("2.0", "2.0", None, False),
     ("2.0", "3.0", "scid-fixture-curve", False),
 ])
+@pytest.mark.process_e2e
 def test_installer_validates_staged_distribution_dependencies(
     tmp_path, core_version, curve_version, missing, accepted,
 ):
@@ -60,6 +61,7 @@ def test_source_core_discovery_caches_catalog_without_domain_operations(source_c
     assert not any("parameter" in item for item in catalog.operation_ids())
 
 
+@pytest.mark.process_e2e
 def test_curve_scores_without_importing_figure(tmp_path):
     """Keep the optional-plugin import boundary in a fresh source process."""
     from tests.operations.test_m2_curve_analysis_boundary import _inputs

@@ -58,6 +58,7 @@ def request(root, candidate='run-1'):
     return job, c.validate(c.workspace(root, 3))
 
 
+@pytest.mark.process_e2e
 def test_audit_only_returns_to_a_and_never_promotes_or_replays(tmp_path, monkeypatch):
     root = audit_fixture(tmp_path)
     request(root)
@@ -85,6 +86,7 @@ def test_audit_only_returns_to_a_and_never_promotes_or_replays(tmp_path, monkeyp
     assert budget.closeout_state(root)['begin'] is None
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('candidate', [None, 'unknown-id'])
 def test_unavailable_choice_preserves_science_and_returns_diagnostic(tmp_path, candidate):
     root = audit_fixture(tmp_path)
@@ -96,6 +98,7 @@ def test_unavailable_choice_preserves_science_and_returns_diagnostic(tmp_path, c
     assert budget.used_steps(root)==3
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('mode', ['skip','leak'])
 def test_incomplete_and_rejected_audits_never_promote_or_claim_global_qualification(tmp_path, mode):
     root = audit_fixture(tmp_path, mode)
@@ -108,6 +111,7 @@ def test_incomplete_and_rejected_audits_never_promote_or_claim_global_qualificat
     assert not budget.execution_blocked(root)
 
 
+@pytest.mark.process_e2e
 def test_unknown_accepted_audit_is_not_replayed_and_blocks_amendment(tmp_path):
     root = audit_fixture(tmp_path)
     job,payload = request(root)
@@ -124,6 +128,7 @@ def test_unknown_accepted_audit_is_not_replayed_and_blocks_amendment(tmp_path):
     assert (directory/'intent.json').read_bytes()==saved and not (directory/'sources.json').exists()
 
 
+@pytest.mark.process_e2e
 def test_filter_selects_early_candidate_without_changing_default_full_pool(tmp_path):
     root=audit_fixture(tmp_path,candidate_count=2)
     job,payload=request(root,'run-1')
@@ -134,6 +139,7 @@ def test_filter_selects_early_candidate_without_changing_default_full_pool(tmp_p
     assert candidate_audit.execute(root,job,payload) is None
 
 
+@pytest.mark.process_e2e
 def test_current_job_and_schema_reject_retired_audit_protocol(tmp_path):
     from scidiscovery.research_loop.protocol import CURRENT, UnsupportedProtocol
     root=audit_fixture(tmp_path,enabled=False)
@@ -144,6 +150,7 @@ def test_current_job_and_schema_reject_retired_audit_protocol(tmp_path):
     assert (root/'jobs/002.json').read_bytes()==original
 
 
+@pytest.mark.process_e2e
 def test_bound_receipt_or_sources_tamper_is_hard_integrity_failure(tmp_path):
     root=audit_fixture(tmp_path)
     job,payload=request(root)
@@ -155,6 +162,7 @@ def test_bound_receipt_or_sources_tamper_is_hard_integrity_failure(tmp_path):
         c._validate_inputs(root,c.workspace(root,4),following)
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('field,value', [('accepted',False),('candidate_id','run-2')])
 def test_audit_outcome_single_field_tamper_is_hard_rejection(tmp_path,field,value):
     root=audit_fixture(tmp_path)
@@ -167,6 +175,7 @@ def test_audit_outcome_single_field_tamper_is_hard_rejection(tmp_path,field,valu
 
 
 
+@pytest.mark.process_e2e
 def test_published_correction_pause_blocks_new_audit_acceptance(tmp_path):
     root=audit_fixture(tmp_path,correction_enabled=True)
     review=dict(dispositions=[],next_focus=dict(mechanism_ref='h001.m1',action='screen'))
@@ -219,6 +228,7 @@ def _seal_existing(root,step,payload):
     return c.seal_result(root,step)
 
 
+@pytest.mark.process_e2e
 def test_closeout_audit_keeps_exact_prefix_returns_a_without_promotion(tmp_path,monkeypatch):
     root=audit_fixture(tmp_path)
     nodes=[dict(step=i,seal_sha256=c.digest(c.host_record(c.workspace(root,i))/'result-identity.json')) for i in (1,2)]
@@ -250,6 +260,7 @@ def test_closeout_audit_keeps_exact_prefix_returns_a_without_promotion(tmp_path,
     assert calls==[4] and budget.used_steps(root)==before
 
 
+@pytest.mark.process_e2e
 def test_unchanged_unavailable_candidate_stops_repeated_audit_route(tmp_path,monkeypatch):
     root=audit_fixture(tmp_path)
     job,payload=request(root)
@@ -281,6 +292,7 @@ def test_unchanged_unavailable_candidate_stops_repeated_audit_route(tmp_path,mon
     assert not (root/'jobs/005.json').exists()
 
 
+@pytest.mark.process_e2e
 def test_unavailable_audit_does_not_block_a_different_exact_candidate(tmp_path,monkeypatch):
     root=audit_fixture(tmp_path,candidate_count=2)
     job,payload=request(root)

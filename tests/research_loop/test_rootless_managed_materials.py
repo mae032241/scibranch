@@ -22,6 +22,7 @@ def prepared(tmp_path, monkeypatch):
     return launcher,root,job
 
 
+@pytest.mark.process_e2e
 def test_frozen_managed_outputs_mount_with_exact_descriptor_and_no_backend_reload(tmp_path,monkeypatch,remote_registry):
     from scidiscovery.research_loop import experiments
     launcher,root,job=prepared(tmp_path,monkeypatch)
@@ -53,6 +54,7 @@ def test_frozen_managed_outputs_mount_with_exact_descriptor_and_no_backend_reloa
     assert before=={path:path.read_bytes() for path in root.rglob('*') if path.is_file()}
 
 
+@pytest.mark.process_e2e
 def test_identical_material_reference_is_an_idempotent_read_without_new_mounts(tmp_path,monkeypatch,remote_registry):
     import json
     from scidiscovery.research_loop import experiments
@@ -75,6 +77,7 @@ def test_identical_material_reference_is_an_idempotent_read_without_new_mounts(t
         assert job==original_job and c.read(manifest)==original_job
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('fault',['call','name','source','proof','digest','size','symlink','conflicting_duplicate'])
 def test_managed_exports_reject_unbound_or_changed_originals(tmp_path,monkeypatch,remote_registry,fault):
     launcher,root,job=prepared(tmp_path,monkeypatch)

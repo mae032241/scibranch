@@ -65,6 +65,7 @@ def managed_scene(tmp_path, *, alias_correct=True, rewrite_script=True, launcher
     return root, nodes, first, second, script, source_p, model_p
 
 
+@pytest.mark.process_e2e
 def test_real_resolver_uses_p_archives_after_same_script_model_and_calls_change(tmp_path):
     root, nodes, first, _, script, source_p, model_p = managed_scene(tmp_path)
     script.write_text('Current script is no longer the original P implementation\n')
@@ -83,12 +84,14 @@ def test_real_resolver_uses_p_archives_after_same_script_model_and_calls_change(
     assert chosen['context']['identity_note'].startswith('Exact sealed managed')
 
 
+@pytest.mark.process_e2e
 def test_absolute_namespace_alias_mismatch_is_unavailable_not_wrong_candidate(tmp_path):
     root, nodes, *_ = managed_scene(tmp_path, alias_correct=False)
     refs = delivery.freeze_sources(root, nodes)
     assert refs['items'] and all(item['status'] == 'unavailable' for item in refs['items'])
 
 
+@pytest.mark.process_e2e
 def test_archived_original_hash_tamper_is_hard_before_resolver(tmp_path):
     root, nodes, first, *_ = managed_scene(tmp_path)
     seal = c.read(c.host_record(c.workspace(root, 2)) / 'result-identity.json')
@@ -113,6 +116,7 @@ def test_managed_context_problem_never_falls_back_to_current_source(kind):
         cov_delivery.managed_objects(dict(candidate_id='run-1', execution_contexts=contexts), dict(run_id=1))
 
 
+@pytest.mark.process_e2e
 def test_legacy_v1_snapshot_is_explicitly_limited_and_still_works(tmp_path):
     root, _, nodes = prepare_fixture(tmp_path)
     refs = delivery.freeze_sources(root, nodes)
@@ -120,6 +124,7 @@ def test_legacy_v1_snapshot_is_explicitly_limited_and_still_works(tmp_path):
     assert refs['items'][0]['context']['identity_note'].startswith('Legacy current-source snapshot')
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('rewrite_script',[False,True])
 def test_direct_delivery_audits_frozen_w_scratch_without_mounting_old_workspace(tmp_path,monkeypatch,rewrite_script):
     """Counterfactual original absolute path fails; adapter-bound original succeeds."""

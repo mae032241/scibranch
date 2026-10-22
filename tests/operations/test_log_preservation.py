@@ -15,6 +15,7 @@ def _descriptor(name, path, media):
 
 
 @pytest.mark.parametrize("returncode", [0, 1])
+@pytest.mark.process_e2e
 def test_command_transport_error_retains_stderr_instead_of_only_message(tmp_path, returncode):
     from tcad_artifact.command_adapter import CommandAdapterConfig, CommandTCADExecutorAdapter
     raw = b"FIRST ERROR\n" + b"trailing detail\n" * 1000

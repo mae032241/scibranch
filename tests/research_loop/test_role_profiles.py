@@ -44,6 +44,7 @@ def test_cli_freezes_expanded_roles_and_does_not_expose_host_profile_to_science(
     assert 'native_profile' not in c.read(c.workspace(root,1)/'science-task.json')
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('text',['null','[]','{}'])
 def test_actual_cli_requires_object_in_explicit_role_profiles_file(tmp_path,text):
     public=tmp_path/'public';public.mkdir();goal=public/'goal';goal.write_text('Original goal')

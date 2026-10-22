@@ -54,6 +54,7 @@ def rejected(lane,script,mechanism='P'):
     return result
 
 
+@pytest.mark.process_e2e
 def test_first_branch_second_call_waits_for_another_branch_then_shared_search_continues(lane):
     first=run(lane,'P-initial')
     directory=lane.records/'calls'/first['call_id']
@@ -99,6 +100,7 @@ def test_large_combination_preserves_initial_opportunities_and_exact_extra_call_
         breadth.admit(value, 'h001.m1', scope, accepted)
 
 
+@pytest.mark.process_e2e
 def test_failed_call_changed_script_and_forged_native_attempt_do_not_reset_opportunity(lane):
     first=run(lane,'failed-P',failed=True,expected=1)
     assert first['status']=='known_failed'
@@ -119,6 +121,7 @@ def test_failed_call_changed_script_and_forged_native_attempt_do_not_reset_oppor
     assert run(lane,'Q-after-failed-P','Q')['status']=='known_success'
 
 
+@pytest.mark.process_e2e
 def test_lost_terminal_originals_cannot_be_replayed_under_any_mechanism(lane):
     result=run(lane,'completed-P')
     assert result['status']=='known_success'
@@ -138,6 +141,7 @@ def test_lost_terminal_originals_cannot_be_replayed_under_any_mechanism(lane):
     assert len(originals(lane))==len(list(lane.records.glob('calls/*/process.json')))==1
 
 
+@pytest.mark.process_e2e
 def test_exact_a_extra_one_call_is_consumed_once_and_queries_collect_remain_available(lane):
     grant=dict(mechanism_ref='h001.m1',source_a=3,source_a_sha256='d'*64,extra_calls=1,used_calls=0)
     baseline=[dict(mechanism_ref='h001.m1',accepted_count=1),dict(mechanism_ref='h001.m2',accepted_count=0)]
@@ -159,6 +163,7 @@ def test_exact_a_extra_one_call_is_consumed_once_and_queries_collect_remain_avai
     assert len(originals(lane))==len(list(lane.records.glob('calls/*/process.json')))==1
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('kind',['missing','ambiguous','unauthorized'])
 def test_scientific_label_must_resolve_exactly_before_accept_or_process(lane,kind):
     if kind=='ambiguous':configure(lane,combination(ambiguous=True))
@@ -172,6 +177,7 @@ def test_scientific_label_must_resolve_exactly_before_accept_or_process(lane,kin
     assert not list(lane.records.rglob('starts.log'))
 
 
+@pytest.mark.process_e2e
 def test_completed_receipt_cannot_change_exact_a_authorization(lane):
     grant=dict(mechanism_ref='h001.m1',source_a=3,source_a_sha256='d'*64,extra_calls=1,used_calls=0)
     configure(lane,combination(grant=grant,baseline=[dict(mechanism_ref='h001.m1',accepted_count=1),

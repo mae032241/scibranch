@@ -12,6 +12,7 @@ from test_worker_fragments import fragment, science
 from scidiscovery.research_loop import checkpoint, contracts as c, controller, cov_lineage as cov, execution, history, lineage, selection
 
 
+@pytest.mark.process_e2e
 def test_twenty_five_real_calls_keep_large_snapshot_contexts_and_restart_bindings(tmp_path,execution_registry):
     outer=tmp_path/('long-real-instance-owner-'+'q'*100);outer.mkdir()
     root,config,digest=cov_scene(outer)
@@ -84,6 +85,7 @@ def test_archive_streams_complete_large_file_and_never_relaxes_path_checks(fragm
         with pytest.raises(history.ObserverIntegrityError):history._proof(root,name)
 
 
+@pytest.mark.process_e2e
 def test_internal_observer_transport_has_no_compact_request_or_response_cap(tmp_path):
     script=tmp_path/'observer.py'
     script.write_text('import json,sys\nq=json.load(sys.stdin)\nprint(json.dumps(dict(original=q["original"])))\n')
@@ -155,6 +157,7 @@ def test_complete_implementation_selection_is_not_capped_at_sixteen(tmp_path):
     c._validate_inputs(root,c.workspace(root,4),job)
 
 
+@pytest.mark.process_e2e
 def test_large_coverage_record_does_not_fail_scientific_seal_or_overview(tmp_path):
     public=tmp_path/'public';public.mkdir();objective=public/'goal';objective.write_text('Retain complete provenance.')
     adapter=tmp_path/'observer.py';adapter.write_text('import json\nprint(json.dumps(dict(candidates=[],current_candidate=None,actual_submission=None,coverage=dict(status="partial",note="original "*20000))))\n')

@@ -23,6 +23,7 @@ from deploy.install_transaction import (
 )
 
 
+@pytest.mark.process_e2e
 def test_primary_installer_has_valid_shell_syntax() -> None:
     project_root = Path(__file__).resolve().parents[2]
     completed = subprocess.run(
@@ -49,6 +50,7 @@ def _figure_supply(root: Path) -> dict[str, str]:
     return {"PATH": f"{binary}:{os.environ['PATH']}"}
 
 
+@pytest.mark.process_e2e
 def test_figure_preflight_exercises_exact_pdf_image_recovery(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -61,6 +63,7 @@ def test_figure_preflight_exercises_exact_pdf_image_recovery(
                    run_name="__main__")
 
 
+@pytest.mark.process_e2e
 def test_figure_installed_preflight_rechecks_the_frozen_contract(
     tmp_path: Path,
 ) -> None:
@@ -88,6 +91,7 @@ validate_figure_dependencies "$2"
     assert all(Path(path).is_absolute() for path in contract["executables"].values())
 
 
+@pytest.mark.process_e2e
 def test_figure_preflight_observes_dependencies_without_identity_inputs(
     tmp_path: Path,
 ) -> None:
@@ -107,6 +111,7 @@ def test_figure_preflight_observes_dependencies_without_identity_inputs(
     assert set(contract["executables"]) == {"pdfimages"}
 
 
+@pytest.mark.process_e2e
 def test_installer_rejects_removed_case_plugin_before_installation(tmp_path: Path) -> None:
     project_root = Path(__file__).resolve().parents[2]
     workspace = tmp_path / "workspace"
@@ -188,6 +193,7 @@ def test_tcad_deployment_examples_declare_both_direct_solvers() -> None:
         assert all(item["release_evidence"] for item in direct.values())
 
 
+@pytest.mark.process_e2e
 def test_ssh_runner_installer_cleans_up_without_scope_error(tmp_path: Path) -> None:
     project_root = Path(__file__).resolve().parents[2]
     bytecode_before = set((project_root / "plugins/tcad_artifact/tcad_artifact").rglob("remote_runner_py36*.pyc"))
@@ -269,6 +275,7 @@ print("fake SSH extraction: pass")
     ) == bytecode_before
 
 
+@pytest.mark.process_e2e
 def test_ssh_runner_install_requires_an_explicit_private_config(
     tmp_path: Path,
 ) -> None:
@@ -301,6 +308,7 @@ def test_ssh_runner_install_requires_an_explicit_private_config(
     assert "SCID_REMOTE_RUNNER_CONFIG" in completed.stderr
 
 
+@pytest.mark.process_e2e
 def test_ssh_runner_install_rejects_an_unedited_example_copy(
     tmp_path: Path,
 ) -> None:
@@ -338,6 +346,7 @@ def test_ssh_runner_install_rejects_an_unedited_example_copy(
     assert "unedited byte-for-byte copy" in completed.stderr
 
 
+@pytest.mark.process_e2e
 def test_ssh_runner_code_upgrade_reuses_transport_and_preserves_config(
     tmp_path: Path,
 ) -> None:
@@ -434,6 +443,7 @@ print("fake SSH code-only extraction: pass")
     ).read_bytes()
 
 
+@pytest.mark.process_e2e
 def test_ssh_runner_code_upgrade_rejects_mismatched_remote_binding(
     tmp_path: Path,
 ) -> None:
@@ -480,6 +490,7 @@ def test_ssh_runner_code_upgrade_rejects_mismatched_remote_binding(
     assert "remote_config must remain under the runner root" in completed.stderr
 
 
+@pytest.mark.process_e2e
 def test_ssh_runner_full_install_reuses_active_transport(
     tmp_path: Path,
 ) -> None:

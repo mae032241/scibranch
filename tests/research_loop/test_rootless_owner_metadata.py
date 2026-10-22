@@ -63,6 +63,7 @@ def test_cold_owner_is_validated_and_rejected_before_namespace(launcher,cold,sta
     assert before=={p:p.read_bytes() for p in root.rglob('*') if p.is_file()}
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('action,arguments',[('capabilities',['--start','0']),
     ('describe',['--key','cov_single_source','--output','work/contract with spaces.json'])])
 def test_native_contract_discovery_forwards_exact_argv(launcher,tmp_path,action,arguments):

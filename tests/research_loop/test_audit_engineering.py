@@ -126,6 +126,7 @@ def repair_scene(tmp_path,*,ordinary=False,reason='dependency',always_fail=False
     return root,rest
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('reason',['dependency','timeout'])
 def test_exact_worker_repair_creates_new_candidate_and_requires_new_authorization(tmp_path,reason):
     root,rest=repair_scene(tmp_path,ordinary=True,reason=reason)
@@ -147,6 +148,7 @@ def test_exact_worker_repair_creates_new_candidate_and_requires_new_authorizatio
     assert cli(root,'status')['closeout']['status']=='delivery_confirmed'
 
 
+@pytest.mark.process_e2e
 def test_final_engineering_fault_retains_original_without_new_worker(tmp_path,monkeypatch):
     program=NATIVE.replace("assert task['role']=='A' and 'run-3' in json.dumps(task)",
         "assert task['role']=='A' and 'run-1' in json.dumps(task)")
@@ -171,6 +173,7 @@ def test_final_engineering_fault_retains_original_without_new_worker(tmp_path,mo
     assert not (root/'jobs/005.json').exists()
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('unresolved_selection',[False,True])
 def test_default_search_routes_exact_repair_with_no_active_scientific_focus(tmp_path,monkeypatch,unresolved_selection):
     from scidiscovery.research_loop import controller,cov_lineage,search
@@ -260,6 +263,7 @@ def test_ordinary_unresolved_selection_still_requires_its_author(tmp_path,search
     assert not (root/'native-evidence/002/native-intent.json').exists()
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('fault',['packing','timeout'])
 def test_control_rebuilds_exact_archives_without_model_copy_or_new_science(tmp_path,monkeypatch,fault):
     root,_,nodes=prepare_fixture(tmp_path);refs=delivery.freeze_sources(root,nodes)
@@ -282,6 +286,7 @@ def test_control_rebuilds_exact_archives_without_model_copy_or_new_science(tmp_p
     assert not any(c.read(p)['kind']=='budget_amend' for p in (root/'control-ledger').glob('*.json'))
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('ordinary',[False,True])
 def test_insufficient_original_budget_stops_before_new_worker(tmp_path,monkeypatch,ordinary):
     from scidiscovery.research_loop import native,controller
@@ -311,6 +316,7 @@ def test_insufficient_original_budget_stops_before_new_worker(tmp_path,monkeypat
     assert not (root/'submission/model.pkl').exists()
 
 
+@pytest.mark.process_e2e
 def test_same_fault_lineage_cannot_automatically_spawn_workers_forever(tmp_path):
     root,_=repair_scene(tmp_path,ordinary=True,always_fail=True,audit_after_repair=True)
     result=cli(root)
@@ -325,6 +331,7 @@ def test_same_fault_lineage_cannot_automatically_spawn_workers_forever(tmp_path)
     assert len(list((root/'jobs').glob('*.json')))==5
 
 
+@pytest.mark.process_e2e
 def test_accepted_control_recovery_without_outcome_is_never_replayed(tmp_path,monkeypatch):
     root,_,nodes=prepare_fixture(tmp_path);refs=delivery.freeze_sources(root,nodes)
     _,_,bound=closeout_decision(root,refs);intent=accepted(root,bound)
@@ -350,6 +357,7 @@ def test_accepted_control_recovery_without_outcome_is_never_replayed(tmp_path,mo
     assert not (root/'submission/model.pkl').exists()
 
 
+@pytest.mark.process_e2e
 def test_unselected_candidate_fault_cannot_launch_screen_repair(tmp_path,monkeypatch):
     from scidiscovery.research_loop import controller
     from test_control_selection import scene,closeout_author
@@ -365,6 +373,7 @@ def test_unselected_candidate_fault_cannot_launch_screen_repair(tmp_path,monkeyp
     assert not (root/'jobs/005.json').exists() and not (root/'submission/model.pkl').exists()
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('mode',['soft'])
 def test_known_unsealed_repair_worker_resumes_exact_session_without_rewriting_seals(tmp_path,monkeypatch,mode):
     from scidiscovery.research_loop import controller
@@ -402,6 +411,7 @@ def test_known_unsealed_repair_worker_resumes_exact_session_without_rewriting_se
     assert len(execution.records(root,4))==2 and (root/'native-evidence/004/result-identity.json').read_bytes()==seal
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('raw',['{not json','[]','null'])
 def test_exit_zero_with_malformed_or_nondict_proof_stays_unclassified_without_retry(tmp_path,raw):
     harness=FAKE_HARNESS.replace("(runs/'submitted.json').write_text(json.dumps(fact))",
@@ -423,6 +433,7 @@ def test_exit_zero_with_malformed_or_nondict_proof_stays_unclassified_without_re
     assert not (root/'submission/model.pkl').exists()
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('damage',['changed','missing'])
 def test_completed_rejection_requires_the_exact_audited_artifact(tmp_path,damage):
     changed="(runs/'submitted_model.pkl').write_bytes(b'different model')" if damage=='changed' else "(runs/'submitted_model.pkl').unlink()"
@@ -435,6 +446,7 @@ def test_completed_rejection_requires_the_exact_audited_artifact(tmp_path,damage
     assert not list(audit_recovery.facts(root)) and not (root/'submission/model.pkl').exists()
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('cause',['unclassified','control_environment'])
 def test_catalogue_does_not_interpret_faults_of_unselected_candidates(tmp_path,monkeypatch,cause):
     from scidiscovery.research_loop import controller
@@ -450,6 +462,7 @@ def test_catalogue_does_not_interpret_faults_of_unselected_candidates(tmp_path,m
     assert len(list((root/'jobs').glob('*.json')))==4 and not (root/'submission/model.pkl').exists()
 
 
+@pytest.mark.process_e2e
 def test_original_managed_output_capacity_blocks_initial_seal_before_repair(tmp_path,monkeypatch):
     import test_cov_delivery_lineage as managed
     original_finish=managed.finish
@@ -488,6 +501,7 @@ def test_original_managed_output_capacity_blocks_initial_seal_before_repair(tmp_
     assert not (root/'submission/model.pkl').exists()
 
 
+@pytest.mark.process_e2e
 def test_ordinary_repair_then_one_final_author_uses_host_audit_and_resumes(tmp_path):
     root,_=repair_scene(tmp_path,ordinary=True,final_after_repair=True)
     originals={root/f'native-evidence/{step:03d}/result-identity.json':
@@ -539,6 +553,7 @@ def _legacy_preflight(root,job):
     return directory,intent,binding
 
 
+@pytest.mark.process_e2e
 def test_invalid_closeout_source_preflight_does_not_accept_an_intent(tmp_path,monkeypatch):
     root,job,payload=_pending_repaired_audit(tmp_path)
     before=budget.used_steps(root)
@@ -550,6 +565,7 @@ def test_invalid_closeout_source_preflight_does_not_accept_an_intent(tmp_path,mo
     assert cli(root)['status']=='delivery_confirmed'
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('partial_result',[False,True])
 def test_legacy_preflight_settles_without_replaying_old_audit_or_rewriting_science(tmp_path,partial_result):
     root,job,payload=_pending_repaired_audit(tmp_path,deliver_after_unavailable=True)
@@ -584,6 +600,7 @@ def test_legacy_preflight_settles_without_replaying_old_audit_or_rewriting_scien
     assert cli(root)['status']==expected and budget.used_steps(root)==after
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('evidence',['dispatch','process','leaf','recovery'])
 def test_legacy_shaped_audit_with_execution_evidence_remains_unknown_without_replay(tmp_path,evidence):
     root,job,payload=_pending_repaired_audit(tmp_path)

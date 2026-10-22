@@ -266,6 +266,7 @@ def _hold_writer(controller, root, ready, release):
         release.wait(10)
 
 
+@pytest.mark.process_e2e
 def test_concurrent_controller_is_rejected_by_process_lock(scene):
     context = multiprocessing.get_context("fork")
     ready, release = context.Event(), context.Event()

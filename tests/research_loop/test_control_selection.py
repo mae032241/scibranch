@@ -147,6 +147,7 @@ def test_schema_requires_authored_choice_without_default_or_override():
     assert 'default_candidate' not in json.dumps(bound) and 'override' not in json.dumps(bound)
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('metrics',[(.9,.8,.7),(.1,.8,999)])
 def test_real_closeout_catalogue_does_not_run_or_choose_candidates(tmp_path,monkeypatch,metrics):
     root=scene(tmp_path,metrics=metrics)
@@ -164,6 +165,7 @@ def test_real_closeout_catalogue_does_not_run_or_choose_candidates(tmp_path,monk
     assert c.read(root/'jobs'/f'{calls[0][0]:03d}.json')['selection']==shortlist.marker(root)
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('candidate,compared',[('run-2',None),('run-3',('run-3','run-2'))])
 def test_explicit_choice_delivers_its_exact_original_with_qualification(tmp_path,monkeypatch,candidate,compared):
     root=scene(tmp_path)
@@ -176,6 +178,7 @@ def test_explicit_choice_delivers_its_exact_original_with_qualification(tmp_path
     assert controller.closeout(root)['status']=='delivery_confirmed' and budget.used_steps(root)==used and len(calls)==1
 
 
+@pytest.mark.process_e2e
 def test_final_null_choice_cannot_authorize_execution_or_another_a(tmp_path,monkeypatch):
     root=scene(tmp_path)
     monkeypatch.setattr(delivery,'leaf_phase',lambda *a,**kw:pytest.fail('Invalid choice cannot execute'))
@@ -187,6 +190,7 @@ def test_final_null_choice_cannot_authorize_execution_or_another_a(tmp_path,monk
     assert not (root/'jobs/005.json').exists() and not (root/'submission/model.pkl').exists()
 
 
+@pytest.mark.process_e2e
 def test_unknown_candidate_preserves_author_but_cannot_prepare_or_deliver(tmp_path,monkeypatch):
     root=scene(tmp_path)
     monkeypatch.setattr(delivery,'leaf_phase',lambda *a,**kw:pytest.fail('Unknown candidate cannot execute'))
@@ -199,6 +203,7 @@ def test_unknown_candidate_preserves_author_but_cannot_prepare_or_deliver(tmp_pa
     assert not (root/'submission/model.pkl').exists()
 
 
+@pytest.mark.process_e2e
 def test_final_without_original_grant_returns_explicit_unsealed_result_and_never_delivers(tmp_path,monkeypatch):
     root=scene(tmp_path)
     monkeypatch.setattr(delivery,'leaf_phase',lambda *a,**kw:pytest.fail('Unaccepted final return cannot execute'))
@@ -209,6 +214,7 @@ def test_final_without_original_grant_returns_explicit_unsealed_result_and_never
     assert not (root/'jobs/005.json').exists() and not (root/'submission/model.pkl').exists()
 
 
+@pytest.mark.process_e2e
 def test_final_without_observed_cleanup_cannot_deliver_even_with_known_usage(tmp_path,monkeypatch):
     root=scene(tmp_path)
     monkeypatch.setattr(delivery,'leaf_phase',lambda *a,**kw:pytest.fail('Unknown writer cleanup cannot execute'))
@@ -218,6 +224,7 @@ def test_final_without_observed_cleanup_cannot_deliver_even_with_known_usage(tmp
     assert len(calls)==1 and not (root/'submission/model.pkl').exists()
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('comparison',[None,table('run-2',ids=('run-2','run-2')),
     table('run-2',ids=('unknown','run-2')),table('run-3'),table('run-2',rationale=' '),
     table('run-2',evidence_steps=(99,))])
@@ -229,6 +236,7 @@ def test_comparison_explanation_is_not_an_extra_delivery_qualification(tmp_path,
     assert len(calls)==1
 
 
+@pytest.mark.process_e2e
 def test_tampered_bound_catalogue_is_rejected(tmp_path,monkeypatch):
     root=scene(tmp_path)
     calls=closeout_author(monkeypatch,choose('run-2'))
@@ -239,6 +247,7 @@ def test_tampered_bound_catalogue_is_rejected(tmp_path,monkeypatch):
         c.validate(c.workspace(root,calls[0][0]))
 
 
+@pytest.mark.process_e2e
 def test_protocol_18_is_read_only_and_cannot_be_migrated_to_current_selection(tmp_path,monkeypatch):
     from scidiscovery.research_loop.protocol import UnsupportedProtocol
     root=scene(tmp_path)

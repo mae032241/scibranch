@@ -12,6 +12,7 @@ from test_cov_delivery_lineage import managed_scene
 from test_delivery import accepted,closeout_decision
 
 
+@pytest.mark.process_e2e
 def test_real_isolated_resolve_audit_promote_and_confirm(tmp_path,monkeypatch,execution_registry):
     root,nodes,first,*_=managed_scene(tmp_path)
     settings=(root/'settings.json').read_bytes();phases=[]
@@ -43,16 +44,19 @@ def test_real_isolated_resolve_audit_promote_and_confirm(tmp_path,monkeypatch,ex
     assert all(path.read_bytes()==data for path,data in target_before.items())
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('phase',['resolve','audit','promote','confirm'])
 def test_each_actual_leaf_rejects_tampered_protocol_before_target_write(tmp_path,monkeypatch,execution_registry,phase):
     _negative(tmp_path,monkeypatch,phase,'bytes')
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('scope',[13,True])
 def test_isolated_entry_rejects_retired_or_boolean_protocol(tmp_path,monkeypatch,execution_registry,scope):
     _negative(tmp_path,monkeypatch,'resolve','scope',scope)
 
 
+@pytest.mark.process_e2e
 def test_actual_leaf_requires_protocol_proof(tmp_path,monkeypatch,execution_registry):
     _negative(tmp_path,monkeypatch,'resolve','missing_proof')
 

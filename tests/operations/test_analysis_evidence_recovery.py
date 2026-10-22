@@ -56,6 +56,7 @@ print(json.dumps(dict(schema_version=1,operation=request['operation'],ok=True,pa
     assert (directory/'work/actual.plx').read_bytes() == b'original bytes'
 
 
+@pytest.mark.process_e2e
 def test_ssh_inspection_download_streams_through_remote_protocol(tmp_path, monkeypatch):
     import sys
     from tcad_artifact.ssh_transport import SSHRemoteClient, SSHTCADTransportConfig

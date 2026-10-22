@@ -29,6 +29,7 @@ def projection(root,config):
     return root/'host-runtime/experiment-control'/config['scope']['job_sha256']/'interfaces/000.json'
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('executor',['local_execution:command','cov_execution:experiment','remote_execution:fixture'])
 def test_continuation_old_terminal_cli_uses_original_interface(tmp_path,monkeypatch,execution_registry,remote_registry,executor):
     options={}
@@ -67,6 +68,7 @@ def test_continuation_old_terminal_cli_uses_original_interface(tmp_path,monkeypa
         assert e.Records(current).accepted(result['call_id'])['native_attempt']==current['native_attempt']
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('terminal',['known_success','known_failed'])
 def test_async_original_call_reconciles_without_collect_or_resubmit(tmp_path,monkeypatch,composed_registry,terminal):
     options=dict(collect=False,terminal_status=terminal)
@@ -88,6 +90,7 @@ def test_async_original_call_reconciles_without_collect_or_resubmit(tmp_path,mon
     assert cli('collect','--call-id',call,config_file=path,expected=2)['status']=='unavailable'
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('fault',['missing','scope','record','attempt','interface','implementation','accepted-attempt'])
 def test_original_projection_missing_or_tampered_fails_closed(tmp_path,monkeypatch,remote_registry,fault):
     root,job,old,cli=case(tmp_path,monkeypatch,resume=True)
@@ -108,6 +111,7 @@ def test_original_projection_missing_or_tampered_fails_closed(tmp_path,monkeypat
     assert len(e.Records(current).calls())==1
 
 
+@pytest.mark.process_e2e
 def test_current_and_original_collection_capabilities_both_required(tmp_path,monkeypatch,composed_registry):
     root,job,old,cli=case(tmp_path,monkeypatch,executor='composed_execution:fixture',extra=dict(synchronous=True),resume=True)
     call=run(root,cli,'P')['call_id']

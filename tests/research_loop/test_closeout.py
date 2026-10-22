@@ -93,6 +93,7 @@ def native_diagnostics(root):
     return 'Bounded native diagnostics are in captured stdout'
 
 
+@pytest.mark.process_e2e
 def test_actual_fake_h_w_closeout_a_submit_confirm_and_no_replay(tmp_path):
     root = real_chain(tmp_path,pause_after_worker=True)
     paused=controller.run(root)
@@ -120,6 +121,7 @@ def test_actual_fake_h_w_closeout_a_submit_confirm_and_no_replay(tmp_path):
     assert len(budget.closeout_state(root)['actions'])==2
 
 
+@pytest.mark.process_e2e
 def test_export_only_existing_model_closeout_never_executes(tmp_path,monkeypatch):
     root=real_chain(tmp_path,pause_after_worker=True)
     paused=controller.run(root)
@@ -136,6 +138,7 @@ def test_export_only_existing_model_closeout_never_executes(tmp_path,monkeypatch
     assert len(budget.closeout_state(root)['actions'])==before
 
 
+@pytest.mark.process_e2e
 def test_audit_only_launch_window_and_malformed_phase_are_unknown(tmp_path):
     root, _, nodes = prepare_fixture(tmp_path)
     refs = delivery.freeze_sources(root, nodes)
@@ -168,6 +171,7 @@ def test_audit_only_launch_window_and_malformed_phase_are_unknown(tmp_path):
     assert budget.closeout_state(root)['actions'][0]['outcome'] is None
 
 
+@pytest.mark.process_e2e
 def test_exhausted_total_tokens_blocks_zero_model_delivery(tmp_path, monkeypatch):
     root, _, nodes = prepare_fixture(tmp_path)
     refs = delivery.freeze_sources(root, nodes)
@@ -224,6 +228,7 @@ def test_historical_build_time_reserve_refusal_keeps_prepared_job_without_intent
     assert (root/'jobs/001.json').read_bytes()==before
 
 
+@pytest.mark.process_e2e
 def test_export_only_does_not_seal_retained_success_or_write_status_cache(tmp_path, monkeypatch):
     root=real_chain(tmp_path)
     job=c.build_job(root,1,'H',[])
@@ -265,6 +270,7 @@ def test_explicit_export_without_adapter_keeps_empty_prefix_without_science(tmp_
     assert budget.final_a_barrier(root) is None
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('boundary', ['accept', 'popen'])
 def test_historical_closeout_a_keeps_execution_floor_after_preparation(tmp_path, monkeypatch, boundary, historical_delivery_reserve):
     now=[100.]
@@ -318,6 +324,7 @@ def test_resolver_cleanup_unknown_keeps_advance_and_blocks_amendment(tmp_path, m
     assert budget.closeout_state(root)['begin']==begin
 
 
+@pytest.mark.process_e2e
 def test_dead_promote_leader_with_live_child_blocks_confirm_admission(tmp_path):
     root, _, nodes=prepare_fixture(tmp_path)
     refs=delivery.freeze_sources(root,nodes)

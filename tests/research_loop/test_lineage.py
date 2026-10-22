@@ -48,6 +48,7 @@ def scene(tmp_path):
     return root,config,digest
 
 
+@pytest.mark.process_e2e
 def test_real_calls_same_node_branch_return_and_readonly_projection(tmp_path):
     root,config,digest=scene(tmp_path);script=c.workspace(root,2)/'work/train.py';script.write_text('success')
     p=cov.run(config,digest,script,new=True)
@@ -73,6 +74,7 @@ def test_real_calls_same_node_branch_return_and_readonly_projection(tmp_path):
     assert all(path.read_bytes()==data for path,data in originals.items())
 
 
+@pytest.mark.process_e2e
 def test_context_scope_and_asset_tamper_are_hard_not_optional(tmp_path):
     root,config,digest=scene(tmp_path);script=c.workspace(root,2)/'work/train.py';script.write_text('success')
     result=cov.run(config,digest,script,new=True)
@@ -99,6 +101,7 @@ def test_v1_existing_contract_bytes_and_relations_remain_unknown(tmp_path):
     assert 'contract_version' not in history.observer_config(dict(adapter=str(Path(cov.__file__).resolve()),config={}))
 
 
+@pytest.mark.process_e2e
 def test_sealed_parent_exact_completion_is_distinct_from_implementation_reuse(tmp_path):
     root,config,digest=scene(tmp_path)
     script=c.workspace(root,2)/'work/train.py';script.write_text('success')
@@ -121,6 +124,7 @@ def test_sealed_parent_exact_completion_is_distinct_from_implementation_reuse(tm
     assert view['candidates'][child['candidate_id']]['support']=='unknown'
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('wrong', ['model', 'future'])
 def test_declared_parent_binding_cannot_borrow_another_or_future_original(tmp_path,wrong):
     root,config,digest=scene(tmp_path)
@@ -153,6 +157,7 @@ def test_declared_parent_binding_cannot_borrow_another_or_future_original(tmp_pa
         lineage.contexts(root,c.read(root/'jobs/002.json'),items,lambda path:history._proof(root,path))
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('field,value', [('candidate_id','run-999'),('run_id',999),('status','known_failed')])
 def test_completed_cannot_change_identity_or_outcome_while_preserving_proofs(tmp_path,field,value):
     root,config,digest=scene(tmp_path)
@@ -172,6 +177,7 @@ def test_completed_cannot_change_identity_or_outcome_while_preserving_proofs(tmp
     assert not (root/'jobs/003.json').exists()
 
 
+@pytest.mark.process_e2e
 def test_completed_model_cannot_be_rebound_to_another_successful_call(tmp_path):
     root,config,digest=scene(tmp_path)
     script=c.workspace(root,2)/'work/train.py';script.write_text('success')
@@ -192,6 +198,7 @@ def test_completed_model_cannot_be_rebound_to_another_successful_call(tmp_path):
     assert not (root/'jobs/003.json').exists()
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('version', [1,2])
 def test_integrity_sentinel_is_v2_only_and_preserves_v1_optional_failure(tmp_path,version):
     public=tmp_path/'public';public.mkdir();objective=public/'objective';objective.write_text('Versioned observation failures')

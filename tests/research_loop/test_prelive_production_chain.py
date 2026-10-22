@@ -44,6 +44,7 @@ def originals(*paths):
     return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('comparison',[False,True])
 @pytest.mark.parametrize('audit_status',[None,'audited','unknown'])
 def test_fake_closeout_author_uses_current_delivery_contract(tmp_path,comparison,audit_status):
@@ -85,6 +86,7 @@ def test_fake_closeout_author_uses_current_delivery_contract(tmp_path,comparison
         assert payload['candidate_comparison']['evidence_steps']==[2]
 
 
+@pytest.mark.process_e2e
 def test_fake_final_choice_reads_full_index_when_source_preview_is_empty(tmp_path):
     work=tmp_path/'work';(work/'inputs/parents').mkdir(parents=True)
     first='inputs/public/first-candidates.json';last='inputs/public/final-candidates.json'
@@ -112,6 +114,7 @@ def test_fake_final_choice_reads_full_index_when_source_preview_is_empty(tmp_pat
     assert 'FileNotFoundError' in failed.stderr and last in failed.stderr
 
 
+@pytest.mark.process_e2e
 def test_latest_frozen_settings_drive_full_chain_to_confirmed_delivery(tmp_path):
     settings,launcher=latest();before=originals(settings,launcher)
     result,verdict=gate(tmp_path,settings,launcher)
@@ -246,6 +249,7 @@ def source_gate_failure(tmp_path,verdict,result):
     show('Exact last unsealed prelive originals',detail)
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('comparison',[False,True])
 def test_source_normal_gate_uses_one_final_author_and_original_host_delivery(tmp_path,execution_registry,comparison):
     settings,launcher,python=source_prelive(tmp_path,comparison)
@@ -288,6 +292,7 @@ def test_source_provenance_rebinding_rejects_self_consistent_changed_facts(tmp_p
     assert not equal(roots[0],roots[1],[(str(roots[0]),str(roots[1])),(str(publics[0]),str(publics[1]))])
 
 
+@pytest.mark.process_e2e
 def test_failed_native_turn_is_a_retained_stop_without_seal_replay_or_delivery(tmp_path):
     # rootless-receipt-cov-20261014b: A005 turn.failed (service routing), reported as native_stopped.
     settings,launcher=latest()
@@ -296,6 +301,7 @@ def test_failed_native_turn_is_a_retained_stop_without_seal_replay_or_delivery(t
     assert verdict['status']=='native_stopped' and verdict['chain'][-1]=={'step':3,'role':'A','purpose':None,'sealed':False}
 
 
+@pytest.mark.process_e2e
 def test_polluted_public_harness_fails_before_any_scene_or_launch(tmp_path):
     # rootless-receipt-cov-20261014: a host smoke wrote harness/__pycache__ into the shared public copy.
     settings,launcher=latest();config=c.read(launcher)

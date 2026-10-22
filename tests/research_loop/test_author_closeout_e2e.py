@@ -172,6 +172,7 @@ def closeout_diagnostics(root,origin):
     return diagnostics
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('mode',['success','unknown','over','wall'])
 def test_fresh_author_closeout_seals_and_audits_or_preserves_failed_attempt(tmp_path,monkeypatch,execution_registry,mode):
     root,origin=scene(tmp_path,monkeypatch,mode)

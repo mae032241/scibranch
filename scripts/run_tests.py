@@ -367,7 +367,7 @@ def main():
                 scratch.mkdir()
                 environment.update(TMPDIR=str(scratch), SCID_TEST_LOG_DIR=str(batch_output / "fixture-logs"),
                     SCID_TEST_LOG_BYTES=str(limits["log_bytes"]), MPLCONFIGDIR=str(batch_output / "matplotlib"))
-                command = [sys.executable, "-B", "-m", "pytest", "-q", "--tb=short", "-o", "addopts=",
+                command = [sys.executable, "-B", "-m", "pytest", "-q", "--tb=short", "--strict-markers", "-o", "addopts=",
                     "-p", "no:cacheprovider", "--test-lane", args.lane, "--basetemp", str(batch_output / "tmp")]
                 if args.lane == "installed":
                     command.extend(["--installation-cohort", args.installation_cohort])

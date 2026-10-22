@@ -70,6 +70,7 @@ def test_actual_same_session_preserves_call_and_frozen_originals(tmp_path,mode):
     assert c.digest(public/'result.pending.json')==c.read(second/'native-outcome.json')['raw_sha256']
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('state',['terminal_replay','unknown_dispatch'])
 def test_actual_main_rejects_relaunch_before_second_namespace_native(tmp_path,state):
     root=prepare_namespace(tmp_path,fake_source=resume_native(False),context='same_session')

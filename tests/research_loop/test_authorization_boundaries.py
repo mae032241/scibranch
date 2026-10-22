@@ -43,6 +43,7 @@ def _forbid_results(monkeypatch):
         monkeypatch.setattr(owner, name, forbidden)
 
 
+@pytest.mark.process_e2e
 def test_audit_permission_and_consumption_ignore_broken_results(tmp_path, monkeypatch):
     root = audit_fixture(tmp_path)
     _, _, intent = _accepted_audit(root)
@@ -62,6 +63,7 @@ def test_audit_permission_and_consumption_ignore_broken_results(tmp_path, monkey
         candidate_audit._validate_request(root, changed)
 
 
+@pytest.mark.process_e2e
 def test_audit_new_acceptance_requires_valid_scientific_result(tmp_path, monkeypatch):
     root = audit_fixture(tmp_path)
     job, payload = request(root)
@@ -76,6 +78,7 @@ def test_audit_new_acceptance_requires_valid_scientific_result(tmp_path, monkeyp
     assert not (candidate_audit._directory(root, 3)/'intent.json').exists()
 
 
+@pytest.mark.process_e2e
 def test_accepted_audit_still_rejects_changed_result_before_effect(tmp_path, monkeypatch):
     root = audit_fixture(tmp_path)
     job, payload, intent = _accepted_audit(root)
@@ -94,6 +97,7 @@ def test_accepted_audit_still_rejects_changed_result_before_effect(tmp_path, mon
         candidate_audit.require_eligibility(root, intent)
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('damage', ['task', 'attempt', 'step', 'root', 'previous', 'gap', 'missing_original'])
 def test_native_consumption_reads_accepted_intents_not_results(tmp_path, monkeypatch, damage):
     root = audit_fixture(tmp_path)
@@ -131,6 +135,7 @@ def test_native_consumption_reads_accepted_intents_not_results(tmp_path, monkeyp
         budget.used_steps(root)
 
 
+@pytest.mark.process_e2e
 def test_audit_retry_consumption_ignores_results_but_rejects_bad_intent(tmp_path, monkeypatch):
     root = audit_fixture(tmp_path)
     operation = 'e'*64
@@ -216,6 +221,7 @@ def test_startup_grant_does_not_prove_positive_engineering_facts(tmp_path, monke
         recovery.require_eligibility(root, 3)
 
 
+@pytest.mark.process_e2e
 def test_final_cursor_permission_is_separate_from_sealed_source_eligibility(tmp_path, monkeypatch):
     root = audit_fixture(tmp_path)
     refs = [dict(step=step, seal_sha256=c.digest(execution.origin(root, step)/'result-identity.json')) for step in (1, 2)]
@@ -232,6 +238,7 @@ def test_final_cursor_permission_is_separate_from_sealed_source_eligibility(tmp_
         budget.require_cursor_eligibility(root, cursor, 3, events)
 
 
+@pytest.mark.process_e2e
 def test_final_report_grant_replay_does_not_revalidate_stopped_results(tmp_path, monkeypatch):
     root = audit_fixture(tmp_path)
     c.build_job(root, 3, 'A', [1, 2])

@@ -155,6 +155,7 @@ def test_long_candidate_member_references_bound_brief_and_keep_complete_catalogu
     assert all(any(row['id'].endswith('/'+path) for row in candidates) for path in artifacts)
 
 
+@pytest.mark.process_e2e
 def test_known_failed_experiment_is_separate_from_original_scientific_conclusion(tmp_path):
     from test_lineage import scene as call_scene
     from scidiscovery.research_loop import cov_lineage as cov

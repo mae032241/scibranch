@@ -30,6 +30,7 @@ def live_scope(config):
     return result
 
 
+@pytest.mark.process_e2e
 def test_running_call_is_visible_before_w_or_call_finishes_and_queries_are_readonly(wrapper):
     code = wrapper.backend.read_text().replace("if mode=='failed':row", "if mode=='slow':\n import time;time.sleep(2)\nif mode=='failed':row", 1)
     wrapper.backend.write_text(code)
@@ -62,6 +63,7 @@ def test_running_call_is_visible_before_w_or_call_finishes_and_queries_are_reado
             process.communicate(timeout=10)
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('name', ['accepted.json', 'completed.json', 'process.json'])
 def test_torn_metadata_never_proves_success_or_reconciles_originals(wrapper, name):
     result = wrapper.run('initial', 'success', '--new-plan')
@@ -87,6 +89,7 @@ def test_torn_metadata_never_proves_success_or_reconciles_originals(wrapper, nam
     assert [p.name for p in directory.parent.iterdir()] == [directory.name]
 
 
+@pytest.mark.process_e2e
 def test_pid_mismatch_without_completion_is_unknown_not_running(wrapper):
     result = wrapper.run('initial', 'success', '--new-plan')
     directory = wrapper.directory(result)
@@ -98,6 +101,7 @@ def test_pid_mismatch_without_completion_is_unknown_not_running(wrapper):
     assert value['calls'][0]['status'] == 'unknown' and value['counts']['running'] == 0
 
 
+@pytest.mark.process_e2e
 def test_more_than_sixteen_calls_remain_counted_once_without_large_asset_reads(wrapper, monkeypatch):
     for index in range(18):
         wrapper.run(f'candidate-{index}', 'success', '--new-plan')
@@ -118,6 +122,7 @@ def test_more_than_sixteen_calls_remain_counted_once_without_large_asset_reads(w
     assert before == {p: p.read_bytes() for p in before}
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('name', ['accepted.json', 'row.json', 'terminal.json'])
 def test_published_metadata_mismatch_is_hard_error_not_optional_unknown(wrapper, name):
     result = wrapper.run('initial', 'success', '--new-plan')
@@ -169,6 +174,7 @@ def test_malformed_budget_advice_is_unavailable_without_raising(tmp_path, key, v
     assert result['observed_at'] is None and result['review_request'] is None
 
 
+@pytest.mark.process_e2e
 def test_tool_budget_symlink_reports_bounded_integrity_error(wrapper):
     wrapper.run('public-candidate', 'success', '--new-plan')
     path = hint(wrapper.root)
@@ -181,6 +187,7 @@ def test_tool_budget_symlink_reports_bounded_integrity_error(wrapper):
     assert private.read_text() == 'no disclosure'
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('data', [b'{', b'\xff', b' ' * 4097, b'[' * 1500 + b']' * 1500])
 def test_tool_malformed_budget_bytes_are_unavailable_and_preserved(wrapper, data):
     wrapper.run('public-candidate', 'success', '--new-plan')
@@ -192,6 +199,7 @@ def test_tool_malformed_budget_bytes_are_unavailable_and_preserved(wrapper, data
     assert path.read_bytes() == data
 
 
+@pytest.mark.process_e2e
 def test_tool_budget_directory_is_a_bounded_integrity_error(wrapper):
     wrapper.run('public-candidate', 'success', '--new-plan')
     path = hint(wrapper.root)
@@ -229,6 +237,7 @@ def test_budget_hint_ancestor_symlink_is_an_integrity_error(tmp_path):
     assert path.read_bytes() == contents
 
 
+@pytest.mark.process_e2e
 def test_large_public_metrics_remain_known_but_are_omitted_from_feedback(wrapper):
     code = wrapper.backend.read_text().replace('val_score=.5,val_acc=.5',
         'val_score=2**1024,val_acc=2**1024,wall_seconds=2**1024')
@@ -245,6 +254,7 @@ def test_large_public_metrics_remain_known_but_are_omitted_from_feedback(wrapper
     assert before == {p: p.read_bytes() for p in before}
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('name,value', [('accepted.json', []), ('process.json', []),
     ('accepted.json', {'parent': []}), ('accepted.json', {'parent': {}}),
     ('accepted.json', {'parent': {'candidate_id': []}})])
@@ -262,6 +272,7 @@ def test_tool_malformed_live_metadata_is_bounded_integrity_error(wrapper, name, 
     assert before == {p: p.read_bytes() for p in before}
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('name', ['accepted.json', 'completed.json', 'process.json'])
 def test_tool_torn_utf8_live_metadata_is_unresolved_or_unknown(wrapper, name):
     result = wrapper.run('public-candidate', 'success', '--new-plan')
@@ -284,6 +295,7 @@ def test_tool_torn_utf8_live_metadata_is_unresolved_or_unknown(wrapper, name):
     assert [p.name for p in directory.parent.iterdir()] == [directory.name]
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('intent', [[], None, 1, 'invalid'])
 @pytest.mark.parametrize('name', ['native-intent.json', 'native-outcome.json'])
 @pytest.mark.parametrize('node_budget', [False, True])
@@ -405,6 +417,7 @@ def test_no_observer_is_explicitly_unavailable_not_zero_progress(tmp_path):
     assert value['budget']['inflight_usage_unknown'] is True
 
 
+@pytest.mark.process_e2e
 def test_registered_local_host_feedback_requires_no_domain_observer(tmp_path):
     from scidiscovery.research_loop import experiments
     public=tmp_path/'public';public.mkdir();objective=public/'goal';objective.write_text('Original public goal')

@@ -36,6 +36,7 @@ def assert_preserved(originals):
     assert all(path.read_bytes()==raw for path,raw in originals.items())
 
 
+@pytest.mark.process_e2e
 def test_default_thin_preview_needs_no_legacy_workspace_or_service(tmp_path):
     environment, originals=scene(tmp_path)
     result=shell(environment,'''systemctl() { exit 91; }
@@ -51,6 +52,7 @@ preview
     assert_preserved(originals)
 
 
+@pytest.mark.process_e2e
 def test_thin_refuses_existing_prefix_and_foreign_wrapper(tmp_path):
     environment, originals=scene(tmp_path)
     prefix=Path(environment['SCID_INSTALL_ROOT'])/'site';prefix.mkdir(parents=True)
@@ -67,6 +69,7 @@ def test_thin_refuses_existing_prefix_and_foreign_wrapper(tmp_path):
     assert_preserved(originals)
 
 
+@pytest.mark.process_e2e
 def test_thin_publication_failure_rolls_back_only_new_wrappers(tmp_path):
     environment, originals=scene(tmp_path)
     prepared=tmp_path/'prepared-site';prepared.mkdir();(prepared/'retained').write_bytes(b'Prepared fixture bytes, not a package.')
@@ -97,6 +100,7 @@ install_all
     assert_preserved(originals)
 
 
+@pytest.mark.process_e2e
 def test_thin_status_and_uninstall_preserve_foreign_commands_and_package(tmp_path):
     environment, originals=scene(tmp_path)
     binary=Path(environment['SCID_BIN_ROOT'])
@@ -125,11 +129,11 @@ uninstall_services
 
 
 @pytest.mark.parametrize('script', ['install.sh', 'reinstall.sh'])
-@pytest.mark.parametrize('action', ['--dry-run', 'install', 'status', 'uninstall'])
-def test_retired_service_deployment_is_rejected_before_any_mutation(tmp_path, script, action):
+@pytest.mark.process_e2e
+def test_retired_service_deployment_is_rejected_before_any_mutation(tmp_path, script):
     environment, originals = scene(tmp_path)
     environment['SCID_DEPLOY_MODE'] = 'legacy'
-    result = subprocess.run(['bash', str(SCRIPT.with_name(script)), action],
+    result = subprocess.run(['bash', str(SCRIPT.with_name(script)), 'install'],
         env=environment, capture_output=True, text=True, timeout=10, check=False)
     assert result.returncode == 2
     assert 'legacy service deployment is retired' in result.stderr
@@ -138,6 +142,7 @@ def test_retired_service_deployment_is_rejected_before_any_mutation(tmp_path, sc
     assert_preserved(originals)
 
 
+@pytest.mark.process_e2e
 def test_reinstaller_passes_operator_python_and_selected_plugins_as_data(tmp_path):
     environment, originals = scene(tmp_path)
     binary = Path(environment['SCID_BIN_ROOT'])

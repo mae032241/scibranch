@@ -91,6 +91,7 @@ def _producer(monkeypatch, script):
     return calls
 
 
+@pytest.mark.process_e2e
 def test_stdout_sink_overflow_terminates_and_reaps_producer(tmp_path, monkeypatch):
     monkeypatch.setattr(pdf_tool, "_TEXT_BYTES", 32)
     processes = []
@@ -107,6 +108,7 @@ def test_stdout_sink_overflow_terminates_and_reaps_producer(tmp_path, monkeypatc
     assert not tuple(tmp_path.rglob("excerpt_*.txt"))
 
 
+@pytest.mark.process_e2e
 def test_stderr_overflow_keeps_bounded_prefix_and_reports_truncation(tmp_path, monkeypatch):
     monkeypatch.setattr(pdf_tool, "_STDERR_BYTES", 32)
     calls = _producer(monkeypatch,
@@ -119,6 +121,7 @@ def test_stderr_overflow_keeps_bounded_prefix_and_reports_truncation(tmp_path, m
     assert not tuple(tmp_path.rglob("excerpt_*.txt"))
 
 
+@pytest.mark.process_e2e
 def test_timeout_preserves_bounded_diagnostics_and_reaps_producer(tmp_path, monkeypatch):
     processes = []
     popen = collection.subprocess.Popen

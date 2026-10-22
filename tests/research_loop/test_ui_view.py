@@ -520,6 +520,7 @@ print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=N
     assert ui_view.resolve_candidate(root, reader.node(3)['job'], 'W002-I002', strict=True) == 'Q'
 
 
+@pytest.mark.process_e2e
 def test_audit_facts_display_saved_receipts_and_candidate_artifact_scope(tmp_path):
     from scidiscovery.research_loop import candidate_audit, contracts as c
     from test_candidate_audit import audit_fixture, request

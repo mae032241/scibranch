@@ -11,6 +11,7 @@ from test_closeout_protocol import NATIVE, command, scene
 from test_control_selection import scene as selection_scene
 
 
+@pytest.mark.process_e2e
 def test_disabled_audit_with_adapter_returns_unavailable_without_external_execution(tmp_path):
     root=scene(tmp_path,[dict(action='audit',candidate='run-1'),dict(action='wait',candidate='run-1')],audit=False)
     result=command(root,'run')
@@ -34,6 +35,7 @@ def test_disabled_audit_with_adapter_returns_unavailable_without_external_execut
     assert not list(candidate_audit.facts(root)) and budget.used_steps(root)==4
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('low_budget',[False,True])
 def test_accepted_audit_without_policy_still_counts_and_projects_unknown(tmp_path,low_budget):
     root=scene(tmp_path,[],audit=False,max_tokens=1120 if low_budget else 100000)
@@ -79,6 +81,7 @@ print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=7,cached_inp
 '''
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('alternative',[False,True])
 def test_ordinary_deliver_with_selection_policy_cannot_bypass_frozen_comparison(tmp_path,alternative):
     launcher=tmp_path/'author.py';launcher.write_text('ALTERNATIVE='+repr(alternative)+'\n'+AUTHOR)
@@ -96,6 +99,7 @@ def test_ordinary_deliver_with_selection_policy_cannot_bypass_frozen_comparison(
     assert len(list((root/'jobs').glob('*.json')))==4
 
 
+@pytest.mark.process_e2e
 def test_ordinary_deliver_without_selection_policy_requires_one_explicit_final_choice(tmp_path):
     launcher=tmp_path/'author.py'
     launcher.write_text("SCENARIO="+repr([dict(action='deliver',candidate='run-2')])+"\nFIRST_STEP=4\n"+NATIVE)

@@ -225,6 +225,7 @@ def test_delivery_policy_rejects_incomplete_or_unbounded_limits(tmp_path, invali
     with pytest.raises(ValueError):delivery.policy(value)
 
 
+@pytest.mark.process_e2e
 def test_pre_a_sources_are_snapshot_pending_not_proxy_qualified(tmp_path):
     root, _, nodes = prepare_fixture(tmp_path)
     refs = delivery.freeze_sources(root, nodes)
@@ -241,6 +242,7 @@ def test_pre_a_sources_are_snapshot_pending_not_proxy_qualified(tmp_path):
     assert len(view.encode()) <= 4096 and 'sha256' not in view and 'host-delivery' not in view
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('mode', ['ok', 'skip', 'leak'])
 def test_real_namespace_audit_promotes_only_complete_nonleaking_result(tmp_path, mode):
     root, _, nodes = prepare_fixture(tmp_path, mode)
@@ -271,6 +273,7 @@ def test_real_namespace_audit_promotes_only_complete_nonleaking_result(tmp_path,
         assert not (root / 'runs/rootless-delivery-operation.json').exists()
 
 
+@pytest.mark.process_e2e
 def test_source_archive_tamper_and_changed_argv_symlink_are_hard_errors(tmp_path):
     root, _, nodes = prepare_fixture(tmp_path)
     refs = delivery.freeze_sources(root, nodes)
@@ -291,6 +294,7 @@ def test_source_archive_tamper_and_changed_argv_symlink_are_hard_errors(tmp_path
     with pytest.raises(ValueError, match='names another original'):delivery._adapter(root)
 
 
+@pytest.mark.process_e2e
 def test_seventeenth_source_remains_selectable_and_shared_objects_are_deduplicated(tmp_path, monkeypatch):
     root, _, nodes = prepare_fixture(tmp_path, candidate_count=17)
     refs = delivery.freeze_sources(root, nodes)
@@ -319,6 +323,7 @@ def test_seventeenth_source_remains_selectable_and_shared_objects_are_deduplicat
     assert page.stat().st_mode & 0o222 == 0
 
 
+@pytest.mark.process_e2e
 def test_partial_target_or_missing_marker_cannot_confirm_or_resubmit(tmp_path):
     root, _, nodes = prepare_fixture(tmp_path)
     refs = delivery.freeze_sources(root, nodes)
@@ -338,6 +343,7 @@ def test_partial_target_or_missing_marker_cannot_confirm_or_resubmit(tmp_path):
     assert not (root / 'runs/submitted_model.pkl').exists()
 
 
+@pytest.mark.process_e2e
 def test_exited_launcher_with_live_stdout_child_is_cleaned_not_success(tmp_path):
     launcher = tmp_path / 'misbehaving.py'
     launcher.write_text('''import json,pathlib,subprocess,sys
@@ -366,6 +372,7 @@ print('{}',flush=True)
     except ChildProcessError:pass
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('mode', ['real_ok', 'real_skip'])
 def test_actual_public_harness_audit_completion_controls_promotion(tmp_path, mode):
     """Opt-in deterministic original public audit, no N5 instance or hidden data."""
@@ -391,6 +398,7 @@ def test_actual_public_harness_audit_completion_controls_promotion(tmp_path, mod
         assert not (root / 'runs/submitted.json').exists()
 
 
+@pytest.mark.process_e2e
 def test_complete_delivery_sources_exceed_old_byte_and_candidate_caps(tmp_path):
     root,_,nodes=prepare_fixture(tmp_path,candidate_count=140)
     catalogue=delivery.catalogue_sources(root,nodes)
@@ -406,6 +414,7 @@ def test_complete_delivery_sources_exceed_old_byte_and_candidate_caps(tmp_path):
     assert selected['items'][0]['candidate_id']=='run-140'
 
 
+@pytest.mark.process_e2e
 def test_complete_internal_adapter_reply_is_spooled_without_byte_truncation(tmp_path):
     script=tmp_path/'adapter.py'
     script.write_text('import json,sys\nrequest=json.load(sys.stdin)\njson.dump({"items":request["items"]},sys.stdout)\n')

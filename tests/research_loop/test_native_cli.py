@@ -403,6 +403,7 @@ c.write=held_write
                 time.sleep(.01)
 
 
+@pytest.mark.process_e2e
 def test_cli_entrypoint_status_is_read_only(instance):
     environment = {**os.environ, 'PYTHONPATH': str(Path(__file__).parents[2] / 'src')}
     result = subprocess.run([sys.executable, '-m', 'scidiscovery.research_loop.cli',

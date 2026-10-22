@@ -47,6 +47,7 @@ def test_transport_differentiates_no_progress_and_total_deadline():
         assert caught.value.timeout_kind == expected
 
 
+@pytest.mark.process_e2e
 def test_common_launcher_preserves_environment_and_full_stdout(tmp_path, monkeypatch):
     import sys
     from scidiscovery.plugin_runtime.observation import materialize_launcher

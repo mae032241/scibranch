@@ -303,6 +303,7 @@ def _until(predicate, seconds=8):
     pytest.fail('Deterministic local process event did not arrive')
 
 
+@pytest.mark.process_e2e
 def test_controller_restart_rejoins_same_slice_and_counts_one_dispatch(tmp_path):
     root = instance(tmp_path, limits=policy(), mode='hold')
     work = c.workspace(root, 1)

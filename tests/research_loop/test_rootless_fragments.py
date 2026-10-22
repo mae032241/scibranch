@@ -21,6 +21,7 @@ def launcher():
     return module
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('action',['submit','--help','-h','help','status'])
 def test_native_exp_warning_preserves_public_command_and_exit_status(launcher,tmp_path,action):
     executable=tmp_path/'task python'

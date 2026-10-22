@@ -49,6 +49,6 @@ norecursedirs = ["portable_delivery"]
 markers = [
   "installed: isolated wheel installation and installed entry points",
   "stress: large-input and resource-bound checks; run with --test-lane=stress",
-  "process_e2e: launches real daemon and stdio proxy processes across Unix sockets",
+  "process_e2e: launches real CLI, shell, namespace, worker or lock-contention subprocesses",
   "live_platform: requires a running Codex platform and is not part of hermetic pytest",
 ]

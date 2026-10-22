@@ -18,6 +18,7 @@ from test_rootless_fragments import launcher
 from test_rootless_owner_metadata import specification
 
 
+@pytest.mark.process_e2e
 def test_terminal_facts_use_retained_transport_without_an_adapter(tmp_path,execution_registry,monkeypatch):
     root,_,first,*_=managed_scene(tmp_path)
     from scidiscovery.research_loop import experiments
@@ -37,6 +38,7 @@ def test_terminal_facts_use_retained_transport_without_an_adapter(tmp_path,execu
         author_closeout.terminal_facts(root,2)
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('action',['run','compile','submit','query','collect','cancel'])
 def test_closeout_native_wrapper_denies_effects_before_any_call(launcher,tmp_path,action):
     wrapper=tmp_path/'exp'
@@ -62,6 +64,7 @@ def test_author_start_requires_positive_actual_shared_balance(unknown_original):
     assert before=={p:p.read_bytes() for p in root.rglob('*') if p.is_file()}
 
 
+@pytest.mark.process_e2e
 def test_real_closeout_namespace_keeps_originals_readonly_and_artifacts_writable(launcher,cold,monkeypatch):
     if shutil.which('bwrap') is None:pytest.skip('Actual bwrap namespace required')
     root,_=cold;work=c.workspace(root,1);home=root/'native-homes/author-context';current=root/'native-evidence/001/continuations/001'

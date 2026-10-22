@@ -74,6 +74,7 @@ def generic_case(tmp_path, monkeypatch, deliver=True, max_steps=5, observer=None
     return root, target, cli, public
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('deliver', [False, True], ids=['export', 'directory-delivery'])
 def test_generic_inverse_default_local_cli_handoff_and_export(tmp_path, execution_registry, monkeypatch, deliver):
     # Delivery needs a separate, catalogue-bound A plus submit and confirm.
@@ -229,6 +230,7 @@ def test_generic_inverse_default_local_cli_handoff_and_export(tmp_path, executio
     (tmp_path / 'acceptance-evidence.json').write_text(json.dumps(report, indent=2) + '\n')
 
 
+@pytest.mark.process_e2e
 def test_generic_directory_delivery_preserves_final_author_without_optional_comparison(tmp_path, execution_registry, monkeypatch):
     native_source = (FIXTURE / 'native.py').read_text()
     comparison_start = native_source.index('    if comparison:\n')
@@ -294,6 +296,7 @@ def test_generic_directory_delivery_preserves_final_author_without_optional_comp
         assert c.validate(c.workspace(root, final_step)) == author
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('fault', ['promotion-response-lost', 'confirmation-response-lost', 'pending-target-conflict'])
 def test_generic_directory_delivery_recovers_by_confirmation_without_resubmission(tmp_path, execution_registry, monkeypatch, fault):
     root, target, _, _ = generic_case(tmp_path, monkeypatch, max_steps=10)
@@ -467,6 +470,7 @@ def test_generic_adapter_missing_required_audit_is_rejected_before_instance_crea
     assert not root.exists() and list(target.iterdir()) == []
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('observer', ['empty', 'unavailable'])
 def test_generic_candidates_are_registered_independently_of_optional_domain_observer(tmp_path, execution_registry, monkeypatch, observer):
     root, _, cli, _ = generic_case(tmp_path, monkeypatch, deliver=False, observer=observer)

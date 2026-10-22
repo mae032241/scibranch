@@ -13,6 +13,7 @@ from test_cov_lineage import BACKEND
 from test_history_handoff import finish
 
 
+@pytest.mark.process_e2e
 def test_sealed_current_h_configures_registered_cov_and_final_a(tmp_path,execution_registry):
     public=tmp_path/'public';public.mkdir();objective=public/'objective.md';objective.write_text('Bounded current scientific composition')
     root=tmp_path/'instance'
@@ -65,6 +66,7 @@ def test_sealed_current_h_configures_registered_cov_and_final_a(tmp_path,executi
     assert before=={p:p.read_bytes() for p in root.rglob('*') if p.is_file()}
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('damage',['missing_protocol','different_owner'])
 def test_context_requires_current_stable_stage_scope(tmp_path,execution_registry,damage):
     from test_lineage import scene

@@ -32,6 +32,7 @@ def test_source_tcad_resources_and_experiment_capability(source_catalog, monkeyp
 
 
 @pytest.mark.skipif(shutil.which("pdftotext") is None, reason="pdftotext is required")
+@pytest.mark.process_e2e
 def test_all_manual_topics_have_real_anchors_and_helpers_preserve_skill(tmp_path):
     scratch = tmp_path / "scratch"
     scratch.mkdir()

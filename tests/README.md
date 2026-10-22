@@ -16,9 +16,13 @@
 
 功能全量也不导入安装目录。显式把安装文件传给功能组（反之亦然）会报错；功能fixture若依赖旧安装fixture也报错，不再自动升级到安装组。根conftest在收集前隔离目录，不能靠执行阶段跳过来掩盖安装依赖。
 
+“功能全量”须覆盖全部功能测试文件的 source 和 process 两组；仅运行默认 source 不代表功能全量。实际启动 CLI、shell、namespace 或锁竞争子进程的用例应标记 `process_e2e`，包括通过 fixture/helper 启动的情况；仅构造命令或模拟进程接口的用例仍可留在 source。安装、大输入和真实平台的验收状态分别报告，不用模拟成功结果替代真实平台证据。
+
 安装组不运行科学实验、H/W/A、daemon业务、评分或恢复矩阵；这些检查回到对应功能组。一个选定cohort只建一次环境、安装一次，不切换环境删除后再重建。默认core，只有涉及TCAD交付元数据时显式选tcad；其余旧包装组合未验证，不构造新矩阵补齐。
 
 `tests/installation/check_source_release.py` 是**单独显式选择**的源码发布包检查，名称不匹配默认测试发现。它检查发布文件、原件hash与manifest，不运行发布包中的pytest或安装检查。源码发布与wheel是不同交付路径，不能以一个冒充另一个；不在默认安装烟顺带构建整份源码发布包。
+
+`tests/installation/check_retired_entrypoints.py` 也须显式选择，用于安装产物的退役入口检查；默认 installed 组只发现 `test_packaging.py`。两项 `check_*.py` 按各自发布变更范围运行，不能把默认安装烟的通过写成它们已验证。
 
 ## 选择与证据
 
@@ -31,6 +35,8 @@
 串行入口为 `scripts/run_tests.py`。确认资源条件与执行范围后，使用精确目标和仓库本地持久日志目录。例如功能目标选择 `--lane source --output .trial/check-name tests/research_loop/<文件>::<用例>`；独立安装选择 `--lane installed --installation-cohort core --output .trial/check-name <精确目标>`。日志属于本地检查证据，不进入源码跟踪。
 
 `--per-file` 会重复启动解释器与session fixture，不作为默认全目录执行方式；安装组禁止该选项。数据/进程用例显式标记 `stress`/`process_e2e`。collect-only也会导入测试，不视为无成本静态检查。
+
+全量执行前按真实分组和已有耗时记录准备精确目标清单，串行分成可在现有 300 秒时限内结束的批次；长文件可按 node ID 拆分。时限属于每批而非整轮，不应把所有文件合成一个超大批次或提高限额绕过失败。CI 当前仍逐文件执行两组，存在空组重复收集成本；调整分批必须同时核对完整覆盖与耗时，不能仅为减少启动次数取消边界。失败、超时、跳过和未运行分别保留记录。
 
 五项生命周期缺陷的专项回归可直接运行 `python scripts/verify_lifecycle_fixes.py`，默认依次执行 `test_instance_delete.py`、`test_fork_consumer_recovery.py`、`test_remote_runner_recovery.py` 各自的 source/process，共六个小批次。`--list` 只静态列出范围，不导入 pytest；`--case delete|fork|remote` 可选择其中一组。脚本从自身位置定位仓库，可在其他工作目录使用绝对脚本路径调用；所有批次使用同一个 Python 解释器与现有 `scripts/run_tests.py` 默认资源限制，首个失败即停止，不自动重试。
 

@@ -119,6 +119,7 @@ def test_host_receipt_child_imports_writable_inputs_without_bytecode(tmp_path,ex
 
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('name',['receipt.json','source.py','row.json'])
 def test_known_cov_original_tamper_is_integrity_error_without_reexecution(wrapper,name):
     source=wrapper.script('original')
@@ -133,6 +134,7 @@ def test_known_cov_original_tamper_is_integrity_error_without_reexecution(wrappe
     assert before=={p:p.read_bytes() for p in directory.iterdir() if p.is_file()}
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('mode',['wrong_run_id','wrong_call_id','wrong_accepted_digest','wrong_source_digest','duplicate_receipt'])
 def test_malformed_independent_receipt_never_borrows_success_logs_or_replays(wrapper,mode):
     text=wrapper.backend.read_text()

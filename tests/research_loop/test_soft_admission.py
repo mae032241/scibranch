@@ -107,6 +107,7 @@ def test_known_failed_resume_does_not_require_unused_soft_target(tmp_path):
     assert all(path.read_bytes()==value for path,value in originals.items())
 
 
+@pytest.mark.process_e2e
 def test_ordinary_audit_refuses_exhausted_shared_time_without_external_effects(tmp_path,monkeypatch):
     from scidiscovery.research_loop import candidate_audit, delivery
     from test_candidate_audit import audit_fixture, request

@@ -1,8 +1,11 @@
 """The unique FINAL cannot dispatch optional audits or their follow-up author."""
+import pytest
+
 from scidiscovery.research_loop import budget, candidate_audit, contracts as c, native
 from test_closeout_protocol import command, scene
 
 
+@pytest.mark.process_e2e
 def test_final_audit_request_preserves_original_without_audit_or_followup_author(tmp_path):
     root=scene(tmp_path,[dict(action='audit',candidate='run-1'),dict(action='deliver',candidate='run-1')])
     settings=(root/'settings.json').read_bytes()
