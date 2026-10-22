@@ -77,8 +77,10 @@ budgets, independent review and user statements do not grant execution permissio
 
 A completed, quiescent current-protocol instance can be forked at an exact logical
 step N. The child reruns that task from its original first-invocation inputs in a fresh
-session, with explicit finite new budgets and a self-contained copy of its declared
-scientific originals. Creation leaves it paused; explicitly use `start --continue`
+session, with explicit finite new budgets and independent references to shared
+read-only scientific originals on the same filesystem. Writable legacy originals
+are snapshotted once before sharing; deleting the parent does not remove the child
+references. Creation leaves it paused; explicitly use `start --continue`
 to launch it. Historical scientific investment, source restrictions and unknown
 costs remain visible; prior review or execution permission does not authorize new
 subjects. See [fork semantics](docs/ARCHITECTURE.md#historical-task-forks) and the

@@ -177,7 +177,7 @@ def test_legacy_typed_closure_and_copy_preserve_author_chain(tmp_path, attempt):
         source=dict(origin_identity=source.origin_identity, step=2),
         entries=list(closure.entries.values()), origins=closure.origins,
         legacy_compilations=closure.legacy_compilations, bootstrap={},
-        source_paths=closure.paths, blocked_reasons=closure.blocked)
+        source_paths=closure.paths, source_root=str(source.storage_root), blocked_reasons=closure.blocked)
     plan['source_fingerprint'] = fork_sources.fingerprint(plan)
     child = tmp_path / 'copied-child'
     manifest = fork_sources.copy_source(plan, child / originals.FORK_DIRECTORY)

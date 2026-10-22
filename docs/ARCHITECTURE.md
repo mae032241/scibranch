@@ -432,13 +432,33 @@ gates. Engineering-repair tasks retain their bounded repair contract. A task wit
 continuations or output repairs restarts from its first input, rather than
 resuming those attempts.
 
-`fork_sources.py` copies a bounded closure of exact scientific originals and
-required host proofs; `originals.py` resolves local and inherited sources by their
-original identity and digest. Nested branches preserve those identities and copy
-the required closure again, so reading inherited scientific inputs does not need
-the parent or ancestor directories after creation. Native homes, credentials,
-model sessions, tools, solvers, licenses and the execution environment are not
-copied. Frozen model, permission and launcher declarations remain declarations;
+`fork_sources.py` retains a bounded closure of exact scientific originals and
+required host proofs using verified hardlinks; `originals.py` resolves them by
+original identity and digest. Existing 0400 originals are shared directly.
+Writable or differently permissioned originals are first frozen once into the
+source's private `host-history/objects/<sha256>` store, then shared. Source bytes
+and permissions are not changed. Public views link only their selected retained
+originals, never private control metadata. Nested branches share these same
+immutable inodes while keeping distinct original identities and local paths.
+
+Each retained directory entry is an owning reference; the filesystem's link count
+is authoritative. Deleting a parent or sibling removes only its references, so
+children remain usable. Source-owned cached snapshots remain until that source's
+storage is removed; data is reclaimed when its last link disappears. There is no
+separate mutable reference-count database. All shared sources and the target must
+be on the same filesystem; unsupported links fail explicitly without copying as
+a fallback. A source requiring new snapshots must permit private-store writes.
+Existing copied manifests remain readable. Later task execution still prepares
+normal node-local input copies; sharing at fork creation is not a zero-copy
+execution-workspace guarantee.
+Pure readers tolerate link-induced metadata changes with at most three attempts
+per reader: only ctime may differ on a 0400 regular file, while its path, inode,
+mode, size and mtime remain fixed. Each attempt must finish with a stable generation
+and exact original binding; aborted hashes are not cached. Persistent changes fail
+closed. This does not retry creation, control actions or external execution.
+
+Native homes, credentials, model sessions, tools, solvers, licenses and the
+execution environment are not copied. Frozen model, permission and launcher declarations remain declarations;
 arbitrary unfrozen native reads are not portable. Declared external runtime/adapter
 read scopes, namespace mappings and delivery targets remain frozen; forking does
 not copy, recreate or expand them, and they must remain valid and available when
@@ -476,8 +496,9 @@ General Web operation recovery across host restarts is not established; the
 CLI/service receipt is durable.
 
 Read-only originals and the host's cooperative source lease protect the declared
-copy boundary among cooperating current-version writers. They remain a same-user
-soft boundary. Do not combine forking with active pre-upgrade writers: the lease
+sharing boundary among cooperating current-version writers. They remain a same-user
+soft boundary: a same-user process that deliberately changes permissions and writes
+a shared inode can damage all its references; digest validation detects corruption. Do not combine forking with active pre-upgrade writers: the lease
 does not retroactively fence older processes. These controls do not establish
 real-model, solver or scientific qualification.
 

@@ -38,7 +38,9 @@ def _source_call(function, *args, **options):
         raise
     except (OSError, ValueError, files.ArchiveError, KeyError, TypeError, IndexError) as error:
         message = str(error)
-        if message.startswith('source_guard_unavailable:'):
+        if isinstance(error, files.SharingUnsupported):
+            code = 'fork_storage_unsupported'
+        elif message.startswith('source_guard_unavailable:'):
             code = 'fork_source_guard_unavailable'
         elif isinstance(error, BlockingIOError):
             code = 'fork_source_busy'
@@ -105,11 +107,12 @@ def _request(parent, step, child, budget, guidance_text):
 
 def _inspect(request):
     plan = _source_call(fork_sources.inspect_source, Path(request['parent_root']), request['step'])
-    # Physical locations are deliberately excluded: copied manifests retain
+    # Physical locations are deliberately excluded: retained manifests bind
     # immutable identities and digests, not the host's temporary locators.
-    binding = {key: value for key, value in plan.items() if key != 'source_paths'}
+    binding = {key: value for key, value in plan.items() if key not in fork_sources.SOURCE_LOCATORS}
     preview_id = _digest(dict(request=request, source=binding))
-    blockers = plan.get('blocked_reasons', [])
+    blockers = list(plan.get('blocked_reasons', []))
+    blockers.extend(_source_call(fork_sources.storage_blockers, plan, Path(request['child_root']).parent))
     result = dict(status='fork_preview_blocked' if blockers else 'fork_preview_ready', preview_id=preview_id,
         source=plan['source'], cut=dict(
             history_steps=[row['step'] for row in plan.get('cut', {}).get('history', {}).get('nodes', [])],
@@ -256,7 +259,16 @@ def _prepare(plan, request, transaction):
         destination = storage_root / 'host-runtime/fork'
         destination.parent.mkdir(parents=True, exist_ok=True)
         source_store.rename(destination)
-        return _child_source_facts(storage_root, global_materials, plan)
+        configured = _child_source_facts(storage_root, global_materials, plan)
+        # Prepare will verify these exact retained originals when it freezes
+        # declarations. Seed immutable aliases so public payloads stay shared.
+        for index, declaration in enumerate(configured):
+            origin = declaration['origin']
+            source = Path(origin['path'])
+            if stat.S_IMODE(source.stat().st_mode) == 0o400:
+                retained = storage_root / 'source-provenance/originals' / f'{index:06d}'
+                _source_call(files.link_verified, source, retained, dict(origin, mode=0o400))
+        return configured
     settings = controller.prepare(**options, _existing_settings=selected_settings, _identity_root=final,
         _public_identity_root=final / 'host-runtime/fork/public', _user_update_texts=texts[1:],
         _source_facts_factory=source_facts)
@@ -275,7 +287,7 @@ def _prepare(plan, request, transaction):
 
 
 def _child_source_facts(stage, global_materials, plan):
-    """Retain existing source restrictions on exact new copies at birth.
+    """Retain existing source restrictions on exact child originals at birth.
 
     Clear/restricted source facts travel with the same bytes. This neither imports
     an old verdict nor grants a new execution allowance.
@@ -325,7 +337,8 @@ def _create_guarded(child, request, request_hash, expected_preview_id, operation
     if checked['preview_id'] != expected_preview_id:
         raise ForkError('fork_preview_stale', 'Source or request changed; preview this exact request again')
     if checked['blockers']:
-        code = ('fork_external_effect_unknown' if any('unknown' in row.get('code', '') for row in checked['blockers']) else 'fork_input_missing')
+        code = ('fork_storage_unsupported' if any(row.get('code') == 'fork_storage_unsupported' for row in checked['blockers']) else
+            'fork_external_effect_unknown' if any('unknown' in row.get('code', '') for row in checked['blockers']) else 'fork_input_missing')
         raise ForkError(code, 'Source inputs or external effects block creation: ' + str(checked['blockers']))
     _reserve_operation(child, operation_id, request_hash)
     transaction = Path(tempfile.mkdtemp(prefix='.scid-fork-', dir=child.parent))
@@ -333,7 +346,7 @@ def _create_guarded(child, request, request_hash, expected_preview_id, operation
         stage, settings = _prepare(plan, request, transaction)
         _source_call(fork_sources.validate_manifest, stage, full=True)
         if _inspect(inspection_request)[1]['preview_id'] != expected_preview_id:
-            raise ForkError('fork_source_changed', 'Source changed while copying; repeat preview')
+            raise ForkError('fork_source_changed', 'Source changed while retaining shared originals; repeat preview')
         receipt = dict(status='fork_created', version=1, operation_id=operation_id,
             request_sha256=request_hash, preview_id=expected_preview_id,
             child_identity=settings['goal_id'], state='paused', child_root=str(child),

@@ -112,19 +112,33 @@ def _digest_generation(path):
         value.st_size,value.st_mtime_ns,value.st_ctime_ns)
 
 
+def _readonly_metadata_change(before, after):
+    """A fresh read may tolerate ctime churn on the same immutable inode."""
+    return (before is not None and after is not None and before != after
+        and before[:-1] == after[:-1] and stat.S_IMODE(before[4]) == 0o400)
+
+
 def digest(path: Path):
     cache=_digest_transaction.get()
     if cache is None:return _stream_digest(path)
-    generation=_digest_generation(path)
-    if generation is None:return _stream_digest(path)
-    value=cache.get(generation)
-    if value is None:value=_stream_digest(path)
-    # Check on hits as well as misses; restoring mtime cannot restore ctime.
-    if _digest_generation(path)!=generation:
-        raise ValueError('Original changed during digest validation')
-    cache[generation]=value;cache.move_to_end(generation)
-    if len(cache)>4096:cache.popitem(last=False)
-    return value
+    binding=None
+    for attempt in range(3):
+        generation=_digest_generation(path)
+        if generation is None and binding is None:return _stream_digest(path)
+        if generation is None or binding is not None and generation[:-1]!=binding:
+            raise ValueError('Original changed during digest validation')
+        binding=generation[:-1]
+        value=cache.get(generation)
+        if value is None:value=_stream_digest(path)
+        # Check hits and misses; retries must look up the new generation and
+        # never publish a digest from an unstable read into this call's cache.
+        checked=_digest_generation(path)
+        if checked!=generation:
+            if attempt<2 and _readonly_metadata_change(generation,checked):continue
+            raise ValueError('Original changed during digest validation')
+        cache[generation]=value;cache.move_to_end(generation)
+        if len(cache)>4096:cache.popitem(last=False)
+        return value
 
 
 def settings(root: Path, job=None):

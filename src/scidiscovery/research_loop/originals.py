@@ -331,14 +331,22 @@ def resolve_ref(source, ref):
         actual = files.check_path(source.storage_root / entry['storage_path'])
     from . import contracts as c
     files.check_path(actual)
-    generation = c._digest_generation(actual)
-    checked = dict(sha256=c.digest(c.regular(actual)), size_bytes=actual.stat().st_size)
-    if c._digest_generation(actual) != generation:
-        raise ValueError('Original changed while reading its binding')
-    for field in ('sha256', 'size_bytes'):
-        if field in expected and checked[field] != expected[field]:
-            raise ValueError('Original bytes changed: ' + key + ':' + path)
-    return actual
+    binding = None
+    for attempt in range(3):
+        generation = c._digest_generation(actual)
+        if generation is None or binding is not None and generation[:-1] != binding:
+            raise ValueError('Original changed while reading its binding')
+        binding = generation[:-1]
+        checked = dict(sha256=c.digest(c.regular(actual)), size_bytes=actual.stat().st_size)
+        after = c._digest_generation(actual)
+        if after != generation:
+            if attempt < 2 and c._readonly_metadata_change(generation, after):
+                continue
+            raise ValueError('Original changed while reading its binding')
+        for field in ('sha256', 'size_bytes'):
+            if field in expected and checked[field] != expected[field]:
+                raise ValueError('Original bytes changed: ' + key + ':' + path)
+        return actual
 
 
 def original_ref(source, path):

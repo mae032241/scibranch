@@ -60,7 +60,9 @@ def test_two_prepared_calls_keep_both_archived_versions_of_one_locator(tmp_path)
     variants = [b'first accepted script\n', b'second accepted script\n']
     proofs = [_proof(locator, raw) for raw in variants]
     for proof, raw in zip(proofs, variants):
-        _write(root, 'host-history/objects/' + proof['sha256'], raw)
+        snapshot = 'host-history/objects/' + proof['sha256']
+        _write(root, snapshot, raw)
+        (root / snapshot).chmod(0o400)  # Match history._proof's immutable archive publication.
     _write(root, locator, b'the current file is neither accepted original\n')
     closure = fork_sources._Closure()
     for call, proof in zip(('one', 'two'), proofs):

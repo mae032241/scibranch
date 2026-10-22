@@ -1,6 +1,6 @@
 """Compile a bounded, exact source closure for a new scientific fork.
 
-Only immutable input originals and their declared control proofs are copied.
+Only immutable input originals and their declared control proofs are retained.
 Creating or launching the child belongs to fork_service and the controller.
 """
 from __future__ import annotations
@@ -8,11 +8,13 @@ from __future__ import annotations
 import copy
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
+import errno
 import hashlib
 import json
 import fcntl
 import os
 import stat
+import tempfile
 from pathlib import Path
 
 from scidiscovery import archive_io as files
@@ -21,6 +23,7 @@ from . import originals as o
 MAX_ENTRIES = 65536
 MAX_BYTES = 4 * 1024**3
 MAX_ANCESTRY = 16
+SOURCE_LOCATORS = frozenset({'source_paths', 'source_root'})
 _guarded = ContextVar('fork_source_read_guards', default=frozenset())
 REFERENCE_MEMBERS = frozenset({
     'files', 'execution_recoveries', 'execution_recovery_materials', 'audit_receipts', 'adjacent_audit',
@@ -786,39 +789,120 @@ def inspect_source(parent_root, selected_job_ref):
         source_declarations=declarations,
         inherited_costs=_inherited_costs(closure, prefix),
         limitations=closure.limitations, blocked_reasons=closure.blocked,
-        source_paths=closure.paths)
+        source_paths=closure.paths, source_root=str(root))
     result['source_fingerprint'] = fingerprint(result)
     return result
 
 
 def fingerprint(plan):
     return hashlib.sha256(files.canonical({key: value for key, value in plan.items()
-        if key not in {'source_paths', 'source_fingerprint'}})).hexdigest()
+        if key not in SOURCE_LOCATORS | {'source_fingerprint'}})).hexdigest()
+
+
+def _existing_directory(path):
+    path = files.check_path(path)
+    while not path.exists():
+        path = path.parent
+    if not path.is_dir():
+        raise ValueError('Fork storage ancestor is not a directory')
+    return path
+
+
+def storage_blockers(plan, target_directory):
+    """Inspect link devices and cache availability without writing either root."""
+    device = _existing_directory(Path(target_directory).absolute()).stat().st_dev
+    for entry in plan['entries']:
+        source = files.check_path(Path(plan['source_paths'][_key(entry['origin_identity'], entry['path'], entry)]))
+        info = source.stat()
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError('Fork original is not a regular file')
+        if info.st_dev != device:
+            return [dict(code='fork_storage_unsupported', reason='Fork originals and target require the same filesystem')]
+        if stat.S_IMODE(info.st_mode) != 0o400:
+            root = files.check_path(Path(plan['source_root']).absolute())
+            directory = _existing_directory(root / 'host-history/objects')
+            if directory.stat().st_dev != device:
+                return [dict(code='fork_storage_unsupported', reason='Fork snapshot cache and target require the same filesystem')]
+            cache = files.check_path(root / 'host-history/objects' / entry['sha256'])
+            if cache.exists() and cache.stat().st_dev != device:
+                return [dict(code='fork_storage_unsupported', reason='Fork snapshot cache and target require the same filesystem')]
+            if not cache.exists() and not stat.S_IMODE(directory.stat().st_mode) & 0o222:
+                return [dict(code='fork_storage_unsupported', reason='Fork needs a writable private source snapshot cache')]
+    return []
+
+
+def _shared_original(source, entry, source_root):
+    """Normalize writable legacy originals once, preserving their original inode."""
+    if stat.S_IMODE(source.stat().st_mode) == 0o400:
+        return source
+    directory = files.check_path(Path(source_root) / 'host-history/objects')
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    destination = files.check_path(directory / entry['sha256'])
+    if destination.exists():
+        checked = files.hash_file(destination)
+        if any(checked[key] != entry[key] for key in ('sha256', 'size_bytes', 'mode')):
+            raise ValueError('Fork snapshot cache original changed')
+        return destination
+    # A crashed import may leave a disposable temporary, but never poison the
+    # next import by reusing/truncating a readonly temporary or published inode.
+    descriptor, name = tempfile.mkstemp(prefix='.fork-snapshot-', dir=directory)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, 'wb') as output:
+            source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            with os.fdopen(source_fd, 'rb') as original:
+                if not stat.S_ISREG(os.fstat(original.fileno()).st_mode):
+                    raise ValueError('Fork original is not a regular file')
+                copied = 0
+                for block in iter(lambda: original.read(1024 * 1024), b''):
+                    copied += len(block)
+                    if copied > entry['size_bytes']:
+                        raise ValueError('Fork original changed during snapshot import')
+                    output.write(block)
+            output.flush()
+            os.fchmod(output.fileno(), 0o400)
+            os.fsync(output.fileno())
+        files.link_verified(temporary, destination, entry)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
 
 
 def copy_source(plan, target_store):
-    """Copy to the exact child/host-runtime/fork directory; never copy a tree."""
+    """Retain shared originals in the exact child/host-runtime/fork directory."""
     if plan.get('blocked_reasons'):
         raise ValueError('Fork source has unresolved original effects')
     if fingerprint(plan) != plan.get('source_fingerprint'):
         raise ValueError('Fork source plan changed after inspection')
     target_store = files.check_path(Path(target_store).absolute())
+    blockers = storage_blockers(plan, target_store)
+    if blockers:
+        raise files.SharingUnsupported(blockers[0]['reason'])
     target_store.mkdir(parents=True, exist_ok=True, mode=0o700)
+    retained = {}
     for entry in plan['entries']:
-        source = Path(plan['source_paths'][_key(entry['origin_identity'], entry['path'], entry)])
-        files.copy_verified(source, target_store / entry['storage_path'], dict(entry, kind='file'))
+        key = _key(entry['origin_identity'], entry['path'], entry)
+        source = Path(plan['source_paths'][key])
+        try:
+            source = _shared_original(source, entry, plan['source_root'])
+        except OSError as error:
+            if error.errno in {errno.EACCES, errno.EROFS}:
+                raise files.SharingUnsupported('Fork needs a writable private source snapshot cache') from error
+            raise
+        retained[key] = target_store / entry['storage_path']
+        files.link_verified(source, retained[key], entry)
     (target_store / 'public').mkdir(exist_ok=True, mode=0o700)
     for snapshot in plan.get('public_snapshots', []):
         ref = snapshot['original_ref']
-        source = Path(plan['source_paths'][_key(ref['origin_identity'], ref['path'], ref)])
-        files.copy_verified(source, target_store / 'public' / o.relative(snapshot['path']),
+        source = retained[_key(ref['origin_identity'], ref['path'], ref)]
+        files.link_verified(source, target_store / 'public' / o.relative(snapshot['path']),
             dict(kind='file', mode=0o400, sha256=ref['sha256'], size_bytes=ref['size_bytes']))
-    # Recheck every original after the entire copy, not just each local read.
+    # Recheck every original after all links/imports, not just each local read.
     for entry in plan['entries']:
         proof = files.hash_file(Path(plan['source_paths'][_key(entry['origin_identity'], entry['path'], entry)]))
         if any(proof[field] != entry[field] for field in ('sha256', 'size_bytes')):
-            raise ValueError('Fork source changed during copy; preview is stale')
-    manifest = {key: copy.deepcopy(value) for key, value in plan.items() if key != 'source_paths'}
+            raise ValueError('Fork source changed during retention; preview is stale')
+    manifest = {key: copy.deepcopy(value) for key, value in plan.items() if key not in SOURCE_LOCATORS}
     files.durable_json(target_store / 'origins.json', manifest['origins'])
     files.durable_json(target_store / 'bootstrap.json', manifest['bootstrap'])
     files.durable_json(target_store / 'manifest.json', manifest)
