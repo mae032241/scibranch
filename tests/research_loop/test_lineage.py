@@ -6,7 +6,8 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts as c, controller, cov_lineage as cov, execution, history, lineage, experiments
+from scidiscovery.research_loop import budget, contracts as c, controller, execution, history, lineage, experiments
+from cov_execution import lineage as cov
 from test_history_handoff import finish
 from execution_fixtures import execution_registry
 

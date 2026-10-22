@@ -15,7 +15,8 @@ from pathlib import Path
 import shutil
 import subprocess
 
-from scidiscovery.research_loop import cov_delivery, selection
+from scidiscovery.research_loop import selection
+from cov_execution import delivery as cov_delivery
 
 HIDDEN = ('official', 'hidden', 'private_score', 'reward')
 FIELDS = ('id', 'label', 'evaluation_key', 'metric', 'direction', 'status')

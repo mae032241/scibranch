@@ -368,8 +368,8 @@ def test_r1_lost_local_process_original_keeps_budget_cleanup_blocked(tmp_path,ex
 
 @pytest.mark.process_e2e
 def test_r2_cov_missing_receipt_fallback_keeps_domain_context_shape(local,monkeypatch):
-    from scidiscovery.research_loop.cov_experiments import CovExecution
-    from scidiscovery.research_loop import cov_lineage
+    from cov_execution.experiments import CovExecution
+    from cov_execution import lineage as cov_lineage
     root,script,config,_=local
     result=e.dispatch(config,script,command_options=dict(experiment_directory=str(root),arguments=[]))
     directory=e.Records(config).directory(result['call_id'])

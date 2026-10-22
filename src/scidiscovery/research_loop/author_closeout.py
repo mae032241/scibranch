@@ -453,36 +453,19 @@ def science_facts(root, step):
         mechanism=row['mechanism'] or {}
         result=completed.get('result') or {}
         source=None
-        executor=config['execution_interface']['executor']
-        if executor=='local_execution:command' or executor.startswith('cov_execution:'):
-            original=accepted['script'];source=work/'work/retained-experiments'/row['call_id']/'source.py'
+        original=observation.get('scientific_source')
+        if original is None and 'scientific_source' not in observation and config['execution_interface'].get('result_protocol')==e.LOCAL_RESULT_PROTOCOL:
+            # Existing local source bytes already have a generic accepted binding.
+            original=accepted['script']
+        if original is not None:
+            source=work/'work/retained-experiments'/row['call_id']/Path(original.get('source',original)['path']).name
             c._copy_bound(Path(original['path']),source,original['sha256'])
-        elif executor.startswith('tcad_execution:'):
-            from . import execution_authority,execution_inputs,qualification
-            job=c.read(Path(root)/'jobs'/f'{step:03d}.json')
-            binding=execution_authority.accepted_input_subject(Path(root),job,accepted)
-            if binding is not None:
-                subject=binding['subject'];seal=qualification._read(Path(root),subject['producer_seal'])
-                compiled=[item for item in seal.get('compiled_implementations',[]) if item['material']==subject['material']]
-                if len(compiled)!=1:raise ValueError('Scientific implementation compiler original is ambiguous')
-                compiler=execution_inputs.verify_compilation(Path(root),compiled[0]['compiler'],
-                    material=subject['material'],client_binding=compiled[0].get('client_binding'))
-                original=compiler['author'];source=work/'work/retained-experiments'/row['call_id']/'implementation.json'
-                c._copy_bound(Path(root)/original['path'],source,original['sha256'])
         value=dict(call_id=row['call_id'],candidate_id=row['candidate_id'],status=row['status'],
             mechanism={key:mechanism[key] for key in ('mechanism_ref',) if key in mechanism},
             source=source.relative_to(work).as_posix() if source is not None else None,
             source_status='retained_scientific_original' if source is not None else 'scientific_source_unavailable',
-            result={key:result[key] for key in ('status','metrics','diagnostic') if key in result},
+            result=e.scientific_result(config,accepted,completed,observation),
             outputs=[],qualification=row['qualification'])
-        # Cov's row is a domain observation with a fixed public metric contract.
-        # It is already bound by verify_observation in terminal_facts.
-        for proof in observation['proofs']:
-            if Path(proof['source']['path']).name == 'row.json':
-                reported=c.read(Path(proof['path']))
-                value['reported']={key:reported[key] for key in
-                    ('metric','val_score','val_acc','wall_seconds','error') if key in reported}
-                if 'evaluation_key' in config:value['evaluation_key']=config['evaluation_key']
         scientific=e.scientific_outputs(config,observation)
         for output in scientific:
             path=work/'work/retained-experiments'/row['call_id']/'outputs'/output.name
@@ -648,11 +631,11 @@ def _successor_facts(root, step):
     for row in facts['calls']:
         directory=work/row['originals'];accepted=c.read(directory/'accepted.json');completed=c.read(directory/'completed.json')
         calls.append(dict(call_id=row['call_id'],status=row['status'],candidate_id=row['candidate_id'],
-            originals=row['originals'],backend_run_id=completed.get('run_id'),
+            originals=row['originals'],backend_run_id=c.read(directory/'submission.json').get('external_run_id'),
             source_sha256=(accepted.get('script') or {}).get('sha256'),
-            model_sha256=(completed.get('model') or {}).get('sha256')))
+            artifacts=[{key:item[key] for key in ('sha256','size_bytes')} for item in completed.get('outputs',[])]))
     return dict(version=1,scope=facts['scope'],call_count=len(calls),omitted_calls=0,calls=calls,
-        ordering='Rows are listed by call directory, not scientific chronology. backend_run_id is copied from the retained completed original; null means unavailable. Infer no last-eight ordering from this list.',
+        ordering='Rows are listed by call directory, not scientific chronology. backend_run_id is copied from the retained submission binding; null means unavailable. Infer no last-eight ordering from this list.',
         detailed_facts=(str(Path(root)/'native-evidence'/f'{step:03d}'/'author-closeout-original-facts.json')
             if (Path(root)/'native-evidence'/f'{step:03d}'/'author-closeout-original-facts.json').exists()
             else 'work/author-closeout-facts.json'),

@@ -25,7 +25,9 @@ inputs and environment. New code cannot inherit a historical verdict.
 
 `scripts/build_git_release.py` is the explicit source-publication allowlist. It
 copies current source, deployment tools, supported plugin trees, functional tests
-and fixtures, current reference documents and selected developer tools. It normalizes
+and fixtures, current reference documents and selected developer tools. The plugin
+trees include the optional `cov_execution` distribution; the core wheel carries no
+Cov execution entry point. It normalizes
 text and modes, scans the result, then writes `MANIFEST.sha256` and a deterministic
 `.tar.gz` archive. An existing output requires an explicit `--force`; use a fresh
 output directory when preserving a candidate.

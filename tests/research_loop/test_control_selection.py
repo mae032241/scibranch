@@ -14,7 +14,7 @@ from test_delivery import FAKE_HARNESS, descriptor, delivery_policy
 from test_history_handoff import finish
 
 REPO = Path(__file__).resolve().parents[2]
-OBSERVER = REPO / 'scripts/observe_covshift_candidates.py'
+OBSERVER = REPO / 'plugins/cov_execution/cov_execution/observer.py'
 LAUNCHER = REPO.parents[1] / '.trial/rootless-task-unit-cov-20261014/launcher.json'
 RUNNER = '''def split_X_y(df, meta):
     targets = meta['target_cols'];features = [c for c in df.columns if c not in targets]

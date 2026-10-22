@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import cov_lineage
+from cov_execution import lineage as cov_lineage
 from scidiscovery.research_loop import experiments
 from execution_fixtures import execution_registry
 
@@ -64,11 +64,11 @@ def wrapper(tmp_path,execution_registry):
         scope=dict(handoff_protocol=CURRENT,step=2, role='W', job_sha256='a'*64, execution_key='b'*64, mechanism_ref='h001.m1'),
         parents=[], evaluation_key='fixture-public-v1')
     config.write_text(json.dumps(experiments.freeze(value,'cov_execution:experiment',path=config)))
-    env = dict(os.environ, PYTHONPATH=str(Path(cov_lineage.__file__).parents[2])+os.pathsep+os.environ.get('PYTHONPATH',''), EXP_WALL_CAP_S='1')
+    env = dict(os.environ, PYTHONPATH=str(Path(cov_lineage.__file__).parents[1])+os.pathsep+os.environ.get('PYTHONPATH',''), EXP_WALL_CAP_S='1')
 
     class Wrapper:
         def cli(self, *args, expected=0):
-            reply = subprocess.run([sys.executable, '-m', 'scidiscovery.research_loop.cov_lineage',
+            reply = subprocess.run([sys.executable, '-m', 'cov_execution.lineage',
                                     '--config', str(config), *map(str, args)],
                                    cwd=tmp_path, env=env, capture_output=True, text=True, timeout=20)
             assert reply.returncode == expected, (reply.stdout, reply.stderr)

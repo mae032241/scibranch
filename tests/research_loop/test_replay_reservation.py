@@ -7,7 +7,8 @@ import pytest
 
 from execution_fixtures import execution_registry
 from scidiscovery.operations.execution import AdapterCapability
-from scidiscovery.research_loop import cov_experiments, experiments as e, replay_check
+from scidiscovery.research_loop import experiments as e, replay_check
+from cov_execution import experiments as cov_experiments
 from scidiscovery.research_loop.protocol import CURRENT
 
 

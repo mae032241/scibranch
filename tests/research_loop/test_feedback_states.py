@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, controller, cov_lineage, execution, experiments, feedback, history
+from scidiscovery.research_loop import contracts as c, controller, execution, experiments, feedback, history
+from cov_execution import lineage as cov_lineage
 from execution_fixtures import execution_registry
 
 

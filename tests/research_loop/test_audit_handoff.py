@@ -11,7 +11,7 @@ from scidiscovery.research_loop import budget, candidate_audit, contracts as c, 
 from test_delivery import FAKE_HARNESS, descriptor, delivery_policy
 from test_history_handoff import finish
 from test_lineage import scene as lineage_scene
-from scidiscovery.research_loop import cov_lineage as cov
+from cov_execution import lineage as cov
 
 
 def audited_scene(tmp_path, monkeypatch):

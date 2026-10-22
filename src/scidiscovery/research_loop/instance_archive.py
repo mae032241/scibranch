@@ -21,10 +21,9 @@ FORMAT = 'scidiscovery.instance-readonly-archive.v1'
 ROOT_FILES = {'settings.json', 'settings-identity.json', 'host-started.json', 'pause.request', 'instance-owner.json'}
 ROOT_DIRS = {'jobs', 'project', 'control-ledger', 'correction-ledger', 'native-evidence',
              'host-runtime', 'host-history', 'host-delivery', 'source-provenance',
-             'qualification', 'execution-authority', 'host-control'}
+             'qualification', 'execution-authority', 'host-control', 'host-recovery'}
 AUTHORITY_EXCLUDED = {'host-key-source.json', 'ui-endpoint.json', 'ui.lock', 'writer.lock'}
 CALL_LOCKS = ('node.lock', 'accept.lock')
-CALL_LEASES = ('tcad-submission-', 'tcad-binding-', 'tcad-collect-', 'observation-', 'engineering-')
 LIMITATIONS = ['Framework-owned originals only; undeclared external inputs/stores are not covered.',
     'Native homes, session caches and credentials are excluded; native continuation is not established.',
     'Historical decisions and resource events are bytes, not renewed permissions, budgets or signature verification.',
@@ -49,6 +48,8 @@ def _path(value):
 
 
 def _excluded(root, parts):
+    if parts[:2] == ('host-history', 'fork-cache'):
+        return 'immutable_fork_snapshot_cache'
     if parts[0] == 'native-homes':
         return 'native_environment_sessions_caches_and_credentials'
     if len(parts) == 1 and parts[0] in {'host-run.lock', 'control-ledger.lock', 'configuration.lock'}:
@@ -68,19 +69,45 @@ def _excluded(root, parts):
         and re.fullmatch('[0-9a-f]{64}', parts[2]) and parts[3] == 'records')
     if legacy_records or host_records:
         name = parts[-1]
-        if name in CALL_LOCKS or any(name.startswith(prefix) and name.endswith('.lock')
-                and (root.joinpath(*parts[:-1]) / 'calls' / name[len(prefix):-5] / 'accepted.json').is_file()
-                for prefix in CALL_LEASES):
+        if name.endswith('.lock'):
             return 'managed_records_lease'
     return None
 
 
+def _private_originals(root):
+    """Exclude only credentials explicitly located by the framework host binding."""
+    locator = root / 'execution-authority/host-key-source.json'
+    if not locator.exists():
+        return frozenset()
+    value = _read(locator)
+    # Historical archives can retain an opaque locator marker without a source.
+    if 'source' not in value:
+        return frozenset()
+    source = value['source']
+    if (not isinstance(source, dict) or not isinstance(source.get('path'), str)
+            or not isinstance(source.get('sha256'), str)
+            or not re.fullmatch('[0-9a-f]{64}', source['sha256'])
+            or type(source.get('size_bytes')) is not int or source['size_bytes'] < 0):
+        raise files.ArchiveError('Private credential locator is malformed')
+    path = Path(source['path'])
+    if not path.is_absolute() or path.resolve() != path:
+        raise files.ArchiveError('Private credential locator is not canonical')
+    binding = root / 'execution-authority/host-key.json'
+    key = value.get('key')
+    if (not isinstance(key, dict) or key.get('path') != 'execution-authority/host-key.json'
+            or any(key.get(field) != files.hash_file(binding)[field] for field in ('sha256', 'size_bytes'))
+            or _read(binding).get('key_sha256') != source['sha256']):
+        raise files.ArchiveError('Private credential locator lost its host binding')
+    return frozenset({path.relative_to(root).as_posix()}) if path.is_relative_to(root) else frozenset()
+
+
 def _inventory(root):
     """Walk only explicit owning namespaces; unknown roots are gaps, not trees."""
+    private = _private_originals(root)
     def walk(path, parts):
         name = '/'.join(parts)
         _path(name)
-        reason = _excluded(root, parts)
+        reason = 'declared_private_credential' if name in private else _excluded(root, parts)
         if reason:
             yield dict(path=name, kind='excluded', reason=reason)
             return
@@ -93,7 +120,7 @@ def _inventory(root):
             source_stat=[info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns])
         unknown = (parts[0] not in ROOT_FILES | ROOT_DIRS
             or len(parts) == 2 and parts[0] == 'project' and parts[1] not in {'global', 'nodes'}
-            or len(parts) == 2 and parts[0] == 'host-control' and parts[1] != 'configuration'
+            or len(parts) == 2 and parts[0] == 'host-control' and parts[1] not in {'configuration', 'guidance', 'guidance-revocations', 'operations', 'wait-continuations'}
             or len(parts) == 2 and parts[0] == 'host-runtime' and parts[1] not in {'experiment-control', 'restore', 'fork'})
         if unknown:
             yield dict(path=name, kind='gap', reason='unrecognized_framework_ownership_not_traversed', **identity)
@@ -141,15 +168,36 @@ def _managed_roots(root):
         yield path
 
 
+def record_leases(records):
+    """Current protocol plus explicit conservative compatibility for old stores.
+
+    Existing record owners keep their locks; no installed plugin is consulted.
+    Taking all direct lock files also fences older writers during migration.
+    """
+    records = files.check_path(records)
+    paths = sorted(path for path in records.glob('*.lock') if path.name not in CALL_LOCKS)
+    for path in paths:
+        files.check_path(path)
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise files.ArchiveError('Managed record lease is not a regular file')
+    return paths
+
+
 def _owner_locks(stack, root, *, disposing=False):
-    # Production nested order: Records node→accept, TCAD submission→binding,
+    # Production nested order: records node→accept→record-writer,
     # then authority→ledger. Runner completion probes controller nonblocking.
     # All exporter acquisitions are nonblocking; no high-level owner reentry.
-    from . import controller
+    from . import controller, instance_owner
+    source_gate = instance_owner._gates.get().get(str(Path(root).absolute()))
     if disposing:
         from . import instance_owner
         if str(Path(root).absolute()) not in instance_owner._disposing.get():
             raise files.ArchiveError('Delete locks require the exact disposal owner')
+        stack.enter_context(controller._local_writer(root))
+    elif source_gate is not None and source_gate['exclusive'] and not source_gate['cold']:
+        # Ordinary archive owns the source gate exclusively; reentering it as
+        # an effect would be forbidden. Cold transfer retains its own protocol.
+        instance_owner.require_owner(root)
         stack.enter_context(controller._local_writer(root))
     else:
         stack.enter_context(controller._writer(root))
@@ -164,8 +212,8 @@ def _owner_locks(stack, root, *, disposing=False):
         for call in sorted((records / 'calls').glob('*')):
             if not call.is_dir() or not re.fullmatch('[A-Za-z0-9._-]{1,128}', call.name):
                 raise files.ArchiveError('Unknown managed call identity')
-            for prefix in CALL_LEASES:
-                _lock(stack, records / (prefix + call.name + '.lock'))
+        for path in record_leases(records):
+            _lock(stack, path)
     for path in sorted((root / 'host-runtime/experiment-control').glob('*/accept.lock')):
         _lock(stack, path)
     _lock(stack, root / 'execution-authority/writer.lock')
@@ -322,8 +370,8 @@ def _publish(stage, output):
 
 
 def archive_export(root, output):
-    from .instance_owner import lease
-    with lease(root):
+    from .instance_owner import source_lease
+    with source_lease(root):
         return _export(root, output)
 
 

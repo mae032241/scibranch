@@ -190,7 +190,7 @@ def test_observer_tool_upgrade_preserves_the_original_observation(scene, tmp_pat
 
 def test_cov_adapter_uses_public_facts_and_keeps_unexported_code_unknown(scene):
     import importlib.util
-    path = Path(__file__).resolve().parents[2] / 'scripts/observe_covshift_candidates.py'
+    path = Path(__file__).resolve().parents[2] / 'plugins/cov_execution/cov_execution/observer.py'
     spec = importlib.util.spec_from_file_location('cov_observer', path)
     adapter = importlib.util.module_from_spec(spec);spec.loader.exec_module(adapter)
     runs = scene / 'runs';runs.mkdir()
@@ -320,7 +320,7 @@ def test_actual_unknown_id_is_unavailable_not_a_false_submission(scene, tmp_path
 
 def test_cov_adapter_retains_all_new_records_and_excludes_known_identities(scene):
     import importlib.util
-    path = Path(__file__).resolve().parents[2] / 'scripts/observe_covshift_candidates.py'
+    path = Path(__file__).resolve().parents[2] / 'plugins/cov_execution/cov_execution/observer.py'
     spec = importlib.util.spec_from_file_location('cov_observer_many', path)
     adapter = importlib.util.module_from_spec(spec);spec.loader.exec_module(adapter)
     runs = scene / 'runs';runs.mkdir()

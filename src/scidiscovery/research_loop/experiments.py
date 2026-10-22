@@ -76,8 +76,18 @@ def _configuration_effect(function):
     def guarded(*args, **kwargs):
         first = args[0] if args else kwargs['config']
         config = first.config if isinstance(first, Records) else first
-        with instance_owner.lease_for_configuration(config):
+        from . import contracts as c
+        with instance_owner.lease_for_configuration(config), c.record_writer(Path(config['record_dir'])):
             return function(*args, **kwargs)
+    return guarded
+
+
+def record_effect(function):
+    @wraps(function)
+    def guarded(self,*args,**kwargs):
+        from . import contracts as c
+        with instance_owner.lease_for_configuration(self.config), c.record_writer(self.records.root):
+            return function(self,*args,**kwargs)
     return guarded
 
 
@@ -312,7 +322,7 @@ def _status_view(value):
     result = {key: value[key] for key in ('state', 'call_id', 'candidate_id', 'evaluation_key',
         'metric', 'direction', 'wall_seconds', 'parent_candidate', 'returncode', 'result',
         'submission_disposition') if key in value}
-    if isinstance(result.get('result'),dict):result['result']=_scientific_result(result['result'])
+    if isinstance(result.get('result'),dict):result['result']=_run_view(result['result'])
     return result
 
 
@@ -334,15 +344,49 @@ def _accounting_view(value):
 
 
 def _run_view(value):
-    result={key:value[key] for key in ('call_id','status','native_state','note','returncode','wall_seconds',
-        'result','candidate_id','run_id','parent','change_intent','model','evaluation_key','metric',
-        'val_score','val_acc','error','engineering_check','review_url','resource_accounting') if key in value}
-    if isinstance(result.get('result'),dict):result['result']=_scientific_result(result['result'])
-    if isinstance(result.get('parent'),dict):
-        result['parent']={key:result['parent'][key] for key in ('status','candidate_id','source') if key in result['parent']}
-    if isinstance(value.get('authorization_request'),dict):
+    """The adapter owns its public science shape; control enforces finite JSON."""
+    if not isinstance(value, dict):
+        raise IntegrityError('Registered public result is not an object')
+    result=json.loads(encoded(value))
+    if len(encoded(result)) > MAX_BYTES:
+        raise IntegrityError('Registered public result exceeds the public response bound')
+    if isinstance(result.get('authorization_request'),dict):
         result['authorization_request']=dict(status='execution_decision_required')
-    if isinstance(result.get('resource_accounting'),dict):result['resource_accounting']=_accounting_view(result['resource_accounting'])
+    if isinstance(result.get('resource_accounting'),dict):
+        result['resource_accounting']=_accounting_view(result['resource_accounting'])
+    return result
+
+
+def _source_projection(config, accepted):
+    """Resolve only the declared source and an already-bound compiler author."""
+    declared,_=registration(config['execution_interface']['executor'])
+    if declared.scientific_source is None:return None
+    implementation=None
+    if accepted.get('execution_authority') is not None:
+        from . import experiment_client,contracts as c,execution_authority,execution_inputs,qualification
+        root=experiment_client.root_for_configuration(config)
+        job=c.read(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
+        binding=execution_authority.accepted_input_subject(root,job,accepted)
+        if binding is not None:
+            subject=binding['subject'];seal=qualification._read(root,subject['producer_seal'])
+            compiled=[item for item in seal.get('compiled_implementations',[]) if item['material']==subject['material']]
+            if len(compiled)==1:
+                compiler=execution_inputs.verify_compilation(root,compiled[0]['compiler'],
+                    material=subject['material'],client_binding=compiled[0].get('client_binding'))
+                implementation=dict(compiler['author'],path=str(root/compiler['author']['path']))
+    source=declared.scientific_source(accepted,implementation=implementation)
+    if source is not None and proof(source['path'])!={key:source[key] for key in ('path','sha256','size_bytes')}:
+        raise IntegrityError('Scientific source differs from its retained original')
+    return source
+
+
+def scientific_result(config, accepted, completed, observation):
+    """Read the frozen public projection; legacy records gain no new meaning."""
+    if 'public_result' in observation:
+        return _run_view(observation['public_result'])
+    result={key:completed[key] for key in ('status','native_state','returncode','wall_seconds') if key in completed}
+    if config['execution_interface'].get('result_protocol')==LOCAL_RESULT_PROTOCOL and isinstance(completed.get('result'),dict):
+        result['result']=_scientific_result(completed['result'])
     return result
 
 
@@ -395,14 +439,37 @@ def _scientific_projection_directory(config):
     return projection_directory
 
 
+def _validated_scientific_outputs(selected):
+    names=set()
+    for descriptor in selected:
+        if not isinstance(descriptor,LocalFileDescriptor):raise IntegrityError('Scientific output descriptor is malformed')
+        name=Path(descriptor.name)
+        if (name.is_absolute() or '..' in name.parts or not name.parts or name.as_posix()!=descriptor.name
+                or '\\' in descriptor.name or descriptor.name in names):
+            raise IntegrityError('Scientific output requires distinct canonical names')
+        names.add(descriptor.name)
+        item=proof(descriptor.local_path)
+        if item['sha256']!=descriptor.sha256 or item['size_bytes']!=descriptor.size_bytes:
+            raise IntegrityError('Scientific output original changed')
+    return selected
+
+
 def scientific_outputs(config, observation, *, adapter=None, include_logs=False):
     """Producer-owned science files from an already verified full observation."""
+    if 'scientific_outputs' in observation and (not include_logs or config['execution_interface'].get('result_protocol')!=LOCAL_RESULT_PROTOCOL):
+        return _validated_scientific_outputs(tuple(LocalFileDescriptor.model_validate(item['descriptor']).model_copy(update={'local_path':item['path']})
+            for item in observation['scientific_outputs']))
     descriptors=tuple(LocalFileDescriptor.model_validate(item['descriptor']).model_copy(update={'local_path':item['path']})
         for item in observation['outputs'])
     if adapter is None:
+        # Old seals remain readable but cannot acquire a newly installed domain
+        # projection. The explicit built-in local protocol has a stable reader.
+        if config['execution_interface'].get('result_protocol')!=LOCAL_RESULT_PROTOCOL:
+            raise UnsupportedExecution('Legacy scientific projection is not frozen; retain its sealed deliverables')
+        method=None
+    else:
         declared,_=registration(config['execution_interface']['executor'])
-        method=declared.scientific_outputs
-    else:method=getattr(adapter,'scientific_outputs',None)
+        method=declared.scientific_outputs or getattr(adapter,'scientific_outputs',None)
     if callable(method):
         selected=tuple(method(descriptors,projection_directory=_scientific_projection_directory(config)))
     elif config['execution_interface'].get('result_protocol')==LOCAL_RESULT_PROTOCOL:
@@ -463,18 +530,7 @@ def scientific_outputs(config, observation, *, adapter=None, include_logs=False)
                     sha256=item['sha256'],size_bytes=item['size_bytes'],media_type='text/plain'))
         selected=tuple(selected)
     else:selected=descriptors
-    names=set()
-    for descriptor in selected:
-        if not isinstance(descriptor,LocalFileDescriptor):raise IntegrityError('Scientific output descriptor is malformed')
-        name=Path(descriptor.name)
-        if (name.is_absolute() or '..' in name.parts or not name.parts or name.as_posix()!=descriptor.name
-                or '\\' in descriptor.name or descriptor.name in names):
-            raise IntegrityError('Scientific output requires distinct canonical names')
-        names.add(descriptor.name)
-        item=proof(descriptor.local_path)
-        if item['sha256']!=descriptor.sha256 or item['size_bytes']!=descriptor.size_bytes:
-            raise IntegrityError('Scientific output original changed')
-    return selected
+    return _validated_scientific_outputs(selected)
 
 
 def _collected_view(config, call_id, observation, adapter):
@@ -513,8 +569,12 @@ def freeze(config, executor, *, path=None):
     result_protocol=getattr(adapter,'result_protocol',None)
     if result_protocol is not None and (not isinstance(result_protocol,str) or not 0<len(result_protocol.encode())<=160):
         raise ValueError('An execution result protocol requires an explicit bounded identifier')
+    if declared.projection_contract is not None and (not isinstance(declared.projection_contract,str)
+            or not 0<len(declared.projection_contract.encode())<=160):
+        raise ValueError('Execution projection requires an explicit bounded contract identifier')
     value['execution_interface'] = dict(version=VERSION, executor=executor, plugin_version=declared.version,
         observation_version=OBSERVATION_VERSION,
+        **(dict(projection_contract=declared.projection_contract) if declared.projection_contract is not None else {}),
         terminal_evidence=getattr(adapter,'terminal_evidence_kind','adapter_result'),
         result_protocol=result_protocol,
         config_sha256=hashlib.sha256(encoded(body)).hexdigest(),
@@ -890,6 +950,9 @@ def verify_observation(value, original, *, interface=None, context=None):
         return json.loads(data)
     if not isinstance(value,dict) or value.get('version')!=OBSERVATION_VERSION:
         raise IntegrityError('Execution observation version unavailable')
+    if (value.get('interface',{}).get('projection_contract') is not None
+            and not {'public_result','scientific_outputs','scientific_source'} <= set(value)):
+        raise IntegrityError('Frozen scientific projection contract is incomplete')
     accepted=decoded(value['accepted']);completed=decoded(value['completed'])
     submission=decoded(value['submission'])
     if (value.get('interface')!=accepted.get('interface') or interface is not None and value.get('interface')!=interface
@@ -917,6 +980,27 @@ def verify_observation(value, original, *, interface=None, context=None):
         if (descriptor.name!=item['name'] or descriptor.local_path!=item['source']['path']
                 or descriptor.sha256!=item['sha256'] or descriptor.size_bytes!=item['size_bytes']):
             raise IntegrityError('Retained collection differs from its original descriptor')
+    source=value.get('scientific_source')
+    if source is not None:
+        bound(source)
+        if any(source[key]!=source['source'][key] for key in ('sha256','size_bytes')):
+            raise IntegrityError('Scientific source lost its retained original')
+    if 'public_result' in value:
+        public=_run_view(value['public_result'])
+        if public.get('status')!=value['status'] or 'call_id' in public and public['call_id']!=value['call_id']:
+            raise IntegrityError('Frozen public result differs from the original call')
+    names=set()
+    for item in value.get('scientific_outputs',[]):
+        bound(item)
+        descriptor=LocalFileDescriptor.model_validate(item['descriptor'])
+        name=Path(descriptor.name)
+        if (descriptor.name in names or name.is_absolute() or '..' in name.parts or not name.parts
+                or name.as_posix()!=descriptor.name or '\\' in descriptor.name
+                or descriptor.name!=item['name'] or descriptor.local_path!=item['source']['path']
+                or any(item[key]!=descriptor.model_dump(mode='json')[key] or item['source'][key]!=item[key]
+                    for key in ('sha256','size_bytes'))):
+            raise IntegrityError('Frozen scientific output lost its exact descriptor')
+        names.add(descriptor.name)
     if value['interface'].get('terminal_evidence')=='local_process':
         terminal=decoded(value['native_terminal'])
         if local_terminal_status(accepted,completed,terminal)!=value['status']:
@@ -960,7 +1044,7 @@ def verify_retirement(value, original, *, interface=None, context=None):
             raise IntegrityError('Retirement original changed')
         return data
     def decoded(item):return json.loads(bound(item))
-    if (not isinstance(value,dict) or type(value.get('version')) is not int or value['version']!=1
+    if (not isinstance(value,dict) or type(value.get('version')) is not int or value['version'] not in {1,2}
             or value.get('kind')!='permanent_not_submitted'):
         raise IntegrityError('Permanent retirement contract is unavailable')
     accepted=decoded(value['accepted'])
@@ -980,15 +1064,18 @@ def verify_retirement(value, original, *, interface=None, context=None):
     bound(accepted['script'])
     bound(dict(path=prepared['local_path'],sha256=prepared['sha256'],size_bytes=prepared['size_bytes']))
     decoded(value['authority'])
-    request=decoded(value['request']);response=decoded(value['response']);protocol=decoded(value['protocol'])
-    if encoded(protocol)!=encoded(contract['backend_protocol']):
-        raise IntegrityError('Retirement backend protocol differs from its frozen permanent contract')
-    if (request.get('call_id')!=value['call_id'] or request.get('scope')!=value['scope']
-            or request.get('accepted')!=value['accepted'] or request.get('prepared')!=value['prepared']
-            or request.get('authority')!=value['authority'] or request.get('target')!=accepted.get('execution_target')
-            or response.get('found') is not False or response.get('retired') is not True
-            or response.get('submission_sha256')!=value['prepared']['sha256']):
-        raise IntegrityError('Backend retirement does not prove the exact original was never submitted')
+    if value['version']==1:
+        declared,_=registration(selected['executor'])
+        if declared.legacy_retirement is None:
+            raise UnsupportedExecution('Legacy retirement requires its original compatible evidence reader')
+        declared.legacy_retirement(value,decoded,contract)
+    else:
+        assertion=decoded(value['assertion'])
+        expected=dict(version=1,kind='permanent_not_submitted',
+            **{key:value[key] for key in ('call_id','scope','accepted','prepared','authority','native_originals')})
+        if assertion!=expected or not isinstance(value['native_originals'],list) or not value['native_originals']:
+            raise IntegrityError('Normalized retirement differs from the exact original call')
+        for item in value['native_originals']:bound(item)
     dispatch=value.get('dispatch_intent')
     if dispatch is not None:
         intent=decoded(dispatch)
@@ -1002,7 +1089,8 @@ def verify_retirement(value, original, *, interface=None, context=None):
 
 def retirement_originals(value,accepted):
     prepared=value['prepared']
-    result=[value[key] for key in ('accepted','authority','request','response','protocol')]
+    result=([value[key] for key in ('accepted','authority','request','response','protocol')]
+        if value['version']==1 else [value['accepted'],value['authority'],value['assertion'],*value['native_originals']])
     result.extend([accepted['script'],dict(path=prepared['local_path'],sha256=prepared['sha256'],size_bytes=prepared['size_bytes'])])
     if value.get('dispatch_intent') is not None:result.append(value['dispatch_intent'])
     return result
@@ -1045,11 +1133,11 @@ def retire_original(config,adapter,call_id):
         with method(call_id) as evidence:
             if evidence.get('status')!='not_submitted':return evidence
             accepted=records.accepted(call_id)
-            value=dict(version=1,kind='permanent_not_submitted',call_id=call_id,scope=accepted['scope'],
+            value=dict(version=2,kind='permanent_not_submitted',call_id=call_id,scope=accepted['scope'],
                 native_attempt=accepted.get('native_attempt'),mechanism_binding=accepted.get('mechanism_binding'),
                 interface=accepted['interface'],accepted=proof(directory/'accepted.json'),prepared=accepted['prepared'],
                 authority=accepted['execution_authority'],capability=_retirement_capability(accepted['interface']),contract=contract,
-                **{key:evidence[key] for key in ('request','response','protocol','dispatch_intent')})
+                **{key:evidence[key] for key in ('assertion','native_originals','dispatch_intent')})
             verify_retirement(value,lambda item:Path(item['path']),interface=config['execution_interface'])
             path=directory/'submission-retirement.json'
             if path.exists():
@@ -1131,6 +1219,18 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
     if 'native_state' in completed:value['native_state']=completed['native_state']
     if config['execution_interface'].get('terminal_evidence')=='local_process':
         value['native_terminal']=proof(directory/'terminal.json')
+    # Validate the original terminal before any optional diagnostic or science
+    # projection. Diagnostics share that original call's deadline and never replay.
+    verify_observation(dict(value,public_result=dict(status=status,call_id=call_id),
+        scientific_source=None,scientific_outputs=[]),lambda item:Path(item['path']),context=operation_context)
+    from . import replay_check
+    replay_check.complete(config,adapter,call_id,value)
+    source=_source_projection(config,accepted)
+    value['scientific_source']=retain(source) if source is not None else None
+    value['public_result']=_run_view(adapter.public_result(result))
+    selected=scientific_outputs(config,value,adapter=adapter)
+    value['scientific_outputs']=[dict(retain(dict(path=item.local_path,sha256=item.sha256,size_bytes=item.size_bytes)),
+        name=item.name,descriptor=item.model_dump(mode='json')) for item in selected]
     verify_observation(value,lambda item:Path(item['path']),context=operation_context)
     with records.lease('observation-'+call_id+'.lock'):
         if path.exists():
@@ -1225,8 +1325,7 @@ def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None
     external_id,state=adapter.submit(prepared)
     records.bind_external(call_id,external_id,state)
     observed=record_observation(config,adapter,call_id)
-    replay_check.complete(config, adapter, call_id, observed)
-    result=adapter.result(call_id)
+    result=json.loads(read(observed['completed']['path'])) if observed is not None else adapter.result(call_id)
     if observed is None and capabilities.query and records.external(call_id) is not None:
         state=execution_status(adapter.status_details(call_id).get('state'))
         if state in PENDING_EXECUTION_STATES:
@@ -1263,7 +1362,7 @@ def progress(config):
             evaluation_key=details.get('evaluation_key'), metric=details.get('metric'), direction=details.get('direction'),
             wall_seconds=details.get('wall_seconds'), parent_candidate=details.get('parent_candidate'),
             **(dict(native_state='cancelled') if details.get('state')=='cancelled' else {}),
-            **(dict(returncode=details['returncode'],result=_scientific_result(details['result'])) if details.get('result') is not None else {})))
+            **(dict(returncode=details['returncode'],result=_run_view(details['result'])) if details.get('result') is not None else {})))
     return dict(version=1, calls=rows[-16:], counts=counts, omitted_count=max(0, len(rows)-16),
         coverage='partial' if counts['unknown'] else 'complete', observed_at=time.time())
 
@@ -1445,7 +1544,12 @@ def main(argv=None):
                 parent=candidate_refs.resolve_reference(root,job,parent)
             result=dispatch(config,args.script or args.payload,parent=parent,new=args.new_plan,change=args.change_intent,mechanism=args.mechanism,
                 command_options=options if arguments or args.experiment_dir else None)
-            result=adapter.public_result(result)
+            observation=Records(config).directory(result['call_id'])/'execution-observation.json' if isinstance(result.get('call_id'),str) else None
+            if observation is not None and observation.exists():
+                observed=json.loads(read(observation))
+                verify_observation(observed,lambda item:Path(item['path']),interface=config['execution_interface'])
+                result=scientific_result(config,Records(config).accepted(result['call_id']),result,observed)
+            else:result=adapter.public_result(result)
             result=_run_view(result)
             code={'known_success':0,'known_failed':1}.get(result['status'],2)
         elif args.command=='lineage-status':result=progress(config);code=0
@@ -1494,7 +1598,7 @@ def main(argv=None):
             code=2 if args.command=='reconcile' and result['status'] not in {'known_success','known_failed'} else 0
         result=_candidate_view(config,result)
         call_id = result.get('call_id', getattr(args, 'call_id', None))
-        if call_id is not None:
+        if call_id is not None and 'engineering_check' not in result:
             from . import replay_check
             result['engineering_check'] = replay_check.public(config, call_id)
         from . import experiment_client,contracts as c

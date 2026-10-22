@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from . import configuration_updates
 from . import contracts as c, execution
-from .audit_recovery import WORKER_CODES
 
 
 class RepairUnavailable(ValueError):
@@ -26,7 +25,7 @@ def _failure(root, decision_step):
         if result['status']=='unavailable' and sources.exists():
             rows=c.read(c.regular(sources))['items']
             if any(row['candidate_id']==receipt['candidate_id'] and row.get('reason')=='delivery_code_source_unavailable' for row in rows):
-                result=dict(status='engineering_error',note='implementation_source_missing',cleanup_confirmed=True)
+                result=dict(status='engineering_error',note='implementation_source_missing',cleanup_confirmed=True,recovery='author_repair')
                 binding=dict(candidate_id=receipt['candidate_id'],source=dict(objects={}))
         return result, path, binding
     actions = [row for row in budget.closeout_state(root)['actions']
@@ -35,7 +34,7 @@ def _failure(root, decision_step):
         for path in reversed(sorted((root/'host-delivery/preparation').glob('*.json'))):
             value=c.read(c.regular(path))
             if value.get('decision_step')==decision_step and value['reason']=='implementation_source_missing':
-                return dict(status='engineering_error',note=value['reason'],cleanup_confirmed=True),path,dict(candidate_id=value['candidate_id'],source=dict(objects={}))
+                return dict(status='engineering_error',note=value['reason'],cleanup_confirmed=True,recovery='author_repair'),path,dict(candidate_id=value['candidate_id'],source=dict(objects={}))
         return None
     row = actions[-1]
     path = root/'control-ledger'/f'{row["outcome"]["seq"]:06d}.json'
@@ -62,7 +61,7 @@ def request(root, decision_step):
 def _request(root,decision_step,failure):
     result, path, binding = failure
     if (result['status'] != 'engineering_error' or not result['cleanup_confirmed']
-            or result['note'] not in WORKER_CODES or binding is None):return None
+            or result.get('recovery')!='author_repair' or binding is None):return None
     from . import originals
     job = originals.source_job(originals.node(root, decision_step))
     cid = binding['candidate_id']

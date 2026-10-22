@@ -45,7 +45,7 @@ def test_git_release_builder_emits_clean_manifested_source(tmp_path: Path) -> No
     assert (output / "docs/TCAD_QUALIFICATION_STATUS.md").is_file()
     assert not (output / "plugins/table_observation").exists()
     assert {path.name for path in (output / "plugins").iterdir() if path.is_dir()} == {
-        "curve_score", "curve_figure_evidence", "tcad_artifact",
+        "curve_score", "curve_figure_evidence", "tcad_artifact", "cov_execution",
     }
     assert not (output / "deploy/apply_ingaas_fig4_profile.sh").exists()
     assert not tuple(output.rglob("figure_geometry.json"))
@@ -142,7 +142,7 @@ def test_git_release_builder_emits_clean_manifested_source(tmp_path: Path) -> No
         "scripts/acceptance/rootless_cov_launcher.py",
         "scripts/acceptance/rootless_public_selection_replay.py",
         "scripts/acceptance/behavior_card.py", "scripts/acceptance/prelive_gate.py",
-        "scripts/observe_covshift_candidates.py",
+        "plugins/cov_execution/cov_execution/observer.py",
         "scripts/acceptance/fixtures/search_mvp/native-payloads.json",
          "scripts/prepare_covshift_local.py",
         "scripts/prepare_nbody_local.py",

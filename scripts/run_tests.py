@@ -295,7 +295,7 @@ def main():
     parser.add_argument("--lane", choices=LANES, default="source")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--output", type=Path, required=True, help="new persistent result directory outside /tmp")
-    parser.add_argument("--installation-cohort", choices=("core", "tcad"), default="core")
+    parser.add_argument("--installation-cohort", choices=("core", "tcad", "cov"), default="core")
     parser.add_argument("--collect-only", action="store_true")
     parser.add_argument("--per-file", action="store_true", help="fresh pytest process per test file; stops on failure")
     parser.add_argument("targets", nargs="*", help="pytest files or node IDs; defaults to tests")

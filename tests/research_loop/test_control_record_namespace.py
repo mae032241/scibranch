@@ -3,7 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, cov_lineage, experiment_client
+from scidiscovery.research_loop import contracts as c, experiment_client
+from cov_execution import lineage as cov_lineage
 from scidiscovery.research_loop import experiments as e, instance_archive, instance_owner
 
 

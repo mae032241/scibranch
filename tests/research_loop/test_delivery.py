@@ -10,7 +10,8 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts as c, controller, cov_delivery, delivery, native
+from scidiscovery.research_loop import budget, contracts as c, controller, delivery, native
+from cov_execution import delivery as cov_delivery
 from scidiscovery.research_loop import runtime
 from test_history_handoff import finish
 
@@ -100,7 +101,7 @@ def prepare_fixture(tmp_path, mode='ok', *, real_harness=None, python=sys.execut
     limits = {role: dict(max_observed_tokens=2000, max_seconds=60) for role in ('H', 'W', 'A', 'E')}
     controller.prepare(root, objective, public, ['fake-no-model'], max_tokens=100_000,
         max_seconds=300, max_steps=12, model='fixture', reasoning_effort='high', search_policy=None,
-        node_budget_policy=limits, history_observer=dict(adapter=str(Path(__file__).resolve().parents[2] / 'scripts/observe_covshift_candidates.py'),
+        node_budget_policy=limits, history_observer=dict(adapter=str(Path(__file__).resolve().parents[2] / 'plugins/cov_execution/cov_execution/observer.py'),
                                                       config=dict(runs='runs', evaluation_key='fixture-public')),
         delivery_policy=delivery_policy(descriptor(root, public, python=python)))
     (root / 'runs').mkdir();(root / 'submission').mkdir()

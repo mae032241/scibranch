@@ -89,7 +89,7 @@ def _deadline(config, bound):
     return deadline if deadline > stamp['at_boottime'] else None
 
 
-def _preview(directory, accepted, *, scientific=False):
+def _preview(directory, accepted, *, scientific=False, config_projection=None):
     bound = accepted.get('engineering_check')
     if bound is None:
         return dict(status='not_run', note='original_call_has_no_bound_engineering_check')
@@ -113,14 +113,8 @@ def _preview(directory, accepted, *, scientific=False):
             if scientific:
                 result.update(status=original['status'],note='isolated_replay_'+original['status'],
                     cleanup_confirmed=original['cleanup_confirmed'])
-                if 'stage' in original:
-                    result['stage']=original['stage'] if original['stage'] in {'harness','source_import','sample_train','sample_predict'} else 'unknown'
-                if isinstance(original.get('samples'),dict):
-                    result['samples']={key:original['samples'][key] for key in
-                        ('train_rows','validation_rows','available_train_rows','available_validation_rows')
-                        if key in original['samples'] and (original['samples'][key] is None or type(original['samples'][key]) is int)}
-                    result['samples']['selection']='first rows in frozen CSV order'
-                if 'completion' in original:result['completion']='Bounded replay did not produce a verified result.'
+                if config_projection is not None:
+                    result.update(config_projection(original))
             else:
                 result.update({key: original[key] for key in ('status', 'note', 'samples', 'stage', 'cleanup_confirmed', 'completion') if key in original})
             if 'diagnostic' in original:
@@ -138,11 +132,14 @@ def public(config, call_id):
     """A bounded read-only view; query never starts a replay."""
     try:
         records = e.Records(config)
-        return _preview(records.directory(call_id), records.accepted(call_id),scientific=config.get('worker_view_version')==1)
+        declared,_=e.registration(config['execution_interface']['executor'])
+        return _preview(records.directory(call_id),records.accepted(call_id),
+            scientific=config.get('worker_view_version')==1,config_projection=declared.engineering_feedback)
     except (OSError, ValueError, KeyError, TypeError):
         return dict(status='unknown', note='engineering_feedback_original_unavailable')
 
 
+@e._configuration_effect
 def complete(config, adapter, call_id, observation):
     """One optional call after confirmed terminal evidence; never repeat an intent.
 

@@ -8,7 +8,8 @@ import sys
 import pytest
 from execution_fixtures import execution_registry
 
-from scidiscovery.research_loop import budget, contracts as c, controller, cov_delivery, cov_lineage, delivery
+from scidiscovery.research_loop import budget, contracts as c, controller, delivery
+from cov_execution import delivery as cov_delivery, lineage as cov_lineage
 from test_cov_lineage import BACKEND
 from test_delivery import FAKE_HARNESS, descriptor, delivery_policy, prepare_fixture
 from test_history_handoff import finish
@@ -31,7 +32,8 @@ def managed_scene(tmp_path, *, alias_correct=True, rewrite_script=True, launcher
     spec = descriptor(root, public)
     if not rewrite_script:
         adapter=tmp_path/'adapter_without_script_rebinding.py'
-        shutil.copyfile(Path(cov_delivery.__file__).with_name('protocol.py'),tmp_path/'protocol.py')
+        from scidiscovery.research_loop import protocol
+        shutil.copyfile(Path(protocol.__file__),tmp_path/'protocol.py')
         adapter.write_text(Path(cov_delivery.__file__).read_text().replace("script='/inputs/source.py'", "script=request['context']['row']['script']"))
         spec.update(adapter=str(adapter),launcher_argv=[sys.executable,str(adapter),'--isolate'])
     spec['config']['namespace_runs'] = (str(namespace_runs) if namespace_runs is not None

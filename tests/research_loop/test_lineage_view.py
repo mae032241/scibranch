@@ -158,7 +158,7 @@ def test_long_candidate_member_references_bound_brief_and_keep_complete_catalogu
 @pytest.mark.process_e2e
 def test_known_failed_experiment_is_separate_from_original_scientific_conclusion(tmp_path):
     from test_lineage import scene as call_scene
-    from scidiscovery.research_loop import cov_lineage as cov
+    from cov_execution import lineage as cov
     root,config,digest=call_scene(tmp_path)
     script=c.workspace(root,2)/'work/train.py';script.write_text('failed')
     failed=cov.run(config,digest,script,new=True)

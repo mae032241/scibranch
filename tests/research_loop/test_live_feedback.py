@@ -9,7 +9,8 @@ import time
 
 import pytest
 
-from scidiscovery.research_loop import cli, contracts as c, controller, cov_lineage, feedback, history
+from scidiscovery.research_loop import cli, contracts as c, controller, feedback, history
+from cov_execution import lineage as cov_lineage
 from test_cov_lineage import wrapper  # Real CLI fixture, never mocked transport.
 from test_history_handoff import finish
 from execution_fixtures import execution_registry
@@ -35,8 +36,8 @@ def test_running_call_is_visible_before_w_or_call_finishes_and_queries_are_reado
     code = wrapper.backend.read_text().replace("if mode=='failed':row", "if mode=='slow':\n import time;time.sleep(2)\nif mode=='failed':row", 1)
     wrapper.backend.write_text(code)
     script = wrapper.script('inflight', 'slow')
-    env = dict(os.environ, PYTHONPATH=str(Path(cov_lineage.__file__).parents[2])+os.pathsep+os.environ.get('PYTHONPATH',''), EXP_WALL_CAP_S='4')
-    process = subprocess.Popen([sys.executable, '-m', 'scidiscovery.research_loop.cov_lineage',
+    env = dict(os.environ, PYTHONPATH=str(Path(cov_lineage.__file__).parents[1])+os.pathsep+os.environ.get('PYTHONPATH',''), EXP_WALL_CAP_S='4')
+    process = subprocess.Popen([sys.executable, '-m', 'cov_execution.lineage',
         '--config', str(wrapper.config), 'run', '--script', str(script), '--new-plan'],
         cwd=wrapper.root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
@@ -319,7 +320,7 @@ def test_host_status_malformed_live_original_reports_bounded_integrity_error(tmp
     if name == 'native-intent.json':
         with pytest.raises(history.ObserverIntegrityError):
             feedback.live(root, job)
-    env = dict(os.environ, PYTHONPATH=str(Path(cov_lineage.__file__).parents[2])+os.pathsep+os.environ.get('PYTHONPATH',''))
+    env = dict(os.environ, PYTHONPATH=str(Path(cov_lineage.__file__).parents[1])+os.pathsep+os.environ.get('PYTHONPATH',''))
     reply = subprocess.run([sys.executable, '-m', 'scidiscovery.research_loop.cli', 'status', '--root', str(root)],
         env=env, capture_output=True, text=True, timeout=10)
     assert reply.returncode == 1 and not reply.stderr
@@ -429,7 +430,7 @@ def test_registered_local_host_feedback_requires_no_domain_observer(tmp_path):
     path=tmp_path/'local-config.json'
     experiments.configure(root,1,'local_execution:command',dict(run_argv=[sys.executable],max_seconds=10),path)
     source=tmp_path/'ordinary.py';source.write_text('print("public output without domain metric")\n')
-    env=dict(os.environ,PYTHONPATH=str(Path(cov_lineage.__file__).parents[2])+os.pathsep+os.environ.get('PYTHONPATH',''))
+    env=dict(os.environ,PYTHONPATH=str(Path(cov_lineage.__file__).parents[1])+os.pathsep+os.environ.get('PYTHONPATH',''))
     reply=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(path),
         'run','--script',str(source)],env=env,capture_output=True,text=True,timeout=20)
     assert reply.returncode==0,reply.stderr

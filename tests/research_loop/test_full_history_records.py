@@ -9,7 +9,8 @@ from execution_fixtures import execution_registry
 from test_lineage import scene as cov_scene
 from test_history_handoff import finish
 from test_worker_fragments import fragment, science
-from scidiscovery.research_loop import checkpoint, contracts as c, controller, cov_lineage as cov, execution, history, lineage, selection
+from scidiscovery.research_loop import checkpoint, contracts as c, controller, execution, history, lineage, selection
+from cov_execution import lineage as cov
 
 
 @pytest.mark.process_e2e

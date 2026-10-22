@@ -8,7 +8,8 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, controller, cov_lineage as cov, execution, guidance
+from scidiscovery.research_loop import contracts as c, controller, execution, guidance
+from cov_execution import lineage as cov
 from test_history_handoff import finish
 from test_cov_lineage import wrapper
 from execution_fixtures import execution_registry
@@ -57,7 +58,7 @@ def cli(wrapper,*args,default=None,expected=0):
     env=dict(os.environ,PYTHONPATH=str(Path(cov.__file__).parents[2]),EXP_WALL_CAP_S='1')
     env.pop('EXP_DEFAULT_SCRIPT',None)
     if default is not None:env['EXP_DEFAULT_SCRIPT']=str(default)
-    reply=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.cov_lineage','--config',str(wrapper.config),*map(str,args)],
+    reply=subprocess.run([sys.executable,'-m','cov_execution.lineage','--config',str(wrapper.config),*map(str,args)],
         env=env,cwd=wrapper.root,capture_output=True,text=True,timeout=20)
     assert reply.returncode==expected,(reply.stdout,reply.stderr)
     return json.loads(reply.stdout)

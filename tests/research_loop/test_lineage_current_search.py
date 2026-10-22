@@ -7,7 +7,8 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import budget,contracts as c,controller,cov_lineage,execution,history,lineage,search
+from scidiscovery.research_loop import budget, contracts as c, controller, execution, history, lineage, search
+from cov_execution import lineage as cov_lineage
 from execution_fixtures import execution_registry
 from test_cov_lineage import BACKEND
 from test_history_handoff import finish
@@ -40,7 +41,7 @@ def test_sealed_current_h_configures_registered_cov_and_final_a(tmp_path,executi
     assert frozen['scope']['mechanism_ref'] is None
     assert frozen['breadth']['mechanisms'][0]['mechanism_ref']=='h001.m1'
     script=c.workspace(root,2)/'work/payload.json';script.write_text('{}')
-    env=dict(os.environ,PYTHONPATH=str(Path(cov_lineage.__file__).parents[2])+os.pathsep+os.environ.get('PYTHONPATH',''))
+    env=dict(os.environ,PYTHONPATH=str(Path(cov_lineage.__file__).parents[1])+os.pathsep+os.environ.get('PYTHONPATH',''))
     command=[sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(config)]
     reply=subprocess.run([*command,'run','--script',str(script),'--new-plan','--mechanism','P'],env=env,capture_output=True,text=True,timeout=20)
     assert reply.returncode==0,(reply.stdout,reply.stderr)

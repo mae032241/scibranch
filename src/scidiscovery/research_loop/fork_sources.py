@@ -1,6 +1,6 @@
-"""Compile a bounded, exact source closure for a new scientific fork.
+"""Retain a bounded owner snapshot and exact scientific cut for a new fork.
 
-Only immutable input originals and their declared control proofs are retained.
+Private snapshot bytes do not become selected inputs or scientific evidence.
 Creating or launching the child belongs to fork_service and the controller.
 """
 from __future__ import annotations
@@ -25,18 +25,6 @@ MAX_BYTES = 4 * 1024**3
 MAX_ANCESTRY = 16
 SOURCE_LOCATORS = frozenset({'source_paths', 'source_root'})
 _guarded = ContextVar('fork_source_read_guards', default=frozenset())
-REFERENCE_MEMBERS = frozenset({
-    'files', 'execution_recoveries', 'execution_recovery_materials', 'audit_receipts', 'adjacent_audit',
-    'materials', 'selected_inputs', 'material', 'retained', 'globals', 'declarations', 'edges', 'seal',
-    'source_provenance', 'input_provenance', 'observations', 'native_authorship', 'attempts', 'intent',
-    'outcome', 'header', 'producer_seal', 'subject', 'requester', 'contract', 'request', 'review',
-    'unavailable', 'source', 'fault', 'audit', 'receipt', 'proofs', 'original', 'originals', 'inputs',
-    'compiler', 'job', 'task', 'author', 'compiled_implementations', 'input_sources', 'accepted_ref',
-    'snapshot_files', 'managed_calls', 'stopped_original', 'delivery_sources',
-    'source_nodes', 'input_selection', 'implementation', 'accepted', 'operation', 'preparation',
-    'execution_authority', 'configuration', 'original_permit', 'completed_output_acceptance',
-    'correction_events', 'sources', 'evidence', 'native_intent', 'capability', 'author_input', 'output', 'client_binding',
-})
 
 
 def _json(path):
@@ -50,28 +38,6 @@ def _key(identity, path, proof):
     return o.identity_key(identity) + ':' + o.relative(path) + ':' + proof['sha256'] + ':' + str(proof['size_bytes'])
 
 
-def _control_document(path, *, context=None, document=None):
-    """Recognize host document types; a JSON suffix never types scientific bytes."""
-    parts = Path(path).parts
-    name = parts[-1]
-    if document is not None and Path(document).name == 'compiler.json' and context in {
-            'author', 'capability', 'capability_source', 'output'}:
-        return False
-    if parts[0] == 'native-evidence':
-        if len(parts) == 5 and parts[2] == 'compiled-implementations':
-            return name == 'compiler.json' or (name.startswith('author-client-') and name.endswith('.json'))
-        record = len(parts) == 3 or (len(parts) == 5 and parts[2] == 'continuations' and parts[3].isdecimal())
-        return record and name in {'result-identity.json', 'native-authorship.json',
-            'input-provenance.json', 'provenance.json', 'observation.json', 'formal-review.json',
-            'experiment-config.json', 'pending-execution-set.json'}
-    if name == 'accepted.json' and context == 'accepted' and document is not None:
-        return (document.startswith(('host-history/observations/', 'host-history/execution-recoveries/'))
-            or document.endswith('/pending-execution-set.json'))
-    return name.endswith('.json') and path.startswith(('source-provenance/',
-        'host-history/observations/', 'host-history/execution-recoveries/',
-        'host-recovery/author-closeout/', 'host-recovery/author-context/',
-        'host-delivery/resolved/', 'host-delivery/preparation/', 'host-delivery/selection/',
-        'execution-authority/', 'host-control/configuration/', 'host-control/guidance/'))
 
 
 def _kind(job):
@@ -178,7 +144,7 @@ def _parent_state(root):
 @contextmanager
 def source_guard(parent_root, *, create_gate=True):
     """Hold existing cooperative source-owner locks without creating a file."""
-    from . import execution, experiment_client, instance_owner
+    from . import execution, experiment_client, instance_owner, instance_archive
     root = files.check_path(Path(parent_root).absolute())
     descriptors = []
     outer = ExitStack()
@@ -220,9 +186,8 @@ def source_guard(parent_root, *, create_gate=True):
             calls = sorted((records / 'calls').glob('*'))
             for path in (records / 'node.lock', _accept_lock(root, job, records)):
                 acquire(path, required=bool(calls) and binding is None)
-            for call in calls:
-                for prefix in ('tcad-submission-', 'tcad-binding-', 'tcad-collect-', 'observation-', 'engineering-'):
-                    acquire(records / (prefix + call.name + '.lock'))
+            for path in instance_archive.record_leases(records):
+                acquire(path, required=True)
             if records.parent.parent.name == 'experiment-control':
                 acquire(records.parent / 'accept.lock')
         acquire(root / 'execution-authority/writer.lock')
@@ -274,7 +239,6 @@ class _Closure:
         self.paths = {}
         self.origins = {}
         self.records = {}
-        self.visited = set()
         self.total_bytes = 0
         self.blocked = []
         self.limitations = []
@@ -282,16 +246,20 @@ class _Closure:
         self.task_active = set()
         self.seals = {}
         self.legacy_compilations = {}
+        self.directory_inventory = []
 
     def entry(self, identity, path, *, required=True):
         matches = [row for row in self.entries.values() if row['origin_identity'] == identity and row['path'] == path]
+        visible = [row for row in matches if row['visibility'] != 'private_snapshot']
+        if visible:
+            matches = visible
         if not matches and not required:
             return None
         if len(matches) != 1:
             raise ValueError('Original has no unique exact closure binding: ' + path)
         return matches[0]
 
-    def add(self, source, path, *, proof=None, visibility='host_proof', parse=False, work_step=None):
+    def add(self, source, path, *, proof=None, visibility='host_proof'):
         path = o.relative(path)
         identity = source.origin_identity
         ref = dict(path=path, **({field: proof[field] for field in ('sha256', 'size_bytes') if field in proof} if proof else {}))
@@ -316,114 +284,49 @@ class _Closure:
                 raise ValueError('Fork source closure exceeds its finite copy bounds')
             self.entries[key] = entry
             self.paths[key] = str(actual)
-        elif previous['visibility'] == 'host_proof' and visibility != 'host_proof':
+        elif (previous['visibility'] == 'private_snapshot' and visibility != 'private_snapshot'
+                or previous['visibility'] == 'host_proof' and visibility not in {'host_proof', 'private_snapshot'}):
             previous['visibility'] = visibility
         origin_key = o.identity_key(identity)
         origin = dict(identity=identity, original_root=source.original_root)
         if origin_key in self.origins and self.origins[origin_key] != origin:
             raise ValueError('Original instance has conflicting logical root identity')
         self.origins[origin_key] = origin
-        if parse and key not in self.visited:
-            self.visited.add(key)
-            self.refs(source, _json(actual), work_step=work_step, context=Path(path).name, document=path)
         return dict(origin_identity=identity, path=path, sha256=entry['sha256'], size_bytes=entry['size_bytes'])
 
-    def refs(self, source, value, *, work_step=None, context=None, document=None):
-        """Follow only declared hash/path original records, never prose strings."""
-        if isinstance(value, list):
-            for item in value:
-                self.refs(source, item, work_step=work_step, context=context, document=document)
-            return
-        if not isinstance(value, dict):
-            return
-        if context == 'engineering_repair':
-            self.refs(source, value.get('failure'), work_step=work_step, context='repair_failure', document=document)
-            for proof in value.get('objects', {}).values():
-                self.refs(source, proof, work_step=work_step, context='repair_object', document=document)
-        if (document is not None and Path(document).name == 'accepted.json' and context == 'prepared'
-                and isinstance(value.get('local_path'), str) and isinstance(value.get('sha256'), str)):
-            prepared = dict(path=value['local_path'], sha256=value['sha256'], size_bytes=value['size_bytes'])
-            logical = Path(prepared['path'])
-            if logical.is_absolute():
-                root = Path(source.original_root)
-                if not logical.is_relative_to(root):
-                    raise ValueError('Prepared original is outside its original instance')
-                prepared['path'] = logical.relative_to(root).as_posix()
-            try:
-                o.resolve_ref(source, prepared)
-            except (OSError, ValueError):
-                # The accepted digest binds these actual retained bytes. Do not
-                # claim archived retention, or require it, before checking them.
-                archive = dict(prepared, path='host-history/objects/' + prepared['sha256'])
-                o.resolve_ref(source, archive)
-                self.add(source, archive['path'], proof=archive)
-                prepared.update(retention='archived', snapshot=archive['path'])
-            self.add(source, prepared['path'], proof=prepared)
-        if isinstance(value.get('sha256'), str) and ('source' in value or 'path' in value):
-            raw = value.get('source', value.get('path'))
-            if isinstance(raw, str):
-                owner = o.source_for_ref(source, value)
-                logical = Path(raw)
-                if logical.is_absolute():
-                    if 'source' in value:
-                        owner, path = o.material_owner(owner, value)
-                    else:
-                        root = Path(owner.original_root)
-                        if not logical.is_relative_to(root):
-                            raise ValueError('Declared original is outside its original instance: ' + raw)
-                        path = logical.relative_to(root).as_posix()
-                else:
-                    path = raw
-                    if path.startswith('inputs/'):
-                        if work_step is None:
-                            raise ValueError('Workspace input reference lacks its exact original job')
-                        path = f'project/nodes/{work_step:03d}/' + path
-                parse = _control_document(path, context=context, document=document)
-                self.add(owner, path, proof=value, parse=parse, work_step=work_step)
-                if value.get('retention') == 'archived' and value.get('snapshot'):
-                    self.add(owner, o.relative(value['snapshot']), proof=value)
-        for key, item in value.items():
-            if document is not None and context == 'accepted.json' and key == 'snapshot_files':
-                # Records.accept copies these bytes under the call's inputs
-                # namespace. item.path is the mutable pre-acceptance locator.
-                for row in item:
-                    path = (Path(document).parent / 'inputs' / o.relative(row['name'])).as_posix()
-                    self.add(source, path, proof=row)
+    def snapshot(self, root):
+        """Retain the inert owner inventory; its superset is never a science cut."""
+        from . import instance_archive
+        manifest = o._manifest(root)
+        if manifest is not None:
+            snapshot = o._snapshot(manifest)
+            self.records.update(snapshot.native_records)
+            self.legacy_compilations.update(snapshot.legacy_compilations)
+            self.directory_inventory.extend(copy.deepcopy(manifest.get('directory_inventory', [])))
+            for row in manifest['entries']:
+                source = o._snapshot_source(root / o.FORK_DIRECTORY, snapshot, row['origin_identity'], 1)
+                self.add(source, row['path'], proof=row, visibility='private_snapshot')
+        source = o.NodeSource(o.local_identity(root), 1, str(root), root)
+        inventory = []
+        for row in instance_archive._inventory(root):
+            path = row['path']
+            # The same versions are retained above under their original identity.
+            # Re-archiving the inherited store would recursively duplicate it.
+            if (path == o.FORK_DIRECTORY or path.startswith(o.FORK_DIRECTORY + '/')
+                    or path == 'host-history/fork-cache'):
                 continue
-            # A retained native session descriptor can point to credentials/home.
-            # Its separately sealed header is the portable authorship evidence.
-            declared = key in REFERENCE_MEMBERS
-            declared |= key in {'view', 'raw'} and context == 'input_sources'
-            declared |= key == 'outputs' and context in {'managed_calls', 'execution-observation.json'}
-            declared |= key == 'items' and context == 'delivery_sources'
-            # These are observer host-contract fields, never keys in authored
-            # scientific output. Their archived proofs are required independently
-            # of the producer's live artifact path.
-            if document is not None and document.startswith('host-history/observations/'):
-                declared |= key in {'candidates', 'current_candidate', 'actual_submission', 'contexts',
-                    'artifact', 'model', 'completed', 'terminal', 'retirement', 'observation'}
-            if document is not None and document.startswith('host-history/execution-recoveries/'):
-                declared |= key in {'row', 'previous', 'allocation', 'pending_set', 'decision',
-                    'admission', 'query', 'submission', 'completed', 'terminal', 'retirement', 'observation'}
-            if document is not None and document.endswith('/pending-execution-set.json'):
-                declared |= key in {'allocations', 'allocation', 'requests', 'prepare_intent',
-                    'submission.json', 'tcad-dispatch.json', 'tcad-backend-binding.json',
-                    'completed.json', 'submission-retirement.json'}
-                declared |= context == 'attempts' and key in {'native-intent.json', 'native-outcome.json',
-                    'runner-process.json', 'native-process.json'}
-            if document is not None and Path(document).name == 'accepted.json':
-                declared |= key in {'script', 'prepared', 'execution_authority', 'input_sources'}
-            if document is not None and document.startswith('execution-authority/'):
-                declared |= key in {'allocation', 'decision', 'admission', 'pending_set', 'grant_revision', 'payload'}
-            if document is not None and (Path(document).name.startswith('author-client-')
-                    or document.startswith('host-recovery/author-closeout/')):
-                declared |= key in {'legacy_authorization', 'permit', 'package', 'settings', 'original_intent',
-                    'original_experiment_config', 'source_originals', 'successor', 'upgrade'}
-                declared |= context == 'source_originals' and key in {'native-intent.json', 'native-outcome.json',
-                    'usage.json', 'usage-observation.json', 'native.jsonl', 'runner-process.json', 'native-process.json'}
-            if declared and not (
-                    key == 'origin' and ('retained' in value or 'material' in value)):
-                self.refs(source, item, work_step=work_step, context=key, document=document)
+            if row['kind'] == 'file':
+                self.add(source, path, proof=row, visibility='private_snapshot')
+            elif row['kind'] == 'gap':
+                self.blocked.append(dict(code='fork_input_missing', path=path,
+                    reason='unrecognized_framework_ownership_not_traversed'))
+                inventory.append(row)
+            else:
+                inventory.append({key: value for key, value in row.items() if key != 'source_stat'})
+        self.directory_inventory.append(dict(origin_identity=source.origin_identity,
+            scope='current_quiescent_owner_snapshot', entries=inventory))
+        self.limitations.append(dict(code='private_snapshot_is_not_historical_absence',
+            detail='The current owner inventory retains bytes; only original frozen task bindings define the historical scientific cut.'))
 
     def settings(self, source):
         self.add(source, 'settings.json', proof=dict(sha256=source.origin_identity['settings_sha256']))
@@ -432,12 +335,10 @@ class _Closure:
         revision = job.get('configuration_revision')
         if revision is not None:
             for number in range(1, revision['revision'] + 1):
-                self.add(source, f'host-control/configuration/revisions/{number:06d}.json', parse=True)
+                self.add(source, f'host-control/configuration/revisions/{number:06d}.json')
                 self.add(source, f'host-control/configuration/identities/{number:06d}.json')
             self.add(source, f'host-control/configuration/bindings/{source.step:03d}.json')
         settings = o.source_settings(source)
-        for field in ('source_provenance', 'formal_review_policy', 'execution_authority_policy'):
-            self.refs(source, settings.get(field), work_step=source.step, context=field)
         return settings
 
     def phase(self, source, job):
@@ -494,7 +395,7 @@ class _Closure:
         for boundary in boundaries:
             for number in range(1, boundary['seq'] + 1):
                 self.add(source, f'control-ledger/{number:06d}.json',
-                    proof=dict(sha256=boundary['sha256']) if number == boundary['seq'] else None, parse=True)
+                    proof=dict(sha256=boundary['sha256']) if number == boundary['seq'] else None)
         if job.get('delivery_sources', {}).get('catalogue'):
             self.add(source, f'project/nodes/{step:03d}/inputs/delivery-candidates.json',
                 visibility='scientific_input' if selected else 'historical_science')
@@ -518,21 +419,6 @@ class _Closure:
             screen_ref = self.add(owner, directory + '/screen.json', proof=dict(sha256=marker['sha256']))
             screen = _json(o.resolve_ref(owner, screen_ref))
             self.add(owner, directory + '/shortlist.json', proof=dict(sha256=screen['shortlist_sha256']))
-        for field in ('global_materials', 'direct_materials', 'direct_refs', 'selected_inputs',
-                      'history', 'source_provenance', 'formal_review', 'formal_review_return', 'candidate_audit',
-                      'engineering_repair', 'correction_request', 'author_correction', 'delivery_sources',
-                      'final_report', 'normal_resume', 'execution_authority', 'user_guidance'):
-            value = job.get(field)
-            if field == 'history' and value is not None:
-                # The view contains authored scientific strings and arbitrary
-                # payload projections; only these typed descriptor members own
-                # original-file dependencies. Never recurse into history.view.
-                value = {key: value[key] for key in ('files', 'execution_recoveries',
-                    'execution_recovery_materials', 'audit_receipts', 'adjacent_audit') if key in value}
-                if 'execution_recoveries' in value:
-                    value['execution_recoveries']=o.recovery_refs(source,job)
-            self.refs(source, value, work_step=step, context=field)
-        self.refs(source, job.get('control_cut'), work_step=step)
         if (o.source_settings(source).get('correction_policy') is not None or job.get('correction_request')) and 'control_cut' not in job:
             self.blocked.append(dict(code='fork_input_missing', input='control_cut.correction_events',
                 reason='historical_correction_cut_unverifiable', path=f'jobs/{step:03d}.json'))
@@ -588,7 +474,7 @@ class _Closure:
         job, job_ref, _ = self.task(source)
         step = source.step
         seal_path = f'native-evidence/{step:03d}/result-identity.json'
-        seal_ref = self.add(source, seal_path, proof=dict(sha256=seal_sha), parse=True, work_step=step)
+        seal_ref = self.add(source, seal_path, proof=dict(sha256=seal_sha))
         seal = _json(o.resolve_ref(source, seal_ref))
         if seal.get('job_sha256') != job_ref['sha256']:
             raise ValueError('Inherited seal lost its exact original job')
@@ -626,10 +512,10 @@ class _Closure:
                 output_upgrade=optional(f'host-recovery/author-closeout/{source.step:03d}-output-upgrade.json'))
         self.legacy_compilations[key] = inventory
         for path in inventory['compiler_paths']:
-            self.add(source, path, parse=True, work_step=source.step)
+            self.add(source, path)
         for name in ('author_successor', 'output_upgrade'):
             if inventory[name] is not None:
-                self.refs(source, inventory[name], work_step=source.step)
+                self.add(o.source_for_ref(source, inventory[name]), inventory[name]['path'], proof=inventory[name])
 
     def _logical_path(self, source, actual):
         if source.entries is None:
@@ -668,7 +554,7 @@ class _Closure:
                     exists = ((source.storage_root / optional_path).exists() if source.entries is None else
                         any(row['origin_identity'] == source.origin_identity and row['path'] == optional_path for row in source.entries))
                     if exists:
-                        self.add(source, optional_path, parse=name == 'experiment-config.json', work_step=step)
+                        self.add(source, optional_path)
             usage_path = record + '/usage.json'
             exists = ((source.storage_root / usage_path).exists() if source.entries is None else
                 any(row['origin_identity'] == source.origin_identity and row['path'] == usage_path for row in source.entries))
@@ -708,6 +594,7 @@ def inspect_source(parent_root, selected_job_ref):
     source = o.node(root, step)
     closure = _Closure()
     closure.blocked.extend(_parent_state(root))
+    closure.snapshot(root)
     job, job_ref, task_ref = closure.task(source, selected=True)
     if isinstance(selected_job_ref, dict):
         if any(selected_job_ref.get(field) != job_ref[field] for field in ('origin_identity', 'path', 'sha256')):
@@ -785,7 +672,8 @@ def inspect_source(parent_root, selected_job_ref):
             execution_recoveries=[dict(ref, origin_identity=ref.get('origin_identity', history_owner.origin_identity))
                 for ref in o.recovery_refs(source,job)]),
         prefix_entries=prefix, entries=list(closure.entries.values()), origins=closure.origins,
-        native_records=closure.records, legacy_compilations=closure.legacy_compilations, bootstrap=boot, ancestry=ancestry,
+        native_records=closure.records, legacy_compilations=closure.legacy_compilations,
+        directory_inventory=closure.directory_inventory, bootstrap=boot, ancestry=ancestry,
         selected_settings=selected_settings, public_snapshots=public_snapshots,
         selected_globals=[dict(material=copy.deepcopy(material),
             original_ref=closure.add(source, material['source'], proof=material)) for material in job['global_materials']],
@@ -823,10 +711,10 @@ def storage_blockers(plan, target_directory):
             return [dict(code='fork_storage_unsupported', reason='Fork originals and target require the same filesystem')]
         if stat.S_IMODE(info.st_mode) != 0o400:
             root = files.check_path(Path(plan['source_root']).absolute())
-            directory = _existing_directory(root / 'host-history/objects')
+            directory = _existing_directory(root / 'host-history/fork-cache')
             if directory.stat().st_dev != device:
                 return [dict(code='fork_storage_unsupported', reason='Fork snapshot cache and target require the same filesystem')]
-            cache = files.check_path(root / 'host-history/objects' / entry['sha256'])
+            cache = files.check_path(root / 'host-history/fork-cache' / entry['sha256'])
             if cache.exists() and cache.stat().st_dev != device:
                 return [dict(code='fork_storage_unsupported', reason='Fork snapshot cache and target require the same filesystem')]
             if not cache.exists() and not stat.S_IMODE(directory.stat().st_mode) & 0o222:
@@ -838,7 +726,7 @@ def _shared_original(source, entry, source_root):
     """Normalize writable legacy originals once, preserving their original inode."""
     if stat.S_IMODE(source.stat().st_mode) == 0o400:
         return source
-    directory = files.check_path(Path(source_root) / 'host-history/objects')
+    directory = files.check_path(Path(source_root) / 'host-history/fork-cache')
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     destination = files.check_path(directory / entry['sha256'])
     if destination.exists():

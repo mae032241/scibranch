@@ -92,12 +92,14 @@ def _candidate_creator(repository: Path, root: Path):
     sources = {
         "core": (repository, "scidiscovery-"),
         "tcad": (repository / "plugins/tcad_artifact", "tcad_artifact-"),
+        "cov": (repository / "plugins/cov_execution", "scidiscovery_cov_execution-"),
         "curve": (repository / "plugins/curve_score", "scidiscovery_curve_score-"),
         "figure": (repository / "plugins/curve_figure_evidence", "scidiscovery_curve_figure_evidence-"),
     }
     selections = {
         "core": ("core",),
-        "all_domains": ("core", "tcad", "curve", "figure"),
+        "all_domains": ("core", "tcad", "curve", "figure", "cov"),
+        "cov": ("core", "cov"),
         "tcad_resolved": ("core", "curve", "tcad"),
     }
     built = {}
@@ -156,7 +158,7 @@ def _candidate_creator(repository: Path, root: Path):
 
 def create_environment(repository: Path, root: Path, *, cohort: str = "core") -> InstalledEnvironment:
     """Build one explicit environment; all_domains is the existing live option."""
-    if cohort not in {"core", "tcad", "all_domains"}:
-        raise ValueError("candidate cohort must be core, tcad or all_domains")
+    if cohort not in {"core", "tcad", "cov", "all_domains"}:
+        raise ValueError("candidate cohort must be core, tcad, cov or all_domains")
     create = _candidate_creator(repository, root)
     return create("tcad_resolved" if cohort == "tcad" else cohort)

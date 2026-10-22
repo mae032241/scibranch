@@ -53,7 +53,7 @@ def real_chain(tmp_path, *, max_steps=5, launcher_text=FAKE_NATIVE, pause_after_
     nodes = {role:dict(max_observed_tokens=2000,max_seconds=60) for role in ('H','W','A','E')}
     controller.prepare(root,objective,public,[sys.executable,str(launcher)],max_tokens=100_000,max_seconds=300,max_steps=max_steps,
         model='no-model',reasoning_effort='high',search_policy=None,node_budget_policy=nodes,
-        history_observer=dict(adapter=str(Path(__file__).resolve().parents[2]/'scripts/observe_covshift_candidates.py'),config=dict(runs='runs',evaluation_key='fixture-public')),
+        history_observer=dict(adapter=str(Path(__file__).resolve().parents[2]/'plugins/cov_execution/cov_execution/observer.py'),config=dict(runs='runs',evaluation_key='fixture-public')),
         delivery_policy=delivery_policy(descriptor(root,public)))
     (root/'runs').mkdir();(root/'submission').mkdir()
     return root

@@ -11,7 +11,8 @@ import textwrap
 
 import pytest
 
-from scidiscovery.research_loop import audit_recovery,budget,contracts as c,controller,cov_delivery,cov_lineage,delivery,search
+from scidiscovery.research_loop import audit_recovery, budget, contracts as c, controller, delivery, search
+from cov_execution import delivery as cov_delivery, lineage as cov_lineage
 from scidiscovery.research_loop.protocol import CURRENT
 from execution_fixtures import execution_registry
 from test_cov_delivery_lineage import managed_scene

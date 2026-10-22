@@ -8,7 +8,8 @@ import sys
 import pytest
 
 from execution_fixtures import execution_registry
-from scidiscovery.research_loop import audit_recovery, budget, candidate_audit, contracts as c, cov_delivery, delivery, engineering
+from scidiscovery.research_loop import audit_recovery, budget, candidate_audit, contracts as c, delivery, engineering
+from cov_execution import delivery as cov_delivery
 from scidiscovery.research_loop.experiment_client import record_directory
 from test_cov_delivery_lineage import managed_scene
 from test_cov_lineage import BACKEND
@@ -39,7 +40,7 @@ def test_only_complete_finite_audit_can_qualify_or_reject(flag,status):
 
 
 NATIVE=r'''import json,os,pathlib,subprocess,sys
-from scidiscovery.research_loop import cov_lineage
+from cov_execution import lineage as cov_lineage
 args=sys.argv[1:];sys.stdin.read()
 work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE']);manifest=json.loads(pathlib.Path(os.environ['THIN_HWA_JOB_MANIFEST']).read_text())
 root=pathlib.Path(os.environ['THIN_HWA_JOB_MANIFEST']).parents[1]
@@ -176,7 +177,8 @@ def test_final_engineering_fault_retains_original_without_new_worker(tmp_path,mo
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('unresolved_selection',[False,True])
 def test_default_search_routes_exact_repair_with_no_active_scientific_focus(tmp_path,monkeypatch,unresolved_selection):
-    from scidiscovery.research_loop import controller,cov_lineage,search
+    from scidiscovery.research_loop import controller, search
+    from cov_execution import lineage as cov_lineage
     import test_cov_delivery_lineage as managed
     prepare=controller.prepare
     def default_search(*args,**kwargs):
@@ -232,16 +234,16 @@ def test_default_search_routes_exact_repair_with_no_active_scientific_focus(tmp_
     assert cli(root)['status']=='delivery_confirmed' and budget.used_steps(root)==steps
 
 
-@pytest.mark.parametrize('code',sorted(audit_recovery.WORKER_CODES))
+@pytest.mark.parametrize('code',sorted(cov_delivery.AUTHOR_REPAIR_CODES))
 def test_worker_audit_fault_is_preserved_without_unchanged_retry(tmp_path,monkeypatch,code):
     calls=[]
     request=dict(operation_id='a'*64,candidate_id='run-1',artifact_sha256='b'*64)
     def fault(spec,item,seconds,**kwargs):
         calls.append(item)
-        return dict(request,status='engineering_error',note=code,diagnostic='Original bounded diagnostic')
+        return dict(cov_delivery._reply(dict(request,phase='audit'),'engineering_error',code),diagnostic='Original bounded diagnostic')
     monkeypatch.setattr(delivery,'_call',fault)
     result,returned,_=audit_recovery.run(tmp_path,{},None,request,5)
-    assert result==dict(status='engineering_error',note=code,diagnostic='Original bounded diagnostic',cleanup_confirmed=True)
+    assert result==dict(status='engineering_error',note=code,diagnostic='Original bounded diagnostic',cleanup_confirmed=True,recovery='author_repair')
     assert len(calls)==1 and returned==request
     assert not (tmp_path/'host-delivery/audit-recovery').exists()
 

@@ -857,17 +857,8 @@ def audit_facts(root, projection, *, subject=None):
     for source, payload in requests:
         if source['role'] == 'A' and payload.get('next_action') == 'audit':
             audit_steps.add(source['step'])
-    models = {}
-    for record in projection['records']:
-        observation = record.get('observation') or {}
-        for context in observation.get('contexts', []):
-            model = context.get('model')
-            if context.get('status') == 'known_success' and model and model.get('retention') == 'archived':
-                models.setdefault(context['candidate_id'], set()).add((model['sha256'], model['size_bytes']))
-        actual = observation.get('actual_submission')
-        if actual and actual.get('candidate_id') is not None and (actual.get('artifact') or {}).get('retention') == 'archived':
-            model = actual['artifact']
-            models.setdefault(actual['candidate_id'], set()).add((model['sha256'], model['size_bytes']))
+    from . import candidate_audit
+    models=candidate_audit.candidate_artifacts(root,projection['records'])
     result, recorded = {}, False
     for step in sorted(audit_steps):
         directory = root / 'native-evidence' / f'{step:03d}' / 'candidate-audit'

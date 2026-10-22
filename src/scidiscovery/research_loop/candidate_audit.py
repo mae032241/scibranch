@@ -404,19 +404,40 @@ def collect_refs(root, sources, *, step, adjacent=None):
     return [refs[key] for key in sorted(refs)]
 
 
-def project_receipts(root, records, refs):
-    """Adapter results and candidate-byte attribution; no leakage interpretation."""
+def candidate_artifacts(root, records):
+    """Exact candidate declarations mapped to their archived artifact identities."""
     models = {}
     for record in records:
         observation = record.get('observation') or {}
-        for context in observation.get('contexts', []):
-            model = context.get('model')
-            if context.get('status') == 'known_success' and model and model.get('retention') == 'archived':
-                models.setdefault(context['candidate_id'], set()).add((model['sha256'], model['size_bytes']))
+        for context in observation.get('contexts',[]):
+            if context.get('status')!='known_success':continue
+            from . import lineage
+            for artifact in lineage.context_artifacts(context):
+                if artifact.get('retention')=='archived':
+                    models.setdefault(context['candidate_id'],set()).add((artifact['sha256'],artifact['size_bytes']))
+        from . import generic_results
+        # Candidate identities and bytes come from their exact frozen declaration.
+        for call in observation.get('managed_calls',[]):
+            for candidate in generic_results.candidates([call]):
+                artifacts=[item for item in candidate['evidence'] if item.get('name') is not None]
+                for artifact in artifacts:
+                    if artifact.get('retention')=='archived':
+                        identity=candidate['id']
+                        if identity not in {row['id'] for row in observation.get('candidates',[])}:
+                            from . import candidate_refs,originals
+                            source=originals.node(root,record['step'])
+                            identity=candidate_refs.origin_candidate(source.origin_identity,identity)
+                        models.setdefault(identity,set()).add((artifact['sha256'],artifact['size_bytes']))
         actual = observation.get('actual_submission')
         if actual and actual.get('candidate_id') is not None and (actual.get('artifact') or {}).get('retention') == 'archived':
             model = actual['artifact']
             models.setdefault(actual['candidate_id'], set()).add((model['sha256'], model['size_bytes']))
+    return models
+
+
+def project_receipts(root, records, refs):
+    """Adapter results and candidate-byte attribution; no leakage interpretation."""
+    models=candidate_artifacts(root,records)
     rows = []
     for ref in refs:
         public_receipt(root, ref)

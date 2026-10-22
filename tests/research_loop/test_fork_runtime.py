@@ -115,9 +115,10 @@ def test_frozen_terminal_recovery_uses_original_pending_authority_and_query(late
     # Exercise the exact typed closure and immutable reader, without claiming
     # that a recovery snapshot itself admits a new research instance.
     closure = fork_sources._Closure()
+    closure.snapshot(root)
     closure.sealed(source, values[-1]['seal_sha256'])
     for ref in refs:
-        closure.add(source, ref['path'], proof=ref, parse=True)
+        closure.add(source, ref['path'], proof=ref)
     store = tmp_path / 'frozen-recovery'
     for key, entry in closure.entries.items():
         archive_io.copy_verified(Path(closure.paths[key]), store / entry['storage_path'], dict(entry, kind='file'))

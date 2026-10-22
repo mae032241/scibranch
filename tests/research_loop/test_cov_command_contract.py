@@ -5,7 +5,8 @@ import json
 
 import pytest
 
-from scidiscovery.research_loop import cov_experiments, experiments as e
+from scidiscovery.research_loop import experiments as e
+from cov_execution import experiments as cov_experiments
 from test_cov_lineage import wrapper
 from execution_fixtures import execution_registry, remote_registry
 

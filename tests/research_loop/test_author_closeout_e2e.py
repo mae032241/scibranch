@@ -8,7 +8,8 @@ import sysconfig
 import pytest
 
 from execution_fixtures import execution_registry
-from scidiscovery.research_loop import budget,candidate_audit,contracts as c,controller,cov_lineage,execution,native
+from scidiscovery.research_loop import budget, candidate_audit, contracts as c, controller, execution, native
+from cov_execution import lineage as cov_lineage
 from scidiscovery.research_loop.experiment_client import record_directory,resolve
 from test_cov_delivery_lineage import managed_scene
 
@@ -77,11 +78,11 @@ def source_python(tmp_path,repo):
     (metadata/'METADATA').write_text('Metadata-Version: 2.1\nName: scidiscovery\nVersion: 0\n')
     (metadata/'entry_points.txt').write_text('[scidiscovery.execution_interfaces]\n'
         'local_execution = scidiscovery.research_loop.local_experiments:REGISTRATION\n'
-        'cov_execution = scidiscovery.research_loop.cov_experiments:REGISTRATION\n')
+        'cov_execution = cov_execution.experiments:REGISTRATION\n')
     source=repo/'src';bootstrap=bridge/'bootstrap.py'
     bootstrap.write_text('import runpy, sys\nfrom pathlib import Path\n'
         'assert sys.flags.isolated and sys.dont_write_bytecode\n'
-        f'sys.path[:0] = {[str(source),str(bridge)]!r}\n'
+        f'sys.path[:0] = {[str(source),str(repo/'plugins/cov_execution'),str(bridge)]!r}\n'
         'from scidiscovery.research_loop import contracts as c\n'
         f'assert Path(c.__file__).resolve() == Path({str(source/"scidiscovery/research_loop/contracts.py")!r})\n'
         'args = sys.argv[1:]\n'

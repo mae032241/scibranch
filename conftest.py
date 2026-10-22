@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
-for relative in ("plugins/tcad_artifact",):
+for relative in ("plugins/tcad_artifact", "plugins/cov_execution"):
     path = str(ROOT / relative)
     if path not in sys.path:
         sys.path.insert(0, path)

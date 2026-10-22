@@ -108,8 +108,8 @@ def source_observation(source, job, value):
                 if parent.get('source') == 'same_node_completed_call' else inputs.get(identity, identity))
         for proof in row.get('proofs', []):
             bind(proof)
-        if row.get('model') is not None:
-            bind(row['model'])
+        from . import lineage
+        for artifact in lineage.context_artifacts(row):bind(artifact)
     for call in result.get('managed_calls', []):
         for field in ('accepted', 'completed', 'terminal', 'observation', 'retirement'):
             bind(call.get(field))

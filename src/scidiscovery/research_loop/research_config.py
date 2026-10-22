@@ -257,6 +257,29 @@ def normalize(options):
         # A host credential source reference only. Never read or copy its bytes.
         ui['approval_secret_file'] = str(Path(ui['approval_secret_file']).expanduser().resolve())
     result['ui'] = ui
+    selected=result.get('execution_config')
+    if isinstance(selected,dict) and 'executor' in selected:
+        from . import experiments
+        declared,_=experiments.registration(selected['executor'])
+        if declared.research_defaults is not None:
+            prepared=experiments.operator_configuration(selected)
+            defaults=declared.research_defaults(prepared['configuration'],root=result['root'])
+            if not isinstance(defaults,dict) or set(defaults)-{'history_observer','delivery_adapter'}:
+                raise ValueError('Execution provider defaults exceed observation/delivery scope')
+            observer=defaults.get('history_observer')
+            if observer is not None:
+                selected_observer=result.get('history_observer')
+                if selected_observer is None:result['history_observer']=copy.deepcopy(observer)
+                elif any(selected_observer.get(key)!=value for key,value in observer.items()):
+                    raise ValueError('Explicit history observer conflicts with the selected execution provider')
+            adapter_defaults=defaults.get('delivery_adapter')
+            policy=result.get('delivery_policy')
+            if adapter_defaults is not None and isinstance(policy,dict) and isinstance(policy.get('adapter'),dict):
+                selected_adapter=policy['adapter']
+                for key,value in adapter_defaults.items():
+                    if key in selected_adapter and selected_adapter[key]!=value:
+                        raise ValueError('Explicit delivery adapter conflicts with the selected execution provider')
+                    selected_adapter.setdefault(key,copy.deepcopy(value))
     launcher = result.get('launcher')
     standard = (result.get('native_backend', 'codex') == 'codex' and isinstance(launcher, list)
                 and len(launcher) == 1 and isinstance(launcher[0], str) and Path(launcher[0]).name == 'codex')

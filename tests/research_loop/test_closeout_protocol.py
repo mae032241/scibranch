@@ -66,7 +66,7 @@ def scene(tmp_path, actions, *, count=2, audit=True, selective_failure=False, ma
         resume_policy=dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn',output_repair=True),
         node_budget_policy={r:dict(max_observed_tokens=2000,max_seconds=60) for r in 'HWAE'},
         candidate_audit_policy={'version':1} if audit else None,
-        history_observer=dict(adapter=str(Path(__file__).resolve().parents[2]/'scripts/observe_covshift_candidates.py'),
+        history_observer=dict(adapter=str(Path(__file__).resolve().parents[2]/'plugins/cov_execution/cov_execution/observer.py'),
             config=dict(runs='runs',evaluation_key='fixture-public')),
         delivery_policy=delivery_policy(descriptor(root,public)))
     if legacy:

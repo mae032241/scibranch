@@ -258,6 +258,7 @@ def managed_status(root, row, *, context=None):
 
 
 def _managed_outputs(interface, completed, observed):
+    if observed is not None and 'scientific_outputs' in observed:return observed['scientific_outputs']
     if observed is not None and interface.get('terminal_evidence')!='local_process':
         return observed['outputs']
     return completed.get('outputs',[]) if 'result' in completed else observed['outputs'] if observed is not None else []
@@ -282,7 +283,9 @@ def scientific_outputs(root, job, call):
         observed = c.read(archived_ref(call['observation']))
         archived = dict(observed, completed=dict(observed['completed'], path=str(archived_ref(call['completed']))),
             outputs=[dict(item, path=str(originals.resolve_ref(source, dict(item, path='host-history/objects/' + item['sha256']))))
-                for item in observed['outputs']])
+                for item in observed['outputs']],
+            **(dict(scientific_outputs=[dict(item,path=str(originals.resolve_ref(source,dict(item,path='host-history/objects/'+item['sha256']))))
+                for item in observed['scientific_outputs']]) if 'scientific_outputs' in observed else {}))
         result = []
         for descriptor in experiments.scientific_outputs(config, archived):
             matches = [row for row in call['outputs'] if row['name'] == descriptor.name
@@ -304,7 +307,9 @@ def scientific_outputs(root, job, call):
     observed=c.read(c.regular(root/call['observation']['snapshot']))
     archived=dict(observed,completed=dict(observed['completed'],path=str(root/call['completed']['snapshot'])),
         outputs=[dict(item,path=str(root/'host-history/objects'/item['sha256']))
-        for item in observed['outputs']])
+        for item in observed['outputs']],
+        **(dict(scientific_outputs=[dict(item,path=str(root/'host-history/objects'/item['sha256']))
+            for item in observed['scientific_outputs']]) if 'scientific_outputs' in observed else {}))
     result=[]
     for descriptor in experiments.scientific_outputs(config,archived):
         proof=_proof(root,Path(descriptor.local_path).relative_to(root).as_posix())
@@ -340,6 +345,8 @@ def managed_calls(root, job, *, context=None):
             observed=c.read(c.regular(observed_path))
             extra=[observed[key] for key in ('accepted','completed','submission')]+observed['proofs']
             if 'native_terminal' in observed:extra.append(observed['native_terminal'])
+            extra.extend(observed.get('scientific_outputs',[]))
+            if observed.get('scientific_source') is not None:extra.append(observed['scientific_source'])
         interface=_execution_interface(root,accepted)
         retired_path=directory/'submission-retirement.json'
         if retired_path.exists() or retired_path.is_symlink():
@@ -361,6 +368,7 @@ def managed_calls(root, job, *, context=None):
                     +[_managed_proof(root,item['path'],item,context=context) for item in (extra if observed is not None else value.get('proofs',[]))],
                 outputs=[dict(name=item['name'],**_managed_proof(root,item['path'],item,context=context)) for item in outputs],
                 execution=dict(returncode=value.get('returncode'),wall_seconds=value.get('wall_seconds'),result=value.get('result'),
+                    **(dict(public_result=observed['public_result']) if observed is not None and 'public_result' in observed else {}),
                     **(dict(native_state=value['native_state']) if 'native_state' in value else {})))
                if 'result' in value or observed is not None else {}))
         if observed is not None:
@@ -400,7 +408,9 @@ def validate_managed(root, job, rows, *, context=None):
         for proof in [*row.get('originals',[]),*row.get('outputs',[])]:_validate_proof(root,proof,context=context)
         if 'execution' in row:
             completed=c.read(root/row['completed']['snapshot'])
+            observed=c.read(root/row['observation']['snapshot']) if row.get('observation') is not None else {}
             if row['execution']!=dict(returncode=completed.get('returncode'),wall_seconds=completed.get('wall_seconds'),result=completed.get('result'),
+                    **(dict(public_result=observed['public_result']) if 'public_result' in observed else {}),
                     **(dict(native_state=completed['native_state']) if 'native_state' in completed else {})):
                 raise ObserverIntegrityError('Managed results differ from completed original')
             originals=[*accepted.get('snapshot_files',[])]
@@ -408,6 +418,8 @@ def validate_managed(root, job, rows, *, context=None):
             if observed is not None:
                 originals.extend([observed[key] for key in ('accepted','completed','submission')]+observed['proofs'])
                 if 'native_terminal' in observed:originals.append(observed['native_terminal'])
+                originals.extend(observed.get('scientific_outputs',[]))
+                if observed.get('scientific_source') is not None:originals.append(observed['scientific_source'])
             else:originals.extend(completed.get('proofs',[]))
             if (len(row['originals'])!=len(originals) or any(any(proof[key]!=original[key] for key in ('sha256','size_bytes'))
                     for proof,original in zip(row['originals'],originals))):
@@ -490,7 +502,14 @@ def validate_managed_original(source, job, rows):
             elif interface.get('observation_version') is None:
                 terminal = c.read(proof_path(row['terminal'])) if row.get('terminal') else None
                 status = experiments.local_terminal_status(accepted, completed, terminal)
+            frozen=c.read(proof_path(row['observation'])) if row.get('observation') is not None else {}
+            expected_outputs=_managed_outputs(interface,completed,frozen or None)
+            if (len(row.get('outputs',[]))!=len(expected_outputs) or any(
+                    any(actual[key]!=expected[key] for key in ('name','sha256','size_bytes'))
+                    for actual,expected in zip(row.get('outputs',[]),expected_outputs))):
+                raise ObserverIntegrityError('Inherited scientific output projection changed')
             if row.get('execution') != dict(returncode=completed.get('returncode'), wall_seconds=completed.get('wall_seconds'),
+                    **(dict(public_result=frozen['public_result']) if 'public_result' in frozen else {}),
                     result=completed.get('result'), **(dict(native_state=completed['native_state']) if 'native_state' in completed else {})):
                 raise ObserverIntegrityError('Inherited execution facts changed their completed original')
         if status != row['status']:
@@ -1183,7 +1202,8 @@ def validate_observation(root, job, seal):
     if config.get('contract_version') == 2:
         for context in value.get('contexts', []):
             proofs.extend(context['proofs'])
-            if context.get('model'):proofs.append(context['model'])
+            from . import lineage
+            proofs.extend(lineage.context_artifacts(context))
     for proof in proofs:
         _validate_proof(root, proof)
 
@@ -1227,8 +1247,8 @@ def validate_observation_original(source, job, seal):
     if config.get('contract_version') == 2:
         for row in value.get('contexts', []):
             proofs.extend(row['proofs'])
-            if row.get('model') is not None:
-                proofs.append(row['model'])
+            from . import lineage
+            proofs.extend(lineage.context_artifacts(row))
     for proof in proofs:
         if proof.get('retention') == 'archived':
             if proof.get('snapshot') != 'host-history/objects/' + proof['sha256']:
@@ -1246,7 +1266,7 @@ def _validate_proof(root, proof, *, context=None):
     from . import originals
     path = originals.resolve_root_ref(root, dict(proof, path=expected)) if (Path(root) / originals.MANIFEST).exists() else root / expected
     actual=c.digest(c.regular(path)) if context is None else experiments.proof(path,context=context)['sha256']
-    if actual != proof['sha256']:
+    if actual != proof['sha256'] or path.stat().st_size!=proof['size_bytes']:
         raise ObserverIntegrityError('Archived observer original changed')
 
 

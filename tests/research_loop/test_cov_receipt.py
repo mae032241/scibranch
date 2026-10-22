@@ -5,7 +5,8 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import cov_receipt, cov_lineage, experiments
+from scidiscovery.research_loop import experiments
+from cov_execution import receipt as cov_receipt, lineage as cov_lineage
 from scidiscovery.research_loop.protocol import CURRENT
 from execution_fixtures import execution_registry
 from test_cov_lineage import wrapper

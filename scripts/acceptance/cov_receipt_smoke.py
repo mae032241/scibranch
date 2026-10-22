@@ -5,7 +5,8 @@ import os
 from pathlib import Path
 import sys
 
-from scidiscovery.research_loop import contracts as c, controller, execution, native, search, cov_lineage, experiments, lineage
+from scidiscovery.research_loop import contracts as c, controller, execution, native, search, experiments, lineage
+from cov_execution import lineage as cov_lineage
 
 TRAIN = '''import json,os,pathlib
 from sklearn.linear_model import Ridge

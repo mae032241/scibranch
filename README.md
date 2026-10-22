@@ -36,7 +36,10 @@ the claims established by its exact inputs, experiment and validation contract.
 | `scid-research archive-*` / `checkpoint-*` | Export and inspect originals, restore selected material, or perform a bounded same-host cold transfer. |
 | `scid-experiment` | Use managed local experiments or a declared domain execution interface. |
 
-The optional TCAD adapter provides detached solver execution through bounded
+The core installs the local execution interface. Cov execution, receipt handling,
+public observation and delivery belong to the optional `cov_execution` plugin
+(`SCID_PLUGINS=cov_execution`), with the stable executor key
+`cov_execution:experiment`. The optional TCAD adapter provides detached solver execution through bounded
 transport. Curve plugins provide deterministic scoring and paper-figure evidence
 capabilities. Installing a plugin registers its declared capabilities; it does not
 supply a solver, license or scientific qualification. Plugin declarations also
@@ -79,7 +82,9 @@ budgets, independent review and user statements do not grant execution permissio
 A completed, quiescent current-protocol instance can be forked at an exact logical
 step N. The child reruns that task from its original first-invocation inputs in a fresh
 session, with explicit finite new budgets and independent references to shared
-read-only scientific originals on the same filesystem. Writable legacy originals
+read-only scientific originals on the same filesystem. A private snapshot of the
+quiescent source directory preserves storage completeness; the selected task's
+original input cut still determines scientific visibility. Writable legacy originals
 are snapshotted once before sharing; deleting the parent does not remove the child
 references. Creation leaves it paused; explicitly use `start --continue`
 to launch it. Historical scientific investment, source restrictions and unknown

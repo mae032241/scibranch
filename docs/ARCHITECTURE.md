@@ -432,14 +432,24 @@ gates. Engineering-repair tasks retain their bounded repair contract. A task wit
 continuations or output repairs restarts from its first input, rather than
 resuming those attempts.
 
-`fork_sources.py` retains a bounded closure of exact scientific originals and
-required host proofs using verified hardlinks; `originals.py` resolves them by
+`fork_sources.py` reuses the generic directory inventory to preserve the complete
+quiescent source storage as a private snapshot using verified hardlinks. This is a
+current-directory superset, not a reconstruction of a complete historical directory
+at task N. The selected job and its exact original input cut separately determine
+scientific visibility. `visibility=private_snapshot` entries are omitted from ordinary
+node views; internal exact-hash references can still resolve them without making
+them scientific inputs or qualifications. Fork/cache implementation storage is
+excluded; existing original object storage is retained. No domain filenames or
+plugin JSON traversal define this inventory. `originals.py` resolves originals by
 original identity and digest. Existing 0400 originals are shared directly.
 Writable or differently permissioned originals are first frozen once into the
-source's private `host-history/objects/<sha256>` store, then shared. Source bytes
+source's private `host-history/fork-cache` store, then shared. Source bytes
 and permissions are not changed. Public views link only their selected retained
 originals, never private control metadata. Nested branches share these same
 immutable inodes while keeping distinct original identities and local paths.
+Declared in-instance host keys are excluded using their verified private source
+locator. An unknown credential-looking filename does not grant an exclusion;
+unrecognized ownership remains an inventory gap and blocks a fork.
 
 Each retained directory entry is an owning reference; the filesystem's link count
 is authoritative. Deleting a parent or sibling removes only its references, so
@@ -494,6 +504,17 @@ failed form drafts and offers same-request receipt
 reconciliation for the attempted operation in the same UI host/browser session.
 General Web operation recovery across host restarts is not established; the
 CLI/service receipt is durable.
+
+Adapter record writers hold the generic shared `record-writer.lock`; pending
+inventory takes its exclusive nonblocking lease. Lifecycle quiescence checks take
+all existing direct record `*.lock` leases exclusively without domain prefixes or
+loading installed providers, preserving conservative handling of old records.
+Writers acquire owner gate, shared record writer, node/admission, then
+adapter-private locks. Lifecycle checks acquire the owner gate exclusively and
+nonblocking before node/admission and direct record locks; that gate serializes
+the two orders. Ordinary archive export also holds this exclusive source gate.
+A held writer blocks fork/archive/delete; an unknown original call still
+requires reconciliation.
 
 Read-only originals and the host's cooperative source lease protect the declared
 sharing boundary among cooperating current-version writers. They remain a same-user

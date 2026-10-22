@@ -68,8 +68,8 @@ class SourceSnapshot:
 
 
 def _snapshot(manifest):
-    entries = tuple(manifest['entries'])
-    index = _entry_index(entries)
+    index = _entry_index(manifest['entries'])
+    entries = tuple(row for row in manifest['entries'] if row.get('visibility') != 'private_snapshot')
     return SourceSnapshot(entries, index, manifest['origins'], manifest.get('native_records', {}),
         manifest.get('legacy_compilations', {}))
 
@@ -301,6 +301,22 @@ def material_owner(source, material):
     return for_origin(root, matches[0]['origin_identity'], step=source.step), matches[0]['path']
 
 
+def has_original(source, path):
+    """Host-side existence in retained storage, independent of science indexing.
+
+    This checks current retained presence; it does not attest historical absence
+    or add a private original to a task's scientific input bindings.
+    """
+    path = relative(path)
+    if source.inherited:
+        if not source._index.get((identity_key(source.origin_identity), path)):
+            return False
+    elif not (source.storage_root / path).exists():
+        return False
+    resolve_ref(source, dict(path=path))
+    return True
+
+
 def resolve_ref(source, ref):
     if not isinstance(source, NodeSource) or not isinstance(ref, dict):
         raise ValueError('Exact original handle and reference required')
@@ -314,15 +330,26 @@ def resolve_ref(source, ref):
         actual = files.check_path(source.storage_root / path)
     else:
         versions = source._index.get((key, path), ())
-        if not versions:
-            raise ValueError('Original is outside the frozen fork closure: ' + key + ':' + path)
         matches = [row for row in versions if all(field not in ref or ref[field] == row[field]
             for field in ('sha256', 'size_bytes'))]
+        if (not matches and isinstance(ref.get('sha256'), str)
+                and re.fullmatch('[0-9a-f]{64}', ref['sha256'])
+                and type(ref.get('size_bytes')) is int and ref['size_bytes'] >= 0):
+            # Old frozen receipts can bind a cleaned/reused locator while the
+            # exact bytes remain in the original owner's content archive. This
+            # resolves that explicit identity; it never discovers a new source,
+            # changes the logical receipt, or bypasses a damaged matching inode.
+            archived = 'host-history/objects/' + ref['sha256']
+            matches = [row for row in source._index.get((key, archived), ())
+                if row['sha256'] == ref['sha256'] and row['size_bytes'] == ref['size_bytes']]
+        if not matches and not versions:
+            raise ValueError('Original is outside the frozen fork closure: ' + key + ':' + path)
         if len(matches) != 1:
             raise ValueError('Original reference has no unique exact frozen binding: ' + key + ':' + path)
         entry = matches[0]
-        if entry['storage_path'] not in {f'inherited/{key}/{path}',
-                f'inherited/{key}/versions/{entry["sha256"]}/{entry["size_bytes"]}/{path}'}:
+        stored_path = relative(entry['path'])
+        if entry['storage_path'] not in {f'inherited/{key}/{stored_path}',
+                f'inherited/{key}/versions/{entry["sha256"]}/{entry["size_bytes"]}/{stored_path}'}:
             raise ValueError('Original storage binding changed')
         for field in ('sha256', 'size_bytes'):
             if field in ref and ref[field] != entry[field]:

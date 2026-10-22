@@ -1,7 +1,7 @@
 """Pure execution contracts shared by registered implementations and callers."""
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 
 from scidiscovery.artifact_agent.schema.execution import LocalFileDescriptor
 from .runtime_plugins import RuntimePluginFactory
@@ -56,6 +56,13 @@ class ExecutionInterfaceRegistration:
     version: str
     factory: RuntimePluginFactory
     scientific_outputs: ScientificOutputProjection | None = None
+    # Optional, pure projections receive only retained call facts or descriptors.
+    scientific_source: Callable | None = None
+    context_validator: Callable | None = None
+    research_defaults: Callable | None = None
+    engineering_feedback: Callable | None = None
+    legacy_retirement: Callable | None = None
+    projection_contract: str | None = None
 
 
 class ExecutionAdapter(Protocol):

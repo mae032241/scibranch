@@ -13,7 +13,8 @@ import sys
 import pytest
 
 from execution_fixtures import execution_registry
-from scidiscovery.research_loop import cov_experiments, cov_lineage, experiments as e, replay_check
+from scidiscovery.research_loop import experiments as e, replay_check
+from cov_execution import experiments as cov_experiments, lineage as cov_lineage
 from scidiscovery.research_loop.protocol import CURRENT
 from test_cov_receipt import CLI
 

@@ -16,7 +16,9 @@ import uuid
 import fcntl
 
 if __package__ in {None, ''}:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    checkout=Path(__file__).resolve().parents[3]
+    if (checkout/'pyproject.toml').is_file() and (checkout/'src/scidiscovery').is_dir():
+        sys.path.insert(0,str(checkout/'src'))
 MAX_BYTES = 256_000
 MAX_ASSET = 32 * 1024 * 1024
 MAX_SCAN = 4 * 1024 * 1024
@@ -97,7 +99,7 @@ def _config(path):
         keys.add('host_launch_implementation')
     if set(value) != keys or value['contract_version'] != 2 or value['feedback_version'] != 1:
         raise ValueError('Explicit wrapper contract2 configuration required')
-    from . import replay_check
+    from scidiscovery.research_loop import replay_check
     replay_check.reserve_seconds(value)
     scope = value['scope']
     if set(scope) != ({'step','role','job_sha256','execution_key','mechanism_ref','handoff_protocol'} if 'handoff_protocol' in scope else {'step','role','job_sha256','execution_key','mechanism_ref'}) or type(scope['step']) is not int or scope['step'] <= 0 or scope['role'] not in {'H','W','A','E'}:
@@ -386,9 +388,9 @@ def observe(request):
 
 def configure(root, step, run_argv, runs_root, output, *, receipt_channel='public_runner_main', engineering_check_reserve_seconds=0):
     """Trusted launcher's host-side preparation, before entering its namespace."""
-    from .protocol import require_current
+    from scidiscovery.research_loop.protocol import require_current
     require_current(root)
-    from . import contracts as _contracts
+    from scidiscovery.research_loop import contracts as _contracts
     require_current(root,_contracts.read(_contracts.regular(Path(root)/'jobs'/f'{step:03d}.json')))
     from scidiscovery.research_loop import contracts as c, execution, lineage, experiment_client
     root=Path(root).resolve();job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
@@ -402,7 +404,7 @@ def configure(root, step, run_argv, runs_root, output, *, receipt_channel='publi
         if context and context['status']=='known_success' and model and model.get('retention')=='archived':
             # The qualified namespace retains the original public runs alias.
             path=Path(runs_root)/f'model_run{context["run_id"]}.pkl'
-            from . import originals
+            from scidiscovery.research_loop import originals
             producer=originals.node(root,context['scope']['step'])
             if producer.inherited:
                 source=originals.source_for_ref(producer,model)
@@ -415,7 +417,7 @@ def configure(root, step, run_argv, runs_root, output, *, receipt_channel='publi
     value=dict(contract_version=2,feedback_version=1,record_dir=str(experiment_client.record_directory(root,step)),runs_root=str(runs_root),run_argv=run_argv,
         scope=stage_scope(root,job),receipt_channel=receipt_channel,
         parents=parents,evaluation_key='covshift-public-val-v1')
-    from . import replay_check
+    from scidiscovery.research_loop import replay_check
     replay_check.reserve_seconds(dict(engineering_check_reserve_seconds=engineering_check_reserve_seconds))
     if engineering_check_reserve_seconds!=0:
         value['engineering_check_reserve_seconds']=engineering_check_reserve_seconds
@@ -426,7 +428,7 @@ def configure(root, step, run_argv, runs_root, output, *, receipt_channel='publi
 def public_feedback(config, result, *, include_model=False):
     value={key:result[key] for key in ('call_id','status','candidate_id','run_id','parent','change_intent','note')}
     if include_model:value['model']={'retained':True} if result['model'] else None
-    from . import replay_check
+    from scidiscovery.research_loop import replay_check
     value['engineering_check'] = replay_check.public(config, result['call_id'])
     if result['status'] in {'known_success','known_failed'}:
         path=Path(config['record_dir'])/'calls'/result['call_id']/'row.json'
@@ -479,7 +481,7 @@ def main(argv=None):
         if args.command=='run' and 'scope' in result:
             result=public_feedback(config,result,include_model=True)
         if 'config' in locals():
-            from . import contracts as c, experiment_client
+            from scidiscovery.research_loop import contracts as c, experiment_client
             root = experiment_client.root_for_configuration(config, allow_standalone=True)
             work = Path(config['record_dir']).parent.parent if root is None else c.workspace(root, config['scope']['step'])
             result['feedback'] = dict(version=1, budget=feedback.budget_hint(work),

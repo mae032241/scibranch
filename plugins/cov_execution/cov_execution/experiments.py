@@ -1,19 +1,21 @@
 """Cov public experiment implementation of the registered lifecycle contract."""
 import json
 import os
+import sys
 from pathlib import Path
 import time
 
 from scidiscovery.operations.execution import AdapterCapability, ExecutionInterfaceRegistration
 from scidiscovery.operations.runtime_plugins import RuntimePluginContribution, RuntimePluginFactory
-from .local_experiments import LocalExecution
-from . import cov_lineage as cov, experiments as e, cov_receipt
+from scidiscovery.research_loop.local_experiments import LocalExecution
+from scidiscovery.research_loop import experiments as e
+from . import lineage as cov, receipt as cov_receipt
 
 
 class CovExecution(LocalExecution):
     def __init__(self, config):
         super().__init__(config)
-        from . import replay_check
+        from scidiscovery.research_loop import replay_check
         replay_check.reserve_seconds(config)
 
     def capabilities(self):
@@ -26,7 +28,7 @@ class CovExecution(LocalExecution):
             'application/json', e.encoded(command), command))
         if self.config.get('receipt_channel') != 'public_runner_main':
             return original
-        from . import replay_check
+        from scidiscovery.research_loop import replay_check
         policy = dict(max_seconds=10, feedback_seconds=2, supports_time_reservation=True,
             check_scope=dict(source='exact accepted source.py',
                 inputs='exact accepted public runner/train.csv/val.csv/meta.json and task runtime',
@@ -44,7 +46,7 @@ class CovExecution(LocalExecution):
         allocation = bound.get('time_allocation') or {}
         if allocation.get('status') != 'reserved':
             return super()._execution_deadline(accepted)
-        from . import budget
+        from scidiscovery.research_loop import budget
         monotonic = time.monotonic(); stamp = budget.clock_stamp()
         remaining = allocation['experiment_deadline_boottime'] - stamp['at_boottime']
         if bound['boot_id'] != stamp['boot_id'] or remaining <= 0:
@@ -53,7 +55,7 @@ class CovExecution(LocalExecution):
 
     def _replay_inputs(self, transport):
         """Freeze only the known public harness layout before the original call."""
-        from . import protocol
+        from scidiscovery.research_loop import protocol
         parent = Path(transport['runner']['path']).parent
         files = []
         for name in ('runner.py', 'train.csv', 'val.csv', 'meta.json'):
@@ -73,11 +75,14 @@ class CovExecution(LocalExecution):
 
     def acceptance_metadata(self,payload,*,parent=None,new=False,change=None):
         channel=self.config.get('receipt_channel')
+        if self.config.get('worker_view_version')==1 and channel!='public_runner_main':
+            raise e.UnsupportedExecution('Retained receipt channel has no qualified scientific execution namespace')
         if channel not in {'public_runner_main','backend_file'}:
             raise e.UnsupportedExecution('Cov execution needs an explicit independent receipt channel; preserved calls remain read-only')
         selected,binding=cov._parent(self.config,parent,new)
         transport = cov_receipt.profile(self.config['run_argv'],channel)
         metadata = dict(parent=selected,parent_binding=binding,change_intent=change,runs_root=self.config['runs_root'],
+            evaluation_key=self.config['evaluation_key'],
             command=[*self.config['run_argv'],'run','--script',payload.local_path],cwd=None,
             receipt_transport=transport, config_sha256=e.hashlib.sha256(e.encoded(self.config)).hexdigest())
         if channel == 'public_runner_main':
@@ -87,9 +92,11 @@ class CovExecution(LocalExecution):
                 metadata['replay_inputs_unavailable'] = True
         return metadata
 
+    @e.record_effect
     def replay_check(self, call_id, *, deadline_boottime, on_process):
         """No new time grant: preparation and execution share one absolute bound."""
-        from . import contracts as c, cov_delivery, delivery
+        from scidiscovery.research_loop import contracts as c, delivery
+        from . import delivery as cov_delivery
         directory = self.records.directory(call_id)
         accepted = self.records.accepted(call_id)
         if accepted.get('replay_inputs_unavailable') or 'replay_runtime' not in accepted:
@@ -201,10 +208,12 @@ class CovExecution(LocalExecution):
         return [self.config['run_argv'][0],'-B','-I',str(Path(cov_receipt.__file__).resolve()),
             str(self.records.directory(accepted['call_id'])/'accepted.json')]
 
+    @e.record_effect
     def result(self,call_id):
         result=cov._completed(self.records.directory(call_id))
         return result if result is not None else dict(status='unknown',call_id=call_id,note='Original call has no completion')
 
+    @e.record_effect
     def status_details(self,call_id):
         state=self._state(call_id)
         directory=self.records.directory(call_id)
@@ -225,4 +234,49 @@ def build(context):
     return RuntimePluginContribution(execution_adapters={'experiment':CovExecution(json.loads(context.config_bytes))})
 
 
-REGISTRATION=ExecutionInterfaceRegistration('cov_execution','1',RuntimePluginFactory(build))
+def validate_context(item, accepted, parent):
+    """Cov's native run/model and derivation contract, separate from host identity."""
+    if ((item['status']=='known_success') != (item.get('model') is not None)
+            or item['status']!='unknown' and (type(item.get('run_id')) is not int
+                or item['run_id']<1 or not isinstance(item['candidate_id'],str))):
+        raise ValueError('Cov failed/unknown context cannot acquire model qualification')
+    if item['parent']['status']=='declared':
+        if parent is None or parent.get('model') is None:
+            raise e.IntegrityError('Cov parent has no earlier model original')
+        completion=next((proof for proof in parent['proofs'] if Path(proof['path']).name=='completed.json'),None)
+        expected=dict(call_id=parent['call_id'],step=parent['scope']['step'],
+            completion_sha256=completion['sha256'],model_sha256=parent['model']['sha256'],
+            model_size_bytes=parent['model']['size_bytes'])
+        if accepted.get('parent_binding')!=expected:
+            raise e.IntegrityError('Cov parent model differs from the accepted original')
+
+
+def engineering_feedback(original):
+    result={}
+    if 'stage' in original:
+        result['stage']=original['stage'] if original['stage'] in {'harness','source_import','sample_train','sample_predict'} else 'unknown'
+    if isinstance(original.get('samples'),dict):
+        result['samples']={key:original['samples'][key] for key in
+            ('train_rows','validation_rows','available_train_rows','available_validation_rows')
+            if key in original['samples'] and (original['samples'][key] is None or type(original['samples'][key]) is int)}
+        result['samples']['selection']='first rows in frozen CSV order'
+    if 'completion' in original:result['completion']='Bounded replay did not produce a verified result.'
+    return result
+
+
+def research_defaults(configuration, *, root):
+    """Declarations only; caller policies and execution permission remain explicit."""
+    root=Path(root).resolve();runs=Path(configuration['runs_root'])
+    if not runs.is_absolute() or runs.resolve()!=runs or not runs.is_relative_to(root):
+        raise ValueError('Cov observer requires the declared runs_root inside the exact new instance')
+    observer=dict(adapter=str(Path(cov.__file__).resolve()),contract_version=2,
+        config=dict(runs=runs.relative_to(root).as_posix(),calls='project/nodes',evaluation_key=configuration['evaluation_key']))
+    from . import delivery
+    return dict(history_observer=observer,delivery_adapter=dict(adapter=str(Path(delivery.__file__).resolve()),
+        launcher_argv=[sys.executable,str(Path(delivery.__file__).resolve()),'--isolate']))
+
+
+REGISTRATION=ExecutionInterfaceRegistration('cov_execution','1',RuntimePluginFactory(build),
+    scientific_source=LocalExecution.scientific_source,
+    context_validator=validate_context,research_defaults=research_defaults,engineering_feedback=engineering_feedback,
+    projection_contract='cov.public-projections.v1')

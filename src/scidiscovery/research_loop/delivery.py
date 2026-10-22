@@ -362,9 +362,12 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
         candidate['execution_contexts'] = None
         if managed:
             candidate['execution_contexts'] = [dict(call_id=context['call_id'], status=context['status'],
-                candidate_id=context['candidate_id'], run_id=context['run_id'],
+                candidate_id=context['candidate_id'],
+                **{key:value for key,value in context.items() if key not in {'call_id','status','candidate_id','scope','parent','change_intent','proofs'}
+                    and (value is None or isinstance(value,(str,int,float,bool)))},
                 proofs=[execution_proof(source, proof) for proof in context['proofs']],
-                model=execution_proof(source, context['model']) if context.get('model') is not None else None)
+                **{key:execution_proof(source,value) for key,value in context.items()
+                    if isinstance(value,dict) and {'path','sha256','size_bytes','retention'} <= set(value)})
                 for source, context in contexts.get(candidate['candidate_id'], [])]
     if not candidates:
         return dict(items=direct,omitted_count=0,source_nodes=list(source_nodes),capabilities=spec.get('capabilities',[]))
@@ -870,7 +873,7 @@ def invoke(root, intent, max_seconds, *, on_process=None, audit_only=False, coll
                     if audit_only:
                         return dict(_result(bound, 'audited', value['note']), cleanup_confirmed=value['cleanup_confirmed'])
                     continue
-                return dict(_result(bound, value['status'], value['note'], cleanup_confirmed=value['cleanup_confirmed']), failure_phase='audit',**(dict(diagnostic=value['diagnostic']) if 'diagnostic' in value else {}))
+                return dict(_result(bound, value['status'], value['note'], cleanup_confirmed=value['cleanup_confirmed']), failure_phase='audit',recovery=value.get('recovery','none'),**(dict(diagnostic=value['diagnostic']) if 'diagnostic' in value else {}))
             try:
                 value = _call(spec, dict(request, phase=phase), remaining, on_process=on_process,
                               evidence=leaf_output(root)) if remaining > 0 else None

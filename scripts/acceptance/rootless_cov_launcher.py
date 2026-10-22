@@ -343,7 +343,8 @@ def outer(s,w,h,command,materials=()):
 def backend_launcher(s,w,h,materials):
     """Host-selected scientific child mounts; callers cannot supply this plan."""
     def launch(config,accepted,command,cwd):
-        from scidiscovery.research_loop import contracts as c,experiments as e,cov_receipt
+        from scidiscovery.research_loop import contracts as c, experiments as e
+        from cov_execution import receipt as cov_receipt
         directory=e.Records(config).directory(accepted['call_id'])
         if e.Records(config).accepted(accepted['call_id'])!=accepted:
             raise e.IntegrityError('Scientific launch differs from its original accepted call')
@@ -606,7 +607,7 @@ def main():
     materials=direct_materials(s,w,os.environ.get('THIN_HWA_JOB_MANIFEST'));prepare_home(s,w,h,os.environ.get('THIN_HWA_AUTH_SOURCE'))
     # Native shares its current job and settings identity read-only; other host
     # jobs, settings, owner anchors and ledgers are not mounted.
-    from scidiscovery.research_loop.cov_lineage import configure
+    from cov_execution.lineage import configure
     job=json.loads(regular(os.environ['THIN_HWA_JOB_MANIFEST']))
     configured=(w/'work/lineage-config.json' if job.get('worker_view_version')==1 else
         Path(s['scene_root'])/'host-runtime'/('lineage-'+w.name+'.json'))

@@ -16,6 +16,9 @@ scid-research --help
 
 默认代码前缀 `/opt/scidiscovery-thin`、命令目录 `/usr/local/bin`。
 `SCID_INSTALL_ROOT`、`SCID_BIN_ROOT`、`SCID_BACKUP_ROOT` 可显式覆盖；路径须为规范绝对路径，命令目录须已存在。
+核心提供 `local_execution:command`，不安装 Cov。需要 Cov 时选择
+`SCID_PLUGINS=cov_execution`，安装独立发行包 `scidiscovery-cov-execution`；
+其 `cov_execution:experiment` 入口、observer、回执与交付提供方随同一插件发布。
 `SCID_PLUGINS=tcad_artifact,curve_score` 可选择本地插件；依赖插件须显式列入，不安装外部依赖。
 可选图插件还需现有 Pillow/pdfimages 环境；预检失败不进入发布事务。
 插件安装不证明 SSH、许可证或真实 solver 资格；远端 runner 的独立部署见[传输合同](tcad_transport_contract.md)。

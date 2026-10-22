@@ -32,7 +32,6 @@ general_science = "scidiscovery.general_science_plugin:PLUGIN"
 
 [project.entry-points."scidiscovery.execution_interfaces"]
 local_execution = "scidiscovery.research_loop.local_experiments:REGISTRATION"
-cov_execution = "scidiscovery.research_loop.cov_experiments:REGISTRATION"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -43,7 +42,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers"
-pythonpath = ["src", ".", "plugins/tcad_artifact", "plugins/curve_score", "plugins/curve_figure_evidence", "tests/fixtures/plugins/architecture_operation_plugin", "tests/fixtures/plugins/table_observation_plugin", "tests/fixtures/plugins/blind_csv_operation_plugin"]
+pythonpath = ["src", ".", "plugins/cov_execution", "plugins/tcad_artifact", "plugins/curve_score", "plugins/curve_figure_evidence", "tests/fixtures/plugins/architecture_operation_plugin", "tests/fixtures/plugins/table_observation_plugin", "tests/fixtures/plugins/blind_csv_operation_plugin"]
 testpaths = ["tests"]
 norecursedirs = ["portable_delivery"]
 markers = [

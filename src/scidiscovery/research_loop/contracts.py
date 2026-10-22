@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
+import fcntl
 import hashlib
 import json
 import os
@@ -76,6 +77,42 @@ def write(path: Path, value):
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temporary, path)
+
+
+_record_writers = ContextVar('scid_record_writers', default={})
+
+
+@contextmanager
+def record_writer(record_root, *, blocking=True, exclusive=False):
+    """Cooperative managed-record write lease; lifecycle readers take exclusive.
+
+    Callers first hold the instance effect gate. The shared lease covers the
+    existing node/admission and adapter locks; snapshots use exclusive=True.
+    """
+    from scidiscovery import archive_io as files
+    root = files.check_path(Path(record_root).absolute())
+    key = str(root)
+    held = _record_writers.get()
+    if key in held:
+        if exclusive and not held[key]:
+            raise ValueError('A shared managed record lease cannot be upgraded')
+        yield
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / 'record-writer.lock'
+    descriptor = os.open(path, os.O_CREAT | os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError('Managed record lease is not a regular file')
+        mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        fcntl.flock(descriptor, mode | (0 if blocking else fcntl.LOCK_NB))
+        token = _record_writers.set(dict(held, **{key: exclusive}))
+        try:
+            yield
+        finally:
+            _record_writers.reset(token)
+    finally:
+        os.close(descriptor)
 
 
 def _stream_digest(path: Path):

@@ -77,7 +77,8 @@ def spec(root):return dict(scene_root=str(root),model='no-model',reasoning_effor
 @pytest.mark.parametrize('operator,expected',[({},15),({'cov_engineering_check_reserve_seconds':0},0)])
 def test_cov_launcher_reserve_reaches_real_frozen_configuration(launcher,accepted,execution_registry,operator,expected):
     """Host-only prepare/freeze: no launcher, namespace, experiment or model starts."""
-    from scidiscovery.research_loop import cov_lineage,experiments as e
+    from scidiscovery.research_loop import experiments as e
+    from cov_execution import lineage as cov_lineage
     root,job,record=accepted
     output=root/'host-runtime/lineage-001.json'
     cov_lineage.configure(root,job['step'],[sys.executable],root/'runs',output,

@@ -46,7 +46,9 @@ for script, target in {
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0 and "usage:" in result.stdout, result.stderr
 execution = entry_points().select(group="scidiscovery.execution_interfaces")
-execution_names = {"cov_execution", "local_execution"}
+execution_names = {"local_execution"}
+if cohort == "cov":
+    execution_names.add("cov_execution")
 if cohort == "tcad":
     execution_names.add("tcad_execution")
 assert sorted(entry.name for entry in execution) == sorted(execution_names)
@@ -73,7 +75,7 @@ assert not (prefix / "share/scidiscovery/roles").exists()
 assert not (prefix / "share/scidiscovery/deploy/systemd").exists()
 
 if cohort == "core":
-    for name in ("tcad-artifact", "scidiscovery-curve-score", "scidiscovery-curve-figure-evidence"):
+    for name in ("tcad-artifact", "scidiscovery-curve-score", "scidiscovery-curve-figure-evidence", "scidiscovery-cov-execution"):
         try:
             distribution(name)
         except PackageNotFoundError:
@@ -81,13 +83,23 @@ if cohort == "core":
         else:
             raise AssertionError(f"core unexpectedly included {name}")
     for module in ("scidiscovery.artifact_agent.service.agent_dispatch", "scidiscovery.platforms.codex_worker",
-                   "scidiscovery.artifact_agent.schema.device_parameters", "architecture_operation_test_plugin"):
+                   "scidiscovery.artifact_agent.schema.device_parameters", "architecture_operation_test_plugin",
+                   "cov_execution", "scidiscovery.research_loop.cov_experiments"):
         try:
             import_module(module)
         except ModuleNotFoundError:
             pass
         else:
             raise AssertionError(f"core unexpectedly exposed {module}")
+elif cohort == "cov":
+    distribution("scidiscovery-cov-execution")
+    from cov_execution import experiments as cov, lineage, delivery, receipt, observer
+    from scidiscovery.research_loop import experiments
+    declared, binding = experiments.registration("cov_execution:experiment")
+    assert declared is cov.REGISTRATION and binding == "experiment"
+    assert all(Path(module.__file__).resolve().is_relative_to(prefix)
+               for module in (cov, lineage, delivery, receipt, observer))
+    assert callable(observer.observe) and callable(delivery.leaf)
 else:
     # One pip install of core + TCAD resolves curve from the same wheelhouse;
     # all_domains --no-deps was never equivalent evidence for this requirement.

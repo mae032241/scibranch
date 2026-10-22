@@ -25,6 +25,8 @@ SciDiscovery 是以 CLI 为核心、提供 Codex 与显式 Agent 协议后端的
 | `scid-research archive-*` / `checkpoint-*` | 导出和核验原件、恢复指定材料，或执行限定的同宿主冷迁移。 |
 | `scid-experiment` | 使用受管本地实验或声明的领域执行接口。 |
 
+核心只安装本地执行接口。Cov 执行、回执、公开观察与交付由可选 `cov_execution` 插件提供，
+通过 `SCID_PLUGINS=cov_execution` 显式安装；执行器标识保持 `cov_execution:experiment`。
 可选 TCAD adapter 通过有界传输提供 detached solver 执行；曲线插件提供确定性评分和论文图
 证据能力。安装插件只注册其声明能力，不提供 solver、许可证或科学资格。插件声明也可按
 [Plugin API](docs/PLUGIN_RUNTIME_API.md)作为库使用。
@@ -54,7 +56,9 @@ scid-research --help
 执行另需冻结配置及授权；科研预算、独立审查和用户陈述均不授予执行权限。
 
 已完成且静止的当前协议实例可在精确逻辑步骤 N 处分支。新分支在新 session 中从该任务
-首次输入重跑，显式声明新的有限预算，并自包含复制其已声明科学原件。创建后保持暂停，
+首次输入重跑，显式声明新的有限预算，通过独立硬链接引用共享只读原件。静止源目录的
+完整私有快照只保留存储事实，科学可见范围仍由所选原任务的冻结输入限定；仍可写原件先在
+父实例私有存储中封存一次，删除父实例不移除子实例引用。创建后保持暂停，
 须显式 `start --continue` 才推进。历史科学投入、来源限制及未知成本仍保留；既有审查或执行许可
 不授权新对象。语义见[架构](docs/ARCHITECTURE.zh-CN.md#历史任务分支)，操作见
 [CLI 指南](docs/ROOTLESS_CLI.zh-CN.md#从历史任务创建分支)。

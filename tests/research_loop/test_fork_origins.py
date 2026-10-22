@@ -201,15 +201,16 @@ def test_typed_observer_and_pending_proofs_do_not_parse_scientific_payloads(tmp_
     c.write(root / document, dict(candidates=[dict(id='candidate', evidence=[proof])],
         authored_payload=dict(raw=dict(path=future.relative_to(root).as_posix(), sha256=c.digest(future)))))
     closure = fork_sources._Closure()
-    closure.add(source, document, parse=True)
+    closure.snapshot(root)
+    closure.add(source, document)
     paths = {row['path'] for row in closure.entries.values()}
     assert proof['snapshot'] in paths
-    assert future.relative_to(root).as_posix() not in paths
+    assert next(row for row in closure.entries.values() if row['path'] == future.relative_to(root).as_posix())['visibility'] == 'private_snapshot'
     pending = 'native-evidence/002/pending-execution-set.json'
     intent = root / 'native-evidence/002/native-intent.json'
     c.write(root / pending, dict(attempts=[{'native-intent.json': dict(
         path=intent.relative_to(root).as_posix(), sha256=c.digest(intent))}]))
-    closure.add(source, pending, parse=True)
+    closure.add(source, pending)
     assert intent.relative_to(root).as_posix() in {row['path'] for row in closure.entries.values()}
 
 
@@ -338,14 +339,11 @@ def test_portable_local_coverage_recomputes_relations_and_restrictions(portable_
     _rewrite_portable_provenance(child, identity, 2, baseline)
 
 
-@pytest.mark.process_e2e
-def test_portable_compiled_managed_authors_keep_complete_exact_contributors(portable_native_chain, tmp_path, capsys):
+def _completed_portable_compiled_source(portable_native_chain, capsys):
     import json
-    import shutil
-    from scidiscovery.research_loop import experiments as e, formal_review, qualification as q
-    from scidiscovery.operations import review_rules
+    from scidiscovery.research_loop import experiments as e, formal_review
     from test_native_execution_inputs import _reviewed_execution
-    root, backend, output, active, _, _ = _reviewed_execution(portable_native_chain, capsys)
+    root, backend, output, active, configuration, _ = _reviewed_execution(portable_native_chain, capsys)
     assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
     call = json.loads(capsys.readouterr().out)['call_id']
     backend.state = 'succeeded'
@@ -355,6 +353,15 @@ def test_portable_compiled_managed_authors_keep_complete_exact_contributors(port
     finish(root, 7, 'A', [6], action='finish')
     expected = formal_review.authors(root, 6)
     assert expected['complete']
+    return root, backend, configuration, call, expected
+
+
+@pytest.mark.process_e2e
+def test_portable_compiled_managed_authors_keep_complete_exact_contributors(portable_native_chain, tmp_path, capsys):
+    import shutil
+    from scidiscovery.research_loop import formal_review, qualification as q
+    from scidiscovery.operations import review_rules
+    root, _, _, _, expected = _completed_portable_compiled_source(portable_native_chain, capsys)
     child = tmp_path / 'portable-native'
     _copy_completed(root, 7, child)
     shutil.rmtree(root)
@@ -365,6 +372,44 @@ def test_portable_compiled_managed_authors_keep_complete_exact_contributors(port
     assert actual == expected
     people = [tuple(row) for row in actual['participants']]
     assert review_rules.independence(people, [people[0]], authors_complete=True, reviewers_complete=True) == 'overlap'
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('prepared_retention', ['missing', 'reused'])
+def test_fork_rejects_invalid_live_prepared_locator_even_with_retained_archive(
+        portable_native_chain, tmp_path, capsys, prepared_retention):
+    from pathlib import Path
+    from scidiscovery.research_loop import controller, experiments as e, history, qualification as q
+    root, backend, configuration, call, _ = _completed_portable_compiled_source(portable_native_chain, capsys)
+    # A valid live parent is required before any fork inventory is collected.
+    c.validate(c.workspace(root, 7))
+    records = e.Records(configuration)
+    prepared = records.accepted(call)['prepared']
+    locator = Path(prepared['local_path'])
+    with controller._writer(root), c.record_writer(records.root, exclusive=True):
+        retained = history._managed_proof(root, locator, prepared)
+        assert retained['retention'] == 'archived'
+        assert retained['sha256'] == prepared['sha256']
+        assert retained['size_bytes'] == prepared['size_bytes']
+        assert c.digest(root / retained['snapshot']) == prepared['sha256']
+        if prepared_retention == 'missing':
+            locator.unlink()
+        else:
+            locator.chmod(0o600)
+            locator.write_bytes(b'later bytes at the original prepared locator')
+    settings = (root / 'settings.json').read_bytes()
+    ledger = {path.name: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')}
+    submissions = backend.submits
+    with pytest.raises(q.IntegrityError):
+        c.validate(c.workspace(root, 7))
+    child = tmp_path / 'rejected-fork'
+    with pytest.raises(q.IntegrityError):
+        _copy_completed(root, 7, child)
+    assert not child.exists() and root.exists()
+    assert backend.submits == submissions
+    assert (root / 'settings.json').read_bytes() == settings
+    assert {path.name: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')} == ledger
+    assert c.digest(root / retained['snapshot']) == prepared['sha256']
 
 
 def test_nested_raw_payload_uses_ancestor_owner_and_preserves_logical_identity(tmp_path):

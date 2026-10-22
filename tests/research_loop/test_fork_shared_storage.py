@@ -286,7 +286,7 @@ def test_interrupted_mutable_import_cannot_publish_partial_cache_object(shared_s
     original = parent / 'project/nodes/001/artifacts/shared.bin'
     original.chmod(0o600)
     payload_sha = c.digest(original)
-    cache = parent / 'host-history/objects' / payload_sha
+    cache = parent / 'host-history/fork-cache' / payload_sha
     cache_before = set(cache.parent.iterdir()) if cache.parent.exists() else set()
     preview = fork_service.preview(parent, 2, child, budget=BUDGET)
     assert (set(cache.parent.iterdir()) if cache.parent.exists() else set()) == cache_before
@@ -350,7 +350,7 @@ def test_conflicting_cache_object_is_rejected_without_damaging_existing_branch(s
     first, second = tmp_path / 'first', tmp_path / 'cache-conflict'
     _create(parent, first, 'cache-conflict-first')
     original = parent / 'project/nodes/001/artifacts/shared.bin'
-    cache = parent / 'host-history/objects' / c.digest(original)
+    cache = parent / 'host-history/fork-cache' / c.digest(original)
     original_inode = _inode(cache)
     cache.unlink()
     cache.write_bytes(b'Conflicting object at the original content address.\n')
@@ -371,7 +371,7 @@ def test_readonly_cache_requires_prior_normalization(shared_source, tmp_path, wa
     parent = shared_source
     if warm:
         _create(parent, tmp_path / 'first', 'readonly-cache-first')
-    cache = parent / 'host-history/objects'
+    cache = parent / 'host-history/fork-cache'
     cache.mkdir(parents=True, exist_ok=True)
     mode = stat.S_IMODE(cache.stat().st_mode)
     cache.chmod(0o500)

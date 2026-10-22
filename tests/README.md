@@ -18,7 +18,7 @@
 
 “功能全量”须覆盖全部功能测试文件的 source 和 process 两组；仅运行默认 source 不代表功能全量。实际启动 CLI、shell、namespace 或锁竞争子进程的用例应标记 `process_e2e`，包括通过 fixture/helper 启动的情况；仅构造命令或模拟进程接口的用例仍可留在 source。安装、大输入和真实平台的验收状态分别报告，不用模拟成功结果替代真实平台证据。
 
-安装组不运行科学实验、H/W/A、daemon业务、评分或恢复矩阵；这些检查回到对应功能组。一个选定cohort只建一次环境、安装一次，不切换环境删除后再重建。默认core，只有涉及TCAD交付元数据时显式选tcad；其余旧包装组合未验证，不构造新矩阵补齐。
+安装组不运行科学实验、H/W/A、daemon业务、评分或恢复矩阵；这些检查回到对应功能组。一个选定cohort只建一次环境、安装一次，不切换环境删除后再重建。默认core验证无可选领域执行器；涉及Cov插件入口时显式选cov，涉及TCAD交付元数据时显式选tcad。其余旧包装组合未验证，不构造新矩阵补齐。
 
 `tests/installation/check_source_release.py` 是**单独显式选择**的源码发布包检查，名称不匹配默认测试发现。它检查发布文件、原件hash与manifest，不运行发布包中的pytest或安装检查。源码发布与wheel是不同交付路径，不能以一个冒充另一个；不在默认安装烟顺带构建整份源码发布包。
 
@@ -32,7 +32,8 @@
 - 修正后只重测受影响路径，不重建环境重跑整组功能。
 - 独立审查默认只读，不另起验收批次。禁止并行测试/安装；必要锁竞争用例中的子进程不等于并行测试批次。
 
-串行入口为 `scripts/run_tests.py`。确认资源条件与执行范围后，使用精确目标和仓库本地持久日志目录。例如功能目标选择 `--lane source --output .trial/check-name tests/research_loop/<文件>::<用例>`；独立安装选择 `--lane installed --installation-cohort core --output .trial/check-name <精确目标>`。日志属于本地检查证据，不进入源码跟踪。
+串行入口为 `scripts/run_tests.py`。确认资源条件与执行范围后，使用精确目标和仓库本地持久日志目录。例如功能目标选择 `--lane source --output .trial/check-name tests/research_loop/<文件>::<用例>`；独立安装选择 `--lane installed --installation-cohort core --output .trial/check-name <精确目标>`；
+Cov 独立插件使用同一目标和 `--installation-cohort cov`。日志属于本地检查证据，不进入源码跟踪。
 
 `--per-file` 会重复启动解释器与session fixture，不作为默认全目录执行方式；安装组禁止该选项。数据/进程用例显式标记 `stress`/`process_e2e`。collect-only也会导入测试，不视为无成本静态检查。
 

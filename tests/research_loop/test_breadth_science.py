@@ -5,8 +5,8 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import (breadth, contracts as c, controller,
-    cov_lineage, execution, experiment_client, experiments, history, lineage, native, search)
+from scidiscovery.research_loop import breadth, contracts as c, controller, execution, experiment_client, experiments, history, lineage, native, search
+from cov_execution import lineage as cov_lineage
 from execution_fixtures import execution_registry
 from test_cov_lineage import BACKEND
 from test_history_handoff import finish

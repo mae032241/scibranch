@@ -18,6 +18,8 @@ import time
 
 BOUND = 32 * 1024 * 1024
 FILES = ('exp_cli.py', 'runner.py', 'train.csv', 'val.csv', 'meta.json')
+AUTHOR_REPAIR_CODES = frozenset({'implementation_source_missing','audit_dependency_missing','audit_training_error',
+    'audit_prediction_error','audit_interface_missing','audit_timeout'})
 
 
 def _exact(path, limit=None):
@@ -286,8 +288,12 @@ def smoke_status(value):
 
 
 def _reply(request, status, note):
-    return dict(status=status, operation_id=request['operation_id'], candidate_id=request['candidate_id'],
-                artifact_sha256=request['artifact_sha256'], note=note)
+    value=dict(status=status,operation_id=request['operation_id'],candidate_id=request['candidate_id'],
+        artifact_sha256=request['artifact_sha256'],note=note)
+    if status=='engineering_error' and request.get('phase')=='audit':
+        value['recovery']='author_repair' if note in AUTHOR_REPAIR_CODES else 'control_retry' if note in {
+            'audit_source_missing','audit_harness_unavailable','audit_process_failed'} else 'none'
+    return value
 
 
 def _write(path, data):
@@ -306,8 +312,15 @@ def _replace(path, data):
 def _current_guard(request):
     # Standalone task Python has no framework import; load the host-frozen pure contract.
     import runpy
-    host=Path(__file__).with_name('protocol.py')
-    source=host if host.is_file() else Path('/inputs/scid-current-protocol')
+    host=None
+    try:
+        from scidiscovery.research_loop import protocol
+        host=Path(protocol.__file__).resolve()
+    except ImportError:
+        checkout=Path(__file__).resolve().parents[3]
+        candidate=checkout/'src/scidiscovery/research_loop/protocol.py'
+        if (checkout/'pyproject.toml').is_file() and candidate.is_file():host=candidate
+    source=host if host is not None else Path('/inputs/scid-current-protocol')
     source=_exact(source)
     if source!=host:
         proof=next((item for item in request.get('inputs',[]) if item.get('label')=='scid-current-protocol'),None)

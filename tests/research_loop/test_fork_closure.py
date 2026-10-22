@@ -1,41 +1,39 @@
-"""Exact mutable locators and opaque compiler bytes in portable source cuts."""
+"""Owner snapshots preserve opaque bytes without widening scientific task cuts."""
 import hashlib
 import json
 import shutil
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, fork_sources, originals
+from scidiscovery.research_loop import contracts as c, fork_service, fork_sources, originals
 from test_fork_source import completed_source
-
-
-def _proof(path, raw):
-    return dict(path=path, sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw))
 
 
 def _write(root, path, raw):
     actual = root / path
     actual.parent.mkdir(parents=True, exist_ok=True)
     actual.write_bytes(raw)
-    return _proof(path, raw)
+    return dict(path=path, sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw))
 
 
-def _accepted(root, call, prepared):
-    path = f'host-runtime/experiment-control/fixture/calls/{call}/accepted.json'
-    c.write(root / path, dict(call_id=call, prepared=dict(
-        local_path=str(root / prepared['path']), sha256=prepared['sha256'], size_bytes=prepared['size_bytes'])))
-    return path
+def _copy(root, child):
+    plan = fork_sources.inspect_source(root, 2)
+    assert plan['blocked_reasons'] == []
+    fork_sources.copy_source(plan, child / originals.FORK_DIRECTORY)
+    return plan, originals.selected_source(child)
 
 
 def _copy_closure(root, closure, child):
-    # Start with the real selected task cut, then add the independently collected
-    # typed fixture records. Publication and all inherited reads use production
-    # code, including its source rechecks and manifest validation.
+    """Keep explicit fixture roots alongside the production owner snapshot."""
     plan = fork_sources.inspect_source(root, 2)
     assert plan['blocked_reasons'] == []
-    plan['entries'].extend(closure.entries.values())
+    entries = {fork_sources._key(row['origin_identity'], row['path'], row): row for row in plan['entries']}
+    entries.update(closure.entries)
+    plan['entries'] = list(entries.values())
     plan['source_paths'].update(closure.paths)
     plan['origins'].update(closure.origins)
+    plan['legacy_compilations'].update(closure.legacy_compilations)
+    plan['native_records'].update(closure.records)
     plan['source_fingerprint'] = fork_sources.fingerprint(plan)
     fork_sources.copy_source(plan, child / originals.FORK_DIRECTORY)
     shutil.rmtree(root)
@@ -43,135 +41,180 @@ def _copy_closure(root, closure, child):
     return originals.selected_source(child)
 
 
-def test_current_prepared_original_needs_no_archive_and_survives_parent_removal(tmp_path):
+def test_arbitrary_adapter_record_and_opaque_json_survive_parent_removal(tmp_path):
     root = completed_source(tmp_path)
-    proof = _write(root, 'project/nodes/001/work/script.py', b'print("original")\n')
-    closure = fork_sources._Closure()
-    closure.add(originals.node(root, 2), _accepted(root, 'one', proof), parse=True)
-    assert not any(row['path'].startswith('host-history/objects/') for row in closure.entries.values())
+    outside = tmp_path / 'outside'
+    outside.write_bytes(b'not an explicitly retained input')
+    raw = json.dumps(dict(any_new_field=dict(path=str(outside), sha256=c.digest(outside)))).encode()
+    proof = _write(root, 'host-recovery/non-domain-name/custom.pending', raw)
     child = tmp_path / 'child'
-    source = _copy_closure(root, closure, child)
-    assert originals.resolve_ref(source, proof).read_bytes() == b'print("original")\n'
+    plan, source = _copy(root, child)
+    assert next(row for row in plan['entries'] if row['path'] == proof['path'])['visibility'] == 'private_snapshot'
+    assert proof['path'] not in {row['path'] for row in source.entries}
+    assert not any(row['sha256'] == c.digest(outside) for row in plan['entries'])
+    shutil.rmtree(root)
+    assert originals.resolve_ref(source, proof).read_bytes() == raw
+    fork_sources.validate_manifest(child, full=True)
 
 
-def test_two_prepared_calls_keep_both_archived_versions_of_one_locator(tmp_path):
+def test_private_future_output_is_retained_but_not_in_scientific_index(tmp_path):
     root = completed_source(tmp_path)
-    locator = 'project/nodes/001/work/script.py'
-    variants = [b'first accepted script\n', b'second accepted script\n']
-    proofs = [_proof(locator, raw) for raw in variants]
-    for proof, raw in zip(proofs, variants):
-        snapshot = 'host-history/objects/' + proof['sha256']
-        _write(root, snapshot, raw)
-        (root / snapshot).chmod(0o400)  # Match history._proof's immutable archive publication.
-    _write(root, locator, b'the current file is neither accepted original\n')
+    future = _write(root, 'project/nodes/999/future.json', b'future evidence')
+    plan, source = _copy(root, tmp_path / 'child')
+    paths = {row['path'] for row in source.entries}
+    assert future['path'] not in paths
+    assert 'native-evidence/002/science-output.json' not in paths
+    assert 'native-evidence/001/science-output.json' in paths
+    assert next(row for row in plan['entries'] if row['path'] == future['path'])['visibility'] == 'private_snapshot'
+    assert [row['step'] for row in plan['prefix_entries']] == [1]
+    assert source.step == 2
+
+
+def test_nested_snapshot_preserves_private_historical_versions_and_shared_inodes(tmp_path):
+    root = completed_source(tmp_path)
+    proof = _write(root, 'host-recovery/custom/original.bin', b'first historical bytes')
+    child = tmp_path / 'child'
+    budget = dict(max_tokens=200, max_seconds=30, max_steps=2)
+    preview = fork_service.preview(root, 2, child, budget=budget)
+    fork_service.create(root, 2, child, budget=budget,
+        expected_preview_id=preview['preview_id'], operation_id='snapshot-child')
+    inherited = originals.selected_source(child)
+    original = originals.resolve_ref(inherited, proof)
+    _write(child, proof['path'], b'new child bytes at the same logical path')
     closure = fork_sources._Closure()
-    for call, proof in zip(('one', 'two'), proofs):
-        closure.add(originals.node(root, 2), _accepted(root, call, proof), parse=True)
-    versions = [row for row in closure.entries.values() if row['path'] == locator]
+    closure.snapshot(child)
+    versions = [row for row in closure.entries.values() if row['path'] == proof['path']]
     assert len(versions) == 2
-    assert len({row['storage_path'] for row in versions}) == 2
-    assert {'host-history/objects/' + proof['sha256'] for proof in proofs} <= {
-        row['path'] for row in closure.entries.values()}
-    child = tmp_path / 'child'
-    source = _copy_closure(root, closure, child)
-    for proof, raw in zip(proofs, variants):
-        assert originals.resolve_ref(source, proof).read_bytes() == raw
-    nested = fork_sources._Closure()
-    for call in ('one', 'two'):
-        nested.add(source, f'host-runtime/experiment-control/fixture/calls/{call}/accepted.json', parse=True)
-    assert {row['sha256'] for row in nested.entries.values() if row['path'] == locator} == {
-        proof['sha256'] for proof in proofs}
-    with pytest.raises(ValueError, match='unique exact'):
-        originals.resolve_ref(source, dict(path=locator))
-    with pytest.raises(ValueError, match='unique exact'):
-        originals.resolve_ref(source, dict(proofs[0], size_bytes=proofs[0]['size_bytes'] + 1))
+    historical = next(row for row in versions if row['sha256'] == proof['sha256'])
+    retained = closure.paths[fork_sources._key(historical['origin_identity'], historical['path'], historical)]
+    assert original.stat().st_ino == originals.files.check_path(retained).stat().st_ino
+    assert originals.resolve_ref(inherited, proof).read_bytes() == b'first historical bytes'
 
 
-@pytest.mark.parametrize('archive_bytes', [None, b'changed archive bytes'])
-def test_prepared_original_missing_exact_current_and_retained_bytes_is_rejected(tmp_path, archive_bytes):
+def test_missing_or_changed_explicit_input_still_fails_closed(tmp_path):
     root = completed_source(tmp_path)
-    proof = _proof('project/nodes/001/work/script.py', b'missing accepted original\n')
-    if archive_bytes is not None:
-        _write(root, 'host-history/objects/' + proof['sha256'], archive_bytes)
-    closure = fork_sources._Closure()
+    selected = root / 'project/nodes/002/inputs/parents/001/conclusion.json'
+    selected.chmod(0o600)
+    selected.write_bytes(b'changed selected input')
     with pytest.raises((OSError, ValueError)):
-        closure.add(originals.node(root, 2), _accepted(root, 'one', proof), parse=True)
-    assert not any(row['path'] == proof['path'] for row in closure.entries.values())
+        fork_sources.inspect_source(root, 2)
 
 
-@pytest.mark.parametrize('author_is_json', [False, True])
-def test_compiler_authored_capability_and_package_bytes_are_opaque(tmp_path, author_is_json):
+def test_unknown_owner_is_explicit_gap_and_native_home_is_excluded(tmp_path):
     root = completed_source(tmp_path)
-    future = _write(root, 'project/nodes/999/future.json', b'{"future":"outside the cut"}')
-    scientific = json.dumps(dict(inputs=[future], files=[future])).encode()
-    base = 'native-evidence/001/compiled-implementations/fixture'
-    author_bytes = scientific if author_is_json else b'this authored document is not JSON\n'
-    author = _write(root, base + '/author.json', author_bytes)
-    capability = _write(root, base + '/capability.json', scientific)
-    package = _write(root, base + '/package.json', scientific)
-    compiler = base + '/compiler.json'
-    c.write(root / compiler, dict(author=author, capability=capability, output=package))
-    closure = fork_sources._Closure()
-    closure.add(originals.node(root, 2), compiler, parse=True)
-    assert {author['path'], capability['path'], package['path']} <= {row['path'] for row in closure.entries.values()}
-    assert future['path'] not in {row['path'] for row in closure.entries.values()}
+    _write(root, 'native-homes/001/secret', b'never retain native credentials')
+    _write(root, 'undeclared-store/original', b'unknown owning namespace')
+    plan = fork_sources.inspect_source(root, 2)
+    assert any(row.get('path') == 'undeclared-store' for row in plan['blocked_reasons'])
+    assert not any(row['path'].startswith('native-homes/') for row in plan['entries'])
+    with pytest.raises(ValueError, match='unresolved original effects'):
+        fork_sources.copy_source(plan, tmp_path / 'child')
+
+
+@pytest.mark.process_e2e
+def test_forked_author_preserves_unavailable_review_constraint_after_parent_removal(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import controller, formal_review, instance_control
+    from scidiscovery.research_loop.output_repair import OutputRepairRequired
+    from test_formal_review import scripted
+    parent, _ = scripted(tmp_path, monkeypatch, missing=True)
+    assert controller.run(parent)['status'] == 'finish'
+    original = formal_review.unavailable(parent, 3)
+    child = tmp_path / 'forked-author'
+    budget = dict(max_tokens=1000, max_seconds=60, max_steps=2)
+    preview = fork_service.preview(parent, 4, child, budget=budget)
+    assert preview['status'] == 'fork_preview_ready'
+    fork_service.create(parent, 4, child, budget=budget,
+        expected_preview_id=preview['preview_id'], operation_id='unavailable-review-child')
+    inherited = originals.node(child, 3)
+    path = 'native-evidence/003/formal-review-unavailable.json'
+    assert path not in {row['path'] for row in inherited.entries}
+    assert originals.has_original(inherited, path)
+    shutil.rmtree(parent)
+    assert formal_review.unavailable(child, 3) == original
+    assert instance_control.continue_instance(child)['status'] == 'finish'
+    job = c.read(child / 'jobs/004.json')
+    assert len(job['formal_review_choices']['unavailable']) == 1
+    assert formal_review.public_choices(child, job)['unavailable'] == [
+        dict(subject='W002-I001', reason='subject_authorship_unsupported')]
+    payload = c.validate(c.workspace(child, 4))
+    with pytest.raises(OutputRepairRequired, match='exact subject and identity'):
+        formal_review.validate_choice(child, job, dict(payload,
+            next_action='formal_review', implementation_selection=['W002-I001']))
+    # New verified author evidence changes the exact failure facts. This does
+    # not qualify the subject and does not modify a retained native receipt.
+    with monkeypatch.context() as changed_identity:
+        changed_identity.setattr(formal_review, 'authors', lambda *args, **kwargs: dict(
+            complete=True, participants=[['fixture', 'newly-verified-author']], reason=None))
+        formal_review.validate_choice(child, job, dict(payload,
+            next_action='formal_review', implementation_selection=['W002-I001']))
+
+
+@pytest.mark.parametrize('locator', ['missing', 'reused'])
+def test_explicit_old_locator_resolves_same_origin_archive_without_discovering_sources(tmp_path, locator):
+    root = completed_source(tmp_path)
+    raw = b'old prepared bytes'
+    old = _write(root, 'host-recovery/custom/prepared.bin', raw)
+    from scidiscovery.research_loop import history
+    current = root / old['path']
+    archived = history._managed_proof(root, current, old)
+    receipt_path = 'host-recovery/custom/retained-original.json'
+    c.write(root / receipt_path, dict(original=old, archive=archived))
+    receipt = originals.original_ref(originals.node(root, 2), receipt_path)
+    if locator == 'missing':
+        current.unlink()
+    else:
+        current.write_bytes(b'new bytes at the old locator')
     child = tmp_path / 'child'
-    source = _copy_closure(root, closure, child)
-    assert originals.resolve_ref(source, author).read_bytes() == author_bytes
-    assert originals.resolve_ref(source, capability).read_bytes() == scientific
-    assert originals.resolve_ref(source, package).read_bytes() == scientific
-    with pytest.raises(ValueError, match='outside the frozen fork closure'):
-        originals.resolve_ref(source, future)
+    _, source = _copy(root, child)
+    shutil.rmtree(root)
+    # This explicitly retained host receipt tests offline identity resolution;
+    # it claims neither a valid live managed call nor scientific qualification.
+    frozen = c.read(originals.resolve_ref(source, receipt))
+    assert frozen == dict(original=old, archive=archived)
+    assert originals.resolve_ref(source, frozen['original']).read_bytes() == raw
+    assert old['path'] not in {row['path'] for row in source.entries}
+    with pytest.raises(ValueError):
+        originals.resolve_ref(source, dict(old, size_bytes=old['size_bytes'] + 1))
+    with pytest.raises(ValueError):
+        originals.resolve_ref(source, dict(path='host-recovery/custom/absent.bin'))
+    retained = originals.resolve_ref(source, archived)
+    retained.chmod(0o600)
+    retained.write_bytes(b'tampered archived original')
+    with pytest.raises(ValueError, match='bytes changed'):
+        originals.resolve_ref(source, old)
 
 
-def test_json_suffix_in_native_evidence_does_not_declare_host_control_type(tmp_path):
+def test_archived_fallback_cannot_hide_tampering_of_exact_locator_version(tmp_path):
     root = completed_source(tmp_path)
-    future = _write(root, 'project/nodes/999/future.json', b'future scientific result')
-    scientific = _write(root, 'native-evidence/001/scientific-document.json',
-        json.dumps(dict(inputs=[future])).encode())
-    closure = fork_sources._Closure()
-    closure.refs(originals.node(root, 2), dict(evidence=[scientific]))
-    assert [row['path'] for row in closure.entries.values()] == [scientific['path']]
+    proof = _write(root, 'host-recovery/custom/prepared.bin', b'exact accepted bytes')
+    archive = _write(root, 'host-history/objects/' + proof['sha256'], b'exact accepted bytes')
+    (root / proof['path']).chmod(0o400)
+    (root / archive['path']).chmod(0o400)
+    _, source = _copy(root, tmp_path / 'child')
+    retained = originals.resolve_ref(source, proof)
+    retained.chmod(0o600)
+    retained.write_bytes(b'damaged exact locator version')
+    with pytest.raises(ValueError, match='bytes changed'):
+        originals.resolve_ref(source, proof)
 
 
-def test_accepted_snapshot_inventory_keeps_call_member_after_authoring_path_changes(tmp_path):
+def test_declared_in_instance_host_key_is_excluded_and_undeclared_key_remains_gap(tmp_path):
+    from scidiscovery.research_loop import execution_authority
     root = completed_source(tmp_path)
-    path = 'host-runtime/experiment-control/fixture/calls/one/accepted.json'
-    snapshot = 'host-runtime/experiment-control/fixture/calls/one/inputs/nested/value.json'
-    original = 'project/nodes/001/work/value.json'
-    proof = _write(root, snapshot, b'original call input\n')
-    _write(root, original, b'later authoring input\n')
-    c.write(root / path, dict(cwd=str((root / snapshot).parents[1]), snapshot_files=[
-        dict(proof, name='nested/value.json', path=str(root / original))]))
-    closure = fork_sources._Closure()
-    closure.add(originals.node(root, 2), path, parse=True)
-    paths = {row['path'] for row in closure.entries.values()}
-    assert snapshot in paths
-    assert original not in paths
-    source = _copy_closure(root, closure, tmp_path / 'child')
-    assert originals.resolve_ref(source, proof).read_bytes() == b'original call input\n'
-
-
-def test_engineering_repair_keeps_exact_failure_and_objects_without_parsing_scientific_names(tmp_path):
-    root = completed_source(tmp_path)
-    failure_bytes = b'{"status":"engineering_error","cleanup_confirmed":true}'
-    failure = _write(root, 'candidate-audit/fixture/outcome.json', failure_bytes)
-    objects = {name: _write(root, f'host-delivery/objects/{index}', raw) for index, (name, raw) in enumerate([
-        ('source.py', b'accepted source\n'), ('artifact', b'exact artifact\n'), ('extra-label', b'extra original\n')])}
-    outside = _write(root, 'project/nodes/999/future.json', b'future scientific evidence')
-    source = originals.node(root, 2)
-    closure = fork_sources._Closure()
-    # The actual repair failure record binds sha256 without size_bytes.
-    closure.refs(source, dict(failure={key: failure[key] for key in ('path', 'sha256')}, objects=objects),
-        context='engineering_repair')
-    closure.refs(source, dict(failure=outside, objects=dict(artifact=outside)), context='scientific_payload')
-    assert {row['path'] for row in closure.entries.values()} == {
-        failure['path'], *(proof['path'] for proof in objects.values())}
-    child = tmp_path / 'child'
-    inherited = _copy_closure(root, closure, child)
-    assert originals.resolve_ref(inherited, failure).read_bytes() == failure_bytes
-    for proof in objects.values():
-        assert originals.resolve_ref(inherited, proof).stat().st_size == proof['size_bytes']
-    assert not (child / 'candidate-audit').exists()
-    with pytest.raises(ValueError, match='outside the frozen fork closure'):
-        originals.resolve_ref(inherited, outside)
+    key = root / 'private-operator-key'
+    key.write_bytes(b'x' * 32)
+    key.chmod(0o600)
+    (root / 'execution-authority').mkdir(exist_ok=True)
+    # Bind against a fixture host contract; no execution grant or signature
+    # verification is inferred from copying these records.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(execution_authority, 'host_contract', lambda _: dict(version=1))
+        execution_authority.bind_secret(root, b'x' * 32, source=key)
+    plan = fork_sources.inspect_source(root, 2)
+    assert plan['blocked_reasons'] == []
+    assert not any(row['path'] in {'private-operator-key', 'execution-authority/host-key-source.json'}
+        for row in plan['entries'])
+    _write(root, 'undeclared-operator-key', b'y' * 32)
+    changed = fork_sources.inspect_source(root, 2)
+    assert any(row.get('path') == 'undeclared-operator-key' for row in changed['blocked_reasons'])
+    assert not any(row['path'] == 'undeclared-operator-key' for row in changed['entries'])

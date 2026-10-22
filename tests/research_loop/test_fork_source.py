@@ -52,7 +52,7 @@ def test_selected_cut_excludes_selected_output_and_keeps_exact_inputs(tmp_path):
     root = completed_source(tmp_path)
     plan = fork_sources.inspect_source(root, 2)
     assert plan['blocked_reasons'] == []
-    paths = {row['path'] for row in plan['entries']}
+    paths = {row['path'] for row in plan['entries'] if row['visibility'] != 'private_snapshot'}
     assert 'native-evidence/001/science-output.json' in paths
     assert 'project/nodes/002/inputs/parents/001/conclusion.json' in paths
     assert 'native-evidence/002/science-output.json' not in paths

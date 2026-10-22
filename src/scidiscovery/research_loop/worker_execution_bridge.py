@@ -152,10 +152,6 @@ def _execute(server, arguments):
     from . import experiments as e
     config=_configuration(server)
     if server.stop.is_set():return _unknown()
-    if (arguments[0]=='run' and config['execution_interface']['executor']=='cov_execution:experiment'
-            and config.get('receipt_channel')!='public_runner_main'):
-        return dict(code=2,result=dict(status='unavailable',accepted=False,
-            note='This retained receipt channel has no qualified scientific execution namespace'))
     out=io.StringIO();err=io.StringIO()
     def trusted_launch(body,accepted,command,cwd):
         expected={key:value for key,value in config.items() if key!='execution_interface'}

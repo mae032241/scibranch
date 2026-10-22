@@ -249,9 +249,7 @@ def wake_packet(root,job,intent):
             accepted=c.read(c.regular(Path(observed['accepted']['path'])))
             _,config=_config(root,job,accepted)
             e.verify_observation(observed,lambda item:Path(item['path']),interface=config['execution_interface'])
-            result={key:completed[key] for key in ('status','native_state','returncode','wall_seconds',
-                'evaluation_key','metric','val_score','val_acc') if key in completed}
-            if isinstance(completed.get('result'),dict):result['result']=e._scientific_result(completed['result'])
+            result=e.scientific_result(config,accepted,completed,observed)
             c.write(work/prefix/'result.json',result)
             outputs=[]
             for item in e.scientific_outputs(config,observed):

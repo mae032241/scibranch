@@ -11,8 +11,6 @@ import re
 from . import budget, contracts as c, configuration_updates
 
 AUDIT_STATUSES = {'audited', 'rejected', 'engineering_error', 'unclassified', 'unknown'}
-WORKER_CODES = {'implementation_source_missing', 'audit_dependency_missing', 'audit_training_error', 'audit_prediction_error',
-                'audit_interface_missing', 'audit_timeout'}
 CONTROL_CODES = {'audit_source_missing', 'audit_harness_unavailable', 'audit_process_failed',
                  'audit_transport_timeout', 'audit_output_capacity', 'audit_process_unavailable'}
 
@@ -25,7 +23,7 @@ def intents(root):
         if (intent.get('settings_sha256') != c.digest(root / 'settings.json')
                 or intent.get('operation_id') != path.parent.name
                 or type(intent.get('attempt')) is not int or intent['attempt'] != 1
-                or intent.get('reason') not in WORKER_CODES | CONTROL_CODES
+                or intent.get('reason') not in CONTROL_CODES
                 or not re.fullmatch('[0-9a-f]{64}',path.parent.name)
                 or type(intent.get('max_seconds')) not in (int,float) or not math.isfinite(intent['max_seconds'])
                 or not 0 < intent['max_seconds'] <= settings['delivery_policy']['submit_seconds']
@@ -41,7 +39,8 @@ def facts(root):
         outcome = path.with_name('outcome.json')
         value = c.read(c.regular(outcome)) if outcome.exists() else None
         if value is not None:
-            if (value['intent_sha256'] != c.digest(path) or value.get('status') not in AUDIT_STATUSES
+            if (value['intent_sha256'] != c.digest(path) or value.get('recovery','none') not in {'none','author_repair','control_retry'}
+                or value.get('status') not in AUDIT_STATUSES
                     or type(value.get('cleanup_confirmed')) is not bool
                     or not value['cleanup_confirmed'] and value['status']!='unknown'):
                 raise ValueError('Audit engineering recovery outcome changed')
@@ -82,12 +81,13 @@ def run(root, spec, source, request, seconds, *, on_process=None, author_require
                     'delivery_audit_process_failed':'audit_process_failed','delivery_audit_process_unavailable':'audit_process_unavailable'}.get(error.code)
             if code is None:raise
             return dict(status='engineering_error', note=code, cleanup_confirmed=True)
-        if (not isinstance(value, dict) or set(value)-{'diagnostic'} != {'status','operation_id','candidate_id','artifact_sha256','note'}
+        if (not isinstance(value, dict) or set(value)-{'diagnostic','recovery'} != {'status','operation_id','candidate_id','artifact_sha256','note'}
                 or any(value.get(k) != request[k] for k in ('operation_id','candidate_id','artifact_sha256'))
+                or value.get('recovery','none') not in {'none','author_repair','control_retry'}
                 or value.get('status') not in AUDIT_STATUSES or not isinstance(value.get('note'), str)
                 or len(value['note'].encode()) > 1024 or 'diagnostic' in value and (not isinstance(value['diagnostic'],str) or len(value['diagnostic'].encode())>4096)):
             return dict(status='unclassified', note='audit_receipt_invalid', cleanup_confirmed=True)
-        return dict(status=value['status'], note=value['note'], cleanup_confirmed=True,**(dict(diagnostic=value['diagnostic']) if 'diagnostic' in value else {}))
+        return dict(status=value['status'], note=value['note'], cleanup_confirmed=True,recovery=value.get('recovery','none'),**(dict(diagnostic=value['diagnostic']) if 'diagnostic' in value else {}))
 
     directory = root / 'host-delivery/audit-recovery' / request['operation_id']
     intent_path, outcome_path = directory/'intent.json', directory/'outcome.json'
@@ -98,12 +98,12 @@ def run(root, spec, source, request, seconds, *, on_process=None, author_require
     result = call(request, on_process)
     if result['status'] != 'engineering_error' or not result['cleanup_confirmed']:
         return result, request, deadline
-    if result['note'] not in WORKER_CODES | CONTROL_CODES:
-        return dict(status='unclassified', note='audit_engineering_reason_unclassified', cleanup_confirmed=True), request, deadline
-    # Re-staging can repair control transport/packing, but cannot change the
-    # frozen implementation. Preserve Worker diagnostics for its exact repair.
-    if result['note'] in WORKER_CODES:
-        return result, request, deadline
+    if result.get('recovery')=='author_repair':
+        return result,request,deadline
+    # Only framework transport failures have a pre-authorized control retry.
+    # A provider declaration classifies diagnostics but cannot grant retries.
+    if result['note'] not in CONTROL_CODES:
+        return dict(status='unclassified',note='audit_engineering_reason_unclassified',cleanup_confirmed=True),request,deadline
     limits, meter = budget.snapshot(root), native.usage(root)
     settings = delivery._settings(root, job)
     policy=settings['delivery_policy']

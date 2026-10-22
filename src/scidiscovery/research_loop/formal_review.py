@@ -359,6 +359,27 @@ def _failure_key(value):
     return {key:value[key] for key in ('contract','subject','authors','unresolved_selection','reason')}
 
 
+def _bound_failure_key(root, value, *, source=None):
+    """Compare an unchanged subject across local and inherited ref spellings.
+
+    A plain historical seal belongs to its failure receipt's original owner.
+    Preserve that identity when comparing with a fork's explicit origin binding;
+    identical bytes from another producer must remain a different subject.
+    """
+    from . import originals
+    key = _failure_key(value)
+    subject = key['subject']
+    if subject is None:
+        return key
+    step = subject['producer_step']
+    owner = originals.node(root, step) if source is None else originals.at_step(source, step)
+    seal = subject['producer_seal']
+    owner = originals.source_for_ref(owner, seal)
+    bound = dict(seal, origin_identity=owner.origin_identity)
+    originals.resolve_ref(owner, bound)
+    return dict(key, subject=dict(subject, producer_seal=bound))
+
+
 def request_route(root, job, payload, parents):
     root = Path(root).resolve()
     seal_path = c.host_record(c.workspace(root, job['step'])) / 'result-identity.json'
@@ -419,7 +440,7 @@ def unavailable(root, step):
     source = originals.node(root, step)
     relative = f'native-evidence/{step:03d}/formal-review-unavailable.json'
     if source.inherited:
-        if not any(row['origin_identity'] == source.origin_identity and row['path'] == relative for row in source.entries):
+        if not originals.has_original(source, relative):
             return None
         path = originals.resolve_ref(source, dict(path=relative))
     else:
@@ -439,11 +460,13 @@ def unavailable(root, step):
 
 def unavailable_attempts(root, step, *, before_step=None):
     """Validate historical finite-correction originals; new routes never count these."""
-    key=unavailable(root,step)['failure_key']
-    stop=before_step if before_step is not None else step+1
     from . import originals
-    steps = [source.step for source in originals.source_sequence(root, stop)]
-    return [prior for prior in steps if (value := unavailable(root, prior)) is not None and value['failure_key'] == key]
+    source = originals.node(root, step)
+    key = _bound_failure_key(root, unavailable(root, step)['failure_key'], source=source)
+    stop = before_step if before_step is not None else step + 1
+    return [prior.step for prior in originals.source_sequence(root, stop)
+        if (value := unavailable(root, prior.step)) is not None
+        and _bound_failure_key(root, value['failure_key'], source=prior) == key]
 
 
 def choice_constraints(root, job, references=None):
@@ -477,9 +500,10 @@ def validate_choice(root, job, payload):
     if value['subject'] is None:
         raise OutputRepairRequired('formal_review_unavailable',
             'Select exactly one resolvable scientific implementation for formal_review, or choose another scientific action. No review was dispatched; do not repeat experiments.')
+    key = _bound_failure_key(root, value)
     for reference in choices['unavailable']:
-        failure=q._read(root,reference)
-        if _failure_key(value)==failure['failure_key']:
+        source, failure = _request_original(root, reference)
+        if key == _bound_failure_key(root, failure['failure_key'], source=source):
             raise OutputRepairRequired('formal_review_unavailable',
                 'Formal review of this exact subject and identity evidence is unavailable. Choose another scientific action or select a different exact subject in this same response. Rewording grants no qualification; do not repeat experiments.')
 
@@ -497,7 +521,8 @@ def public_choices(root, job):
             materials=sorted(seal['materials'],key=lambda row:row['path'])
             if subject['material'] not in materials:
                 raise q.IntegrityError('Unavailable subject differs from its producer original')
-            role=c.read(c.regular(Path(root)/'jobs'/f'{subject["producer_step"]:03d}.json'))['role']
+            from . import originals
+            role=originals.source_job(originals.node(root, subject['producer_step']))['role']
             object_id=f'{role}{subject["producer_step"]:03d}-I{materials.index(subject["material"])+1:03d}'
         key=(object_id,failure['reason'])
         if key not in seen:

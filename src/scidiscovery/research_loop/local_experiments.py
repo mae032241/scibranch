@@ -74,6 +74,7 @@ class LocalExecution:
         from . import execution_inputs
         return execution_inputs.local_input_sources(self.config,self.frozen_interface,payload,metadata)
 
+    @e.record_effect
     def prepare(self,payload,*,preparation_profile,exchange_directory):
         if preparation_profile!='research_loop.v1' or Path(exchange_directory)!=self.records.root:
             raise ValueError('Exact managed preparation context required')
@@ -145,6 +146,7 @@ class LocalExecution:
             raise e.IntegrityError('Dispatch lease differs from exact frozen scope')
         self._lease=(accepted['call_id'],accepted['prepared'])
 
+    @e.record_effect
     def lookup_submission(self,submission):
         path=self.records.root/'calls'/submission.name/'accepted.json'
         if not path.exists():return None
@@ -153,6 +155,7 @@ class LocalExecution:
             raise e.IntegrityError('Original submission differs from prepared input')
         return submission.name,self._state(submission.name)
 
+    @e.record_effect
     def submit(self,submission):
         found=self.lookup_submission(submission)
         if self._lease!=(submission.name,submission.model_dump(mode='json')):
@@ -348,6 +351,7 @@ class LocalExecution:
             return dict(status='invalid',metrics=[],outputs=[],diagnostic='result_io' if isinstance(error,OSError) else 'result_json_invalid',
                 detail='result.json original could not be read' if isinstance(error,OSError) else detail)
 
+    @e.record_effect
     def result(self,call_id):
         directory=self.records.directory(call_id)
         path=directory/'completed.json'
@@ -369,9 +373,11 @@ class LocalExecution:
                 raise e.IntegrityError('Accepted input snapshot changed')
         return result
 
+    @e.record_effect
     def status(self,external_run_id):
         return self._state(external_run_id)
 
+    @e.record_effect
     def status_details(self,external_run_id):
         state=self._state(external_run_id)
         result={}
@@ -385,16 +391,19 @@ class LocalExecution:
     def cancel(self,external_run_id):
         raise e.UnsupportedExecution('Original command cancellation is not declared')
 
+    @e.record_effect
     def cancel_original(self,call_id):
         external=self.records.external(call_id)
         if external is None:raise e.UnsupportedExecution('Original external execution is unknown')
         return self.cancel(external)
 
+    @e.record_effect
     def collect_original(self,call_id):
         external=self.records.external(call_id)
         if external is None:raise e.UnsupportedExecution('Original external execution is unknown')
         return self.collect(external)
 
+    @e.record_effect
     def collect(self,external_run_id):
         if self.status(external_run_id) not in {'succeeded','failed'}:
             raise e.UnsupportedExecution('Original command is not confirmed terminal')
@@ -404,6 +413,10 @@ class LocalExecution:
         return tuple(LocalFileDescriptor(name=f'output-{index}',local_path=str(path),
             sha256=e.proof(path)['sha256'],size_bytes=path.stat().st_size,
             media_type='application/octet-stream') for index,path in enumerate(paths))
+
+    @staticmethod
+    def scientific_source(accepted, *, implementation=None):
+        return accepted['script']
 
     @staticmethod
     def public_result(result):
@@ -443,7 +456,8 @@ def build(context):
         frozen_interface=context.frozen_execution_interface)})
 
 
-REGISTRATION=ExecutionInterfaceRegistration('local_execution','1',RuntimePluginFactory(build))
+REGISTRATION=ExecutionInterfaceRegistration('local_execution','1',RuntimePluginFactory(build),
+    scientific_source=LocalExecution.scientific_source,projection_contract='scidiscovery.local-projections.v1')
 
 
 def cleanup(root,job,*,watchdog=False):

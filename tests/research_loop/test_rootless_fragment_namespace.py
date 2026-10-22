@@ -10,7 +10,8 @@ import sys
 import pytest
 
 from execution_fixtures import execution_registry
-from scidiscovery.research_loop import budget,contracts as c,controller,cov_lineage,cov_receipt,execution,lineage,native,search
+from scidiscovery.research_loop import budget, contracts as c, controller, execution, lineage, native, search
+from cov_execution import lineage as cov_lineage, receipt as cov_receipt
 from scidiscovery.research_loop.experiment_client import record_directory
 from test_author_closeout_e2e import source_python
 from test_worker_execution_hash_free import PUBLIC_CLI,PUBLIC_RUNNER

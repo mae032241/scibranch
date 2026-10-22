@@ -30,6 +30,10 @@ scientific runtime policy.
 The defaults are `/opt/scidiscovery-thin` and `/usr/local/bin`.
 Override `SCID_INSTALL_ROOT`, `SCID_BIN_ROOT`, `SCID_BACKUP_ROOT` explicitly as
 canonical absolute paths; the command directory must already exist.
+The core supplies `local_execution:command` without installing Cov. Select
+`SCID_PLUGINS=cov_execution` for the independently packaged
+`scidiscovery-cov-execution` adapter and its `cov_execution:experiment` entry point.
+Its observer, receipt and delivery providers ship in the same package.
 `SCID_PLUGINS=tcad_artifact,curve_score` selects local plugins. Explicitly include
 plugin dependencies; the installer does not fetch external dependencies.
 The optional figure plugin also requires existing Pillow/pdfimages; dependency

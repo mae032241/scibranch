@@ -268,11 +268,16 @@ FINAL 与 closeout 任务保留阶段和来源 cutoff，新预算本身不把它
 中立的精确 subject 合同与独立性门槛；工程修复保留有界 repair 合同。有 continuation 或输出修复
 的任务也从首次输入重跑，不续接这些 attempt。
 
-`fork_sources.py` 通过已验证的硬链接留存精确科学原件及必要宿主证明的有界依赖闭包，
-`originals.py` 按原身份与摘要解析来源。已封存为 0400 的原件直接共享；仍可写或权限不同的
-原件先在父实例私有 `host-history/objects/<sha256>` 中封存一次，再共享。原文件内容和权限
+`fork_sources.py` 复用通用目录 inventory，通过已验证硬链接完整保留静止源目录的私有快照。
+它是当前目录的保留超集，不伪称任务 N 时刻已有完整历史目录快照；科学可见范围另由所选 job
+和准确原输入 cut 限定。`visibility=private_snapshot` 条目不进入普通节点视图，内部精确摘要
+引用仍可解析，但不因此成为科学输入或资格。fork/cache 实现存储排除，已有原件 object 存储
+仍完整保留；目录清单不遍历领域 JSON 或依赖领域文件名。`originals.py` 按原身份与摘要解析来源。已封存为 0400 的原件直接共享；仍可写或权限不同的
+原件先在父实例私有 `host-history/fork-cache` 中封存一次，再共享。原文件内容和权限
 不变。public 视图只链接明确选定的已留存公开原件，不暴露私有控制元数据。嵌套分支共享这些
 不可变 inode，同时保留各自的原身份与本地路径。
+已明确绑定在实例内的主机密钥按已验证的私有来源定位排除；未知文件仅凭名称像凭证，
+不获得排除许可，无法识别的存储归属仍标为 inventory gap 并阻止 fork。
 
 每个留存目录项都是持有引用，文件系统链接数是引用状态的权威，不另建可变引用计数数据库。
 删除父或兄弟实例仅移除其引用，子实例仍可使用原件；父实例的快照缓存随父实例存储保留，
@@ -304,6 +309,13 @@ runtime/adapter 读取范围、命名空间映射和交付目标保持冻结；�
 网页从历史节点进入；打开暂停的新实例后点击“继续研究”才推进。错误时保留表单草稿；
 同一 UI host/browser session 内可对已尝试的原操作
 按同请求核对 receipt。跨 host 重启的通用 Web 操作恢复尚未建立；CLI/service 回执持久化。
+
+适配器记录写者持有通用 `record-writer.lock` 共享 lease，pending inventory 使用独占非阻塞
+lease。生命周期静止检查对现有记录目录内全部直接 `*.lock` 取独占非阻塞锁，作为旧记录的
+保守兼容，不依赖领域前缀或已安装插件。写者顺序为 owner gate、record writer 共享锁、
+node/admission、适配器私有锁；生命周期先取 owner gate 独占非阻塞锁，再取 node/admission
+及直接记录锁，gate 互斥这两种顺序；普通归档导出同样持有独占 source gate。
+活动写者阻止 fork/archive/delete，未知原调用仍须先对账。
 
 只读原件与宿主统一协作 source lease 在配合协议的当前版本 writer 间保护共享边界，仍是
 同用户软边界：同用户进程主动修改权限并原地写入共享 inode 可损坏所有引用，摘要校验负责

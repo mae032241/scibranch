@@ -148,11 +148,14 @@ def test_retained_legacy_client_requires_exact_author_chain_and_inventory(tmp_pa
 
 
 @pytest.mark.parametrize('attempt', [1, 2])
-def test_legacy_typed_closure_and_copy_preserve_author_chain(tmp_path, attempt):
+def test_legacy_owner_inventory_and_copy_preserve_author_chain(tmp_path, attempt):
     source, compiler, binding, material = retained_legacy(tmp_path, attempt=attempt, retain=False)
     closure = fork_sources._Closure()
+    from scidiscovery.research_loop import instance_archive
+    for row in instance_archive._inventory(source.storage_root):
+        if row['kind'] == 'file':
+            closure.add(source, row['path'], proof=row)
     closure.compilation_inventory(source)
-    closure.refs(source, dict(material=material, client_binding=binding), work_step=2)
     # The real sealed-node collector independently adds the accepted attempt
     # chain. These fixtures contain no scientific seal or admissible task cut;
     # keep the exact accepted intent as an explicit proof root instead.

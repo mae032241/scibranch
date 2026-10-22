@@ -29,7 +29,7 @@ args=sys.argv[1:]
 if args and args[0]=='sandbox':
  # Transport fixture only: outer bwrap is real; no provider sandbox qualification.
  assert len(args)==12 and args[:2]==['sandbox','-P'] and args[3]=='-C' and args[5]=='--'
- assert args[7:9]==['-B','-I'] and pathlib.Path(args[9]).name=='cov_receipt.py'
+ assert args[7:9]==['-B','-I'] and pathlib.Path(args[9]).name=='receipt.py'
  assert args[10:]==['--science-runner','/opt/exp/scid-invocation.json']
  invocation=json.loads(pathlib.Path(args[11]).read_text())
  assert set(invocation)=={'runner','source','output_line','output'}
@@ -250,7 +250,7 @@ def source_provenance_equal(source, target, maps):
 
 def rebind(settings_path, launcher_path, work, scid_python, fault=None):
     """Fresh scratch inputs; the source run is read, hashed and never written."""
-    from scidiscovery.research_loop import cov_delivery, cov_lineage
+    from cov_execution import delivery as cov_delivery, lineage as cov_lineage
     settings = json.loads(settings_path.read_bytes());config = json.loads(launcher_path.read_bytes())
     proof = _source_proof(settings_path.parent)
     manifest = json.loads(Path(config['public_manifest']).read_bytes())

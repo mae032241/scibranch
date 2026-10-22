@@ -34,7 +34,7 @@ def audit_fixture(tmp_path, mode='ok', *, enabled=True, candidate_count=1, corre
         correction_policy=dict(review_after=1,pause_after=1) if correction_enabled else None,
         node_budget_policy=limits, delivery_policy=delivery_policy(descriptor(root, public)),
         candidate_audit_policy={'version':1} if enabled else None,
-        history_observer=dict(adapter=str(Path(__file__).resolve().parents[2] / 'scripts/observe_covshift_candidates.py'),
+        history_observer=dict(adapter=str(Path(__file__).resolve().parents[2] / 'plugins/cov_execution/cov_execution/observer.py'),
                               config=dict(runs='runs', evaluation_key='fixture-public')))
     (root / 'runs').mkdir()
     (root / 'submission').mkdir()

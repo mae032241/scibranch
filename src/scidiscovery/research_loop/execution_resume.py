@@ -34,7 +34,8 @@ def _capture_pending(root, job):
     path = execution.origin(root, job['step']) / 'pending-execution-set.json'
     if path.exists():
         return q._ref(root, path)
-    with authority.writer(root,blocking=False):
+    records=experiment_client.record_directory(root,job['step'])/'calls'
+    with authority.writer(root,blocking=False), c.record_writer(records.parent,blocking=False,exclusive=True):
         allocations = []; complete = True
         job_ref=q._ref(root,root/'jobs'/f'{job["step"]:03d}.json')
         records=experiment_client.record_directory(root,job['step'])/'calls'
@@ -86,9 +87,22 @@ def _capture_pending(root, job):
             accepted = records / call / 'accepted.json'
             refs = dict(prepare_intent=q._ref(root, prepare) if prepare.exists() else None,
                         accepted=q._ref(root, accepted) if accepted.exists() else None)
-            for name in ('submission.json','tcad-dispatch.json','tcad-backend-binding.json','completed.json','submission-retirement.json'):
-                file=records/call/name
-                refs[name]=q._ref(root,file) if file.exists() else None
+            # Snapshot the original call's inventory without interpreting any
+            # adapter-owned JSON or depending on provider availability.
+            originals=[]
+            call_directory=records/call
+            if call_directory.exists():
+                import os
+                def unreadable(error):raise error
+                for parent,directories,files in os.walk(call_directory,followlinks=False,onerror=unreadable):
+                    directory_path=Path(parent)
+                    if directory_path.resolve()!=directory_path:raise ValueError('Pending call directory changed')
+                    for name in directories:
+                        if (directory_path/name).resolve()!=directory_path/name:
+                            raise ValueError('Pending call directory is not original')
+                    for name in sorted(files):
+                        originals.append(q._ref(root,c.regular(directory_path/name)))
+            refs['records']=originals
             allocations.append(dict(call_id=call, allocation=q._ref(root, original),
                 requests=requests.pop(call, []), **refs,
                 disposition='unprepared' if not prepare.exists() and call not in namespace else 'possibly_prepared'))
@@ -122,6 +136,12 @@ def verify_pending_set(root, seal, allocation_ref=None, *, unprepared=False, req
     if source is not None and unprepared:
         raise ValueError('Inherited pending evidence never authorizes dispatch')
     read = (lambda proof: q._read(root, proof)) if source is None else (lambda proof: c.read(_source_path(source, proof)))
+    def verify_bytes(proof):
+        if source is not None:
+            _source_path(source,proof)
+        else:
+            from . import originals
+            originals.resolve_root_ref(root,proof)
     def proof_at(path, expected):
         if source is None:return q._ref(root, path)
         relative = Path(path).relative_to(source.original_root).as_posix()
@@ -162,9 +182,13 @@ def verify_pending_set(root, seal, allocation_ref=None, *, unprepared=False, req
             request = read(proof)
             if request['call_id'] != row['call_id'] or request['job'] != value['job']:
                 raise q.IntegrityError('Pending request escaped its original allocation')
-        for key in ('prepare_intent','accepted','submission.json','tcad-dispatch.json','tcad-backend-binding.json','completed.json','submission-retirement.json'):
-            if row[key] is not None:
-                read(row[key])
+        # New inventory refs and legacy top-level proof-shaped values share
+        # the same hash/size/origin checks; legacy missing data is never empty.
+        for key,item in row.items():
+            if isinstance(item,dict) and {'path','sha256','size_bytes'} <= set(item):verify_bytes(item)
+        if 'records' in row:
+            if not isinstance(row['records'],list):raise q.IntegrityError('Pending call inventory changed')
+            for proof in row['records']:verify_bytes(proof)
     if allocation_ref is None:
         return value
     matches = [row for row in value['allocations'] if row['allocation'] == allocation_ref]

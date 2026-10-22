@@ -237,6 +237,7 @@ class TCADManagedExecution:
             raise ValueError('Exact TCAD call identity required')
         return self.records.root / 'tcad-prepared' / call
 
+    @e.record_effect
     def prepare(self, payload, *, preparation_profile, exchange_directory):
         self._original_interface()
         if preparation_profile != 'research_loop.v1' or Path(exchange_directory) != self.records.root:
@@ -406,6 +407,7 @@ class TCADManagedExecution:
             else:
                 e.write(path, value)
 
+    @e.record_effect
     def lookup_submission(self, submission):
         _, descriptor = self._bound(submission.name)
         if descriptor != submission:
@@ -415,6 +417,7 @@ class TCADManagedExecution:
             self._binding(descriptor.name, descriptor, found[0])
         return found
 
+    @e.record_effect
     def submit(self, submission):
         with self.records.lease('tcad-submission-' + submission.name + '.lock'):
             if e.retirement(self.config, submission.name) is not None:
@@ -459,7 +462,7 @@ class TCADManagedExecution:
     @contextmanager
     def retire_original(self, call):
         # Core publishes its common receipt inside this context, under this lease.
-        with self.records.lease('tcad-submission-' + call + '.lock'):
+        with e.instance_owner.lease_for_configuration(self.config), c.record_writer(self.records.root), self.records.lease('tcad-submission-' + call + '.lock'):
             existing = e.retirement(self.config, call)
             if existing is not None:
                 yield dict(existing, status='not_submitted')
@@ -496,8 +499,12 @@ class TCADManagedExecution:
                     for name in ('completed.json', 'terminal.json', 'execution-observation.json')):
                 raise e.IntegrityError('TCAD non-submission contradicts an original job or terminal fact')
             intent = directory / 'tcad-dispatch.json'
-            yield dict(call_id=call, status='not_submitted', request=request_proof,
-                response=response_proof, protocol=protocol_proof,
+            native_originals=[request_proof,response_proof,protocol_proof]
+            assertion=dict(version=1,kind='permanent_not_submitted',call_id=call,scope=accepted['scope'],
+                accepted=e.proof(directory/'accepted.json'),prepared=prepared.model_dump(mode='json'),
+                authority=value['authority'],native_originals=native_originals)
+            yield dict(call_id=call,status='not_submitted',
+                assertion=self._retirement_packet(call,'assertion',assertion),native_originals=native_originals,
                 dispatch_intent=e.proof(intent) if intent.exists() else None)
 
     def _query(self, call):
@@ -522,6 +529,7 @@ class TCADManagedExecution:
             raise e.IntegrityError('TCAD status changed the original external identity')
         return dict(details, call_id=call, external_run_id=external)
 
+    @e.record_effect
     def status_details(self, call):
         if e.retirement(self.config, call) is not None:
             return dict(state='unknown', call_id=call, submission_disposition='not_submitted')
@@ -640,6 +648,7 @@ class TCADManagedExecution:
         self.records.publish(call, 'collected.json', dict(native_state=manifest.terminal_state,
             outputs=[item.model_dump(mode='json') for item in retained]))
 
+    @e.record_effect
     def result(self, call):
         directory = self.records.directory(call)
         if e.retirement(self.config, call) is not None:
@@ -685,6 +694,7 @@ class TCADManagedExecution:
                 proofs=proofs, note='Retained native TCAD execution facts; no scientific qualification'))
             return json.loads(e.read(directory / 'completed.json'))
 
+    @e.record_effect
     def collect_original(self, call):
         if self.result(call)['status'] == 'unknown':
             raise e.UnsupportedExecution('Original TCAD terminal collection is not verified')
@@ -774,6 +784,7 @@ class TCADManagedExecution:
     def collect(self, external):
         return self.collect_original(self._external_call(external))
 
+    @e.record_effect
     def cancel_original(self, call):
         accepted, prepared = self._bound(call)
         details = self.status_details(call)
@@ -789,6 +800,7 @@ class TCADManagedExecution:
     def cancel(self, external):
         return self.cancel_original(self._external_call(external))
 
+    @e.record_effect
     def resource_consumption(self, call):
         """Trusted projection from the same verified native terminal originals."""
         from .execution_control import _consumed_budget
@@ -797,6 +809,10 @@ class TCADManagedExecution:
         outputs = tuple(LocalFileDescriptor.model_validate(item) for item in collected['outputs'])
         manifest = self._inventory(outputs, completed['native_state'],context=self.operation_context)
         return _consumed_budget(manifest.model_dump(mode='json')) or {}
+
+    @staticmethod
+    def scientific_source(accepted, *, implementation=None):
+        return implementation
 
     @staticmethod
     def public_result(result):
@@ -924,6 +940,22 @@ def build_managed_runtime(context):
         operation_context=getattr(services, 'operation_context', None))})
 
 
+def legacy_retirement(value, decoded, contract):
+    """Pure reader for published v1 TCAD receipts; never constructs a backend."""
+    accepted=decoded(value['accepted'])
+    request=decoded(value['request']);response=decoded(value['response']);protocol=decoded(value['protocol'])
+    if e.encoded(protocol)!=e.encoded(contract['backend_protocol']):
+        raise e.IntegrityError('Legacy TCAD retirement protocol differs from its frozen contract')
+    if (request.get('call_id')!=value['call_id'] or request.get('scope')!=value['scope']
+            or request.get('accepted')!=value['accepted'] or request.get('prepared')!=value['prepared']
+            or request.get('authority')!=value['authority'] or request.get('target')!=accepted.get('execution_target')
+            or response.get('found') is not False or response.get('retired') is not True
+            or response.get('submission_sha256')!=value['prepared']['sha256']):
+        raise e.IntegrityError('Legacy TCAD retirement does not fence the exact original call')
+
+
 REGISTRATION = ExecutionInterfaceRegistration('tcad_execution', '1', RuntimePluginFactory(build_managed_runtime,
     configure=configure_managed_execution, requires_config_file=True),
-    scientific_outputs=TCADManagedExecution.scientific_outputs)
+    scientific_outputs=TCADManagedExecution.scientific_outputs,
+    scientific_source=TCADManagedExecution.scientific_source,legacy_retirement=legacy_retirement,
+    projection_contract='tcad.public-projections.v2')

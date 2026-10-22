@@ -220,7 +220,8 @@ def test_operator_configuration_rejects_host_identity_and_permissions(execution_
 
 
 def test_trusted_cov_launcher_configuration_preserves_exact_host_bindings(tmp_path, execution_registry):
-    from scidiscovery.research_loop import cov_lineage, experiment_client, profiles
+    from scidiscovery.research_loop import experiment_client, profiles
+    from cov_execution import lineage as cov_lineage
     from scidiscovery.research_loop.protocol import stage_scope
     from test_history_handoff import finish
     public, goal = inputs(tmp_path)

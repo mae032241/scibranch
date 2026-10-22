@@ -36,6 +36,19 @@ _SOURCE_FULL_PLUGINS = EntryPoints(
 
 
 @pytest.fixture(autouse=True)
+def _source_subprocess_paths(monkeypatch, request):
+    """Preserve independent package imports in source-launched child interpreters."""
+    if Path(request.node.path).is_relative_to(Path(__file__).parent / "installation"):
+        return
+    root = Path(__file__).resolve().parents[1]
+    paths = [str(root / "src"), str(root / "plugins/cov_execution")]
+    inherited = os.environ.get("PYTHONPATH")
+    if inherited:
+        paths.append(inherited)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(paths))
+
+
+@pytest.fixture(autouse=True)
 def _source_checkout_plugin_metadata(monkeypatch: pytest.MonkeyPatch, request):
     """Model the default full install without writing egg-info into the checkout."""
 
@@ -55,7 +68,7 @@ _LANES = {"installed": "installed", "process_e2e": "process", "stress": "stress"
 def pytest_addoption(parser):
     parser.addoption("--test-lane", choices=("source", "installed", "process", "stress", "live"),
                      default="source", help="Explicit test layer; installation is isolated from functional collection")
-    parser.addoption("--installation-cohort", choices=("core", "tcad"), default="core",
+    parser.addoption("--installation-cohort", choices=("core", "tcad", "cov"), default="core",
                      help="One explicitly selected packaging cohort; used only by the installed lane")
 
 

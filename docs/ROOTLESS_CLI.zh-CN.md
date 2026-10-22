@@ -125,7 +125,9 @@ scid-research start --continue --root /absolute/project/branch
 
 新有限预算只供子实例新工作使用，历史科学投入与机会不清零，未知历史成本不填零；旧审查和
 执行许可不授权新 subject 或调用。指引按原文作为可不采纳的 advice；正式审查仍用中立输入，
-通用指引延后到合法后继。创建通过硬链接共享所需只读原件，保留原身份并支持嵌套分支；
+通用指引延后到合法后继。创建通过硬链接共享只读原件，保留原身份并支持嵌套分支。
+静止源目录的完整私有快照保留当前存储超集，不构成历史任务 N 的完整目录快照；
+私有保留条目不会自动进入科学视图，科学可见范围仍由原任务准确输入 cut 限定；
 仍可写的旧原件先在父实例私有快照存储中封存一次，后续分支复用。不会修改原文件权限。
 各分支目录项持有引用，文件系统维护链接数；删除父实例不影响子实例。父实例快照缓存随其
 存储保留，最后一个链接移除后释放数据，不需要手工维护引用计数。
@@ -318,7 +320,11 @@ anchor 目录须已存在、独立于实例。export 冻结旧写者；restore �
 named/default permissions、选定配置 profile、managed policy、额外可写根等不能忠实投影的权限配置，使受管命令明确返回 unsupported；不会为运行而降权或放宽原生权限。
 自定义 launcher 省略模式时按兼容规则冻结 `external`，执行配置和提交服务由 launcher 提供；任务简报会说明普通 shell 命令没有自动记录。自定义 launcher 可显式选择 `local`，但其后端权限无法证明时受管启动明确不支持；`capabilities`、`describe` 等只读合同入口仍可用。已有 cov launcher 使用 `external`，不会被默认 local 配置覆盖。
 该 cov launcher 只读共享当前节点的 `jobs/<step>.json` 与 `settings-identity.json`，供受管命令核对原任务和未注册冷 owner 的状态；这些元数据可能包含宿主来源路径，不构成科学证据或写权限。其它节点 job、`settings.json`、控制账本及外部 owner anchor 不挂载。此 launcher 不支持已注册冷 checkpoint owner 的实例：宿主先验证原 owner，并在进入原生命名空间前明确拒绝已注册、缺失、损坏或 fenced 的 owner 状态；不把命名空间内缺文件当作未注册。普通宿主 CLI 的冷 owner lease 行为不变。
-`scripts/acceptance/rootless_cov_launcher.py` 在其 operator JSON 中默认选择 `cov_engineering_check_reserve_seconds=15`，可显式设为 `0` 关闭预留。它经原 `cov_lineage.configure` 冻结到 Cov 执行配置；配置只影响新调用，不改变已接受调用。原单调用65秒不增加：支持 `public_runner_main` 的新调用请求实验至多50秒、检查至多10秒、反馈留2秒，原任务剩余窗口还可进一步裁剪；`exp run` 前的短提示仅说明请求上界，实际是否 `reserved` 及原绝对截止仍看回包的 `engineering_check.time_allocation`。仅接受0或大于2且小于65的有限秒数；`backend_file` 无该检查能力时明确不承诺切分。默认通用 Local 不受此 launcher 配置影响。
+Cov launcher 需要在其选定 runtime 显式安装 `scidiscovery-cov-execution`
+（源码安装器使用 `SCID_PLUGINS=cov_execution`），执行器标识仍为 `cov_execution:experiment`。
+`experiments`、`lineage`、`delivery`、`receipt`、`observer` 均由 `cov_execution` 包提供。
+
+`scripts/acceptance/rootless_cov_launcher.py` 在其 operator JSON 中默认选择 `cov_engineering_check_reserve_seconds=15`，可显式设为 `0` 关闭预留。它经原 `cov_execution.lineage.configure` 冻结到 Cov 执行配置；配置只影响新调用，不改变已接受调用。原单调用65秒不增加：支持 `public_runner_main` 的新调用请求实验至多50秒、检查至多10秒、反馈留2秒，原任务剩余窗口还可进一步裁剪；`exp run` 前的短提示仅说明请求上界，实际是否 `reserved` 及原绝对截止仍看回包的 `engineering_check.time_allocation`。仅接受0或大于2且小于65的有限秒数；`backend_file` 无该检查能力时明确不承诺切分。默认通用 Local 不受此 launcher 配置影响。
 模式在 settings/job 中冻结，恢复沿用原选择；已有实例缺少此字段时保持原配置路径。
 原生 shell 和权限照常可用，临时分析无需逐项受管。
 
@@ -631,10 +637,12 @@ Codex 后端是软边界：关闭项目 AGENTS 自动加载，默认关闭 nativ
 
 ## 可选候选事实观察
 
-`prepare --history-observer-config /绝对路径/observer.json` 可冻结一个可信宿主只读 adapter：
+`prepare --history-observer-config /绝对路径/observer.json` 可冻结一个可信宿主只读 adapter。
+Cov 观察器随独立 `cov_execution` 插件安装，下面为源码布局示例；安装环境应使用该插件
+`cov_execution.observer.__file__` 指向的精确原件：
 
 ```json
-{"adapter":"/绝对路径/scripts/observe_covshift_candidates.py","config":{"runs":"runs","evaluation_key":"cov-public-val-score-d78f5eb-v1"}}
+{"adapter":"/绝对路径/plugins/cov_execution/cov_execution/observer.py","config":{"runs":"runs","evaluation_key":"cov-public-val-score-d78f5eb-v1"}}
 ```
 
 默认不配置 adapter；历史仍维护 H/W/A/E 的原摘要、限制、H 范围与科学结论页。

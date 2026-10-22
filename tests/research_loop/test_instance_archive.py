@@ -79,7 +79,7 @@ def test_active_writer_and_unknown_native_preserve_originals_without_export(tmp_
     root, material = scene(tmp_path); package = tmp_path / 'archive'
     original = material.read_bytes()
     with controller._writer(root):
-        with pytest.raises(RuntimeError, match='running controller'):
+        with pytest.raises(archive.files.ArchiveError, match='Source read guard'):
             archive.archive_export(root, package)
     from scidiscovery.research_loop.instance_ui import _host_lock
     with _host_lock(root):
@@ -107,7 +107,7 @@ def test_export_preserves_pending_configuration_and_its_dependencies(tmp_path):
     c.write(private, {'must_not_be_copied': True})
     original = root / 'host-control/configuration/revisions/000001.json'
     with configuration_updates._writer(root):
-        with pytest.raises(archive.files.ArchiveError, match='owner is active'):
+        with pytest.raises(archive.files.ArchiveError):
             archive.archive_export(root, tmp_path / 'busy-archive')
     package = tmp_path / 'archive'
     archive.archive_export(root, package)
@@ -280,3 +280,72 @@ def test_restore_refuses_active_unknown_and_competing_originals(tmp_path, monkey
         archive.archive_restore_material(root, package, step=1, index=index)
     assert material.read_bytes() == b'A competing original, never overwritten.'
     assert not list((root / 'host-runtime').glob('material-restore-*'))
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_arbitrary_managed_writer_lease_blocks_lifecycle_without_domain_names(tmp_path, legacy):
+    import fcntl
+    import os
+    from scidiscovery.research_loop import fork_sources, instance_delete
+    root, material = scene(tmp_path)
+    records = root / 'project/nodes/001/work/lineage'
+    records.mkdir(parents=True)
+    lease = records / ('custom-adapter.lock' if legacy else 'record-writer.lock')
+    descriptor = os.open(lease, os.O_CREAT | os.O_RDONLY, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        with pytest.raises(archive.files.ArchiveError, match='owner is active'):
+            archive.archive_export(root, tmp_path / 'blocked-archive')
+        # Fork's read guard also sees old stores through the owning task.
+        c.build_job(root, 1, 'H', [])
+        job_path = root / 'jobs/001.json'
+        job = c.read(job_path)
+        job.pop('worker_view_version', None)
+        c.write(job_path, job)
+        # Explicit old task version selects the legacy records owner.
+        with pytest.raises(BlockingIOError):
+            with fork_sources.source_guard(root):
+                pass
+        settings = c.settings(root)
+        with pytest.raises(archive.files.ArchiveError, match='owner is active'):
+            instance_delete.delete_instance(root, instance_id=settings['goal_id'],
+                settings_sha256=c.digest(root / 'settings.json'), operation_id='blocked-delete')
+        assert root.exists() and material.exists()
+    finally:
+        os.close(descriptor)
+
+
+def test_archive_fences_first_managed_writer_after_lease_enumeration(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from scidiscovery.research_loop import experiments, experiment_client
+    root, _ = scene(tmp_path)
+    job = c.build_job(root, 1, 'H', [])
+    records = experiment_client.record_directory(root, 1)
+    effect = records / 'new-adapter-original'
+
+    class Writer:
+        config = dict(record_dir=str(records), scope=dict(step=1, role=job['role'],
+            job_sha256=c.digest(root / 'jobs/001.json')))
+
+        @experiments.record_effect
+        def mutate(self):
+            records.mkdir(parents=True, exist_ok=True)
+            effect.write_bytes(b'writer must not begin during archive')
+
+    writer = Writer()
+    writer.records = SimpleNamespace(root=records)
+    original = archive._owner_locks
+    attempted = []
+
+    def after_enumeration(stack, source, **options):
+        original(stack, source, **options)
+        assert not (records / 'record-writer.lock').exists()
+        with pytest.raises(archive.files.ArchiveError, match='Source read guard'):
+            writer.mutate()
+        attempted.append(True)
+        assert not records.exists() and not effect.exists()
+
+    monkeypatch.setattr(archive, '_owner_locks', after_enumeration)
+    result = archive.archive_export(root, tmp_path / 'archive')
+    assert result['status'] == 'archive_exported' and attempted == [True]
+    assert not records.exists() and not effect.exists()

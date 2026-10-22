@@ -331,3 +331,10 @@ These implemented surfaces have no implied live-browser or backend qualification
 相同 API 检查和准备实例；TOML 为可选导入、导出及明确保存格式。导入文件目录决定其相对路径基准，
 导出与另存保留路径含义；新建声明编辑不修改已有实例。网页还提供预算排队、
 用户方向、操作回执、后台启动/恢复和有界进度。这些入口不额外授予真实浏览器或后端资格。
+
+Cov execution is provided by the optional `scidiscovery-cov-execution` distribution
+(`SCID_PLUGINS=cov_execution`). Its executor key remains `cov_execution:experiment`;
+new configuration freezes the registration's observer/delivery defaults. Explicit
+operator policies still apply; installing a provider grants no execution authority.
+Cov 执行来自独立插件，核心安装不含 Cov；注册提供的新实例默认观察与交付配置仍须冻结，
+安装本身不授予执行权限。

@@ -290,6 +290,33 @@ the immutable managed-call tree. TCAD keeps the complete native manifest private
 execution facts alongside unchanged scientific output bytes. Original manifest and
 output verification still precede publication.
 
+The optional `cov_execution` package owns `experiments`, `lineage`, `delivery`,
+`receipt` and `observer`; its execution entry point remains `cov_execution:experiment`.
+Core-only installations expose `local_execution:command` without importing Cov.
+Installed providers are discovered through the existing execution interface group.
+The registration may declare `scientific_source`,
+`context_validator`, `research_defaults`, `engineering_feedback`, `legacy_retirement`
+and a `projection_contract`. These trusted optional hooks project retained facts,
+validate native contexts or supply new-instance defaults. The projection contract is
+frozen with the interface; it is not an installed-version authorization gate.
+Core owns call/candidate identity, budgets, permissions, independent review and exact
+audit scope. Native run IDs and model layouts belong to providers. `public_result`
+is the adapter's strict JSON scientific projection, shared by immediate results and
+managed wakes; raw backend results and private bindings are not public feedback.
+
+Managed adapter record mutation uses the host's shared
+`research_loop.contracts.record_writer(records, *, blocking=True, exclusive=False)`
+lease on `records/record-writer.lock`. Pending inventory takes the exclusive
+nonblocking lease inside the original owner writer context. Writers acquire owner
+gate, shared record-writer, node/admission, then adapter-private locks, covering the
+first preparation write as well. Never upgrade a shared lease to exclusive inside
+the context. Lifecycle checks first take the owner gate exclusively and nonblocking,
+then node/admission and record locks; the gate serializes these two orders.
+Lifecycle checks acquire existing direct record `*.lock` files exclusively and
+nonblocking as conservative compatibility for old records, without matching domain
+names or loading a provider. Terminal original retention remains offline; a missing
+provider cannot erase an unknown call, consumed budget or immutable binding.
+
 TCAD adapter consumers may use the following optional hooks:
 `supports_preparation_profile(profile)`,
 `validate_preparation_payload(raw, *, preparation_profile)`,

@@ -7,15 +7,20 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def execution_registry(tmp_path,monkeypatch):
-    if list(importlib.metadata.entry_points().select(group='scidiscovery.execution_interfaces')):
+    declared = {item.name for item in importlib.metadata.entry_points().select(group='scidiscovery.execution_interfaces')}
+    entries = {
+        'local_execution': 'scidiscovery.research_loop.local_experiments:REGISTRATION',
+        'cov_execution': 'cov_execution.experiments:REGISTRATION',
+    }
+    missing = {name: target for name, target in entries.items() if name not in declared}
+    if not missing:
         source_root=Path(e.__file__).parents[3]
         return source_root if (source_root/'pyproject.toml').is_file() else None
     metadata=tmp_path/'discovery/scidiscovery_execution_source.dist-info'
     metadata.mkdir(parents=True)
     (metadata/'METADATA').write_text('Metadata-Version: 2.1\nName: scidiscovery-execution-source\nVersion: 0\n')
-    (metadata/'entry_points.txt').write_text('[scidiscovery.execution_interfaces]\n'
-        'local_execution = scidiscovery.research_loop.local_experiments:REGISTRATION\n'
-        'cov_execution = scidiscovery.research_loop.cov_experiments:REGISTRATION\n')
+    (metadata/'entry_points.txt').write_text('[scidiscovery.execution_interfaces]\n' +
+        ''.join(name + ' = ' + target + '\n' for name, target in missing.items()))
     root=str(metadata.parent)
     monkeypatch.syspath_prepend(root)
     monkeypatch.setenv('PYTHONPATH',root+os.pathsep+os.environ.get('PYTHONPATH',''))

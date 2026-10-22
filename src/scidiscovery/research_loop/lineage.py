@@ -15,6 +15,12 @@ from . import contracts as c, history, originals, search
 MAX_CONTEXTS = 128
 
 
+def context_artifacts(item):
+    """Top-level proof descriptors have provider-owned scientific labels."""
+    return [value for value in item.values() if isinstance(value,dict)
+        and {'path','sha256','size_bytes'} <= set(value)]
+
+
 def _parent_original(root, item, available, *, source=None):
     """Bind the declared choice to an earlier exact completed call, never a name."""
     accepted=next((p for p in item['proofs'] if Path(p['path']).name=='accepted.json'),None)
@@ -39,17 +45,17 @@ def _parent_original(root, item, available, *, source=None):
         if binding is not None:raise history.ObserverIntegrityError('Undeclared parent acquired a binding')
         return
     source=available.get(parent['candidate_id'])
-    if source is None or source['status']!='known_success' or source['model'] is None:
+    if source is None or source['status']!='known_success':
         raise history.ObserverIntegrityError('Declared parent has no earlier completed original')
     completion=next((p for p in source['proofs'] if Path(p['path']).name=='completed.json'),None)
     if completion is None:raise history.ObserverIntegrityError('Parent completion original unavailable')
-    model=source['model']
-    expected=dict(call_id=source['call_id'],step=source['scope']['step'],completion_sha256=completion['sha256'],
-                  model_sha256=model['sha256'],model_size_bytes=model['size_bytes'])
     same=source['scope']['step']==item['scope']['step']
-    if (binding!=expected or parent['source']!=('same_node_completed_call' if same else 'sealed')
+    if (not isinstance(binding,dict) or any(binding.get(key)!=value for key,value in
+            dict(call_id=source['call_id'],step=source['scope']['step'],completion_sha256=completion['sha256']).items())
+            or parent['source']!=('same_node_completed_call' if same else 'sealed')
             or source['scope']['step']>item['scope']['step']):
-        raise history.ObserverIntegrityError('Declared parent completion/artifact/source differs')
+        raise history.ObserverIntegrityError('Declared parent completion/source differs')
+    return original, source
 
 
 def contexts(root, job, items, archive, previous=()):
@@ -60,7 +66,7 @@ def contexts(root, job, items, archive, previous=()):
     expected_scope=stage_scope(root,job)
     result=[];seen=set();available={item['candidate_id']:item for item in previous if item['status']=='known_success'}
     for item in items:
-        if not isinstance(item,dict) or set(item) not in ({'call_id','scope','status','candidate_id','run_id','model','parent','change_intent','note','proofs'}, {'call_id','scope','status','candidate_id','run_id','model','parent','change_intent','note','proofs','mechanism_binding'}):
+        if not isinstance(item,dict) or not {'call_id','scope','status','candidate_id','parent','change_intent','note','proofs'} <= set(item):
             raise ValueError('Plugin context fields differ from contract2')
         if not isinstance(item['call_id'],str) or len(item['call_id'])>128 or item['call_id'] in seen:
             raise history.ObserverIntegrityError('Execution context identity is ambiguous')
@@ -95,17 +101,26 @@ def contexts(root, job, items, archive, previous=()):
             if accepted.get('scope')!=scope or accepted.get('call_id')!=item['call_id'] or accepted.get('mechanism_binding')!=binding:
                 raise history.ObserverIntegrityError('Context mechanism differs from original accepted call')
             breadth.check_binding(job['search']['breadth'],binding,scope)
-        model=None
-        if item['model'] is not None:
-            model=archive(item['model']['path'])
-            if model['sha256'] is None:raise ValueError('Context model read capacity unavailable')
-            if model['sha256']!=item['model']['sha256'] or model['size_bytes']!=item['model']['size_bytes']:
+        # Provider-owned artifact labels are opaque; every descriptor receives
+        # the same original-byte validation, regardless of its scientific name.
+        validated={**item,'proofs':proofs}
+        for key,value in item.items():
+            if not isinstance(value,dict) or not {'path','sha256','size_bytes'} <= set(value):continue
+            if set(value)!={'path','sha256','size_bytes'}:
+                raise ValueError('Provider context cannot predeclare host archive fields')
+            original=archive(value['path'])
+            if original.get('sha256') is None:raise ValueError('Context artifact read capacity unavailable')
+            if any(original[field]!=value[field] for field in ('sha256','size_bytes')):
                 raise history.ObserverIntegrityError('Execution artifact changed')
-        if ((item['status']=='known_success')!=(model is not None)
-                or (item['status']!='unknown' and (type(item['run_id']) is not int or item['run_id']<1 or not isinstance(item['candidate_id'],str)))):
-            raise ValueError('Failed/unknown context cannot acquire model qualification')
-        validated={**item,'proofs':proofs,'model':model}
+            validated[key]=original
         _parent_original(root,validated,available)
+        accepted_proof=next((proof for proof in proofs if Path(proof['path']).name=='accepted.json'),None)
+        accepted=c.read(root/accepted_proof['snapshot'])
+        interface=history._execution_interface(root,accepted)
+        from . import experiments
+        declared,_=experiments.registration(interface['executor'])
+        if declared.context_validator is not None:
+            declared.context_validator(validated,accepted,available.get(item['parent']['candidate_id']))
         result.append(validated)
         if validated['status']=='known_success':available[validated['candidate_id']]=validated
     return result
@@ -521,6 +536,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                 returncode=details.get('returncode'),wall_seconds=details.get('wall_seconds'),
                 **(dict(native_state=details['native_state']) if 'native_state' in details else {}),
                 result_status=result.get('status','unobserved'),diagnostic=result.get('diagnostic'),
+                **(dict(public_result=details['public_result']) if 'public_result' in details else {}),
                 metrics=metrics[:8],metrics_omitted_count=max(0,len(metrics)-8),
                 outputs=outputs[:8],outputs_omitted_count=max(0,len(outputs)-8),
                 **(dict(native_originals_index=native_pages[0],recovery_note='Appended original terminal facts; the prior sealed scientific conclusion is unchanged.') if native_pages else {}),
