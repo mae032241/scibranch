@@ -32,6 +32,10 @@
 
 `--per-file` 会重复启动解释器与session fixture，不作为默认全目录执行方式；安装组禁止该选项。数据/进程用例显式标记 `stress`/`process_e2e`。collect-only也会导入测试，不视为无成本静态检查。
 
+五项生命周期缺陷的专项回归可直接运行 `python scripts/verify_lifecycle_fixes.py`，默认依次执行 `test_instance_delete.py`、`test_fork_consumer_recovery.py`、`test_remote_runner_recovery.py` 各自的 source/process，共六个小批次。`--list` 只静态列出范围，不导入 pytest；`--case delete|fork|remote` 可选择其中一组。脚本从自身位置定位仓库，可在其他工作目录使用绝对脚本路径调用；所有批次使用同一个 Python 解释器与现有 `scripts/run_tests.py` 默认资源限制，首个失败即停止，不自动重试。
+
+默认日志目录为仓库内 `.trial/lifecycle-validation-<UTC时间>-<随机后缀>`；`--output .trial/<新目录>` 可指定仓库内的新目录，相对路径以仓库根目录为基准，既有目录拒绝覆盖。每批保留 `runner.log` 和 `guard/` 原始证据，聚合 `summary.json` 记录命令、退出码、原始 guard 结果及未运行批次。只有退出码为 0、guard 报告 passed 且清理完成才通过；Ctrl-C/TERM 会转交现有 guard 并等待收尾。这是五项专项回归，不是功能全量、真实模型 Worker、solver 或 SSH 验收。
+
 ## 资源与支持边界
 
 `scripts/run_tests.py` 现有RSS、可用内存采样和超时止损不是内核聚合硬内存限制。安装与功能分组不能替代资源隔离；是否具备资源域隔离须由具体运行环境证明，不能从测试通过推断。
