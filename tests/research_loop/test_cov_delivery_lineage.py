@@ -67,6 +67,85 @@ def managed_scene(tmp_path, *, alias_correct=True, rewrite_script=True, launcher
     return root, nodes, first, second, script, source_p, model_p
 
 
+def current_managed_scene(tmp_path,monkeypatch):
+    """Real current public-runner calls through the shipped native launch callback."""
+    import importlib.util
+    from cov_execution import receipt as cov_receipt
+    from scidiscovery.research_loop import execution,experiment_client,experiments,worker_execution_bridge as bridge
+    from test_default_native_local_execution import actual_native
+    from test_worker_execution_hash_free import PUBLIC_CLI,PUBLIC_RUNNER
+    actual=actual_native()
+    public=tmp_path/'public';harness=public/'environment/harness';harness.mkdir(parents=True)
+    audit_harness=public/'harness';audit_harness.mkdir()
+    (public/'instruction.md').write_text('Inert public receipt and delivery transport; no scientific efficacy claim.')
+    for name,text in dict(exp_cli=PUBLIC_CLI,runner=PUBLIC_RUNNER).items():
+        (harness/(name+'.py')).write_text(text)
+    for name in ('train.csv','val.csv'):(harness/name).write_text('fixture\n')
+    root=tmp_path/'instance'
+    meta=dict(mode='ok',control_path=str(root/'settings.json'),hidden_path=str(tmp_path/'private-never-mounted'))
+    c.write(harness/'meta.json',meta)
+    for name in ('runner.py','train.csv','val.csv','meta.json'):shutil.copyfile(harness/name,audit_harness/name)
+    (audit_harness/'exp_cli.py').write_text(FAKE_HARNESS)
+    adapter=descriptor(root,public)
+    # The production scientific callback keeps this declared host-path alias
+    # inside its namespace; the resolver must use that exact frozen prefix.
+    adapter['config']['namespace_runs']=str(root/'runs')
+    controller.prepare(root,public/'instruction.md',public,['fake-no-model'],max_tokens=100000,max_seconds=300,max_steps=12,
+        model='fixture',reasoning_effort='high',search_policy=None,
+        node_budget_policy={role:dict(max_observed_tokens=2000,max_seconds=60) for role in 'HWAE'},
+        delivery_policy=delivery_policy(adapter),
+        history_observer=dict(contract_version=2,adapter=str(Path(cov_lineage.__file__).absolute()),
+            config=dict(runs='runs',calls='project/nodes',evaluation_key='covshift-public-val-v1')))
+    (root/'runs').mkdir();(root/'submission').mkdir()
+    finish(root,1,'H',[],action='experiment')
+    job=c.build_job(root,2,'W',[1],instruction='Exact scientific question');work=c.workspace(root,2)
+    record=execution.origin(root,2)
+    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json'),budget_slice=budget.accept_node(root,job)))
+    # The production callback freezes the native home and exact source/runner,
+    # then runs the actual installed sandbox inside its bwrap mounts. No model.
+    repo=Path(__file__).resolve().parents[2]
+    spec=importlib.util.spec_from_file_location('current_cov_launcher',repo/'scripts/acceptance/rootless_cov_launcher.py')
+    launcher=importlib.util.module_from_spec(spec);spec.loader.exec_module(launcher)
+    receipt_path=str(Path(cov_receipt.__file__).resolve())
+    settings=dict(scene_root=str(root),public_root=str(public),runs_dir=str(root/'runs'),submission_dir=str(root/'submission'),
+        native=str(actual),code_mode_host=dict(path=str(actual.parent/'codex-code-mode-host')),
+        task_python=sys.executable,scid_python=sys.executable,runtime_paths=list(dict.fromkeys([sys.prefix,sys.base_prefix,receipt_path])),
+        profile='delivery-transport-no-model',model='fixture',reasoning_effort='high',_worker_science_view=True,
+        cov_engineering_check_reserve_seconds=0)
+    monkeypatch.setenv('THIN_HWA_JOB_MANIFEST',str(root/'jobs/002.json'));monkeypatch.setenv('THIN_HWA_ROLE','W')
+    home=root/'host-runtime/delivery-scientific-home'
+    launcher.prepare_home(settings,work,home)
+    path=work/'work/experiment-config.json'
+    environment=dict(EXP_RUN_DIR=str(root/'runs'),EXP_RUNNER=str(harness/'runner.py'),EXP_TRAIN=str(harness/'train.csv'),
+        EXP_VAL=str(harness/'val.csv'),EXP_META=str(harness/'meta.json'))
+    with bridge._environment(environment):
+        cov_lineage.configure(root,2,[sys.executable,'-I',str(harness/'exp_cli.py')],root/'runs',path,receipt_channel='public_runner_main')
+    configuration=experiment_client.resolve(path,c.read(path))
+    launch=launcher.backend_launcher(settings,work,home,[(receipt_path,receipt_path)])
+    source=work/'train.py'
+    def diagnostics(reply):
+        tails=[]
+        for call in experiments.Records(configuration).calls()[-2:]:
+            error=call/'stderr.raw'
+            if error.is_file():tails.append(error.read_bytes()[-8192:].decode(errors='replace'))
+        return reply,tails
+    with bridge.serve(work/bridge.SUBMISSION_DIRECTORY,path,work,launch=launch,environment=environment) as slot:
+        source.write_text("print('inert P; no training')\n")
+        first_reply=bridge.client(slot,['run','--script',str(source),'--new-plan'])
+        assert first_reply['code']==0 and first_reply['result']['status']=='known_success',diagnostics(first_reply)
+        calls=experiments.Records(configuration).calls()
+        first=cov_lineage._completed(calls[-1])
+        source_p=source.read_bytes();model_p=Path(first['model']['path']).read_bytes()
+        source.write_text("print('inert Q; no training')\n")
+        second_reply=bridge.client(slot,['run','--script',str(source),'--parent-plan',first_reply['result']['candidate_id']])
+        assert second_reply['code']==0 and second_reply['result']['status']=='known_success',diagnostics(second_reply)
+        calls=experiments.Records(configuration).calls()
+        second=cov_lineage._completed(calls[-1])
+    finish(root,2,'W',[1],preserve_native_intent=True)
+    nodes=[dict(step=step,seal_sha256=c.digest(c.host_record(c.workspace(root,step))/'result-identity.json')) for step in (1,2)]
+    return root,nodes,first,second,source,source_p,model_p
+
+
 @pytest.mark.process_e2e
 def test_real_resolver_uses_p_archives_after_same_script_model_and_calls_change(tmp_path):
     root, nodes, first, _, script, source_p, model_p = managed_scene(tmp_path)

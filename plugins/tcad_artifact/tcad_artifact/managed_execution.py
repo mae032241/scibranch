@@ -76,43 +76,26 @@ def _verify_proof(original, context=None):
 
 
 def _write_original(path, value):
-    if path.exists():
+    try:
+        e.write(path, value)
+    except FileExistsError:
         if json.loads(e.read(path)) != value:
             raise e.IntegrityError('TCAD retained original changed')
-    else:
-        e.write(path, value)
 
 
 def _copy_original(descriptor, target, context):
+    from scidiscovery.research_loop import atomic_files
     if target.exists() or target.is_symlink():
         _verify_descriptor(descriptor.model_copy(update={'local_path': str(target)}), context)
         target.chmod(0o440)
         return
-    partial = target.with_name('.' + target.name + '.partial')
-    if partial.exists() or partial.is_symlink():
-        if partial.resolve() != partial or not partial.is_file():
-            raise e.IntegrityError('TCAD retention partial is not an original regular file')
-        partial.chmod(0o600)
-    digest, size = hashlib.sha256(), 0
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-    with Path(descriptor.local_path).open('rb') as source, os.fdopen(os.open(partial, flags, 0o600), 'wb') as output:
-        while True:
-            context.remaining_seconds()
-            block = source.read(1024 * 1024)
-            if not block:
-                break
-            size += len(block)
-            if size > descriptor.size_bytes:
-                raise e.IntegrityError('TCAD original exceeds its declared identity')
-            digest.update(block)
-            output.write(block)
-        if (digest.hexdigest(), size) != (descriptor.sha256, descriptor.size_bytes):
-            raise e.IntegrityError('TCAD original changed during retention')
-        output.flush()
-        os.fsync(output.fileno())
-    context.remaining_seconds()
-    os.chmod(partial, 0o440)
-    os.replace(partial, target)
+    if target.resolve() != target or Path(descriptor.local_path).resolve() != Path(descriptor.local_path):
+        raise e.IntegrityError('Exact TCAD regular original required')
+    try:
+        atomic_files.copy_original(descriptor.local_path, target, sha256=descriptor.sha256,
+            size_bytes=descriptor.size_bytes, mode=0o440, context=context)
+    except ValueError as exc:
+        raise e.IntegrityError('TCAD original changed during retention') from exc
 
 
 class TCADManagedExecution:
@@ -488,8 +471,7 @@ class TCADManagedExecution:
                 external = response['run_id']
                 self._binding(call, prepared, external)
                 self.records.bind_external(call, external, response['state'])
-                state = self.cancel_original(call)
-                yield dict(call_id=call, status=state, external_run_id=external,
+                yield dict(call_id=call, status=response['state'], external_run_id=external,
                     note='Original job found; use its native terminal evidence, not a non-submission proof')
                 return
             if (response.get('found') is not False or response.get('retired') is not True

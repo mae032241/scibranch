@@ -58,8 +58,9 @@ compact previews and omitted-field diagnostics refer back to that retained file.
 
 With H search commitments, `prepare --candidate-extra-slots N` freezes the W
 nomination allowance (default 2). W's scientific `candidate_nominations` response
-declares one representative or an explained gap for every unwaived mechanism,
-including deferred and screened, plus at most N distinct extra alternatives.
+declares one representative or an explained gap for each unwaived mechanism in
+the frozen task scope, plus at most N distinct extra alternatives. Local W tasks
+cover only their assigned mechanisms; screen retains the global scope.
 Each representative names the actual H mechanism reference, exact registered
 candidate and scientific reason; sharing one model across mechanisms needs an
 explicit reason for each. Current-call originals use `{call_id, artifact}`;
@@ -70,8 +71,11 @@ No usable model is an explicit gap and does not prohibit partial or final result
 Only A's explicit waived disposition with a scientific negative or infeasibility
 reason exempts a mechanism; relative underperformance alone calls for deferral.
 
-The latest sealed W nominations supply the default comparison preview and a
-complete paginated nomination index with reasons and source conclusions. The
+The latest sealed W declaration for each mechanism supplies the comparison
+preview and paginated nomination index with its own original source. Local
+returns retain other mechanisms' prior representatives and gaps; new mechanisms
+remain pending without a synthesized global judgment. Extra alternatives come
+from the latest W declaration. The
 retained candidate pool, experiments and exact materials remain in their existing
 paginated indexes and delivery catalogue, without a nomination count limit.
 A may inspect and select any registered model using the existing recommendation
@@ -353,6 +357,15 @@ Protocol 23 accepts only soft node settings. Older protocols remain read-only;
 frozen hard settings are never silently changed to soft. A denied start
 advances the existing control journal to durable `FINAL` (`closeout_begin` mode
 `final`); it never reclassifies an ordinary A as final from the remaining balance.
+An ordinary A's explicit `finish` ends the run without delivery. Its explicit
+`deliver` consumes only that sealed author's exact candidate authorization, with
+no additional FINAL author. When selection policy is enabled, the ordinary A
+receives its frozen complete comparison catalogue before authoring its result;
+delivery verifies that same catalogue and all original qualification gates.
+Delivery failure or missing qualification retains the unresolved result without
+a new scientific author or automatic FINAL. Budget denial preserves the exact
+pending route; optional thinking shares use the ledger's effective total token
+authorization and are checked again before explicit budget increases can resume it.
 FINAL authorizes one exact original A through `final_a_return`, using accepted W
 evidence and preserving missing inputs. Insufficient, zero or exceeded shared
 token, time or step budgets cannot veto this A or its original authorized host
@@ -579,3 +592,5 @@ not operate existing host services, databases or external jobs.
 TCAD-specific promotion evidence is defined in the [qualification status](TCAD_QUALIFICATION_STATUS.md).
 
 See the [CLI guide](ROOTLESS_CLI.zh-CN.md), [installation](INSTALL.md) and [release scope](RELEASE.md).
+
+Adapter audit, smoke and scratch recovery requests contain staged candidate originals and the frozen scientific configuration, without the real delivery target. Only promote and confirm requests receive that target. This reduces unnecessary host information in the phase interface; same-user execution remains a soft boundary.

@@ -29,7 +29,7 @@ def schema():
         extras=rows(dict(candidate=candidate,reason=text)),gaps=rows(dict(mechanism_ref=text,reason=text)))
     return dict(type=['object','null'],properties=fields,required=list(fields),additionalProperties=False,
         description='W scientific comparison preview, separate from the complete result.candidates retention pool. '
-        'Each unwaived H mechanism, including deferred and screened, needs one representative or an explicit gap. '
+        'Each unwaived mechanism in the frozen candidate_nomination_mechanisms needs one representative or an explicit gap. Local tasks do not reassess other mechanisms; their prior declarations and gaps remain visible to A. '
         'Use a listed historical candidate reference, or {call_id,artifact} for an exact candidate declared in your current managed call. '
         'Explain retention and mechanism coverage; repeated use of one model across mechanisms needs a scientific reason for each. '
         'Extras are distinct alternatives within the frozen extra_slots allowance. Never invent a model to fill a gap. '
@@ -79,14 +79,14 @@ def require(root, job, payload):
     seen=set();representatives=set()
     for row in value['representatives']:
         ref=row['mechanism_ref'];candidate=row['candidate']
-        if ref not in required or ref in seen:repair('use each unwaived H mechanism exactly once as representative or gap')
+        if ref not in required or ref in seen:repair('use each assigned unwaived mechanism exactly once as representative or gap')
         if not isinstance(candidate,str) or candidate not in known:repair('locate each representative in the exact retained candidate pool')
         seen.add(ref);representatives.add(candidate)
     for row in value['gaps']:
         ref=row['mechanism_ref']
-        if ref not in required or ref in seen:repair('use each unwaived H mechanism exactly once as representative or gap')
+        if ref not in required or ref in seen:repair('use each assigned unwaived mechanism exactly once as representative or gap')
         seen.add(ref)
-    if seen!=required:repair('cover every unwaived H mechanism with a representative or an explained gap')
+    if seen!=required:repair('cover every assigned unwaived mechanism with a representative or an explained gap')
     extras=[]
     for row in value['extras']:
         candidate=row['candidate']
@@ -98,25 +98,35 @@ def require(root, job, payload):
 
 
 def project(records, state):
-    """Latest sealed W declaration; later A dispositions never rewrite its bytes."""
-    latest=next((row for row in reversed(records) if row['role']=='W'
-        and isinstance(row.get('candidate_nominations'),dict)),None)
+    """Latest sealed declaration per mechanism, retaining each original author."""
+    workers=[row for row in records if row['role']=='W'
+        and isinstance(row.get('candidate_nominations'),dict)]
+    latest=workers[-1] if workers else None
     mechanisms=state['mechanisms'] if state else {}
-    value=copy.deepcopy(latest['candidate_nominations']) if latest else dict(representatives=[],extras=[],gaps=[])
-    covered={row['mechanism_ref'] for row in [*value['representatives'],*value['gaps']]}
-    pending=[ref for ref,item in mechanisms.items() if item['status']!='waived' and ref not in covered]
+    declared={};sources={}
+    for worker in workers:
+        for kind in ('representatives','gaps'):
+            for row in worker['candidate_nominations'][kind]:
+                ref=row['mechanism_ref']
+                declared[ref]=(kind,copy.deepcopy(row))
+                sources[ref]=worker['step']
+    value=dict(representatives=[],extras=copy.deepcopy(latest['candidate_nominations']['extras']) if latest else [],gaps=[])
+    for kind,row in declared.values():value[kind].append(row)
+    pending=[ref for ref,item in mechanisms.items() if item['status']!='waived' and ref not in declared]
     waived=[dict(mechanism_ref=ref,reason=item['disposition']['reason'],source_a=item['disposition']['source_a'])
         for ref,item in mechanisms.items() if item['status']=='waived' and item.get('disposition')]
-    return dict(source_step=latest['step'] if latest else None,**value,pending_mechanisms=pending,waived=waived)
+    return dict(source_step=latest['step'] if latest else None,**value,pending_mechanisms=pending,waived=waived,
+        mechanism_sources=sources)
 
 
 def page_rows(value):
     rows=[]
     for kind in ('representatives','extras','gaps'):
         for item in value[kind]:
-            row=dict(kind=kind,source_step=value['source_step'],**item)
+            source_step=value.get('mechanism_sources',{}).get(item.get('mechanism_ref'),value['source_step'])
+            row=dict(kind=kind,source_step=source_step,**item)
             if 'candidate' in row:row['candidate_id']=row.pop('candidate')
-            row['original']=f'inputs/history/nodes/{value["source_step"]:03d}/0001.json'
+            row['original']=f'inputs/history/nodes/{source_step:03d}/0001.json'
             reason=row['reason'];row['reason']=reason.encode()[:512].decode('utf-8',errors='ignore')
             row['reason_truncated']=row['reason']!=reason
             rows.append(row)
@@ -134,4 +144,4 @@ def preview(value, index):
         extras=[dict(candidate_id=row['candidate']) for row in value['extras']],
         gaps=[row['mechanism_ref'] for row in value['gaps']],pending_mechanisms=value['pending_mechanisms'],
         distinct_candidate_count=len({row['candidate'] for row in [*value['representatives'],*value['extras']]}),
-        scope='W scientific nominations only. Read the nomination pages for reasons and gaps; the complete candidate index remains selectable by A.')
+        scope='Latest W scientific declaration per mechanism, with each original source retained. Other mechanisms keep their prior declarations or explicit pending gaps; no new global judgment is inferred. Read nomination pages for reasons; the complete candidate index remains selectable by A.')

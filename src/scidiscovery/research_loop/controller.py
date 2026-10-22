@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 import fcntl
 import os
+import stat
 from pathlib import Path
 import uuid
 
@@ -323,20 +325,43 @@ def _writer(root):
         yield
 
 
+_controller_writers = ContextVar('controller_writers', default=frozenset())
+
+
+def require_writer(root):
+    if (os.getpid(), str(Path(root).resolve())) not in _controller_writers.get():
+        raise RuntimeError('Original controller writer is required for audit recovery')
+
+
 @contextmanager
-def _local_writer(root):
+def _local_writer(root, *, descriptor=None):
     from .protocol import require_current
     require_current(root)
-    descriptor = os.open(root / "host-run.lock",
-        os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    owned = descriptor is None
+    if owned:
+        descriptor = os.open(root / "host-run.lock",
+            os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    else:
+        opened=os.fstat(descriptor);current=os.stat(root/'host-run.lock',follow_symlinks=False)
+        if (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino):
+            raise ValueError('Detached controller lost the original writer lock')
     try:
+        opened=os.fstat(descriptor);current=os.stat(root/'host-run.lock',follow_symlinks=False)
+        if (not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(current.st_mode)
+                or opened.st_nlink!=1 or current.st_nlink!=1
+                or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)):
+            raise ValueError('Original controller writer lock changed')
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise RuntimeError("This research loop already has a running controller") from error
-        yield
+        token = _controller_writers.set(_controller_writers.get() | {(os.getpid(), str(Path(root).resolve()))})
+        try:
+            yield
+        finally:
+            _controller_writers.reset(token)
     finally:
-        os.close(descriptor)
+        if owned:os.close(descriptor)
 
 
 @contextmanager
@@ -607,6 +632,8 @@ def _continue_wait(root, step, job, result, next_role, target):
 def _run(root, *, continue_wait=None):
     from .protocol import require_current
     require_current(root)
+    from . import candidate_audit
+    candidate_audit.settle_preflights(root)
     from . import fork_runtime
     fork = fork_runtime.bootstrap(root)
     if fork is not None:
@@ -895,9 +922,8 @@ def _run(root, *, continue_wait=None):
                 return _start_final_report(root, completed, step + 1, next_role or role, share_stop)
             return _finish(root, settings, 'role_budget_stop', completed, last, reason=share_stop)
         if next_role is None:
-            if settings.get('delivery_policy') is not None and result.get('next_action') in {'finish', 'deliver'}:
-                return _start_closeout(root, completed, step + 1, 'scientific_finish',
-                    authorization_step=step if result['next_action'] == 'deliver' else None)
+            if settings.get('delivery_policy') is not None and result.get('next_action') == 'deliver':
+                return _start_closeout(root, completed, step + 1, 'scientific_deliver', authorization_step=step)
             if result.get('next_action') == 'deliver':
                 return _finish(root, settings, 'delivery_unavailable', completed, last, reason='No frozen delivery policy')
             return _finish(root, settings, result["next_action"], completed, last,
@@ -1101,6 +1127,12 @@ def _resume_final(root, begin):
         return False
     first = max(begin['first_step'],max((int(path.stem) for path in (root/'jobs').glob('*.json')),default=0))+1
     cursor = begin['resume_cursor']
+    if cursor['source_refs'] and cursor['author_correction'] is None:
+        source_step = cursor['source_refs'][-1]['step']
+        source_job, source_result, _, _ = history.source_sequence(root, begin['source_cutoff'] + 1)[-1]
+        if role_share.reason(root, source_step, source_job, source_result, cursor['role'],
+                cursor['correction_request'], allow_repeat=source_result.get('next_action') == 'wait') is not None:
+            return False
     if not budget.task_step_available(root, first) or budget.node_admission(root,
             dict(step=first,role=cursor['role']),normal_resume_check=True) is not None:
         return False
@@ -1269,7 +1301,7 @@ def _start_closeout(root, cutoff, first_step, reason, *, export_only=False, auth
     if budget.closeout_state(root)['begin'] is not None:
         return _run_closeout(root)
     settings = configuration_updates.current(root)
-    if not export_only and settings.get('final_a_completion_policy') is not None:
+    if not export_only and authorization_step is None and settings.get('final_a_completion_policy') is not None:
         return _start_budget_closeout(root, cutoff, first_step, 'A', reason)
     if (root / 'jobs' / f'{first_step:03d}.json').exists():
         return _closeout_result(root, 'retained_job_conflict', reason='Closeout cannot replace a prepared scientific task', step=first_step)
@@ -1299,8 +1331,7 @@ def _start_closeout(root, cutoff, first_step, reason, *, export_only=False, auth
             delivery.preparation_failure(root, error.code, nodes)
             return _closeout_result(root, 'closeout_preparation_unavailable', reason=error.code)
         preparation = budget.snapshot(root)['advance_seconds'] - at
-        final = budget.final_a_barrier(root)
-        use_model = (final is not None and authorization_step == final['step']
+        use_model = (authorization_step is not None
                      or _closeout_funds(root, preparation_seconds=preparation, author_required=authorization_step is None)
                      or settings.get('final_a_completion_policy') is not None
                         and _closeout_funds(root, preparation_seconds=preparation))
@@ -1399,6 +1430,28 @@ def _repair_funds(root, *, limits=None):
         and budget.effective_max_steps(root)-budget.used_steps(root) >= 2+floor['steps'])
 
 
+def _run_direct_delivery(root, begin):
+    """Consume only the ordinary A's exact choice; failure grants no new science."""
+    from . import delivery
+    step=begin['authorization_step']
+    job=contracts.read(root/'jobs'/f'{step:03d}.json')
+    result=contracts.validate(contracts.workspace(root,step))
+    if job['role']!='A' or job.get('purpose') is not None or result['next_action']!='deliver' or step!=begin['source_cutoff']:
+        raise ValueError('Original direct delivery authorization changed')
+    try:
+        delivery.prepare_binding(root,job,result)
+    except delivery.PreparationUnavailable as error:
+        return _closeout_result(root,'closeout_preparation_unavailable',reason=error.code,step=step)
+    except delivery.DeliveryUnresolved as error:
+        return _closeout_result(root,'closeout_unresolved',reason=error.code,step=step)
+    delivered=_run_delivery_actions(root,job,result)
+    if delivered['status']=='delivery_reselect':
+        return _closeout_result(root,'delivery_rejected',reason=delivered.get('reason'),step=step)
+    if delivered.get('reason')=='final_author_required':
+        return _closeout_result(root,'closeout_budget_unavailable',reason='original_delivery_budget_unavailable',step=step)
+    return delivered
+
+
 def _run_closeout(root):
     from . import delivery,engineering
     begin = budget.closeout_state(root)['begin']
@@ -1413,6 +1466,8 @@ def _run_closeout(root):
     final = budget.final_a_barrier(root)
     if final is not None:
         return _collect_final_a(root, final)
+    if begin.get('authorization_step') is not None:
+        return _run_direct_delivery(root, begin)
     initial_repair=None
     first_job=root/'jobs'/f'{begin["first_step"]:03d}.json'
     from . import fork_runtime
@@ -1458,55 +1513,6 @@ def _run_closeout(root):
         original_route = fork['route']
         parents, instruction = original_route['parents'], original_route['instruction']
         author_request = original_route['author_correction']
-    direct_author = begin.get('authorization_step') is not None and repair is None
-    if direct_author and not budget.closeout_state(root)['actions'] and not _closeout_funds(root,
-            preparation_seconds=begin['preparation_seconds'], author_required=False):
-        if contracts.settings(root).get('final_a_completion_policy') is None:
-            return _closeout_result(root, 'closeout_budget_unavailable', step=begin['authorization_step'])
-        direct_author = False
-        parents = [begin['authorization_step']]
-    if direct_author:
-        step = begin['authorization_step']
-        job = contracts.read(root / 'jobs' / f'{step:03d}.json')
-        result = contracts.validate(contracts.workspace(root, step))
-        if job['role'] != 'A' or job.get('purpose') is not None or result['next_action'] != 'deliver' or step != begin['source_cutoff']:
-            raise ValueError('Original direct delivery authorization changed')
-        try:
-            delivery.prepare_binding(root, job, result)
-        except delivery.PreparationUnavailable as error:
-            repair=engineering.request(root,step)
-            if repair is None:return _closeout_result(root,'closeout_preparation_unavailable',reason=error.code,step=step)
-            try:engineering.admit(root,repair,begin['first_step'])
-            except engineering.RepairUnavailable as blocked:return _closeout_result(root,str(blocked),step=step)
-        except delivery.DeliveryUnresolved as error:
-            if error.code == 'selection_comparison_required':
-                instruction = ('The frozen candidate catalogue is ready. Compare relevant closeout.comparison alternatives by the same goal criteria '
-                    'in scientific_result. Explicitly name candidate_recommendation and explain its evidence; null supplies no delivery choice. '
-                    'The original A selection and limitations remain retained. Use deliver to authorize, finish to decline, audit or wait.')
-            else:
-                source = semantic._source(root, step)
-                author_request = dict(root=source, source=source, reason=error.code)
-                corrections = 1
-                instruction = ('Clarify the original unresolved delivery authorization: ' + error.code
-                    + '. Use deliver for exact adapter delivery, audit for qualification, finish to decline or wait. E extracts scientific evidence only.')
-        else:
-            delivered = _run_delivery_actions(root, job, result)
-            if delivered['status']=='delivery_engineering_error':
-                repair=engineering.request(root,step)
-                if repair is None:return delivered
-                try:engineering.admit(root,repair,begin['first_step'])
-                except engineering.RepairUnavailable as error:return _closeout_result(root,str(error))
-            elif delivered.get('reason') == 'final_author_required':
-                pass  # No original submission was accepted; the final A owns the next decision.
-            elif delivered['status'] != 'delivery_reselect':
-                return delivered
-            instruction = ('No original submission was accepted before the host budget boundary. Return the final scientific decision and retain missing work and limitations.'
-                if delivered.get('reason') == 'final_author_required' else
-                'The adapter failed audit before submission: ' + delivered.get('reason', '')
-                + '. Select another candidate with deliver, request audit, decline with finish or wait. The original budget remains binding.')
-        parents = sorted({step,repair['source']['step']}) if repair else [step]
-    # Normal audit/selection turns are bounded by the original shared budget.
-    # Only an invalid author decision consumes the separate correction allowance.
     last_step = max(begin['first_step'], budget.historical_step_limit(root))
     if contracts.settings(root).get('final_a_completion_policy') is not None:
         last_step += 1  # A preserved unused repair may occupy the last granted slot.
@@ -1679,6 +1685,8 @@ def closeout(root, *, export_only=False):
     require_current(root)
     root = Path(root).resolve()
     with _writer(root), _inactive_on_error(root):
+        from . import candidate_audit
+        candidate_audit.settle_preflights(root)
         if budget.closeout_state(root)['begin'] is not None:
             return _closeout_result(root, 'exported_unsubmitted', reason='operator_export_only') if export_only else _run_closeout(root)
         from . import fork_runtime, originals

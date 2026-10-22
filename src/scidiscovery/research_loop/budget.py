@@ -290,8 +290,29 @@ def execution_grant(root, *, operation_context=None):
         return dict(owner=owner, **grants[owner['key']])
 
 
-def amend_execution_grant(root, *, allowance, authorization_note):
+@contextmanager
+def _operator_writer(root):
+    """Reuse this controller scope, or acquire its existing exclusive writer."""
+    from .controller import _writer, require_writer
+    try:
+        require_writer(root)
+    except RuntimeError:
+        with _writer(Path(root).resolve()):
+            yield
+    else:
+        yield
+
+
+def amend_execution_grant(root, *, allowance, authorization_note, operation_id=None):
+    with _operator_writer(root):
+        return _amend_execution_grant_locked(root, allowance=allowance,
+            authorization_note=authorization_note, operation_id=operation_id)
+
+
+def _amend_execution_grant_locked(root, *, allowance, authorization_note, operation_id=None):
     """Operator ceiling amendment, never an exact-call execution decision."""
+    from .controller import require_writer
+    require_writer(root)
     allowance = _resource_dimensions(allowance)
     if not isinstance(authorization_note, str) or not authorization_note.strip():
         raise ValueError('Execution resource amendment requires an operator decision')
@@ -299,11 +320,19 @@ def amend_execution_grant(root, *, allowance, authorization_note):
     root = Path(root).resolve(); settings = _resource_settings(root); owner = _resource_owner(settings)
     with _ledger_writer(root):
         events, parent, (grants, _) = _events(root, settings, resources=True)
+        if operation_id is not None:
+            prior = next((event for event in events if event['kind'] == 'resource_grant'
+                          and event.get('operation_id') == operation_id), None)
+            if prior is not None:
+                if prior['allowance'] != allowance or prior['owner'] != owner:
+                    raise ValueError('Execution resource amendment operation changed')
+                return dict(owner=owner, ref=_resource_ref(root, prior), allowance=allowance)
         previous = grants[owner['key']]
-        if previous['allowance'] == allowance:
+        if previous['allowance'] == allowance and operation_id is None:
             return dict(owner=owner, **previous)
         event = _append(root, settings, events, parent, kind='resource_grant', owner=owner,
-            previous_grant=previous['ref'], allowance=allowance, authorization_note=authorization_note)
+            previous_grant=previous['ref'], allowance=allowance, authorization_note=authorization_note,
+            **(dict(operation_id=operation_id) if operation_id is not None else {}))
         return dict(owner=owner, ref=_resource_ref(root, event), allowance=allowance)
 
 

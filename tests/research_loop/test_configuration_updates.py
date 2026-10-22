@@ -1,5 +1,8 @@
 """Operational edits bind new nodes without rewriting the research originals."""
 import copy
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import Context
+import threading
 
 import pytest
 
@@ -121,6 +124,97 @@ def test_model_only_pending_save_does_not_revert_intervening_budget_amendment(tm
     assert budget.snapshot(root)['max_tokens'] == 14000
 
 
+@pytest.mark.parametrize('final_tokens', [10000, 12000, 14000])
+def test_pending_budget_change_rejects_later_authorization_even_when_values_match(tmp_path, final_tokens):
+    root = instance(tmp_path)
+    document = updates.status(root)['configuration']
+    document['budget']['max_tokens'] = 12000
+    updates.submit(root, document, authorization_note='Queued comparison allowance')
+    original = updates.revisions(root)[0]
+    budget._amend_locked(root, max_tokens=14000, authorization_note='Independent newer allowance')
+    if final_tokens != 14000:
+        budget._amend_locked(root, max_tokens=final_tokens, authorization_note='Explicit later amount')
+    events, _ = budget._events(root, c.settings(root))
+    with pytest.raises(ValueError, match='budget conflicts.*reload'):
+        updates.bind_new_job(root, 1)
+    assert budget.ceilings(root)['max_tokens'] == final_tokens
+    assert budget._events(root, c.settings(root))[0] == events
+    assert updates.revisions(root)[0] == original
+    assert not (root / 'host-control/configuration/bindings/000001.json').exists()
+
+
+def test_model_edit_preserves_pending_budget_predecessor_after_cli_amendment(tmp_path):
+    root = instance(tmp_path)
+    document = updates.status(root)['configuration']
+    document['budget']['max_tokens'] = 12000
+    updates.submit(root, document, authorization_note='Original pending budget statement')
+    baseline = updates.revisions(root)[0]['budget_baseline']
+    budget._amend_locked(root, max_tokens=14000, authorization_note='Later CLI allowance')
+    edit(root, model='changed')
+    latest = updates.revisions(root)[-1]
+    assert latest['budget_baseline'] == baseline
+    assert latest['authorization_note'] == 'Original pending budget statement'
+    with pytest.raises(ValueError, match='budget conflicts'):
+        updates.bind_new_job(root, 1)
+    assert budget.ceilings(root)['max_tokens'] == 14000
+
+
+@pytest.mark.parametrize('change_model', [False, True])
+def test_explicit_new_statement_reauthorizes_same_pending_budget_after_conflict(tmp_path, change_model):
+    root = instance(tmp_path)
+    document = updates.status(root)['configuration']
+    document['budget']['max_tokens'] = 12000
+    updates.submit(root, document, authorization_note='Original queued allowance')
+    budget._amend_locked(root, max_tokens=14000, authorization_note='Independent newer allowance')
+    with pytest.raises(ValueError, match='budget conflicts'):
+        updates.bind_new_job(root, 1)
+    state = updates.status(root)
+    assert updates.submit(root, state['configuration'])['status'] == 'configuration_unchanged'
+    document = state['configuration']
+    if change_model:
+        document['agent']['model'] = 'explicitly-revised-model'
+    saved = updates.submit(root, document, expected_revision=state['revision'],
+        authorization_note='New decision: retain 12000 after reading the newer CLI allowance')
+    assert saved['revision'] == 2
+    assert updates.revisions(root)[-1]['budget_baseline'] == budget.authorization_revision(root)
+    updates.bind_new_job(root, 1)
+    assert budget.ceilings(root)['max_tokens'] == 12000
+
+
+def test_explicit_uncontested_budget_decrease_is_applied(tmp_path):
+    root = instance(tmp_path)
+    document = updates.status(root)['configuration']
+    document['budget']['max_tokens'] = 8000
+    updates.submit(root, document, authorization_note='Explicitly reduce remaining research scope')
+    updates.bind_new_job(root, 1)
+    assert budget.ceilings(root)['max_tokens'] == 8000
+
+
+def test_budget_bind_retry_recognizes_own_applied_operation_before_later_cli_change(tmp_path, monkeypatch):
+    root = instance(tmp_path)
+    document = updates.status(root)['configuration']
+    document['budget']['max_tokens'] = 12000
+    updates.submit(root, document, authorization_note='Queued budget allowance')
+    original_write = c.write
+
+    def interrupted_binding(path, value):
+        if path.parent.name == 'bindings':
+            raise InterruptedError('Crash after amendment before binding')
+        return original_write(path, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(c, 'write', interrupted_binding)
+        with pytest.raises(InterruptedError):
+            updates.bind_new_job(root, 1)
+    assert budget.ceilings(root)['max_tokens'] == 12000
+    budget._amend_locked(root, max_tokens=14000, authorization_note='Later CLI ceiling')
+    events, _ = budget._events(root, c.settings(root))
+    updates.bind_new_job(root, 1)
+    assert budget.ceilings(root)['max_tokens'] == 14000
+    assert budget._events(root, c.settings(root))[0] == events
+    assert len([event for event in events if event.get('operation_id') == 'configuration-1']) == 1
+
+
 def test_step_generator_applies_pending_step_increase_before_old_limit(tmp_path):
     root = instance(tmp_path)
     document = updates.status(root)['configuration']
@@ -230,6 +324,161 @@ def test_model_only_edit_preserves_separate_execution_resource_amendment(tmp_pat
     updates.bind_new_job(root, 1)
     assert budget.execution_grant(root) == revised
     assert budget._events(root, c.settings(root))[0] == events
+
+
+@pytest.mark.parametrize('final_wall', [100, 120, 150])
+def test_resource_conflict_is_detected_before_any_queued_budget_change(tmp_path, final_wall):
+    root = resource_instance(tmp_path, enabled=True)
+    budget.execution_grant(root)
+    document = updates.status(root)['configuration']
+    document['budget']['max_tokens'] = 12000
+    document['executor']['resource_policy']['allowance']['wall_time_seconds'] = 120
+    updates.submit(root, document, authorization_note='Queued combined allowance adjustment')
+    budget.amend_execution_grant(root, allowance=dict(wall_time_seconds=150, max_storage_bytes=10000),
+        authorization_note='Later explicit resource allowance')
+    if final_wall != 150:
+        budget.amend_execution_grant(root, allowance=dict(wall_time_seconds=final_wall, max_storage_bytes=10000),
+            authorization_note='Explicit subsequent resource amount')
+    events, _ = budget._events(root, c.settings(root))
+    with pytest.raises(ValueError, match='execution resources conflict.*reload'):
+        updates.bind_new_job(root, 1)
+    assert budget.ceilings(root)['max_tokens'] == 10000
+    assert budget.execution_grant(root)['allowance']['wall_time_seconds'] == final_wall
+    assert budget._events(root, c.settings(root))[0] == events
+    assert not (root / 'host-control/configuration/bindings/000001.json').exists()
+
+
+def test_resource_bind_retry_uses_original_operation_after_later_grant_change(tmp_path, monkeypatch):
+    root = resource_instance(tmp_path, enabled=True)
+    budget.execution_grant(root)
+    document = updates.status(root)['configuration']
+    document['executor']['resource_policy']['allowance']['wall_time_seconds'] = 120
+    updates.submit(root, document, authorization_note='Queued execution resource adjustment')
+    original_write = c.write
+
+    def interrupted_binding(path, value):
+        if path.parent.name == 'bindings':
+            raise InterruptedError('Crash after resource amendment before binding')
+        return original_write(path, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(c, 'write', interrupted_binding)
+        with pytest.raises(InterruptedError):
+            updates.bind_new_job(root, 1)
+    assert budget.execution_grant(root)['allowance']['wall_time_seconds'] == 120
+    revised = budget.amend_execution_grant(root, allowance=dict(wall_time_seconds=150, max_storage_bytes=10000),
+        authorization_note='Later independent resource adjustment')
+    events, _ = budget._events(root, c.settings(root))
+    original_event = next(event for event in events if event.get('operation_id') == 'configuration-1-resources')
+    replay = budget.amend_execution_grant(root, allowance=dict(wall_time_seconds=120, max_storage_bytes=10000),
+        authorization_note='Queued execution resource adjustment', operation_id='configuration-1-resources')
+    assert replay['ref'] == budget._resource_ref(root, original_event)
+    with pytest.raises(ValueError, match='operation changed'):
+        budget.amend_execution_grant(root, allowance=dict(wall_time_seconds=121, max_storage_bytes=10000),
+            authorization_note='Cannot mutate an original operation', operation_id='configuration-1-resources')
+    updates.bind_new_job(root, 1)
+    assert budget.execution_grant(root) == revised
+    assert budget._events(root, c.settings(root))[0] == events
+    assert len([event for event in events if event.get('operation_id') == 'configuration-1-resources']) == 1
+
+
+def test_first_resource_seed_interruption_is_not_a_competing_authorization(tmp_path, monkeypatch):
+    root = resource_instance(tmp_path, enabled=False)
+    document = updates.status(root)['configuration']
+    document['executor']['resource_policy'] = dict(version=1, allowance=dict(wall_time_seconds=100, max_storage_bytes=10000))
+    updates.submit(root, document, authorization_note='Enable the original execution resource pool')
+    original_append = budget._append
+
+    def interrupted_amendment(*args, **fields):
+        if fields.get('operation_id') == 'configuration-1-resources':
+            raise InterruptedError('Crash after initial seed before operation receipt')
+        return original_append(*args, **fields)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(budget, '_append', interrupted_amendment)
+        with pytest.raises(InterruptedError):
+            updates.bind_new_job(root, 1)
+    assert budget.execution_grant(root)['allowance'] == document['executor']['resource_policy']['allowance']
+    updates.bind_new_job(root, 1)
+    events, _ = budget._events(root, c.settings(root))
+    grants = [event for event in events if event['kind'] == 'resource_grant']
+    assert len(grants) == 2
+    assert grants[0]['previous_grant'] is None
+    assert grants[1]['operation_id'] == 'configuration-1-resources'
+
+
+def test_resource_model_edit_does_not_rebase_pending_resource_authorization(tmp_path):
+    root = resource_instance(tmp_path, enabled=True)
+    document = updates.status(root)['configuration']
+    document['executor']['resource_policy']['allowance']['wall_time_seconds'] = 120
+    updates.submit(root, document, authorization_note='Original resource adjustment')
+    baseline = updates.revisions(root)[0]['resource_baseline']
+    budget.amend_execution_grant(root, allowance=dict(wall_time_seconds=150, max_storage_bytes=10000),
+        authorization_note='Later independent resource adjustment')
+    edit(root, model='changed')
+    assert updates.revisions(root)[-1]['resource_baseline'] == baseline
+    with pytest.raises(ValueError, match='execution resources conflict'):
+        updates.bind_new_job(root, 1)
+    assert budget.execution_grant(root)['allowance']['wall_time_seconds'] == 150
+
+
+@pytest.mark.parametrize('change_model', [False, True])
+def test_explicit_new_statement_reauthorizes_same_pending_resources_after_conflict(tmp_path, change_model):
+    root = resource_instance(tmp_path, enabled=True)
+    document = updates.status(root)['configuration']
+    document['executor']['resource_policy']['allowance']['wall_time_seconds'] = 120
+    updates.submit(root, document, authorization_note='Original queued resource allowance')
+    budget.amend_execution_grant(root, allowance=dict(wall_time_seconds=150, max_storage_bytes=10000),
+        authorization_note='Independent newer resource allowance')
+    with pytest.raises(ValueError, match='execution resources conflict'):
+        updates.bind_new_job(root, 1)
+    state = updates.status(root)
+    assert updates.submit(root, state['configuration'])['status'] == 'configuration_unchanged'
+    document = state['configuration']
+    if change_model:
+        document['agent']['model'] = 'explicitly-revised-model'
+    saved = updates.submit(root, document, expected_revision=state['revision'],
+        authorization_note='New decision: retain 120 after reading the newer CLI allowance')
+    assert saved['revision'] == 2
+    updates.bind_new_job(root, 1)
+    assert budget.execution_grant(root)['allowance']['wall_time_seconds'] == 120
+
+
+def test_external_resource_amendment_cannot_cross_composite_configuration_binding(tmp_path, monkeypatch):
+    root = resource_instance(tmp_path, enabled=True)
+    document = updates.status(root)['configuration']
+    document['budget']['max_tokens'] = 12000
+    document['executor']['resource_policy']['allowance']['wall_time_seconds'] = 120
+    updates.submit(root, document, authorization_note='One combined queued declaration')
+    ready, competed = threading.Event(), threading.Event()
+    original_amend = budget._amend_execution_grant_locked
+
+    def pause_resource_apply(*args, **kwargs):
+        if kwargs.get('operation_id') == 'configuration-1-resources':
+            ready.set()
+            assert competed.wait(timeout=5), 'Resource competitor did not reach the controller boundary'
+        return original_amend(*args, **kwargs)
+
+    def competing_operator():
+        assert ready.wait(timeout=5), 'Configuration did not reach its resource amendment'
+        try:
+            with pytest.raises(RuntimeError, match='running controller'):
+                budget.amend_execution_grant(root, allowance=dict(wall_time_seconds=150, max_storage_bytes=10000),
+                    authorization_note='Concurrent independent CLI-equivalent adjustment')
+        finally:
+            competed.set()
+
+    monkeypatch.setattr(budget, '_amend_execution_grant_locked', pause_resource_apply)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        # A fresh context cannot borrow the binding thread's writer marker.
+        competitor = executor.submit(Context().run, competing_operator)
+        updates.bind_new_job(root, 1)
+        competitor.result(timeout=10)
+    assert budget.ceilings(root)['max_tokens'] == 12000
+    assert budget.execution_grant(root)['allowance']['wall_time_seconds'] == 120
+    budget.amend_execution_grant(root, allowance=dict(wall_time_seconds=150, max_storage_bytes=10000),
+        authorization_note='Explicit later retry after configuration binding completed')
+    assert budget.execution_grant(root)['allowance']['wall_time_seconds'] == 150
 
 
 def test_unchanged_file_only_plugin_configuration_is_not_reopened_for_model_edit(tmp_path, monkeypatch):

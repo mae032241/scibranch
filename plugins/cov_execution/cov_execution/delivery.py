@@ -317,9 +317,11 @@ def _current_guard(request):
         from scidiscovery.research_loop import protocol
         host=Path(protocol.__file__).resolve()
     except ImportError:
-        checkout=Path(__file__).resolve().parents[3]
-        candidate=checkout/'src/scidiscovery/research_loop/protocol.py'
-        if (checkout/'pyproject.toml').is_file() and candidate.is_file():host=candidate
+        parents=Path(__file__).resolve().parents
+        if len(parents)>3:
+            checkout=parents[3]
+            candidate=checkout/'src/scidiscovery/research_loop/protocol.py'
+            if (checkout/'pyproject.toml').is_file() and candidate.is_file():host=candidate
     source=host if host is not None else Path('/inputs/scid-current-protocol')
     source=_exact(source)
     if source!=host:
@@ -470,7 +472,7 @@ def isolate(request, adapter):
         if Path(path).exists():args += ['--ro-bind', path, path]
     args += ['--ro-bind', str(stage / 'inputs'), '/inputs', '--ro-bind', adapter, '/delivery.py']
     phase = request['phase']
-    if phase != 'replay':target(request['target'])
+    if phase not in {'audit','smoke','replay'}:target(request['target'])
     args += ['--bind' if phase in {'audit', 'resolve', 'smoke', 'replay'} else '--ro-bind', str(stage / 'scratch'), '/scratch']
     if phase == 'resolve':
         for scope in request['source_roots']:

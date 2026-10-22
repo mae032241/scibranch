@@ -20,6 +20,9 @@ def capture_pending(root, job):
     if path.exists():return q._ref(root,path)
     try:
         return _capture_pending(root,job)
+    except BlockingIOError:
+        # A live writer is a retryable sealing boundary, never missing evidence.
+        raise
     except (OSError,ValueError,KeyError,TypeError) as error:
         return q._save(root,path,dict(version=1,job=q._ref(root,root/'jobs'/f'{job["step"]:03d}.json'),
                 contract=authority.contract(root,job),attempts=[],allocations=[],calls_namespace=[],complete=False,
@@ -60,6 +63,8 @@ def _capture_pending(root, job):
                 requests.setdefault(value['call_id'], []).append(q._ref(root, item))
         attempts = []
         for record in execution.records(root, job['step']):
+            from . import worker_execution_bridge
+            worker_execution_bridge.stopped(record,execution.identity(root,job['step'],len(attempts)))
             proofs = {}
             for name in ('native-intent.json', 'native-outcome.json', 'runner-process.json', 'native-process.json'):
                 if (record / name).exists():
@@ -327,7 +332,8 @@ class _RecoveryAdmission:
             if not (c.host_record(c.workspace(self.root,step))/'result-identity.json').exists():break
             sources.append(history._source(self.root,step))
         state=search.fold(self.root,sources,recovery_refs=execution_recovery.prefix(self.root,budget.historical_step_limit(self.root)+1))
-        current=search._breadth(self.root,state,c.settings(self.root)['search_policy'],None)
+        from . import configuration_updates
+        current=search._breadth(self.root,state,configuration_updates.for_job(self.root,self.job)['search_policy'],None)
         actual=breadth.admit(current,binding['mechanism_ref'],self.config['scope'],[])
         if actual!=binding:raise ValueError('Original scientific opportunity is no longer eligible; no new opportunity was granted')
 

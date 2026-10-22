@@ -5,10 +5,11 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import budget, candidate_audit, contracts as c, delivery, shortlist
+from scidiscovery.research_loop import budget, candidate_audit, contracts as c, controller, delivery
 from test_candidate_audit import _seal_existing
-from test_closeout_protocol import NATIVE, command, scene
+from test_closeout_protocol import command, scene
 from test_control_selection import scene as selection_scene
+from test_delivery import failure_diagnostics
 
 
 @pytest.mark.process_e2e
@@ -61,67 +62,57 @@ def test_accepted_audit_without_policy_still_counts_and_projects_unknown(tmp_pat
     assert not (root/'host-delivery/leaf-output').exists()
 
 
-AUTHOR=r'''import json,os,pathlib,sys
-args=sys.argv[1:];sys.stdin.read()
-work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE'])
-root=pathlib.Path(os.environ['THIN_HWA_JOB_MANIFEST']).parents[1]
-task=json.loads((work/'science-task.json').read_text())
-assert not (root/'submission/model.pkl').exists()
-table=task['closeout']['comparison']
-assert 'default' not in table and len(table['rows'])==3
-chosen='run-3' if ALTERNATIVE else 'run-2'
-comparison=dict(rows=[dict(candidate_id=r['candidate_id'],key_risk='Fixture public evidence only',decision='keep' if r['candidate_id']==chosen else 'replace') for r in table['rows']],
- rationale='Original W observation supports the explicit choice',evidence_steps=[2])
-payload=dict(summary='Compare frozen policy screen',scientific_result='Bounded public choice; target performance remains unknown.',limitations=['Fixture only'],
- implementation_selection=None,search_review=None,progress_assessment=None,decision_request=None,portfolio_review=None,
- next_action='deliver',route_reason='Explicit choice after policy screening',candidate_recommendation=chosen,candidate_comparison=comparison)
-if isinstance(payload.get('candidate_recommendation'),str):payload['selection_explanation']=dict(criteria='Compare the declared public fixture evidence and retain its stated limitations.',criteria_change=dict(status='unchanged',prior_criteria=None,changes=None,evidence=None,accepted_tradeoffs=None))
-pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))
-print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))),flush=True)
-'''
-
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('alternative',[False,True])
-def test_ordinary_deliver_with_selection_policy_cannot_bypass_frozen_comparison(tmp_path,alternative):
-    launcher=tmp_path/'author.py';launcher.write_text('ALTERNATIVE='+repr(alternative)+'\n'+AUTHOR)
-    root=selection_scene(tmp_path,launcher=[sys.executable,str(launcher)],author_action='deliver')
-    result=command(root,'run')
-    assert result['status']=='delivery_confirmed',result
-    assert result['last_confirmed']['candidate_id']==('run-3' if alternative else 'run-2')
-    jobs=[c.read(p) for p in sorted((root/'jobs').glob('*.json'))]
-    assert [j['role'] for j in jobs]==['H','W','A','A']
-    assert jobs[2].get('purpose') is None and jobs[3]['purpose']=='closeout'
-    assert jobs[3]['selection']==shortlist.marker(root) and jobs[3].get('author_correction') is None
-    assert not list((root/'host-delivery/selection').rglob('*.intent.json')) and len(budget.closeout_state(root)['actions'])==2
-    assert c.read(c.workspace(root,3)/'science-task.json')['delivery_selection']
-    assert command(root,'run')['status']=='delivery_confirmed'
-    assert len(list((root/'jobs').glob('*.json')))==4
-
-
-@pytest.mark.process_e2e
-def test_ordinary_deliver_without_selection_policy_requires_one_explicit_final_choice(tmp_path):
-    launcher=tmp_path/'author.py'
-    launcher.write_text("SCENARIO="+repr([dict(action='deliver',candidate='run-2')])+"\nFIRST_STEP=4\n"+NATIVE)
-    root=selection_scene(tmp_path,policy=None,launcher=[sys.executable,str(launcher)],author_action='deliver')
+@pytest.mark.parametrize('policy',[None,{'version':2}])
+def test_ordinary_deliver_retains_exact_author_and_choice_without_final(tmp_path,policy):
+    launcher=tmp_path/'author.py';launcher.write_text("raise AssertionError('No new scientific author is authorized')\n")
+    root=selection_scene(tmp_path,policy=policy,launcher=[sys.executable,str(launcher)],author_action='deliver')
     originals={path:path.read_bytes() for path in (root/'jobs/003.json',root/'native-evidence/003/science-output.json',
         root/'native-evidence/003/result-identity.json',c.workspace(root,2)/'artifacts/train.py')}
     assert c.read(root/'native-evidence/003/science-output.json')['candidate_recommendation']=='run-3'
-    assert not budget.closeout_state(root)['actions'] and not (root/'submission/model.pkl').exists()
+    if policy:
+        job=c.read(root/'jobs/003.json');task=c.read(c.workspace(root,3)/'science-task.json')
+        assert job['selection']['normal_step']==3
+        assert {row['candidate_id'] for row in task['delivery_comparison']['rows']}=={'run-1','run-2','run-3'}
     result=command(root,'run')
-    assert result['status']=='delivery_confirmed' and result['last_confirmed']['candidate_id']=='run-2',result
+    assert result['status']=='delivery_confirmed' and result['last_confirmed']['candidate_id']=='run-3',(result,failure_diagnostics(root))
     jobs=[c.read(path) for path in sorted((root/'jobs').glob('*.json'))]
-    assert [job['role'] for job in jobs]==['H','W','A','A']
-    assert all(job.get('purpose') is None for job in jobs[:3]) and jobs[3]['final_only']
-    assert 'selection' not in jobs[3] and shortlist.marker(root) is None
-    assert 'comparison' not in c.read(c.workspace(root,4)/'science-task.json')['closeout']
-    assert not list((root/'host-delivery/selection').rglob('*.intent.json'))
+    assert [job['role'] for job in jobs]==['H','W','A']
+    assert all(job.get('purpose') is None for job in jobs) and budget.final_a_barrier(root) is None
+    assert budget.closeout_state(root)['begin']['authorization_step']==3
     actions=budget.closeout_state(root)['actions']
     assert [row['intent']['action_kind'] for row in actions]==['submit','confirm']
-    assert all(row['intent']['decision']['step']==4 and row['intent']['binding']['candidate_id']=='run-2' for row in actions)
+    assert all(row['intent']['decision']['step']==3 and row['intent']['binding']['candidate_id']=='run-3' for row in actions)
     source=actions[0]['intent']['binding']['source']
     assert source['objects']['source.py']['sha256']==c.digest(c.workspace(root,2)/'artifacts/train.py')
-    assert source['objects']['artifact']['sha256']==c.digest(root/'runs/model-2.pkl')
+    assert source['objects']['artifact']['sha256']==c.digest(root/'runs/model-3.pkl')
     assert all(path.read_bytes()==raw for path,raw in originals.items())
     assert command(root,'run')['status']=='delivery_confirmed' and budget.closeout_state(root)['actions']==actions
-    assert all(path.read_bytes()==raw for path,raw in originals.items()) and not (root/'jobs/005.json').exists()
+    assert all(path.read_bytes()==raw for path,raw in originals.items()) and not (root/'jobs/004.json').exists()
+
+
+@pytest.mark.process_e2e
+def test_ordinary_finish_declines_delivery_without_final_or_submit(tmp_path):
+    launcher=tmp_path/'author.py';launcher.write_text("raise AssertionError('No new scientific author is authorized')\n")
+    root=selection_scene(tmp_path,launcher=[sys.executable,str(launcher)],author_action='finish')
+    original=(root/'native-evidence/003/science-output.json').read_bytes()
+    assert command(root,'run')['status']=='finish'
+    assert budget.closeout_state(root)['begin'] is None and not budget.closeout_state(root)['actions']
+    assert budget.final_a_barrier(root) is None and not (root/'jobs/004.json').exists()
+    assert not (root/'submission/model.pkl').exists()
+    assert command(root,'run')['status']=='finish'
+    assert (root/'native-evidence/003/science-output.json').read_bytes()==original
+
+
+@pytest.mark.process_e2e
+def test_ordinary_delivery_preparation_failure_retains_author_without_new_final(tmp_path,monkeypatch):
+    root=selection_scene(tmp_path,author_action='deliver')
+    monkeypatch.setattr(delivery,'prepare_binding',lambda *args:(_ for _ in ()).throw(delivery.DeliveryUnresolved('missing_exact_qualification')))
+    original=(root/'native-evidence/003/science-output.json').read_bytes()
+    result=controller.run(root)
+    assert result['status']=='closeout_unresolved' and result['reason']=='missing_exact_qualification'
+    assert not budget.closeout_state(root)['actions'] and budget.final_a_barrier(root) is None
+    assert not (root/'jobs/004.json').exists() and not (root/'submission/model.pkl').exists()
+    assert controller.run(root)['status']=='closeout_unresolved'
+    assert (root/'native-evidence/003/science-output.json').read_bytes()==original

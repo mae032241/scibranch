@@ -8,26 +8,31 @@ import subprocess
 import pytest
 from execution_fixtures import execution_registry
 from scidiscovery.research_loop import budget,contracts as c,delivery
-from test_cov_delivery_lineage import managed_scene
+from test_cov_delivery_lineage import managed_scene,current_managed_scene
 from test_delivery import accepted,closeout_decision
 
 
 @pytest.mark.process_e2e
 def test_real_isolated_resolve_audit_promote_and_confirm(tmp_path,monkeypatch,execution_registry):
-    root,nodes,first,*_=managed_scene(tmp_path)
-    settings=(root/'settings.json').read_bytes();phases=[]
+    root,nodes,first,*_=current_managed_scene(tmp_path,monkeypatch)
+    settings=(root/'settings.json').read_bytes();phases=[];resolved=[]
     original=delivery._call
     def observe(spec,request,seconds,**kwargs):
         phases.append(request['phase'])
+        if request['phase'] in {'audit','smoke'}:assert 'target' not in request
+        elif request['phase'] in {'promote','confirm'}:assert request['target']==spec['target']
         proof=next(p for p in request['inputs'] if p['label']=='scid-current-protocol')
         staged=Path(request['stage'])/'inputs/scid-current-protocol'
         assert c.digest(staged)==proof['sha256'] and staged.stat().st_size==proof['size_bytes']
         assert request['scope']['handoff_protocol']==CURRENT
-        return original(spec,request,seconds,**kwargs)
+        response=original(spec,request,seconds,**kwargs)
+        if request['phase']=='resolve' and isinstance(response,dict):
+            resolved.extend({key:item.get(key) for key in ('candidate_id','status','reason')} for item in response.get('items',[])[:8])
+        return response
     monkeypatch.setattr(delivery,'_call',observe)
     refs=delivery.freeze_sources(root,nodes)
     chosen=next(item for item in refs['items'] if item['candidate_id']==first['candidate_id'])
-    assert chosen['status']=='audit_pending'
+    assert chosen['status']=='audit_pending', ({key:value for key,value in chosen.items() if key not in {'objects','source','row'}},resolved)
     _,_,bound=closeout_decision(root,refs,recommendation=first['candidate_id'])
     submit=accepted(root,bound)
     result=delivery.invoke(root,submit,20)

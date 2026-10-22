@@ -1,14 +1,14 @@
-"""Frozen role token shares derived from sealed meters; routing only, no new balance.
+"""Role token shares of the effective authorization derived from sealed meters; routing only, no new balance.
 
 Optional H/A thinking is refused once its reported exploration usage reaches
-the frozen share, or when
+the configured share of the current total authorization, or when
 the same role repeats without new sealed W/E evidence or an audit receipt.
 Required reviews stay legal: A after W, A after an audit receipt, control
 correction review and closeout.
 """
 from __future__ import annotations
 
-from . import contracts as c, execution
+from . import budget, contracts as c, execution
 
 DEFAULT = dict(version=1, min_w_share=.65, max_thinking_share=.35, thinking_node_target_tokens=250_000)
 THINKING = ('H', 'A')
@@ -70,7 +70,7 @@ def reason(root, step, job, result, role, correction_request=None, *, allow_repe
         return None
     if not allow_repeat and job['role'] == role and not (job.get('formal_review') or result.get('next_action')=='formal_review'):
         return 'role_repeat_without_evidence'
-    meter, total = usage(root, step), c.settings(root, job)['max_tokens']
+    meter, total = usage(root, step), budget.ceilings(root)['max_tokens']
     if meter['thinking'] >= limits['max_thinking_share'] * total:
         return 'role_share_thinking_reached'
     if meter['thinking'] + meter['E'] >= (1 - limits['min_w_share']) * total:
@@ -89,4 +89,4 @@ def effective_route(root, step, result, job, route, *, allow_repeat=False):
     if code is None:
         return (*route, None)
     # Insufficient allocation never authorizes another scientific task.
-    return None, [], '', None, current_h, current_w, None, None, code
+    return (*route, code)

@@ -639,7 +639,11 @@ def run_native(root: Path, step: int, attempt=0):
         error = exc
         stop = 'native_error_unknown'
     finally:
-        scientific_lifetime.close()
+        try:
+            scientific_lifetime.close()
+        except (OSError,ValueError,RuntimeError) as bridge_error:
+            error=error or bridge_error
+            cleanup='cleanup_unknown';stop='cleanup_unknown'
         if process is not None:
             try:
                 if process_id is not None and runtime.process_matches(process_id, process_id['task_sha256']):
@@ -653,7 +657,8 @@ def run_native(root: Path, step: int, attempt=0):
                     os.killpg(process_id['pgid'], signal.SIGKILL)
                 process.wait(timeout=5)
             if process_id is not None:
-                cleanup = runtime.cleanup_owned_group(process_id)
+                native_cleanup = runtime.cleanup_owned_group(process_id)
+                cleanup = 'cleanup_unknown' if cleanup=='cleanup_unknown' else native_cleanup
                 if cleanup == 'cleanup_unknown':
                     stop = 'cleanup_unknown'
             if job.get('experiment_mode')=='local' and job['role']=='W':

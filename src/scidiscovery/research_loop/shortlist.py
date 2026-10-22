@@ -21,8 +21,12 @@ def configured(root):
     return policy(value) if value is not None else None
 
 
-def _directory(root, before_step=None, *, repair_step=None):
+def _directory(root, before_step=None, *, repair_step=None, normal_step=None):
     from . import engineering
+    if normal_step is not None:
+        path=root/'host-delivery/selection/nodes'/f'{normal_step:03d}'
+        if path.resolve()!=path:raise ValueError('Control selection original location changed')
+        return path
     if repair_step is None:
         repaired=engineering.steps(root,before_step)
         if repaired:
@@ -74,6 +78,26 @@ def screen(root, begin, before_step=None):
     return None
 
 
+def bind_normal(root, job):
+    """Freeze the exact comparison input before an ordinary A sees its task."""
+    from . import history
+    directory=_directory(root,normal_step=job['step'])
+    path=directory/'shortlist.json'
+    computed=dict(selection.shortlist(selection.public_inputs(history.rebuild(root,job['step'],write_cache=False))),
+        source_nodes=job['history']['nodes'])
+    if path.exists():
+        if c.read(c.regular(path))!=computed:raise ValueError('Ordinary A comparison input changed')
+    else:_save(path,computed)
+    final=directory/'screen.json'
+    frozen=dict(version=2,public_view_version=3,shortlist_sha256=c.digest(path),source_nodes=computed['source_nodes'],
+        rows=[dict(member,smoke=dict(status='not_run',note='explicit_candidate_required'),
+            audit=dict(status='not_run',note='read_exact_candidate_audit_receipts')) for member in computed['members']])
+    if final.exists():
+        if c.read(c.regular(final))!=frozen:raise ValueError('Ordinary A comparison catalogue changed')
+    else:_save(final,frozen)
+    return dict(version=2,sha256=c.digest(final),normal_step=job['step'])
+
+
 def marker(root,before_step=None):
     directory=_directory(root,before_step)
     path = directory/'screen.json'
@@ -87,7 +111,7 @@ def marker(root,before_step=None):
 
 def _screen(root, mark, *, job=None):
     if mark.get('version') != 2:raise ValueError('Unsupported frozen candidate catalogue marker')
-    directory = _directory(root,repair_step=mark.get('repair_step',0))
+    directory = _directory(root,repair_step=mark.get('repair_step',0),normal_step=mark.get('normal_step'))
     path = directory / 'screen.json'
     source=None
     if job is not None and job.get('fork_source'):
@@ -112,6 +136,10 @@ def _screen(root, mark, *, job=None):
     value = c.read(path)
     if value.get('version') != 2 or value.get('public_view_version') != 3:
         raise ValueError('Unsupported frozen candidate catalogue')
+    if mark.get('normal_step') is not None and job is not None:
+        owner_job=originals.source_job(source) if source is not None else job
+        if mark['normal_step']!=owner_job['step'] or value.get('source_nodes')!=owner_job['history']['nodes']:
+            raise ValueError('Ordinary A catalogue differs from its exact scientific input')
     original=directory/'shortlist.json'
     if source is not None:
         original=originals.resolve_ref(source,dict(path=original.relative_to(root).as_posix(),sha256=value['shortlist_sha256']))

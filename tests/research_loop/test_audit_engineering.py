@@ -268,12 +268,18 @@ def test_ordinary_unresolved_selection_still_requires_its_author(tmp_path,search
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('fault',['packing','timeout'])
 def test_control_rebuilds_exact_archives_without_model_copy_or_new_science(tmp_path,monkeypatch,fault):
-    root,_,nodes=prepare_fixture(tmp_path);refs=delivery.freeze_sources(root,nodes)
+    root,_,nodes=prepare_fixture(tmp_path)
+    try:refs=delivery.freeze_sources(root,nodes)
+    except delivery.DeliveryUnresolved as error:
+        from test_delivery import failure_diagnostics
+        pytest.fail(str((error.code,failure_diagnostics(root))))
     _,_,bound=closeout_decision(root,refs)
     intent=accepted(root,bound);before=budget.used_steps(root)
     original=delivery._call;phases=[]
     def initial_pack_error(spec,request,seconds,**kwargs):
         phases.append(request['phase'])
+        if request['phase']=='audit':assert 'target' not in request
+        elif request['phase']=='promote':assert request['target']==spec['target']
         if phases==['audit'] and fault=='packing':
             (Path(request['stage'])/'inputs/source.py').unlink()
         return original(spec,request,.001 if phases==['audit'] and fault=='timeout' else seconds,**kwargs)

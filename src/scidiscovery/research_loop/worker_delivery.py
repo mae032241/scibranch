@@ -48,6 +48,8 @@ def writers_stopped(root,job,record):
     from . import runtime
     number=execution.records(root,job['step']).index(record)
     identity=execution.identity(root,job['step'],number)
+    from . import worker_execution_bridge
+    worker_execution_bridge.stopped(record,identity)
     for name in ('runner-process.json','native-process.json'):
         path=record/name
         if path.exists():

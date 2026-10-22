@@ -164,9 +164,14 @@ def _child(root, operation_id, descriptor):
         if (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino):
             raise ValueError('Detached controller lost the original writer lock')
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with lease(root), controller._inactive_on_error(root):
+        with lease(root), controller._local_writer(root,descriptor=descriptor), controller._inactive_on_error(root):
             with budget._ledger_writer(root):
                 value = _read(root, operation_id)
+                current_process=value.get('process')
+                if (value.get('operation_id')!=operation_id or value.get('kind')!='controller'
+                        or current_process is not None and (current_process.get('pid')!=os.getpid()
+                            or not runtime.process_matches(current_process,operation_id))):
+                    raise ValueError('Detached controller lost its original operation identity')
                 if value['status'] not in {'accepted', 'running'}:
                     return
                 value.update(status='running', process=runtime.process_identity(os.getpid(), operation_id))

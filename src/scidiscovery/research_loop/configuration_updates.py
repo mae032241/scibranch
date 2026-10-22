@@ -170,6 +170,14 @@ def status(root):
                 settings=settings, active_settings=active)
 
 
+def _resource_authorization_revision(root, events):
+    from . import budget
+    # Initial seeding only materializes the frozen grant; later grants revise it.
+    changes = [event for event in events if event['kind'] == 'resource_grant'
+               and (event.get('previous_grant') is not None or event.get('operation_id') is not None)]
+    return budget._resource_ref(root, changes[-1]) if changes else None
+
+
 def submit(root, configuration, *, base=None, expected_revision=None,
            authorization_note=None):
     """Validate and queue a complete declaration using optimistic concurrency."""
@@ -179,6 +187,7 @@ def submit(root, configuration, *, base=None, expected_revision=None,
         raise ValueError('Research configuration must be an object')
     if authorization_note is not None and not isinstance(authorization_note, str):
         raise ValueError('Configuration update note must be text')
+    explicit_authorization = bool(authorization_note and authorization_note.strip())
     with _writer(root):
         values = revisions(root)
         if expected_revision is not None and (type(expected_revision) is not int or expected_revision != len(values)):
@@ -186,7 +195,14 @@ def submit(root, configuration, *, base=None, expected_revision=None,
         settings = research_config.validate_update(root, configuration, base=base)
         document = research_config.to_document(root, settings)
         previous = editable(root)
-        if settings == previous:
+        state = status(root)
+        events, _ = budget._events(root, c.settings(root))
+        budget_baseline = budget.authorization_revision(root)
+        resource_baseline = _resource_authorization_revision(root, events)
+        reauthorized = bool(explicit_authorization and values and state['pending'] and (
+            values[-1].get('budget_changes') and values[-1].get('budget_baseline') != budget_baseline
+            or values[-1].get('resource_change') and values[-1].get('resource_baseline') != resource_baseline))
+        if settings == previous and not reauthorized:
             return dict(status(root), status='configuration_unchanged')
         revision = len(values) + 1
         directory = _directory(root) / 'contracts' / f'{revision:06d}'
@@ -205,7 +221,6 @@ def submit(root, configuration, *, base=None, expected_revision=None,
             # preserves the same still-pending budget adjustment.
             authorization_note = values[-1]['authorization_note']
         changed = {key: settings[key] for key in ('max_tokens', 'max_seconds', 'max_steps') if settings[key] != before[key]}
-        state = status(root)
         active_resource = copy.deepcopy(state['active_settings'].get('execution_resource_policy'))
         if active_resource is not None:
             accounting = budget.execution_accounting(root)
@@ -217,12 +232,20 @@ def submit(root, configuration, *, base=None, expected_revision=None,
         if changed:
             budget._validate_amendment(root, **changed, authorization_note=authorization_note,
                                       authorization_statement=authorization_note)
+        if values and state['pending'] and not explicit_authorization:
+            # A model-only edit keeps the original pending authorization, rather
+            # than silently rebasing its older amounts onto an intervening CLI edit.
+            if all(settings[key] == previous[key] for key in ('max_tokens', 'max_seconds', 'max_steps')):
+                budget_baseline = values[-1].get('budget_baseline')
+            if settings.get('execution_resource_policy') == previous.get('execution_resource_policy'):
+                resource_baseline = values[-1].get('resource_baseline')
         path = _directory(root) / 'revisions' / f'{revision:06d}.json'
         predecessor = (_reference(root, values[-1]) if values else
                        dict(path='settings.json', sha256=c.digest(c.regular(root / 'settings.json'))))
         predecessor.pop('revision', None)
         row = dict(version=1, revision=revision, predecessor=predecessor, settings=settings,
                    configuration=document, budget_changes=changed, resource_change=resource_changed,
+                   budget_baseline=budget_baseline, resource_baseline=resource_baseline,
                    authorization_note=(authorization_note or '').strip())
         staged = path.with_suffix('.pending')
         c.write(staged, row)
@@ -242,7 +265,7 @@ def bind_new_job(root, step):
     """
     from . import budget
     root = Path(root).resolve()
-    with _writer(root):
+    with budget._operator_writer(root), _writer(root):
         path = root / 'jobs' / f'{step:03d}.json'
         if path.exists():
             job = c.read(c.regular(path))
@@ -255,18 +278,34 @@ def bind_new_job(root, step):
         previously_bound = {(_reservation(root, int(path.stem))['configuration_revision'] or {}).get('revision', 0)
                             for path in (_directory(root) / 'bindings').glob('*.json')}
         if values and values[-1]['revision'] not in previously_bound:
-            settings = values[-1]['settings']
-            before = budget.snapshot(root)
-            # Only totals explicitly changed by this save amend the shared ledger.
-            # An intervening separate amendment must survive model-only edits.
-            changed = {key: amount for key, amount in values[-1].get('budget_changes', {}).items() if amount != before[key]}
-            if changed:
-                budget._amend_locked(root, **changed, authorization_note=values[-1]['authorization_note'],
-                                     authorization_statement=values[-1]['authorization_note'],
-                                     operation_id=f'configuration-{values[-1]["revision"]}')
-            if values[-1].get('resource_change') and settings.get('execution_resource_policy') is not None:
+            row = values[-1]
+            settings = row['settings']
+            changed = row.get('budget_changes', {})
+            operation = f'configuration-{row["revision"]}'
+            resource_operation = operation + '-resources'
+            events, _ = budget._events(root, c.settings(root))
+            applied = next((event for event in events if event['kind'] == 'budget_amend'
+                            and event.get('operation_id') == operation), None)
+            resource_applied = next((event for event in events if event['kind'] == 'resource_grant'
+                                     and event.get('operation_id') == resource_operation), None)
+            # Check both predecessors before applying either part of this save.
+            # Matching numeric values do not erase a later operator decision.
+            if changed and applied is None and row.get('budget_baseline') != budget.authorization_revision(root):
+                raise ValueError('Pending configuration budget conflicts with a later amendment; reload and save the configuration')
+            if row.get('resource_change') and resource_applied is None and row.get('resource_baseline') != _resource_authorization_revision(root, events):
+                raise ValueError('Pending configuration execution resources conflict with a later amendment; reload and save the configuration')
+            if applied is not None and any(
+                    (applied.get('after_max_steps') if key == 'max_steps' else applied['after'][key]) != amount
+                    for key, amount in changed.items()):
+                raise ValueError('Configuration budget amendment operation changed')
+            if resource_applied is not None and resource_applied['allowance'] != (settings.get('execution_resource_policy') or {}).get('allowance'):
+                raise ValueError('Configuration execution resource amendment operation changed')
+            if changed and applied is None:
+                budget._amend_locked(root, **changed, authorization_note=row['authorization_note'],
+                                     authorization_statement=row['authorization_note'], operation_id=operation)
+            if row.get('resource_change') and settings.get('execution_resource_policy') is not None and resource_applied is None:
                 budget.amend_execution_grant(root, allowance=settings['execution_resource_policy']['allowance'],
-                    authorization_note=values[-1]['authorization_note'])
+                    authorization_note=row['authorization_note'], operation_id=resource_operation)
         binding = _directory(root) / 'bindings' / f'{step:06d}.json'
         c.write(binding, dict(step=step, configuration_revision=ref))
         binding.chmod(0o400)

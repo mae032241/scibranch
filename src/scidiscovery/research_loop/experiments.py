@@ -176,9 +176,8 @@ def proof(path, limit=None, *, context=None):
 
 
 def write(path, value):
-    with Path(path).open('x',encoding='utf-8') as stream:
-        json.dump(value,stream,ensure_ascii=False,sort_keys=True,allow_nan=False)
-        stream.write('\n');stream.flush();os.fsync(stream.fileno())
+    from . import atomic_files
+    atomic_files.publish_bytes(path, encoded(value))
 
 
 def registration(executor):
@@ -390,10 +389,17 @@ def scientific_result(config, accepted, completed, observation):
     return result
 
 
-def _diagnostic(error, fallback):
-    text=str(error)
-    # Exception strings are host diagnostics, never scientific source/data.
-    return fallback if re.search(r'[0-9a-fA-F]{64}',text) else text[:1024]
+def _diagnostic(error, fallback, *, config=None):
+    # Provider/validator exception text can contain arbitrary private paths and
+    # credentials. Keep the original only in the host diagnostic namespace.
+    if isinstance(config,dict) and isinstance(config.get('record_dir'),str):
+        try:
+            from . import contracts as c
+            directory=Path(config['record_dir']).parent/'execution-diagnostics'
+            if directory.resolve()!=directory:raise ValueError('Diagnostic namespace changed')
+            c.write(directory/(uuid.uuid4().hex+'.json'),dict(error=type(error).__name__,note=str(error)))
+        except (OSError,ValueError,TypeError):pass
+    return fallback
 
 
 def _candidate_view(config, value):
@@ -1607,11 +1613,13 @@ def main(argv=None):
         result['feedback']=dict(version=1,budget=feedback.budget_hint(work),
             review=review_feedback(feedback_config),
             qualification='Execution metadata does not establish scientific or candidate qualification.')
-    except ReviewRequired as error:result=dict(status='review_required',reason=_diagnostic(error,'Original execution review required'),accepted=False);code=2
-    except (IntegrityError,common.IntegrityError,feedback.history.ObserverIntegrityError) as error:result=dict(status='integrity_error',note=_diagnostic(error,'Execution original integrity check failed'));code=3
-    except OSError:result=dict(status='integrity_error',note='Execution original cannot be read');code=3
-    except (CommandOptionsError,common.CommandOptionsError) as error:result=dict(status='known_not_started',accepted=False,error='caller_error',note=_diagnostic(error,'Requested command options are unavailable'));code=2
-    except ValueError as error:result=dict(status='unavailable' if isinstance(error,(UnsupportedExecution,common.UnsupportedExecution)) else 'unresolved',note=_diagnostic(error,'Execution request could not be resolved'));code=2
+    except ReviewRequired as error:result=dict(status='review_required',reason=_diagnostic(error,'Original execution review required; request the declared review before continuing',config=feedback_config),accepted=False);code=2
+    except (IntegrityError,common.IntegrityError,feedback.history.ObserverIntegrityError) as error:result=dict(status='integrity_error',note=_diagnostic(error,'Execution original integrity check failed; preserve originals and report this call',config=feedback_config));code=3
+    except OSError as error:result=dict(status='integrity_error',note=_diagnostic(error,'Execution original cannot be read; preserve originals and report the unavailable input',config=feedback_config));code=3
+    except (CommandOptionsError,common.CommandOptionsError) as error:result=dict(status='known_not_started',accepted=False,error='caller_error',note=_diagnostic(error,'Requested command options are unavailable; check exp help for this command',config=feedback_config));code=2
+    except (CallerError,common.CallerError) as error:result=caller_feedback(error);code=2
+    except ValueError as error:result=dict(status='unavailable' if isinstance(error,(UnsupportedExecution,common.UnsupportedExecution)) else 'unresolved',note=_diagnostic(error,'Execution request could not be resolved; check declared inputs and preserve any original call',config=feedback_config));code=2
+    except Exception as error:result=dict(status='unknown',note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config));code=3
     finally:owner_lease.close()
     if args.command in {'run','query','lookup','collect','cancel','reconcile'}:
         from . import managed_wait

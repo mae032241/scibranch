@@ -280,7 +280,6 @@ def test_special_submission_slot_rejects_without_blocking(tmp_path,monkeypatch,r
 
 def test_concurrent_thin_clients_and_manual_overwrite_never_misbind(tmp_path,monkeypatch,remote_registry):
     from concurrent.futures import ThreadPoolExecutor
-    import threading
     from scidiscovery.research_loop import worker_execution_bridge as bridge
     root,_,config,_=case(tmp_path,monkeypatch)
     work=c.workspace(root,2);slot=work/bridge.SUBMISSION_DIRECTORY
@@ -291,19 +290,28 @@ def test_concurrent_thin_clients_and_manual_overwrite_never_misbind(tmp_path,mon
             description=pool.submit(bridge.client,slot,['describe','--key','opaque_input','--metadata','--output',str(work/'work/concurrent.json')])
             assert caps.result(timeout=5)['result']['contracts']
             assert description.result(timeout=5)['result']['key']=='opaque_input'
-        entered=threading.Event();release=threading.Event();execute=bridge._execute
-        def paused(server,arguments):
-            entered.set()
-            if not release.wait(5):raise AssertionError('Test scheduling gate timed out')
-            return execute(server,arguments)
-        monkeypatch.setattr(bridge,'_execute',paused)
+    # Install the barrier before the isolated receiver is forked. Its actual
+    # observation/release are files shared with the client, not thread memory.
+    entered=tmp_path/'receiver-entered';release=tmp_path/'receiver-release';execute=bridge._execute
+    def paused(server,arguments):
+        import time
+        entered.touch();deadline=time.monotonic()+5
+        while not release.exists():
+            if time.monotonic()>=deadline:raise AssertionError('Test scheduling gate timed out')
+            time.sleep(.01)
+        return execute(server,arguments)
+    monkeypatch.setattr(bridge,'_execute',paused)
+    with bridge.serve(slot,work/'work/experiment-config.json',work,launch=no_local_launch):
         with ThreadPoolExecutor(max_workers=1) as pool:
             waiting=pool.submit(bridge.client,slot,['capabilities'])
-            assert entered.wait(3)
+            import time
+            deadline=time.monotonic()+3
+            while not entered.exists() and time.monotonic()<deadline:time.sleep(.01)
+            assert entered.exists()
             request=c.read(slot/'submit.json')
             request['arguments']=['lineage-status']
             c.write(slot/'submit.json',request)
-            release.set()
+            release.touch()
             with pytest.raises(ValueError,match='response|slot'):
                 waiting.result(timeout=5)
         response=wait_submission(slot,request['submission_ref'],code=3)

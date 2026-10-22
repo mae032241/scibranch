@@ -16,6 +16,25 @@ from scidiscovery.research_loop import runtime
 from test_history_handoff import finish
 
 
+def failure_diagnostics(root):
+    """Bounded failed adapter diagnostics for pytest capture; no scientific bytes."""
+    directory=root/'host-delivery/leaf-output'
+    rows=[]
+    for path in sorted(directory.glob('*.json'))[-8:]:
+        value=c.read(path)
+        row={key:value.get(key) for key in ('operation_id','phase','outcome','returncode')}
+        streams=value.get('streams',{})
+        for key,proof in streams.items():
+            if 'stderr' not in key or not proof.get('path'):continue
+            # _keep owns the local diagnostic filenames; never follow arbitrary
+            # scientific paths or include settings, credentials or model data.
+            saved=directory/Path(proof['path']).name
+            if saved.is_file() and not saved.is_symlink():
+                row[key]=saved.read_bytes()[-8192:].decode(errors='replace')
+        rows.append(row)
+    return rows
+
+
 FAKE_HARNESS = '''import json,os,pathlib,shutil
 runs=pathlib.Path(os.environ['EXP_RUN_DIR'])
 row=json.loads((runs/'results.jsonl').read_text())
@@ -182,15 +201,15 @@ def test_delivery_tool_upgrade_preserves_scientific_input_checks(tmp_path,monkey
         delivery._adapter(tmp_path)
 
 
-@pytest.mark.parametrize('kind',['generic','cov'])
-def test_delivery_namespace_accepts_old_interpreter_metadata(tmp_path,monkeypatch,kind):
+@pytest.mark.parametrize('kind,phase',[('generic','confirm'),('cov','confirm'),('cov','audit'),('cov','smoke')])
+def test_delivery_namespace_accepts_old_interpreter_metadata(tmp_path,monkeypatch,kind,phase):
     from scidiscovery.research_loop import generic_delivery
     from scidiscovery.research_loop.protocol import CURRENT
     stage=tmp_path/'stage';(stage/'inputs').mkdir(parents=True);(stage/'scratch').mkdir()
     target=tmp_path/'target';target.mkdir()
     python=Path(sys.executable)
     proof=dict(label='runtime-python',invoked_path=str(python.absolute()),path=str(python.resolve()),sha256='0'*64)
-    request=dict(scope=dict(handoff_protocol=CURRENT),stage=str(stage),phase='confirm',inputs=[proof],
+    request=dict(scope=dict(handoff_protocol=CURRENT),stage=str(stage),phase=phase,inputs=[proof],
         source_roots=[],config=dict(python=str(python)),target={})
     if kind=='generic':
         module=generic_delivery
@@ -201,6 +220,7 @@ def test_delivery_namespace_accepts_old_interpreter_metadata(tmp_path,monkeypatc
         runs=target/'runs';runs.mkdir()
         submission=target/'submission';submission.mkdir()
         request['target']=dict(runs=str(runs),submission=str(submission))
+    if phase in {'audit','smoke'}:request.pop('target')
     commands=[]
     class NamespaceReady(Exception):pass
     def capture(program,arguments):
@@ -212,7 +232,11 @@ def test_delivery_namespace_accepts_old_interpreter_metadata(tmp_path,monkeypatc
     program,arguments=commands[0]
     assert program=='/qualified/bwrap' and '--unshare-net' in arguments
     assert arguments[arguments.index('--')+1]==str(python)
-    assert '--bind' not in arguments  # Confirmation preserves read-only delivery targets.
+    if phase=='confirm':
+        assert '--bind' not in arguments  # Confirmation preserves read-only delivery targets.
+    else:
+        assert '/target' not in arguments and str(target) not in arguments
+
 
 
 @pytest.mark.parametrize('invalid', ['missing', 'nan', 'zero_submit', 'negative_margin'])
@@ -423,3 +447,20 @@ def test_complete_internal_adapter_reply_is_spooled_without_byte_truncation(tmp_
     result=delivery._call(dict(launcher_argv=[sys.executable,str(script)],adapter=str(script)),
         dict(phase='resolve',operation_id='f'*64,items=rows),10)
     assert result==dict(items=rows) and len(delivery._bytes(result))>delivery.MAX_BYTES
+
+
+def test_staged_audit_and_recovery_inputs_omit_delivery_destination(tmp_path,monkeypatch):
+    original=tmp_path/'artifact';original.write_bytes(b'Exact retained scientific object')
+    proof=dict(sha256=c.digest(original))
+    spec=dict(inputs=[],config={'scientific_contract':'bounded audit'},target={'credential':'private-destination'})
+    source=dict(candidate_id='exact-candidate',objects={'artifact':proof},context={'kind':'scientific-result'})
+    monkeypatch.setattr(delivery,'_proof',lambda root,value:original)
+    monkeypatch.setattr(delivery,'_settings',lambda *args:dict(handoff_protocol=c.HANDOFF_PROTOCOL))
+    stage=tmp_path/'stage'
+    request=delivery._staged(tmp_path,spec,source,'same-operation',stage)
+    recovery=delivery._staged(tmp_path,spec,source,'same-operation',stage/'recovery-1')
+    assert 'target' not in request and 'target' not in recovery
+    assert 'private-destination' not in json.dumps([request,recovery])
+    assert request['candidate_id']==recovery['candidate_id']=='exact-candidate'
+    assert request['object_digests']==recovery['object_digests']=={'artifact':proof['sha256']}
+    assert (stage/'inputs/artifact').read_bytes()==(stage/'recovery-1/inputs/artifact').read_bytes()==original.read_bytes()

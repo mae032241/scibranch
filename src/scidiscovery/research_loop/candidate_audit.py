@@ -25,12 +25,9 @@ def _directory(root, step):
 
 
 def _save(path, value):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('x',encoding='utf-8') as stream:
-        json.dump(value,stream,ensure_ascii=False,allow_nan=False,sort_keys=True)
-        stream.write('\n');stream.flush()
-        os.fsync(stream.fileno())
-    path.chmod(0o400)
+    from . import atomic_files
+    payload = (json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True) + '\n').encode('utf-8')
+    atomic_files.publish_bytes(path, payload)
 
 
 def _decision(root, step):
@@ -47,13 +44,19 @@ def _operation(root, decision, candidate):
 def _validate_request(root, intent):
     decision = intent['decision']
     stored_fields = {'action_id', 'action_kind', 'operation_id', 'decision', 'candidate_id', 'max_seconds', 'advance_seconds'}
-    if (set(intent) - {'binding'} != stored_fields or intent['action_kind'] != 'audit'
+    if (set(intent) - {'binding','fence_protocol','owner'} != stored_fields or intent['action_kind'] != 'audit'
             or intent['operation_id'] != _operation(root, decision, intent['candidate_id'])
             or intent['action_id'] != intent['operation_id']
             or intent['max_seconds'] != configuration_updates.for_step(root, decision['step'])['delivery_policy']['submit_seconds']
             or type(intent['advance_seconds']) not in (int, float)
             or not math.isfinite(intent['advance_seconds']) or intent['advance_seconds'] < 0):
         raise ValueError('Candidate audit accepted budget or identity changed')
+    if intent.get('fence_protocol') is not None:
+        owner=intent.get('owner',{})
+        if (intent['fence_protocol']!=1 or owner.get('task_sha256')!=intent['operation_id']
+                or any(type(owner.get(key)) is not int or owner[key]<=0 for key in ('pid','start_ticks','pgid','sid'))
+                or not isinstance(owner.get('boot_id'),str)):
+            raise ValueError('Candidate audit dispatch owner changed')
     if (set(decision) != {'step','job_sha256','raw_sha256','seal_sha256'}
             or type(decision['step']) is not int or decision['step'] <= 0
             or any(not isinstance(decision[key],str) or len(decision[key]) != 64
@@ -153,6 +156,13 @@ def _outcome(root, step):
             validate_binding(root, dict(intent, binding=binding))
             if value['binding_sha256'] != c.digest(directory / 'binding.json'):
                 raise ValueError('Candidate audit binding receipt changed')
+        if value.get('recovery_sha256') is not None:
+            from . import audit_recovery
+            recovery_path=root/'host-delivery/audit-recovery'/intent['operation_id']/'outcome.json'
+            recovered=next((fact for row,fact in audit_recovery.facts(root) if row['operation_id']==intent['operation_id']),None)
+            if (recovered is None or not recovered['cleanup_confirmed'] or recovered['status']!='engineering_error'
+                    or c.digest(c.regular(recovery_path))!=value['recovery_sha256']):
+                raise ValueError('Candidate audit recovery original changed')
         result = value['result']
         expected_artifact = binding['source']['objects']['artifact']['sha256'] if value.get('binding_sha256') is not None else None
         if (result.get('operation_id') != intent['operation_id'] or result.get('candidate_id') != intent['candidate_id']
@@ -222,36 +232,73 @@ def public_receipt(root, ref):
                 artifact_scope='exact frozen artifact; does not establish target performance')
 
 
-def _settle_legacy_preflight(root,intent):
-    """Settle c5790ba's impossible-to-dispatch boundary, never replay its intent.
-
-    Its old closeout guard necessarily raised before staging or Popen for this
-    expanded source set. Absence of a process record alone is never sufficient.
-    New calls additionally freeze dispatch.json before entering the adapter.
-    """
-    job=c.read(c.regular(root/'jobs'/f'{intent["decision"]["step"]:03d}.json'))
+def mark_dispatch(root, job, operation):
+    """The atomic fence is durable before the audit adapter can have effects."""
+    if job is None:return
     directory=_directory(root,job['step'])
-    begin=budget.closeout_state(root)['begin']
-    if (job.get('purpose')!='closeout' or begin is None
-            or job['delivery_sources']==begin['delivery_sources']
-            or not {'intent.json','sources.json','binding.json'} <= {p.name for p in directory.iterdir()}
-            or any(p.name not in {'intent.json','sources.json','binding.json','adapter-result.json'} for p in directory.iterdir())
-            or (root/'host-delivery/audit-recovery'/intent['operation_id']).exists()
-            or any(delivery.leaf_output(root).glob(intent['operation_id']+'-*'))):
-        return False
-    binding=c.read(c.regular(directory/'binding.json'))
-    validate_binding(root,dict(intent,binding=binding))
-    result=dict(status='unavailable',note='candidate_audit_legacy_preflight_not_dispatched',cleanup_confirmed=True,
-        operation_id=intent['operation_id'],candidate_id=intent['candidate_id'],
-        artifact_sha256=binding['source']['objects']['artifact']['sha256'])
-    result_path=directory/'adapter-result.json'
-    if result_path.exists():
-        if c.read(c.regular(result_path))!=result:raise ValueError('Candidate audit preflight recovery changed')
-    else:_save(result_path,result)
-    _save(directory/'outcome.json',dict(decision=intent['decision'],candidate_id=intent['candidate_id'],accepted=True,
-        result=result,intent_sha256=c.digest(directory/'intent.json'),binding_sha256=c.digest(directory/'binding.json'),
-        result_sha256=c.digest(result_path),process_sha256=None,leaf_output=[]))
-    return True
+    path=directory/'intent.json'
+    if not path.exists():return
+    intent=c.read(c.regular(path))
+    if intent['operation_id']!=operation:return
+    validate_binding(root,dict(intent,binding=c.read(c.regular(directory/'binding.json'))))
+    _save(directory/'dispatch.json',_dispatch_binding(root,intent))
+
+
+def _preflight_absent(root, directory, intent):
+    # Absence only has meaning under the new durable-before-effects invariant.
+    return (intent.get('fence_protocol')==1
+        and not any((directory/name).exists() or (directory/name).is_symlink()
+            for name in ('dispatch.json','process.json'))
+        and not (root/'host-delivery/audit-recovery'/intent['operation_id']/'intent.json').exists()
+        and not any(delivery.leaf_output(root).glob(intent['operation_id']+'-*')))
+
+
+def _settle_preflight(root,intent):
+    """Only the exclusive new owner may settle a stopped owner's preflight."""
+    from . import controller,runtime
+    controller.require_writer(root)
+    directory=_directory(root,intent['decision']['step'])
+    with c.record_writer(directory,blocking=False,exclusive=True):
+        validate_intent(root,intent)
+        if runtime.process_matches(intent.get('owner',{}),intent['operation_id']):return False
+        from . import audit_recovery
+        recovered=audit_recovery.recover_preflight(root,intent['operation_id'])
+        if recovered is None and not _preflight_absent(root,directory,intent):return False
+        binding=c.read(c.regular(directory/'binding.json')) if (directory/'binding.json').exists() else None
+        result=dict(status='unavailable',note='candidate_audit_preflight_not_dispatched',cleanup_confirmed=True,
+            operation_id=intent['operation_id'],candidate_id=intent['candidate_id'],
+            artifact_sha256=binding['source']['objects']['artifact']['sha256'] if binding else None)
+        if recovered is not None:
+            if not recovered.get('cleanup_confirmed') or recovered.get('status')!='engineering_error':return False
+            result.update({key:recovered[key] for key in ('status','note','cleanup_confirmed')})
+        result_path=directory/'adapter-result.json'
+        if result_path.exists():
+            old=c.read(c.regular(result_path))
+            if (old.get('status') not in {'unavailable','engineering_error'} or old.get('cleanup_confirmed') is not True
+                    or any(old.get(key)!=result[key] for key in ('operation_id','candidate_id','artifact_sha256'))):
+                return False
+            result=old
+        else:_save(result_path,result)
+        _save(directory/'outcome.json',dict(decision=intent['decision'],candidate_id=intent['candidate_id'],accepted=True,
+            result=result,intent_sha256=c.digest(directory/'intent.json'),
+            binding_sha256=c.digest(directory/'binding.json') if binding else None,
+            result_sha256=c.digest(result_path),
+            process_sha256=c.digest(directory/'process.json') if (directory/'process.json').exists() else None,
+            leaf_output=delivery.leaf_refs(root,intent['operation_id']),
+            **(dict(recovery_sha256=c.digest(root/'host-delivery/audit-recovery'/intent['operation_id']/'outcome.json')) if recovered is not None else {})))
+        return True
+
+
+def settle_preflights(root):
+    """Owner recovery precedes admission; unknown dispatches remain blockers."""
+    from . import controller,audit_recovery
+    controller.require_writer(root)
+    for intent,outcome in facts(root):
+        if outcome is None:_settle_preflight(root,intent)
+    # Selection and delivery consumers can have retries without a candidate
+    # audit intent. Their pre-dispatch recovery uses the same exclusive owner.
+    for intent,outcome in audit_recovery.facts(root):
+        if outcome is None:audit_recovery.recover_preflight(root,intent['operation_id'])
 
 
 def _unavailable_input(root,job,chosen,rows):
@@ -270,6 +317,7 @@ def _unavailable_input(root,job,chosen,rows):
 def execute(root, job, payload):
     """Returns a blocking status, or None once an immutable receipt is available."""
     from .protocol import require_current
+    from . import runtime
     require_current(root,job)
     step, chosen = job['step'], payload.get('candidate_recommendation')
     if job!=c.read(c.regular(root/'jobs'/f'{step:03d}.json')):
@@ -280,7 +328,7 @@ def execute(root, job, payload):
         if previous['result']['note']=='candidate_audit_unchanged_originals_unavailable':return 'candidate_audit_originals_unavailable'
         return None if previous['result']['cleanup_confirmed'] else 'candidate_audit_unknown'
     if (directory / 'intent.json').exists():
-        if _settle_legacy_preflight(root,c.read(c.regular(directory/'intent.json'))):
+        if _settle_preflight(root,c.read(c.regular(directory/'intent.json'))):
             return None
         return 'candidate_audit_unknown'  # Never repeat an uncertain accepted call.
     if (root / 'pause.request').exists():
@@ -297,13 +345,13 @@ def execute(root, job, payload):
         result = result or dict(status=status, note=note, cleanup_confirmed=cleanup)
         if intent is not None and 'operation_id' not in result:
             result.update(operation_id=intent['operation_id'], candidate_id=chosen,
-                          artifact_sha256=binding['source']['objects']['artifact']['sha256'] if binding else None)
+                          artifact_sha256=binding['source']['objects']['artifact']['sha256'] if binding is not None and (directory/'binding.json').exists() else None)
         value = dict(decision=decision, candidate_id=chosen, accepted=intent is not None, result=result)
         if unavailable_input is not None:value['unavailable_input_sha256']=unavailable_input
         if intent is not None:
             _save(directory / 'adapter-result.json', result)
             value.update(intent_sha256=c.digest(directory / 'intent.json'),
-                         binding_sha256=c.digest(directory / 'binding.json') if binding is not None else None,
+                         binding_sha256=c.digest(directory / 'binding.json') if binding is not None and (directory/'binding.json').exists() else None,
                          result_sha256=c.digest(directory / 'adapter-result.json'),
                          process_sha256=c.digest(directory / 'process.json') if (directory / 'process.json').exists() else None,
                          leaf_output=(delivery.leaf_refs(root, resolved) if resolved else []) + delivery.leaf_refs(root, intent['operation_id']))
@@ -339,7 +387,8 @@ def execute(root, job, payload):
         return finish('unavailable', 'candidate_audit_reserve_unavailable')
     operation = _operation(root, decision, chosen)
     intent = dict(action_id=operation, action_kind='audit', operation_id=operation, decision=decision,
-                  candidate_id=chosen, max_seconds=policy['submit_seconds'], advance_seconds=budget.snapshot(root)['advance_seconds'])
+                  candidate_id=chosen, max_seconds=policy['submit_seconds'], advance_seconds=budget.snapshot(root)['advance_seconds'],
+                  fence_protocol=1,owner=runtime.process_identity(os.getpid(),operation))
     _validate_request(root,intent)
     require_eligibility(root,intent)
     budget.transition(root, 'advance', 'candidate_audit')
@@ -371,12 +420,17 @@ def execute(root, job, payload):
         _save(directory / 'binding.json', binding)
         def process(phase, identity):
             _save(directory / 'process.json', dict(operation_id=operation, phase=phase, identity=identity))
-        _save(directory / 'dispatch.json',_dispatch_binding(root,intent))
         result = delivery.invoke(root, dict(intent, binding=binding), policy['submit_seconds'],
                                  on_process=process, audit_only=True)
         return finish(result['status'], result['note'], cleanup=result['cleanup_confirmed'], result=result)
     except delivery.DeliveryUnresolved as error:
         return finish('unknown', error.code, cleanup=error.code != 'delivery_cleanup_unknown')
+    except Exception as error:
+        # A fence without a process receipt may already have crossed Popen.
+        c.write(directory/'diagnostic.json',dict(error=type(error).__name__,note=str(error)))
+        preflight=_preflight_absent(root,directory,intent)
+        return finish('engineering_error' if preflight else 'unknown',
+            'candidate_audit_preflight_failed' if preflight else 'candidate_audit_dispatch_unknown',cleanup=preflight)
 
 
 def collect_refs(root, sources, *, step, adjacent=None):

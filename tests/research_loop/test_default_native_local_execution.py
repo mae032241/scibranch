@@ -159,6 +159,8 @@ def _default_local_case(tmp_path, monkeypatch, directory, network_enabled, *, ex
     root=tmp_path/'instance'
     controller.prepare(root,objective,public,[str(fake)],max_tokens=10000,max_seconds=90,max_steps=4,
         model='no-model',reasoning_effort='high',search_policy=None,node_budget_mode='soft',
+        execution_config=(dict(executor='local_execution:command',
+            configuration=dict(run_argv=[sys.executable],max_seconds=3)) if lifecycle_exit else None),
         native_options=dict(network=network_enabled,
             sandbox_workspace_write=dict(exclude_tmpdir_env_var=exclude_tmpdir)))
     assert c.settings(root)['experiment_mode']=='local'
@@ -281,6 +283,10 @@ def _check_active_backend_shutdown(root,work,target):
         call=calls[0];accepted=(call/'accepted.json').read_bytes()
         identity=c.read(call/'process.json');identities=_process_tree(identity)
         assert len(identities)>1 and all(runtime.process_matches(item,item['task_sha256']) for item in identities)
+        from scidiscovery.research_loop import worker_execution_bridge
+        assert config['max_seconds']==3
+        with pytest.raises(BlockingIOError):
+            worker_execution_bridge.stopped(record,execution.identity(root,2))
         release.touch();original.join(timeout=15)
         assert not original.is_alive(),'Native cleanup did not finish'
         assert errors,'An early native exit cannot seal a scientific result'

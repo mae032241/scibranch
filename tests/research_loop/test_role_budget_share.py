@@ -150,11 +150,46 @@ def test_budget_refusal_never_substitutes_a_w_task(tmp_path, monkeypatch):
     begin = budget.closeout_state(root)['begin']
     assert final == [begin] and begin['mode'] == 'final'
     assert begin['stop_reason'] == 'role_share_thinking_reached' and begin['source_cutoff'] == 3
+    assert begin['resume_cursor']['role']=='H'
+    assert begin['resume_cursor']['parents']==[1,2,3]
     assert launched == [(1, 'H'), (2, 'W'), (3, 'A')]
     assert not (root / 'jobs/004.json').exists()
     before = list(launched)
     assert controller.run(root)['status'] == 'final_report'
     assert launched == before
+
+
+def test_role_share_uses_effective_amended_total_and_preserves_route(tmp_path):
+    root=scene(tmp_path)
+    seal(root,1,'H',[],action='experiment',plan=PLAN,tokens=100_000)
+    seal(root,2,'W',[1],findings=FINDINGS,tokens=500_000)
+    job,result=seal(root,3,'A',[1,2],action='revise_h',tokens=3_400_000)
+    route=('H',[1,2,3],'Retain the exact revision question',None,1,2,None,None)
+    assert role_share.effective_route(root,3,result,job,route)==(*route,'role_share_thinking_reached')
+    budget.amend(root,max_tokens=20_000_000,authorization_note='Explicit increase for the original route')
+    assert role_share.effective_route(root,3,result,job,route)==(*route,None)
+    budget.amend(root,max_tokens=10_000_000,authorization_note='Explicit decrease')
+    assert role_share.reason(root,3,job,result,'H')=='role_share_thinking_reached'
+
+
+def test_share_stop_resumes_exact_route_only_after_sufficient_explicit_increase(tmp_path,monkeypatch):
+    root=scene(tmp_path)
+    launched=drive(monkeypatch,{1:dict(action='experiment',plan=PLAN,tokens=100_000),
+        2:dict(findings=FINDINGS,tokens=500_000),3:dict(action='revise_h',tokens=3_400_000),
+        5:dict(action='wait',tokens=10)})
+    monkeypatch.setattr(controller,'_run_final',lambda root,begin:dict(status='final_report'))
+    assert controller.run(root)['status']=='final_report'
+    begin=budget.closeout_state(root)['begin']
+    assert begin['resume_cursor']['role']=='H'
+    # Increasing only steps cannot clear the thinking share threshold.
+    budget.amend(root,max_tokens=10_000_000,max_steps=13,authorization_note='Steps alone cannot clear thinking share',
+        authorization_statement='Allow one additional step')
+    assert controller.run(root)['status']=='final_report' and launched==[(1,'H'),(2,'W'),(3,'A')]
+    budget.amend(root,max_tokens=20_000_000,authorization_note='Explicit increase for retained revise_h')
+    assert controller.run(root)['status']=='wait'
+    resumed=c.read(root/'jobs/005.json')
+    assert resumed['role']=='H' and parents(resumed)==[1,2,3]
+    assert launched==[(1,'H'),(2,'W'),(3,'A'),(5,'H')]
 
 
 def test_controller_preserves_required_author_correction(tmp_path, monkeypatch):

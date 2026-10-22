@@ -6,6 +6,7 @@ budget. An accepted retry without its outcome is unknown and cannot be replayed.
 from __future__ import annotations
 
 import math
+import os
 import re
 
 from . import budget, contracts as c, configuration_updates
@@ -59,17 +60,48 @@ def blocked(root):
     return any(value is None or not value['cleanup_confirmed'] for _, value in facts(root))
 
 
+def recover_preflight(root, operation):
+    """Recover only a stopped retry which demonstrably never crossed its fence."""
+    from . import controller,delivery,runtime
+    from .candidate_audit import _save
+    controller.require_writer(root)
+    directory=root/'host-delivery/audit-recovery'/operation
+    path=directory/'intent.json'
+    if not path.exists():return None
+    with c.record_writer(directory,blocking=False,exclusive=True):
+        intent=next((row for row in intents(root) if row['operation_id']==operation),None)
+        if (intent is None or intent.get('fence_protocol')!=1
+                or runtime.process_matches(intent.get('owner',{}),operation)):
+            return None
+        outcome=directory/'outcome.json'
+        if outcome.exists():
+            return next(value for row,value in facts(root) if row['operation_id']==operation)
+        if (any((directory/name).exists() or (directory/name).is_symlink() for name in ('dispatch.json','process.json'))
+                or delivery.leaf_refs(root,operation)!=intent.get('leaf_output')
+                or intent.get('initial_result',{}).get('status')!='engineering_error'
+                or intent['initial_result'].get('cleanup_confirmed') is not True):
+            return None
+        result=dict(status='engineering_error',note='audit_recovery_preflight_not_dispatched',cleanup_confirmed=True)
+        _save(outcome,dict(intent_sha256=c.digest(path),process_sha256=None,**result))
+        return result
+
+
 def run(root, spec, source, request, seconds, *, on_process=None, author_required=True, job=None):
     from pathlib import Path
     import time
-    from . import budget, delivery, native
+    from . import budget, delivery, native, runtime
     from .candidate_audit import _save
     deadline = time.clock_gettime(time.CLOCK_BOOTTIME) + seconds
 
-    def call(item, callback):
+    def call(item, callback, *, retry=False):
         if deadline-time.clock_gettime(time.CLOCK_BOOTTIME)<=0:
             return dict(status='engineering_error',note='audit_transport_timeout',cleanup_confirmed=True)
         try:
+            if retry:
+                _save(directory/'dispatch.json',dict(intent_sha256=c.digest(intent_path),operation_id=request['operation_id']))
+            else:
+                from . import candidate_audit
+                candidate_audit.mark_dispatch(root,job,request['operation_id'])
             value = delivery._call(spec, dict(item, phase='audit'),
                 max(0, deadline-time.clock_gettime(time.CLOCK_BOOTTIME)), on_process=callback,
                 evidence=delivery.leaf_output(root))
@@ -117,14 +149,23 @@ def run(root, spec, source, request, seconds, *, on_process=None, author_require
     intent = dict(settings_sha256=c.digest(root/'settings.json'), operation_id=request['operation_id'], attempt=1,
         candidate_id=request['candidate_id'], artifact_sha256=request['artifact_sha256'],
         object_digests=request['object_digests'], reason=result['note'], max_seconds=min(remaining,limits['seconds_remaining']),
+        fence_protocol=1,owner=runtime.process_identity(os.getpid(),request['operation_id']),
+        initial_result=result,leaf_output=delivery.leaf_refs(root,request['operation_id']),
         advance_seconds=limits['advance_seconds'])
     if job is not None and job.get('configuration_revision') is not None:
         intent['configuration_revision'] = job['configuration_revision']
     _save(intent_path, intent)
     deadline=time.clock_gettime(time.CLOCK_BOOTTIME)+intent['max_seconds']
-    fresh = delivery._staged(root, spec, source, request['operation_id'], Path(request['stage'])/'recovery-1', job=job)
-    def process(phase, identity):
-        _save(directory/'process.json', dict(phase=phase, identity=identity))
-    result = call(fresh, process)
+    fresh=request
+    try:
+        fresh = delivery._staged(root, spec, source, request['operation_id'], Path(request['stage'])/'recovery-1', job=job)
+        def process(phase, identity):
+            _save(directory/'process.json', dict(phase=phase, identity=identity))
+        result = call(fresh, process, retry=True)
+    except Exception as error:
+        c.write(directory/'diagnostic.json',dict(error=type(error).__name__,note=str(error)))
+        preflight=not (directory/'dispatch.json').exists()
+        result=dict(status='engineering_error' if preflight else 'unknown',
+            note='audit_recovery_preflight_failed' if preflight else 'audit_recovery_dispatch_unknown',cleanup_confirmed=preflight)
     _save(outcome_path, dict(intent_sha256=c.digest(intent_path),process_sha256=c.digest(directory/'process.json') if (directory/'process.json').exists() else None, **result))
     return result, fresh, deadline

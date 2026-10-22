@@ -10,7 +10,7 @@ from scidiscovery.research_loop import (candidate_nominations as nominations,
     candidate_refs, cli, contracts as c, delivery, execution, experiments,
     generic_results, history, budget, search)
 from execution_fixtures import execution_registry
-from test_breadth_science import prepare, h, findings
+from test_breadth_science import prepare, h, a, findings
 from test_history_handoff import finish
 
 
@@ -200,3 +200,34 @@ def test_same_node_interface_identity_does_not_read_execution_results(tmp_path,e
     c.write(later/'native-intent.json',damaged)
     with pytest.raises(ValueError,match='continuation identity changed'):
         history._execution_interface(root,accepted)
+
+
+def test_local_worker_nominates_only_its_assigned_mechanism_and_keeps_other_gaps(tmp_path,monkeypatch):
+    root=prepare(tmp_path);h(root,labels=('P','Q'))
+    screen=c.build_job(root,2,'W',[1])
+    assert {row['mechanism_ref'] for row in screen['candidate_nomination_mechanisms']}=={'h001.m1','h001.m2'}
+    finish(root,2,'W',[1],mechanism_findings=findings('P',blocked=('Q',)))
+    a(root,3,[1,2],focus='h001.m1',mode='improve')
+    local=c.build_job(root,4,'W',[1,2,3])
+    assert [row['mechanism_ref'] for row in local['candidate_nomination_mechanisms']]==['h001.m1']
+    monkeypatch.setattr(history,'managed_calls',lambda *args:[])
+    value=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref='h001.m1',reason='Local observation remains missing')])
+    nominations.require(root,local,dict(candidate_nominations=value))
+    value['gaps'].append(dict(mechanism_ref='h001.m2',reason='This is outside the assigned task'))
+    with pytest.raises(ValueError,match='assigned'):
+        nominations.require(root,local,dict(candidate_nominations=value))
+
+
+def test_local_preview_retains_each_other_mechanism_original_and_gap():
+    global_value=dict(representatives=[dict(mechanism_ref='p',candidate='old-p',reason='Original p')],extras=[],
+        gaps=[dict(mechanism_ref='q',reason='Original missing q')])
+    local=dict(representatives=[dict(mechanism_ref='p',candidate='new-p',reason='Local p revision')],extras=[],gaps=[])
+    records=[dict(step=2,role='W',candidate_nominations=global_value),dict(step=4,role='W',candidate_nominations=local)]
+    state=dict(mechanisms={ref:dict(status='pending') for ref in ('p','q','r')})
+    value=nominations.project(records,state)
+    assert value['representatives']==local['representatives'] and value['gaps']==global_value['gaps']
+    assert value['pending_mechanisms']==['r']
+    rows=nominations.page_rows(value)
+    assert rows[0]['source_step']==4 and rows[0]['original']=='inputs/history/nodes/004/0001.json'
+    assert rows[1]['source_step']==2 and rows[1]['original']=='inputs/history/nodes/002/0001.json'
+    assert records[0]['candidate_nominations']==global_value and records[1]['candidate_nominations']==local

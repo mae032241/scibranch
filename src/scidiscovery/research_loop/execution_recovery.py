@@ -274,7 +274,7 @@ def sealed_pending_rows(root,sources):
         if (value['job']['sha256']!=seal['job_sha256'] or value['job']['path']!=f'jobs/{job["step"]:03d}.json'):
             raise history.ObserverIntegrityError('Pending execution metadata escaped its sealed source')
         for row in value['allocations']:
-            if row['disposition']!='possibly_prepared' or row['accepted'] is not None:continue
+            if row['disposition']!='possibly_prepared':continue
             allocation=c.read(originals.resolve_ref(originals.source_for_ref(source,row['allocation']),row['allocation']))
             if allocation['call_id']!=row['call_id'] or allocation['binding']['scope']['job_sha256']!=seal['job_sha256']:
                 raise history.ObserverIntegrityError('Unknown preparation lost its original allocation')
@@ -289,7 +289,7 @@ def _current_pending_sources(root):
         seal=c.read(c.regular(path,limit=None))
         if seal.get('pending_executions') is not None:
             result.append((dict(step=int(path.parent.name)),None,
-                {key:seal[key] for key in ('job_sha256','pending_executions')},None))
+                {key:seal[key] for key in ('job_sha256','pending_executions','observations') if key in seal},None))
     return result
 
 

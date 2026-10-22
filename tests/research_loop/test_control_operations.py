@@ -291,13 +291,22 @@ raise AssertionError('Killed starter returned')
 
 @pytest.mark.process_e2e
 def test_background_controller_survives_starter_and_serializes_duplicate_start(root, tmp_path):
+    from scidiscovery.research_loop import configuration_updates
+    state=configuration_updates.status(root)
+    document=state['configuration'];document['agent']['model']='detached-next-model'
+    configuration_updates.submit(root,document,expected_revision=state['revision'])
     # A process-only stand-in owns no scientific result, model or external call.
     shim = tmp_path / 'shim'
     shim.mkdir()
     (shim / 'sitecustomize.py').write_text('''
 import time
-from scidiscovery.research_loop import controller
+from scidiscovery.research_loop import controller,configuration_updates,candidate_audit,contracts
 def bounded_control(root):
+    controller.require_writer(root)
+    candidate_audit.settle_preflights(root)
+    revision=configuration_updates.bind_new_job(root,1)
+    job=contracts.build_job(root,1,'H',[])
+    assert job.get('configuration_revision')==revision
     (root / 'entered').touch()
     deadline = time.monotonic() + 15
     while not (root / 'release').exists() and time.monotonic() < deadline:
@@ -316,6 +325,8 @@ controller._run = bounded_control
         while not (root / 'entered').exists() and time.monotonic() < deadline:
             time.sleep(.02)
         assert (root / 'entered').exists()
+        assert contracts.read(root/'jobs/001.json')['configuration_revision']['revision']==1
+        assert configuration_updates.for_step(root,1)['model']=='detached-next-model'
         duplicate = controls.start_background(root)
         assert duplicate['operation_id'] == receipt['operation_id']
         assert duplicate['already_running'] is True

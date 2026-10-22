@@ -98,12 +98,13 @@ def _read(root, ref, *, source=None):
 
 
 def _save(root, path, value):
-    if path.exists():
+    from . import atomic_files
+    payload = (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + '\n').encode('utf-8')
+    try:
+        atomic_files.publish_bytes(path, payload)
+    except FileExistsError:
         if c.read(c.regular(path)) != value:
             raise IntegrityError('Frozen source receipt changed')
-    else:
-        c.write(path, value)
-        path.chmod(0o400)
     return _ref(root, path)
 
 

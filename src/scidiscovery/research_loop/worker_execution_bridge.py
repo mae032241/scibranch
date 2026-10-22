@@ -7,6 +7,8 @@ trusted process wrapper preserves the declared scientific execution namespace.
 from contextlib import contextmanager, redirect_stdout, redirect_stderr
 from contextvars import ContextVar
 import fcntl
+import ctypes
+import signal
 import io
 import json
 import os
@@ -151,6 +153,9 @@ def _execute(server, arguments):
     arguments=_arguments(arguments,server.work)
     from . import experiments as e
     config=_configuration(server)
+    from . import contracts as c,experiment_client,budget
+    deadline=_bridge_deadline(experiment_client.root_for_configuration(config),config)
+    c.write(server.record/'bridge-operation.json',dict(boot_id=budget.clock_stamp()['boot_id'],deadline_boottime=deadline))
     if server.stop.is_set():return _unknown()
     out=io.StringIO();err=io.StringIO()
     def trusted_launch(body,accepted,command,cwd):
@@ -163,6 +168,12 @@ def _execute(server, arguments):
             raise e.IntegrityError('Scientific process differs from its accepted frozen configuration')
         _configuration(server)
         if server.stop.is_set():raise e.IntegrityError('Original task submission lifetime ended')
+        if not accepted.get('execution_authority'):
+            # Plain local execution owns its finite max_seconds independently
+            # of soft node targets and later shared-balance changes. Retain its
+            # existing wait(5)+group-cleanup(3) grace before forced bridge exit.
+            c.write(server.record/'bridge-operation.json',dict(boot_id=budget.clock_stamp()['boot_id'],
+                deadline_boottime=time.clock_gettime(time.CLOCK_BOOTTIME)+config['max_seconds']+8))
         return server.launch(config,accepted,command,cwd)
     token=_LOCAL_LAUNCH.set(trusted_launch)
     try:
@@ -346,36 +357,188 @@ def _watch(server, stop, initial):
             continue
 
 
+class _BridgeStopped(BaseException):
+    pass
+
+
+def _descendants(owner):
+    """Snapshot actual parentage, including children with their own session."""
+    from . import runtime
+    children=[];parents={owner['pid']}
+    rows=[]
+    for path in Path('/proc').iterdir():
+        if not path.name.isdecimal():continue
+        try:rows.append(runtime.process_identity(int(path.name),owner['task_sha256']))
+        except (OSError,ValueError,IndexError):continue
+    while True:
+        found=[row for row in rows if row['ppid'] in parents and row['pid'] not in parents]
+        if not found:return children
+        children.extend(found);parents.update(row['pid'] for row in found)
+
+
+def _cleanup_bridge_children(identity):
+    from . import runtime
+    deadline=time.monotonic()+3  # Existing owned-process cleanup grace.
+    while True:
+        children=_descendants(identity)
+        if not children:return 'observed_group_cleaned'
+        for child in reversed(children):
+            if runtime.process_matches(child,identity['task_sha256']):
+                try:os.kill(child['pid'],signal.SIGKILL)
+                except ProcessLookupError:pass
+            try:os.waitpid(child['pid'],os.WNOHANG)
+            except ChildProcessError:pass
+        if time.monotonic()>=deadline:return 'cleanup_unknown'
+        time.sleep(.02)
+
+
+def _bridge_process(server,initial,parent_pid,ready):
+    from . import contracts as c,instance_owner,runtime
+    def interrupted(*_):raise _BridgeStopped()
+    try:
+        signal.signal(signal.SIGUSR1,lambda *_:server.stop.set())
+        signal.signal(signal.SIGTERM,interrupted)
+        os.setsid();runtime._subreaper()
+        libc=ctypes.CDLL(None,use_errno=True)
+        if libc.prctl(1,signal.SIGTERM,0,0,0)!=0:
+            raise OSError(ctypes.get_errno(),'Cannot bind execution bridge to its runner')
+        if os.getppid()!=parent_pid:raise _BridgeStopped()
+        # Fork transfers only the immutable launch closure. Never retain the
+        # parent's owner/controller/record locks or their logical held tokens.
+        c._record_writers.set({});c._digest_transaction.set(None)
+        instance_owner._held.set({});instance_owner._gates.set({})
+        for path in Path('/proc/self/fd').iterdir():
+            descriptor=int(path.name)
+            if descriptor>=3 and descriptor!=ready:
+                try:os.close(descriptor)
+                except OSError:pass
+        identity=runtime.process_identity(os.getpid(),server.identity)
+        c.write(server.record/'bridge-process.json',identity)
+        (server.record/'bridge-outcome.json').unlink(missing_ok=True)
+        (server.record/'bridge-operation.json').unlink(missing_ok=True)
+        os.write(ready,b'1');os.close(ready);ready=None
+        _watch(server,server.stop,initial)
+    except _BridgeStopped:
+        pass
+    except BaseException as error:
+        try:c.write(server.diagnostic,dict(error=type(error).__name__,note=str(error)))
+        except (OSError,ValueError):pass
+    finally:
+        signal.signal(signal.SIGTERM,signal.SIG_IGN)
+        signal.signal(signal.SIGUSR1,signal.SIG_IGN)
+        if ready is not None:
+            try:os.close(ready)
+            except OSError:pass
+        try:
+            identity=runtime.process_identity(os.getpid(),server.identity)
+            cleanup=_cleanup_bridge_children(identity)
+            c.write(server.record/'bridge-outcome.json',dict(process=identity,cleanup=cleanup))
+        finally:os._exit(0)
+
+
+def _bridge_deadline(root,configuration):
+    """Freeze the original task's finite remaining wall permission, never extend it."""
+    from . import budget,execution,native,contracts as c
+    job=c.read(c.regular(root/'jobs'/f'{configuration['scope']['step']:03d}.json'))
+    record=execution.record(root,job['step'],configuration['native_attempt']['number'])
+    intent=c.read(c.regular(record/'native-intent.json'))
+    stamp=budget.clock_stamp();limits=budget.snapshot(root,sample_stamp=stamp)
+    seconds=budget.execution_available(root,job,limits,native.usage(root))['seconds']
+    if budget.node_mode(root)=='hard':
+        node=budget.node_limits(root,job)
+        if node is not None:seconds=min(seconds,node['max_seconds']-budget._node_duration(root,job,intent,limits))
+        if job.get('search') is not None:
+            seconds=min(seconds,job['search']['limits']['max_w_seconds']-(limits['advance_seconds']-intent['search_slice']['advance_seconds']))
+    return time.clock_gettime(time.CLOCK_BOOTTIME)+max(0.,seconds)
+
+
 @contextmanager
 def serve(directory, config_path, work, *, launch, environment=None):
-    """Observe one ordinary file slot only for the exact launched task lifetime."""
-    from . import contracts as c,experiment_client,experiments as e
+    """One isolated host bridge, stopped and reaped before the task can seal."""
+    from . import contracts as c,experiment_client,experiments as e,execution,runtime
     directory=Path(directory).absolute();work=Path(work).absolute();config_path=Path(config_path).absolute()
     if (directory!=work/SUBMISSION_DIRECTORY or directory.resolve()!=directory
             or work.resolve()!=work or not callable(launch)):
         raise ValueError('Exact ordinary scientific submission directory required')
     directory.mkdir(mode=0o700,parents=True,exist_ok=True)
     client=c.read(c.regular(config_path));configuration=experiment_client.resolve(config_path,client)
-    if c.workspace(experiment_client.root_for_configuration(configuration),client['step'])!=work:
+    root=experiment_client.root_for_configuration(configuration)
+    if c.workspace(root,client['step'])!=work:
         raise ValueError('Submission workspace differs from its accepted task')
     e.load(configuration,path=config_path)
     private=Path(configuration['record_dir']).parent
     claims=private/'worker-submissions';claims.mkdir(mode=0o700,parents=True,exist_ok=True)
     diagnostic=private/'bridge-diagnostics';diagnostic.mkdir(mode=0o700,parents=True,exist_ok=True)
+    record=execution.record(root,client['step'],client['attempt'])
+    identity=execution.identity(root,client['step'],client['attempt'])
     server=SimpleNamespace(directory=directory,work=work,config_path=config_path,client=client,
         configuration=configuration,launch=launch,environment=dict(environment or {}),
-        claims=claims,diagnostic=diagnostic/'latest-error.json')
+        claims=claims,diagnostic=diagnostic/'latest-error.json',record=record,identity=identity,stop=threading.Event())
     try:initial=_read_file(directory/'submit.json')
     except FileNotFoundError:initial=None
-    stop=threading.Event();server.stop=stop
-    thread=threading.Thread(target=_watch,args=(server,stop,initial),daemon=True)
-    thread.start()
-    try:yield directory
+    read_ready,write_ready=os.pipe()
+    parent_pid=os.getpid();pid=os.fork()
+    if pid==0:
+        os.close(read_ready)
+        _bridge_process(server,initial,parent_pid,write_ready)
+    os.close(write_ready)
+    receipt=None
+    try:
+        import select
+        if not select.select([read_ready],[],[],5)[0] or os.read(read_ready,1)!=b'1':
+            raise ValueError('Original execution bridge did not start')
+        receipt=c.read(c.regular(record/'bridge-process.json'))
+        if receipt.get('pid')!=pid or not runtime.process_matches(receipt,identity):
+            raise ValueError('Original execution bridge identity changed')
+        yield directory
     finally:
-        # Special-file or idle readers cannot hold shutdown open. An active
-        # effect retains its original deadline/cleanup and is never reclassified
-        # as not-started or replayed because the submission observer stopped.
-        stop.set();thread.join(timeout=2)
+        os.close(read_ready)
+        if receipt is None:
+            try:receipt=runtime.process_identity(pid,identity)
+            except (OSError,ValueError,IndexError):pass
+        if receipt is not None and runtime.process_matches(receipt,identity):os.kill(pid,signal.SIGUSR1)
+        idle_deadline=time.clock_gettime(time.CLOCK_BOOTTIME)+5
+        while receipt is not None and runtime.process_matches(receipt,identity):
+            # Read the operation's original permission, not today's balance.
+            # New effects publish this marker before checking the stop signal.
+            path=record/'bridge-operation.json'
+            deadline=idle_deadline
+            if path.exists():
+                from . import budget
+                operation=c.read(c.regular(path))
+                if operation.get('boot_id')==budget.clock_stamp()['boot_id']:
+                    deadline=operation['deadline_boottime']
+            if time.clock_gettime(time.CLOCK_BOOTTIME)>=deadline:break
+            time.sleep(.05)
+        if receipt is not None and runtime.process_matches(receipt,identity):
+            descendants=_descendants(receipt)
+            os.kill(pid,signal.SIGTERM)
+            cleanup_deadline=time.monotonic()+5
+            while runtime.process_matches(receipt,identity) and time.monotonic()<cleanup_deadline:time.sleep(.02)
+            for child in reversed(descendants):
+                if runtime.process_matches(child,identity):
+                    try:os.kill(child['pid'],signal.SIGKILL)
+                    except ProcessLookupError:pass
+            if runtime.process_matches(receipt,identity):os.kill(pid,signal.SIGKILL)
+        os.waitpid(pid,0)
+        # A killed bridge has stopped writing, but has no positive cleanup
+        # receipt. Sealing must defer; accepted external calls stay unknown.
+        stopped(record,identity)
+
+
+def stopped(record, identity):
+    from . import contracts as c,runtime
+    process=record/'bridge-process.json'
+    if not process.exists():return  # Attempts without a bridge retain their contract.
+    receipt=c.read(c.regular(process))
+    if receipt.get('task_sha256')!=identity or runtime.process_matches(receipt,identity):
+        raise BlockingIOError('Original execution bridge still owns this attempt')
+    path=record/'bridge-outcome.json'
+    if not path.exists():raise ValueError('Original execution bridge cleanup is unconfirmed')
+    outcome=c.read(c.regular(path))
+    if (outcome.get('cleanup')!='observed_group_cleaned' or any(outcome.get('process',{}).get(key)!=receipt.get(key)
+            for key in ('pid','boot_id','start_ticks','pgid','sid','task_sha256'))):
+        raise ValueError('Original execution bridge cleanup is unconfirmed')
 
 
 def _client(directory, arguments):

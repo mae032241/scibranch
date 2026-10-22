@@ -414,7 +414,9 @@ class _Closure:
                 if owner_job.get('selection') != marker:
                     raise ValueError('Selection marker differs from its exact original task')
             directory = 'host-delivery/selection'
-            if marker.get('repair_step'):
+            if marker.get('normal_step'):
+                directory += f'/nodes/{marker["normal_step"]:03d}'
+            elif marker.get('repair_step'):
                 directory += f'/repairs/{marker["repair_step"]:03d}'
             screen_ref = self.add(owner, directory + '/screen.json', proof=dict(sha256=marker['sha256']))
             screen = _json(o.resolve_ref(owner, screen_ref))

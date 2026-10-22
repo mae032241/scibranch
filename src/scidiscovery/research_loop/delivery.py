@@ -539,7 +539,11 @@ def _choice(root, job, result):
         raise DeliveryUnresolved('selection_candidate_unavailable')
     from . import shortlist
     if _settings(root, job).get('selection_policy') is not None:
-        if job.get('fork_source') and job.get('selection') is not None:
+        if job.get('selection',{}).get('normal_step') is not None:
+            if job['selection']['normal_step']!=job['step']:raise DeliveryUnresolved('selection_comparison_required')
+            shortlist._screen(root,job['selection'],job=job)
+            expected=job['selection']
+        elif job.get('fork_source') and job.get('selection') is not None:
             shortlist._screen(root,job['selection'],job=job)
             expected=job['selection']
         else:
@@ -782,7 +786,7 @@ def _staged(root, spec, source, operation_id, stage, *, job=None):
     return dict(scope=dict(handoff_protocol=_settings(root, job)['handoff_protocol']), operation_id=operation_id, candidate_id=candidate,
                 artifact_sha256=source['objects']['artifact']['sha256'], context=source['context'],
                 object_digests={name: proof['sha256'] for name, proof in source['objects'].items()},
-                inputs=spec['inputs'], config=spec['config'], target=spec['target'], stage=str(stage))
+                inputs=spec['inputs'], config=spec['config'], stage=str(stage))
 
 
 @owner_effect
@@ -875,7 +879,7 @@ def invoke(root, intent, max_seconds, *, on_process=None, audit_only=False, coll
                     continue
                 return dict(_result(bound, value['status'], value['note'], cleanup_confirmed=value['cleanup_confirmed']), failure_phase='audit',recovery=value.get('recovery','none'),**(dict(diagnostic=value['diagnostic']) if 'diagnostic' in value else {}))
             try:
-                value = _call(spec, dict(request, phase=phase), remaining, on_process=on_process,
+                value = _call(spec, dict(request, phase=phase, target=spec['target']), remaining, on_process=on_process,
                               evidence=leaf_output(root)) if remaining > 0 else None
             except DeliveryUnresolved as error:
                 if error.code != 'delivery_cleanup_unknown':raise
