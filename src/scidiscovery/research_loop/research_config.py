@@ -269,7 +269,7 @@ def normalize(options):
         if not native_home.is_absolute():
             raise ValueError('Frozen native output repair requires an absolute inherited CODEX_HOME')
         result['resume_policy'] = dict(max_attempts=2, protocol='codex_exec_resume', usage_scope='turn',
-            output_repair=True, output_only=True, native_home=str(native_home.resolve()))
+            output_repair=True, output_only=True, execution_wake=True, native_home=str(native_home.resolve()))
         if result.get('node_budget_policy') is None:
             result['node_budget_policy'] = {role: dict(max_observed_tokens=result['max_tokens'],
                 max_seconds=result['max_seconds']) for role in 'HWAE'}

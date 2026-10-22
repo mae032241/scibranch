@@ -15,7 +15,7 @@ from scidiscovery.research_loop import budget, contracts as c, controller, execu
 
 pytestmark = pytest.mark.process_e2e
 
-LAUNCHER = r'''import json,os,pathlib,subprocess,sys
+LAUNCHER = r'''import json,os,pathlib,subprocess,sys,time
 from scidiscovery.research_loop import experiments as e
 args=sys.argv[1:];prompt=sys.stdin.read();work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE'])
 home=pathlib.Path(os.environ['THIN_HWA_NATIVE_HOME']);role=os.environ['THIN_HWA_ROLE']
@@ -43,9 +43,22 @@ if role=='W':
   assert reply.returncode==2,(reply.stdout,reply.stderr)
   result=json.loads(reply.stdout);assert result['status']==options.get('query_state','running'),result
   (work/'work/original-call').write_text(result['call_id'])
+  (work/'work/executor-handoff.json').write_text(json.dumps(result['handoff']))
+  if options.get('follow_handoff') and result['handoff']['action']=='poll_original':
+   handoff=result['handoff'];queries=0
+   while queries<handoff['max_queries']:
+    time.sleep(handoff['poll_interval_seconds'])
+    query=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(work/'work/config.json'),'query','--call-id',result['call_id']],capture_output=True,text=True)
+    assert query.returncode==0,(query.stdout,query.stderr)
+    next_handoff=json.loads(query.stdout)['handoff']
+    assert next_handoff['action']=='poll_original' and next_handoff['max_queries']==handoff['max_queries']
+    assert next_handoff['call_id']==result['call_id']
+    queries+=1
+   (work/'work/poll-count').write_text(str(queries))
  else:
   assert thread in args and (work/'work/original-call').exists()
   assert 'original managed execution has finished' in prompt
+  (work/'work/wake-prompt').write_text(prompt)
   packet=json.loads((work/'work/execution-results.json').read_text())
   assert len(packet['executions'])==1
   row=packet['executions'][0]
@@ -57,6 +70,13 @@ if role=='W':
   for item in packet['executions'][0]['outputs']:assert (work/item['path']).read_bytes()==b'opaque original job package'
   (work/'work/consumed-result').write_text(packet['executions'][0]['status'])
   if 'native_state' in packet['executions'][0]:(work/'work/consumed-native-state').write_text(packet['executions'][0]['native_state'])
+  options=json.loads((root/'fixture-options.json').read_text())
+  if options.get('probe_new_call'):
+   forbidden=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(work/'work/config.json'),'run','--payload',str(work/'work/package'),'--new-plan','--mechanism','Q'],capture_output=True,text=True)
+   assert forbidden.returncode==2,(forbidden.stdout,forbidden.stderr)
+   denied=json.loads(forbidden.stdout)
+   assert denied['status']=='unavailable' and 'Output-only execution wake' in denied['note']
+   (work/'work/new-call-denied').write_text(denied['status'])
  payload.update(stage_intent='review' if resume else options.get('stage_intent','review'),mechanism_findings=[dict(mechanism='P',basis='observed' if resume else 'blocked',finding='Read exact original terminal' if resume else 'Original accepted execution still running'),dict(mechanism='Q',basis='blocked',finding='No Q experiment requested in this fixture')])
 elif role=='A':
  payload.update(candidate_recommendation=None,progress_assessment=None,portfolio_review=None,search_review=dict(dispositions=[dict(mechanism_ref='h001.m1',status='screened',reason='Review original W result')],next_focus=dict(mechanism_ref='h001.m1',action='improve')),next_action='wait',route_reason='Bounded engineering test complete',decision_request=dict(decision='mechanism',question='What changes the mechanism?',change_criterion='A discriminating observation'))
@@ -82,6 +102,112 @@ def instance(tmp_path,options,*,fragment=False,resume=True,seconds=120,node_seco
 
 def run_cli(root):
     return subprocess.run([sys.executable,'-m','scidiscovery.research_loop.cli','run','--root',str(root)],capture_output=True,text=True,timeout=35)
+
+
+def standard_instance(tmp_path,monkeypatch,*,wake='default'):
+    """Use the real prepare CLI and its standard Codex defaulting path."""
+    public=tmp_path/'public';public.mkdir()
+    objective=public/'objective.md';objective.write_text('Read the same original managed result and retain its limitations.')
+    home=tmp_path/'native-home';home.mkdir()
+    (home/'config.toml').write_text('[sandbox_workspace_write]\nnetwork_access=true\n')
+    executable=tmp_path/'bin/codex';executable.parent.mkdir()
+    executable.write_text('#!'+sys.executable+'\n'+LAUNCHER);executable.chmod(0o700)
+    monkeypatch.setenv('CODEX_HOME',str(home))
+    monkeypatch.setenv('PATH',str(executable.parent)+os.pathsep+os.environ['PATH'])
+    root=tmp_path/'instance';nodes=tmp_path/'nodes.json'
+    c.write(nodes,{role:dict(max_observed_tokens=200,max_seconds=20) for role in 'HWAE'})
+    launcher=['codex'] if wake=='default' else [str(executable)]
+    arguments=['prepare','--root',str(root),'--objective',str(objective),'--public-root',str(public),
+        '--native-launcher-json',json.dumps(launcher),'--experiment-mode','external','--max-tokens','1000',
+        '--max-seconds','120','--max-steps','7','--model','no-model','--reasoning-effort','high',
+        '--node-budget-policy',str(nodes)]
+    if wake!='default':
+        policy=dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn',
+            output_repair=True,output_only=True,native_home=str(home))
+        if wake!='missing':policy['execution_wake']=wake
+        path=tmp_path/'resume.json';c.write(path,policy)
+        arguments+=['--worker-resume-policy',str(path)]
+    prepared=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.cli',*arguments],
+        capture_output=True,text=True,timeout=15)
+    assert prepared.returncode==0,(prepared.stdout,prepared.stderr)
+    c.write(root/'fixture-options.json',dict(collect=True,terminal_status='known_success',probe_new_call=True))
+    finish(root,1,'H',[],action='experiment',search_choice=dict(scope='Two mechanisms',commitments=[
+        dict(label=label,minimal_test='Read original backend fact',existing_ref=None) for label in ('P','Q')],
+        focus=dict(label=None,action='screen')))
+    return root,home
+
+
+def test_default_cli_wakes_original_output_only_w_and_cannot_start_another_managed_call(tmp_path,monkeypatch,composed_registry):
+    root,home=standard_instance(tmp_path,monkeypatch)
+    policy=c.settings(root)['resume_policy']
+    assert policy['execution_wake'] is True and policy['output_only'] is True and policy['output_repair'] is True
+    originals={path:path.read_bytes() for path in (root/'settings.json',root/'settings-identity.json',home/'config.toml')}
+    config,call=stop_at_waiting(root)
+    work=c.workspace(root,2)
+    capability=c.read(work/'science-task.json')['managed_execution_wait']
+    assert capability['wake_authorized'] is True and 'normal scientific JSON' in capability['instruction']
+    handoff=c.read(work/'work/executor-handoff.json')
+    assert handoff['action']=='return_control' and handoff['call_id']==call
+    assert str(home) not in json.dumps(capability)
+    assert len(execution.records(root,2))==1 and len(e.Records(config).calls())==1
+    e.load(config).complete(call)
+    original_command=[sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(work/'work/config.json')]
+    terminal_query=subprocess.run([*original_command,'query','--call-id',call],capture_output=True,text=True,timeout=10)
+    assert terminal_query.returncode==0,(terminal_query.stdout,terminal_query.stderr)
+    assert json.loads(terminal_query.stdout)['handoff']['action']=='reconcile_or_stop'
+    terminal=subprocess.run([*original_command,'reconcile','--call-id',call],capture_output=True,text=True,timeout=10)
+    assert terminal.returncode==0,(terminal.stdout,terminal.stderr)
+    assert json.loads(terminal.stdout)['handoff']['action']=='consume_terminal'
+    from scidiscovery.research_loop import managed_wait
+    assert managed_wait.handoff(config,dict(call_id=call,status='unknown'),'query')['action']=='reconcile_or_stop'
+    reply=run_cli(root);result=json.loads(reply.stdout)
+    assert reply.returncode==0 and result['status']=='wait',(reply.stdout,reply.stderr)
+    assert (work/'work/launches').read_text()=='exec\nresume\n'
+    assert (work/'work/consumed-result').read_text()=='known_success'
+    assert (work/'work/new-call-denied').read_text()=='unavailable'
+    prompt=(work/'work/wake-prompt').read_text()
+    assert 'This output-only wake' in prompt and 'Do not start new experiments or training' in prompt
+    assert 'handoff.action' in prompt
+    chain=execution.records(root,2);assert len(chain)==2
+    intent=c.read(chain[1]/'native-intent.json')
+    assert intent['continuation_kind']=='execution_wake' and intent['session']['home']==str(home)
+    assert execution.home(root,2,0)==execution.home(root,2,1)==home
+    assert intent['budget_slice']['previous_tokens']==12
+    assert (chain[0]/'execution-wait.json').exists() and (chain[0]/'result-identity.json').exists()
+    assert c.read(chain[1]/'native-outcome.json')['usage']['unknown_steps']==[]
+    # Both public dispatch and an adapter's direct acceptance must consult the
+    # current host intent, even with the original pre-wake configuration.
+    with pytest.raises(e.UnsupportedExecution,match='Output-only execution wake'):
+        e.dispatch(config,work/'work/package',new=True,mechanism='Q')
+    accepted=e.Records(config).accepted(call)
+    from scidiscovery.operations.execution import LocalFileDescriptor
+    with pytest.raises(e.UnsupportedExecution,match='Output-only execution wake'):
+        e.Records(config).accept(LocalFileDescriptor.model_validate(accepted['prepared']),{},accepted['interface'])
+    assert len(e.Records(config).calls())==1
+    assert all(path.read_bytes()==raw for path,raw in originals.items())
+    assert json.loads(run_cli(root).stdout)['status']=='wait'
+    assert (work/'work/launches').read_text()=='exec\nresume\n'
+
+
+@pytest.mark.parametrize('wake',['missing',False])
+def test_output_only_without_explicit_wake_diagnoses_before_waiting_for_terminal(tmp_path,monkeypatch,composed_registry,wake):
+    root,_=standard_instance(tmp_path,monkeypatch,wake=wake)
+    original=(root/'settings.json').read_bytes()
+    reply=run_cli(root);result=json.loads(reply.stdout)
+    assert reply.returncode==2 and result['status']=='output_repair_unavailable',result
+    assert result['reason']=='worker_execution_wake_unauthorized'
+    record=execution.origin(root,2);wait=c.read(record/'execution-wait.json')
+    item=wait['calls'][0];config=c.read(Path(item['config']['path']))
+    call=c.read(Path(item['accepted']['path']))['call_id']
+    assert e.load(config).status_details(call)['state']=='running'
+    assert c.read(c.workspace(root,2)/'work/executor-handoff.json')['action']=='poll_original'
+    assert c.read(c.workspace(root,2)/'science-task.json')['managed_execution_wait']['wake_authorized'] is False
+    assert not (record/'result-identity.json').exists() and (record/'checkpoint.json').exists()
+    assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
+    e.load(config).complete(call);e.record_observation(config,e.load(config),call)
+    assert json.loads(run_cli(root).stdout)['reason']=='worker_execution_wake_unauthorized'
+    assert (root/'settings.json').read_bytes()==original and len(execution.records(root,2))==1
+    assert len(e.Records(config).calls())==1 and not (record/'result-identity.json').exists()
 
 
 @pytest.mark.parametrize('outcome,fragment,multicall,query_state,terminal_state',[
@@ -196,6 +322,7 @@ def test_uncertain_execution_is_not_running_or_replayed(tmp_path,composed_regist
     assert reply.returncode==0,(reply.stdout,reply.stderr)
     record=execution.origin(root,2);assert not (record/'execution-wait.json').exists()
     assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
+    assert c.read(c.workspace(root,2)/'work/executor-handoff.json')['action']=='reconcile_or_stop'
     config=c.read(record/'experiment-config.json')
     assert len(e.Records(config).calls())==1 and len(execution.records(root,2))==1
     seal=c.read(record/'result-identity.json');fact=c.read(root/seal['observations']['path'])
@@ -216,12 +343,70 @@ def test_wait_deadline_is_finite_without_native_wake_or_submission_replay(tmp_pa
 
 def test_missing_session_capability_retains_checkpoint_without_fabricated_wake(tmp_path,composed_registry):
     root=instance(tmp_path,dict(collect=False),resume=False)
-    config,call=stop_at_waiting(root);e.load(config).complete(call)
     result=json.loads(run_cli(root).stdout)
     assert result['status']=='output_repair_unavailable' and result['reason']=='worker_resume_unsupported',result
     assert (execution.origin(root,2)/'checkpoint.json').exists()
     assert not (execution.origin(root,2)/'result-identity.json').exists()
     assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
+
+
+def test_executor_handoff_without_wake_uses_bounded_same_call_queries_then_returns(tmp_path,composed_registry):
+    root=instance(tmp_path,dict(collect=False,follow_handoff=True),resume=False)
+    result=json.loads(run_cli(root).stdout)
+    assert result['status']=='output_repair_unavailable' and result['reason']=='worker_resume_unsupported'
+    work=c.workspace(root,2);handoff=c.read(work/'work/executor-handoff.json')
+    assert handoff['action']=='poll_original' and handoff['poll_interval_seconds']==1
+    assert int((work/'work/poll-count').read_text())==handoff['max_queries']==3
+    config=c.read(execution.origin(root,2)/'experiment-config.json')
+    assert len(e.Records(config).calls())==len(execution.records(root,2))==1
+    assert (execution.origin(root,2)/'execution-wait.json').exists()
+    assert not (execution.origin(root,2)/'result-identity.json').exists()
+
+
+def test_bridge_cached_pending_response_requests_reconciliation_without_rewriting_originals(tmp_path,composed_registry,monkeypatch):
+    from types import SimpleNamespace
+    from scidiscovery.research_loop import worker_execution_bridge as bridge
+    root=instance(tmp_path,dict(collect=False));config,call=stop_at_waiting(root)
+    work=c.workspace(root,2);config_path=work/'work/config.json'
+    directory=work/bridge.SUBMISSION_DIRECTORY;directory.mkdir(exist_ok=True)
+    private=Path(config['record_dir']).parent
+    claims=private/'worker-submissions';claims.mkdir(exist_ok=True)
+    server=SimpleNamespace(work=work,directory=directory,config_path=config_path,configuration=config,
+        client=c.read(config_path),claims=claims,diagnostic=private/'test-bridge-error.json',
+        stop=threading.Event(),environment={},launch=lambda *args:pytest.fail('Query must not launch a process'))
+    request=dict(submission_ref='S001',arguments=['query','--call-id',call])
+    raw=bridge._encoded(request);bridge._handle(server,raw)
+    first=c.read(directory/'response.json')
+    assert first['result']['handoff']['action']=='return_control'
+    originals={path:path.read_bytes() for path in (claims/'S001').iterdir() if path.is_file()}
+    bridge._handle(server,raw)
+    cached=c.read(directory/'response.json')
+    assert cached['result']['status']=='unknown'
+    assert cached['result']['handoff']['action']=='reconcile_or_stop'
+    assert cached['result']['handoff']['call_id']==call
+    assert all(path.read_bytes()==value for path,value in originals.items())
+    assert len(e.Records(config).calls())==len(execution.records(root,2))==1
+    assert bridge._unknown()['result']['handoff']['action']=='reconcile_or_stop'
+    for number,arguments in ((2,1),(3,{'run':'invalid'}),(4,[{'run':'invalid'}])):
+        bridge._handle(server,bridge._encoded(dict(submission_ref=f'S{number:03d}',arguments=arguments)))
+        malformed=c.read(directory/'response.json')
+        assert malformed['code']==2 and malformed['result']['status']=='caller_error'
+    # A malformed ordinary request must not terminate the receiver before a
+    # subsequent legitimate query of the same original call.
+    bridge._handle(server,bridge._encoded(dict(submission_ref='S005',arguments=['query','--call-id',call])))
+    assert c.read(directory/'response.json')['result']['handoff']['action']=='return_control'
+    from scidiscovery.research_loop import managed_wait
+    real_handoff=managed_wait.handoff
+    def large_handoff(body,*args,**kwargs):
+        return dict(action='reconcile_or_stop',instruction='x'*bridge.MAX_BYTES) if body is not None else real_handoff(body,*args,**kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(managed_wait,'handoff',large_handoff)
+        bridge._handle(server,raw)
+    oversized=c.read(directory/'response.json')
+    assert oversized['code']==3 and oversized['result']['status']=='integrity_error'
+    assert oversized['result']['handoff']['action']=='reconcile_or_stop'
+    assert len((directory/'response.json').read_bytes())<=bridge.MAX_BYTES
+    assert all(path.read_bytes()==value for path,value in originals.items())
 
 
 def test_persisted_wake_intent_without_process_is_unknown_and_never_relaunched(tmp_path,composed_registry,monkeypatch):

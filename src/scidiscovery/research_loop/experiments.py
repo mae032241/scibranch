@@ -81,6 +81,21 @@ def _configuration_effect(function):
     return guarded
 
 
+def _require_new_execution(config):
+    """A narrow terminal wake cannot borrow an old client to start fresh work."""
+    from . import contracts as c, execution, experiment_client
+    root=experiment_client.root_for_configuration(config,allow_standalone=True)
+    if root is None:return
+    step=config['scope']['step']
+    job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
+    if not (configuration_updates.for_job(root,job).get('resume_policy') or {}).get('output_only'):return
+    paths=execution.records(root,step)
+    for path in paths[1:]:
+        intent=c.read(c.regular(path/'native-intent.json'))
+        if intent.get('continuation_kind')=='execution_wake':
+            raise UnsupportedExecution('Output-only execution wake permits original results only; no new managed execution')
+
+
 def _review_observation(value, stamp):
     """Interpret the same live or archived host observation without new grants."""
     reason=('host_review_observation_unavailable' if value is None else
@@ -710,6 +725,7 @@ class Records:
     @_configuration_effect
     def accept(self, descriptor, metadata, interface, *, expected_calls=None, mechanism=None, recovery_admission=None, operation_context=None):
         """Short admission linearization point. No solver or domain IO under lock."""
+        _require_new_execution(self.config)
         from .protocol import require_scope
         require_scope(self.config['scope'])
         from . import contracts as c
@@ -1137,6 +1153,7 @@ def dispatch_descriptor(config, payload, *, parent=None, new=False, change=None,
 def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None, mechanism=None, command_options=None):
     from .protocol import require_scope
     require_scope(config.get('scope'))
+    _require_new_execution(config)
     if config.get('host_execution_authority') is not None:
         from . import execution_authority,execution_recovery
         root,_,_=execution_authority._host_context(config)
@@ -1362,7 +1379,7 @@ def main(argv=None):
         print(json.dumps(result,allow_nan=False));return 2
     except OSError:
         print(json.dumps(dict(status='integrity_error',note='Configuration client cannot be read; preserve its original and report the unavailable input.'),allow_nan=False));return 3
-    owner_lease = ExitStack()
+    owner_lease = ExitStack();feedback_config=None
     try:
         config=json.loads(read(args.config.absolute()))
         if isinstance(config,dict) and 'worker_view_version' in config and 'scope' not in config:
@@ -1492,6 +1509,9 @@ def main(argv=None):
     except (CommandOptionsError,common.CommandOptionsError) as error:result=dict(status='known_not_started',accepted=False,error='caller_error',note=_diagnostic(error,'Requested command options are unavailable'));code=2
     except ValueError as error:result=dict(status='unavailable' if isinstance(error,(UnsupportedExecution,common.UnsupportedExecution)) else 'unresolved',note=_diagnostic(error,'Execution request could not be resolved'));code=2
     finally:owner_lease.close()
+    if args.command in {'run','query','lookup','collect','cancel','reconcile'}:
+        from . import managed_wait
+        result['handoff']=managed_wait.handoff(feedback_config,result,args.command,getattr(args,'call_id',None))
     # CLI is a compact model view; the complete collection is already durable.
     if isinstance(result.get('outputs'),list):
         original=result['outputs'];result=dict(result,outputs=[])

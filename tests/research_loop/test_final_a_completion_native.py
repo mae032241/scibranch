@@ -164,6 +164,33 @@ def test_final_json_without_terminal_event_or_zero_exit_never_seals_or_relaunche
 
 
 @pytest.mark.process_e2e
+@pytest.mark.parametrize('event,reason', [
+    (dict(type='turn.failed',error=dict(message='Later failure')), 'native_failure_event'),
+    (dict(type='turn.completed',usage=dict(input_tokens=210,cached_input_tokens=209,output_tokens=3)),
+        'native_completion_duplicated'),
+])
+def test_final_completion_rejects_later_native_failure_or_duplicate_without_replay(tmp_path, monkeypatch, event, reason):
+    monkeypatch.setitem(globals(), 'FAKE_NATIVE', FAKE_NATIVE.replace("raise SystemExit(config['returncode'])",
+        'print('+repr(json.dumps(event))+",flush=True)\nraise SystemExit(config['returncode'])"))
+    root = instance(tmp_path)
+    result = controller.run(root)
+    assert result['status'] == 'closeout_native_unsealed', result
+    record = execution.origin(root, 2)
+    outcome = c.read(record / 'native-outcome.json')
+    assert outcome['returncode'] == 0 and outcome['stop_reason'] == reason
+    assert outcome['metering']['coverage'] == 'unknown' and outcome['metering']['reason'] == reason
+    assert c.read(record / 'usage.json') == dict(input_tokens=210,cached_input_tokens=209,output_tokens=3)
+    assert native.usage(root)['unknown_steps'] == [2]
+    assert (record / 'result.pending.json').is_file()
+    assert not (record / 'science-output.json').exists() and not (record / 'result-identity.json').exists()
+    originals = {path: path.read_bytes() for path in record.iterdir() if path.is_file()}
+    assert controller.run(root)['status'] != 'final_a_completed'
+    assert all(path.read_bytes() == raw for path, raw in originals.items())
+    assert (c.workspace(root, 2) / 'work/launches').read_text() == 'A\n'
+    assert not (record / 'continuations').exists() and not (root / 'jobs/003.json').exists()
+
+
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('meter', ['missing', 'mismatched'])
 def test_final_native_terminal_report_seals_with_unknown_billing_without_relaunch(tmp_path, meter):
     root = instance(tmp_path, meter=meter, terminal=True)

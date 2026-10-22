@@ -121,8 +121,12 @@ def records(root, step):
                 or intent.get('root_intent_sha256') != c.digest(c.regular(first / 'native-intent.json'))):
             raise ValueError('Native continuation chain changed')
         kind = intent.get('continuation_kind', 'repair')
+        from . import continuation
+        wake_authorized = kind == 'execution_wake' and continuation.wake_allowed(settings.get('resume_policy'))
+        if kind == 'execution_wake' and not wake_authorized:
+            raise ValueError('Execution wake differs from its frozen authorization')
         if ((settings.get('resume_policy') or {}).get('output_only') and kind in {'repair','fragment','execution_wake'}
-                and not output_repair):
+                and not output_repair and not wake_authorized):
             raise ValueError('Output-only policy cannot authorize scientific continuation')
         if kind not in {'repair', 'fragment', 'execution_wake','author_closeout','startup_successor'} or kind == 'fragment' and not fragments:
             raise ValueError('Native continuation kind differs from its frozen policy')

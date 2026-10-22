@@ -682,13 +682,36 @@ scid-research closeout --root /绝对路径/实例 --export-only
 ## 可选的 Worker 原线程续接
 
 标准单命令 `codex` 的 CLI `prepare` 在未传 `--worker-resume-policy` 且未请求
-`--worker-context` 时，冻结最多两次同任务、同 session 的仅输出补填：
-`output_repair: true`、`output_only: true`。它只补已确认完成的返回，不授权失败任务续跑、
-`WorkRepairRequired` 科学修复、实验重做、W fragment 或执行唤醒。
+`--worker-context` 时，冻结最多两次同任务、同 session 的输出补填或原受管执行唤醒：
+`output_repair: true`、`output_only: true`、`execution_wake: true`。
+补填只修已确认完成的返回；窄唤醒只解释同一原受管调用的已核验终态并完成返回，
+不授权新实验、训练、失败任务续跑、`WorkRepairRequired` 科学修复或 W fragment。
 launcher 的绝对调用路径及其指向的原文件被冻结，保留符号链接调用语义。
 原 `CODEX_HOME`（未设置时为 `~/.codex`）仅在宿主私有策略中绑定，配置、认证和权限来源不变，
 不复制凭据；没有节点预算文件时，各角色软目标引用原全局 token/时间上限，不预扣或增加共享额度。
 自定义 launcher 没有默认补填授权；直接 controller API 仍须显式策略。
+
+W 的 `science-task.json` 会报告 `managed_execution_wait.wake_authorized`。
+原受管调用仍 pending/running/queued/cancelling 且回执指示 `return_control` 时，W 应正常返回科学 JSON 并保留原调用及限制，
+由宿主保存未封存 checkpoint 后监控同一调用；不要仅为轮询而占住 native turn，也不要虚构终态。
+这依赖 W 正常交回，框架不会强行终止活 W 并伪造成成功 checkpoint。
+有冻结唤醒权限且原终态已验证时，宿主在原 home/session 追加有限 W turn；实际 session、权限、
+累计预算、pause 及原调用绑定仍逐项核验。窄唤醒期间宿主拒绝新增受管调用，包括使用旧客户端提交；
+原调用 query/collect/reconcile 不因此被禁，同用户 shell 仍是软边界。
+旧 output-only 策略缺 `execution_wake` 或显式为 false 不会获得新权限；
+缺能力在进入宿主监控时即明确停止，保留等待 checkpoint，不等终态后才发现无法续接。
+旧显式完整 resume 策略未声明该标志时保留已有唤醒能力，显式 false 关闭唤醒。
+
+`exp run/query/lookup/collect/reconcile/cancel` 的回执增加宿主生成的 `handoff` 投影，
+与宿主等待使用同一状态判定规则，不改原 accepted/terminal/seal：
+`action=return_control` 表示原调用可查且已冻结唤醒能力，W 正常交回当前科学 JSON；
+`poll_original` 只允许按 `poll_interval_seconds` 查询同一原 ID，
+当前 turn 对同一调用累计最多 `max_queries` 次（默认 1 秒、3 次），后续回执不重置计数，
+且仍须在原预算内；达到上限后交回 pending 限制。
+`consume_terminal` 仅在原终态已核验时要求消费原结果；
+`reconcile_or_stop` 要求核对同一原调用或报告障碍，禁止盲轮询和重提交。
+终态字符串本身不会得到消费指示；尚未核验时先用原 ID reconcile。
+这些是执行器与 W 的交接合同及有界建议，不是新的执行许可、额度或对任意模型的强制调度保证。
 
 显式策略文件优先，包括 `output_repair: false` 或 JSON null 关闭默认补填。
 若需要已知失败后的普通 Worker 原线程续接，新 `prepare` 须同时传

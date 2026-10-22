@@ -721,6 +721,8 @@ def science_view(job, root=None):
         **(dict(experiment_execution=('Host-configured registered W execution is available; only calls through the provided experiment command are recorded. Native scratch shell remains available.'
             if job['experiment_mode'] == 'local' else 'External launcher owns experiment configuration; native shell commands are not automatically recorded.'))
             if 'experiment_mode' in job else {}),
+        **(dict(managed_execution_wait=job['managed_execution_wait'])
+            if 'managed_execution_wait' in job else {}),
         'outputs': 'artifacts/', 'scratch': 'work/',
     }.items() if value}
     from . import candidate_refs
@@ -1110,6 +1112,11 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         job['control_cut'] = dict(correction_events=correction.freeze_prefix(root))
     elif retained is not None and 'control_cut' in retained:
         job['control_cut'] = retained['control_cut']
+    if retained is not None and 'managed_execution_wait' in retained:
+        job['managed_execution_wait'] = retained['managed_execution_wait']
+    elif retained is None and role=='W' and 'experiment_mode' in job:
+        from . import managed_wait
+        job['managed_execution_wait'] = managed_wait.capability(root,job)
     from . import user_guidance
     with user_guidance.binding(root, step, role, retained) as statements:
         if statements:

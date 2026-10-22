@@ -12,6 +12,167 @@ from scidiscovery.research_loop import contracts, controller, execution, native,
 from scidiscovery.research_loop.cli import main, status
 
 
+# Retain the real CLI/runner reproduction shape from the local defect audit.
+# This launcher supplies transport evidence only; no model or solver runs.
+TERMINAL_LAUNCHER = r'''import json, os, pathlib, sys
+mode = sys.argv[1]
+args = sys.argv[2:]
+assert args[0] == 'exec'
+sys.stdin.read()
+work = pathlib.Path(os.environ['THIN_HWA_WORKSPACE'])
+task = json.loads((work / 'science-task.json').read_text())
+role = task['role']
+payload = {key: None for key in task['final_response']}
+payload.update(summary='Local transport reproduction ' + role,
+    scientific_result='Synthetic transport evidence only; no scientific finding.',
+    limitations=['No model, API, remote service or solver was invoked.'],
+    implementation_selection=None,
+    next_action='analyze' if role == 'H' else 'finish',
+    route_reason='Exercise the immediate successor of the retained H output.')
+pending = pathlib.Path(args[args.index('--output-last-message') + 1])
+if mode != 'late-output':
+    pending.write_text(json.dumps(payload))
+(work / 'work/launcher-payload.json').write_text(json.dumps(payload))
+with (work / 'work/launcher-count.txt').open('a') as stream:
+    stream.write('launch\n')
+def event(kind, **fields):
+    print(json.dumps(dict(type=kind, **fields)), flush=True)
+event('thread.started', thread_id='local-reproduction-' + role)
+if role == 'H' and mode == 'failed-before-completed':
+    event('turn.failed', error=dict(message='Synthetic earlier failure'))
+if role != 'H' or mode != 'missing-completed':
+    event('turn.completed', usage=dict(input_tokens=12, cached_input_tokens=0, output_tokens=3))
+if role == 'H':
+    if mode in {'new-turn', 'failed-turn'}:
+        event('turn.started')
+        if mode == 'new-turn':
+            event('item.started', item=dict(id='unfinished-item', type='agent_message', text='Unfinished new activity'))
+        else:
+            event('turn.failed', error=dict(message='Synthetic later turn failed'))
+    elif mode == 'new-item':
+        event('item.completed', item=dict(id='late-item', type='agent_message', text='Later output'))
+    elif mode == 'new-thread':
+        event('thread.started', thread_id='another-thread')
+    elif mode == 'error':
+        event('error', message='Synthetic transport error')
+    elif mode == 'duplicate-completed':
+        event('turn.completed', usage=dict(input_tokens=12, cached_input_tokens=0, output_tokens=3))
+    elif mode == 'duplicate-unreported':
+        event('turn.completed')
+    elif mode == 'unterminated-new-turn':
+        sys.stdout.write(json.dumps(dict(type='turn.started')))
+        sys.stdout.flush()
+    elif mode == 'nonzero-exit':
+        sys.exit(7)
+if mode == 'late-output':
+    pending.write_text(json.dumps(payload))
+'''
+
+
+def _terminal_cli(root, *arguments):
+    environment = dict(os.environ)
+    environment['PYTHONPATH'] = os.pathsep.join(dict.fromkeys(
+        [str(Path(__file__).parents[2] / 'src'), *map(str, sys.path), environment.get('PYTHONPATH', '')]))
+    process = subprocess.run([sys.executable, '-m', 'scidiscovery.research_loop.cli',
+        *map(str, arguments), '--root', str(root)], env=environment,
+        capture_output=True, text=True, timeout=25)
+    assert process.stdout.strip(), process.stderr
+    return process, json.loads(process.stdout.splitlines()[-1])
+
+
+def _terminal_instance(tmp_path, mode):
+    public = tmp_path / 'public'
+    public.mkdir()
+    objective = public / 'objective.md'
+    objective.write_text('Retain the exact original transport result and its uncertainty.')
+    launcher = tmp_path / 'local-native.py'
+    launcher.write_text(TERMINAL_LAUNCHER)
+    disabled_search = tmp_path / 'disabled-search.json'
+    disabled_search.write_text('null')
+    root = tmp_path / 'instance'
+    process, result = _terminal_cli(root, 'prepare', '--objective', objective, '--public-root', public,
+        '--native-launcher-json', json.dumps([sys.executable, str(launcher), mode]),
+        '--native-backend', 'codex', '--experiment-mode', 'external',
+        '--search-policy', disabled_search, '--model', 'local-fixture-no-model',
+        '--reasoning-effort', 'high', '--max-tokens', '1000',
+        '--max-seconds', '60', '--max-steps', '4')
+    assert process.returncode == 0 and result['status'] == 'prepared', (result, process.stderr)
+    return root
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('mode,reason', [
+    ('new-turn', 'native_activity_after_completion'),
+    ('failed-turn', 'native_activity_after_completion'),
+    ('new-item', 'native_activity_after_completion'),
+    ('new-thread', 'native_activity_after_completion'),
+    ('error', 'native_failure_event'),
+    ('failed-before-completed', 'native_failure_event'),
+    ('duplicate-completed', 'native_completion_duplicated'),
+    ('duplicate-unreported', 'native_completion_duplicated'),
+    ('unterminated-new-turn', 'native_activity_after_completion'),
+])
+def test_cli_rejects_ambiguous_native_completion_without_seal_or_successor(tmp_path, mode, reason):
+    root = _terminal_instance(tmp_path, mode)
+    process, result = _terminal_cli(root, 'run')
+    assert process.returncode == 2 and result['status'] == 'native_stopped', (result, process.stderr)
+    record = execution.origin(root, 1)
+    outcome = contracts.read(record / 'native-outcome.json')
+    assert outcome['returncode'] == 0 and outcome['stop_reason'] == reason
+    assert outcome['metering']['coverage'] == 'unknown'
+    assert outcome['metering']['reason'] == reason
+    assert contracts.read(record / 'usage.json') == dict(input_tokens=12, cached_input_tokens=0, output_tokens=3)
+    assert native.usage(root)['observed_tokens'] == 15 and native.usage(root)['unknown_steps'] == [1]
+    assert (record / 'native.jsonl').read_bytes()
+    assert (record / 'native.stderr').is_file()
+    assert (record / 'result.pending.json').is_file()
+    assert not (record / 'science-output.json').exists()
+    assert not (record / 'result-identity.json').exists()
+    assert not (root / 'jobs/002.json').exists()
+    work = contracts.workspace(root, 1)
+    assert (work / 'work/launcher-count.txt').read_text() == 'launch\n'
+    originals = {name: (record / name).read_bytes() for name in (
+        'native.jsonl', 'native-outcome.json', 'usage.json', 'usage-observation.json')}
+    repeated, result = _terminal_cli(root, 'run')
+    assert repeated.returncode == 2 and result['status'] == 'native_outcome_unsealed'
+    assert result['reason'] == 'Original execution lost its verified completion; preserved without replay'
+    assert all((record / name).read_bytes() == raw for name, raw in originals.items())
+    assert (work / 'work/launcher-count.txt').read_text() == 'launch\n'
+    assert not (record / 'science-output.json').exists()
+    assert not (record / 'result-identity.json').exists()
+    assert not (root / 'jobs/002.json').exists()
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('mode,expected_rc', [('missing-completed', 0), ('nonzero-exit', 7)])
+def test_cli_missing_completion_or_nonzero_exit_retains_original(tmp_path, mode, expected_rc):
+    root = _terminal_instance(tmp_path, mode)
+    process, result = _terminal_cli(root, 'run')
+    assert process.returncode == 2 and result['status'] == 'native_stopped', (result, process.stderr)
+    record = execution.origin(root, 1)
+    outcome = contracts.read(record / 'native-outcome.json')
+    assert outcome['returncode'] == expected_rc and outcome['stop_reason'] is None
+    assert (record / 'result.pending.json').is_file()
+    assert not (record / 'science-output.json').exists()
+    assert not (record / 'result-identity.json').exists()
+    assert not (root / 'jobs/002.json').exists()
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('mode', ['success', 'late-output'])
+def test_cli_unique_native_completion_routes_original_including_late_output(tmp_path, mode):
+    root = _terminal_instance(tmp_path, mode)
+    process, result = _terminal_cli(root, 'run')
+    assert process.returncode == 0 and result['status'] == 'finish', (result, process.stderr)
+    assert result['completed_steps'] == 2
+    for step in (1, 2):
+        record = execution.origin(root, step)
+        assert contracts.read(record / 'native-outcome.json')['metering']['coverage'] == 'terminal'
+        assert (record / 'result-identity.json').is_file()
+        assert (contracts.workspace(root, step) / 'work/launcher-count.txt').read_text() == 'launch\n'
+    assert contracts.read(root / 'jobs/002.json')['role'] == 'A'
+
+
 @pytest.fixture
 def instance(tmp_path):
     public = tmp_path / 'public'
@@ -507,7 +668,8 @@ session.parent.mkdir(parents=True,exist_ok=True)
 session.write_text(json.dumps({'type':'session_meta','payload':{'id':thread,'cwd':str(work)}})+'\\n'+json.dumps({'type':'event_msg','payload':{'type':'token_count','info':{'total_token_usage':{'input_tokens':LIVE_INPUT,'cached_input_tokens':80,'output_tokens':5}}}})+'\\n')
 print(json.dumps({'type':'thread.started','thread_id':thread}),flush=True)'''.replace('LIVE_INPUT', str(live_input)))
     if stream == 'known_then_unreported':
-        source += "\nprint(json.dumps({'type':'turn.completed'}),flush=True)\n"
+        source = source.replace("print(json.dumps({'type':'turn.completed','usage':{'input_tokens':100,'cached_input_tokens':80,'output_tokens':5}}),flush=True)",
+            "print(json.dumps({'type':'turn.completed'}),flush=True)")
     script.write_text(source)
     contracts.build_job(instance, 1, 'H', [])
     result = native.execute_native(instance, 1)

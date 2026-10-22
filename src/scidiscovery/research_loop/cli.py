@@ -405,6 +405,16 @@ def main(argv=None):
         print(json.dumps(dict(status='error',error=str(error),**(dict(code=error.code) if hasattr(error, 'code') else {})), ensure_ascii=False))
         return 1
     print(json.dumps(result, ensure_ascii=False))
+    if args.command == 'execution-resume' and args.maintenance is not None:
+        from scidiscovery.operations.execution import PENDING_EXECUTION_STATES, execution_status
+        # Remote failure is a successfully maintained original, not a failed
+        # control operation. Unknown facts still require reconciliation.
+        raw = result.get('state') if args.maintenance == 'query' else result.get('status')
+        state = raw if raw in ('known_success', 'known_failed') else execution_status(raw)
+        recognized = {'known_success', 'known_failed'}
+        if args.maintenance in {'query', 'cancel'}:
+            recognized.update(PENDING_EXECUTION_STATES)
+        return 0 if state in recognized else 2
     return 0 if result.get('status') in {None, 'fork_preview_ready', 'fork_created', 'preserved_read_only', 'prepared', 'finish', 'final_a_completed', 'wait', 'paused', 'pause_requested', 'budget_amended', 'delivery_confirmed', 'execution_recovered', 'execution_resume_recorded', 'exported_unsubmitted', 'ui_stopped', 'archive_exported', 'archive_inspected', 'material_restored', 'material_already_present','checkpoint_enrolled','checkpoint_exported','checkpoint_restored','checkpoint_restore_already_completed','execution_maintained','config_checked','config_inspected','accepted','running','applied','operations','guidance_listed','pending','revoked','progress_read','progress_unavailable','artifact_downloaded'} else 2
 
 

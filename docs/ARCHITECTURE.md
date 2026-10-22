@@ -304,14 +304,35 @@ revoke that completion or its original authorized delivery. They authorize no ne
 experiment, scientific node or retry of unknown execution.
 
 Standard single-command `codex` CLI preparation freezes up to two output-only
-repairs by default, binding the original native home privately so configuration,
+repairs or original managed-execution wakes by default, binding the original native home privately so configuration,
 authentication and permissions remain unchanged. It freezes the absolute invoked
 launcher and its target without replacing invocation symlinks. If no node policy
 was supplied, per-role soft targets reference the original global ceilings; they
 allocate nothing. Explicit policies override this default, including disabling
 repair; custom launchers and direct controller API calls remain explicit. This
-default never authorizes failed-task, work-repair, fragment or execution-wake
-continuations.
+default freezes `execution_wake: true` as a narrow exception to `output_only`.
+When W normally returns scientific JSON while an original managed call is still
+pending, control retains an unsealed waiting checkpoint and monitors that call
+without a native turn. Only verified terminal facts for those exact calls may
+resume the same W session to interpret results and finalize its response. The
+host rejects new managed calls during this narrow wake, including through an old
+client; ordinary same-user shell access remains a soft boundary. The exception
+shares the original finite attempt limit, cumulative budget, permissions and
+home/session. It grants no failed-task retry, work-repair or fragment continuation.
+Old frozen output-only policies without the flag gain no wake permission; explicit
+full-resume policies retain their existing wake behavior unless explicitly disabled.
+The W task reports frozen wake permission and normal pending-call handoff instructions;
+this does not force a live W to yield or prove that its session is usable. Missing
+permission is diagnosed before host monitoring waits for terminal completion, while
+preserving the original checkpoint and call.
+Executor receipts carry a compact host-generated `handoff.action`: `return_control`,
+`poll_original`, `consume_terminal`, or `reconcile_or_stop`. The same pure decision
+rule drives host waiting. Consumption requires a verified original terminal,
+not a returned status string. Polling advice specifies a one-second interval and
+three queries total for the same call in this turn, within the original budget;
+later receipts do not reset that bound. This is a Worker handoff contract and
+advice, not a forced scheduler or an added execution grant. New tasks freeze the
+handoff explanation literally; existing task and call originals remain unchanged.
 
 New `prepare` freezes `final_a_completion_policy` version 1. Each ordinary state
 checks whether its remaining budget can start the next action. This mode reserves

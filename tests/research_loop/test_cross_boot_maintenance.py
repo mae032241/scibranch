@@ -10,6 +10,7 @@ from scidiscovery.research_loop import (budget, contracts as c, controller,
 from execution_fixtures import execution_registry
 from test_execution_resources import resource_registry, prepare
 from test_native_execution_inputs import chain, _reviewed_execution
+from scidiscovery.research_loop.cli import main
 
 
 def _clock(monkeypatch):
@@ -145,3 +146,66 @@ def test_cross_boot_original_maintenance_collects_without_scientific_dispatch(ch
     with pytest.raises(ValueError, match='expired'):
         window.check()
     assert backend.submits == 1
+
+
+@pytest.mark.parametrize('action,state,expected_code,expected', [
+    ('query', 'queued', 0, 'queued'),
+    ('query', 'failed', 0, 'failed'),
+    ('query', 'unknown', 2, 'unknown'),
+    ('collect', 'succeeded', 0, 'known_success'),
+    ('collect', 'failed', 0, 'known_failed'),
+    ('collect', 'queued', 2, 'unknown'),
+    ('cancel', 'cancelling', 0, 'cancelling'),
+    ('cancel', 'cancelled', 0, 'cancelled'),
+    ('cancel', 'unknown', 2, 'unknown'),
+])
+def test_original_maintenance_cli_reports_control_outcome(
+        chain, capsys, monkeypatch, action, state, expected_code, expected):
+    root, backend, output, active, config, _ = _reviewed_execution(chain, capsys)
+    assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
+    call = json.loads(capsys.readouterr().out)['call_id']
+    records = e.Records(config); directory = records.directory(call)
+    accepted = (directory / 'accepted.json').read_bytes()
+    ledger = {path.name: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')}
+    seals = {c.host_record(c.workspace(root, step)) / 'result-identity.json':
+        (c.host_record(c.workspace(root, step)) / 'result-identity.json').read_bytes()
+        for step in range(1, 6)}
+    stamp = budget.clock_stamp(); stamp.update(boot_id='cli-maintenance-new-boot', at_boottime=10.)
+    monkeypatch.setattr(budget, 'clock_stamp', lambda: dict(stamp))
+    def no_science(*args, **kwargs):
+        pytest.fail('Maintenance must not admit scientific work')
+    monkeypatch.setattr(budget, 'snapshot', no_science)
+    monkeypatch.setattr(authority, '_remaining', no_science)
+    cancellations = []
+    def cancel(external):
+        cancellations.append(external)
+        backend.state = state
+        return state
+    monkeypatch.setattr(backend, 'cancel', cancel, raising=False)
+    # Begin from a cancellable original. A cancelling/terminal/unknown query
+    # deliberately makes cancel_original return without another cancel request.
+    backend.state = 'queued' if action == 'cancel' else state
+    code = main(['execution-resume', '--root', str(root), '--step', '6', '--call-id', call,
+        '--max-seconds', '30', '--authorization-note', 'Maintain this exact accepted original',
+        '--maintenance', action])
+    result = json.loads(capsys.readouterr().out)
+    assert code == expected_code, result
+    assert result['call_id'] == call
+    assert result['state' if action == 'query' else 'status'] == expected
+    assert c.read(directory / 'maintenance-operations/000001/outcome.json')['result'] == result
+    if action == 'collect' and expected_code == 0:
+        observed = c.read(directory / 'execution-observation.json')
+        assert observed['status'] == expected
+        e.verify_observation(observed, lambda item: Path(item['path']), interface=config['execution_interface'])
+    assert cancellations == ([records.external(call)] if action == 'cancel' else [])
+    assert backend.submits == 1 and len(backend.prepared) == 1
+    assert (directory / 'accepted.json').read_bytes() == accepted
+    assert {path.name: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')} == ledger
+    assert all(path.read_bytes() == raw for path, raw in seals.items())
+
+
+def test_cli_known_failed_without_maintenance_remains_non_success(chain, capsys, monkeypatch):
+    root = chain[0]
+    monkeypatch.setattr(controller, 'run', lambda root: dict(status='known_failed'))
+    assert main(['run', '--root', str(root)]) == 2
+    assert json.loads(capsys.readouterr().out) == dict(status='known_failed')

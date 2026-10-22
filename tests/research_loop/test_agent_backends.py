@@ -72,6 +72,43 @@ def test_protocol_missing_terminal_retains_original_without_verifying_success(tm
     assert c.read(record/'native-outcome.json')['metering']['coverage']=='unknown'
 
 
+@pytest.mark.process_e2e
+def test_protocol_can_deliver_result_after_completed_declaration(tmp_path):
+    root=prepare(tmp_path);record=intent(root)
+    result="print(json.dumps(dict(type='result',result=result)),flush=True)"
+    assert SCRIPT.count(result)==1
+    (tmp_path/'independent.py').write_text(SCRIPT.replace(result,'')+'\n'+result+'\n')
+    outcome=native.run_native(root,1)
+    assert outcome['returncode']==0 and outcome['stop_reason'] is None
+    assert outcome['metering']['coverage']=='terminal'
+    assert c.read(record/'science-output.json')['summary']=='Completed bounded work'
+    events=[json.loads(line)['type'] for line in (record/'native.jsonl').read_text().splitlines()]
+    assert events[-2:]==['completed','result']
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('event,reason',[
+    (dict(type='completed',usage=dict(input_tokens=12,output_tokens=3)),'native_completion_duplicated'),
+    (dict(type='session',session_id='independent-session'),'native_activity_after_completion'),
+    (dict(type='message',text='Unfinished later activity'),'native_activity_after_completion'),
+    (dict(type='tool',tool='later-execution',status='started'),'native_activity_after_completion'),
+    (dict(type='failed'),'native_failure_event'),
+    (dict(type='error',message='Unresolved failure'),'native_failure_event'),
+])
+def test_protocol_rejects_activity_or_failure_after_completion(tmp_path,event,reason):
+    root=prepare(tmp_path);record=intent(root)
+    (tmp_path/'independent.py').write_text(SCRIPT+'\nprint('+repr(json.dumps(event))+',flush=True)\n')
+    with pytest.raises(RuntimeError,match='preserved without replay'):native.run_native(root,1)
+    outcome=c.read(record/'native-outcome.json')
+    assert outcome['returncode']==0 and outcome['stop_reason']==reason
+    assert outcome['metering']['coverage']=='unknown' and outcome['metering']['reason']==reason
+    assert c.read(record/'usage.json')==dict(input_tokens=12,cached_input_tokens=0,output_tokens=3)
+    assert native.usage(root)['unknown_steps']==[1]
+    assert (record/'result.pending.json').is_file()
+    assert not (record/'science-output.json').exists()
+    assert not (record/'result-identity.json').exists()
+
+
 def test_protocol_resume_is_explicitly_unsupported(tmp_path):
     root=prepare(tmp_path)
     from scidiscovery.research_loop import continuation

@@ -289,12 +289,24 @@ def run_native(root: Path, step: int, attempt=0):
             'Preserve the actual task-required deliverables, including needed evaluated objects and native receipts, in these declared outputs before temporary files disappear. The adapter cannot reconstruct missing results from source code or metrics. '
             'Use finite metric values; control does not infer metric meaning, candidate ranking or qualification. '
             'Do not write hashes or identities. Native shell remains available for scratch. Query lineage-status for original calls; never repeat an unknown call.\n')
-    if job['role'] == 'W':
+    output_only_wake = bool(intent.get('execution_wake') and (settings.get('resume_policy') or {}).get('output_only'))
+    # A wake may consume an external original without configuring a new run.
+    if job['role'] == 'W' and (experiment_config is not None or intent.get('execution_wake')):
+        prompt += ('\nAfter every managed execution response, follow its host-generated handoff.action. '
+            'return_control means return your normal final scientific JSON now, explaining the pending original call and limitations; '
+            'the host monitors that original call without model polling and applies its frozen wake permission. '
+            'poll_original permits only the exact original call, within the remaining original budget and the supplied '
+            'poll_interval_seconds and max_queries. Count queries cumulatively for that same call in this native turn; '
+            'later receipts do not reset the bound. At the bound, return normal scientific JSON with the pending limitation and hand control back. '
+            'consume_terminal means read the retained original outputs and finish your scientific interpretation. '
+            'reconcile_or_stop means preserve the uncertain original identity and report the blocker; do not blindly poll or resubmit. '
+            'Keep no model turn or shell loop alive merely to await a long execution.\n')
+    if job['role'] == 'W' and not output_only_wake:
         prompt += ('\nAn optional engineering_check may follow a confirmed managed call while you remain in this task. Read its compact feedback and repair source in this same session when useful. '
             'sample_replay_ok covers only its declared sample path, never full training or audit qualification. Small-sample or bounded-check failures may be inconclusive. '
             'An isolated replay sees only frozen submitted source and declared public inputs plus the task runtime dependencies; sibling scratch helpers and your home are absent. '
             'Do not package dependencies or write hashes/manifests; make the submitted implementation self-contained or use an explicitly supported dependency input.\n')
-    if checkpoint.enabled(root, job):
+    if checkpoint.enabled(root, job) and not output_only_wake:
         prompt += ('\nA native turn can be a fragment of this same scientific stage. Give your current understanding, '
                    'unresolved questions and scientific next intent. stage_intent=continue requests more work in the assigned task; '
                    'review reports its completed scientific delivery, while decision requests A with partial work. The host can require review at the original investment boundary. '
@@ -306,9 +318,12 @@ def run_native(root: Path, step: int, attempt=0):
             remaining.update(mode='soft_targets',previous_observed_tokens=intent['budget_slice']['previous_tokens'])
         label = 'Original soft-target gaps (zero is not a new grant): ' if control_budget.node_mode(root)=='soft' else 'Original node remaining budget: '
         context = 'new context for this same task/workspace' if intent.get('context_mode') == 'new_context' else 'same task/session/workspace'
+        recovery = ('Read the retained original execution results and complete only your final response. '
+                    if output_only_wake else
+                    'collect or recover managed executions by their original IDs rather than resubmitting. '
+                    'Use scientific judgment for ordinary native shell checkpoints; no new mechanical registry is required. ')
         prompt = (label + json.dumps(remaining) + '\nContinue this ' + context + '. Read existing checkpoints and confirmed results; '
-                  'collect or recover managed executions by their original IDs rather than resubmitting. '
-                  'Use scientific judgment for ordinary native shell checkpoints; no new mechanical registry is required.\n' + prompt)
+                  + recovery + '\n' + prompt)
         if intent.get('output_repair'):
             prompt = ('Repair only your final response for this same completed task. Preserve completed experiments and '
                       'their results; do not rerun or resubmit them. Return corrected scientific JSON using the frozen '
@@ -320,7 +335,11 @@ def run_native(root: Path, step: int, attempt=0):
         from . import continuation
         continuation.validate_wake(root,step,intent,execution.record(root,step,attempt-1))
         managed_wait.wake_packet(root,job,intent)
+        wake_scope = ('This output-only wake permits interpreting and preserving the original terminal results and completing your final response only. '
+            'Do not start new experiments or training, request a fragment continuation or WorkRepair. '
+            if output_only_wake else '')
         prompt=('The original managed execution has finished. Read work/execution-results.json and its exact retained outputs. '
+            + wake_scope +
             'Continue this same task/session from its checkpoint, interpret the results, and return your own scientific findings. '
             'Do not rerun or resubmit the completed execution.\n'+prompt)
     if intent.get('work_repair'):
@@ -479,6 +498,7 @@ def run_native(root: Path, step: int, attempt=0):
     meter = dict(input_tokens=0, cached_input_tokens=0, output_tokens=0)
     observed = False
     terminal_observed = False
+    terminal_fault = None
     terminal_usage_observed = False
     terminal_usage_missing = False
     terminal_meter = dict(meter)
@@ -531,10 +551,14 @@ def run_native(root: Path, step: int, attempt=0):
                         chunk = os.read(key.fileobj.fileno(), 65536)
                         if not chunk:
                             selector.unregister(key.fileobj)
-                            continue
-                        log.write(chunk)
-                        log.flush()
-                        pending_line += chunk
+                            if not pending_line:
+                                continue
+                            # A final JSON event need not end in a newline.
+                            pending_line += b'\n'
+                        else:
+                            log.write(chunk)
+                            log.flush()
+                            pending_line += chunk
                         if len(pending_line) > 64 * 1024 * 1024:
                             raise ValueError('Native event exceeds transport byte budget')
                         while b'\n' in pending_line:
@@ -552,6 +576,12 @@ def run_native(root: Path, step: int, attempt=0):
                                     public_log.write(json.dumps(public_event,ensure_ascii=False)+'\n')
                                     public_log.flush()
                             event = backend.event(event)
+                            if event.get('failed'):
+                                terminal_fault = terminal_fault or 'native_failure_event'
+                            if terminal_observed and ('session' in event or event.get('activity')):
+                                terminal_fault = terminal_fault or 'native_activity_after_completion'
+                            if terminal_observed and event.get('completed'):
+                                terminal_fault = terminal_fault or 'native_completion_duplicated'
                             if 'session' in event:
                                 thread_id = event['session']
                                 live_meter.bind_thread(thread_id)
@@ -565,9 +595,11 @@ def run_native(root: Path, step: int, attempt=0):
                                 terminal_observed = True
                             current = event.get('usage')
                             if current is not None:
-                                # exec turn.completed usage belongs to this turn.
+                                # Only one completion can verify this invocation.
+                                # Ambiguous duplicates retain an observed lower
+                                # bound without counting the same report twice.
                                 for key in terminal_meter:
-                                    terminal_meter[key] += current[key]
+                                    terminal_meter[key] = max(terminal_meter[key], current[key])
                                 terminal_usage_observed = True
                                 observed = True
                                 hint_dirty=True
@@ -635,6 +667,7 @@ def run_native(root: Path, step: int, attempt=0):
                 process.stdout.close()
             if process.stdin is not None and not process.stdin.closed:
                 process.stdin.close()
+    stop = stop or terminal_fault
     if process is not None:
         observation = live_meter.poll()
         observed = observed or observation['has_observation']
@@ -644,7 +677,9 @@ def run_native(root: Path, step: int, attempt=0):
                            live_tokens=dict(observation['tokens']))
         if terminal_observed:
             observation['source'] = backend.terminal_source
-        if terminal_usage_observed and not terminal_usage_missing:
+        if terminal_fault:
+            observation.update(coverage='unknown', reason=terminal_fault)
+        elif terminal_usage_observed and not terminal_usage_missing:
             mismatch = any(terminal_meter[key] < meter[key] for key in meter)
             if mismatch or live_meter.fault:
                 observation.update(coverage='unknown', reason=live_meter.fault or 'terminal_usage_below_live_observation')

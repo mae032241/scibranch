@@ -25,14 +25,28 @@ def _read(root, operation_id):
 
 def operation(root, operation_id):
     root = Path(root).resolve()
-    with budget._ledger_writer(root):
-        value = _read(root, operation_id)
-        process = value.get('process')
-        if (value['kind'] == 'controller' and value['status'] in {'accepted', 'running'} and process is not None
-                and not runtime.process_matches(process, operation_id)):
-            value.update(status='failed', error='Controller process disappeared; original work requires reconciliation')
-            contracts.write(_path(root, operation_id), value)
-        return value
+    from .instance_owner import lease
+    with lease(root):
+        descriptor = os.open(root / 'host-run.lock', os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        try:
+            # Probe before the ledger: the starter/child owns writer -> ledger.
+            # A busy writer may still be publishing its child's exact identity.
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                inactive = True
+            except BlockingIOError:
+                inactive = False
+            with budget._ledger_writer(root):
+                value = _read(root, operation_id)
+                process = value.get('process')
+                if (value['kind'] == 'controller' and value['status'] in {'accepted', 'running'}
+                        and ((process is None and inactive)
+                             or (process is not None and not runtime.process_matches(process, operation_id)))):
+                    value.update(status='failed', error='Controller owner disappeared; original work requires reconciliation; missing process does not prove non-submission')
+                    contracts.write(_path(root, operation_id), value)
+                return value
+        finally:
+            os.close(descriptor)
 
 
 def operations(root):
@@ -60,7 +74,9 @@ def start_background(root, *, continue_run=False, ack_correction=None, authoriza
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                active = [row for row in operations(root) if row['kind'] == 'controller' and row['status'] in {'accepted', 'running'}]
+                active = [row for row in operations(root) if row['kind'] == 'controller'
+                          and row['status'] in {'accepted', 'running'} and row.get('process') is not None
+                          and runtime.process_matches(row['process'], row['operation_id'])]
                 if active:
                     return dict(active[-1], already_running=True)
                 return dict(operation_id=None, kind='controller', status='running', already_running=True,

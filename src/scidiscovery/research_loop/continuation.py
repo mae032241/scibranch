@@ -18,10 +18,11 @@ class ResumeUnavailable(ValueError):
 def policy(value, launcher):
     required={'max_attempts','protocol','usage_scope'}
     if (not isinstance(value, dict) or not required <= set(value)
-            or set(value)-required-{'output_repair','output_only','native_home'}
+            or set(value)-required-{'output_repair','output_only','execution_wake','native_home'}
             or type(value['max_attempts']) is not int or not 1 <= value['max_attempts'] <= 2
             or value['protocol'] != 'codex_exec_resume' or value['usage_scope'] != 'turn'
             or ('output_repair' in value and type(value['output_repair']) is not bool)
+            or ('execution_wake' in value and type(value['execution_wake']) is not bool)
             or ('output_only' in value and (type(value['output_only']) is not bool
                 or value['output_only'] and not value.get('output_repair',False)))
             or ('native_home' in value and (not value.get('output_only') or not isinstance(value['native_home'],str)
@@ -50,6 +51,18 @@ def validate_launcher(root, step=None):
         if Path(proof['invoked_path']).resolve() != Path(proof['path']):
             raise ValueError('Frozen resume launcher changed')
         c.regular(Path(proof['path']))
+    return limits
+
+
+def wake_allowed(limits):
+    """Old full-resume grants retain wake; output-only needs its narrow opt-in."""
+    return limits is not None and limits.get('execution_wake', not limits.get('output_only', False)) is True
+
+
+def validate_wake_policy(root, step):
+    limits = validate_launcher(root, step)
+    if not wake_allowed(limits):
+        raise ResumeUnavailable('worker_execution_wake_unauthorized')
     return limits
 
 
@@ -455,6 +468,8 @@ def start(root, step):
 def validate_wake(root,step,intent,prior):
     from . import managed_wait, experiments
     job=c.read(root/'jobs'/f'{step:03d}.json')
+    validate_wake_policy(root,step)
+    if job['role']!='W':raise ValueError('Execution wake requires the original W task')
     managed_wait.validate(root,job,prior)
     request=intent['execution_wake']
     if request['waiting']!=experiments.proof(prior/managed_wait.NAME):
@@ -473,8 +488,7 @@ def validate_wake(root,step,intent,prior):
 def wake_start(root,step,observations):
     """Resume one successful suspended native turn, sharing original finite authorization."""
     from . import managed_wait, experiments
-    limits=validate_launcher(root, step);job=validate_task(root,step);paths=execution.records(root,step);last=paths[-1]
-    if limits.get('output_only'):raise ResumeUnavailable('worker_resume_output_only')
+    limits=validate_wake_policy(root, step);job=validate_task(root,step);paths=execution.records(root,step);last=paths[-1]
     if (execution.origin(root,step)/'result-identity.json').exists():raise ResumeUnavailable('execution_wake_stage_already_sealed')
     if (root/'pause.request').exists() or budget.closeout_state(root)['begin'] is not None:
         raise ResumeUnavailable('worker_resume_paused_or_closeout')

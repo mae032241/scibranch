@@ -1,5 +1,6 @@
 """Unified configuration uses real preparation validation without native calls."""
 import json
+import sys
 
 import pytest
 
@@ -28,6 +29,48 @@ max_steps = 8
 
 def output(capsys):
     return json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize('value',[0,1,'true',None])
+def test_execution_wake_permission_requires_boolean(value):
+    from scidiscovery.research_loop import continuation
+    with pytest.raises(ValueError,match='explicit finite attempts'):
+        continuation.policy(dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn',
+            execution_wake=value),[sys.executable])
+
+
+def test_narrow_wake_permission_preserves_legacy_full_resume():
+    from scidiscovery.research_loop import continuation
+    full=dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn')
+    assert continuation.wake_allowed(full)
+    assert not continuation.wake_allowed(None)
+    output=dict(full,output_only=True,output_repair=True)
+    assert not continuation.wake_allowed(output)
+    assert not continuation.wake_allowed(dict(output,execution_wake=False))
+    assert continuation.wake_allowed(dict(output,execution_wake=True))
+
+
+@pytest.mark.parametrize('state,bound,query,wake,verified,expected',[
+    ('running',True,True,True,False,'return_control'),
+    ('queued',True,True,False,False,'poll_original'),
+    ('cancelling',True,True,False,False,'poll_original'),
+    ('running',False,True,True,False,'reconcile_or_stop'),
+    ('running',True,False,True,False,'reconcile_or_stop'),
+    ('unknown',True,True,True,False,'reconcile_or_stop'),
+    ('unknown',True,True,True,True,'reconcile_or_stop'),
+    ('known_success',True,True,True,False,'reconcile_or_stop'),
+    ('known_failed',True,True,True,False,'reconcile_or_stop'),
+    ('known_success',True,True,True,True,'consume_terminal'),
+    ('succeeded',True,True,True,False,'reconcile_or_stop'),
+    ('succeeded',True,True,True,True,'consume_terminal'),
+    ('known_failed',True,True,True,True,'consume_terminal'),
+    ('failed',True,True,True,True,'consume_terminal'),
+    ('cancelled',True,True,True,True,'consume_terminal'),
+])
+def test_executor_and_host_share_handoff_rules(state,bound,query,wake,verified,expected):
+    from scidiscovery.research_loop import managed_wait
+    assert managed_wait.handoff_action(state,original_bound=bound,query=query,
+        wake_authorized=wake,terminal_verified=verified)==expected
 
 
 def test_research_plugin_file_is_relative_to_declaration_and_freezes_once(tmp_path, monkeypatch):

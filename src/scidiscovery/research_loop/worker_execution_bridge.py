@@ -178,8 +178,10 @@ def _execute(server, arguments):
 
 
 def _unknown():
+    from . import managed_wait
     return dict(code=2,result=dict(status='unknown',
-        note='Preserve the original submission and reconcile its original call; no automatic replay'))
+        note='Preserve the original submission and reconcile its original call; no automatic replay',
+        handoff=managed_wait.handoff(None,{},'run')))
 
 
 def _call_evidence(config, call_id):
@@ -311,9 +313,23 @@ def _handle(server, raw, *, retained=False):
         except (OSError,ValueError):pass
         response=dict(code=3,result=dict(status='integrity_error',
             note='Scientific submission could not be verified; preserve original calls'),submission_ref=reference,request=request)
+    arguments=request['arguments']
+    if isinstance(arguments,list) and arguments and isinstance(arguments[0],str) and arguments[0] in {'run','query','lookup','collect','cancel','reconcile'}:
+        # Recompute only the public projection, never cached claim originals.
+        # A retained unknown remains unknown even if its old hint said to wait.
+        from . import managed_wait
+        control=arguments[:arguments.index('--')] if '--' in arguments else arguments
+        call_id=None
+        if '--call-id' in control:
+            index=control.index('--call-id')
+            if index+1<len(control):call_id=control[index+1]
+        response['result']=dict(response['result'],handoff=managed_wait.handoff(
+            server.configuration,response['result'],arguments[0],call_id))
     if len(_encoded(response))>MAX_BYTES:
-        response=dict(code=3,result=dict(status='integrity_error',
-            note='Execution response exceeds its declared bound'),submission_ref=reference,request=request)
+        from . import managed_wait
+        result=dict(status='integrity_error',note='Execution response exceeds its declared bound')
+        result['handoff']=managed_wait.handoff(None,result,'run')
+        response=dict(code=3,result=result,submission_ref=reference,request=request)
     _publish(server.directory/'response.json',_encoded(response))
 
 
@@ -444,6 +460,9 @@ def main(argv=None):
     except e.CallerError as error:response=dict(code=2,result=e.caller_feedback(error))
     except (OSError,ValueError):
         response=dict(code=3,result=dict(status='unknown',note='Scientific submission result is unavailable; preserve original calls'))
+    if response['result'].get('status') in {'unknown','integrity_error','caller_error'}:
+        from . import managed_wait
+        response['result']['handoff']=managed_wait.handoff(None,response['result'],'run')
     print(json.dumps(response['result'],ensure_ascii=False,allow_nan=False))
     return response['code']
 

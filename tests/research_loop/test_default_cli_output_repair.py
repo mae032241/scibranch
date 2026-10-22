@@ -140,7 +140,7 @@ def test_default_standard_cli_repairs_same_a_in_original_native_home(tmp_path,fi
     root,home,env=prepare_cli(tmp_path,final=final)
     settings=c.settings(root);policy=settings['resume_policy']
     assert settings['native_launcher_argv']==[str(tmp_path/'bin/codex')]
-    assert policy['output_only'] and policy['output_repair'] and policy['max_attempts']==2
+    assert policy['output_only'] and policy['output_repair'] and policy['execution_wake'] and policy['max_attempts']==2
     assert policy['native_home']==str(home)
     assert policy['launcher_files'][0]['path']==str(tmp_path/'native.py')
     assert settings['node_budget_policy']=={role:dict(max_observed_tokens=settings['max_tokens'],max_seconds=60) for role in 'HWAE'}

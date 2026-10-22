@@ -3,6 +3,7 @@ import json
 import fcntl
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import threading
@@ -201,6 +202,91 @@ def test_worker_resume_keeps_unknown_original_ineligible(root, monkeypatch):
     assert result['status'] == 'worker_resume_unavailable'
     assert result['reason'] == 'worker_resume_usage_unknown'
     assert (root / 'jobs/001.json').read_bytes() == original
+
+
+def test_busy_writer_does_not_attribute_missing_process_receipt_to_current_owner(root, monkeypatch):
+    stale = controls._new('controller', action=dict(kind='run'))
+    path = controls._path(root, stale['operation_id'])
+    contracts.write(path, stale)
+    original = path.read_bytes()
+    monkeypatch.setattr(controls.subprocess, 'Popen', lambda *args, **kwargs: pytest.fail('Busy writer must not dispatch'))
+    with controller._writer(root):
+        assert controls.operation(root, stale['operation_id']) == stale
+        duplicate = controls.start_background(root)
+        assert duplicate == dict(operation_id=None, kind='controller', status='running',
+                                 already_running=True, owner='existing_controller')
+        assert path.read_bytes() == original
+    reconciled = controls.operation(root, stale['operation_id'])
+    assert reconciled['operation_id'] == stale['operation_id'] and reconciled['status'] == 'failed'
+    assert 'requires reconciliation' in reconciled['error']
+
+
+def test_detached_child_publication_window_retains_accepted_receipt(root, monkeypatch):
+    seen = []
+
+    def launch(command, **options):
+        operation_id = command[4]
+        value = controls.operation(root, operation_id)
+        assert value['status'] == 'accepted' and 'process' not in value
+        assert controls.start_background(root)['operation_id'] is None
+        seen.append(operation_id)
+        return SimpleNamespace(pid=os.getpid())
+
+    monkeypatch.setattr(controls.subprocess, 'Popen', launch)
+    receipt = controls.start_background(root)
+    assert seen == [receipt['operation_id']]
+    assert receipt['status'] == 'accepted' and receipt['process']['pid'] == os.getpid()
+
+
+@pytest.mark.process_e2e
+def test_killed_pre_popen_starter_receipt_reconciles_without_dispatch(root, tmp_path):
+    # Kill the real starter after its receipt is durable, before Popen executes.
+    script = r'''
+import json, os, pathlib, signal, sys
+from scidiscovery.research_loop import control_operations as controls, contracts
+root, witness = map(pathlib.Path, sys.argv[1:])
+def die_before_popen(command, **options):
+    assert command[:3] == [sys.executable, '-m', controls.__name__]
+    operation_id = command[4]
+    path = controls._path(root, operation_id)
+    value = contracts.read(path)
+    assert value['status'] == 'accepted' and 'process' not in value
+    with witness.open('x') as stream:
+        json.dump(dict(operation_id=operation_id, sha256=contracts.digest(path)), stream)
+        stream.flush(); os.fsync(stream.fileno())
+    os.kill(os.getpid(), signal.SIGKILL)
+controls.subprocess.Popen = die_before_popen
+controls.start_background(root)
+raise AssertionError('Killed starter returned')
+'''
+    source = Path(contracts.__file__).resolve().parents[2]
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(source), *map(str, sys.path)]))
+    witness = tmp_path / 'starter-boundary.json'
+    starter = subprocess.run([sys.executable, '-c', script, str(root), str(witness)],
+                             env=env, capture_output=True, text=True, timeout=10)
+    assert starter.returncode == -signal.SIGKILL, (starter.stdout, starter.stderr)
+    boundary = contracts.read(witness)
+    path = controls._path(root, boundary['operation_id'])
+    assert contracts.digest(path) == boundary['sha256']
+    original = contracts.read(path)
+    assert original['status'] == 'accepted' and 'process' not in original
+    final = None
+    for _ in range(2):
+        query = subprocess.run([sys.executable, '-m', 'scidiscovery.research_loop.cli', 'operations',
+            '--root', str(root), '--operation-id', boundary['operation_id']],
+            env=env, capture_output=True, text=True, timeout=10)
+        assert query.returncode == 2, (query.stdout, query.stderr)
+        observed = json.loads(query.stdout)
+        assert observed['status'] == 'failed' and 'process' not in observed
+        assert observed['operation_id'] == original['operation_id']
+        assert observed['action'] == original['action']
+        assert 'requires reconciliation' in observed['error']
+        assert 'does not prove non-submission' in observed['error']
+        if final is not None:
+            assert path.read_bytes() == final
+        final = path.read_bytes()
+    assert not (root / 'jobs').exists()
+    assert not (root / 'native-evidence/001/native-intent.json').exists()
 
 
 @pytest.mark.process_e2e

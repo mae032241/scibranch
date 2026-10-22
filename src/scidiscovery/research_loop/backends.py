@@ -171,6 +171,9 @@ class Codex:
         kind = value.get('type')
         if kind=='thread.started':return dict(session=value.get('thread_id'))
         if kind=='turn.completed':return dict(completed=True,usage=_usage(value.get('usage')))
+        if kind in {'turn.failed','error'}:return dict(failed=True)
+        if isinstance(kind,str) and kind.startswith(('turn.','item.','thread.')):
+            return dict(activity=True)
         return {}
 
     def identity(self, meter, session):
@@ -258,6 +261,8 @@ class Protocol:
         if kind=='usage':return dict(live_usage=_usage(value.get('usage')))
         if kind=='result':return dict(result=value.get('result'))
         if kind=='completed':return dict(completed=True,usage=_usage(value.get('usage')))
+        if kind in {'failed','error'}:return dict(failed=True)
+        if kind in {'message','tool'}:return dict(activity=True)
         return {}
     def identity(self, meter, session):
         return dict(backend=self.name,session_id=session,participant_scope='unsupported',
