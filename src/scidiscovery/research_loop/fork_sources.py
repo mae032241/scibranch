@@ -101,7 +101,7 @@ def _parent_state(root):
     blocked = []
     if not (root / 'host-run.lock').exists() and not (root / 'instance-owner.json').exists():
         blocked.append(dict(code='source_guard_unavailable', path='host-run.lock'))
-    jobs = sorted((root / 'jobs').glob('*.json'))
+    jobs = sorted((root / 'jobs').glob('*.json'), key=lambda path: int(path.stem))
     complete = False
     if jobs:
         last = c.read(c.regular(jobs[-1]))

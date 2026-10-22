@@ -125,7 +125,9 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     if objective_text is not None:
         if not isinstance(objective_text, str):
             raise ValueError("The objective must contain original user text")
-        if len(objective_text.encode('utf-8')) > 256_000:
+        # An unchanged frozen file objective may exceed the new inline input cap.
+        if (len(objective_text.encode('utf-8')) > 256_000
+                and (_existing_settings is None or objective_text != _existing_settings.get('objective'))):
             raise ValueError("The objective text exceeds the 256000-byte limit")
         objective = root.resolve() / "project/global/objective.md"
     text = objective.read_text(encoding="utf-8") if objective_text is None else objective_text

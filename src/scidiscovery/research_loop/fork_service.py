@@ -257,7 +257,7 @@ def _prepare(plan, request, transaction):
         destination.parent.mkdir(parents=True, exist_ok=True)
         source_store.rename(destination)
         return _child_source_facts(storage_root, global_materials, plan)
-    settings = controller.prepare(**options, _identity_root=final,
+    settings = controller.prepare(**options, _existing_settings=selected_settings, _identity_root=final,
         _public_identity_root=final / 'host-runtime/fork/public', _user_update_texts=texts[1:],
         _source_facts_factory=source_facts)
     settings = c.settings(stage)

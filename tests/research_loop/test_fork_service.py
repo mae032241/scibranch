@@ -209,6 +209,59 @@ def test_real_source_create_preserves_permissions_and_new_ledgers(tmp_path):
     fork_sources.validate_manifest(child, full=True)
 
 
+def test_file_objective_over_inline_limit_survives_fork(tmp_path, monkeypatch):
+    from test_history_handoff import finish
+    from scidiscovery.research_loop import controller, fork_sources, qualification
+    public = tmp_path / 'public'; public.mkdir()
+    objective = public / 'objective.md'
+    text = 'A' * (300 * 1024 - 1) + '\n'
+    objective.write_text(text, encoding='utf-8')
+    original = objective.read_bytes()
+    options = dict(max_tokens=1000, max_seconds=60, max_steps=3,
+        model='fixture', reasoning_effort='high', experiment_mode='external', search_policy=None)
+    for previous in (None, dict(objective='A different frozen objective.')):
+        with pytest.raises(ValueError, match='256000-byte limit'):
+            controller.prepare(tmp_path / 'inline', objective, public, ['fixture-no-execution'],
+                objective_text=text, validate_only=True, _existing_settings=previous, **options)
+    assert not (tmp_path / 'inline').exists()
+    parent = tmp_path / 'parent'
+    controller.prepare(parent, objective, public, ['fixture-no-execution'], **options,
+        source_restrictions=[dict(source=str(objective), sha256=c.digest(objective), restriction='clear')])
+    write = c.write
+
+    def write_synthetic_result(path, value):
+        if path.name == 'native-outcome.json':
+            value = dict(value, native_started=False)
+        return write(path, value)
+
+    # Declare the helper's lack of a native process before sealing its results.
+    with monkeypatch.context() as patch:
+        patch.setattr(c, 'write', write_synthetic_result)
+        finish(parent, 1, 'H', [], action='analyze')
+        finish(parent, 2, 'A', [1], action='finish')
+    with controller._writer(parent):
+        pass
+    child = tmp_path / 'branch'
+    preview = service.preview(parent, 2, child, budget=BUDGET)
+    assert preview['status'] == 'fork_preview_ready'
+    receipt = service.create(parent, 2, child, budget=BUDGET,
+        expected_preview_id=preview['preview_id'], operation_id='large-file-objective')
+    settings = c.settings(child)
+    assert receipt['state'] == 'paused' and (child / 'pause.request').exists()
+    assert settings['objective'] == text
+    assert (child / 'project/global/objective.md').read_bytes() == original
+    sources = qualification._sources(child)
+    assert sources['globals'][0]['origin']['path'] == str(child / 'project/global/objective.md')
+    assert sources['globals'][0]['origin']['sha256'] == c.digest(child / 'project/global/objective.md')
+    assert any(row['origin']['path'] == str(child / 'project/global/objective.md')
+               and row['restriction'] == 'clear' for row in sources['declarations'])
+    assert b'.scid-fork-' not in (child / settings['source_provenance']['path']).read_bytes()
+    shutil.rmtree(parent)
+    shutil.rmtree(public)
+    fork_sources.validate_manifest(child, full=True)
+    assert (child / 'project/global/objective.md').read_bytes() == original
+
+
 def test_created_child_archives_private_origins_without_public_science_leak(tmp_path):
     import json
     from test_fork_source import completed_source

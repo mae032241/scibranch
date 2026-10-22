@@ -22,6 +22,32 @@ def completed_source(tmp_path):
     return root
 
 
+@pytest.mark.parametrize('latest_finished', [True, False])
+def test_parent_completion_uses_numeric_latest_step(tmp_path, monkeypatch, latest_finished):
+    root = completed_source(tmp_path)
+    endpoint_results = {}
+    for step, finished in ((999, not latest_finished), (1000, latest_finished)):
+        c.write(root / 'jobs' / f'{step:03d}.json', dict(step=step, role='A' if finished else 'H'))
+        # Sparse markers isolate latest-job selection from full seal validation.
+        c.write(root / 'native-evidence' / f'{step:03d}' / 'result-identity.json', {})
+        endpoint_results[c.workspace(root, step)] = dict(next_action='finish' if finished else 'analyze')
+    validate = c.validate
+    validated = []
+
+    def validate_endpoint(work):
+        if work in endpoint_results:
+            validated.append(work)
+            return endpoint_results[work]
+        return validate(work)
+
+    monkeypatch.setattr(c, 'validate', validate_endpoint)
+    blocked = fork_sources._parent_state(root)
+
+    assert validated == [c.workspace(root, 1000)]
+    assert any(row['code'] == 'source_not_completed' for row in blocked) is not latest_finished
+    assert all(row['code'] == 'source_not_completed' for row in blocked)
+
+
 def test_selected_cut_excludes_selected_output_and_keeps_exact_inputs(tmp_path):
     root = completed_source(tmp_path)
     plan = fork_sources.inspect_source(root, 2)
