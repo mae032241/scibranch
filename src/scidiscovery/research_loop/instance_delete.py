@@ -88,6 +88,7 @@ def _preflight_tree(root, identity):
         raise error
     for current, directories, names in os.walk(root, followlinks=False, onerror=failed):
         current = Path(current)
+        originals = {}
         for name in directories + names:
             path = current / name
             info = path.lstat()
@@ -99,6 +100,22 @@ def _preflight_tree(root, identity):
                 raise DeleteError('delete_mount_unsafe', 'Delete target crosses a filesystem boundary')
             if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
                 raise DeleteError('delete_path_unsafe', 'Delete target contains a special file')
+            originals[name] = info.st_mode
+        # Identity damage must not turn an independent instance into payload.
+        # Fork originals retain these settings in separate hash-versioned trees,
+        # without an adjacent settings pair or local global-material directory.
+        settings = {'settings.json', 'settings-identity.json'} & originals.keys()
+        project = False
+        if current != root and settings and stat.S_ISDIR(originals.get('project', 0)):
+            try:
+                project = stat.S_ISDIR((current / 'project/global').lstat().st_mode)
+            except FileNotFoundError:
+                pass
+        if current != root and (
+                {owner.BINDING, owner.RETIREMENT} & originals.keys()
+                or len(settings) == 2
+                or project):
+            raise DeleteError('delete_nested_instance', 'Delete target contains an independent nested instance')
     _same(root, identity)
 
 

@@ -765,66 +765,67 @@ def checkpoint_restore(root, package):
                 raise files.ArchiveError('Completed restore root lost its current generation')
             return dict(status='checkpoint_restore_already_completed', root=str(root),
                 generation=current['generation'], paused=(root/'pause.request').exists())
-        if anchor['state'] == 'frozen':
-            if root.exists() or root.is_symlink():
-                raise files.ArchiveError('Move the original root aside explicitly; cold restore never deletes or overwrites it')
-            anchor.update(state='restore_pending', generation=binding['generation']+1, root_identity=None)
-            files.durable_json(directory / 'owner.json', anchor)
-        elif anchor['state'] not in {'restore_pending','active'}:
-            raise files.ArchiveError('Original anchor has no matching cold restore transaction')
-        if not root.exists():
-            if anchor['state'] != 'restore_pending' or not root.parent.is_dir():
-                raise files.ArchiveError('Original restore destination parent is unavailable')
-            stage = Path(tempfile.mkdtemp(prefix='.' + root.name + '-restore-', dir=root.parent))
-            try:
-                directories = []
-                for entry in _checkpoint_entries(package, metadata):
-                    target = stage / _path(entry['path'])
-                    if entry['kind'] == 'file':
-                        files.copy_verified(package / 'payload' / entry['blob'], target, entry)
-                    elif entry['kind'] == 'directory':
-                        target.mkdir(parents=True, exist_ok=True); directories.append((target,entry['mode']))
-                    elif entry['kind'] == 'gap':
-                        raise files.ArchiveError('Unsupported checkpoint storage gap')
-                for target, mode in reversed(directories):
-                    target.chmod(mode)
-                # Rename preserves this inode. Commit it before publication so
-                # a crash after rename cannot strand an otherwise exact root.
-                anchor['root_identity'] = owner._identity(stage)
+        with owner.creation(root):
+            if anchor['state'] == 'frozen':
+                if root.exists() or root.is_symlink():
+                    raise files.ArchiveError('Move the original root aside explicitly; cold restore never deletes or overwrites it')
+                anchor.update(state='restore_pending', generation=binding['generation']+1, root_identity=None)
                 files.durable_json(directory / 'owner.json', anchor)
-                _publish(stage, root)
-            finally:
-                if stage.exists():
-                    shutil.rmtree(stage)
-        elif anchor.get('root_identity') != owner._identity(root):
-            raise files.ArchiveError('Existing restore root has an unrecognized owner')
-        restored = dict(binding, generation=anchor['generation'])
-        _validate_restored_payload(root, package, checkpoint, restored, metadata)
-        files.durable_json(root / owner.BINDING, restored)
-        receipt = root / 'host-runtime/restore' / checkpoint['transaction']
-        receipt.mkdir(parents=True, exist_ok=True)
-        source = package / 'checkpoint.json'
-        files.copy_verified(source, receipt / 'checkpoint.json', dict(kind='file', **checkpoint_proof))
-        checkpoint_ref = q._ref(root, receipt / 'checkpoint.json')
-        transfer = dict(version=1, kind='owner_restore', transaction=checkpoint['transaction'],
-            checkpoint_ref=checkpoint_ref, instance_id=binding['instance_id'], original_root=str(root),
-            anchor_id=binding['anchor_id'], host=binding['host'], from_generation=binding['generation'],
-            to_generation=anchor['generation'], root_identity=anchor['root_identity'])
-        path = receipt / 'transfer.json'
-        if path.exists() and _read(path) != transfer:
-            raise files.ArchiveError('Original restore transfer receipt changed')
-        if not path.exists():files.durable_json(path, transfer)
-        owner.verify_transition(root, checkpoint_ref, q._ref(root, path))
-        budget.reanchor_paused_checkpoint(root, checkpoint_ref=checkpoint_ref, transfer_ref=q._ref(root, path))
-        from . import configuration_updates
-        configuration = configuration_updates.status(root)
-        _restore_dependencies(configuration['active_settings'])
-        if configuration['pending']:
-            _restore_dependencies(configuration['settings'])
-        if anchor['state'] != 'active':
-            files.durable_json(root / 'pause.request', dict(reason='cold_checkpoint_restored'))
-            anchor['state'] = 'active'
-            files.durable_json(directory / 'owner.json', anchor)
-        return dict(status='checkpoint_restored', root=str(root), generation=anchor['generation'], paused=True,
-            limitations=['Original native sessions and host credentials are not restored; their optional capabilities require the original dependencies.',
-                'No automatic scientific advance, replay, new execution permission or resource grant.'])
+            elif anchor['state'] not in {'restore_pending','active'}:
+                raise files.ArchiveError('Original anchor has no matching cold restore transaction')
+            if not root.exists():
+                if anchor['state'] != 'restore_pending' or not root.parent.is_dir():
+                    raise files.ArchiveError('Original restore destination parent is unavailable')
+                stage = Path(tempfile.mkdtemp(prefix='.' + root.name + '-restore-', dir=root.parent))
+                try:
+                    directories = []
+                    for entry in _checkpoint_entries(package, metadata):
+                        target = stage / _path(entry['path'])
+                        if entry['kind'] == 'file':
+                            files.copy_verified(package / 'payload' / entry['blob'], target, entry)
+                        elif entry['kind'] == 'directory':
+                            target.mkdir(parents=True, exist_ok=True); directories.append((target,entry['mode']))
+                        elif entry['kind'] == 'gap':
+                            raise files.ArchiveError('Unsupported checkpoint storage gap')
+                    for target, mode in reversed(directories):
+                        target.chmod(mode)
+                    # Rename preserves this inode. Commit it before publication so
+                    # a crash after rename cannot strand an otherwise exact root.
+                    anchor['root_identity'] = owner._identity(stage)
+                    files.durable_json(directory / 'owner.json', anchor)
+                    _publish(stage, root)
+                finally:
+                    if stage.exists():
+                        shutil.rmtree(stage)
+            elif anchor.get('root_identity') != owner._identity(root):
+                raise files.ArchiveError('Existing restore root has an unrecognized owner')
+            restored = dict(binding, generation=anchor['generation'])
+            _validate_restored_payload(root, package, checkpoint, restored, metadata)
+            files.durable_json(root / owner.BINDING, restored)
+            receipt = root / 'host-runtime/restore' / checkpoint['transaction']
+            receipt.mkdir(parents=True, exist_ok=True)
+            source = package / 'checkpoint.json'
+            files.copy_verified(source, receipt / 'checkpoint.json', dict(kind='file', **checkpoint_proof))
+            checkpoint_ref = q._ref(root, receipt / 'checkpoint.json')
+            transfer = dict(version=1, kind='owner_restore', transaction=checkpoint['transaction'],
+                checkpoint_ref=checkpoint_ref, instance_id=binding['instance_id'], original_root=str(root),
+                anchor_id=binding['anchor_id'], host=binding['host'], from_generation=binding['generation'],
+                to_generation=anchor['generation'], root_identity=anchor['root_identity'])
+            path = receipt / 'transfer.json'
+            if path.exists() and _read(path) != transfer:
+                raise files.ArchiveError('Original restore transfer receipt changed')
+            if not path.exists():files.durable_json(path, transfer)
+            owner.verify_transition(root, checkpoint_ref, q._ref(root, path))
+            budget.reanchor_paused_checkpoint(root, checkpoint_ref=checkpoint_ref, transfer_ref=q._ref(root, path))
+            from . import configuration_updates
+            configuration = configuration_updates.status(root)
+            _restore_dependencies(configuration['active_settings'])
+            if configuration['pending']:
+                _restore_dependencies(configuration['settings'])
+            if anchor['state'] != 'active':
+                files.durable_json(root / 'pause.request', dict(reason='cold_checkpoint_restored'))
+                anchor['state'] = 'active'
+                files.durable_json(directory / 'owner.json', anchor)
+            return dict(status='checkpoint_restored', root=str(root), generation=anchor['generation'], paused=True,
+                limitations=['Original native sessions and host credentials are not restored; their optional capabilities require the original dependencies.',
+                    'No automatic scientific advance, replay, new execution permission or resource grant.'])

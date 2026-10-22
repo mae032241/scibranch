@@ -60,6 +60,16 @@ rejected. Example thresholds are configurable values, separate from RAM or trans
 quotas. Policy authorization is bound to the exact request, package, compiled
 identity, budget and policy digest; independent review is not an execution decision.
 The runner rechecks authorization at submission and freezes resource settings.
+The standalone remote runner reserves a concurrency slot as soon as it creates
+the accepted run directory, including startup before the worker is running.
+Incomplete or uncertain starts keep that slot until terminal completion is proven;
+retrying the same descriptor never launches another worker.
+
+Worker output collection rejects nonregular files, including FIFOs, without
+blocking on their open. Collection, recovery collection and diagnostic finalization
+share the existing `collection_total_seconds` window and check cancellation.
+A stopped collection retains already captured records and publishes its failure
+or cancellation; it does not grant another execution.
 
 Reserve work before submission. Renaming or revising a scientific project does not
 create a fresh allowance. Terminal observations settle elapsed wall time and storage

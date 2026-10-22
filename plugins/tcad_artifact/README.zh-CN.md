@@ -38,6 +38,12 @@ Solver capability snapshot 使用 `tcad.solver-capability.v2`；私有 executabl
 [策略示例](config/execution-policy.example.json)和[runner 示例](config/remote-runner.example.json)。
 缺失或非法策略拒绝。示例阈值可配置，与 RAM 和传输额度独立。策略授权绑定精确请求、执行包、
 编译身份、预算及 policy digest；独立审查不构成执行决定。Runner 提交时重新核对授权，随后冻结资源设置。
+独立远程 runner 从创建已接受运行目录起占用并发名额，包含 Worker 尚未启动的阶段。
+未完成或结果不明的启动保留名额，直到有终态完成事实；重试相同描述符不会再启动 Worker。
+
+Worker 输出收集以非阻塞方式拒绝 FIFO 等非普通文件。首次收集、错误后收集及诊断收尾
+共用已有的 `collection_total_seconds` 时限并检查取消。收集停止时保留已捕获记录，
+发布失败或取消终态，不产生另一次执行权限。
 
 提交前预留资源；重命名或修订科学项目不产生新额度。终态观测按累计墙钟和存储高水位结算，
 观测缺失和未知提交保留预留。策略收紧不清除已消费量。只有绑定原调用和精确描述符的

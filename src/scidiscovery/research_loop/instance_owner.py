@@ -1,7 +1,7 @@
 """Explicit same-host cold-transfer owner; no scheduling or budget authority."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from functools import wraps
 import fcntl
@@ -141,6 +141,20 @@ def source_lease(root, *, create=True):
         yield value
 
 
+@contextmanager
+def creation(root):
+    """Fence creation against deletion of any existing containing directory."""
+    root = Path(root).resolve()
+    ancestors = [(path, _identity(path)) for path in reversed((root, *root.parents))
+                 if path.is_dir()]
+    with ExitStack() as guards:
+        for ancestor, identity in ancestors:
+            guards.enter_context(_host_gate(ancestor, exclusive=False))
+            _same_gate_root(ancestor, identity)
+            _require_not_retired(ancestor)
+        yield
+
+
 def _read(path):
     files.check_path(path)
     with Path(path).open('rb') as stream:
@@ -264,7 +278,8 @@ def disposal(root, tombstone, identity, *, binding=None, retired=False):
     if root.parent != tombstone.parent or root == tombstone:
         raise files.ArchiveError('Delete tombstone must be an exact separate sibling')
     value = _Disposal(root, tombstone, identity, retired=retired)
-    with _host_gate(root, exclusive=True, _disposal=value):
+    with (_host_gate(root, exclusive=True, _disposal=value),
+            _host_gate(tombstone, exclusive=True, _disposal=value)):
         previous = _disposing.get()
         token = _disposing.set({**previous, str(root): value})
         try:

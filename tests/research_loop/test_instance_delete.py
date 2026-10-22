@@ -1,4 +1,5 @@
 """Explicit local disposal on temporary fixtures; no model, solver or cancellation."""
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -66,6 +67,373 @@ def _finish(monkeypatch, root, step, role, parents, **options):
 def _record_path(root, operation):
     key = hashlib.sha256(operation.encode()).hexdigest()
     return root.parent / '.scid-delete-operations' / (key + '.json')
+
+
+def _prepare_nested(root, tmp_path):
+    public = tmp_path / 'public'
+    inner = root / 'retained' / 'independent-instance'
+    controller.prepare(inner, public / 'objective.md', public, [sys.executable],
+        max_tokens=4000, max_seconds=60, max_steps=7, model='fixture-never-called',
+        reasoning_effort='high', search_policy=None, experiment_mode='external')
+    return inner
+
+
+@pytest.mark.parametrize('damage', ['intact', 'missing_settings', 'missing_identity',
+    'corrupt_settings', 'corrupt_identity', 'missing_project', 'owner_marker_only',
+    'retirement_marker_only'])
+def test_delete_preserves_independently_leased_nested_instance(instance, tmp_path, damage):
+    request = _request(instance)
+    inner = _prepare_nested(instance, tmp_path)
+    with owner.lease(inner):
+        if damage in {'missing_settings', 'corrupt_settings'}:
+            (inner / 'settings.json').unlink()
+            if damage == 'corrupt_settings':
+                (inner / 'settings.json').write_bytes(b'Damaged frozen settings')
+        elif damage in {'missing_identity', 'corrupt_identity'}:
+            (inner / 'settings-identity.json').unlink()
+            if damage == 'corrupt_identity':
+                (inner / 'settings-identity.json').write_bytes(b'Damaged frozen identity')
+        elif damage == 'missing_project':
+            (inner / 'project').rename(tmp_path / 'detached-inner-project')
+        elif damage in {'owner_marker_only', 'retirement_marker_only'}:
+            (inner / 'settings.json').unlink()
+            (inner / 'settings-identity.json').unlink()
+            marker = owner.BINDING if damage == 'owner_marker_only' else owner.RETIREMENT
+            (inner / marker).write_bytes(b'Damaged retained owner identity')
+        before = _retained(instance)
+        with pytest.raises(deletion.DeleteError) as error:
+            deletion.delete_instance(instance, **request)
+        assert error.value.code == 'delete_nested_instance'
+        _assert_retained(instance, before)
+        assert inner.is_dir()
+        assert not (instance / owner.RETIREMENT).exists()
+        assert not _record_path(instance, request['operation_id']).exists()
+
+
+@pytest.mark.parametrize('boundary', ['prepared_before_marker', 'prepared_after_marker',
+    'prepared_tombstone', 'retired_tombstone'])
+def test_delete_retry_preserves_new_independently_leased_nested_instance(instance, tmp_path, monkeypatch, boundary):
+    request = _request(instance)
+    path = _record_path(instance, request['operation_id'])
+    with monkeypatch.context() as patch:
+        if boundary == 'prepared_before_marker':
+            write = deletion._write_record
+            def crash(target, record):
+                write(target, record)
+                raise RuntimeError('fixture nested-instance retry interruption')
+            patch.setattr(deletion, '_write_record', crash)
+        elif boundary in {'prepared_after_marker', 'prepared_tombstone'}:
+            publish = deletion._publish_retirement
+            def crash(root, tombstone):
+                if boundary == 'prepared_tombstone':
+                    publish(root, tombstone)
+                raise RuntimeError('fixture nested-instance retry interruption')
+            patch.setattr(deletion, '_publish_retirement', crash)
+        else:
+            def crash(*args):
+                raise RuntimeError('fixture nested-instance retry interruption')
+            patch.setattr(deletion, '_remove_tree', crash)
+        with pytest.raises(RuntimeError, match='fixture nested-instance retry interruption'):
+            deletion.delete_instance(instance, **request)
+    record = c.read(path)
+    selected = Path(record['tombstone']) if 'tombstone' in boundary else instance
+    if (selected / owner.RETIREMENT).exists():
+        # Retained trees from earlier writers or restoration must also survive
+        # retry admission; current creators reject this retirement marker.
+        staged = _prepare_nested(tmp_path / 'staged', tmp_path)
+        inner = selected / 'retained' / 'independent-instance'
+        inner.parent.mkdir()
+        staged.rename(inner)
+    else:
+        inner = _prepare_nested(selected, tmp_path)
+    before = _retained(selected)
+    with owner.lease(inner):
+        with pytest.raises(deletion.DeleteError) as error:
+            deletion.delete_instance(instance, **request)
+        assert error.value.code == 'delete_nested_instance'
+        _assert_retained(selected, before)
+        assert inner.is_dir()
+    retained_record = c.read(path)
+    assert retained_record['request'] == record['request']
+    assert retained_record['root_identity'] == record['root_identity']
+    assert retained_record['phase'] != 'deleted'
+
+
+def test_instance_marker_symlinks_do_not_inspect_external_instance(instance, tmp_path):
+    inner = _prepare_nested(tmp_path / 'outside', tmp_path)
+    links = instance / 'payload-links'
+    links.mkdir()
+    for name in ('settings.json', 'settings-identity.json', owner.BINDING, owner.RETIREMENT):
+        (links / name).symlink_to(inner / 'settings.json')
+    (links / 'project').symlink_to(inner / 'project', target_is_directory=True)
+    before = _retained(inner)
+    with owner.lease(inner):
+        assert deletion.delete_instance(instance, **_request(instance))['status'] == 'instance_deleted'
+        _assert_retained(inner, before)
+    assert not instance.exists()
+
+
+def test_nested_preparation_fences_outer_delete_before_settings_publication(instance, tmp_path, monkeypatch):
+    from scidiscovery.research_loop import qualification
+    request = _request(instance)
+    freeze = qualification.freeze_sources
+    observed = []
+
+    def check_delete(root, *args, **options):
+        before = _retained(instance)
+        with pytest.raises(archive.files.ArchiveError):
+            deletion.delete_instance(instance, **request)
+        _assert_retained(instance, before)
+        assert not (instance / owner.RETIREMENT).exists()
+        observed.append(root)
+        return freeze(root, *args, **options)
+
+    monkeypatch.setattr(qualification, 'freeze_sources', check_delete)
+    inner = _prepare_nested(instance, tmp_path)
+    assert observed == [inner]
+    assert c.settings(inner)['goal_id']
+    with owner.lease(inner):
+        with pytest.raises(deletion.DeleteError) as error:
+            deletion.delete_instance(instance, **request)
+        assert error.value.code == 'delete_nested_instance'
+
+
+@pytest.mark.parametrize('boundary', ['original', 'tombstone', 'partial_cleanup_retry'])
+def test_outer_disposal_fences_nested_preparation_before_mkdir(instance, tmp_path, monkeypatch, boundary):
+    request = _request(instance)
+    if boundary == 'partial_cleanup_retry':
+        with monkeypatch.context() as patch:
+            def crash(*args):
+                raise RuntimeError('fixture retained tombstone')
+            patch.setattr(deletion, '_remove_tree', crash)
+            with pytest.raises(RuntimeError, match='fixture retained tombstone'):
+                deletion.delete_instance(instance, **request)
+        record = c.read(_record_path(instance, request['operation_id']))
+        (Path(record['tombstone']) / owner.RETIREMENT).unlink()
+    preflight = deletion._preflight_tree
+    observed = []
+
+    def check_prepare(root, identity):
+        selected = root == instance if boundary == 'original' else root != instance
+        if selected and not observed:
+            before = _retained(root)
+            with pytest.raises(archive.files.ArchiveError):
+                _prepare_nested(root, tmp_path)
+            assert not (root / 'retained').exists()
+            _assert_retained(root, before)
+            observed.append(root)
+        return preflight(root, identity)
+
+    monkeypatch.setattr(deletion, '_preflight_tree', check_prepare)
+    assert deletion.delete_instance(instance, **request)['status'] == 'instance_deleted'
+    assert len(observed) == 1
+    assert not observed[0].exists()
+
+
+def test_creator_rejects_retired_ancestor_before_mkdir(instance, tmp_path, monkeypatch):
+    request = _request(instance)
+    with monkeypatch.context() as patch:
+        def crash(*args):
+            raise RuntimeError('fixture prepared retirement')
+        patch.setattr(deletion, '_publish_retirement', crash)
+        with pytest.raises(RuntimeError, match='fixture prepared retirement'):
+            deletion.delete_instance(instance, **request)
+    before = _retained(instance)
+    with pytest.raises(archive.files.ArchiveError, match='deletion is pending'):
+        _prepare_nested(instance, tmp_path)
+    assert not (instance / 'retained').exists()
+    _assert_retained(instance, before)
+
+
+@pytest.mark.parametrize('replacement', [False, True])
+def test_creator_does_not_recreate_ancestor_retired_before_gate_acquisition(instance, tmp_path, monkeypatch, replacement):
+    request = _request(instance)
+    host_gate = owner._host_gate
+    observed = []
+
+    @contextmanager
+    def retire_before_gate(root, *, exclusive, **options):
+        if root == instance and not exclusive and not observed:
+            observed.append(deletion.delete_instance(instance, **request))
+            if replacement:
+                instance.mkdir()
+                (instance / 'sentinel').write_bytes(b'Replacement directory must survive failed creation.')
+        with host_gate(root, exclusive=exclusive, **options) as value:
+            yield value
+
+    monkeypatch.setattr(owner, '_host_gate', retire_before_gate)
+    with pytest.raises(archive.files.ArchiveError):
+        _prepare_nested(instance, tmp_path)
+    assert len(observed) == 1
+    assert observed[0]['status'] == 'instance_deleted'
+    assert not (instance / 'retained').exists()
+    if replacement:
+        assert (instance / 'sentinel').read_bytes() == b'Replacement directory must survive failed creation.'
+    else:
+        assert not instance.exists()
+
+
+@pytest.mark.parametrize('first', ['fork', 'delete'])
+def test_fork_creation_and_outer_disposal_are_mutually_fenced(instance, tmp_path, monkeypatch, first):
+    source = _prepare_nested(tmp_path / 'source', tmp_path)
+    _finish(monkeypatch, source, 1, 'H', [], action='analyze')
+    c.build_job(source, 2, 'A', [1], c.validate(c.workspace(source, 1))['route_reason'])
+    _finish(monkeypatch, source, 2, 'A', [1], action='finish')
+    with controller._writer(source):
+        pass
+    child = instance / 'fork-child'
+    limits = dict(max_tokens=200, max_seconds=30, max_steps=2)
+    preview = fork_service.preview(source, 2, child, budget=limits)
+    assert preview['status'] == 'fork_preview_ready'
+    options = dict(budget=limits, expected_preview_id=preview['preview_id'],
+        operation_id='nested-fork-creation')
+    request = _request(instance)
+    observed = []
+    if first == 'fork':
+        prepare = fork_service._prepare
+
+        def check_delete(*args):
+            result = prepare(*args)
+            before = _retained(instance)
+            with pytest.raises(archive.files.ArchiveError):
+                deletion.delete_instance(instance, **request)
+            _assert_retained(instance, before)
+            observed.append(True)
+            return result
+
+        monkeypatch.setattr(fork_service, '_prepare', check_delete)
+        receipt = fork_service.create(source, 2, child, **options)
+        assert observed == [True]
+        with owner.lease(child):
+            with pytest.raises(deletion.DeleteError) as error:
+                deletion.delete_instance(instance, **request)
+            assert error.value.code == 'delete_nested_instance'
+        def forbidden(*args):
+            pytest.fail('An exact published receipt must not repeat creation admission')
+        monkeypatch.setattr(owner, 'creation', forbidden)
+        assert fork_service.create(source, 2, child, **options) == receipt
+    else:
+        preflight = deletion._preflight_tree
+
+        def check_fork(root, identity):
+            if root == instance and not observed:
+                with pytest.raises(archive.files.ArchiveError):
+                    fork_service.create(source, 2, child, **options)
+                assert not child.exists()
+                assert not (instance / '.scid-fork-operations').exists()
+                observed.append(True)
+            return preflight(root, identity)
+
+        monkeypatch.setattr(deletion, '_preflight_tree', check_fork)
+        assert deletion.delete_instance(instance, **request)['status'] == 'instance_deleted'
+        assert observed == [True]
+
+
+def _cold_checkpoint_at(root, tmp_path):
+    public = tmp_path / 'public'
+    controller.prepare(root, public / 'objective.md', public, [sys.executable],
+        max_tokens=4000, max_seconds=60, max_steps=7, model='fixture-never-called',
+        reasoning_effort='high', search_policy=None, experiment_mode='external')
+    c.write(root / 'host-started.json', budget.clock_stamp())
+    budget.transition(root, 'paused', 'Fixture inactive checkpoint, no scientific dispatch')
+    anchors = tmp_path / 'nested-anchors'
+    anchors.mkdir()
+    archive.checkpoint_enroll(root, anchors)
+    anchor = Path(c.read(root / owner.BINDING)['anchor']) / 'owner.json'
+    package = tmp_path / 'nested-checkpoint'
+    archive.checkpoint_export(root, package)
+    previous = root.rename(tmp_path / 'previous-nested-instance')
+    return package, previous, anchor
+
+
+def test_checkpoint_restore_cannot_publish_after_final_tombstone_preflight(instance, tmp_path, monkeypatch):
+    request = _request(instance)
+    key = hashlib.sha256(request['operation_id'].encode()).hexdigest()
+    tombstone = instance.parent / ('.scid-delete-' + key[:24])
+    inner = tombstone / 'independent-instance'
+    # This is an exact supported historical original, not a changed restore
+    # destination: the ordinary outer will later retire into this pathname.
+    package, previous, anchor = _cold_checkpoint_at(inner, tmp_path)
+    tombstone.rmdir()
+    originals = _retained(previous)
+    anchor_before = anchor.read_bytes()
+    preflight = deletion._preflight_tree
+    observed = []
+
+    def restore_after_preflight(root, identity):
+        result = preflight(root, identity)
+        if root == tombstone:
+            before = _retained(root)
+            entries = set(root.iterdir())
+            with pytest.raises(archive.files.ArchiveError):
+                archive.checkpoint_restore(inner, package)
+            assert not inner.exists()
+            assert set(root.iterdir()) == entries
+            _assert_retained(root, before)
+            assert anchor.read_bytes() == anchor_before
+            observed.append(root)
+        return result
+
+    monkeypatch.setattr(deletion, '_preflight_tree', restore_after_preflight)
+    assert deletion.delete_instance(instance, **request)['status'] == 'instance_deleted'
+    assert observed == [tombstone]
+    assert not tombstone.exists()
+    _assert_retained(previous, originals)
+    assert c.read(anchor)['state'] == 'frozen'
+
+
+@pytest.mark.parametrize('pending_retry', [False, True])
+def test_checkpoint_restore_fences_outer_delete_through_publication(instance, tmp_path, monkeypatch, pending_retry):
+    request = _request(instance)
+    inner = instance / 'independent-instance'
+    package, previous, anchor = _cold_checkpoint_at(inner, tmp_path)
+    originals = _retained(previous)
+    publish = archive._publish
+    observed = []
+
+    def delete_before_publication(stage, target):
+        if target == inner:
+            before = _retained(instance)
+            with pytest.raises(archive.files.ArchiveError):
+                deletion.delete_instance(instance, **request)
+            _assert_retained(instance, before)
+            assert not (instance / owner.RETIREMENT).exists()
+            observed.append(stage)
+        return publish(stage, target)
+
+    monkeypatch.setattr(archive, '_publish', delete_before_publication)
+    if pending_retry:
+        with monkeypatch.context() as patch:
+            def missing(settings):
+                raise archive.files.ArchiveError('Fixture pending restore dependency')
+            patch.setattr(archive, '_restore_dependencies', missing)
+            with pytest.raises(archive.files.ArchiveError, match='Fixture pending restore dependency'):
+                archive.checkpoint_restore(inner, package)
+        assert c.read(anchor)['state'] == 'restore_pending'
+        assert c.read(anchor)['generation'] == 2
+    result = archive.checkpoint_restore(inner, package)
+    assert result['status'] == 'checkpoint_restored'
+    assert result['generation'] == 2 and result['paused'] is True
+    assert len(observed) == 1
+    _assert_retained(previous, originals)
+    with owner.lease(inner):
+        with pytest.raises(deletion.DeleteError) as error:
+            deletion.delete_instance(instance, **request)
+        assert error.value.code == 'delete_nested_instance'
+
+    # A completed restore is still a pure acknowledgment after control advances;
+    # it does not repeat creator admission or restore an old pause/generation.
+    with controller._writer(inner):
+        (inner / 'pause.request').unlink()
+        budget.transition(inner, 'advance', 'Fixture control advancement, no native launch')
+    before = _retained(inner)
+    def forbidden(*args):
+        pytest.fail('An exact completed restore must not repeat creation admission')
+    monkeypatch.setattr(owner, 'creation', forbidden)
+    again = archive.checkpoint_restore(inner, package)
+    assert again['status'] == 'checkpoint_restore_already_completed'
+    assert again['generation'] == 2 and again['paused'] is False
+    _assert_retained(inner, before)
 
 
 @pytest.mark.parametrize('state', ['prepared', 'paused', 'completed'])
@@ -570,7 +938,10 @@ def test_operation_id_conflict_never_retargets_replacement(instance):
 
 def test_deleting_source_sibling_and_child_preserves_exact_shared_forks(instance, tmp_path, monkeypatch):
     payload = 'Opaque original shared through independent exact fork manifests.\n' * 128
-    _finish(monkeypatch, instance, 1, 'H', [], action='analyze', files={'shared.bin': payload})
+    # Its hash bucket also holds the original settings.json beside project/nodes;
+    # immutable inherited payload must not be mistaken for a nested instance.
+    _finish(monkeypatch, instance, 1, 'H', [], action='analyze',
+        files={'shared.bin': payload, 'settings-copy.json': (instance / 'settings.json').read_text()})
     c.build_job(instance, 2, 'A', [1], c.validate(c.workspace(instance, 1))['route_reason'])
     _finish(monkeypatch, instance, 2, 'A', [1], action='finish')
     with controller._writer(instance):

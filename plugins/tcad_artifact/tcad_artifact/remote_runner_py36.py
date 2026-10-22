@@ -11,7 +11,6 @@ import json
 import os
 import re
 import resource
-import shutil
 import signal
 import stat
 import subprocess
@@ -33,6 +32,10 @@ CREDENTIAL_LABEL_RE = re.compile(
 
 
 class _Cancelled(Exception):
+    pass
+
+
+class _CollectionStopped(RuntimeError):
     pass
 
 
@@ -447,7 +450,10 @@ def _submit(config, descriptor, authorization=None):
             raise RuntimeError("this exact submission was permanently retired")
         active = 0
         for name in os.listdir(runs_root):
-            if os.path.isfile(os.path.join(runs_root, name, "running")):
+            existing = os.path.join(runs_root, name)
+            # Creation reserves the slot while startup is still asynchronous.
+            # An uncertain/failed start is not proof that the slot is free.
+            if os.path.isdir(existing) and not os.path.isfile(os.path.join(existing, "done")):
                 active += 1
         if active >= config["max_concurrent_runs"]:
             raise RuntimeError("remote runner concurrent limit is reached")
@@ -620,6 +626,18 @@ def _run_worker(config, run_dir):
     outputs = []
     usage = {}
     process = None
+    collection_deadline = [None]
+    collection_stopped = False
+
+    def check_collection():
+        if os.path.isfile(os.path.join(run_dir, "cancel_requested")):
+            raise _Cancelled("cancelled_during_collection")
+        now = time.monotonic()
+        if collection_deadline[0] is None:
+            collection_deadline[0] = now + runtime["runner_policy"]["collection_total_seconds"]
+        if now >= collection_deadline[0]:
+            raise _CollectionStopped("collection_time_exceeded")
+
     started_at = _timestamp()
     _write_new(os.path.join(run_dir, "started_at"), started_at.encode("ascii"), 0o440)
     try:
@@ -648,6 +666,7 @@ def _run_worker(config, run_dir):
             outputs, collection_errors,
             archive_entries=runtime.get("archive_entries", ()),
             collect_generated_outputs=runtime.get("collect_generated_outputs", False),
+            check=check_collection,
         )
         if collection_errors:
             error = "; ".join(collection_errors)[:8192]
@@ -655,12 +674,14 @@ def _run_worker(config, run_dir):
                 exit_code = 97
         terminal = "succeeded" if exit_code == 0 else "failed"
     except _Cancelled as failure:
+        collection_stopped = True
         exit_code = 130
         terminal = "cancelled"
         error = str(failure)
         if process is not None and process.poll() is None:
             _terminate(process, runtime["runner_policy"]["terminate_grace_seconds"])
     except RuntimeError as failure:
+        collection_stopped = isinstance(failure, _CollectionStopped)
         reason = str(failure)
         error = reason
         if reason == "wall_time_exceeded":
@@ -675,25 +696,50 @@ def _run_worker(config, run_dir):
             exit_code = 97
         if process is not None and process.poll() is None:
             _terminate(process, runtime["runner_policy"]["terminate_grace_seconds"])
-    if error and not outputs:
+    if error and not outputs and not collection_stopped:
         try:
             _collect_expected(os.path.join(run_dir, "work"), runtime["expected_outputs"],
                 dict(runtime["limits"], transfer_chunk_bytes=runtime["runner_policy"]["transfer_chunk_bytes"]),
                 outputs, collection_errors, archive_entries=runtime["archive_entries"],
-                collect_generated_outputs=runtime.get("collect_generated_outputs", False))
+                collect_generated_outputs=runtime.get("collect_generated_outputs", False),
+                check=check_collection)
+        except _Cancelled as failure:
+            terminal, exit_code, error = "cancelled", 130, str(failure)
+            collection_stopped = True
+        except _CollectionStopped as failure:
+            collection_errors.append(str(failure))
+            collection_stopped = True
         except Exception as failure:
             collection_errors.append(str(failure)[:1024])
     try:
-        _augment_development_debug_log(run_dir, runtime)
+        if not collection_stopped:
+            check_collection()
+            _augment_development_debug_log(run_dir, runtime, check=check_collection)
+            check_collection()
+    except _Cancelled as failure:
+        terminal, exit_code, error = "cancelled", 130, str(failure)
+        collection_stopped = True
+    except _CollectionStopped as failure:
+        error = (error + "; " + str(failure)).lstrip("; ")
+        if terminal == "succeeded":
+            terminal, exit_code = "failed", 97
+        collection_stopped = True
     except Exception as failure:
         error = (error + "; diagnostic collection failed: " + str(failure)).lstrip("; ")
     try:
         if "_started_monotonic" in usage:
             usage["elapsed_seconds"] = time.monotonic() - usage.pop("_started_monotonic")
-            usage["observed_storage_high_water_bytes"] = max(usage["observed_storage_high_water_bytes"],
-                _logical_storage_bytes(run_dir, runtime["archive_entries"], runtime["expected_outputs"]))
+            if not collection_stopped:
+                usage["observed_storage_high_water_bytes"] = max(usage["observed_storage_high_water_bytes"],
+                    _logical_storage_bytes(run_dir, runtime["archive_entries"], runtime["expected_outputs"], check=check_collection))
             if usage["observed_storage_high_water_bytes"] > runtime["limits"]["max_storage_bytes"]:
                 terminal, exit_code, error = "failed", 124, "total_storage_exceeded"
+    except _Cancelled as failure:
+        terminal, exit_code, error = "cancelled", 130, str(failure)
+    except _CollectionStopped as failure:
+        error = (error + "; " + str(failure)).lstrip("; ")
+        if terminal == "succeeded":
+            terminal, exit_code = "failed", 97
     except Exception as failure:
         usage = {}
         terminal, exit_code, error = "failed", 124, "terminal storage accounting failed: " + str(failure)
@@ -768,33 +814,50 @@ def _validate_job(job):
             raise ValueError("job limits must be positive integers")
 
 
-def _publish_log_mirror(source_path, target_path, digest, size, chunk_bytes):
+def _publish_log_mirror(source_path, target_path, digest, size, chunk_bytes, check=None):
     import tempfile
     descriptor, temporary = tempfile.mkstemp(prefix=".stdout.", dir=os.path.dirname(str(target_path)))
     try:
-        with open(str(source_path), "rb") as source, os.fdopen(descriptor, "wb") as target:
-            shutil.copyfileobj(source, target, chunk_bytes)
+        with os.fdopen(descriptor, "wb") as target:
+            source_descriptor = os.open(str(source_path), os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(source_descriptor, "rb") as source:
+                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                    raise ValueError("scientific file is not regular")
+                while True:
+                    if check is not None:
+                        check()
+                    chunk = source.read(chunk_bytes)
+                    if not chunk:
+                        break
+                    target.write(chunk)
             target.flush()
             os.fsync(target.fileno())
-        if _file_identity(temporary, chunk_bytes) != (digest, size):
+        if _file_identity(temporary, chunk_bytes, check=check) != (digest, size):
             raise RuntimeError("stdout changed during mirror publication")
         os.chmod(temporary, 0o440)
         try:
             os.link(temporary, str(target_path))
         except FileExistsError:
-            if _file_identity(target_path, chunk_bytes) != (digest, size):
+            if _file_identity(target_path, chunk_bytes, check=check) != (digest, size):
                 raise RuntimeError("reserved stdout mirror conflicts with an existing file; originals retained")
     finally:
         os.unlink(temporary)
 
 
-def _file_identity(path, chunk_bytes):
-    descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+def _file_identity(path, chunk_bytes, check=None):
+    if check is not None:
+        check()
+    descriptor = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
     with os.fdopen(descriptor, "rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
             raise ValueError("scientific file is not regular")
         digest, size = hashlib.sha256(), 0
-        for chunk in iter(lambda: stream.read(chunk_bytes), b""):
+        while True:
+            if check is not None:
+                check()
+            chunk = stream.read(chunk_bytes)
+            if not chunk:
+                break
             digest.update(chunk)
             size += len(chunk)
     return digest.hexdigest(), size
@@ -834,12 +897,16 @@ def _extract_archive(archive_path, entries, destination, chunk_bytes):
         raise ValueError("archive is missing declared members")
 
 
-def _collect_expected(root, expected, limits, records=None, errors=None, *, archive_entries=(), collect_generated_outputs=False):
+def _collect_expected(root, expected, limits, records=None, errors=None, *, archive_entries=(), collect_generated_outputs=False, check=None):
     records = [] if records is None else records
     total = sum(int(item["size_bytes"]) for item in records)
     failures = [] if errors is None else errors
+    if check is not None:
+        check()
     for index, item in enumerate(expected):
         try:
+            if check is not None:
+                check()
             relative = _safe_relative(item["relative_path"])
             capture = item.get("capture", "workspace_file")
             if capture == "workspace_file":
@@ -854,7 +921,7 @@ def _collect_expected(root, expected, limits, records=None, errors=None, *, arch
                 continue
             if os.lstat(path).st_size > item["max_bytes"]:
                 raise RuntimeError("output exceeds declared bound")
-            digest, size = _file_identity(path, limits["transfer_chunk_bytes"])
+            digest, size = _file_identity(path, limits["transfer_chunk_bytes"], check=check)
             if size > item["max_bytes"]:
                 raise RuntimeError("output exceeds declared bound")
             total += size
@@ -863,10 +930,12 @@ def _collect_expected(root, expected, limits, records=None, errors=None, *, arch
             if capture == "process_log":
                 target = os.path.join(root, *relative.split("/"))
                 os.makedirs(os.path.dirname(target), exist_ok=True)
-                _publish_log_mirror(path, target, digest, size, limits["transfer_chunk_bytes"])
+                _publish_log_mirror(path, target, digest, size, limits["transfer_chunk_bytes"], check=check)
             os.chmod(path, 0o440)
             records.append({"name": item["name"], "relative_path": relative,
                 "media_type": item["media_type"], "sha256": digest, "size_bytes": size})
+        except _CollectionStopped:
+            raise
         except (OSError, RuntimeError, ValueError) as failure:
             failures.append(str(failure)[:1024])
             if "total output" in str(failure):
@@ -874,15 +943,19 @@ def _collect_expected(root, expected, limits, records=None, errors=None, *, arch
                 break
     if collect_generated_outputs:
         try:
-            _collect_generated(root, archive_entries, expected, limits, records)
+            _collect_generated(root, archive_entries, expected, limits, records, check=check)
+        except _CollectionStopped:
+            raise
         except (OSError, RuntimeError, ValueError) as failure:
             failures.append(str(failure)[:1024])
     if errors is None and failures:
         raise RuntimeError("; ".join(failures)[:8192])
+    if check is not None:
+        check()
     return records
 
 
-def _collect_generated(root, archive_entries, expected, limits, records):
+def _collect_generated(root, archive_entries, expected, limits, records, check=None):
     originals = dict((item["relative_path"], item) for item in archive_entries)
     reserved = set(item["relative_path"] for item in expected)
     total = sum(int(item["size_bytes"]) for item in records)
@@ -891,19 +964,27 @@ def _collect_generated(root, archive_entries, expected, limits, records):
         raise error
 
     for directory, dirs, files in os.walk(root, followlinks=False, onerror=fail_walk):
+        if check is not None:
+            check()
         dirs.sort()
         files.sort()
         for name in dirs:
+            if check is not None:
+                check()
             if not stat.S_ISDIR(os.lstat(os.path.join(directory, name)).st_mode):
                 raise RuntimeError("generated output directory is not a real directory")
         for name in files:
+            if check is not None:
+                check()
             path = os.path.join(directory, name)
             relative = _safe_relative(os.path.relpath(path, root).replace(os.sep, "/"))
             if len(relative) > 1024:
                 raise RuntimeError("generated output path exceeds contract")
             if relative in reserved:
                 continue
-            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            if not stat.S_ISREG(os.lstat(path).st_mode):
+                raise RuntimeError("generated output is not a regular file: " + relative)
+            flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
             descriptor = os.open(path, flags)
             try:
                 metadata = os.fstat(descriptor)
@@ -915,6 +996,8 @@ def _collect_generated(root, archive_entries, expected, limits, records):
                 size = 0
                 with os.fdopen(descriptor, "rb", closefd=False) as stream:
                     while True:
+                        if check is not None:
+                            check()
                         chunk = stream.read(limits["transfer_chunk_bytes"])
                         if not chunk:
                             break
@@ -940,9 +1023,11 @@ def _collect_generated(root, archive_entries, expected, limits, records):
                             "sha256": digest.hexdigest(), "size_bytes": size})
     if not generated:
         raise RuntimeError("solver produced no generated output files")
+    if check is not None:
+        check()
 
 
-def _augment_development_debug_log(run_dir, runtime):
+def _augment_development_debug_log(run_dir, runtime, check=None):
     arguments = runtime.get("arguments")
     if not isinstance(arguments, list) or not arguments:
         return
@@ -965,23 +1050,30 @@ def _augment_development_debug_log(run_dir, runtime):
     parts = []
     total = 0
     for name in names:
+        if check is not None:
+            check()
         candidate = os.path.join(work_dir, name)
         if not os.path.exists(candidate):
             continue
-        raw = _read_diagnostic_log(candidate, runtime["runner_policy"]["max_log_bytes"] // 2 - total)
+        raw = _read_diagnostic_log(candidate, runtime["runner_policy"]["max_log_bytes"] // 2 - total, check=check)
         total += len(raw)
         parts.append(b"\n--- scidiscovery solver diagnostic: " + name.encode("utf-8") + b" ---\n" + raw)
     if not parts:
         return
-    stdout = _read_diagnostic_log(os.path.join(run_dir, "worker.log"), runtime["runner_policy"]["max_log_bytes"] // 2)
+    stdout = _read_diagnostic_log(os.path.join(run_dir, "worker.log"), runtime["runner_policy"]["max_log_bytes"] // 2, check=check)
     _atomic_write(os.path.join(run_dir, "diagnostic.log"), stdout + b"".join(parts), 0o440)
 
 
-def _read_diagnostic_log(path, limit):
+def _read_diagnostic_log(path, limit, check=None):
     metadata = os.lstat(path)
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         raise ValueError("debug log is not a regular file")
-    with open(path, "rb") as source:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(descriptor, "rb") as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise ValueError("debug log is not a regular file")
+        if check is not None:
+            check()
         if metadata.st_size <= limit:
             return source.read(limit + 1)
         raise ValueError("diagnostic log exceeds its capture limit; original file retained")
@@ -993,16 +1085,22 @@ def _limits(limits):
     resource.setrlimit(resource.RLIMIT_FSIZE, (limits["max_output_bytes"], limits["max_output_bytes"]))
 
 
-def _logical_storage_bytes(run_dir, entries, expected):
+def _logical_storage_bytes(run_dir, entries, expected, check=None):
     originals = {item["relative_path"]: item["size_bytes"] for item in entries}
     total = sum(originals.values())
     work = os.path.join(str(run_dir), "work")
     control = {"job.json", "runtime.json", "submitted_at", "started_at", "pid", "solver_pid", "launcher_pid", "running", "done", "status", "output_manifest.json", "cancel_requested"}
     for directory, dirs, files in os.walk(str(run_dir), followlinks=False):
+        if check is not None:
+            check()
         for name in dirs:
+            if check is not None:
+                check()
             if os.path.islink(os.path.join(directory, name)):
                 raise RuntimeError("storage accounting encountered a symlink directory")
         for name in files:
+            if check is not None:
+                check()
             path = os.path.join(directory, name)
             try:
                 metadata = os.lstat(path)
@@ -1018,6 +1116,8 @@ def _logical_storage_bytes(run_dir, entries, expected):
                 total += max(0, metadata.st_size - originals.get(work_relative, 0))
             else:
                 total += metadata.st_size
+    if check is not None:
+        check()
     return total
 
 

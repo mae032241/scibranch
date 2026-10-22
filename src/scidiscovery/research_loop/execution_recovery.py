@@ -9,12 +9,12 @@ DIRECTORY = 'host-history/execution-recoveries'
 
 
 def prefix(root,step):
+    from . import originals
     path=Path(root)/'jobs'/f'{step:03d}.json'
-    if path.exists():return c.read(c.regular(path)).get('history',{}).get('execution_recoveries',[])
+    if path.exists():return originals.recovery_refs(originals.node(root,step),c.read(c.regular(path)))
     directory=Path(root)/DIRECTORY
     paths=sorted([*directory.glob('*/*.json'), *directory.glob('*/*/[0-9]*.json')])
     local = [dict(path=path.relative_to(root).as_posix(),sha256=c.digest(c.regular(path))) for path in paths]
-    from . import originals
     inherited = originals.frozen_recovery_refs(root, step) if originals._manifest(root) is not None else []
     return inherited + [ref for ref in local if ref not in inherited]
 

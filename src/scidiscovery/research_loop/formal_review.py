@@ -382,7 +382,7 @@ def input_binding(root, reference):
     context, request = _request_original(root, reference)
     requester = originals.source_job(context)
     subject = request['subject']
-    _, seal = _seal_original(root, subject['producer_step'], subject['producer_seal'], context)
+    producer, seal = _seal_original(root, subject['producer_step'], subject['producer_seal'], context)
     expected_contract = originals.source_settings(context).get('formal_review_policy', {}).get('contract')
     if (request['contract'] != expected_contract or request['question'] != QUESTION
             or subject['material'] not in seal['materials']):
@@ -394,15 +394,17 @@ def input_binding(root, reference):
     if compiled and compiled[0].get('client_binding') is not None:
         if len(compiled)!=1:raise q.IntegrityError('Reviewed compiler subject is ambiguous')
         from . import execution_inputs
+        source = producer if producer.inherited else None
         compiler=execution_inputs.verify_compilation(root,compiled[0]['compiler'],material=subject['material'],
-            client_binding=compiled[0]['client_binding'])
+            client_binding=compiled[0]['client_binding'],source=source)
         author=compiler['author']
-        scientific=[dict(source=str(Path(root)/author['path']),path='inputs/review/scientific-implementation.json',
+        originals.resolve_ref(originals.source_for_ref(producer,author),author)
+        scientific=[dict(source=str(Path(producer.original_root)/author['path']),path='inputs/review/scientific-implementation.json',
             sha256=author['sha256'],size_bytes=author['size_bytes'])]
         materials.extend(scientific)
-        owner=q._read(root,compiler['job'])
+        owner=q._read(root,compiler['job'],source=source)
         for item in compiler['inputs']:
-            material=execution_inputs.resolve_native_original(root,item['original'],compiler_job=owner)
+            material=execution_inputs.resolve_native_original(root,item['original'],compiler_job=owner,source=source)
             if material not in materials:materials.append(material)
             steps.append(item['original']['producer_step'])
     return dict(materials=materials, selected=[selected],
@@ -587,7 +589,7 @@ def _qualification(root, job, payload, seal):
     producer, _ = _seal_original(root, subject['producer_step'], subject['producer_seal'], context)
     if job.get('fork_source'):
         subject = dict(subject, producer_seal=dict(subject['producer_seal'], origin_identity=producer.origin_identity))
-    current_authors = authors(root, subject['producer_step'])
+    current_authors = authors(root, subject['producer_step'], source=producer)
     input_binding(root, job['formal_review'])
     if request['authors'] != current_authors:
         raise q.IntegrityError('Formal review contract or subject authors changed')

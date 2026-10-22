@@ -100,18 +100,23 @@ def _screen_refs(root,source,seal,state):
                 raw_sha256=seal['raw_sha256'],source_attempt=intent.get('attempt',0)):
             raise history.ObserverIntegrityError('Inherited W evidence changed its exact attempt')
         from . import execution_recovery
-        recovery_refs=[dict(ref,origin_identity=ref.get('origin_identity',owner.origin_identity))
-            for ref in source.get('history',{}).get('execution_recoveries',[])]
-        recovered=execution_recovery.resolved(root,recovery_refs)
+        recovered=execution_recovery.resolved(root,originals.recovery_refs(owner,source))
         for row in facts['evidence']:
-            accepted=c.read(originals.resolve_ref(owner,dict(row['accepted'],path=row['accepted']['snapshot'])))
-            producer=originals.dependency(owner,accepted['scope']['step'])
+            accepted=worker_delivery.accepted_original(root,row['accepted'],source=owner)
+            producer=(originals.at_step(originals.source_for_ref(owner,row['accepted']),accepted['scope']['step'])
+                if 'origin_identity' in row['accepted'] else originals.dependency(owner,accepted['scope']['step']))
             producer_job=originals.source_job(producer)
             producer_seal=c.read(originals.source_record(producer,'result-identity.json'))
             observed=c.read(originals.resolve_ref(producer,producer_seal['observations']))
             calls=[recovered.get((producer.step,call['call_id']),call) for call in observed.get('managed_calls',[])]
-            matches=[call for call in calls if call['accepted']==row['accepted']
-                and all(call.get(key)==row.get(key) for key in ('completed','terminal','observation'))]
+            proofs={}
+            for key in ('accepted','completed','terminal','observation'):
+                proof=row.get(key)
+                if proof is not None and proof.get('origin_identity',producer.origin_identity)!=producer.origin_identity:
+                    raise history.ObserverIntegrityError('Inherited W evidence changed its exact observation origin')
+                proofs[key]=({field:value for field,value in proof.items() if field!='origin_identity'}
+                    if proof is not None else None)
+            matches=[call for call in calls if all(call.get(key)==proofs[key] for key in proofs)]
             if len(matches)!=1 or matches[0]['status'] not in {'known_success','known_failed'}:
                 raise history.ObserverIntegrityError('Inherited W evidence lacks its exact known observation')
             history.validate_managed_original(producer,producer_job,matches)
@@ -132,7 +137,7 @@ def _screen_refs(root,source,seal,state):
     for row in facts['evidence']:
         ref=row['mechanism_ref'];findings=declared.get(ref,[]);current=state['mechanisms'].get(ref)
         if current is None or len(findings)!=1 or findings[0]['basis']!='observed' or not findings[0]['finding'].strip():continue
-        binding=c.read(originals.resolve_ref(owner,dict(row['accepted'],path=row['accepted']['snapshot'])))['mechanism_binding'];step=current['source_h']
+        binding=worker_delivery.accepted_original(root,row['accepted'],source=owner)['mechanism_binding'];step=current['source_h']
         if step not in hashes:hashes[step]=c.digest(originals.source_record(originals.node(root,step),'result-identity.json'))
         if binding['source_h']==step and binding['source_h_sha256']==hashes[step]:refs.add(ref)
     return refs
@@ -344,8 +349,7 @@ def fold(root,sources,*,recovery_refs=()):
     all_refs={ref_key(ref):ref for ref in recovery_refs};source_refs={}
     for job,_,_,_ in sources:
         owner=originals.node(root,job['step'])
-        refs=[dict(ref,origin_identity=ref.get('origin_identity',owner.origin_identity)) if owner.inherited else ref
-            for ref in job.get('history',{}).get('execution_recoveries',[])]
+        refs=originals.recovery_refs(owner,job)
         source_refs[job['step']]=refs
         for ref in refs:
             prior=all_refs.setdefault(ref_key(ref),ref)

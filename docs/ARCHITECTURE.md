@@ -513,6 +513,10 @@ paths and mounted-subtree checks constrain cleanup to the selected tree. Symlink
 in control namespaces traversed by quiescence checks are rejected before traversal;
 other interior symlinks are unlinked without traversing their targets. Cleanup may
 restore owner write access to pinned directories, never to shared regular files.
+Nested independent instances, including recognizable damaged identities, block
+deletion and cleanup retries. Preparation, fork publication and cold restoration hold containing
+directory gates; deletion fences both the original and tombstone paths so a new
+instance cannot be created inside a tree during its disposal.
 
 A private durable operation record outside the root pins its directory inode and
 exact tombstone. A retirement marker fences ordinary effects, including

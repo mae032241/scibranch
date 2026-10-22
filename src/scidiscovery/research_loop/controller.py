@@ -262,53 +262,57 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
         settings['execution_authority_policy'] = dict(authority_policy)
     if validate_only:
         return settings
-    root.mkdir(parents=True)
-    globals_ = root / 'project/global'
-    (globals_ / 'updates').mkdir(parents=True)
-    sources = [(globals_ / 'objective.md', text), *[
-        (globals_ / 'updates' / f'{index:03d}.md', update)
-        for index, update in enumerate(updates, 1)]]
-    settings['global_materials'] = []
-    for source, contents in sources:
-        source.write_text(contents, encoding='utf-8')
-        source.chmod(0o400)
-        settings['global_materials'].append(dict(source=source.relative_to(root).as_posix(),
-            path='inputs/global/' + source.relative_to(globals_).as_posix(),
-            sha256=contracts.digest(source)))
-    if _source_facts_factory is not None:
-        if source_restrictions:
-            raise ValueError('Staged source facts cannot replace external source declarations')
-        source_facts = _source_facts_factory(root, settings['global_materials'])
-        if not isinstance(source_facts, list):
-            raise ValueError('Staged source preparation must return exact configured declarations')
-    settings['source_provenance'] = qualification.freeze_sources(root, source_facts, original_globals, settings['global_materials'])
-    if identity_root != root.resolve() and (objective_text is not None or _user_update_texts is not None or _source_facts_factory is not None):
-        # This original is created by prepare itself. Freeze its final logical
-        # location before sealing; supplied external originals keep their identity.
-        provenance_path = root / settings['source_provenance']['path']
-        provenance = contracts.read(provenance_path)
-        for index, mapping in enumerate(provenance['globals']):
-            if index == 0 and objective_text is None or index > 0 and _user_update_texts is None:
-                continue
-            relative = 'project/global/objective.md' if index == 0 else f'project/global/updates/{index:03d}.md'
-            generated = mapping['origin']
-            if generated['path'] != str((root / relative).resolve()):
-                raise ValueError('Generated global lost its exact preparation original')
-            generated['path'] = str(identity_root / relative)
-        if _source_facts_factory is not None:
-            for declaration in provenance['declarations']:
-                source_path = Path(declaration['origin']['path'])
-                if source_path.is_relative_to(root.resolve()):
-                    declaration['origin']['path'] = str(identity_root / source_path.relative_to(root.resolve()))
-        contracts.write(provenance_path, provenance)
-        settings['source_provenance'] = qualification._ref(root, provenance_path)
-    if review_policy is not None:
-        settings['formal_review_policy']=formal_review.freeze_contract(root)
-    if authority_policy is not None:
-        settings['execution_authority_policy']=execution_authority.freeze_configuration(root)
-    contracts.write(root / "settings.json", settings)
-    contracts.write(root / "settings-identity.json",
-                    dict(sha256=contracts.digest(root / "settings.json")))
+    from .instance_owner import creation
+    with creation(root):
+        root.mkdir(parents=True)
+        # Include newly created parents and this root before writing originals.
+        with creation(root):
+            globals_ = root / 'project/global'
+            (globals_ / 'updates').mkdir(parents=True)
+            sources = [(globals_ / 'objective.md', text), *[
+                (globals_ / 'updates' / f'{index:03d}.md', update)
+                for index, update in enumerate(updates, 1)]]
+            settings['global_materials'] = []
+            for source, contents in sources:
+                source.write_text(contents, encoding='utf-8')
+                source.chmod(0o400)
+                settings['global_materials'].append(dict(source=source.relative_to(root).as_posix(),
+                    path='inputs/global/' + source.relative_to(globals_).as_posix(),
+                    sha256=contracts.digest(source)))
+            if _source_facts_factory is not None:
+                if source_restrictions:
+                    raise ValueError('Staged source facts cannot replace external source declarations')
+                source_facts = _source_facts_factory(root, settings['global_materials'])
+                if not isinstance(source_facts, list):
+                    raise ValueError('Staged source preparation must return exact configured declarations')
+            settings['source_provenance'] = qualification.freeze_sources(root, source_facts, original_globals, settings['global_materials'])
+            if identity_root != root.resolve() and (objective_text is not None or _user_update_texts is not None or _source_facts_factory is not None):
+                # This original is created by prepare itself. Freeze its final logical
+                # location before sealing; supplied external originals keep their identity.
+                provenance_path = root / settings['source_provenance']['path']
+                provenance = contracts.read(provenance_path)
+                for index, mapping in enumerate(provenance['globals']):
+                    if index == 0 and objective_text is None or index > 0 and _user_update_texts is None:
+                        continue
+                    relative = 'project/global/objective.md' if index == 0 else f'project/global/updates/{index:03d}.md'
+                    generated = mapping['origin']
+                    if generated['path'] != str((root / relative).resolve()):
+                        raise ValueError('Generated global lost its exact preparation original')
+                    generated['path'] = str(identity_root / relative)
+                if _source_facts_factory is not None:
+                    for declaration in provenance['declarations']:
+                        source_path = Path(declaration['origin']['path'])
+                        if source_path.is_relative_to(root.resolve()):
+                            declaration['origin']['path'] = str(identity_root / source_path.relative_to(root.resolve()))
+                contracts.write(provenance_path, provenance)
+                settings['source_provenance'] = qualification._ref(root, provenance_path)
+            if review_policy is not None:
+                settings['formal_review_policy']=formal_review.freeze_contract(root)
+            if authority_policy is not None:
+                settings['execution_authority_policy']=execution_authority.freeze_configuration(root)
+            contracts.write(root / "settings.json", settings)
+            contracts.write(root / "settings-identity.json",
+                            dict(sha256=contracts.digest(root / "settings.json")))
     return settings
 
 

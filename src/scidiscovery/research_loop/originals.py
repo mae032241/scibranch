@@ -451,12 +451,34 @@ def source_sequence(root, before_step, *, source_cutoff=None, extra_steps=()):
     return result
 
 
+def history_source(source, job):
+    """Unchanged selected-task history retains its exact original author."""
+    binding=job.get('history',{});owner=job;seen=set()
+    while owner.get('fork_source') is not None:
+        ref=owner['fork_source']['job']
+        source=source_for_ref(source,ref)
+        key=(identity_key(source.origin_identity),ref['sha256'])
+        if key in seen:raise ValueError('Frozen history has a cyclic task origin')
+        seen.add(key)
+        owner=_json(resolve_ref(source,ref))
+        if owner.get('history',{})!=binding:
+            raise ValueError('Frozen history differs from its exact original task')
+    return source
+
+
+def recovery_refs(source, job):
+    owner=history_source(source,job)
+    refs=job.get('history',{}).get('execution_recoveries',[])
+    return ([dict(ref,origin_identity=ref.get('origin_identity',owner.origin_identity)) for ref in refs]
+        if owner.inherited else refs)
+
+
 def frozen_recovery_refs(root, before_step):
     manifest = _manifest(root)
     rows = [] if manifest is None else list(manifest['cut'].get('execution_recoveries', []))
     for path in sorted((Path(root) / 'jobs').glob('*.json')):
         if path.stem.isdecimal() and int(path.stem) < before_step:
-            for value in _json(path).get('history', {}).get('execution_recoveries', []):
+            for value in recovery_refs(node(root,int(path.stem)),_json(path)):
                 if value not in rows:
                     rows.append(value)
     return rows

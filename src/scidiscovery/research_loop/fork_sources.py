@@ -529,6 +529,8 @@ class _Closure:
                 # original-file dependencies. Never recurse into history.view.
                 value = {key: value[key] for key in ('files', 'execution_recoveries',
                     'execution_recovery_materials', 'audit_receipts', 'adjacent_audit') if key in value}
+                if 'execution_recoveries' in value:
+                    value['execution_recoveries']=o.recovery_refs(source,job)
             self.refs(source, value, work_step=step, context=field)
         self.refs(source, job.get('control_cut'), work_step=step)
         if (o.source_settings(source).get('correction_policy') is not None or job.get('correction_request')) and 'control_cut' not in job:
@@ -773,14 +775,15 @@ def inspect_source(parent_root, selected_job_ref):
     ancestry.append(direct)
     if len(ancestry) > MAX_ANCESTRY:
         raise ValueError('Fork ancestry exceeds its finite depth bound')
+    history_owner=o.history_source(source,job)
     result = dict(version=1, kind='scientific_fork', source=dict(origin_identity=source.origin_identity,
         step=step, job_ref=job_ref, science_task_ref=task_ref, native_intent_path=native_intent, intent_kind=_kind(job)),
         cut=dict(history=copy.deepcopy(job.get('history', {})),
             correction_events=[dict(ref, origin_identity=ref.get('origin_identity', source.origin_identity))
                 for ref in job.get('control_cut', {}).get('correction_events', [])],
             phase_original_ref=phase_ref,
-            execution_recoveries=[dict(ref, origin_identity=ref.get('origin_identity', source.origin_identity))
-                for ref in job.get('history', {}).get('execution_recoveries', [])]),
+            execution_recoveries=[dict(ref, origin_identity=ref.get('origin_identity', history_owner.origin_identity))
+                for ref in o.recovery_refs(source,job)]),
         prefix_entries=prefix, entries=list(closure.entries.values()), origins=closure.origins,
         native_records=closure.records, legacy_compilations=closure.legacy_compilations, bootstrap=boot, ancestry=ancestry,
         selected_settings=selected_settings, public_snapshots=public_snapshots,

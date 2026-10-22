@@ -327,7 +327,8 @@ def create(parent_root, step, child_root, *, budget, guidance_text=None, expecte
         existing = _existing(child, operation_id, request_hash)
         if existing is not None:
             return existing
-        with _source_guard(parent):
+        from .instance_owner import creation
+        with creation(child), _source_guard(parent):
             return _create_guarded(child, request, request_hash, expected_preview_id, operation_id)
 
 

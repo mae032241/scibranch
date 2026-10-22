@@ -60,6 +60,43 @@ def writers_stopped(root,job,record):
             raise ValueError('Original native writer still owns this attempt; no delivery snapshot can be captured')
 
 
+def _prefix_calls(root,job):
+    """Resolve only this task's frozen predecessors and recovery prefix."""
+    from . import originals,execution_recovery
+    recovered=execution_recovery.resolved(root,originals.recovery_refs(originals.node(root,job['step']),job))
+    for receipt in job['history']['nodes']:
+        source=originals.node(root,receipt['step'])
+        seal_path=originals.source_record(source,'result-identity.json')
+        if c.digest(seal_path)!=receipt['seal_sha256']:
+            raise history.ObserverIntegrityError('Worker evidence prefix changed')
+        seal=c.read(seal_path);owner=originals.source_job(source)
+        if seal.get('observations') is None:continue
+        observed=(history.validate_observation_original(source,owner,seal) if source.inherited
+            else history.read_observation(root,owner,seal))
+        if (owner.get('search') or {}).get('breadth'):
+            history.validate_managed(root,owner,observed['managed_calls'])
+        for row in observed.get('managed_calls',[]):
+            row=recovered.get((source.step,row['call_id']),row)
+            if source.inherited:history.validate_managed_original(source,owner,[row])
+            yield source,row
+
+
+def _evidence(source,row):
+    proofs={key:row[key] for key in ('accepted','completed','terminal')}
+    if 'observation' in row:proofs['observation']=row['observation']
+    if source.inherited:
+        proofs={key:(dict(proof,origin_identity=source.origin_identity) if proof is not None else None)
+            for key,proof in proofs.items()}
+    return dict(mechanism_ref=row['mechanism_binding']['mechanism_ref'],**proofs)
+
+
+def accepted_original(root,proof,*,source=None):
+    from . import originals
+    ref=dict(proof,path=proof['snapshot'])
+    owner=originals.source_for_ref(source,ref) if source is not None else None
+    return c.read(originals.resolve_ref(owner,ref) if owner is not None else originals.resolve_root_ref(root,ref))
+
+
 def capture(root,job,record):
     """The native owner calls this only after its attempt has stopped writing.
 
@@ -78,26 +115,10 @@ def capture(root,job,record):
     needed={row['mechanism_ref'] for row in job['search']['coverage_obligation']}
     rows=[];unknown=[];capacity=False
     # Frozen predecessor observations only, never recursively copy their assets.
-    for receipt in job['history']['nodes']:
-        source_record=c.host_record(c.workspace(root,receipt['step']))
-        seal_path=c.regular(source_record/'result-identity.json')
-        if c.digest(seal_path)!=receipt['seal_sha256']:raise history.ObserverIntegrityError('Worker evidence prefix changed')
-        seal=c.read(seal_path);observation=seal.get('observations')
-        if observation is None:continue
-        source=c.read(c.regular(root/'jobs'/f'{receipt["step"]:03d}.json'))
-        observed_path=c.regular(root/observation['path'],limit=None)
-        if c.digest(observed_path)!=observation['sha256']:raise history.ObserverIntegrityError('Worker observation original changed')
-        observed=c.read(observed_path)
-        from . import execution_recovery
-        recovered=execution_recovery.resolved(root,job.get('history',{}).get('execution_recoveries',[]))
-        if (source.get('search') or {}).get('breadth'):history.validate_managed(root,source,observed['managed_calls'])
-        for row in observed.get('managed_calls',[]):
-            row=recovered.get((source['step'],row['call_id']),row)
-            if row.get('mechanism_binding') is None:continue
-            ref=row['mechanism_binding']['mechanism_ref']
-            if ref not in needed:continue
-            if row['status'] in {'known_success','known_failed'}:rows.append(dict(mechanism_ref=ref,accepted=row['accepted'],completed=row['completed'],terminal=row['terminal'],
-                **(dict(observation=row['observation']) if 'observation' in row else {})))
+    for source,row in _prefix_calls(root,job):
+        if row.get('mechanism_binding') is None:continue
+        ref=row['mechanism_binding']['mechanism_ref']
+        if ref in needed and row['status'] in {'known_success','known_failed'}:rows.append(_evidence(source,row))
     for row in history.managed_calls(root,job):
         accepted=c.read(root/row['accepted']['snapshot'])
         attempt=accepted.get('native_attempt')
@@ -117,7 +138,7 @@ def capture(root,job,record):
     for row in rows:
         original=row['accepted']
         if original.get('retention')!='archived':capacity=True;continue
-        value=c.read(root/original['snapshot']);mechanism=value.get('mechanism_binding') or {};ref=row['mechanism_ref'];expected=obligations[ref]
+        value=accepted_original(root,original);mechanism=value.get('mechanism_binding') or {};ref=row['mechanism_ref'];expected=obligations[ref]
         if all(mechanism.get(key)==expected[key] for key in ('mechanism_ref','source_h','source_h_sha256')):selected[ref]=row
     value=dict(version=1,binding=binding,evidence=list(selected.values()),unknown=unknown,
         prior_unknown=job['search']['breadth']['prior_unknown'],capacity=capacity,omitted_evidence=0,omitted_unknown=0)
@@ -131,6 +152,7 @@ def validate(root,job,record):
         raw_sha256=c.digest(c.regular(record/'science-output.json',limit=None)),
         source_attempt=execution.records(root,job['step']).index(record))
     if value.get('version')!=1 or value.get('binding')!=expected:raise history.ObserverIntegrityError('Worker fact snapshot binding changed')
+    inherited=None
     for row in [*value['evidence'],*value['unknown']]:
         for key in ('accepted','completed','terminal','observation'):
             proof=row.get(key)
@@ -138,8 +160,16 @@ def validate(root,job,record):
         if 'mechanism_ref' in row:
             if any(row[key] is None or row[key].get('retention')!='archived' for key in ('accepted','completed')):
                 raise history.ObserverIntegrityError('Worker known observation originals unavailable')
-            accepted=c.read(root/row['accepted']['snapshot'])
-            if history.managed_status(root,row) not in {'known_success','known_failed'}:raise history.ObserverIntegrityError('Worker observation differs from accepted terminal originals')
+            accepted=accepted_original(root,row['accepted'])
+            if 'origin_identity' in row['accepted']:
+                if inherited is None:
+                    inherited=[_evidence(source,call) for source,call in _prefix_calls(root,job)
+                        if source.inherited and call.get('mechanism_binding') is not None
+                        and call['status'] in {'known_success','known_failed'}]
+                if row not in inherited:
+                    raise history.ObserverIntegrityError('Worker evidence lacks its exact frozen inherited observation')
+            elif history.managed_status(root,row) not in {'known_success','known_failed'}:
+                raise history.ObserverIntegrityError('Worker observation differs from accepted terminal originals')
             ref=row['mechanism_ref'];target=next((item for item in job['search']['coverage_obligation'] if item['mechanism_ref']==ref),None)
             if target is None or any(accepted['mechanism_binding'].get(key)!=target[key] for key in ('mechanism_ref','source_h','source_h_sha256')):
                 raise history.ObserverIntegrityError('Worker observation differs from assigned H version')
