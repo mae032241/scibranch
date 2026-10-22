@@ -15,8 +15,10 @@ import uuid
 from scidiscovery import archive_io as files
 
 BINDING = 'instance-owner.json'
+RETIREMENT = 'instance-delete.json'
 _held = ContextVar('instance_owner_held', default={})
 _gates = ContextVar('instance_owner_gates', default={})
+_disposing = ContextVar('instance_owner_disposing', default={})
 
 
 def _gate_directory():
@@ -54,31 +56,38 @@ def _same_gate_path(path, descriptor, *, directory):
 
 
 @contextmanager
-def _host_gate(root, *, exclusive, create=True, cold=False, allow_missing=False):
-    root = files.check_path(Path(root).absolute())
+def _host_gate(root, *, exclusive, create=True, cold=False, allow_missing=False, _disposal=None):
+    root = Path(root).absolute()
+    files.check_path(root if _disposal is None else root.parent)
     # Cold restore may own an absent destination using its existing anchor.
     # Every lock here and at that anchor is nonblocking: no waiting lock cycle.
-    if allow_missing and not root.exists():
+    if _disposal is None and allow_missing and not root.exists():
         if root.resolve() != root:
             raise files.ArchiveError('Cold owner root must remain canonical')
         yield None
         return
-    root, identity = _gate_root(root)
+    if _disposal is None:
+        root, identity = _gate_root(root)
+        check_root = lambda: _same_gate_root(root, identity)
+    else:
+        identity = _disposal.identity
+        check_root = _disposal.check
+        check_root()
     previous = _gates.get()
     held = previous.get(str(root))
     if held is not None:
-        _same_gate_root(root, held['identity'])
+        check_root()
         if exclusive or (held['exclusive'] and not held['cold']):
             raise files.ArchiveError('Source read guard cannot be entered as an effect lease')
         yield held
-        _same_gate_root(root, held['identity'])
+        check_root()
         return
     directory = files.check_path(_gate_directory())
     if create:
         directory.mkdir(mode=0o700, exist_ok=True)
     elif not directory.exists():
         yield None
-        _same_gate_root(root, identity)
+        check_root()
         return
     directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     fd = None
@@ -92,7 +101,7 @@ def _host_gate(root, *, exclusive, create=True, cold=False, allow_missing=False)
             if create:
                 raise
             yield None
-            _same_gate_root(root, identity)
+            check_root()
             return
         _same_gate_path(directory / key, fd, directory=False)
         try:
@@ -101,14 +110,14 @@ def _host_gate(root, *, exclusive, create=True, cold=False, allow_missing=False)
             raise files.ArchiveError('An instance effect is still active or source read guard is active') from error
         _same_gate_path(directory, directory_fd, directory=True)
         _same_gate_path(directory / key, fd, directory=False)
-        _same_gate_root(root, identity)
+        check_root()
         value = dict(fd=fd, identity=identity, exclusive=exclusive, cold=cold)
         token = _gates.set({**previous, str(root): value})
         try:
             yield value
         finally:
             _gates.reset(token)
-            _same_gate_root(root, identity)
+            check_root()
             _same_gate_path(directory, directory_fd, directory=True)
             _same_gate_path(directory / key, fd, directory=False)
     finally:
@@ -126,7 +135,9 @@ def source_lease(root, *, create=True):
     while any process lives invalidates the coordination guarantee. Existing
     local locks/quiescence remain necessary for pre-upgrade running processes.
     """
+    root = Path(root).absolute()
     with _host_gate(root, exclusive=True, create=create) as value:
+        _require_not_retired(root)
         yield value
 
 
@@ -191,6 +202,7 @@ def _active(root, binding):
 def require_owner(root):
     """A check only; effect owners also hold lease for their full lifetime."""
     root = Path(root).absolute()
+    _require_not_retired(root)
     binding = _binding(root)
     if binding is None:
         return None
@@ -204,8 +216,65 @@ def require_owner(root):
 def lease(root):
     root = Path(root).absolute()
     with _host_gate(root, exclusive=False):
+        _require_not_retired(root)
         with _owner_lease(root) as value:
             yield value
+
+
+def _require_not_retired(root):
+    marker = root / RETIREMENT
+    if (marker.exists() or marker.is_symlink()) and str(root) not in _disposing.get():
+        raise files.ArchiveError('Instance deletion is pending; reconcile its original delete operation')
+
+
+class _Disposal:
+    """Exact inode retirement token, available only inside disposal()."""
+
+    def __init__(self, root, tombstone, identity, *, retired):
+        self.root, self.tombstone, self.identity = root, tombstone, identity
+        self.retired = retired
+        self.removed = retired and not tombstone.exists() and not tombstone.is_symlink()
+
+    def check(self):
+        path = self.tombstone if self.retired else self.root
+        files.check_path(path)
+        if self.retired and self.removed and not path.exists():
+            return
+        if not path.is_dir() or _identity(path) != self.identity:
+            raise files.ArchiveError('Delete owner lost its exact original directory inode')
+
+    def retire(self):
+        self.retired = True
+        self.check()
+
+    def finish(self):
+        if self.tombstone.exists() or self.tombstone.is_symlink():
+            raise files.ArchiveError('Delete tombstone is still present')
+        self.removed = True
+
+
+@contextmanager
+def disposal(root, tombstone, identity, *, binding=None, retired=False):
+    """Fence one pinned original while it moves to and leaves its tombstone.
+
+    The caller retains the durable request binding outside the original root.
+    Ordinary owner gates continue to require their original live directory.
+    """
+    root, tombstone = Path(root).absolute(), Path(tombstone).absolute()
+    if root.parent != tombstone.parent or root == tombstone:
+        raise files.ArchiveError('Delete tombstone must be an exact separate sibling')
+    value = _Disposal(root, tombstone, identity, retired=retired)
+    with _host_gate(root, exclusive=True, _disposal=value):
+        previous = _disposing.get()
+        token = _disposing.set({**previous, str(root): value})
+        try:
+            if binding is None:
+                yield value, None, None
+            else:
+                with _exclusive_owner(root, binding) as (directory, anchor, _):
+                    yield value, directory, anchor
+        finally:
+            _disposing.reset(token)
 
 
 @contextmanager

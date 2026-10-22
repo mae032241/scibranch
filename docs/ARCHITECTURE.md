@@ -502,6 +502,33 @@ a shared inode can damage all its references; digest validation detects corrupti
 does not retroactively fence older processes. These controls do not establish
 real-model, solver or scientific qualification.
 
+## Explicit instance deletion
+
+`instance_delete.py` removes only an explicitly named current-protocol instance,
+bound to its goal ID, frozen settings digest and operation ID. Unused prepared,
+paused and completed roots must pass the existing archive quiescence checks.
+Active owner/source-reader locks, unknown execution or delivery effects, and
+unknown cleanup block deletion without canceling or replaying work. Canonical
+paths and mounted-subtree checks constrain cleanup to the selected tree. Symlinks
+in control namespaces traversed by quiescence checks are rejected before traversal;
+other interior symlinks are unlinked without traversing their targets. Cleanup may
+restore owner write access to pinned directories, never to shared regular files.
+
+A private durable operation record outside the root pins its directory inode and
+exact tombstone. A retirement marker fences ordinary effects, including
+unenrolled instances. With the original host gate and local owners locked, the
+service retires an enrolled anchor, atomically moves the exact root, and removes
+only the recorded tombstone. Owner disposal retains identity checks across this
+intentional move; ordinary leases cannot opt out of them. The external anchor
+reaches its deleted state before the completed receipt is published.
+
+Exact-request retries recover recorded retirement/cleanup and return the original
+receipt. They never adopt a replacement root at the former path. Deleted evidence
+cannot be restored by the delete service; old cold checkpoints do not reactivate
+a deleted owner generation. Shared payloads use ordinary inode references:
+unlinking one instance does not remove another branch's originals, and no manual
+reference-count database or garbage-collection authority is introduced.
+
 ## Extension rules
 
 Domain algorithms, scientific schemas and execution adapters belong to plugins.

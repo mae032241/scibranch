@@ -141,12 +141,18 @@ def _managed_roots(root):
         yield path
 
 
-def _owner_locks(stack, root):
+def _owner_locks(stack, root, *, disposing=False):
     # Production nested order: Records node→accept, TCAD submission→binding,
     # then authority→ledger. Runner completion probes controller nonblocking.
     # All exporter acquisitions are nonblocking; no high-level owner reentry.
     from . import controller
-    stack.enter_context(controller._writer(root))
+    if disposing:
+        from . import instance_owner
+        if str(Path(root).absolute()) not in instance_owner._disposing.get():
+            raise files.ArchiveError('Delete locks require the exact disposal owner')
+        stack.enter_context(controller._local_writer(root))
+    else:
+        stack.enter_context(controller._writer(root))
     if (root / 'configuration.lock').exists():
         _lock(stack, root / 'configuration.lock')
     _lock(stack, root / 'execution-authority/ui.lock')

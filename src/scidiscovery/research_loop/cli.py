@@ -186,6 +186,11 @@ def main(argv=None):
     export = commands.add_parser('archive-export', help='Copy quiescent framework originals to a new inert read-only directory package; no writable restore')
     export.add_argument('--root', type=Path, required=True)
     export.add_argument('--output', type=Path, required=True)
+    delete = commands.add_parser('instance-delete', help='Permanently delete one exact quiescent instance; retry only with the same operation ID')
+    delete.add_argument('--root', type=Path, required=True)
+    delete.add_argument('--instance-id', required=True, help='Exact frozen goal_id confirmation')
+    delete.add_argument('--settings-sha256', required=True, help='Exact frozen settings.json SHA256 confirmation')
+    delete.add_argument('--operation-id', required=True, help='Original deletion operation ID retained for crash and lost-response retries')
     inspect = commands.add_parser('archive-inspect', help='Verify a read-only package and page its complete manifest without running code or importing plugins')
     inspect.add_argument('--package', type=Path, required=True)
     inspect.add_argument('--after', type=int, default=0, help='Exact prior entry index; default starts at the first entry')
@@ -208,11 +213,11 @@ def main(argv=None):
     arguments = list(argv) if argv is not None else sys.argv[1:]
     args = parser.parse_args(arguments)
     root_arg = getattr(args, 'root', None)
-    root = ((root_arg.expanduser().absolute() if args.command in {'archive-export', 'archive-restore-material','checkpoint-enroll','checkpoint-export','checkpoint-restore'} else root_arg.expanduser().resolve())
+    root = ((root_arg.expanduser().absolute() if args.command in {'instance-delete', 'archive-export', 'archive-restore-material','checkpoint-enroll','checkpoint-export','checkpoint-restore'} else root_arg.expanduser().resolve())
             if root_arg is not None else None)
     try:
         workspace_ui = args.command == 'serve-ui' and args.workspace is not None
-        if args.command not in {'prepare','config-check','config-inspect','status','archive-inspect','checkpoint-enroll','checkpoint-export','checkpoint-restore','fork-preview','fork-create'} and not workspace_ui:
+        if args.command not in {'instance-delete','prepare','config-check','config-inspect','status','archive-inspect','checkpoint-enroll','checkpoint-export','checkpoint-restore','fork-preview','fork-create'} and not workspace_ui:
             from .protocol import require_current
             require_current(root)
         if args.command in {'fork-preview', 'fork-create'}:
@@ -334,6 +339,10 @@ def main(argv=None):
                 result = user_guidance.revoke(root, args.guidance_id, expected_revision=args.expected_revision)
             else:
                 result = dict(status='guidance_listed', guidance=user_guidance.list_guidance(root))
+        elif args.command == 'instance-delete':
+            from .instance_delete import delete_instance
+            result = delete_instance(root, instance_id=args.instance_id,
+                settings_sha256=args.settings_sha256, operation_id=args.operation_id)
         elif args.command == 'archive-export':
             from .instance_archive import archive_export
             result = archive_export(root, args.output)
@@ -405,6 +414,8 @@ def main(argv=None):
         print(json.dumps(dict(status='error',error=str(error),**(dict(code=error.code) if hasattr(error, 'code') else {})), ensure_ascii=False))
         return 1
     print(json.dumps(result, ensure_ascii=False))
+    if result.get('status') == 'instance_deleted':
+        return 0
     if args.command == 'execution-resume' and args.maintenance is not None:
         from scidiscovery.operations.execution import PENDING_EXECUTION_STATES, execution_status
         # Remote failure is a successfully maintained original, not a failed

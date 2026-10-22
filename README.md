@@ -31,6 +31,7 @@ the claims established by its exact inputs, experiment and validation contract.
 | `scid-research` | Prepare an instance; run, inspect, pause and continue research; close out results. |
 | `scid-research start` | Start or reconnect to a detached controller for one explicit instance. |
 | `scid-research fork-preview` / `fork-create` | Preview and create a paused branch from one exact historical logical task. |
+| `scid-research instance-delete` | Permanently remove an exact quiescent instance; reconcile retries through its retained deletion receipt. |
 | `scid-research serve-ui` | Optional webpage for the same instance controls and paginated sealed results. |
 | `scid-research archive-*` / `checkpoint-*` | Export and inspect originals, restore selected material, or perform a bounded same-host cold transfer. |
 | `scid-experiment` | Use managed local experiments or a declared domain execution interface. |
