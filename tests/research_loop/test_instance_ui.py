@@ -1051,7 +1051,7 @@ network = false
     monkeypatch.setattr(ui_mechanisms, 'project', fixture_mechanisms)
     monkeypatch.setattr(control, 'start_background', detached)
     ui = InstanceUI(workspace, secret_file=key, workspace=True); ready = threading.Event(); servers = []; errors = []
-    ui.translation.configure(dict(enabled=True, model='fixture-reading-model', target_language='zh-CN'))
+    ui.translation.configure(dict(enabled=True, model='fixture-reading-model', target_language='zh-CN', launcher_argv=['fixture-custom-wrapper']))
     server_type = instance_ui.ThreadingHTTPServer
 
     class Server(server_type):
@@ -1392,8 +1392,8 @@ await noOverflow();
 await screenshot('research-process-mechanisms-live');
 await evaluate(`(()=>{const cards=document.querySelectorAll('.mechanism-card');window.neighborCardHeight=cards[1].getBoundingClientRect().height;window.previousMechanism=cards[0].querySelector('details');window.previousMechanism.open=true;window.previousMechanism.querySelector('summary').focus();return true})()`);
 if (!(await evaluate(`Math.abs(document.querySelectorAll('.mechanism-card')[1].getBoundingClientRect().height-window.neighborCardHeight)<1 && document.querySelector('.mechanism-details').innerText.includes('Original disposition caveat')`))) throw new Error('Opening a mechanism stretches its neighbor or hides the full A reason');
-// Unsupported backends retain the original and disable new calls before enqueueing.
-await waitFor(`document.querySelector('[data-translation-start]').disabled && document.querySelector('[data-translation-status]').textContent.includes('执行前禁工具')`);
+// A custom wrapper cannot claim native read-only/offline protection; reads retain originals.
+await waitFor(`document.querySelector('[data-translation-start]').disabled && document.querySelector('[data-translation-status]').textContent.includes('原生只读与禁网')`);
 await writeFile(process.env.SCID_TEST_ADVANCE, 'mechanisms-refresh');
 await waitFor(`!window.previousMechanism.isConnected && document.querySelector('.mechanism-details').open && document.activeElement===document.querySelector('.mechanism-details > summary') && document.querySelector('.mechanism-overview').innerText.includes('Updated public observation.')`);
 await waitFor(`document.querySelector('.mechanism-card h3').textContent==='Transport-driven response'`);

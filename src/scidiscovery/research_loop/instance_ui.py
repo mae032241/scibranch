@@ -367,7 +367,7 @@ class InstanceUI:
         fields = ('<input type="hidden" name="nonce" value="' + self.translation_nonce + '">'
             '<input type="hidden" name="csrf" value="' + self._csrf(token, 'translation-configure', self.translation_nonce) + '">'
             '<label class="check-label"><input type="checkbox" name="enabled" value="true"'
-            + (' checked' if value.get('enabled') else '') + '>保留翻译模型授权设置（当前后端不支持新调用）</label>'
+            + (' checked' if value.get('enabled') else '') + '>启用应用翻译模型</label>'
             + field('target_language', '目标语言', placeholder='zh-CN、en、ja…')
             + '<label>翻译后端<select name="backend">' + ''.join('<option value="' + backend + '"'
                 + (' selected' if value.get('backend') == backend else '') + '>' + label + '</option>'
@@ -382,7 +382,8 @@ class InstanceUI:
             + '<p class="note">留空保留已保存的启动命令。请使用本机后端的登录设置；此处不填写凭据。</p></details>')
         body = ('<nav><a href="/">返回工作台</a></nav><details open><summary>阅读与翻译</summary>'
             '<p>翻译仅用于阅读。设置在工作台内跨实例共享，独立于研究模型与预算。原文和下载文件保持原样。</p>'
-            '<p>当前后端无法在工具执行前禁用全部工具，新翻译调用为 unsupported，不会入队或启动。保存语言后仍可读取既有缓存，原文始终可用。</p>'
+            '<p>点击翻译后才会调用模型。标准 Codex 临时采用原生只读、禁网、禁网页与禁子代理设置，忽略用户配置，在独立临时目录运行。检测到工具事件会停止并拒绝译文；这不保证工具执行前全部禁用，也不是同用户强隔离。失败后仅手动重试。</p>'
+            + '<p class="note">' + ('当前启动器支持此临时防护。' if value['supported'] else ui.esc(value['unsupported_reason'])) + '</p>'
              + (problem.markup() if problem else '') + '<form method="post" action="/translation/configure">' + fields + '<button type="submit">保存阅读设置</button></form></details>')
         return (problem.status if problem else 200), self._page(problem.title if problem else '阅读与翻译', body, live=False), {}
 

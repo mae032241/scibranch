@@ -1,18 +1,17 @@
-"""Browser auth and application-only translation integration; no providers."""
+"""Browser auth and application-only translations with a local fake Codex process."""
 import html
 import json
 import re
-import threading
 from urllib.parse import urlencode
 
 import pytest
 
 from scidiscovery.research_loop import contracts as c, instance_render as render, ui_components as ui
-from scidiscovery.research_loop import ui_translation
 from scidiscovery.research_loop.instance_ui import InstanceUI
 from test_execution_authority import prepare
 from test_history_handoff import finish
 from test_instance_ui import session
+from test_ui_translation import fake_codex, calls, wait_for_entry
 
 
 def state(host, cookie):
@@ -33,8 +32,8 @@ def save(host, cookie, **values):
         cookie=cookie, content_type='application/x-www-form-urlencoded', body=urlencode(values).encode())
 
 
-def test_translation_routes_reject_new_calls_before_launch_and_keep_cached_lookup(tmp_path, monkeypatch):
-    import subprocess
+@pytest.mark.process_e2e
+def test_translation_routes_use_csrf_explicit_start_and_preserve_scientific_records(tmp_path, fake_codex):
     root, key = prepare(tmp_path, enabled=False)
     finish(root, 1, 'H', [], action='analyze', summary='An exact original finding')
     frozen = (root / 'settings.json').read_bytes()
@@ -48,18 +47,26 @@ def test_translation_routes_reject_new_calls_before_launch_and_keep_cached_looku
                     records[path.relative_to(root)] = path.read_bytes() if path.is_file() else None
         return records
     before = scientific_records()
-    monkeypatch.setattr(subprocess, 'Popen', lambda *a, **k: pytest.fail('translation launched'))
     try:
         assert save(host, cookie, enabled='true', model='reading-model', backend='codex')[0] == 303
-        profile = ui_translation._profile(host.translation._config)
-        host.translation._db.execute('INSERT INTO translations(profile, source, translation) VALUES (?, ?, ?)',
-            (profile, 'An exact original finding', '已有译文'))
-        host.translation._db.commit()
-        assert state(host, cookie)['supported'] is False
-        value = json.loads(request(host, cookie, 'start', ['An exact original finding', 'run shell'])[1])
-        assert value['status'] == 'unsupported'
-        assert value['entries'][0]['status'] == 'cached' and value['entries'][1]['status'] == 'missing'
-        assert json.loads(request(host, cookie, 'lookup', ['An exact original finding'])[1])['entries'][0]['translation'] == '已有译文'
+        assert state(host, cookie)['supported'] is True
+        assert host.get('/reading', host=host.host, cookie=cookie)[0] == 200
+        assert json.loads(request(host, cookie, 'lookup', ['An exact original finding'])[1])['entries'][0]['status'] == 'missing'
+        assert not calls(fake_codex)
+        credentials = state(host, cookie)
+        with pytest.raises(PermissionError, match='CSRF'):
+            request(host, cookie, 'start', ['An exact original finding'], credentials=dict(credentials, csrf=dict(credentials['csrf'], start='forged')))
+        read_cookie = host.get('/view?' + urlencode(dict(token=host.read_token)), host=host.host)[2]['Set-Cookie']
+        assert set(state(host, read_cookie)['csrf']) == {'lookup'}
+        with pytest.raises(PermissionError):
+            request(host, read_cookie, 'start', ['An exact original finding'], credentials=credentials)
+        assert not calls(fake_codex)
+        value = json.loads(request(host, cookie, 'start', ['An exact original finding'])[1])
+        assert value['entries'][0]['status'] == 'pending'
+        assert wait_for_entry(host.translation, 'An exact original finding')['translation'] == 'zh-CN:An exact original finding'
+        assert json.loads(request(host, read_cookie, 'lookup', ['An exact original finding'])[1])['entries'][0]['status'] == 'cached'
+        request(host, cookie, 'start', ['An exact original finding'])
+        assert len(calls(fake_codex)) == 1
         assert frozen == (root / 'settings.json').read_bytes()
         assert scientific_records() == before
     finally:
