@@ -222,7 +222,12 @@ def prepare(root, step, record, work, home, args, *, standard, resume_position=N
 
 
 def _launch(value,config,accepted,command,cwd,*,public,root):
-    from . import experiments as e
+    from . import experiments as e, shared_input_views, storage_policy
+    from . import contracts as c
+    from . import worker_execution_bridge
+    context=storage_policy.Deadline(config['max_seconds'],upstream=worker_execution_bridge.operation_context())
+    shared_input_views.ensure_capability(context=context)
+    job=c.read(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
     if config['execution_interface']['executor']!='local_execution:command':
         raise e.UnsupportedExecution('Selected executor has no default scientific subprocess namespace')
     directory=e.Records(config).directory(accepted['call_id'])
@@ -267,8 +272,8 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
         *[Path(path) for path in ('/etc/resolv.conf','/etc/hosts','/etc/ssl/certs',
             value['native']['path'],str(Path(command[0]).absolute()))]])
     wrapped.extend(['--ro-bind',str(public),str(public)])
-    wrapped.extend(['--bind',str(work),str(work),
-        '--ro-bind',value['backend_configuration']['path'],str(backend/'config.toml'),
+    wrapped.extend(shared_input_views.workspace_arguments(root,work))
+    wrapped.extend(['--ro-bind',value['backend_configuration']['path'],str(backend/'config.toml'),
         '--tmpfs',str(work/'work/experiment'),'--tmpfs','/task-tmp','--chdir',cwd])
     # Codex protects these metadata directories even when they were absent at
     # preparation. Supply them in the host workspace before inner sandboxing.
@@ -277,6 +282,7 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
         path=metadata_root/name
         if not path.exists():path.mkdir(mode=0o700)
     for mode,source_path,target in bindings:wrapped.extend([mode,str(source_path),str(target)])
+    wrapped.extend(shared_input_views.mount_arguments(root,job,work,include_skills=False,context=context))
     environment=dict(PATH='/usr/bin:/bin',HOME='/task-tmp',CODEX_HOME=str(backend),
         TMPDIR='/task-tmp',XDG_RUNTIME_DIR='/task-tmp',LANG='C.UTF-8',PYTHONDONTWRITEBYTECODE='1')
     for key,content in environment.items():wrapped.extend(['--setenv',key,content])

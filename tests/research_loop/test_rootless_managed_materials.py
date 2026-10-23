@@ -128,7 +128,8 @@ def test_selected_skill_mounts_and_grants_use_frozen_objects_without_private_man
     import sys
     from cov_execution import launcher
     from test_skill_supply import prepare, _object
-    from scidiscovery.research_loop import skill_supply
+    from scidiscovery.research_loop import shared_input_views, skill_supply
+    monkeypatch.setattr(shared_input_views,'ensure_capability',lambda **kwargs: '/usr/bin/bwrap')
     root, source = prepare(tmp_path)
     job = c.build_job(root, 1, 'H', [])
     work = c.workspace(root, 1)
@@ -159,6 +160,12 @@ def test_selected_skill_mounts_and_grants_use_frozen_objects_without_private_man
     import shutil
     shutil.rmtree(source)
     assert launcher.native_skill_mounts(settings, work) == mounts
+    from scidiscovery.research_loop.experiments import UnsupportedExecution
+    def unavailable(**kwargs):
+        raise UnsupportedExecution('Shared input readonly view unsupported: namespace unavailable')
+    monkeypatch.setattr(shared_input_views,'ensure_capability',unavailable)
+    with pytest.raises(UnsupportedExecution,match='namespace unavailable'):
+        launcher.outer(settings,work,home,['/usr/bin/true'])
 
 
 @pytest.mark.process_e2e
@@ -202,13 +209,68 @@ def test_cov_outer_reads_selected_skill_in_real_namespace_without_copy_or_privat
                     device=before.st_dev, inode=before.st_ino)
     bindings = dict(projection=str(work / '.agents/skills'), selected=str(selected),
                     unselected=str(unselected), manifest=str(root / skill_supply.MANIFEST),
-                    expected=expected)
+                    expected=expected, workspace=str(work), home=str(home))
+    objective = work / 'inputs/global/objective.md'
+    assert objective.is_file()
+    alias = work / 'artifacts/objective-alias.md'
+    alias.hardlink_to(objective)
+    objective_before = objective.stat()
+    objective_bytes = objective.read_bytes()
+    experiment = work / 'experiments/namespace-fixture'
+    experiment.mkdir(parents=True)
+    snapshot = root / 'host-runtime/namespace-accepted-inputs'
+    (snapshot / 'artifacts').mkdir(parents=True)
+    (snapshot / 'source.py').write_text('Original accepted source; never executed.\n')
+    bindings['experiment'] = str(experiment)
     shutil.rmtree(source)
     check = r'''
 import errno, hashlib, json, os, sys
 from pathlib import Path
 value = json.loads(sys.argv[1]); backend = sys.argv[2] == 'backend'
 projection = Path(value['projection']); selected = Path(value['selected'])
+work = Path(value['workspace']); home = Path(value['home'])
+def readonly(path):
+    info = path.stat()
+    try:
+        path.chmod(0o700 if path.is_dir() else 0o600)
+    except OSError as error:
+        assert error.errno == errno.EROFS, error
+    else:
+        raise AssertionError('Shared input chmod succeeded: ' + str(path))
+    try:
+        (path / '.write-probe').write_text('changed') if path.is_dir() else path.write_text('changed')
+    except OSError as error:
+        assert error.errno in (errno.EROFS, errno.EACCES), error
+    else:
+        raise AssertionError('Shared input write succeeded: ' + str(path))
+    try:
+        path.rename(path.with_name(path.name + '-moved'))
+    except OSError as error:
+        assert error.errno in (errno.EROFS, errno.EBUSY), error
+    else:
+        raise AssertionError('Shared input rename succeeded: ' + str(path))
+    assert path.stat().st_mode == info.st_mode
+for path in (work / 'inputs', work / 'inputs/global/objective.md',
+             work / 'artifacts/objective-alias.md',
+             *(work / 'work' / name for name in
+               ('retained-experiments', 'execution-results', 'retained-implementations'))):
+    readonly(path)
+for path in (work, work / 'work'):
+    try:
+        path.rename(path.with_name(path.name + '-moved'))
+    except OSError as error:
+        assert error.errno == errno.EBUSY, error
+    else:
+        raise AssertionError('Writable ancestor mountpoint was renamed')
+for path in (work / 'work/scratch', work / 'artifacts/scratch', Path('/task-tmp/scratch')):
+    path.write_text('native write retained')
+if backend:
+    experiment = Path(value['experiment'])
+    readonly(experiment / 'source.py')
+    (experiment / 'artifacts/raw-output').write_text('accepted artifacts remain writable')
+else:
+    (home / 'sessions').mkdir(exist_ok=True)
+    (home / 'sessions/readonly-view-fixture').write_text('session write retained')
 # Relative discovery links resolve from their own location, independently of CWD.
 os.chdir('/task-tmp')
 assert (projection / 'alpha').is_symlink()
@@ -220,6 +282,7 @@ if backend:
     print(json.dumps(dict(backend_skill_objects_visible=False)))
 else:
     manual = projection / 'alpha/SKILL.md'
+    readonly(projection); readonly(selected); readonly(manual)
     info = manual.stat()
     assert manual.resolve() == selected / 'SKILL.md'
     assert hashlib.sha256(manual.read_bytes()).hexdigest() == value['expected']['sha256']
@@ -238,7 +301,12 @@ else:
 '''
     for backend in (False, True):
         mode = 'backend' if backend else 'native'
-        command = launcher.outer(dict(settings, _backend=backend), work, home,
+        current = dict(settings, _backend=backend)
+        if backend:
+            current['_backend_materials'] = [(str(snapshot), str(experiment), '--ro-bind'),
+                (str(snapshot / 'artifacts'), str(experiment / 'artifacts'), '--bind')]
+            current['_accepted_artifacts'] = (str(snapshot / 'artifacts'), str(experiment / 'artifacts'))
+        command = launcher.outer(current, work, home,
                                  [str(python), '-c', check, json.dumps(bindings), mode])
         result = subprocess.run(command, capture_output=True, text=True, timeout=15)
         assert result.returncode == 0, result.stdout + result.stderr
@@ -248,4 +316,8 @@ else:
                                  unselected_visible=False, private_manifest_visible=False))
     assert original.stat().st_ino == before.st_ino
     assert hashlib.sha256(original.read_bytes()).hexdigest() == expected['sha256']
+    assert objective.read_bytes() == objective_bytes
+    assert objective.stat().st_mode == objective_before.st_mode
+    assert alias.stat().st_ino == objective.stat().st_ino == objective_before.st_ino
+    assert (snapshot / 'artifacts/raw-output').read_text() == 'accepted artifacts remain writable'
     skill_supply.validate(root, c.settings(root))

@@ -109,6 +109,12 @@ assert reply['result']['status']=='known_success',reply
 call=reply['result']['call_id']
 assert request(3,['query','--call-id',call])['result']['state']=='succeeded'
 collected=request(4,['collect','--call-id',call]);assert collected['code']==0,collected
+for item in collected['result']['outputs']:
+ retained=pathlib.Path(item['path'])
+ for action in (lambda:retained.chmod(0o600),lambda:retained.write_bytes(b'must stay readonly')):
+  try:action()
+  except OSError:pass
+  else:raise AssertionError('Dynamic collected output was writable in the running native process')
 if probe['directory']:
  outputs=collected['result']['outputs']
  assert any(pathlib.Path(item['path']).read_text()=='real generic backend completed' for item in outputs if item['path'].endswith('sentinel.txt'))

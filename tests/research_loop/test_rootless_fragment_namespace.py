@@ -17,7 +17,27 @@ from test_author_closeout_e2e import source_python
 from test_worker_execution_hash_free import PUBLIC_CLI,PUBLIC_RUNNER
 
 
-FAKE_NATIVE=r'''import json,os,pathlib,subprocess,sys
+FAKE_NATIVE=r'''import errno,json,os,pathlib,subprocess,sys
+def readonly(path):
+ before=path.stat();original=path.read_bytes() if path.is_file() else None
+ for action in (lambda:path.chmod(0o700 if path.is_dir() else 0o600),
+  lambda:(path/'.write-probe').write_text('changed') if path.is_dir() else path.write_text('changed'),
+  lambda:path.rename(path.with_name(path.name+'-moved'))):
+  try:action()
+  except OSError as error:assert error.errno in (errno.EROFS,errno.EBUSY,errno.EACCES),error
+  else:raise AssertionError('Shared input mutation succeeded: '+str(path))
+ assert path.stat().st_mode==before.st_mode
+ if original is not None:assert path.read_bytes()==original
+def shared_inputs(work):
+ readonly(work/'inputs/global/objective.md')
+ for name in ('retained-experiments','execution-results','retained-implementations'):
+  readonly(work/'work'/name)
+ for parent in (work,work/'work'):
+  try:parent.rename(parent.with_name(parent.name+'-moved'))
+  except OSError as error:assert error.errno==errno.EBUSY,error
+  else:raise AssertionError('Shared-input ancestor was renamed')
+ (work/'work/readonly-view-scratch').write_text('Native scratch remains writable')
+ (work/'artifacts/readonly-view-scratch').write_text('Native artifacts remain writable')
 args=sys.argv[1:]
 if args and args[0]=='sandbox':
  # Fake contract only: real outer bwrap and runner, no provider sandbox qualification.
@@ -28,6 +48,7 @@ if args and args[0]=='sandbox':
  assert pathlib.Path(invocation['source']).parent==pathlib.Path(args[4]) and pathlib.Path(invocation['source']).is_file()
  assert type(invocation['output_line']) is int and invocation['output_line']>0
  assert invocation['output']=='/task-tmp/scid-receipt/row.json'
+ shared_inputs(pathlib.Path(args[4]));readonly(pathlib.Path(invocation['source']))
  os.chdir(args[4]);os.execv(args[6],args[6:])
 sys.stdin.read()
 work=pathlib.Path(args[args.index('-C')+1]);home=pathlib.Path(os.environ['CODEX_HOME'])
@@ -38,12 +59,14 @@ for private in (root/'jobs',root/'settings-identity.json',root/'settings.json',r
 task=json.loads((work/'science-task.json').read_text());role=task['role']
 assert role in ('H','W','A') and task['global']['objective']=='inputs/global/objective.md'
 assert (work/task['global']['objective']).read_text()=='Two synthetic native contexts; zero model requests.'
+shared_inputs(work)
 search_enabled=bool(task.get('lineage',{}).get('mechanisms',{}).get('authorized_count'))
 output=pathlib.Path(args[args.index('--output-last-message')+1]);later='resume' in args or home.name=='context-001'
 assert output==pathlib.Path('/task-result/result.pending.json')
 assert 'resume' not in args
 schema=pathlib.Path(args[args.index('--output-schema')+1])
 assert schema==pathlib.Path('/task-result/science-result.schema.json') and json.loads(schema.read_text())['type']=='object'
+readonly(schema)
 thread='22222222-2222-4222-8222-222222222222' if later else '11111111-1111-4111-8111-111111111111'
 print(json.dumps(dict(type='thread.started',thread_id=thread)),flush=True)
 session=home/'sessions/current.jsonl';session.parent.mkdir(parents=True,exist_ok=True)
@@ -82,9 +105,26 @@ if role=='W':
   original=(slot/'response.json').read_bytes();response=json.loads(original)
   assert response['code']==0 and response['result']==reply
   (work/'work/original-response.json').write_bytes(original)
+  collected=subprocess.run([str(work/'bin/exp'),'collect','--call-id',reply['call_id']],capture_output=True,text=True)
+  assert collected.returncode==0,(collected.stdout,collected.stderr)
+  collection=json.loads(collected.stdout)
+  assert collection['status']=='collected' and collection['call_id']==reply['call_id'] and collection['outputs']
+  for item in collection['outputs']:
+   path=pathlib.Path(item['path'])
+   assert path.is_relative_to(work/'work/retained-experiments'/reply['call_id']/'outputs') and path.is_file()
+   readonly(path)
+  shared_inputs(work)
+  (work/'work/readonly-collect.json').write_text(collected.stdout)
   if search_enabled:
    rejected=subprocess.run(cmd+['--mechanism','P'],capture_output=True,text=True)
-   assert rejected.returncode!=0 and 'Other H mechanisms' in rejected.stdout+rejected.stderr,(rejected.stdout,rejected.stderr)
+   rejection=json.loads(rejected.stdout)
+   assert rejected.returncode!=0 and rejection['status']=='unresolved',(rejected.stdout,rejected.stderr)
+   assert rejection['handoff']['action']=='reconcile_or_stop' and 'call_id' not in rejection
+   ledger=pathlib.Path(os.environ['EXP_RUN_DIR'])/'results.jsonl'
+   assert len(ledger.read_text().splitlines())==1
+   rejected_response=json.loads((slot/'response.json').read_text())
+   assert rejected_response['code']!=0 and rejected_response['result']==rejection
+   (work/'work/breadth-rejection.json').write_text(json.dumps(rejected_response))
    other=subprocess.run(cmd+['--mechanism','Q'],capture_output=True,text=True)
    assert other.returncode==0,(other.stdout,other.stderr)
    assert json.loads(other.stdout)['status']=='known_success'
@@ -120,7 +160,7 @@ output.write_text(json.dumps(payload))
 
 def prepare_namespace(tmp_path,*,search_enabled=False,fake_source=FAKE_NATIVE,context='new_context',repair=False):
     if shutil.which('bwrap') is None:pytest.skip('Actual namespace unavailable')
-    repo=Path(__file__).resolve().parents[2];launcher=repo/'scripts/acceptance/rootless_cov_launcher.py'
+    repo=Path(__file__).resolve().parents[2]
     python,scid_python,runtime_paths=source_python(tmp_path,repo)
     (tmp_path/'private-owner-state').write_text('Host-only owner-state canary; no credentials.')
     public=tmp_path/'public';harness=public/'environment/harness';harness.mkdir(parents=True)
@@ -138,10 +178,9 @@ def prepare_namespace(tmp_path,*,search_enabled=False,fake_source=FAKE_NATIVE,co
     c.write(config,dict(scene_root=str(root),public_root=str(public),public_manifest=str(manifest),
         runs_dir=str(root/'runs'),submission_dir=str(root/'submission'),native=str(fake),native_sha256=c.digest(fake),
         code_mode_host=dict(path=str(codehost),sha256=c.digest(codehost)),task_python=python,scid_python=scid_python,
-        runtime_paths=runtime_paths,
+        runtime_paths=[*runtime_paths,str(Path(cov_receipt.__file__).resolve())],
         model='no-model',reasoning_effort='high',profile='namespace-no-model',cov_receipt_channel='public_runner_main'))
-    launch=[scid_python,'-B','-I','-c','import runpy,sys;runpy.run_path(sys.argv.pop(1),run_name="__main__")',
-        str(launcher),'--config',str(config),'--']
+    launch=[scid_python,'-B','-I','-m','cov_execution.launcher','--config',str(config),'--']
     controller.prepare(root,public/'instruction.md',public,launch,
         max_tokens=100000,max_seconds=120,max_steps=8,model='no-model',reasoning_effort='high',search_policy=search.DEFAULT_POLICY if search_enabled else None,
         history_observer=dict(adapter=str(Path(cov_lineage.__file__).resolve()),contract_version=2,
@@ -170,6 +209,17 @@ def execute_namespace(root,step):
                     with path.open('rb') as stream:
                         stream.seek(max(0,path.stat().st_size-8192))
                         diagnostics[str(path.relative_to(root))]=stream.read(8192).decode(errors='replace')
+        calls=record_directory(root,step)/'calls'
+        if calls.is_dir():
+            for call in sorted(calls.iterdir())[-3:]:
+                if not call.is_dir() or call.is_symlink():continue
+                for name in ('stdout.raw','stderr.raw','terminal.json','submission.json','completed.json',
+                    'engineering-check.intent.json','engineering-check.process.json','engineering-check.outcome.json'):
+                    path=call/name
+                    if path.is_file():
+                        with path.open('rb') as stream:
+                            stream.seek(max(0,path.stat().st_size-16384))
+                            diagnostics[str(path.relative_to(root))]=stream.read(16384).decode(errors='replace')
         pytest.fail(json.dumps(dict(error=str(error),diagnostics=diagnostics),ensure_ascii=False,indent=2))
 
 
@@ -194,6 +244,7 @@ def assert_public_submission(root,step):
             assert c.read(rejected_claim/'outcome.json')['calls']==[]
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('search_enabled',[False,True],ids=['no-search','sealed-h-search-w-a'])
 def test_actual_launcher_two_new_contexts_keep_original_registered_call(tmp_path,search_enabled):
     root=prepare_namespace(tmp_path,search_enabled=search_enabled)
@@ -219,10 +270,17 @@ def test_actual_launcher_two_new_contexts_keep_original_registered_call(tmp_path
     assert len(list((record_directory(root,step)/'calls').glob('*/accepted.json')))==(2 if search_enabled else 1)
     assert_public_submission(root,step)
     assert len(c.read(work/'work/rejected-caller-options.json'))==2
+    collection=c.read(work/'work/readonly-collect.json')
+    assert collection['status']=='collected' and collection['outputs']
+    assert all(Path(item['path']).is_file() for item in collection['outputs'])
     assert c.read(work/'work/second-context-query.json')['state']=='succeeded'
     assert len(list((root/'jobs').glob('*.json')))==step
     assert c.validate(work)['stage_intent']=='review'
     if search_enabled:
+        rejected=c.read(work/'work/breadth-rejection.json')
+        claim=record_directory(root,step).parent/'worker-submissions'/rejected['submission_ref']
+        assert c.read(claim/'outcome.json')['calls']==[]
+        assert len((root/'runs/results.jsonl').read_text().splitlines())==2
         assert first['scope']['mechanism_ref'] is None
         c.build_job(root,3,'A',[1,2]);execute_namespace(root,3)
         assert c.validate(c.workspace(root,3))['next_action']=='finish'

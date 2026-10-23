@@ -110,6 +110,7 @@ def _tree(directory, *, inventory=None, context=None):
 
 def _launcher_module(launcher):
     args = list(launcher[1:])
+    if args and args[-1]=='--':args.pop()  # Optional exact argparse boundary.
     while args and args[0] in {'-B', '-I'}:
         args.pop(0)
     if (re.fullmatch(r'python(?:[0-9]+(?:\.[0-9]+)*)?', Path(launcher[0]).name) is None
@@ -167,6 +168,36 @@ def _launcher_contract(backend, launcher, retained=None):
     if retained is not None and value != retained:
         raise ValueError('Frozen native Skill launcher identity changed; create a new instance')
     return value
+
+
+def native_launcher_contract(backend, launcher, *, retained=...):
+    """Freeze the existing registered final scientific namespace owner.
+
+    Other local argv remain eligible for the common outer. An existing exact
+    declaration is verified even when the selected Skill inventory is empty.
+    """
+    value=None
+    if backend=='codex' and not (len(launcher)==1 and Path(launcher[0]).name=='codex'):
+        try:module=_launcher_module(launcher)
+        except ValueError:module=None
+        if module is not None:
+            entries=importlib.metadata.entry_points().select(group='scidiscovery.execution_interfaces')
+            matches=[entry for entry in entries if _provider(entry,module) is not None]
+            if len(matches)>1:raise ValueError('Native namespace launcher requires one exact registered provider')
+            if matches:
+                value=_launcher_contract(backend,launcher,retained if retained is not ... else None)
+    if retained is not ... and value!=retained:
+        raise ValueError('Frozen native namespace launcher identity changed; create a new instance')
+    return value
+
+
+def namespace_launcher(settings):
+    """Validate the frozen owner before choosing its final namespace seam."""
+    capabilities=settings.get('native_capabilities',{})
+    if 'native_launcher_contract' not in capabilities:
+        raise ValueError('Frozen native namespace launcher contract is missing')
+    return native_launcher_contract(settings.get('native_backend','codex'),settings['native_launcher_argv'],
+        retained=capabilities['native_launcher_contract'])
 
 
 def prepare(value, *, backend, launcher, existing=None, policy=None, context=None):

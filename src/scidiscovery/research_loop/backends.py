@@ -14,7 +14,7 @@ from pathlib import Path
 from .native_usage import SessionUsage, tokens
 
 
-def configuration(backend='codex', launcher=None, native_options=None):
+def configuration(backend='codex', launcher=None, native_options=None, *, existing=None):
     if not isinstance(backend,str) or backend not in {'codex', 'protocol'}:
         raise ValueError('Native backend must be codex or protocol')
     if launcher is None:
@@ -52,7 +52,12 @@ def configuration(backend='codex', launcher=None, native_options=None):
                   native_options=options if native_options is not None else None)
     frozen['native_permissions'] = permission_summary(frozen)
     adapter = selected(frozen)
-    frozen['native_capabilities'] = dict(response_schema_transport=adapter.schema_transport,
+    from . import skill_supply
+    retained=(existing or {}).get('native_capabilities',{}).get('native_launcher_contract',...)
+    if existing is not None and retained is ...:
+        raise ValueError('Frozen native namespace launcher contract is missing')
+    namespace=skill_supply.native_launcher_contract(backend,list(launcher),retained=retained)
+    frozen['native_capabilities'] = dict(native_launcher_contract=namespace,response_schema_transport=adapter.schema_transport,
         session_resume=adapter.supports_resume, complete_native_authorship=adapter.complete_authorship)
     return frozen
 

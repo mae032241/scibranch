@@ -15,11 +15,14 @@ from scidiscovery.research_loop import budget, contracts as c, controller, execu
 
 pytestmark = pytest.mark.process_e2e
 
-LAUNCHER = r'''import json,os,pathlib,subprocess,sys,time
-from scidiscovery.research_loop import budget,experiments as e
+LAUNCHER = r'''import json,os,pathlib,sys,time
+from scidiscovery.research_loop import worker_execution_bridge as bridge
 args=sys.argv[1:];prompt=sys.stdin.read();work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE'])
 home=pathlib.Path(os.environ['THIN_HWA_NATIVE_HOME']);role=os.environ['THIN_HWA_ROLE']
-root=work.parents[2];step=int(work.name);resume='resume' in args
+root=work.parents[2];resume='resume' in args
+def request(arguments):
+ reply=bridge.client(work/'work/experiment',arguments)
+ return reply['code'],reply['result']
 thread='11111111-2222-4333-8444-555555555555'
 with (work/'work/launches').open('a') as f:f.write('resume\n' if resume else 'exec\n')
 print(json.dumps(dict(type='thread.started',thread_id=thread)),flush=True)
@@ -34,51 +37,50 @@ if role=='W':
  if not resume:
   (work/'work/initial-prompt').write_text(prompt)
   options=json.loads((root/'fixture-options.json').read_text())
-  config=e.configure(root,step,'composed_execution:fixture',options,work/'work/config.json')
   package=work/'work/package';package.write_bytes(b'opaque original job package')
-  command=[sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(work/'work/config.json'),'run','--payload',str(package),'--new-plan','--mechanism','P']
+  command=['run','--payload',str(package),'--new-plan','--mechanism','P']
   if options.get('synchronous_first'):
-   first=subprocess.run(command,capture_output=True,text=True);assert first.returncode==0,(first.stdout,first.stderr)
+   code,first=request(command);assert code==0,first
    command[-1]='Q'
-  reply=subprocess.run(command,capture_output=True,text=True)
-  assert reply.returncode==2,(reply.stdout,reply.stderr)
-  result=json.loads(reply.stdout);assert result['status']==options.get('query_state','running'),result
+  code,result=request(command)
+  assert code==2,result
+  assert result['status']==options.get('query_state','running'),result
   (work/'work/original-call').write_text(result['call_id'])
   (work/'work/executor-handoff.json').write_text(json.dumps(result['handoff']))
   if options.get('follow_handoff') and result['handoff']['action']=='poll_original':
    handoff=result['handoff'];queries=[]
    while handoff['action']=='poll_original':
     assert 'max_queries' not in handoff
-    remaining=budget.snapshot(root)['seconds_remaining']
-    if remaining<=0:
-     (work/'work/poll-stop').write_text('shared_wall_budget')
-     break
-    time.sleep(min(handoff['poll_interval_seconds'],remaining))
-    if budget.snapshot(root)['seconds_remaining']<=0:
-     (work/'work/poll-stop').write_text('shared_wall_budget')
-     break
-    # Synthetic backend events occur only after several real same-call CLI queries.
-    number=len(queries)+1
-    if number==options.get('terminal_at_query'):e.load(config).complete(result['call_id'])
-    if number==options.get('unknown_at_query'):
-     path=e.Records(config).directory(result['call_id'])/'backend-accepted.json'
-     backend=json.loads(path.read_text());backend['state']='unknown';path.write_text(json.dumps(backend))
-    query=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(work/'work/config.json'),'query','--call-id',result['call_id']],capture_output=True,text=True)
-    assert query.returncode==0,(query.stdout,query.stderr)
-    handoff=json.loads(query.stdout)['handoff']
+    # The host bridge retains the original finite deadline. Synthetic backend
+    # events belong to the test host, never this readonly native namespace.
+    time.sleep(handoff['poll_interval_seconds'])
+    event=dict(call_id=result['call_id'],number=len(queries)+1)
+    temporary=work/'work/fixture-query.pending';temporary.write_text(json.dumps(event))
+    temporary.replace(work/'work/fixture-query.json')
+    deadline=time.monotonic()+10
+    while True:
+     try:ack=json.loads((work/'work/fixture-query-ack.json').read_text())
+     except (FileNotFoundError,json.JSONDecodeError):ack=None
+     if ack==event:break
+     assert time.monotonic()<deadline,'Host did not deliver the synthetic backend event'
+     time.sleep(.02)
+    code,query=request(['query','--call-id',result['call_id']])
+    assert code==0,query
+    handoff=query['handoff']
     assert handoff['call_id']==result['call_id']
     queries.append(handoff['call_id'])
     (work/'work/poll-queries.json').write_text(json.dumps(queries))
    if handoff['action']=='reconcile_or_stop':
-    reconciled=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(work/'work/config.json'),'reconcile','--call-id',result['call_id']],capture_output=True,text=True)
-    assert reconciled.returncode in (0,2),(reconciled.stdout,reconciled.stderr)
-    terminal=json.loads(reconciled.stdout);handoff=terminal['handoff']
+    code,terminal=request(['reconcile','--call-id',result['call_id']])
+    assert code in (0,2),terminal
+    handoff=terminal['handoff']
     assert handoff['call_id']==result['call_id']
     (work/'work/reconciled-call').write_text(result['call_id'])
     if handoff['action']=='consume_terminal':
-     observed=json.loads((e.Records(config).directory(result['call_id'])/'execution-observation.json').read_text())
-     outputs=e.scientific_outputs(config,observed)
-     for item in outputs:assert pathlib.Path(item.local_path).read_bytes()==b'opaque original job package'
+     code,collected=request(['collect','--call-id',result['call_id']])
+     assert code==0,collected
+     outputs=collected['outputs']
+     for item in outputs:assert pathlib.Path(item['path']).read_bytes()==b'opaque original job package'
      (work/'work/consumed-output-count').write_text(str(len(outputs)))
      (work/'work/consumed-result').write_text(terminal['status'])
    (work/'work/final-handoff.json').write_text(json.dumps(handoff))
@@ -94,14 +96,18 @@ if role=='W':
   assert result['status']==row['status']
   assert not {'proofs','scope','accepted','submission','sha256','config_sha256'} & result.keys()
   assert not (work/row['result']).parent.joinpath('originals').exists()
-  for item in packet['executions'][0]['outputs']:assert (work/item['path']).read_bytes()==b'opaque original job package'
+  for item in packet['executions'][0]['outputs']:
+   retained=work/item['path'];assert retained.read_bytes()==b'opaque original job package'
+   for action in (lambda:retained.chmod(0o600),lambda:retained.write_bytes(b'must stay readonly')):
+    try:action()
+    except OSError:pass
+    else:raise AssertionError('Managed wake reopened a shared output')
   (work/'work/consumed-result').write_text(packet['executions'][0]['status'])
   if 'native_state' in packet['executions'][0]:(work/'work/consumed-native-state').write_text(packet['executions'][0]['native_state'])
   options=json.loads((root/'fixture-options.json').read_text())
   if options.get('probe_new_call'):
-   forbidden=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(work/'work/config.json'),'run','--payload',str(work/'work/package'),'--new-plan','--mechanism','Q'],capture_output=True,text=True)
-   assert forbidden.returncode==2,(forbidden.stdout,forbidden.stderr)
-   denied=json.loads(forbidden.stdout)
+   code,denied=request(['run','--payload',str(work/'work/package'),'--new-plan','--mechanism','Q'])
+   assert code==2,denied
    assert denied['status']=='unavailable',denied
    (work/'work/new-call-denied').write_text(denied['status'])
  consumed=(work/'work/consumed-result').exists()
@@ -117,8 +123,9 @@ def instance(tmp_path,options,*,fragment=False,resume=True,seconds=120,node_seco
     public=tmp_path/'public';public.mkdir();goal=public/'objective.md';goal.write_text('Read an async original and retain scientific limits.')
     launcher=tmp_path/'launcher.py';launcher.write_text(LAUNCHER)
     root=tmp_path/'instance'
+    # The host freezes the remote fixture and serves the ordinary Worker bridge.
     controller.prepare(root,goal,public,[sys.executable,str(launcher)],max_tokens=1000,max_seconds=seconds,max_steps=7,
-        model='no-model',reasoning_effort='high',node_budget_mode='soft',experiment_mode='external',
+        model='no-model',reasoning_effort='high',node_budget_mode='soft',execution_config=dict(executor='composed_execution:fixture',configuration=options),
         node_budget_policy={role:dict(max_observed_tokens=200,max_seconds=node_seconds) for role in 'HWAE'},
         resume_policy=dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn') if resume else None,
         worker_fragment_policy=dict(context='same_session') if fragment else None)
@@ -129,7 +136,36 @@ def instance(tmp_path,options,*,fragment=False,resume=True,seconds=120,node_seco
 
 
 def run_cli(root):
-    return subprocess.run([sys.executable,'-m','scidiscovery.research_loop.cli','run','--root',str(root)],capture_output=True,text=True,timeout=35)
+    options=c.read(root/'fixture-options.json');stop=threading.Event();errors=[]
+    def backend_events():
+        previous=None;work=c.workspace(root,2)
+        try:
+            while not stop.wait(.01):
+                path=work/'work/fixture-query.json'
+                if not path.exists():continue
+                event=c.read(path)
+                if event==previous:continue
+                acknowledgement=work/'work/fixture-query-ack.json'
+                if acknowledgement.exists() and c.read(acknowledgement)==event:continue
+                config=c.read(execution.origin(root,2)/'experiment-config.json')
+                call=event['call_id'];number=event['number']
+                assert e.Records(config).accepted(call)['call_id']==call
+                if number==options.get('terminal_at_query'):e.load(config).complete(call)
+                if number==options.get('unknown_at_query'):
+                    path=e.Records(config).directory(call)/'backend-accepted.json'
+                    backend=c.read(path);backend['state']='unknown';c.write(path,backend)
+                temporary=work/'work/fixture-query-ack.pending';c.write(temporary,event)
+                temporary.replace(work/'work/fixture-query-ack.json');previous=event
+        except BaseException as error:errors.append(error)
+    thread=threading.Thread(target=backend_events) if options.get('follow_handoff') else None
+    if thread is not None:thread.start()
+    try:
+        return subprocess.run([sys.executable,'-m','scidiscovery.research_loop.cli','run','--root',str(root)],capture_output=True,text=True,timeout=35)
+    finally:
+        stop.set()
+        if thread is not None:thread.join(timeout=3)
+        assert not errors,errors
+        assert thread is None or not thread.is_alive()
 
 
 def standard_instance(tmp_path,monkeypatch,*,wake='default'):
@@ -145,8 +181,10 @@ def standard_instance(tmp_path,monkeypatch,*,wake='default'):
     root=tmp_path/'instance';nodes=tmp_path/'nodes.json'
     c.write(nodes,{role:dict(max_observed_tokens=200,max_seconds=20) for role in 'HWAE'})
     launcher=['codex'] if wake=='default' else [str(executable)]
+    options=dict(collect=True,terminal_status='known_success',probe_new_call=True)
+    selection=tmp_path/'execution.json';c.write(selection,dict(executor='composed_execution:fixture',configuration=options))
     arguments=['prepare','--root',str(root),'--objective',str(objective),'--public-root',str(public),
-        '--native-launcher-json',json.dumps(launcher),'--experiment-mode','external','--max-tokens','1000',
+        '--native-launcher-json',json.dumps(launcher),'--execution-config',str(selection),'--max-tokens','1000',
         '--max-seconds','120','--max-steps','7','--model','no-model','--reasoning-effort','high',
         '--node-budget-policy',str(nodes)]
     if wake!='default':
@@ -158,7 +196,7 @@ def standard_instance(tmp_path,monkeypatch,*,wake='default'):
     prepared=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.cli',*arguments],
         capture_output=True,text=True,timeout=15)
     assert prepared.returncode==0,(prepared.stdout,prepared.stderr)
-    c.write(root/'fixture-options.json',dict(collect=True,terminal_status='known_success',probe_new_call=True))
+    c.write(root/'fixture-options.json',options)
     finish(root,1,'H',[],action='experiment',search_choice=dict(scope='Two mechanisms',commitments=[
         dict(label=label,minimal_test='Read original backend fact',existing_ref=None) for label in ('P','Q')],
         focus=dict(label=None,action='screen')))
@@ -179,7 +217,7 @@ def test_default_cli_wakes_original_output_only_w_and_cannot_start_another_manag
     assert str(home) not in json.dumps(capability)
     assert len(execution.records(root,2))==1 and len(e.Records(config).calls())==1
     e.load(config).complete(call)
-    original_command=[sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(work/'work/config.json')]
+    original_command=[sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(work/'work/experiment-config.json')]
     terminal_query=subprocess.run([*original_command,'query','--call-id',call],capture_output=True,text=True,timeout=10)
     assert terminal_query.returncode==0,(terminal_query.stdout,terminal_query.stderr)
     assert json.loads(terminal_query.stdout)['handoff']['action']=='reconcile_or_stop'
@@ -469,13 +507,14 @@ def test_bridge_cached_pending_response_requests_reconciliation_without_rewritin
     from types import SimpleNamespace
     from scidiscovery.research_loop import worker_execution_bridge as bridge
     root=instance(tmp_path,dict(collect=False));config,call=stop_at_waiting(root)
-    work=c.workspace(root,2);config_path=work/'work/config.json'
+    work=c.workspace(root,2);config_path=work/'work/experiment-config.json'
     directory=work/bridge.SUBMISSION_DIRECTORY;directory.mkdir(exist_ok=True)
     private=Path(config['record_dir']).parent
-    claims=private/'worker-submissions';claims.mkdir(exist_ok=True)
+    claims=private/'test-worker-submissions';claims.mkdir(exist_ok=True)
     server=SimpleNamespace(work=work,directory=directory,config_path=config_path,configuration=config,
         client=c.read(config_path),claims=claims,diagnostic=private/'test-bridge-error.json',
-        stop=threading.Event(),environment={},launch=lambda *args:pytest.fail('Query must not launch a process'))
+        record=execution.origin(root,2),stop=threading.Event(),environment={},
+        launch=lambda *args:pytest.fail('Query must not launch a process'))
     request=dict(submission_ref='S001',arguments=['query','--call-id',call])
     raw=bridge._encoded(request);bridge._handle(server,raw)
     first=c.read(directory/'response.json')

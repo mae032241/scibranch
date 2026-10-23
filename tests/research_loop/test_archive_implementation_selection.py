@@ -175,3 +175,22 @@ def test_registered_candidate_and_material_refs_resolve_the_same_exact_call_not_
     copied=next_work/originals[0]['path'];copied.chmod(0o600);copied.write_bytes(original+b' ')
     with pytest.raises(ValueError,match='Bound scientific history page changed'):
         c._validate_inputs(root,next_work,successor)
+
+
+def test_legacy_v2_archive_inspection_uses_only_frozen_bytes_without_current_plugins(tmp_path, monkeypatch):
+    import importlib
+    from scidiscovery.research_loop import instance_archive as archive
+    from test_instance_archive import scene
+    root, _ = scene(tmp_path); package = tmp_path / 'archive'
+    archive.archive_export(root, package)
+    metadata = c.read(package / 'archive.json')
+    metadata['format'] = archive.SHARED_FORMAT; metadata.pop('blob_ownership')
+    archive.files.durable_json(package / 'archive.json', metadata)
+    before = {path.relative_to(package): path.read_bytes() for path in package.rglob('*') if path.is_file()}
+    def forbidden(*args, **options):
+        pytest.fail('Read-only legacy package inspection consulted the current implementation')
+    monkeypatch.setattr(c, 'settings', forbidden)
+    monkeypatch.setattr(importlib, 'import_module', forbidden)
+    inspected = archive.archive_inspect(package)
+    assert inspected['blob_ownership'] == 'shared' and inspected['restorable'] is False
+    assert {path.relative_to(package): path.read_bytes() for path in package.rglob('*') if path.is_file()} == before

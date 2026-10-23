@@ -205,6 +205,28 @@ requires the same filesystem and fails explicitly without a copy fallback.
 Source ownership is supplied by its lifecycle, not inferred from mode or link
 count. Mode 0400 alone is not hostile same-user write isolation.
 
+Protocol 25 protects shared inputs at the final native launch boundary with Linux
+read-only mounts, including custom protocol argv. An exactly registered module
+launcher retains host preparation and submission service ownership, then applies
+the same protection at its final scientific namespace. Its provider/module identity
+is frozen even without selected Skills; ordinary wrappers cannot claim this path.
+Workspace and work mountpoints
+are established before input, Skill and retained-result overlays; ordinary scratch
+and output writes remain available. Cov and managed execution apply these overlays
+after their path mappings, retaining only the exact accepted output exception.
+Host publication verifies the pinned retained-directory identities; replacing a
+directory does not redirect publication. Unsupported mount capability fails before
+launch, without a writable or copied-tree fallback. Existing native network, web,
+subagent and sandbox declarations remain unchanged. Metadata alias checks cover
+the exact workspace and known framework aliases, not arbitrary host paths. External
+same-user processes, pre-existing descriptors and external aliases remain a soft
+boundary; these mounts do not make the host itself read-only.
+A new standalone local subprocess without the original host launch owner is
+unsupported; existing query/collect/reconcile operations retain their original
+record path. Legacy public compilation cannot publish new shared aliases into
+writable artifacts after a view is bound; the current private Worker compilation
+path remains supported.
+
 `storage_policy` is frozen with the instance and exact job/call configuration.
 It defaults to `enabled=false`, with every limit null. Enabling it requires at least
 one explicit positive `max_scan_entries`, `max_files`, `max_file_bytes`,
@@ -312,7 +334,7 @@ Deterministic curve and figure algorithms are self-contained Skill scripts;
   scientific explanation; its rows, `keep`, rationale and evidence-step formatting
   do not grant or gate delivery. Actual audit and delivery actions still require
   an exact available candidate, qualification and execution permission. Null
-  does not authorize delivery. Protocol 24 rejects earlier frozen protocols without
+  does not authorize delivery. Protocol 25 rejects earlier frozen protocols without
   migrating their original bytes.
 - One advancing writer per instance; read views neither call models nor own scientific/budget state.
 - Exact immutable originals, configuration and calls; revisions inherit no prior qualification or approval.
@@ -404,7 +426,7 @@ exact identity checks and independent execution authorization still apply.
 Shared budget checks for new nodes remain unchanged. Author
 closeout token permits are also soft targets; their finite time limits remain
 enforced. Actual usage remains accounted without creating a new shared allowance.
-Protocol 24 accepts only soft node settings. Older protocols remain read-only;
+Protocol 25 accepts only soft node settings. Older protocols remain read-only;
 frozen hard settings are never silently changed to soft. A denied start
 advances the existing control journal to durable `FINAL` (`closeout_begin` mode
 `final`); it never reclassifies an ordinary A as final from the remaining balance.
@@ -650,6 +672,16 @@ Managed local experiments, candidate delivery, UI, declared provenance, executio
 original-call maintenance and same-host original-path cold checkpoints are implemented.
 `/results?after=N` lists sealed nodes; `/results/<step>` shows an exact result.
 Observed candidate facts and authored choices are frozen at that node's input boundary.
+Archive and checkpoint exports share frozen blobs by default and require the same
+filesystem. Such a package is not an independent backup. Explicit `--independent`
+export writes each unique blob once into a separate inode. Independent packages
+also restore independently; `--independent` can request this for a shared package.
+Restored immutable aliases share the first restored target, while mutable files
+remain separate. Existing targets that still share a package inode conflict under
+either effective independent mode. Checkpoint export and restore freeze the mode
+in the original transaction; retries cannot switch it. New packages use archive
+format 3 and checkpoint format 2; older packages remain inspect-only. Derived
+workspace mount identities are excluded and rebuilt before a new native launch.
 Ordinary read-only archives grant no advancing restore permission. Cross-host recovery,
 lost anchors and arbitrary native external reads remain outside support.
 Source/HTTP/synthetic-process checks do not qualify real browsers, native Codex continuation,

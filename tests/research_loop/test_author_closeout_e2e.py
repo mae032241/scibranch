@@ -11,7 +11,7 @@ from execution_fixtures import execution_registry
 from scidiscovery.research_loop import budget, candidate_audit, contracts as c, controller, execution, native
 from cov_execution import lineage as cov_lineage
 from scidiscovery.research_loop.experiment_client import record_directory,resolve
-from test_cov_delivery_lineage import managed_scene
+from test_cov_delivery_lineage import current_managed_scene
 
 
 FAKE=r'''import json,os,pathlib,subprocess,sys
@@ -74,15 +74,21 @@ def assert_original_delivery(root):
 def source_python(tmp_path,repo):
     """Explicit source imports under real -I; no product install or test path."""
     bridge=tmp_path/'source-runtime';bridge.mkdir()
-    metadata=bridge/'scidiscovery-0.dist-info';metadata.mkdir()
-    (metadata/'METADATA').write_text('Metadata-Version: 2.1\nName: scidiscovery\nVersion: 0\n')
-    (metadata/'entry_points.txt').write_text('[scidiscovery.execution_interfaces]\n'
-        'local_execution = scidiscovery.research_loop.local_experiments:REGISTRATION\n'
-        'cov_execution = cov_execution.experiments:REGISTRATION\n')
+    metadata=bridge/'scidiscovery_namespace_fixture-0.dist-info';metadata.mkdir()
+    (metadata/'METADATA').write_text('Metadata-Version: 2.1\nName: scidiscovery-namespace-fixture\nVersion: 0\n')
     source=repo/'src';bootstrap=bridge/'bootstrap.py'
-    bootstrap.write_text('import runpy, sys\nfrom pathlib import Path\n'
+    bootstrap.write_text('import importlib.metadata, runpy, sys\nfrom pathlib import Path\n'
         'assert sys.flags.isolated and sys.dont_write_bytecode\n'
         f'sys.path[:0] = {[str(source),str(repo/'plugins/cov_execution'),str(bridge)]!r}\n'
+        f'discovery_paths = [path for path in sys.path if path != {str(bridge)!r}]\n'
+        'declared = {entry.name for distribution in importlib.metadata.distributions(path=discovery_paths)\n'
+        '    for entry in distribution.entry_points if entry.group == "scidiscovery.execution_interfaces"}\n'
+        'entries = {"local_execution": "scidiscovery.research_loop.local_experiments:REGISTRATION",\n'
+        '    "cov_execution": "cov_execution.experiments:REGISTRATION"}\n'
+        'content = "[scidiscovery.execution_interfaces]\\n" + "".join(\n'
+        '    name + " = " + target + "\\n" for name, target in entries.items() if name not in declared)\n'
+        f'entry_file = Path({str(metadata/'entry_points.txt')!r})\n'
+        'if not entry_file.exists() or entry_file.read_text() != content: entry_file.write_text(content)\n'
         'from scidiscovery.research_loop import contracts as c\n'
         f'assert Path(c.__file__).resolve() == Path({str(source/"scidiscovery/research_loop/contracts.py")!r})\n'
         'args = sys.argv[1:]\n'
@@ -104,12 +110,16 @@ def source_python(tmp_path,repo):
 
 
 def scene(tmp_path,monkeypatch,mode):
+    from test_default_native_local_execution import actual_native
     repo=Path(__file__).resolve().parents[2];config=tmp_path/'launcher.json'
     python,scid_python,runtime_paths=source_python(tmp_path,repo)
-    launcher=[scid_python,'-B','-I','-c',
-        f'import runpy;runpy.run_path({str(repo/"scripts/acceptance/rootless_cov_launcher.py")!r},run_name="__main__")',
-        '--config',str(config),'--']
-    fake=tmp_path/'fake-codex';fake.write_text('#!'+sys.executable+'\nMODE='+repr(mode)+'\n'+FAKE);fake.chmod(0o555)
+    launcher=[scid_python,'-B','-I','-m','cov_execution.launcher','--config',str(config),'--']
+    actual=actual_native()
+    fake=tmp_path/'fake-codex';fake.write_text('#!'+sys.executable+'\nimport os,sys\n'
+        f'if os.path.basename(sys.argv[0])=="codex-linux-sandbox": os.execv({str(actual)!r},[sys.argv[0],*sys.argv[1:]])\n'
+        f'if len(sys.argv)>1 and sys.argv[1]=="sandbox": os.execv({str(actual)!r},[{str(actual)!r},*sys.argv[1:]])\n'
+        'assert len(sys.argv)>1 and sys.argv[1]=="exec", repr(sys.argv)\n'
+        +'MODE='+repr(mode)+'\n'+FAKE);fake.chmod(0o555)
     original_prepare=controller.prepare
     def prepare(*args,**kwargs):
         kwargs.update(max_steps=5,node_budget_mode='soft')
@@ -119,10 +129,12 @@ def scene(tmp_path,monkeypatch,mode):
     old_finish=managed.finish
     def unfinished(root,step,role,parents,*args,**kwargs):
         if step!=2:return old_finish(root,step,role,parents,*args,**kwargs)
-        # managed_scene needs a descriptor slot; no scientific W output is made.
+        # Retain an unsealed W slot; no scientific W output is made.
         c.write(execution.origin(root,2)/'result-identity.json',dict(fixture='unsealed W slot'))
     monkeypatch.setattr(managed,'finish',unfinished)
-    root,*_=managed_scene(tmp_path,launcher=launcher,audit=True)
+    root,*_=current_managed_scene(tmp_path,monkeypatch,native_launcher=launcher,native_program=fake,audit=True)
+    c.write(root/'host-started.json',budget.clock_stamp())
+    budget.transition(root,'advance','Bounded delivery preparation')
     origin=execution.origin(root,2);(origin/'result-identity.json').unlink()
     meter=dict(input_tokens=17,cached_input_tokens=2,output_tokens=3)
     observation=dict(coverage='unknown',reason='terminal_usage_unreported',thread_id='old-fixture-thread',tokens=meter)
@@ -145,11 +157,11 @@ def scene(tmp_path,monkeypatch,mode):
     manifest=tmp_path/'public-manifest.json'
     c.write(manifest,dict(task_revision='d78f5eb52ad754c5ee9154741af73130a85a65b8',
         public_files_sha256={p.relative_to(public).as_posix():c.digest(p) for p in public.rglob('*') if p.is_file()}))
-    codehost=Path('/usr/bin/true').resolve()
+    codehost=actual.parent/'codex-code-mode-host'
     c.write(config,dict(scene_root=str(root),public_root=str(public),public_manifest=str(manifest),
         runs_dir=str(root/'runs'),submission_dir=str(root/'submission'),native=str(fake),
         code_mode_host=dict(path=str(codehost)),task_python=python,scid_python=scid_python,
-        runtime_paths=runtime_paths,model='fixture',reasoning_effort='high',profile='closeout-no-model',cov_receipt_channel='backend_file'))
+        runtime_paths=[*runtime_paths,str(actual)],model='fixture',reasoning_effort='high',profile='closeout-no-model',cov_receipt_channel='public_runner_main'))
     projection=origin/'experiment-config.json';original=projection.read_bytes();frozen=c.read(projection)
     configured=c.workspace(root,2)/'work/lineage-config.json'
     cov_lineage.configure(root,2,frozen['run_argv'],Path(frozen['runs_root']),configured,

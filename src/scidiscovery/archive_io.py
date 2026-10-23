@@ -174,3 +174,27 @@ def copy_verified(source, destination, entry, *, context=None):
             temporary.unlink(missing_ok=True)
         finally:
             os.chmod(destination.parent, parent_mode)
+
+
+def copy_independent_verified(source, destination, entry, *, context=None):
+    """Publish one bounded independent inode, retaining exact existing originals."""
+    from .research_loop import atomic_files
+    source, destination = check_path(source), check_path(destination)
+    original = hash_file(source, context=context)
+    if original['mode'] != 0o400 or any(original[key] != entry[key] for key in ('sha256', 'size_bytes')):
+        raise ArchiveError('Independent copy source differs from its frozen binding')
+    try:
+        atomic_files.copy_original(source, destination, sha256=entry['sha256'],
+            size_bytes=entry['size_bytes'], mode=entry['mode'], context=context)
+    except ValueError as error:
+        raise ArchiveError('Independent copy identity changed') from error
+    except OSError as error:
+        if error.errno in {errno.EXDEV, errno.EOPNOTSUPP, errno.ENOSYS, errno.EPERM, errno.EMLINK}:
+            raise SharingUnsupported('Independent copy publication requires supported destination hardlinks') from error
+        raise
+    actual = hash_file(destination, context=context)
+    if (any(actual[key] != entry[key] for key in ('sha256', 'size_bytes', 'mode'))
+            or actual['source_stat'][:2] == original['source_stat'][:2]):
+        # A competing no-replacement destination remains its owner's original.
+        # The archive/checkpoint caller owns cleanup only of its exact stage.
+        raise ArchiveError('Independent copy destination is not an independent exact original')

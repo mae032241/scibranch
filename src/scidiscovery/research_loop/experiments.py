@@ -75,6 +75,9 @@ def _configuration_effect(function):
         config = first.config if isinstance(first, Records) else first
         from . import contracts as c, storage_policy as storage, experiment_client, shared_originals
         root = experiment_client.root_for_configuration(config, allow_standalone=True)
+        if root is not None:
+            from . import shared_input_views
+            shared_input_views.dynamic_root(root,c.workspace(root,config['scope']['step']),'retained-experiments')
         with instance_owner.lease_for_configuration(config), c.record_writer(Path(config['record_dir'])), storage.bind(root,config.get('storage_policy')), c.verified_digests(), shared_originals.verified():
             return function(*args, **kwargs)
     return guarded
@@ -85,6 +88,9 @@ def record_effect(function):
     def guarded(self,*args,**kwargs):
         from . import contracts as c, storage_policy as storage, experiment_client, shared_originals
         root = experiment_client.root_for_configuration(self.config, allow_standalone=True)
+        if root is not None:
+            from . import shared_input_views
+            shared_input_views.dynamic_root(root,c.workspace(root,self.config['scope']['step']),'retained-experiments')
         with instance_owner.lease_for_configuration(self.config), c.record_writer(self.records.root), storage.bind(root,self.config.get('storage_policy')), c.verified_digests(), shared_originals.verified():
             return function(self,*args,**kwargs)
     return guarded
@@ -438,6 +444,9 @@ def _candidate_view(config, value):
 def _scientific_projection_directory(config):
     from . import contracts as c,experiment_client
     root=experiment_client.root_for_configuration(config,allow_standalone=True)
+    if root is not None:
+        from . import shared_input_views
+        shared_input_views.dynamic_root(root,c.workspace(root,config['scope']['step']),'retained-experiments')
     record_directory=Path(config['record_dir'])
     if root is None:
         parts=record_directory.parts
@@ -572,13 +581,15 @@ def _collected_view(config, call_id, observation, adapter, *, operation_context=
     from . import contracts as c,experiment_client
     root=experiment_client.root_for_configuration(config)
     work=c.workspace(root,config['scope']['step'])
+    from . import shared_input_views
+    shared_input_views.dynamic_root(root,work,'retained-experiments')
     result = []
     from . import storage_policy as storage
     context=operation_context or storage.Deadline(config['max_seconds'])
     inventory=storage.Inventory(config.get('storage_policy'),context=context)
     for descriptor in scientific_outputs(config,observation,adapter=adapter,include_logs=True,operation_context=context):
         inventory.entry();inventory.file(descriptor.size_bytes)
-        target = work / 'work/retained-experiments' / call_id / 'outputs' / descriptor.name
+        target = shared_input_views.dynamic_root(root,work,'retained-experiments') / call_id / 'outputs' / descriptor.name
         c._bind_original(Path(descriptor.local_path), target, descriptor.sha256, context=context, policy=config.get('storage_policy'), root=root, size_bytes=descriptor.size_bytes, source_kind='mutable')
         result.append(dict(name=descriptor.name, path=str(target), media_type=descriptor.media_type,
             size_bytes=descriptor.size_bytes, retention='retained_original'))

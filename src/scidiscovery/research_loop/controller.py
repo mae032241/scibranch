@@ -92,7 +92,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
         raise ValueError("Output item capacity exceeds total capacity")
     from . import backends as agent_backends
     backend_settings = agent_backends.configuration(native_backend, launcher,
-        {} if native_options is None else native_options)
+        {} if native_options is None else native_options, existing=_existing_settings)
     launcher = backend_settings['native_launcher_argv']
     if not isinstance(model, str) or not model.strip():
         raise ValueError('An explicit model is required')

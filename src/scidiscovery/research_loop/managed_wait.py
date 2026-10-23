@@ -239,6 +239,8 @@ def wait_and_wake(root,step):
 def wake_packet(root,job,intent):
     """Present verified scientific results to the original W, with bounded navigation."""
     rows=[];work=c.workspace(root,job['step'])
+    from . import shared_input_views
+    shared_input_views.dynamic_root(root,work,'execution-results')
     from . import storage_policy as storage
     frozen=c.settings(root,job)
     context=storage.Deadline(frozen['max_seconds'])
@@ -246,6 +248,7 @@ def wake_packet(root,job,intent):
     for number,proof in enumerate(intent['execution_wake']['observations'],1):
         observed=c.read(Path(proof['path']));directory=Path(proof['path']).parent
         completed=c.read(Path(observed['completed']['path']))
+        shared_input_views.dynamic_root(root,work,'execution-results')
         prefix=f'work/execution-results/{number:03d}'
         if type(job.get('worker_view_version')) is int and job['worker_view_version'] == 1:
             if e.proof(proof['path']) != proof:

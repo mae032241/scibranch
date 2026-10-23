@@ -67,7 +67,7 @@ def managed_scene(tmp_path, *, alias_correct=True, rewrite_script=True, launcher
     return root, nodes, first, second, script, source_p, model_p
 
 
-def current_managed_scene(tmp_path,monkeypatch):
+def current_managed_scene(tmp_path,monkeypatch,*,native_launcher=None,native_program=None,audit=False):
     """Real current public-runner calls through the shipped native launch callback."""
     import importlib.util
     from cov_execution import receipt as cov_receipt
@@ -90,8 +90,9 @@ def current_managed_scene(tmp_path,monkeypatch):
     # The production scientific callback keeps this declared host-path alias
     # inside its namespace; the resolver must use that exact frozen prefix.
     adapter['config']['namespace_runs']=str(root/'runs')
-    controller.prepare(root,public/'instruction.md',public,['fake-no-model'],max_tokens=100000,max_seconds=300,max_steps=12,
+    controller.prepare(root,public/'instruction.md',public,native_launcher or ['fake-no-model'],max_tokens=100000,max_seconds=300,max_steps=12,
         model='fixture',reasoning_effort='high',search_policy=None,
+        candidate_audit_policy={'version':1} if audit else None,
         node_budget_policy={role:dict(max_observed_tokens=2000,max_seconds=60) for role in 'HWAE'},
         delivery_policy=delivery_policy(adapter),
         history_observer=dict(contract_version=2,adapter=str(Path(cov_lineage.__file__).absolute()),
@@ -107,8 +108,9 @@ def current_managed_scene(tmp_path,monkeypatch):
     from cov_execution import launcher
     receipt_path=str(Path(cov_receipt.__file__).resolve())
     settings=dict(scene_root=str(root),public_root=str(public),runs_dir=str(root/'runs'),submission_dir=str(root/'submission'),
-        native=str(actual),code_mode_host=dict(path=str(actual.parent/'codex-code-mode-host')),
-        task_python=sys.executable,scid_python=sys.executable,runtime_paths=list(dict.fromkeys([sys.prefix,sys.base_prefix,receipt_path])),
+        native=str(native_program or actual),code_mode_host=dict(path=str(actual.parent/'codex-code-mode-host')),
+        task_python=sys.executable,scid_python=sys.executable,
+        runtime_paths=list(dict.fromkeys([sys.prefix,sys.base_prefix,receipt_path,*([str(actual)] if native_program else [])])),
         profile='delivery-transport-no-model',model='fixture',reasoning_effort='high',_worker_science_view=True,
         cov_engineering_check_reserve_seconds=0)
     monkeypatch.setenv('THIN_HWA_JOB_MANIFEST',str(root/'jobs/002.json'));monkeypatch.setenv('THIN_HWA_ROLE','W')

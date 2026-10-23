@@ -1,6 +1,6 @@
 """Isolated cov launcher: host binds lineage; native receives public work only."""
 from pathlib import Path
-import argparse, hashlib, json, os, shlex, shutil, sys
+import argparse, hashlib, json, os, shlex, sys
 from scidiscovery.research_loop.worker_execution_bridge import SUBMISSION_DIRECTORY
 
 def engineering_reserve(s):
@@ -289,16 +289,24 @@ def prepare_home(s,w,h, auth_source=None):
         (h/'launcher-config-sha256.txt').write_text(hashlib.sha256(content.encode()).hexdigest()+'\n')
 
 def outer(s,w,h,command,materials=()):
+    from scidiscovery.research_loop import contracts, shared_input_views, worker_execution_bridge
+    root=Path(s['scene_root']).absolute()
+    operation_context=worker_execution_bridge.operation_context() if s.get('_backend') else None
+    bwrap=shared_input_views.ensure_capability(context=operation_context)
     metadata=owner_metadata(s,w)
+    job=contracts.read(contracts.regular(root/'jobs'/(w.name+'.json')))
+    readonly_mounts=list(materials)
     output_bind='--ro-bind' if s.get('_read_only_closeout') else '--bind'
-    c=[shutil.which('bwrap') or 'bwrap','--unshare-user','--unshare-pid','--unshare-ipc','--unshare-uts',
+    c=[str(bwrap),'--unshare-user','--unshare-pid','--unshare-ipc','--unshare-uts',
        '--die-with-parent','--new-session','--clearenv','--proc','/proc','--dev','/dev','--tmpfs','/tmp']
     for p in dict.fromkeys(['/usr','/bin','/lib','/lib64',*s['runtime_paths'],s['native'],s['code_mode_host']['path']]):
         if Path(p).exists():c.extend(['--ro-bind',p,p])
     for p in ['/etc/resolv.conf','/etc/hosts','/etc/ssl/certs']:
         if Path(p).exists():c.extend(['--ro-bind',p,p])
     c.extend(['--ro-bind',str(Path(s['scene_root'])/'host-runtime/native-bin'),str(Path(s['scene_root'])/'host-runtime/native-bin'),'--ro-bind',s['public_root'],s['public_root'],'--ro-bind',s['public_root']+'/instruction.md','/instruction.md',
-        '--dir','/opt/exp','--dir','/opt/exp/runs',output_bind,str(w),str(w),
+        '--dir','/opt/exp','--dir','/opt/exp/runs'])
+    c.extend(shared_input_views.workspace_arguments(root,w,readonly=bool(s.get('_read_only_closeout'))))
+    c.extend([
         output_bind,s['runs_dir'],'/opt/exp/runs',output_bind,s['submission_dir'],'/submission',
         output_bind,s['runs_dir'],s['runs_dir'],output_bind,s['submission_dir'],s['submission_dir'],
         '--tmpfs','/task-tmp','--chdir',str(w)])
@@ -313,6 +321,8 @@ def outer(s,w,h,command,materials=()):
     if s.get('_worker_science_view'):
         if s.get('_public_result') and not s.get('_backend'):
             c.extend(['--bind',s['_public_result'],'/task-result'])
+            readonly_mounts.append((Path(s['_public_result'])/'science-result.schema.json',
+                Path('/task-result/science-result.schema.json')))
     else:
         c.extend([output_bind,str(Path(s['scene_root'])/'native-evidence'/w.name),str(Path(s['scene_root'])/'native-evidence'/w.name)])
     if s.get('_legacy_science_overlay') and not s.get('_backend'):
@@ -327,8 +337,10 @@ def outer(s,w,h,command,materials=()):
         c.extend(['--ro-bind',str(context/'science-task.json'),str(w/'science-task.json'),
             '--tmpfs',str(w/'inputs')])
         if (context/'inputs').is_dir():c.extend(['--ro-bind',str(context/'inputs'),str(w/'inputs')])
+        if (context/'inputs').is_dir():readonly_mounts.append((context/'inputs',w/'inputs'))
         if (context/'work/retained-implementations').is_dir():
             c.extend(['--ro-bind',str(context/'work/retained-implementations'),str(w/'work/retained-implementations')])
+            readonly_mounts.append((context/'work/retained-implementations',w/'work/retained-implementations'))
     if s.get('_read_only_closeout'):
         c.extend(['--bind',str(w/'artifacts'),str(w/'artifacts')])
         if not s.get('_worker_science_view'):
@@ -342,9 +354,9 @@ def outer(s,w,h,command,materials=()):
     for name in ['exp_cli.py','runner.py','train.csv','val.csv','meta.json']:
         c.extend(['--ro-bind',str(Path(s['scene_root'])/'host-runtime/native-bin'),str(Path(s['scene_root'])/'host-runtime/native-bin'),'--ro-bind',s['public_root']+'/environment/harness/'+name,'/opt/exp/'+name])
     for source,target in materials:c.extend(['--ro-bind',source,target])
-    for source,target in native_skill_mounts(s,w):c.extend(['--ro-bind',str(source),str(target)])
     if not s.get('_backend'):
-        for source,target in s.get('_author_artifact_masks',()):c.extend(['--ro-bind',source,target])
+        for source,target in s.get('_author_artifact_masks',()):
+            c.extend(['--ro-bind',source,target]);readonly_mounts.append((source,target))
     if not s.get('_worker_science_view'):
         for path in metadata:c.extend(['--ro-bind',str(path),str(path)])
     if not s.get('_worker_science_view'):
@@ -352,7 +364,16 @@ def outer(s,w,h,command,materials=()):
     manifest=Path(s['scene_root'])/'jobs'/(w.name+'.json')
     control=Path(s['scene_root'])/'host-runtime/experiment-control'/hashlib.sha256(regular(manifest)).hexdigest()
     if control.exists() and not s.get('_worker_science_view'):c.extend(['--ro-bind',str(control),str(control)])
-    for source,target,mode in s.get('_backend_materials',()):c.extend([mode,source,target])
+    for source,target,mode in s.get('_backend_materials',()):
+        c.extend([mode,source,target])
+        if mode=='--ro-bind':readonly_mounts.append((source,target))
+    # Every wider writable mapping is installed first. This is the final
+    # logical scientific view; canonical stores and manifests remain private.
+    c.extend(shared_input_views.mount_arguments(root,job,w,mounts=readonly_mounts,
+        include_skills=not s.get('_backend'),context=operation_context))
+    if s.get('_accepted_artifacts'):
+        source,target=s['_accepted_artifacts']
+        c.extend(['--bind',source,target])
     for k,v in {**environment(s,w),'CODEX_HOME':str(h),'LANG':'C.UTF-8'}.items():c.extend(['--setenv',k,v])
     return c+command
 
@@ -406,6 +427,7 @@ def backend_launcher(s,w,h,materials):
                     raise e.UnsupportedExecution('Scientific experiment is outside its task namespace')
                 bindings.extend([(str(directory/'inputs'),str(target),'--ro-bind'),
                     (str(directory/'inputs/artifacts'),str(target/'artifacts'),'--bind')])
+                settings['_accepted_artifacts']=(str(directory/'inputs/artifacts'),str(target/'artifacts'))
                 command[accepted['script_index']]=str(target/accepted['entry']);cwd=str(target)
             else:
                 bindings.append((str(directory/'source.py'),str(source),'--ro-bind'))

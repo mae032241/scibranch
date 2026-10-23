@@ -884,6 +884,11 @@ class NativeInputHost:
         policy=c.settings(self.root,self.job).get('storage_policy')
         work = c.workspace(self.root, self.job['step']); source = Path(source).absolute(); output = Path(output).absolute()
         private_output = type(self.job.get('worker_view_version')) is int and self.job['worker_view_version'] == 1
+        if not private_output:
+            from . import shared_input_views
+            if shared_input_views._binding(self.root,work).exists():
+                from .experiments import UnsupportedExecution
+                raise UnsupportedExecution('Legacy public compile cannot publish shared originals into writable artifacts after readonly view binding')
         if private_output:
             output_allowed = _private_compile_output(self.root, self.job, self.config, output)
         else:

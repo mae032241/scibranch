@@ -202,6 +202,11 @@ def _anchor(binding):
     if any(value.get(key) != binding.get(key) for key in
             ('version', 'instance_id', 'settings_sha256', 'root', 'host', 'anchor_id')):
         raise files.ArchiveError('External owner anchor differs from its binding')
+    if ('transaction' in value and value.get('export_blob_ownership') not in ('shared', 'independent')
+            or value.get('state') == 'restore_pending' and value.get('restore_blob_ownership') not in ('shared', 'independent')
+            or 'restore_blob_ownership' in value and (value['restore_blob_ownership'] not in ('shared', 'independent')
+                or value.get('export_blob_ownership') == 'independent' and value['restore_blob_ownership'] != 'independent')):
+        raise files.ArchiveError('External owner anchor lost its frozen blob ownership')
     return directory, value
 
 
@@ -447,8 +452,11 @@ def _exclusive_owner(root, binding):
 def read_transition(root, checkpoint_ref, transfer_ref):
     from . import qualification as q
     checkpoint, transfer = q._read(root, checkpoint_ref), q._read(root, transfer_ref)
-    if (checkpoint.get('version') != 1 or checkpoint.get('kind') != 'cold_checkpoint'
+    if (checkpoint.get('version') != 2 or checkpoint.get('kind') != 'cold_checkpoint'
+            or checkpoint.get('blob_ownership') not in ('shared', 'independent')
             or transfer.get('version') != 1 or transfer.get('kind') != 'owner_restore'
+            or transfer.get('restore_blob_ownership') not in ('shared', 'independent')
+            or checkpoint.get('blob_ownership') == 'independent' and transfer.get('restore_blob_ownership') != 'independent'
             or transfer.get('checkpoint_ref') != checkpoint_ref
             or any(transfer.get(key) != checkpoint.get(key) for key in
                 ('transaction', 'instance_id', 'original_root', 'anchor_id', 'host'))
@@ -473,6 +481,8 @@ def verify_transition(root, checkpoint_ref, transfer_ref):
             or anchor.get('generation') != transfer['to_generation']
             or anchor.get('transaction') != checkpoint['transaction']
             or anchor.get('checkpoint_sha256') != checkpoint_ref['sha256']
+            or anchor.get('export_blob_ownership') != checkpoint['blob_ownership']
+            or anchor.get('restore_blob_ownership') != transfer['restore_blob_ownership']
             or anchor.get('root_identity') != _identity(root)
             or transfer.get('root_identity') != _identity(root)):
         raise files.ArchiveError('Cold restore has no current exclusive owner transition')

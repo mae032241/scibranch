@@ -7,6 +7,7 @@ can continue the exact original native thread.
 from __future__ import annotations
 
 import json
+import errno
 from contextlib import ExitStack
 import os
 from pathlib import Path
@@ -137,6 +138,24 @@ def wait_native(root: Path, step: int):
         time.sleep(.1)
 
 
+def _shared_view_context(root, job, intent, limits, *, final_return=None, author_permit=None):
+    """Finite mechanical preparation, bounded only by existing hard clocks.
+
+    Shared balance and ordinary node targets are soft for accepted work; they
+    must not become a fresh readonly preparation deadline.
+    """
+    from . import shared_input_views, storage_policy
+    seconds=shared_input_views.ALIAS_SECONDS+10
+    if final_return is not None:
+        policy=control_budget.node_limits(root,job)
+        seconds=min(seconds,policy['max_seconds']-control_budget._node_duration(root,job,intent,limits))
+    if author_permit is not None:
+        elapsed=control_budget._node_duration(root,job,intent,limits)-intent['budget_slice']['previous_seconds']
+        seconds=min(seconds,author_permit['max_seconds']-elapsed)
+    if seconds<=0:raise TimeoutError('Original native hard deadline reached before readonly preparation')
+    return storage_policy.Deadline(seconds)
+
+
 def run_native(root: Path, step: int, attempt=0):
     from .protocol import require_current
     require_current(root)
@@ -160,6 +179,7 @@ def run_native(root: Path, step: int, attempt=0):
     profile = profiles.validate_intent(settings, job, intent)
     from . import skill_supply
     skill_supply.project(root, settings, job)
+    namespace_launcher=skill_supply.namespace_launcher(settings)
     if job.get('experiment_mode') != settings.get('experiment_mode'):
         raise ValueError('Frozen experiment mode changed')
     experiment_config=None
@@ -543,6 +563,16 @@ def run_native(root: Path, step: int, attempt=0):
                 scientific_lifetime.enter_context(worker_execution_bridge.serve(
                     work/worker_execution_bridge.SUBMISSION_DIRECTORY,work/'work/experiment-config.json',work,
                     launch=launch))
+            from . import shared_input_views
+            limits=control_budget.snapshot(root,settings)
+            view_context=_shared_view_context(root,job,intent,limits,final_return=final_return,
+                author_permit=permit if intent.get('continuation_kind')=='author_closeout' else None)
+            if namespace_launcher is None:
+                args=shared_input_views.wrap(root,job,work,args,context=view_context)
+            else:
+                # Registered host preparation/bridge stays in its host view.
+                # Its frozen module owns the final scientific namespace seam.
+                shared_input_views.ensure_capability(context=view_context)
             process = subprocess.Popen(args, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=err, env=env, start_new_session=True)
             process_id = runtime.process_identity(process.pid, execution.identity(root, step, attempt))
@@ -638,7 +668,10 @@ def run_native(root: Path, step: int, attempt=0):
                         break
     except BaseException as exc:
         error = exc
-        stop = 'native_error_unknown'
+        from .experiments import UnsupportedExecution
+        if process is None and isinstance(exc,OSError) and exc.errno==errno.E2BIG:
+            error=UnsupportedExecution('Shared input readonly mount plan exceeds the operating system launch capability')
+        stop = 'shared_input_view_unsupported' if isinstance(error,UnsupportedExecution) and process is None else 'native_error_unknown'
     finally:
         try:
             scientific_lifetime.close()
@@ -699,13 +732,18 @@ def run_native(root: Path, step: int, attempt=0):
         if observed:
             write(record / 'usage.json', meter)
         write(record / 'usage-observation.json', observation)
-    outcome = dict(returncode=process.returncode if process else None,
+    outcome = dict(returncode=process.returncode if process else None, native_started=process is not None,
           stop_reason=stop, usage=usage(root), thread_id=thread_id, cleanup=cleanup,
           native_identity=backend.identity(live_meter, thread_id),
           native_backend=backend.name,
           native_permissions=backends.permission_summary(settings),
           metering=live_meter.snapshot() if process is None else observation,
           limitation='Observed token metadata only; running requests and reporting delay are unmeasured.')
+    outcome['shared_inputs']=dict(enforcement=('registered_final_namespace' if namespace_launcher is not None
+        else 'kernel_readonly_mounts') if process is not None else 'not_started',
+        limitation='Same-user host processes and pre-existing writable descriptors remain trusted.')
+    if error is not None and process is None:
+        outcome['limitation']=str(error)
     if final_return is not None:
         outcome['final_a_completion'] = control_budget.final_a_receipt(final_return, intent, meter if observed else None, outcome['usage'])
     if attempt and intent.get('context_mode') != 'new_context' and thread_id != intent['session']['thread_id']:

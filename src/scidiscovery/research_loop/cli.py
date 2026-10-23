@@ -186,9 +186,10 @@ def main(argv=None):
     serve.add_argument('--approval-secret-file', type=Path, help='Operator-owned regular 0600 browser host key; defaults to frozen ui.approval_secret_file')
     serve.add_argument('--translation-config', type=Path, help='Optional application translation TOML; independent of frozen scientific profiles')
     serve.add_argument('--port', type=int, help='Loopback port; defaults to frozen ui.port or an available port')
-    export = commands.add_parser('archive-export', help='Copy quiescent framework originals to a new inert read-only directory package; no writable restore')
+    export = commands.add_parser('archive-export', help='Retain quiescent originals in a new inert package; default requires same-filesystem hardlinks')
     export.add_argument('--root', type=Path, required=True)
     export.add_argument('--output', type=Path, required=True)
+    export.add_argument('--independent', action='store_true', help='Use independent blob copies; independent packages always restore independently')
     delete = commands.add_parser('instance-delete', help='Permanently delete one exact quiescent instance; retry only with the same operation ID')
     delete.add_argument('--root', type=Path, required=True)
     delete.add_argument('--instance-id', required=True, help='Exact frozen goal_id confirmation')
@@ -202,6 +203,7 @@ def main(argv=None):
     restore = commands.add_parser('archive-restore-material', help='Restore one missing ordinary sealed file to its original instance; never restore control/call state or continue research')
     restore.add_argument('--root', type=Path, required=True)
     restore.add_argument('--package', type=Path, required=True)
+    restore.add_argument('--independent', action='store_true', help='Use independent blob copies; independent packages always restore independently')
     restore.add_argument('--step', type=int, required=True)
     restore.add_argument('--index', type=int, required=True, help='Exact member index from the sealed scientific materials page')
     enroll = commands.add_parser('checkpoint-enroll', help='Explicitly bind a quiescent instance to an external same-host cold-transfer anchor')
@@ -210,9 +212,11 @@ def main(argv=None):
     cold = commands.add_parser('checkpoint-export', help='Freeze this enrolled generation and export its complete cold state; never delete the source root')
     cold.add_argument('--root', type=Path, required=True)
     cold.add_argument('--output', type=Path, required=True)
+    cold.add_argument('--independent', action='store_true', help='Use independent blob copies; independent packages always restore independently')
     resume_cold = commands.add_parser('checkpoint-restore', help='Restore a registered cold checkpoint only to its absent original same-host root; no automatic continuation')
     resume_cold.add_argument('--root', type=Path, required=True)
     resume_cold.add_argument('--package', type=Path, required=True)
+    resume_cold.add_argument('--independent', action='store_true', help='Use independent blob copies; independent packages always restore independently')
     arguments = list(argv) if argv is not None else sys.argv[1:]
     args = parser.parse_args(arguments)
     root_arg = getattr(args, 'root', None)
@@ -349,22 +353,22 @@ def main(argv=None):
                 settings_sha256=args.settings_sha256, operation_id=args.operation_id)
         elif args.command == 'archive-export':
             from .instance_archive import archive_export
-            result = archive_export(root, args.output)
+            result = archive_export(root, args.output, independent=args.independent)
         elif args.command == 'archive-inspect':
             from .instance_archive import archive_inspect
             result = archive_inspect(args.package, after=args.after, limit=args.limit, section=args.section)
         elif args.command == 'archive-restore-material':
             from .instance_archive import archive_restore_material
-            result = archive_restore_material(root, args.package, step=args.step, index=args.index)
+            result = archive_restore_material(root, args.package, step=args.step, index=args.index, independent=args.independent)
         elif args.command == 'checkpoint-enroll':
             from .instance_archive import checkpoint_enroll
             result = checkpoint_enroll(root,args.anchor_directory)
         elif args.command == 'checkpoint-export':
             from .instance_archive import checkpoint_export
-            result = checkpoint_export(root,args.output)
+            result = checkpoint_export(root,args.output,independent=args.independent)
         elif args.command == 'checkpoint-restore':
             from .instance_archive import checkpoint_restore
-            result = checkpoint_restore(root,args.package)
+            result = checkpoint_restore(root,args.package,independent=args.independent)
         elif args.command == 'execution-recover':
             result=controller.execution_recover(root,args.step)
         elif args.command == 'execution-resume':

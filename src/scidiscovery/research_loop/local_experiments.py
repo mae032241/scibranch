@@ -219,6 +219,7 @@ class LocalExecution:
         if 'entry' in accepted:
             cwd=str(directory/'inputs');(Path(cwd)/'artifacts').mkdir()
         deadline=self._execution_deadline(accepted)
+        if deadline is None:deadline=started+self.config['max_seconds']
         from . import experiment_client
         storage_root = experiment_client.root_for_configuration(self.config, allow_standalone=True) or self.records.root
         limits = storage.configuration(self.config.get('storage_policy'))
@@ -227,7 +228,8 @@ class LocalExecution:
         with (directory/'stdout.raw').open('xb') as out,(directory/'stderr.raw').open('xb') as err:
             command=self.command(accepted)
             from . import worker_execution_bridge
-            command,cwd,finish=worker_execution_bridge.local_process_launch(self.config,accepted,command,cwd)
+            command,cwd,finish=worker_execution_bridge.local_process_launch(self.config,accepted,command,cwd,
+                operation_context=storage.Deadline(max(.001,deadline-time.monotonic())))
             if deadline is not None and time.monotonic()>=deadline:
                 raise TimeoutError('Original reserved experiment deadline reached before launch')
             process=subprocess.Popen(command,cwd=cwd,stdout=subprocess.PIPE,
@@ -236,8 +238,6 @@ class LocalExecution:
             try:
                 identity=runtime.process_identity(process.pid,hashlib.sha256(e.encoded(accepted)).hexdigest())
                 self.records.publish(call_id,'process.json',identity)
-                seconds=self.config['max_seconds']
-                if deadline is None:deadline=time.monotonic()+seconds
                 with selectors.DefaultSelector() as selector:
                     selector.register(process.stdout,selectors.EVENT_READ);selector.register(process.stderr,selectors.EVENT_READ)
                     count=0

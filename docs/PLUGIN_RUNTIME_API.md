@@ -66,17 +66,24 @@ frozen projection; they do not re-query a backend to reconstruct historical fact
 The optional local result/candidate protocol is explicitly frozen; arbitrary result
 fields do not opt an implementation into that protocol.
 
-## Native Skill loading by a provider
+## Native views supplied by a provider
 
 A trusted installed registration can declare `native_launcher_module`, the exact
-Python module implementing selective native Skill loading. The generic loader
+Python module implementing selective native Skill loading and the final scientific
+read-only namespace. The generic loader
 resolves a unique declaration through the existing execution entry points and
-freezes provider/interface/module identity. This declares native loading capability;
+freezes provider/interface/module identity in `native_capabilities.native_launcher_contract`,
+including when no Skills are selected. Protocol 25 keeps this registered launcher
+on the host for preparation and its original submission service; its final scientific
+launch must apply the shared-input read-only mounts after all writable mappings.
+Other launcher argv retain the generic final-process protection. This declares native loading capability;
 it does not select a scientific execution backend or enable external execution.
-Unmatched, conflicting or changed bindings fail before model launch.
+Conflicting or changed frozen bindings fail before model launch. Unmatched argv
+retains generic protection; selecting Skills still requires a supported Skill
+loader contract.
 
 The supported module invocation is `python [-B] [-I] -m <declared-module>
---config <exact-operator-file>`. A copied script or arbitrary wrapper cannot claim
+--config <exact-operator-file> [--]`. A copied script or arbitrary wrapper cannot claim
 support through a prompt or a JSON flag. `cov_execution.launcher` implements this
 contract: it obtains verified `skill_supply.native_mounts(root, job)` on the host,
 mounts only the current role's discovery directory and selected frozen objects

@@ -50,6 +50,8 @@ def science_context(root, job, record, *, permit=None, attempt=None):
     references,texts=_context_sources(root,job)
     from . import candidate_refs
     public=record/'author-science-context';public.mkdir()
+    from . import shared_input_views
+    shared_input_views.dynamic_root(root,public,'retained-implementations')
     original_task=work/'science-task.json'
     target=public/'science-task.json'
     task=candidate_refs.public_fields(c.read(original_task),references)

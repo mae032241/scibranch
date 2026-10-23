@@ -258,3 +258,187 @@ def test_restore_shares_immutable_payloads_keeps_mutable_files_independent_and_c
     assert not os.path.samefile(source, previous / source.relative_to(root))
     source.write_bytes(b'Independent restored mutable state')
     assert other.read_bytes() == blob.read_bytes() == raw
+
+
+@pytest.mark.parametrize('independent_package', [False, True])
+def test_cli_independent_checkpoint_copies_unique_immutable_targets_and_isolates_mutable(cold, tmp_path, monkeypatch, capsys, independent_package):
+    from collections import Counter
+    from scidiscovery.research_loop import atomic_files, shared_originals
+    root, anchor = cold
+    raw = b'Identical bytes with distinct mutable ownership.\n' * 40
+    source = root / 'project/global/mutable-a'; source.write_bytes(raw)
+    other = root / 'project/global/mutable-b'; other.write_bytes(raw)
+    proof = {key: archive.files.hash_file(source)[key] for key in ('sha256', 'size_bytes')}
+    frozen = shared_originals.retain(root, source, source_kind='mutable', **proof)
+    aliases = [root / f'project/nodes/001/inputs/immutable-{number}' for number in range(6)]
+    for alias in aliases:
+        shared_originals.link(frozen, alias, root=root, **proof)
+    archive.checkpoint_enroll(root, anchor)
+    package = tmp_path / 'checkpoint'
+    arguments = ['checkpoint-export', '--root', str(root), '--output', str(package)]
+    if independent_package:
+        arguments.append('--independent')
+    assert cli.main(arguments) == 0
+    exported = json.loads(capsys.readouterr().out)
+    assert exported['blob_ownership'] == ('independent' if independent_package else 'shared')
+    checkpoint = c.read(package / 'checkpoint.json')
+    assert checkpoint['version'] == 2 and checkpoint['blob_ownership'] == exported['blob_ownership']
+    rows = [json.loads(line) for line in (package / 'payload/manifest.jsonl').read_bytes().splitlines()]
+    files = [row for row in rows if row['kind'] == 'file']
+    old_inodes = {(path.stat().st_dev, path.stat().st_ino) for path in root.rglob('*') if path.is_file()}
+    previous = tmp_path / 'source'; root.rename(previous)
+    copied = []
+    original_copy = atomic_files.copy_original
+    def count_copy(blob, target, **options):
+        if blob.parent == package / 'payload/blobs':
+            copied.append(blob.name)
+        return original_copy(blob, target, **options)
+    monkeypatch.setattr(atomic_files, 'copy_original', count_copy)
+    arguments = ['checkpoint-restore', '--root', str(root), '--package', str(package)]
+    if not independent_package:
+        arguments.append('--independent')
+    assert cli.main(arguments) == 0
+    assert json.loads(capsys.readouterr().out)['blob_ownership'] == 'independent'
+    expected = Counter(Path(row['blob']).name for row in files if row['storage'] == 'independent')
+    expected.update({Path(row['blob']).name for row in files if row['storage'] == 'immutable'})
+    assert Counter(copied) == expected
+    package_inodes = {(path.stat().st_dev, path.stat().st_ino) for path in (package / 'payload/blobs').iterdir()}
+    for row in files:
+        target = root / row['path']; info = target.stat()
+        assert (info.st_dev, info.st_ino) not in package_inodes | old_inodes
+    restored_frozen = root / frozen.relative_to(root)
+    assert all(os.path.samefile(alias, restored_frozen) for alias in aliases)
+    assert not os.path.samefile(source, other) and not os.path.samefile(source, restored_frozen)
+    blob = package / 'payload' / next(row['blob'] for row in files if row['sha256'] == proof['sha256'])
+    source.write_bytes(b'New mutable bytes')
+    assert other.read_bytes() == restored_frozen.read_bytes() == blob.read_bytes() == raw
+    blob.chmod(0o600); blob.write_bytes(b'Changed independent package bytes'); blob.chmod(0o400)
+    assert other.read_bytes() == restored_frozen.read_bytes() == raw
+    assert (previous / source.relative_to(root)).read_bytes() == raw
+    assert not (root / 'host-history/restore-objects').exists()
+
+
+@pytest.mark.parametrize('published', [False, True])
+def test_export_retry_freezes_mode_before_publication_and_retains_original_transaction(cold, tmp_path, monkeypatch, published):
+    root, anchor = cold; archive.checkpoint_enroll(root, anchor)
+    package = tmp_path / 'checkpoint'
+    publish = archive._publish
+    def interrupted(stage, output):
+        if output == package:
+            if published:
+                publish(stage, output)
+            raise RuntimeError('Interrupted exact checkpoint publication')
+        return publish(stage, output)
+    monkeypatch.setattr(archive, '_publish', interrupted)
+    with pytest.raises(RuntimeError, match='Interrupted exact'):
+        archive.checkpoint_export(root, package, independent=True)
+    binding = owner._binding(root); directory = Path(binding['anchor'])
+    before = (directory / 'owner.json').read_bytes()
+    frozen = json.loads(before)
+    assert frozen['state'] == 'frozen' and frozen['export_blob_ownership'] == 'independent'
+    assert package.exists() is published
+    with pytest.raises(archive.files.ArchiveError, match='original frozen checkpoint transaction'):
+        archive.checkpoint_export(root, package)
+    assert (directory / 'owner.json').read_bytes() == before
+    with pytest.raises(archive.files.ArchiveError, match='original frozen checkpoint transaction'):
+        archive.checkpoint_export(root, tmp_path / 'different', independent=True)
+    assert (directory / 'owner.json').read_bytes() == before
+    monkeypatch.setattr(archive, '_publish', publish)
+    assert archive.checkpoint_export(root, package, independent=True)['blob_ownership'] == 'independent'
+    assert c.read(package / 'checkpoint.json')['transaction'] == frozen['transaction']
+    assert c.read(directory / 'owner.json')['transaction'] == frozen['transaction']
+    assert not list(tmp_path.glob('.checkpoint-checkpoint-*'))
+
+
+def test_restore_pending_and_active_retries_cannot_change_effective_mode_or_budget(cold, tmp_path, monkeypatch):
+    root, anchor = cold; archive.checkpoint_enroll(root, anchor)
+    package = tmp_path / 'checkpoint'; archive.checkpoint_export(root, package)
+    before_budget = budget.snapshot(root)['consumed_seconds']
+    root.rename(tmp_path / 'previous')
+    dependencies = archive._restore_dependencies
+    def unavailable(settings):
+        raise archive.files.ArchiveError('Fixture dependency unavailable')
+    monkeypatch.setattr(archive, '_restore_dependencies', unavailable)
+    with pytest.raises(archive.files.ArchiveError, match='Fixture dependency'):
+        archive.checkpoint_restore(root, package, independent=True)
+    directory = Path(c.read(package / 'checkpoint.json')['binding']['anchor'])
+    original_anchor = (directory / 'owner.json').read_bytes()
+    original_ledger = {p.name: p.read_bytes() for p in (root / 'control-ledger').glob('*.json')}
+    assert json.loads(original_anchor)['restore_blob_ownership'] == 'independent'
+    with pytest.raises(archive.files.ArchiveError, match='frozen restore ownership'):
+        archive.checkpoint_restore(root, package)
+    assert (directory / 'owner.json').read_bytes() == original_anchor
+    assert {p.name: p.read_bytes() for p in (root / 'control-ledger').glob('*.json')} == original_ledger
+    monkeypatch.setattr(archive, '_restore_dependencies', dependencies)
+    archive.checkpoint_restore(root, package, independent=True)
+    assert budget.snapshot(root)['consumed_seconds'] == pytest.approx(before_budget)
+    with controller._writer(root):
+        (root / 'pause.request').unlink()
+        budget.transition(root, 'advance', 'Fixture advancement after exact independent transfer')
+    completed_anchor = (directory / 'owner.json').read_bytes()
+    completed_ledger = {p.name: p.read_bytes() for p in (root / 'control-ledger').glob('*.json')}
+    with pytest.raises(archive.files.ArchiveError, match='frozen restore ownership'):
+        archive.checkpoint_restore(root, package)
+    assert (directory / 'owner.json').read_bytes() == completed_anchor
+    assert archive.checkpoint_restore(root, package, independent=True)['paused'] is False
+    assert {p.name: p.read_bytes() for p in (root / 'control-ledger').glob('*.json')} == completed_ledger
+
+
+@pytest.mark.parametrize('damage', ['package_alias', 'split_immutable', 'mutable_alias', 'mutable_package'])
+def test_independent_pending_restore_validates_all_inode_ownership(cold, tmp_path, monkeypatch, damage):
+    from scidiscovery.research_loop import shared_originals
+    root, anchor = cold
+    source = root / 'project/global/mutable-a'; source.write_bytes(b'Shared content, distinct frozen ownership.\n')
+    other = root / 'project/global/mutable-b'; other.write_bytes(source.read_bytes())
+    proof = {key: archive.files.hash_file(source)[key] for key in ('sha256', 'size_bytes')}
+    frozen = shared_originals.retain(root, source, source_kind='mutable', **proof)
+    alias = root / 'project/nodes/001/inputs/immutable-alias'
+    shared_originals.link(frozen, alias, root=root, **proof)
+    archive.checkpoint_enroll(root, anchor)
+    package = tmp_path / 'checkpoint'; archive.checkpoint_export(root, package, independent=True)
+    root.rename(tmp_path / 'previous')
+    dependencies = archive._restore_dependencies
+    monkeypatch.setattr(archive, '_restore_dependencies', lambda settings: (_ for _ in ()).throw(RuntimeError('Fixture pending')))
+    with pytest.raises(RuntimeError, match='Fixture pending'):
+        archive.checkpoint_restore(root, package)
+    monkeypatch.setattr(archive, '_restore_dependencies', dependencies)
+    rows = [json.loads(line) for line in (package / 'payload/manifest.jsonl').read_bytes().splitlines()]
+    row = next(row for row in rows if row.get('sha256') == proof['sha256'])
+    if damage == 'package_alias':
+        alias.unlink(); os.link(package / 'payload' / row['blob'], alias)
+    elif damage == 'split_immutable':
+        raw = alias.read_bytes(); alias.unlink(); alias.write_bytes(raw); alias.chmod(0o400)
+    elif damage == 'mutable_alias':
+        other.unlink(); os.link(source, other)
+    else:
+        other.unlink(); os.link(package / 'payload' / row['blob'], other)
+    before = (Path(c.read(package / 'checkpoint.json')['binding']['anchor']) / 'owner.json').read_bytes()
+    with pytest.raises(archive.files.ArchiveError, match='Pending restore .*ownership|Pending restore mutable original'):
+        archive.checkpoint_restore(root, package)
+    assert (Path(c.read(package / 'checkpoint.json')['binding']['anchor']) / 'owner.json').read_bytes() == before
+
+
+def test_independent_package_active_retry_uses_effective_mode(cold, tmp_path):
+    root, anchor = cold; archive.checkpoint_enroll(root, anchor)
+    package = tmp_path / 'checkpoint'; archive.checkpoint_export(root, package, independent=True)
+    root.rename(tmp_path / 'previous')
+    assert archive.checkpoint_restore(root, package)['blob_ownership'] == 'independent'
+    assert archive.checkpoint_restore(root, package, independent=True)['status'] == 'checkpoint_restore_already_completed'
+
+
+def test_shared_checkpoint_can_explicitly_restore_independently_across_simulated_devices(cold, tmp_path, monkeypatch):
+    root, anchor = cold; archive.checkpoint_enroll(root, anchor)
+    package = tmp_path / 'checkpoint'; archive.checkpoint_export(root, package)
+    root.rename(tmp_path / 'previous')
+    original_stat = Path.stat
+    def other_device(path, **options):
+        value = original_stat(path, **options)
+        if path == package:
+            fields = list(value); fields[2] += 1
+            return os.stat_result(fields)
+        return value
+    monkeypatch.setattr(Path, 'stat', other_device)
+    with pytest.raises(archive.files.SharingUnsupported, match='same-filesystem'):
+        archive.checkpoint_restore(root, package)
+    assert not root.exists()
+    assert archive.checkpoint_restore(root, package, independent=True)['blob_ownership'] == 'independent'

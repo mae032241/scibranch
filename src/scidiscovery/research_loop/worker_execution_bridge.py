@@ -33,15 +33,28 @@ PATH_OPTIONS = frozenset({'--script','--payload','--experiment-dir','--implement
 VALUE_OPTIONS = PATH_OPTIONS | {'--start','--key','--parent-plan','--change-intent','--mechanism','--call-id'}
 FLAG_OPTIONS = frozenset({'--metadata','--new-plan'})
 _LOCAL_LAUNCH = ContextVar('scientific_local_launch', default=None)
+_LOCAL_LAUNCH_CONTEXT = ContextVar('scientific_local_launch_context', default=None)
 
 
 class _FileReplaced(ValueError):
     """An ordinary regular file was atomically replaced during this read."""
 
 
-def local_process_launch(config, accepted, command, cwd):
+def operation_context():
+    """The original local call deadline, available only during host wrapping."""
+    return _LOCAL_LAUNCH_CONTEXT.get()
+
+
+def local_process_launch(config, accepted, command, cwd, *, operation_context=None):
     launch = _LOCAL_LAUNCH.get()
-    return launch(config, accepted, command, cwd) if launch is not None else (command, cwd, None)
+    if launch is None:
+        from .experiments import UnsupportedExecution
+        raise UnsupportedExecution('Shared input readonly view requires the original host launch owner; no bare local subprocess fallback')
+    token=_LOCAL_LAUNCH_CONTEXT.set(operation_context)
+    try:
+        return launch(config, accepted, command, cwd)
+    finally:
+        _LOCAL_LAUNCH_CONTEXT.reset(token)
 
 
 def _arguments(arguments, work):
