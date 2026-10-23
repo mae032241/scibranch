@@ -19,12 +19,15 @@ def transaction(tmp_path, monkeypatch):
     monkeypatch.setattr(service.fork_sources, 'inspect_source', lambda *_: plan)
     monkeypatch.setattr(service.fork_sources, 'validate_manifest', lambda *_, **__: {})
     monkeypatch.setattr(service.fork_sources, 'source_guard', lambda *_: nullcontext())
-    def prepare(plan, request, transaction):
+    def prepare(plan, request, transaction, *, _on_created=None):
         root = transaction / 'child'; root.mkdir()
-        c.write(root / 'settings.json', dict(goal_id='child-new-identity'))
+        if _on_created is not None:
+            _on_created(root)
+        c.write(root / 'settings.json', dict(goal_id='child-' + service.uuid.uuid4().hex))
+        c.write(root / 'settings-identity.json', dict(sha256=c.digest(root / 'settings.json')))
         c.write(root / 'pause.request', dict(reason='fork_created_paused'))
         c.write(root / 'host-runtime/fork/manifest.json', dict(kind='test-transaction-only'))
-        return root, dict(goal_id='child-new-identity')
+        return root, c.settings(root)
     monkeypatch.setattr(service, '_prepare', prepare)
     return parent, child, plan
 
@@ -33,6 +36,10 @@ def create(parent, child, operation='create-once', **options):
     preview = service.preview(parent, 200, child, budget=BUDGET, **options)
     return service.create(parent, 200, child, budget=BUDGET, expected_preview_id=preview['preview_id'],
                           operation_id=operation, **options)
+
+
+def operation_record(child, operation):
+    return c.read(child.parent / '.scid-fork-operations' / (service._digest(operation) + '.json'))
 
 
 def test_preview_is_read_only_and_guidance_preserves_original(transaction):
@@ -55,7 +62,7 @@ def test_publish_is_paused_durable_and_idempotent_after_parent_disappears(transa
     shutil.rmtree(parent)
     monkeypatch.setattr(service.fork_sources, 'inspect_source', lambda *_: pytest.fail('Published retry reread parent'))
     assert service.create(parent, 200, child, budget=BUDGET, expected_preview_id=expected, operation_id='one') == receipt
-    with pytest.raises(service.ForkError, match='different request'):
+    with pytest.raises(service.ForkError, match='another request'):
         service.create(parent, 200, child, budget=dict(BUDGET, max_tokens=201), expected_preview_id=expected, operation_id='one')
 
 
@@ -79,9 +86,10 @@ def test_stale_preview_and_unknown_effect_never_publish(transaction):
     assert not child.exists()
 
 
-def test_receipt_exists_before_atomic_publication_and_failure_leaves_no_target(transaction, monkeypatch):
+def test_publication_failure_retains_exact_prepared_child_for_retry(transaction, monkeypatch):
     from scidiscovery.research_loop import instance_archive
     parent, child, _ = transaction
+    publish = instance_archive._publish
     def fail(stage, output):
         assert c.read(stage / 'host-runtime/fork/receipt.json')['state'] == 'paused'
         assert (stage / 'pause.request').exists()
@@ -91,7 +99,14 @@ def test_receipt_exists_before_atomic_publication_and_failure_leaves_no_target(t
     with pytest.raises(OSError, match='injected'):
         create(parent, child)
     assert not child.exists()
-    assert not [path for path in child.parent.iterdir() if path.is_dir() and path.name.startswith('.scid-fork-') and path.name != '.scid-fork-operations']
+    record = operation_record(child, 'create-once')
+    assert record['phase'] == 'prepared'
+    stage = service.Path(record['transaction_path']) / 'child'
+    assert c.read(stage / 'host-runtime/fork/receipt.json') == record['receipt']
+    monkeypatch.setattr(instance_archive, '_publish', publish)
+    monkeypatch.setattr(service, '_prepare', lambda *_: pytest.fail('Prepared retry created another identity'))
+    assert create(parent, child) == record['receipt']
+    assert not stage.parent.exists()
 
 
 def test_lost_response_after_publish_returns_original_identity_on_retry(transaction, monkeypatch):
@@ -357,7 +372,8 @@ def test_fork_preserves_disabled_search_and_literal_role_guidance_for_successors
     parent = tmp_path / 'parent'
     controller.prepare(parent, objective, public, [sys.executable, '-c', 'raise SystemExit(99)'],
         max_tokens=1000, max_seconds=60, max_steps=4, model='fixture', reasoning_effort='high',
-        experiment_mode='external', search_policy=None, role_guidance=role_guidance)
+        experiment_mode='external', search_policy=None, role_guidance=role_guidance,
+        storage_policy=dict(version=1, enabled=True, max_file_bytes=10 * 1024 * 1024))
     for step, role, parents, action in ((1, 'H', [], 'analyze'), (2, 'A', [1], 'finish')):
         _, _, record = finish(parent, step, role, parents, action=action)
         c.write(record / 'native-outcome.json', dict(c.read(record / 'native-outcome.json'), native_started=False))
@@ -370,6 +386,7 @@ def test_fork_preserves_disabled_search_and_literal_role_guidance_for_successors
     assert settings.get('search_policy') is None
     assert settings.get('role_guidance') == role_guidance
     assert settings['native_launcher_argv'] == c.settings(parent)['native_launcher_argv']
+    assert settings['storage_policy'] == c.settings(parent)['storage_policy']
     # Compile a later ordinary task without launching a participant. Its
     # scientific contract must retain the source's disabled/custom semantics.
     job = c.build_job(child, 3, 'H', [])
@@ -417,3 +434,308 @@ def test_missing_existing_source_guard_blocks_without_creating_parent_lock(tmp_p
         service.create(parent, 2, child, budget=BUDGET, expected_preview_id=preview['preview_id'], operation_id='missing-guard')
     assert error.value.code == 'fork_source_guard_unavailable'
     assert not child.exists() and not (parent / 'host-run.lock').exists()
+
+
+@pytest.mark.parametrize('disposition', ['delete', 'move'])
+def test_published_operation_never_recreates_missing_child(transaction, monkeypatch, disposition):
+    parent, child, _ = transaction
+    expected = service.preview(parent, 200, child, budget=BUDGET)['preview_id']
+    receipt = create(parent, child)
+    assert operation_record(child, 'create-once')['phase'] == 'published'
+    if disposition == 'delete':
+        shutil.rmtree(child)
+    else:
+        child.rename(child.with_name('moved-child'))
+    shutil.rmtree(parent)
+    monkeypatch.setattr(service, '_prepare', lambda *_: pytest.fail('Completed operation created another child'))
+    monkeypatch.setattr(service.fork_sources, 'inspect_source', lambda *_: pytest.fail('Receipt retry reread source'))
+    assert service.create(parent, 200, child, budget=BUDGET, expected_preview_id=expected,
+                          operation_id='create-once') == receipt
+    assert not child.exists()
+
+
+@pytest.mark.parametrize('disposition', ['delete', 'move'])
+def test_lost_publish_and_missing_child_remain_unknown_with_original_identity(transaction, monkeypatch, disposition):
+    from scidiscovery.research_loop import instance_archive
+    parent, child, _ = transaction
+    publish = instance_archive._publish
+    def publish_without_ack(stage, target):
+        publish(stage, target)
+        raise OSError('lost publish acknowledgement')
+    monkeypatch.setattr(instance_archive, '_publish', publish_without_ack)
+    with pytest.raises(OSError, match='lost publish'):
+        create(parent, child)
+    record = operation_record(child, 'create-once')
+    assert record['phase'] == 'prepared'
+    if disposition == 'delete':
+        shutil.rmtree(child)
+    else:
+        child.rename(child.with_name('moved-child'))
+    monkeypatch.setattr(service, '_prepare', lambda *_: pytest.fail('Unknown publication recreated child'))
+    monkeypatch.setattr(service.fork_sources, 'inspect_source', lambda *_: pytest.fail('Unknown publication read source'))
+    with pytest.raises(service.ForkError) as error:
+        service.create(parent, 200, child, budget=BUDGET,
+                       expected_preview_id=record['receipt']['preview_id'], operation_id='create-once')
+    assert error.value.code == 'fork_publication_unknown'
+    assert error.value.receipt == record['receipt']
+    assert record['receipt']['child_identity'] in str(error.value)
+    assert operation_record(child, 'create-once') == record
+    assert not child.exists()
+
+
+def test_prepared_receipt_reconciliation_confirms_publish_before_later_delete(transaction, monkeypatch):
+    from scidiscovery.research_loop import instance_archive
+    parent, child, _ = transaction
+    publish = instance_archive._publish
+    def lose_response(stage, target):
+        publish(stage, target)
+        raise OSError('lost response')
+    monkeypatch.setattr(instance_archive, '_publish', lose_response)
+    with pytest.raises(OSError, match='lost response'):
+        create(parent, child)
+    receipt = operation_record(child, 'create-once')['receipt']
+    monkeypatch.setattr(service, '_prepare', lambda *_: pytest.fail('Published child was rebuilt'))
+    assert create(parent, child) == receipt
+    assert operation_record(child, 'create-once')['phase'] == 'published'
+    shutil.rmtree(child)
+    assert create(parent, child) == receipt
+    assert not child.exists()
+
+
+def test_published_record_preserves_existing_child_integrity_checks(transaction):
+    parent, child, _ = transaction
+    create(parent, child)
+    c.write(child / 'settings.json', dict(goal_id='a-different-child'))
+    c.write(child / 'settings-identity.json', dict(sha256=c.digest(child / 'settings.json')))
+    with pytest.raises(service.ForkError, match='receipt identity'):
+        create(parent, child)
+    assert c.read(child / 'settings.json')['goal_id'] == 'a-different-child'
+
+
+@pytest.mark.process_e2e
+def test_killed_staging_reclaims_only_registered_links_and_preserves_active_other_operation(transaction):
+    import multiprocessing
+    import os
+    parent, child, _ = transaction
+    original = parent / 'immutable.bin'; original.write_bytes(b'one shared original'); original.chmod(0o400)
+    context = multiprocessing.get_context('fork')
+    first_ready, second_ready = context.Event(), context.Event()
+    prepare = service._prepare
+    def creator(target, operation, ready):
+        def retain(plan, request, directory, **options):
+            retained = directory / 'origins'; retained.mkdir()
+            os.link(original, retained / 'immutable.bin')
+            return prepare(plan, request, directory, **options)
+        service._prepare = retain
+        def stop_before_prepared(stage):
+            ready.set()
+            context.Event().wait(30)
+        service._sync_tree = stop_before_prepared
+        create(parent, target, operation)
+    other = child.with_name('other-child')
+    first = context.Process(target=creator, args=(child, 'killed-staging', first_ready))
+    second = context.Process(target=creator, args=(other, 'active-staging', second_ready))
+    first.start(); second.start()
+    try:
+        assert first_ready.wait(5) and second_ready.wait(5)
+        first_record = operation_record(child, 'killed-staging')
+        second_record = operation_record(other, 'active-staging')
+        assert first_record['phase'] == second_record['phase'] == 'staging'
+        assert original.stat().st_nlink == 3
+        first.terminate(); first.join(5)
+        receipt = create(parent, child, 'killed-staging')
+        assert receipt['state'] == 'paused'
+        assert not service.Path(first_record['transaction_path']).exists()
+        assert service.Path(second_record['transaction_path']).is_dir()
+        assert original.stat().st_nlink == 2
+        with pytest.raises(service.ForkError) as error:
+            create(parent, other, 'active-staging')
+        assert error.value.code == 'fork_busy'
+        assert original.read_bytes() == b'one shared original' and original.stat().st_mode & 0o777 == 0o400
+    finally:
+        for process in (first, second):
+            if process.is_alive():
+                process.terminate()
+            process.join(5)
+
+
+def test_unregistered_transaction_and_replaced_registered_inode_are_preserved(transaction, monkeypatch):
+    parent, child, _ = transaction
+    directory = child.parent / '.scid-fork-operations'
+    directory.mkdir(mode=0o700)
+    orphan = directory / (service._digest('create-once') + '.stage')
+    orphan.mkdir(); (orphan / 'original.bin').write_bytes(b'unregistered; preserve')
+    with pytest.raises(service.ForkError, match='Unregistered'):
+        create(parent, child)
+    assert (orphan / 'original.bin').read_bytes() == b'unregistered; preserve'
+    orphan.rename(child.parent / 'orphan-preserved')
+    prepare = service._prepare
+    clean = service._clean_transaction
+    def fail_after_prepare(plan, request, transaction, **options):
+        prepare(plan, request, transaction, **options)
+        raise OSError('interrupted preparation')
+    with monkeypatch.context() as patch:
+        patch.setattr(service, '_prepare', fail_after_prepare)
+        patch.setattr(service, '_clean_transaction', lambda *_: None)
+        with pytest.raises(OSError, match='interrupted'):
+            create(parent, child)
+    record = operation_record(child, 'create-once')
+    transaction_path = service.Path(record['transaction_path'])
+    transaction_path.rename(child.parent / 'registered-original-preserved')
+    transaction_path.mkdir(); (transaction_path / 'foreign.bin').write_bytes(b'replacement; preserve')
+    with pytest.raises(service.ForkError, match='registered directory identity'):
+        create(parent, child)
+    assert (transaction_path / 'foreign.bin').read_bytes() == b'replacement; preserve'
+    assert service._clean_transaction is clean and not child.exists()
+
+
+def test_real_published_delete_never_recreates_child(tmp_path, monkeypatch):
+    from test_fork_source import completed_source
+    from scidiscovery.research_loop import instance_delete
+    parent = completed_source(tmp_path); child = tmp_path / 'branch'
+    expected = service.preview(parent, 2, child, budget=BUDGET)['preview_id']
+    receipt = service.create(parent, 2, child, budget=BUDGET,
+        expected_preview_id=expected, operation_id='published-deleted')
+    instance_delete.delete_instance(child, instance_id=receipt['child_identity'],
+        settings_sha256=c.digest(child / 'settings.json'), operation_id='delete-child')
+    monkeypatch.setattr(service, '_prepare', lambda *_: pytest.fail('Deleted child was recreated'))
+    assert service.create(parent, 2, child, budget=BUDGET,
+        expected_preview_id=expected, operation_id='published-deleted') == receipt
+    assert not child.exists()
+
+
+def test_cleanup_failure_never_revokes_published_receipt(transaction, monkeypatch):
+    parent, child, _ = transaction
+    def unavailable(*_):
+        raise OSError('disposable cleanup unavailable')
+    monkeypatch.setattr(service, '_clean_transaction', unavailable)
+    receipt = create(parent, child)
+    assert operation_record(child, 'create-once')['phase'] == 'published'
+    shutil.rmtree(child)
+    monkeypatch.setattr(service, '_prepare', lambda *_: pytest.fail('Cleanup failure recreated published child'))
+    assert create(parent, child) == receipt
+    assert not child.exists()
+
+
+def test_initialization_failure_after_settings_reclaims_registered_stage_and_original_links(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from test_fork_source import completed_source
+    from scidiscovery.research_loop import storage_policy as storage
+    parent = completed_source(tmp_path)
+    sibling = tmp_path / 'sibling'
+    preview = service.preview(parent, 2, sibling, budget=BUDGET)
+    service.create(parent, 2, sibling, budget=BUDGET, expected_preview_id=preview['preview_id'], operation_id='sibling')
+    manifest = service.fork_sources.validate_manifest(sibling, full=True)
+    retained = sibling / 'host-runtime/fork' / manifest['entries'][0]['storage_path']
+    proof = (retained.read_bytes(), retained.stat().st_mode, retained.stat().st_nlink)
+    child = tmp_path / 'branch'
+    preview = service.preview(parent, 2, child, budget=BUDGET)
+    mutation = storage.mutation
+    registered = []
+    @contextmanager
+    def reject_initialized(root, growth, **options):
+        if root is not None and root.name == 'child' and root.parent.name.endswith('.stage'):
+            assert (root / 'settings.json').is_file() and (root / 'settings-identity.json').is_file()
+            record = operation_record(child, 'failed-initialization')
+            assert record['phase'] == 'staging'
+            assert record['stage_identity'] == service._directory_identity(root)
+            registered.append(record['stage_identity'])
+            raise storage.StorageQuotaExceeded('injected initialization quota')
+        with mutation(root, growth, **options):
+            yield
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, 'mutation', reject_initialized)
+        with pytest.raises(storage.StorageQuotaExceeded, match='injected initialization quota'):
+            service.create(parent, 2, child, budget=BUDGET,
+                expected_preview_id=preview['preview_id'], operation_id='failed-initialization')
+    record = operation_record(child, 'failed-initialization')
+    assert registered and record['phase'] == 'reserved'
+    assert not service.Path(record['transaction_path']).exists() and not child.exists()
+    assert (retained.read_bytes(), retained.stat().st_mode, retained.stat().st_nlink) == proof
+    service.fork_sources.validate_manifest(sibling, full=True)
+    receipt = service.create(parent, 2, child, budget=BUDGET,
+        expected_preview_id=preview['preview_id'], operation_id='failed-initialization')
+    assert receipt['state'] == 'paused'
+
+
+def test_prepared_record_follows_completed_tree_and_stage_parent_sync(transaction, monkeypatch):
+    parent, child, _ = transaction
+    events = []
+    synchronize, fsync, durable = service._sync_tree, service.files.fsync_directory, service.files.durable_json
+    def sync_tree(stage):
+        synchronize(stage)
+        events.append(('tree', stage))
+    def sync_directory(directory):
+        fsync(directory)
+        events.append(('directory', directory))
+    def write_record(path, value):
+        if value.get('phase') == 'prepared':
+            directory = service.Path(value['transaction_path'])
+            assert events[-2:] == [('tree', directory / 'child'), ('directory', directory)]
+            events.append(('prepared', path))
+        durable(path, value)
+    monkeypatch.setattr(service, '_sync_tree', sync_tree)
+    monkeypatch.setattr(service.files, 'fsync_directory', sync_directory)
+    monkeypatch.setattr(service.files, 'durable_json', write_record)
+    create(parent, child)
+    assert any(event[0] == 'prepared' for event in events)
+
+
+def test_source_directory_sync_failure_recovers_original_published_child(transaction, monkeypatch):
+    parent, child, _ = transaction
+    synchronize = service.files.fsync_directory
+    failures, recovered = [], []
+    def sync_directory(directory):
+        if directory.name.endswith('.stage') and child.exists():
+            record = operation_record(child, 'create-once')
+            assert record['phase'] == 'prepared'
+            if not failures:
+                failures.append(service._directory_identity(child))
+                raise OSError('injected source directory sync failure')
+            recovered.append(directory)
+        synchronize(directory)
+    monkeypatch.setattr(service.files, 'fsync_directory', sync_directory)
+    with pytest.raises(OSError, match='source directory sync failure'):
+        create(parent, child)
+    record = operation_record(child, 'create-once')
+    assert record['phase'] == 'prepared' and failures == [record['stage_identity']]
+    monkeypatch.setattr(service, '_prepare', lambda *_, **__: pytest.fail('Rename recovery rebuilt a child'))
+    assert create(parent, child) == record['receipt']
+    assert recovered == [service.Path(record['transaction_path'])]
+    assert service._directory_identity(child) == record['stage_identity']
+    assert operation_record(child, 'create-once')['phase'] == 'published'
+
+
+@pytest.mark.parametrize('phase', ['published', 'prepared'])
+def test_existing_child_retry_rejects_corrupt_retained_original(tmp_path, monkeypatch, phase):
+    from test_fork_source import completed_source
+    from scidiscovery.research_loop import instance_archive
+    parent = completed_source(tmp_path)
+    child = tmp_path / 'branch'
+    preview = service.preview(parent, 2, child, budget=BUDGET)
+    def retry():
+        return service.create(parent, 2, child, budget=BUDGET,
+            expected_preview_id=preview['preview_id'], operation_id='corrupt-retained')
+    if phase == 'prepared':
+        publish = instance_archive._publish
+        def lose_response(stage, target):
+            publish(stage, target)
+            raise OSError('injected lost publication response')
+        with monkeypatch.context() as patch:
+            patch.setattr(instance_archive, '_publish', lose_response)
+            with pytest.raises(OSError, match='lost publication response'):
+                retry()
+    else:
+        retry()
+    record = operation_record(child, 'corrupt-retained')
+    assert record['phase'] == phase
+    manifest = service.fork_sources.validate_manifest(child, full=True)
+    retained = child / 'host-runtime/fork' / manifest['entries'][0]['storage_path']
+    retained.chmod(0o600)
+    retained.write_bytes(b'corrupt retained original')
+    retained.chmod(0o400)
+    monkeypatch.setattr(service, '_prepare', lambda *_, **__: pytest.fail('Corrupt child was rebuilt'))
+    with pytest.raises(service.ForkError):
+        retry()
+    assert operation_record(child, 'corrupt-retained') == record
+    assert service._directory_identity(child) == record['stage_identity']

@@ -12,9 +12,7 @@ import math
 import os
 from pathlib import Path
 import re
-import shutil
 import stat
-import tempfile
 import uuid
 
 from scidiscovery import archive_io as files
@@ -80,6 +78,8 @@ def _target(parent, child):
     child = files.check_path(Path(child).expanduser().absolute())
     if parent.resolve() != parent or child.resolve() != child or child == parent or parent in child.parents or child in parent.parents:
         raise ForkError('fork_path_unsafe', 'Source and target must be separate canonical instance roots')
+    if any(path.name == '.scid-fork-operations' for path in (child, *child.parents)):
+        raise ForkError('fork_path_unsafe', 'Fork targets cannot name private operation storage')
     if not child.parent.is_dir():
         raise ForkError('fork_path_unsafe', 'The explicit target parent directory must already exist')
     return parent, child
@@ -164,28 +164,150 @@ def _existing(child, operation_id, request_hash):
         raise ForkError('fork_target_exists', 'Target belongs to another operation')
     if receipt.get('request_sha256') != request_hash:
         raise ForkError('fork_operation_conflict', 'Operation ID was already used for a different request')
-    _source_call(fork_sources.validate_manifest, child)
+    _source_call(fork_sources.validate_manifest, child, full=True)
+    if _source_call(c.settings, child).get('goal_id') != receipt.get('child_identity'):
+        raise ForkError('fork_transaction_changed', 'Child settings differ from the original receipt identity')
     return receipt
 
 
-def _reserve_operation(child, operation_id, request_hash):
-    # Operation IDs are scoped to the explicit destination parent directory;
-    # a retry may not silently choose a second sibling destination.
-    directory = child.parent / '.scid-fork-operations'
-    files.check_path(directory)
+def _directory_identity(path):
+    files.check_path(path)
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode):
+        raise ForkError('fork_transaction_changed', 'Fork transaction directory was replaced')
+    return dict(dev=info.st_dev, ino=info.st_ino)
+
+
+@contextmanager
+def _operation(child, operation_id, request_hash):
+    # Keep this exact operation locked until its publication/cleanup is durable.
+    from . import instance_owner as owner
+    directory = files.check_path(child.parent / '.scid-fork-operations')
     directory.mkdir(mode=0o700, exist_ok=True)
-    path = directory / (_digest(operation_id) + '.json')
-    value = dict(operation_id=operation_id, request_sha256=request_hash, child_root=str(child))
-    descriptor = os.open(path.with_suffix('.lock'), os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    owner._private_stat(directory.lstat(), directory=True)
+    files.fsync_directory(directory.parent)
+    key = _digest(operation_id)
+    path = directory / (key + '.json')
+    transaction = directory / (key + '.stage')
+    expected = dict(version=1, operation_id=operation_id, request_sha256=request_hash,
+        child_root=str(child), parent_identity=_directory_identity(child.parent), transaction_path=str(transaction))
+    lock = path.with_suffix('.lock')
+    descriptor = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        if path.exists():
-            if c.read(c.regular(path)) != value:
-                raise ForkError('fork_operation_conflict', 'Operation ID already names another request in this target parent')
+        owner._same_gate_path(lock, descriptor, directory=False)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ForkError('fork_busy', 'Another creator owns this operation; reconcile its receipt') from error
+        if path.exists() or path.is_symlink():
+            record = c.read(c.regular(files.check_path(path)))
+            if (not isinstance(record, dict) or any(record.get(key) != value for key, value in expected.items())
+                    or set(record) != set(expected) | {'phase', 'transaction_identity', 'stage_identity', 'settings_sha256', 'receipt'}
+                    or record.get('phase') not in {'reserved', 'staging', 'prepared', 'published'}):
+                raise ForkError('fork_operation_conflict', 'Operation ID already names another request or unsupported record')
+            identities = [record['transaction_identity'], record['stage_identity']]
+            if any(value is not None and (not isinstance(value, dict) or set(value) != {'dev', 'ino'}
+                    or any(type(number) is not int or number < 0 for number in value.values())) for value in identities):
+                raise ForkError('fork_operation_conflict', 'Fork operation lost its exact directory identities')
+            prepared = record['phase'] in {'prepared', 'published'}
+            if (prepared != (record['receipt'] is not None and record['stage_identity'] is not None)
+                    or (record['phase'] != 'reserved' and record['transaction_identity'] is None)
+                    or (record['phase'] == 'reserved' and any(value is not None for value in identities))
+                    or (not prepared and (record['receipt'] is not None or record['settings_sha256'] is not None))
+                    or (prepared and not isinstance(record['settings_sha256'], str))
+                    or (prepared and not re.fullmatch('[0-9a-f]{64}', record['settings_sha256']))):
+                raise ForkError('fork_operation_conflict', 'Fork operation has an incomplete publication record')
+            if prepared and (not isinstance(record['receipt'], dict)
+                    or any(record['receipt'].get(key) != value for key, value in
+                        dict(operation_id=operation_id, request_sha256=request_hash, child_root=str(child),
+                             status='fork_created', version=1, state='paused').items())
+                    or not isinstance(record['receipt'].get('child_identity'), str)):
+                raise ForkError('fork_operation_conflict', 'Fork operation lost its original receipt')
         else:
-            files.durable_json(path, value)
+            record = dict(expected, phase='reserved', transaction_identity=None, stage_identity=None, settings_sha256=None, receipt=None)
+        yield path, record
+        owner._same_gate_path(lock, descriptor, directory=False)
     finally:
         os.close(descriptor)
+
+
+def _clean_transaction(path, record):
+    """Unlink only references in this locked operation's registered directory."""
+    from . import instance_delete as deletion
+    transaction = Path(record['transaction_path'])
+    if transaction.exists() or transaction.is_symlink():
+        if record['transaction_identity'] is None or _directory_identity(transaction) != record['transaction_identity']:
+            raise ForkError('fork_transaction_changed', 'Fork transaction no longer has its registered directory identity')
+        if any(item.name not in {'origins', 'child'} for item in transaction.iterdir()):
+            raise ForkError('fork_transaction_changed', 'Fork transaction contains unrecognized ownership')
+        # The child was never published in staging; a published transaction must
+        # be only its disposable envelope, never another child at the old path.
+        if record['phase'] == 'published' and (transaction / 'child').exists():
+            raise ForkError('fork_transaction_changed', 'Published fork transaction regained a child directory')
+        stage = transaction / 'child'
+        if stage.exists():
+            if ((record['stage_identity'] is not None and _directory_identity(stage) != record['stage_identity'])
+                    or record['stage_identity'] is None and (stage / 'settings.json').exists()
+                    and (stage / 'settings-identity.json').exists()
+                    or any((stage / name).exists() for name in ('host-started.json', 'jobs', 'native-evidence', 'instance-owner.json'))):
+                raise ForkError('fork_transaction_changed', 'Unpublished child has unregistered identity or activity')
+        origins = transaction / 'origins'
+        if any((origins / name).exists() for name in ('settings.json', 'settings-identity.json', 'instance-owner.json')):
+            raise ForkError('fork_transaction_changed', 'Fork originals directory contains an independent instance')
+        deletion._check_mounts(transaction)
+        for item in transaction.iterdir():
+            deletion._preflight_tree(item, _directory_identity(item))
+        deletion._remove_tree(transaction, record['transaction_identity'])
+    if record['phase'] in {'reserved', 'staging'}:
+        record.update(phase='reserved', transaction_identity=None, stage_identity=None, settings_sha256=None)
+        files.durable_json(path, record)
+
+
+def _published_receipt(path, record):
+    try:
+        _clean_transaction(path, record)
+    except (OSError, files.ArchiveError, ForkError):
+        # Disposable cleanup cannot revoke a positively confirmed publication.
+        # Its exact registered identity remains available to the next retry.
+        pass
+    return record['receipt']
+
+
+def _publication_unknown(record):
+    receipt = record['receipt']
+    error = ForkError('fork_publication_unknown', 'Original fork publication is unknown; do not recreate it. '
+        + 'Original receipt: ' + files.canonical(receipt).decode())
+    error.receipt = receipt
+    return error
+
+
+def _finish_prepared(child, path, record):
+    transaction = Path(record['transaction_path'])
+    stage = transaction / 'child'
+    existing = _existing(child, record['operation_id'], record['request_sha256'])
+    if existing is not None:
+        if (existing != record['receipt'] or _directory_identity(child) != record['stage_identity']
+                or c.digest(child / 'settings.json') != record['settings_sha256']
+                or stage.exists() or stage.is_symlink()):
+            raise ForkError('fork_transaction_changed', 'Published child differs from its original staged identity')
+        if _directory_identity(transaction) != record['transaction_identity']:
+            raise ForkError('fork_transaction_changed', 'Published fork lost its exact transaction directory')
+        # A prior rename may have returned before either directory barrier.
+        files.fsync_directory(child.parent)
+        files.fsync_directory(transaction)
+    else:
+        if not stage.exists() and not stage.is_symlink():
+            raise _publication_unknown(record)
+        if (_directory_identity(transaction) != record['transaction_identity']
+                or _directory_identity(stage) != record['stage_identity']
+                or _existing(stage, record['operation_id'], record['request_sha256']) != record['receipt']
+                or c.digest(stage / 'settings.json') != record['settings_sha256']):
+            raise ForkError('fork_transaction_changed', 'Prepared fork lost its exact original child')
+        from .instance_archive import _publish
+        _publish(stage, child)
+    record['phase'] = 'published'
+    files.durable_json(path, record)
+    return _published_receipt(path, record)
 
 
 def _sync_tree(root):
@@ -207,7 +329,7 @@ def _sync_tree(root):
         files.fsync_directory(Path(current))
 
 
-def _prepare(plan, request, transaction):
+def _prepare(plan, request, transaction, *, _on_created=None):
     """Rebuild declared configuration with new identity and no inherited grant."""
     source_store = transaction / 'origins'
     _source_call(fork_sources.copy_source, plan, source_store)
@@ -230,7 +352,7 @@ def _prepare(plan, request, transaction):
     options['launcher'] = copy.deepcopy(selected_settings['native_launcher_argv'])
     # Editing declarations omit disabled options and literal role guidance.
     # Restore those exact values after the ordinary defaults have been applied.
-    for field in ('search_policy', 'role_guidance'):
+    for field in ('search_policy', 'role_guidance', 'storage_policy'):
         options[field] = copy.deepcopy(selected_settings.get(field))
     if selected_settings.get('delivery_policy') is not None:
         # Keep declared invocation spellings while rebuilding (and checking)
@@ -271,7 +393,7 @@ def _prepare(plan, request, transaction):
         return configured
     settings = controller.prepare(**options, _existing_settings=selected_settings, _identity_root=final,
         _public_identity_root=final / 'host-runtime/fork/public', _user_update_texts=texts[1:],
-        _source_facts_factory=source_facts)
+        _source_facts_factory=source_facts, _on_created=_on_created)
     settings = c.settings(stage)
     changed = fork_runtime.changed_task_settings(selected_settings, settings)
     if changed:
@@ -323,16 +445,26 @@ def create(parent_root, step, child_root, *, budget, guidance_text=None, expecte
         raise ForkError('fork_operation_conflict', 'Declare one bounded operation ID')
     request.update(expected_preview_id=expected_preview_id)
     request_hash = _digest(request)
-    with _target_lock(child):
-        existing = _existing(child, operation_id, request_hash)
-        if existing is not None:
-            return existing
-        from .instance_owner import creation
-        with creation(child), _source_guard(parent):
-            return _create_guarded(child, request, request_hash, expected_preview_id, operation_id)
+    from .instance_owner import creation
+    with creation(child), _operation(child, operation_id, request_hash) as (path, record), _target_lock(child):
+        if record['phase'] == 'published':
+            existing = _existing(child, operation_id, request_hash)
+            if existing is not None and (existing != record['receipt']
+                    or _directory_identity(child) != record['stage_identity']
+                    or c.digest(child / 'settings.json') != record['settings_sha256']):
+                raise ForkError('fork_transaction_changed', 'Current target differs from the original published child')
+            return _published_receipt(path, record)
+        if record['phase'] == 'prepared':
+            return _finish_prepared(child, path, record)
+        if _existing(child, operation_id, request_hash) is not None:
+            raise ForkError('fork_operation_conflict', 'Target receipt has no prepared operation record')
+        if record['phase'] == 'staging':
+            _clean_transaction(path, record)
+        with _source_guard(parent):
+            return _create_guarded(child, request, expected_preview_id, path, record)
 
 
-def _create_guarded(child, request, request_hash, expected_preview_id, operation_id):
+def _create_guarded(child, request, expected_preview_id, path, record):
     inspection_request = {key: value for key, value in request.items() if key != 'expected_preview_id'}
     plan, checked = _inspect(inspection_request)
     if checked['preview_id'] != expected_preview_id:
@@ -341,24 +473,43 @@ def _create_guarded(child, request, request_hash, expected_preview_id, operation
         code = ('fork_storage_unsupported' if any(row.get('code') == 'fork_storage_unsupported' for row in checked['blockers']) else
             'fork_external_effect_unknown' if any('unknown' in row.get('code', '') for row in checked['blockers']) else 'fork_input_missing')
         raise ForkError(code, 'Source inputs or external effects block creation: ' + str(checked['blockers']))
-    _reserve_operation(child, operation_id, request_hash)
-    transaction = Path(tempfile.mkdtemp(prefix='.scid-fork-', dir=child.parent))
+    transaction = Path(record['transaction_path'])
+    if transaction.exists() or transaction.is_symlink():
+        raise ForkError('fork_transaction_changed', 'Unregistered fork transaction needs explicit reconciliation')
+    files.durable_json(path, record)
+    transaction.mkdir(mode=0o700)
+    files.fsync_directory(transaction.parent)
+    record.update(phase='staging', transaction_identity=_directory_identity(transaction))
+    files.durable_json(path, record)  # No original links exist before this commit.
+    def register_stage(stage):
+        if stage != transaction / 'child' or record['stage_identity'] is not None:
+            raise ForkError('fork_transaction_changed', 'Fork preparation created an unexpected child directory')
+        record['stage_identity'] = _directory_identity(stage)
+        files.durable_json(path, record)
     try:
-        stage, settings = _prepare(plan, request, transaction)
+        stage, settings = _prepare(plan, request, transaction, _on_created=register_stage)
+        if stage != transaction / 'child' or _directory_identity(stage) != record['stage_identity']:
+            raise ForkError('fork_transaction_changed', 'Fork preparation lost its registered child directory')
         _source_call(fork_sources.validate_manifest, stage, full=True)
         if _inspect(inspection_request)[1]['preview_id'] != expected_preview_id:
             raise ForkError('fork_source_changed', 'Source changed while retaining shared originals; repeat preview')
-        receipt = dict(status='fork_created', version=1, operation_id=operation_id,
-            request_sha256=request_hash, preview_id=expected_preview_id,
+        receipt = dict(status='fork_created', version=1, operation_id=record['operation_id'],
+            request_sha256=record['request_sha256'], preview_id=expected_preview_id,
             child_identity=settings['goal_id'], state='paused', child_root=str(child),
             manifest_ref='host-runtime/fork/manifest.json')
-        c.write(stage / 'host-runtime/fork/request.json', dict(request, operation_id=operation_id))
+        c.write(stage / 'host-runtime/fork/request.json', dict(request, operation_id=record['operation_id']))
         c.write(stage / 'host-runtime/fork/receipt.json', receipt)
         _sync_tree(stage)
-        from .instance_archive import _publish
-        _publish(stage, child)
-        return receipt
-    finally:
-        # A published receipt remains authoritative even when disposable
-        # transaction cleanup fails after the atomic publication.
-        shutil.rmtree(transaction, ignore_errors=True)
+        files.fsync_directory(transaction)
+        prepared = dict(record, phase='prepared', receipt=receipt, stage_identity=_directory_identity(stage),
+                        settings_sha256=c.digest(stage / 'settings.json'))
+        files.durable_json(path, prepared)
+        record.update(prepared)
+    except BaseException:
+        # A prepared record is authoritative even if its durable write returned
+        # an error. Never erase publication evidence or retry with a new identity.
+        persisted = c.read(c.regular(path))
+        if persisted['phase'] == 'staging':
+            _clean_transaction(path, persisted)
+        raise
+    return _finish_prepared(child, path, record)

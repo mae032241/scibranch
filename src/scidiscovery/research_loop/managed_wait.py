@@ -239,6 +239,10 @@ def wait_and_wake(root,step):
 def wake_packet(root,job,intent):
     """Present verified scientific results to the original W, with bounded navigation."""
     rows=[];work=c.workspace(root,job['step'])
+    from . import storage_policy as storage
+    frozen=c.settings(root,job)
+    context=storage.Deadline(frozen['max_seconds'])
+    inventory=storage.Inventory(frozen.get('storage_policy'),context=context)
     for number,proof in enumerate(intent['execution_wake']['observations'],1):
         observed=c.read(Path(proof['path']));directory=Path(proof['path']).parent
         completed=c.read(Path(observed['completed']['path']))
@@ -253,21 +257,24 @@ def wake_packet(root,job,intent):
             c.write(work/prefix/'result.json',result)
             outputs=[]
             for item in e.scientific_outputs(config,observed):
+                inventory.entry();inventory.file(item.size_bytes)
                 target=prefix+'/outputs/'+item.name
-                c._copy_bound(Path(item.local_path),work/target,item.sha256)
+                c._copy_bound(Path(item.local_path),work/target,item.sha256,context=context,policy=config.get('storage_policy'),root=root)
                 outputs.append(dict(name=item.name,path=target))
             rows.append(dict(status=observed['status'],result=prefix+'/result.json',outputs=outputs,
                 **(dict(native_state=observed['native_state']) if 'native_state' in observed else {})))
             continue
-        c._copy_bound(Path(observed['completed']['path']),work/prefix/'result.json',observed['completed']['sha256'])
+        c._copy_bound(Path(observed['completed']['path']),work/prefix/'result.json',observed['completed']['sha256'],root=root,policy=frozen.get('storage_policy'),context=context)
         outputs=[]
         for item in observed['outputs']:
             target=prefix+'/outputs/'+item['name']
-            c._copy_bound(Path(item['path']),work/target,item['sha256']);outputs.append(dict(name=item['name'],path=target))
+            inventory.entry();inventory.file(item['size_bytes'])
+            c._copy_bound(Path(item['path']),work/target,item['sha256'],root=root,policy=frozen.get('storage_policy'),context=context);outputs.append(dict(name=item['name'],path=target))
         originals=[]
         for index,item in enumerate(observed['proofs'],1):
             target=prefix+f'/originals/{index:03d}'
-            c._copy_bound(Path(item['path']),work/target,item['sha256']);originals.append(target)
+            inventory.entry();inventory.file(item['size_bytes'])
+            c._copy_bound(Path(item['path']),work/target,item['sha256'],root=root,policy=frozen.get('storage_policy'),context=context);originals.append(target)
         rows.append(dict(status=observed['status'],original=prefix+'/result.json',outputs=outputs,native_originals=originals,
             **(dict(native_state=observed['native_state']) if 'native_state' in observed else {})))
     c.write(work/'work/execution-results.json',dict(executions=rows,

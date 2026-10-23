@@ -54,6 +54,8 @@ def _excluded(root, parts):
         return 'native_environment_sessions_caches_and_credentials'
     if len(parts) == 1 and parts[0] in {'host-run.lock', 'control-ledger.lock', 'configuration.lock'}:
         return 'controller_or_budget_lock'
+    if parts == ('host-runtime', 'storage.lock'):
+        return 'managed_storage_lease'
     if len(parts) == 2 and parts[0] == 'execution-authority' and parts[1] in AUTHORITY_EXCLUDED:
         return 'private_key_locator_or_transient_ui_or_authority_lock'
     if (parts[0] == 'native-evidence' and parts[-1] == 'runner.lock'
@@ -218,6 +220,8 @@ def _owner_locks(stack, root, *, disposing=False):
         _lock(stack, path)
     _lock(stack, root / 'execution-authority/writer.lock')
     _lock(stack, root / 'control-ledger.lock')
+    if (root / 'host-runtime/storage.lock').exists():
+        _lock(stack, root / 'host-runtime/storage.lock')
 
 
 def _dead(identity, binding):
@@ -367,12 +371,24 @@ def _publish(stage, output):
             raise files.ArchiveError('Archive destination already exists')
         raise OSError(error, os.strerror(error))
     files.fsync_directory(output.parent)
+    if stage.parent != output.parent:
+        files.fsync_directory(stage.parent)
 
 
 def archive_export(root, output):
     from .instance_owner import source_lease
     with source_lease(root):
         return _export(root, output)
+
+
+def _same_inventory_entry(expected, current):
+    if (expected.get('kind') == current.get('kind') == 'file'
+            and expected.get('mode') == current.get('mode') == 0o400):
+        # Both inventories freshly hash the file. Link/unlink changes ctime on
+        # shared readonly inodes; every other property and field stays binding.
+        expected = dict(expected, source_stat=expected['source_stat'][:3])
+        current = dict(current, source_stat=current['source_stat'][:3])
+    return expected == current
 
 
 def _export(root, output, *, on_locked=None):
@@ -420,7 +436,7 @@ def _export(root, output, *, on_locked=None):
                         raise files.ArchiveError('Original archive scope gained entries before publication')
                     expected = json.loads(line)
                     expected.pop('blob', None)
-                    if expected != dict(index=index, **current):
+                    if not _same_inventory_entry(expected, dict(index=index, **current)):
                         raise files.ArchiveError('Original archive scope changed before publication')
                 if stream.read(1):
                     raise files.ArchiveError('Original archive scope lost entries before publication')

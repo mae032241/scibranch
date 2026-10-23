@@ -863,14 +863,17 @@ def global_materials(root: Path):
     return rows
 
 
-def _copy_bound(source: Path, destination: Path, sha256: str, *, context=None):
+def _copy_bound(source: Path, destination: Path, sha256: str, *, context=None, policy=None, root=None):
     if any(parent.is_symlink() for parent in destination.parents):
         raise ValueError('Bound input directories must not be links')
     if destination.exists() or destination.is_symlink():
         regular(destination, limit=None)
     else:
         regular(source, limit=None)
-    atomic_files.copy_original(source, destination, sha256=sha256, context=context)
+    # Node inputs and retained result views live in the Worker's writable tree.
+    # Reflinks reduce materialization cost without exposing a shared CAS inode.
+    from . import shared_originals
+    shared_originals.isolated_copy(source, destination, sha256=sha256, context=context, policy=policy,root=root)
 
 
 @owner_effect
@@ -931,8 +934,11 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     (work / 'work').mkdir(exist_ok=True)
     (work / 'artifacts').mkdir(exist_ok=True)
     globals_ = global_materials(root)
+    from . import storage_policy as storage
+    input_inventory=storage.Inventory(policy.get('storage_policy'),context=storage.Deadline(policy['max_seconds']))
     for item in globals_:
-        _copy_bound(root / item['source'], work / item['path'], item['sha256'])
+        input_inventory.entry();input_inventory.file((root/item['source']).stat().st_size)
+        _copy_bound(root / item['source'], work / item['path'], item['sha256'],root=root,policy=policy.get('storage_policy'),context=input_inventory.context)
     refs, materials, entry_points, selected = [], [], [], []
     if review_binding is not None:
         materials=review_binding['materials'];selected=review_binding['selected']
@@ -943,7 +949,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         # references. Historical lineage remains in the host-owned node tree.
         source = _execution_raw(root, parent)
         ref = dict(path=f'inputs/parents/{parent:03d}/conclusion.json', sha256=digest(source))
-        if worker_view_version!=1:_copy_bound(source, work / ref['path'], ref['sha256'])
+        if worker_view_version!=1:_copy_bound(source, work / ref['path'], ref['sha256'],root=root,policy=policy.get('storage_policy'),context=input_inventory.context)
         (work / Path(ref['path']).parent / 'artifacts').mkdir(parents=True,exist_ok=True)
         refs.append(ref)
         from . import originals
@@ -969,8 +975,9 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     if output_quota_exceeded(policy,(row['material']['size_bytes'] for row in selected)):
         raise ValueError('Selected implementations exceed the frozen handoff bound')
     for item in materials:
+        input_inventory.entry();input_inventory.file(item['size_bytes'])
         from . import originals
-        _copy_bound(originals.material_path(root, item), work / item['path'], item['sha256'])
+        _copy_bound(originals.material_path(root, item), work / item['path'], item['sha256'],root=root,policy=policy.get('storage_policy'),context=input_inventory.context)
     # No recursive parent expansion; per-file identities stay in host storage.
     job = dict(step=step, role=role, goal_text=policy['objective'], public_root=policy['public_root'],
                instruction=instruction, direct_refs=refs, direct_materials=materials, direct_entry_points=entry_points, global_materials=globals_,
@@ -1077,7 +1084,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
             reported=candidate_refs.public_science_fields(read(source),candidate_refs.for_job(job))
             original_path=str(Path(original['path']).parent/'scientific-original.json')
             public=scientific_projection(reported,original_path)
-            if public!=reported:_copy_bound(source,work/original_path,original['sha256'])
+            if public!=reported:_copy_bound(source,work/original_path,original['sha256'],root=root,policy=policy.get('storage_policy'),context=input_inventory.context)
             target=work/original['path']
             if target.exists():
                 if read(regular(target))!=public:raise ValueError('Frozen parent scientific view changed')

@@ -47,6 +47,7 @@ def main(argv=None):
     prepare.add_argument('--worker-resume-policy', type=Path, help='Explicit qualified finite continuation policy JSON; omitted standard codex uses at most two output-only repairs in its original home; custom launchers have no default')
     prepare.add_argument('--max-output-item-bytes', type=int, help='Optional explicit per-file storage quota; default has no storage size cap')
     prepare.add_argument('--max-output-total-bytes', type=int, help='Optional explicit total deliverable storage quota; default has no storage size cap')
+    prepare.add_argument('--storage-policy', type=Path, help='Optional version1 managed storage policy JSON; enabled defaults false, with no implicit limits')
     prepare.add_argument('--max-tokens', type=int)
     prepare.add_argument('--max-seconds', type=float, help='Maximum authorized runtime: advancement and accepted execution waiting; idle pauses do not consume this ceiling')
     prepare.add_argument('--max-steps', type=int)
@@ -257,6 +258,7 @@ def main(argv=None):
                     native_backend=args.native_backend,
                     native_options=json.loads(args.native_options_json) if args.native_options_json is not None else None,
                     max_steps=args.max_steps, max_output_item_bytes=args.max_output_item_bytes, max_output_total_bytes=args.max_output_total_bytes, model=args.model, reasoning_effort=args.reasoning_effort, node_budget_mode=args.node_budget_mode,
+                    storage_policy=contracts.read(contracts.regular(args.storage_policy, limit=4096)) if args.storage_policy is not None else None,
                     service_tier=args.service_tier, user_updates=args.user_update,
                     role_profiles=role_profiles,
                     experiment_mode=args.experiment_mode,

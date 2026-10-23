@@ -363,7 +363,14 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
     require_current(root)
     projection=project(root,step,source_cutoff=source_cutoff,extra_steps=extra_steps)
     records,state=projection['records'],projection['search_state']
-    add,paged,files=history.page_writer(c.workspace(root,step))
+    from . import storage_policy as storage
+    frozen=configuration_updates.for_new_job(root,step)
+    context=storage.Deadline(frozen['max_seconds'])
+    inventory=storage.Inventory(frozen.get('storage_policy'),context=context)
+    def copy_bound(source,destination,sha256):
+        inventory.entry();inventory.file(source.stat().st_size)
+        c._copy_bound(source,destination,sha256,root=root,policy=frozen.get('storage_policy'),context=context)
+    add,paged,files=history.page_writer(c.workspace(root,step),root=root,policy=frozen.get('storage_policy'),context=context)
     from . import candidate_refs
     references=candidate_refs.references(records) if worker_view_version==1 else {}
     if references:
@@ -377,7 +384,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
             if public!=reported:
                 raw=c.regular(c._execution_raw(root,record['step']))
                 destination=c.workspace(root,step)/original_path
-                c._copy_bound(raw,destination,source[2]['raw_sha256'])
+                copy_bound(raw,destination,source[2]['raw_sha256'])
                 files.append(dict(path=original_path,sha256=c.digest(destination),size_bytes=destination.stat().st_size,
                     kind='scientific_original'))
             text=json.dumps(public,ensure_ascii=False,allow_nan=False)
@@ -427,7 +434,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                 source=next(source for source in projection['sources'] if source[0]['step']==disposition['source_a'])
                 raw=c.regular(c._execution_raw(root,disposition['source_a']))
                 destination=c.workspace(root,step)/original
-                c._copy_bound(raw,destination,source[2]['raw_sha256'])
+                copy_bound(raw,destination,source[2]['raw_sha256'])
                 files.append(dict(path=original,sha256=c.digest(destination),size_bytes=destination.stat().st_size,
                     kind='scientific_original'))
             row['disposition']=dict(reason=_clip(reason,160),reason_truncated=len(reason.encode())>160,
@@ -488,7 +495,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                     if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
                         raise ValueError('Retirement proof materials exceed the original input bound')
                     target=f'{prefix}/{name}'
-                    c._copy_bound(archive_path(item),c.workspace(root,step)/target,item['sha256'])
+                    copy_bound(archive_path(item),c.workspace(root,step)/target,item['sha256'])
                     recovery_materials.append(dict(path=target,sha256=item['sha256'],size_bytes=item['size_bytes']))
                 experiments.append(dict(step=record['step'],call_id=call['call_id'],execution_status='not_submitted',
                     **(dict(retirement_proof=f'{prefix}/retirement.json',native_originals=[f'{prefix}/{name}' for _,name in retained[1:]])
@@ -513,7 +520,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                     limits=configuration_updates.for_new_job(root,step)
                     if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
                         raise ValueError('Execution recovery materials exceed the original input bound')
-                    c._copy_bound(archive_path(item),c.workspace(root,step)/output['path'],item['sha256'])
+                    copy_bound(archive_path(item),c.workspace(root,step)/output['path'],item['sha256'])
                     recovery_materials.append(dict(path=output['path'],sha256=item['sha256'],size_bytes=item['size_bytes']))
             native_originals=[]
             if call['call_id'] in record.get('recovered_calls',[]):
@@ -527,7 +534,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                     limits=configuration_updates.for_new_job(root,step)
                     if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
                         raise ValueError('Execution recovery originals exceed the original input bound')
-                    c._copy_bound(archive_path(item),c.workspace(root,step)/target,item['sha256'])
+                    copy_bound(archive_path(item),c.workspace(root,step)/target,item['sha256'])
                     recovery_materials.append(dict(path=target,sha256=item['sha256'],size_bytes=item['size_bytes']))
                     native_originals.append(dict(path=target))
             native_pages=paged(native_originals,16,'originals',f'inputs/history/recoveries/{record["step"]:03d}/{call["call_id"]}','recovered-native-originals') if native_originals else []

@@ -12,7 +12,7 @@ import re
 import subprocess
 import sys
 import tempfile
-import uuid
+from functools import wraps
 from urllib.parse import unquote, urlsplit
 
 from . import contracts as c
@@ -136,30 +136,20 @@ def _proof(root, source, *, context=None):
     size = path.stat().st_size
     from . import experiments
     sha = c.digest(path) if context is None else experiments.proof(path,context=context)['sha256']
-    objects = root / 'host-history/objects'
-    snapshot = objects / sha
-    if objects.resolve() != objects or snapshot.is_symlink():
-        raise ObserverIntegrityError('Observer archive must contain original files')
-    if snapshot.exists():
-        if not snapshot.is_file():raise ObserverIntegrityError('Archived observer original changed')
-        actual=c.digest(c.regular(snapshot)) if context is None else experiments.proof(snapshot,context=context)['sha256']
-        if actual != sha:
-            raise ObserverIntegrityError('Archived observer original changed')
-    else:
-        objects.mkdir(parents=True, exist_ok=True)
-        if objects.resolve() != objects:
-            raise ObserverIntegrityError('Observer archive must be an original directory')
-        # A timed-out bounded copy must not poison the next explicit operation.
-        # Keep its partial; a later operation verifies the original anew.
-        temporary = objects / (sha + ('.'+uuid.uuid4().hex if context is not None else '') + '.tmp')
-        if temporary.exists() or temporary.is_symlink():
-            raise ObserverIntegrityError('Observer archive has an uncertain temporary original')
-        c._copy_bound(path,temporary,sha,context=context)
-        with temporary.open('rb') as stream:os.fsync(stream.fileno())
-        if context is not None:context.remaining_seconds()
-        temporary.replace(snapshot)
+    from . import shared_originals, storage_policy as storage
+    limits=storage.for_path(root,path)
+    snapshot=shared_originals.retain(root,path,sha256=sha,size_bytes=size,context=context,policy=limits)
     return dict(path=source, sha256=sha, size_bytes=size, retention='archived',
                 snapshot=snapshot.relative_to(root).as_posix())
+
+
+def _job_storage(function):
+    @wraps(function)
+    def bound(root,job,*args,**kwargs):
+        from . import storage_policy as storage, shared_originals
+        with storage.bind(root,c.settings(root,job).get('storage_policy')), shared_originals.verified():
+            return function(root,job,*args,**kwargs)
+    return bound
 
 
 def read_adapter(config, request):
@@ -264,6 +254,7 @@ def _managed_outputs(interface, completed, observed):
     return completed.get('outputs',[]) if 'result' in completed else observed['outputs'] if observed is not None else []
 
 
+@_job_storage
 def scientific_outputs(root, job, call):
     """Publish selected scientific assets from the full verified call archive."""
     from . import experiments, execution
@@ -319,6 +310,7 @@ def scientific_outputs(root, job, call):
     return result
 
 
+@_job_storage
 def managed_calls(root, job, *, context=None):
     """Capture small common receipts, independent of domain candidates or observers."""
     from . import experiments, breadth, generic_results
@@ -628,6 +620,7 @@ def validate_input_coverage(root, job, rows, published, *, source=None):
             verified_compilers.add(key)
 
 
+@_job_storage
 def _capture(root, job, payload, materials):
     """Snapshot mechanical adapter facts once, before the scientific seal."""
     config = c.settings(root, job).get('history_observer')
@@ -1047,9 +1040,11 @@ def candidate_overview(records):
     return lineage.candidate_view(records)
 
 
-def page_writer(work):
+def page_writer(work, *, root=None, policy=None, context=None):
     from .protocol import require_current
+    from . import storage_policy as storage
     require_current(Path(work).parents[2])
+    inventory=storage.Inventory(policy,context=context)
     files = []
     def omitted(row):
         identity={key:row[key] for key in ('id','step','role','call_id','source','part','parts') if key in row and isinstance(row[key],(int,str)) and len(str(row[key]).encode())<512}
@@ -1060,10 +1055,11 @@ def page_writer(work):
             value=omitted(value)
             data=_bytes(value)
         destination = work / path
+        inventory.entry();inventory.file(len(data))
         # _copy_bound checks existing data and all destination directory symlinks.
         with tempfile.TemporaryDirectory() as temporary:
             original = Path(temporary) / 'page.json';original.write_bytes(data)
-            c._copy_bound(original, destination, hashlib.sha256(data).hexdigest())
+            c._copy_bound(original, destination, hashlib.sha256(data).hexdigest(),root=root,policy=policy,context=context)
         files.append(dict(path=path, sha256=c.digest(destination), size_bytes=len(data)))
     def paged(rows, row_limit, key, prefix, source=None):
         groups, group = [], []

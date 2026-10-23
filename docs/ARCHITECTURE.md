@@ -194,6 +194,28 @@ permissions are not replaced to make them run. The internal permission profile a
 no operator setting. These file views do not establish hostile same-user process
 isolation or a blanket guarantee for generic native execution.
 
+Managed execution outputs, observation originals and history retention reuse the
+instance's existing `host-history/objects/<sha256>` archive. Host-only immutable
+aliases may share an inode across calls; equal bytes do not merge original calls,
+origins or scientific paths. Accepted writable cwd snapshots and Worker input,
+collection and wake views use independent inodes: bounded reflinks where supported,
+otherwise bounded copies. Mode 0400 alone is not same-user write isolation.
+
+`storage_policy` is frozen with the instance and exact job/call configuration.
+It defaults to `enabled=false`, with every limit null. Enabling it requires at least
+one explicit positive `max_scan_entries`, `max_files`, `max_file_bytes`,
+`max_total_bytes` or `max_instance_bytes`; no old constant silently becomes a cap.
+The instance limit serializes participating retention/materialization writers and
+counts regular-file sizes by unique inode, including partials. Reflinks count their
+full size conservatively; hardlink aliases count once. This is managed retention
+accounting, not an OS quota on arbitrary native Worker writes. Disabled quotas do
+not trigger a whole-instance usage scan. Finite execution/IO deadlines and explicit
+handoff or execution-authorization resource policies remain independently effective.
+Necessary dispatched-identity, terminal and retirement receipts bypass content
+quota refusal so exhaustion cannot erase recovery facts; their bytes remain in
+subsequent usage scans. Pre-dispatch acceptance, payloads, logs and materialization
+retain their quota checks.
+
 Control retains exact binding indexes, full receipts and per-file omission inventories;
 default scientific views expose human references, observations and limitations. New
 views are labelled projections, while source, user originals and scientific prose
@@ -504,7 +526,16 @@ Creation atomically publishes a paused child and a durable request/receipt.
 including target, budgets and exact guidance text. Repeating the same ID and
 request reconciles the same receipt, including after loss of the response; a
 conflicting request or existing unrelated target is refused. Receipt reconciliation
-does not require a surviving parent. Explicit `start --continue` clears the pause
+does not require a surviving parent. The destination parent's private operation
+record retains the published child identity and original receipt even after the
+child is deleted or moved; the same operation never recreates that child.
+Interrupted preparation is cleaned only through its registered transaction inode
+while holding that operation's lock. Once a complete staged child and receipt
+are durable, recovery publishes that same child. If publication was not confirmed
+and both the original stage and target are gone, `fork_publication_unknown` retains
+the original identity/receipt for reconciliation and creates nothing. Existing
+targets still undergo receipt and original-integrity checks. Explicit
+`start --continue` clears the pause
 and starts child work under its own gates. Preview and creation launch no model
 or solver calls.
 
@@ -528,6 +559,13 @@ nonblocking before node/admission and direct record locks; that gate serializes
 the two orders. Ordinary archive export also holds this exclusive source gate.
 A held writer blocks fork/archive/delete; an unknown original call still
 requires reconciliation.
+
+All cooperating host processes must see the same stable
+`/tmp/scidiscovery-owner-gates-<euid>` directory and lock inodes, as well as the
+same instance mounts. Do not delete or rotate these gates while processes live.
+Private `/tmp` namespaces, including PrivateTmp or separate containers, require
+an explicit common deployment mount; independent private gates do not coordinate.
+Changing TMPDIR or an XDG runtime directory does not establish that shared mount.
 
 Read-only originals and the host's cooperative source lease protect the declared
 sharing boundary among cooperating current-version writers. They remain a same-user

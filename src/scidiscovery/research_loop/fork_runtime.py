@@ -11,7 +11,7 @@ FROZEN_TASK_SETTINGS = (
     'delivery_policy', 'resume_policy', 'model', 'reasoning_effort', 'service_tier', 'role_profiles',
     'native_backend', 'native_options', 'native_launcher_argv', 'max_output_item_bytes', 'max_output_total_bytes',
     'final_a_completion_policy', 'live_feedback_version', 'experiment_interface_version',
-    'managed_admission_version', 'worker_view_version',
+    'managed_admission_version', 'worker_view_version', 'storage_policy',
 )
 
 
@@ -232,8 +232,13 @@ def build_selected_job(root, step):
     (work / 'work').mkdir(exist_ok=True)
     (work / 'artifacts').mkdir(exist_ok=True)
     job = _selected_base(root, selected, bind_inputs=True)
+    from . import storage_policy as storage
+    frozen=configuration_updates.for_new_job(root,step)
+    context=storage.Deadline(frozen['max_seconds'])
+    inventory=storage.Inventory(frozen.get('storage_policy'),context=context)
     for relative, source, digest in _selected_files(root, selected):
-        c._copy_bound(source, work / relative, digest)
+        inventory.entry();inventory.file(source.stat().st_size)
+        c._copy_bound(source,work/relative,digest,root=root,policy=frozen.get('storage_policy'),context=context)
     # Review inputs remain neutral; general advice waits for the next legal task.
     if job.get('formal_review'):
         statements = selected['job'].get('user_guidance', [])

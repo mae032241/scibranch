@@ -36,9 +36,6 @@ OBSERVATION_VERSION = 1
 ADMISSION_VERSION = 1
 MAX_BYTES = 256_000
 MAX_ASSET = 32 * 1024 * 1024
-MAX_CALLS = 128
-MAX_INPUT_FILES = 128
-MAX_INPUT_BYTES = 64 * 1024 * 1024
 ID = re.compile(r'[A-Za-z0-9._-]{1,128}\Z')
 RETIREMENT_KEY = 'original_submission_retirement'
 RETIREMENT_SCHEMA = 'scidiscovery.permanent-submission-retirement.v1'
@@ -76,8 +73,9 @@ def _configuration_effect(function):
     def guarded(*args, **kwargs):
         first = args[0] if args else kwargs['config']
         config = first.config if isinstance(first, Records) else first
-        from . import contracts as c
-        with instance_owner.lease_for_configuration(config), c.record_writer(Path(config['record_dir'])):
+        from . import contracts as c, storage_policy as storage, experiment_client, shared_originals
+        root = experiment_client.root_for_configuration(config, allow_standalone=True)
+        with instance_owner.lease_for_configuration(config), c.record_writer(Path(config['record_dir'])), storage.bind(root,config.get('storage_policy')), c.verified_digests(), shared_originals.verified():
             return function(*args, **kwargs)
     return guarded
 
@@ -85,8 +83,9 @@ def _configuration_effect(function):
 def record_effect(function):
     @wraps(function)
     def guarded(self,*args,**kwargs):
-        from . import contracts as c
-        with instance_owner.lease_for_configuration(self.config), c.record_writer(self.records.root):
+        from . import contracts as c, storage_policy as storage, experiment_client, shared_originals
+        root = experiment_client.root_for_configuration(self.config, allow_standalone=True)
+        with instance_owner.lease_for_configuration(self.config), c.record_writer(self.records.root), storage.bind(root,self.config.get('storage_policy')), c.verified_digests(), shared_originals.verified():
             return function(self,*args,**kwargs)
     return guarded
 
@@ -167,17 +166,30 @@ def proof(path, limit=None, *, context=None):
     from . import contracts as c
     path=c.regular(Path(path),limit=limit)
     if context is None:return dict(path=str(path),sha256=c.digest(path),size_bytes=path.stat().st_size)
-    digest=hashlib.sha256()
-    with path.open('rb') as stream:
-        for block in iter(lambda:stream.read(1024*1024),b''):
-            context.remaining_seconds();digest.update(block)
-    context.remaining_seconds()
-    return dict(path=str(path),sha256=digest.hexdigest(),size_bytes=path.stat().st_size)
-
-
-def write(path, value):
     from . import atomic_files
-    atomic_files.publish_bytes(path, encoded(value))
+    digest=hashlib.sha256();size=0
+    with atomic_files._regular_stream(path) as stream:
+        before=os.fstat(stream.fileno())
+        while True:
+            context.remaining_seconds()
+            block=stream.read(min(1024*1024,before.st_size-size+1))
+            if not block:break
+            size+=len(block)
+            if size>before.st_size:raise IntegrityError('Execution original grew during verification')
+            digest.update(block)
+        after=os.fstat(stream.fileno())
+        if (size,before.st_size,before.st_mtime_ns)!=(before.st_size,after.st_size,after.st_mtime_ns):
+            raise IntegrityError('Execution original changed during verification')
+    context.remaining_seconds()
+    return dict(path=str(path),sha256=digest.hexdigest(),size_bytes=size)
+
+
+def write(path, value, *, root=None, policy=None, context=None):
+    from . import atomic_files
+    from . import storage_policy as storage
+    path=Path(path);data=encoded(value)
+    with storage.mutation(root,0 if path.exists() else len(data),policy=policy,context=context or storage.Deadline(65)):
+        atomic_files.publish_bytes(path, data)
 
 
 def registration(executor):
@@ -198,7 +210,8 @@ def registration(executor):
 
 HOST_CONFIGURATION_FIELDS = frozenset({'scope','record_dir','native_attempt','admission','breadth',
     'engineering_repair','execution_interface','registered_implementation', 'host_execution_authority',
-    'execution_host_services', 'frozen_execution_interface', 'worker_view_version', 'host_launch_implementation'})
+    'execution_host_services', 'frozen_execution_interface', 'worker_view_version', 'host_launch_implementation',
+    'storage_policy'})
 
 
 def operator_configuration(value, base=None):
@@ -529,8 +542,13 @@ def scientific_outputs(config, observation, *, adapter=None, include_logs=False)
                 if target.exists():
                     if target.read_bytes()!=rendered:raise IntegrityError('Scientific log projection changed')
                 else:
-                    with target.open('xb') as output:output.write(rendered)
-                    target.chmod(0o400)
+                    from . import atomic_files,storage_policy as storage,experiment_client
+                    limits=config.get('storage_policy')
+                    context=storage.Deadline(config['max_seconds'])
+                    storage.Inventory(limits,context=context).file(len(rendered))
+                    with storage.mutation(experiment_client.root_for_configuration(config,allow_standalone=True),
+                            len(rendered),policy=limits,context=context):
+                        atomic_files.publish_bytes(target,rendered,existing_ok=True)
                 item=proof(target)
                 selected.append(LocalFileDescriptor(name=log_name+'/'+stream+'.txt',local_path=str(target),
                     sha256=item['sha256'],size_bytes=item['size_bytes'],media_type='text/plain'))
@@ -545,9 +563,13 @@ def _collected_view(config, call_id, observation, adapter):
     root=experiment_client.root_for_configuration(config)
     work=c.workspace(root,config['scope']['step'])
     result = []
+    from . import storage_policy as storage
+    context=storage.Deadline(config['max_seconds'])
+    inventory=storage.Inventory(config.get('storage_policy'),context=context)
     for descriptor in scientific_outputs(config,observation,adapter=adapter,include_logs=True):
+        inventory.entry();inventory.file(descriptor.size_bytes)
         target = work / 'work/retained-experiments' / call_id / 'outputs' / descriptor.name
-        c._copy_bound(Path(descriptor.local_path), target, descriptor.sha256)
+        c._copy_bound(Path(descriptor.local_path), target, descriptor.sha256,context=context,policy=config.get('storage_policy'),root=root)
         result.append(dict(name=descriptor.name, path=str(target), media_type=descriptor.media_type,
             size_bytes=descriptor.size_bytes, retention='retained_original'))
     return dict(status='collected', call_id=call_id, outputs=result)
@@ -558,6 +580,8 @@ def freeze(config, executor, *, path=None):
     from .protocol import require_scope
     require_scope(config.get('scope'))
     value = dict(config)
+    from . import storage_policy as storage
+    value['storage_policy'] = storage.configuration(value.get('storage_policy'))
     from . import breadth
     breadth.validate(value.get('breadth'))
     value.setdefault('admission',dict(version=ADMISSION_VERSION,mode='unavailable'))
@@ -631,6 +655,7 @@ def configure(root,step,executor,config,output):
         scope=stage_scope(root,job),breadth=(job.get('search') or {}).get('breadth'),
         **(dict(engineering_repair=dict(candidate_id=candidate_refs.resolve_reference(root,job,
             job['engineering_repair']['candidate_id']))) if job.get('engineering_repair') else {}))
+    value['storage_policy'] = c.settings(root, job).get('storage_policy')
     client = None
     if job.get('worker_view_version') == 1:
         from . import experiment_client
@@ -747,6 +772,10 @@ class Records:
         if self.root.resolve() != self.root:
             raise IntegrityError('Execution record namespace changed')
 
+    def storage_root(self):
+        from . import experiment_client
+        return experiment_client.root_for_configuration(self.config,allow_standalone=True) or self.root
+
     def calls(self):
         root = self.root / 'calls'
         if root.resolve() != root:
@@ -794,7 +823,9 @@ class Records:
         _require_new_execution(self.config)
         from .protocol import require_scope
         require_scope(self.config['scope'])
-        from . import contracts as c
+        from . import contracts as c, storage_policy as storage
+        operation_context = storage.Deadline(self.config['max_seconds'],operation_context)
+        inventory = storage.Inventory(self.config.get('storage_policy'),context=operation_context)
         original=proof(descriptor.local_path,context=operation_context)
         if original['sha256']!=descriptor.sha256 or original['size_bytes']!=descriptor.size_bytes:
             raise IntegrityError('Prepared execution input changed')
@@ -802,15 +833,19 @@ class Records:
         self.root.mkdir(parents=True,exist_ok=True)
         directory=Path(tempfile.mkdtemp(prefix='.prepared-',dir=self.root))
         source = directory / 'source.py'
-        c._copy_bound(Path(descriptor.local_path),source,descriptor.sha256,context=operation_context)
         destination=self.root/'calls'/descriptor.name
-        source_proof=proof(source,context=operation_context);source_proof['path']=str(destination/'source.py')
+        source_proof=dict(path=str(destination/'source.py'),sha256=descriptor.sha256,size_bytes=descriptor.size_bytes)
         accepted = dict(metadata, call_id=descriptor.name, scope=self.config['scope'],
             source_script=descriptor.local_path, script=source_proof,native_attempt=self.config.get('native_attempt'),
             prepared=descriptor.model_dump(mode='json'), interface=interface)
         try:
             files = metadata.get('snapshot_files', [])
             if not isinstance(files,list):raise ValueError('Managed input inventory required')
+            if not files:inventory.file(descriptor.size_bytes)
+            for item in files:
+                inventory.entry();inventory.file(item['size_bytes'])
+            c._copy_bound(Path(descriptor.local_path),source,descriptor.sha256,context=operation_context,
+                root=self.storage_root(),policy=self.config.get('storage_policy'))
             seen = set()
             for item in files:
                 name = item['name']; relative = Path(name)
@@ -822,7 +857,8 @@ class Records:
                 if any(original[key]!=item[key] for key in ('sha256','size_bytes')):
                     raise IntegrityError('Managed input changed before acceptance')
                 target=directory/'inputs'/relative
-                c._copy_bound(Path(item['path']),target,item['sha256'],context=operation_context)
+                c._copy_bound(Path(item['path']),target,item['sha256'],context=operation_context,
+                    root=self.storage_root(),policy=self.config.get('storage_policy'))
             with self.lease():
                 if expected_calls is not None and [path.name for path in self.calls()]!=expected_calls:
                     raise ConcurrentExecution('Another original execution was accepted; query its identity')
@@ -836,7 +872,8 @@ class Records:
                     binding=breadth.admit(self.config.get('breadth'),mechanism,self.config['scope'],
                         [self.accepted(path.name) for path in self.calls()])
                     if binding is not None:accepted['mechanism_binding']=binding
-                    write(directory/'accepted.json',accepted)
+                    write(directory/'accepted.json',accepted,root=self.storage_root(),
+                        policy=self.config.get('storage_policy'),context=operation_context)
                     destination.parent.mkdir(exist_ok=True)
                     directory.rename(destination)
         finally:
@@ -858,6 +895,10 @@ class Records:
             if 'mechanism_binding' in value and value['mechanism_binding']!=accepted['mechanism_binding']:
                 raise IntegrityError('Execution receipt changed scientific mechanism')
             value=dict(value,call_id=call_id,scope=self.config['scope'],mechanism_binding=accepted['mechanism_binding'])
+        # These receipts retain dispatched identities, cleanup and terminal or
+        # permanent-retirement facts. Content quota exhaustion must not erase
+        # recovery information after a real side effect. Admission and retained
+        # payloads/logs remain quota-bound; receipt bytes count in the next scan.
         write(directory / filename, value)
 
     def accepted(self,call_id):
@@ -1166,7 +1207,12 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
     validate cleanup, transport and exit code in status_details/result. Scientific
     readers consume only this immutable projection and its retained originals.
     """
+    from . import shared_originals, storage_policy as storage, experiment_client
+    operation_context=storage.Deadline(config['max_seconds'],operation_context)
     records=Records(config);directory=records.directory(call_id)
+    storage_root=experiment_client.root_for_configuration(config,allow_standalone=True) or records.root
+    inventory=storage.Inventory(config.get('storage_policy'),context=operation_context)
+    retained={}
     path=directory/'execution-observation.json'
     if path.exists():
         value=json.loads(read(path));verify_observation(value,lambda item:Path(item['path']),
@@ -1198,17 +1244,30 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
         if proof(item['path'],context=operation_context)!=item:raise IntegrityError('Adapter terminal original changed')
     def retain(item):
         from . import contracts as c
-        source=Path(item['path']);original=proof(source,context=operation_context)
-        if any(original[key]!=item[key] for key in ('sha256','size_bytes')):
+        source=c.regular(Path(item['path']));info=source.stat()
+        key=(str(source),info.st_dev,info.st_ino,info.st_mtime_ns,info.st_ctime_ns,
+            item['sha256'],item['size_bytes'])
+        if key in retained:return dict(retained[key],source=item)
+        original=proof(source,context=operation_context)
+        if any(original[field]!=item[field] for field in ('sha256','size_bytes')):
             raise IntegrityError('Execution observation original changed during collection')
         target=directory/'observed-originals'/item['sha256']
-        c._copy_bound(source,target,item['sha256'],context=operation_context)
-        return dict(proof(target,context=operation_context),source=item)
+        frozen=shared_originals.retain(storage_root,source,sha256=item['sha256'],size_bytes=item['size_bytes'],
+            context=operation_context,policy=config.get('storage_policy'))
+        shared_originals.link(frozen,target,sha256=item['sha256'],size_bytes=item['size_bytes'],context=operation_context,
+            root=storage_root,policy=config.get('storage_policy'))
+        result=dict(path=str(target),sha256=item['sha256'],size_bytes=item['size_bytes'])
+        info=source.stat()
+        key=(str(source),info.st_dev,info.st_ino,info.st_mtime_ns,info.st_ctime_ns,
+            item['sha256'],item['size_bytes'])
+        retained[key]=result
+        return dict(result,source=item)
     proofs=[retain(item) for item in proofs]
     outputs=[];names=set()
     if lifecycle_capabilities(adapter).collect:
         descriptors=adapter.collect_original(call_id) if collected is None else collected
         for descriptor in descriptors:
+            inventory.entry();inventory.file(descriptor.size_bytes)
             name=Path(descriptor.name)
             if (name.is_absolute() or '..' in name.parts or not name.parts or name.as_posix()!=descriptor.name
                     or '\\' in descriptor.name or descriptor.name in names):
@@ -1241,7 +1300,7 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
     with records.lease('observation-'+call_id+'.lock'):
         if path.exists():
             if json.loads(read(path))!=value:raise IntegrityError('Frozen execution observation changed')
-        else:write(path,value)
+        else:write(path,value,root=storage_root,policy=config.get('storage_policy'),context=operation_context)
     from . import execution_authority
     execution_authority.reconcile_resources(config,adapter,call_id,observation=value,operation_context=operation_context)
     return value

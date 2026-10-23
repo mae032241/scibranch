@@ -123,6 +123,21 @@ managed policy、额外可写根以及无法忠实投影后端权限的自定义
 明确返回不支持，不为执行而替换其原生权限。内部权限 profile 不增加操作者配置项。
 这些文件视图不构成防同用户恶意进程的隔离，也不对泛原生执行提供统一隔离保证。
 
+受管执行输出、观察原件和历史保留共用实例既有的 `host-history/objects/<sha256>`。
+宿主私有不可变 alias 可跨 call 共享 inode；相同字节不合并原 call、origin 或科学路径。
+可写 cwd 快照、Worker 输入及 collect/wake 视图使用独立 inode，优先有界 reflink，
+不支持时有界复制。0400 本身不构成同用户写隔离。
+
+`storage_policy` 随实例及准确 job/call 配置冻结，默认 `enabled=false` 且各额度为 null。
+启用须至少明确一项正整数 `max_scan_entries`、`max_files`、`max_file_bytes`、
+`max_total_bytes` 或 `max_instance_bytes`，不暗中启用旧常量。
+实例累计额度串行核对合作保留/物化写者，按唯一 inode 的完整 regular 文件大小计量，
+含正在写入的 partial；reflink 保守计完整大小，hardlink alias 不重复计费。
+这不是任意原生 Worker 写入的 OS 磁盘配额。关闭时不进行实例全树用量扫描；
+有限执行/IO deadline、显式 handoff 额度及独立执行授权资源合同继续有效。
+已派发身份、终态和退休事实等必要控制回执不因内容额度耗尽而拒写，防止丢失恢复依据；
+回执字节仍进入后续用量扫描。派发前 acceptance、内容原件、日志及物化继续受额度约束。
+
 控制侧保留完整绑定索引、回执和逐文件省略绑定；默认科学视图提供人可读引用、观察与限制。
 新视图明确标注为投影，源代码、用户原件和科学正文保留原内容。独立操作侧导出工具
 `scripts/acceptance/worker_evidence_view.py` 核验显式绑定的原索引及已索引字节，生成分开的
@@ -304,6 +319,11 @@ runtime/adapter 读取范围、命名空间映射和交付目标保持冻结；�
 创建以事务方式发布暂停子实例及持久 request/receipt。`fork-create` 以 `expected_preview_id` 和
 `operation_id` 绑定完整请求，包括目标、新预算及指引原文。同 ID、同请求重复调用核对同一回执，
 包括响应丢失后的核对；冲突请求或已有无关目标明确拒绝。回执核对不依赖父目录仍然存在。
+目标父目录的私有 operation 记录持久保留已发布 child 的原身份和回执，即使 child 删除或移走，
+同一操作也不重建它。中断的准备事务仅在该 operation 锁下按已登记的准确目录 inode 清理；
+完整 stage 与原回执落盘后，恢复只发布同一个 stage。若发布尚未确认且原 stage 与目标均消失，
+返回 `fork_publication_unknown` 并保留原身份/回执供核对，不新建实例。目标仍存在时继续核对
+其回执与原件完整性。
 须显式 `start --continue` 清除暂停后才在子实例自身门槛下推进；预览与创建均不启动模型或 solver。
 
 可选方向指引按用户准确原文作为 advice 交给所选普通任务及合法后继；若选中正式审查，
@@ -318,6 +338,11 @@ lease。生命周期静止检查对现有记录目录内全部直接 `*.lock` �
 node/admission、适配器私有锁；生命周期先取 owner gate 独占非阻塞锁，再取 node/admission
 及直接记录锁，gate 互斥这两种顺序；普通归档导出同样持有独占 source gate。
 活动写者阻止 fork/archive/delete，未知原调用仍须先对账。
+
+全部合作宿主进程必须看见同一稳定的 `/tmp/scidiscovery-owner-gates-<euid>` 目录及锁 inode，
+并共享相同的实例挂载；进程存活期间不得删除或轮换 gate。PrivateTmp、容器等私有 `/tmp`
+命名空间须由部署显式提供共同挂载；互不相见的私有 gate 不建立协调。改 TMPDIR 或 XDG
+运行目录本身不能证明双方共享同一挂载。
 
 只读原件与宿主统一协作 source lease 在配合协议的当前版本 writer 间保护共享边界，仍是
 同用户软边界：同用户进程主动修改权限并原地写入共享 inode 可损坏所有引用，摘要校验负责

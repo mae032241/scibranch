@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import selectors
 import signal
-import shutil
 import subprocess
 import time
 
@@ -17,8 +16,7 @@ from scidiscovery.operations.execution import (AdapterCapability, ExecutionInter
 from scidiscovery.operations.runtime_plugins import RuntimePluginContribution, RuntimePluginFactory
 from . import configuration_updates
 from . import experiments as e
-
-MAX_SCAN_ENTRIES = 1024
+from . import storage_policy as storage, shared_originals
 
 # Published by describe; this is the existing optional result format, not a
 # domain evaluation or a grant to execute anything.
@@ -108,7 +106,8 @@ class LocalExecution:
             if not source.is_relative_to(root) or source.relative_to(root).parts[0]=='artifacts':
                 raise ValueError('Script must belong to the experiment input directory')
             metadata.update(experiment_directory=str(root),entry=source.relative_to(root).as_posix(),
-                snapshot_files=self.files(root,exclude_artifacts=True))
+                snapshot_files=self.files(root,exclude_artifacts=True,policy=self.config.get('storage_policy'),
+                    context=storage.Deadline(self.config['max_seconds'])))
             entry=next(item for item in metadata['snapshot_files'] if item['name']==metadata['entry'])
             if entry['sha256']!=payload.sha256 or entry['size_bytes']!=payload.size_bytes:
                 raise e.IntegrityError('Experiment script changed during preparation')
@@ -118,26 +117,32 @@ class LocalExecution:
         return metadata
 
     @staticmethod
-    def files(root,*,exclude_artifacts=False):
+    def files(root,*,exclude_artifacts=False,policy=None,context=None):
+        context = context or storage.Deadline(65)
+        inventory = storage.Inventory(policy, context=context)
         if root.resolve()!=root or not root.is_dir():
             raise ValueError('Managed files require an original directory')
-        files=[];total=0;scanned=0;pending=[root]
+        files=[];pending=[root]
         while pending:
             directory=pending.pop()
             if directory.resolve()!=directory or not directory.is_dir():
                 raise ValueError('Managed directories must remain original')
             with os.scandir(directory) as entries:
                 for entry in entries:
+                    inventory.entry()
                     if exclude_artifacts and directory==root and entry.name=='artifacts':
                         if not entry.is_dir(follow_symlinks=False):
                             raise ValueError('Managed artifacts output must be an original directory')
                         continue
-                    scanned+=1
                     path=Path(entry.path);name=path.relative_to(root).as_posix()
                     if entry.is_symlink():raise ValueError('Managed directories cannot contain links')
                     if entry.is_dir(follow_symlinks=False):
                         pending.append(path);continue
-                    item=e.proof(path);total+=item['size_bytes']
+                    size=entry.stat(follow_symlinks=False).st_size
+                    inventory.file(size)
+                    item=e.proof(path,context=context)
+                    if item['size_bytes'] != size:
+                        raise e.IntegrityError('Managed file changed during its inventory')
                     files.append(dict(item,name=name))
         return sorted(files,key=lambda item:item['name'])
 
@@ -214,6 +219,11 @@ class LocalExecution:
         if 'entry' in accepted:
             cwd=str(directory/'inputs');(Path(cwd)/'artifacts').mkdir()
         deadline=self._execution_deadline(accepted)
+        from . import experiment_client
+        storage_root = experiment_client.root_for_configuration(self.config, allow_standalone=True) or self.records.root
+        limits = storage.configuration(self.config.get('storage_policy'))
+        log_inventory = storage.Inventory(limits)
+        log_limited = False
         with (directory/'stdout.raw').open('xb') as out,(directory/'stderr.raw').open('xb') as err:
             command=self.command(accepted)
             from . import worker_execution_bridge
@@ -222,33 +232,61 @@ class LocalExecution:
                 raise TimeoutError('Original reserved experiment deadline reached before launch')
             process=subprocess.Popen(command,cwd=cwd,stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,start_new_session=True)
-            identity=runtime.process_identity(process.pid,hashlib.sha256(e.encoded(accepted)).hexdigest())
-            self.records.publish(call_id,'process.json',identity)
-            seconds=self.config['max_seconds']
-            if deadline is None:deadline=time.monotonic()+seconds
-            with selectors.DefaultSelector() as selector:
-                selector.register(process.stdout,selectors.EVENT_READ);selector.register(process.stderr,selectors.EVENT_READ)
-                count=0
-                while selector.get_map() or process.poll() is None:
-                    for key,_ in selector.select(.1):
-                        chunk=os.read(key.fileobj.fileno(),65536)
-                        if not chunk:selector.unregister(key.fileobj);continue
-                        count+=len(chunk)
-                        sink=out if key.fileobj is process.stdout else err;sink.write(chunk);sink.flush()
-                    if time.monotonic()>=deadline:
-                        transport_complete=False
-                        if runtime.process_matches(identity,identity['task_sha256']):os.killpg(identity['pgid'],signal.SIGTERM)
-                        break
-            try:process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                if runtime.process_matches(identity,identity['task_sha256']):os.killpg(identity['pgid'],signal.SIGKILL)
-                process.wait(timeout=5)
-            cleanup=runtime.cleanup_owned_group(identity)=='observed_group_cleaned'
-            returncode=process.returncode
-            process.stdout.close();process.stderr.close()
+            identity=None
+            try:
+                identity=runtime.process_identity(process.pid,hashlib.sha256(e.encoded(accepted)).hexdigest())
+                self.records.publish(call_id,'process.json',identity)
+                seconds=self.config['max_seconds']
+                if deadline is None:deadline=time.monotonic()+seconds
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stdout,selectors.EVENT_READ);selector.register(process.stderr,selectors.EVENT_READ)
+                    count=0
+                    while selector.get_map() or process.poll() is None:
+                        for key,_ in selector.select(.1):
+                            chunk=os.read(key.fileobj.fileno(),65536)
+                            if not chunk:selector.unregister(key.fileobj);continue
+                            sink=out if key.fileobj is process.stdout else err
+                            try:
+                                log_inventory.limit('max_file_bytes',sink.tell()+len(chunk))
+                                log_inventory.limit('max_total_bytes',count+len(chunk))
+                                with storage.mutation(storage_root,len(chunk),policy=limits,
+                                        context=storage.Deadline(max(.001,deadline-time.monotonic()))):
+                                    sink.write(chunk);sink.flush()
+                                count+=len(chunk)
+                            except storage.StorageQuotaExceeded:
+                                log_limited=True
+                                break
+                            except TimeoutError:
+                                break
+                        if log_limited or time.monotonic()>=deadline:
+                            transport_complete=False
+                            break
+            except BaseException:
+                transport_complete=False
+                raise
+            finally:
+                # An identity/receipt/IO exception after Popen must not leave an
+                # unregistered running child. Preserve that original exception.
+                if process.poll() is None:
+                    if identity is not None and runtime.process_matches(identity,identity['task_sha256']):
+                        try:os.killpg(identity['pgid'],signal.SIGTERM)
+                        except ProcessLookupError:pass
+                    else:process.terminate()
+                try:process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    if identity is not None and runtime.process_matches(identity,identity['task_sha256']):
+                        try:os.killpg(identity['pgid'],signal.SIGKILL)
+                        except ProcessLookupError:pass
+                    else:process.kill()
+                    process.wait(timeout=5)
+                if identity is not None:
+                    cleanup=runtime.cleanup_owned_group(identity)=='observed_group_cleaned'
+                returncode=process.returncode
+                process.stdout.close();process.stderr.close()
         if finish is not None:finish(returncode,cleanup,transport_complete)
         self.records.publish(call_id,'terminal.json',dict(returncode=returncode,cleanup_confirmed=cleanup,
-            transport_complete=transport_complete,wall_seconds=time.monotonic()-started))
+            transport_complete=transport_complete,wall_seconds=time.monotonic()-started,
+            **(dict(storage_limit_reached=True) if log_limited else {})))
         self.records.publish(call_id,'completed.json',self.completion(directory,accepted,returncode,cleanup,transport_complete))
 
     def completion(self,directory,accepted,returncode,cleanup,transport_complete):
@@ -264,14 +302,20 @@ class LocalExecution:
                 result=dict(status='unavailable',metrics=[],outputs=[],diagnostic='execution_cleanup_unknown')
             else:
                 try:
-                    for item in self.files(directory/'inputs/artifacts'):
+                    from . import experiment_client
+                    root = experiment_client.root_for_configuration(self.config, allow_standalone=True) or self.records.root
+                    context=storage.Deadline(self.config['max_seconds'])
+                    for item in self.files(directory/'inputs/artifacts',policy=self.config.get('storage_policy'),context=context):
                         source=Path(item['path']);target=directory/'outputs'/item['name']
-                        target.parent.mkdir(parents=True,exist_ok=True)
-                        shutil.copyfile(source,target);target.chmod(0o400)
-                        frozen=e.proof(target)
-                        if frozen['sha256']!=item['sha256']:raise e.IntegrityError('Managed output changed during collection')
+                        frozen_original=shared_originals.retain(root,source,sha256=item['sha256'],size_bytes=item['size_bytes'],
+                            context=context,policy=self.config.get('storage_policy'))
+                        shared_originals.link(frozen_original,target,sha256=item['sha256'],size_bytes=item['size_bytes'],context=context,
+                            root=root,policy=self.config.get('storage_policy'))
+                        frozen=dict(path=str(target),sha256=item['sha256'],size_bytes=item['size_bytes'])
                         outputs.append(dict(frozen,name=item['name']))
                     result=self.read_result(directory/'outputs',outputs)
+                except storage.StorageQuotaExceeded:
+                    result=dict(status='unavailable',metrics=[],outputs=[],diagnostic='managed_output_storage_limit')
                 except (OSError,ValueError) as error:
                     result=dict(status='unavailable',metrics=[],outputs=[],diagnostic='managed_output_io' if isinstance(error,OSError) else 'managed_output_invalid')
         terminal=json.loads(e.read(directory/'terminal.json'))

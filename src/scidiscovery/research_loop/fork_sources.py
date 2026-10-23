@@ -192,6 +192,7 @@ def source_guard(parent_root, *, create_gate=True):
                 acquire(records.parent / 'accept.lock')
         acquire(root / 'execution-authority/writer.lock')
         acquire(root / 'control-ledger.lock')
+        acquire(root / 'host-runtime/storage.lock')
         token = _guarded.set(_guarded.get() | {str(root)})
         try:
             yield

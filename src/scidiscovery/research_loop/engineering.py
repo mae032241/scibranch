@@ -153,7 +153,10 @@ def validate_job(root, job):
 
 def bind_inputs(root, job):
     from . import delivery
+    from . import storage_policy as storage
     policy=configuration_updates.for_job(root, job)
+    context=storage.Deadline(policy['max_seconds'])
+    inventory=storage.Inventory(policy.get('storage_policy'),context=context)
     repair=job['engineering_repair']
     proofs=[repair['objects'][name] for name in ('source.py','artifact') if name in repair['objects']]
     if c.output_quota_exceeded(policy,(proof['size_bytes'] for proof in [*proofs,*job['direct_materials']])):
@@ -164,7 +167,9 @@ def bind_inputs(root, job):
     for name in ('source.py','artifact'):
         proof=job['engineering_repair']['objects'].get(name)
         if proof is None:continue
-        c._copy_bound(_repair_original(root, job['engineering_repair'], proof),c.workspace(root,job['step'])/'inputs/repair'/name,proof['sha256'])
+        inventory.entry();inventory.file(proof['size_bytes'])
+        c._copy_bound(_repair_original(root,job['engineering_repair'],proof),c.workspace(root,job['step'])/'inputs/repair'/name,
+            proof['sha256'],root=root,policy=policy.get('storage_policy'),context=context)
 
 
 def _repair_original(root, repair, proof):

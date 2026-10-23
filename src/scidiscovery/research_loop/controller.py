@@ -19,6 +19,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
             model: str, reasoning_effort: str, service_tier: str = "default",
             max_output_item_bytes: int | None = None,
             max_output_total_bytes: int | None = None,
+            storage_policy: dict | None = None,
             user_updates: list[Path] | None = None,
             history_observer: dict | None = None,
             search_policy: dict | None = search.DEFAULT_POLICY,
@@ -45,9 +46,11 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
             _identity_root: Path | None = None,
             _public_identity_root: Path | None = None,
             _user_update_texts: list[str] | None = None,
-            _source_facts_factory=None) -> dict:
+            _source_facts_factory=None, _on_created=None) -> dict:
     """Freeze an explicit goal and finite launch budgets in a fresh directory."""
     from . import candidate_nominations
+    from . import storage_policy as storage
+    storage_limits = storage.configuration(storage_policy)
     nomination_limits=candidate_nominations.configuration(candidate_extra_slots)
     portfolio_limits = search.portfolio_policy(portfolio_policy) if portfolio_policy is not None else None
     if exploration_order_version is not None:
@@ -202,7 +205,8 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
         max_tokens=max_tokens, max_seconds=max_seconds, max_steps=max_steps, time_budget_basis="active",
         model=model, reasoning_effort=reasoning_effort, service_tier=service_tier,
         max_output_item_bytes=max_output_item_bytes,
-        max_output_total_bytes=max_output_total_bytes)
+        max_output_total_bytes=max_output_total_bytes,
+        storage_policy=storage_limits)
     settings.update(backend_settings)
     if ui is not None:
         settings['ui'] = dict(ui)
@@ -267,6 +271,8 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     from .instance_owner import creation
     with creation(root):
         root.mkdir(parents=True)
+        if _on_created is not None:
+            _on_created(root)
         # Include newly created parents and this root before writing originals.
         with creation(root):
             globals_ = root / 'project/global'
@@ -315,6 +321,8 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
             contracts.write(root / "settings.json", settings)
             contracts.write(root / "settings-identity.json",
                             dict(sha256=contracts.digest(root / "settings.json")))
+            with storage.mutation(root,0,policy=storage_limits,context=storage.Deadline(max_seconds)):
+                pass
     return settings
 
 

@@ -349,3 +349,60 @@ def test_archive_fences_first_managed_writer_after_lease_enumeration(tmp_path, m
     result = archive.archive_export(root, tmp_path / 'archive')
     assert result['status'] == 'archive_exported' and attempted == [True]
     assert not records.exists() and not effect.exists()
+
+
+@pytest.mark.parametrize('mode', [0o400, 0o600])
+def test_export_link_metadata_tolerance_is_limited_to_readonly_files(tmp_path, monkeypatch, mode):
+    import os
+    root, material = scene(tmp_path); package = tmp_path / 'archive'
+    material.chmod(mode)
+    alias = tmp_path / 'sibling-reference'
+    copy = archive.files.copy_verified
+    before = material.stat()
+    def retain_sibling(source, destination, entry):
+        copy(source, destination, entry)
+        if source == material:
+            os.link(material, alias)
+            alias.unlink()
+    monkeypatch.setattr(archive.files, 'copy_verified', retain_sibling)
+    if mode == 0o400:
+        archive.archive_export(root, package)
+        row = next(row for row in entries(package) if row['path'] == material.relative_to(root).as_posix())
+        assert (package / row['blob']).read_bytes() == material.read_bytes()
+    else:
+        with pytest.raises(archive.files.ArchiveError, match='scope changed'):
+            archive.archive_export(root, package)
+        assert not package.exists()
+    assert material.stat().st_ino == before.st_ino and material.stat().st_mtime_ns == before.st_mtime_ns
+    assert material.stat().st_ctime_ns != before.st_ctime_ns
+
+
+@pytest.mark.parametrize('mutation', ['bytes', 'inode', 'mode', 'mtime', 'added', 'removed'])
+def test_readonly_export_still_rejects_every_non_ctime_change(tmp_path, monkeypatch, mutation):
+    import os
+    root, material = scene(tmp_path); package = tmp_path / 'archive'
+    material.chmod(0o400)
+    copy = archive.files.copy_verified
+    def change_original(source, destination, entry):
+        copy(source, destination, entry)
+        if source != material:
+            return
+        if mutation == 'bytes':
+            material.chmod(0o600); material.write_bytes(b'different original bytes'); material.chmod(0o400)
+        elif mutation == 'inode':
+            replacement = material.with_name('replacement')
+            replacement.write_bytes(material.read_bytes()); replacement.chmod(0o400)
+            before = material.stat(); os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+            replacement.replace(material)
+        elif mutation == 'mode':
+            material.chmod(0o600)
+        elif mutation == 'mtime':
+            before = material.stat(); os.utime(material, ns=(before.st_atime_ns, before.st_mtime_ns + 1000000000))
+        elif mutation == 'added':
+            (material.parent / 'another-original').write_bytes(b'new original')
+        else:
+            material.unlink()
+    monkeypatch.setattr(archive.files, 'copy_verified', change_original)
+    with pytest.raises(archive.files.ArchiveError, match='scope changed|scope gained|scope lost'):
+        archive.archive_export(root, package)
+    assert not package.exists()

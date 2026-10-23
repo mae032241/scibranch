@@ -167,7 +167,7 @@ def from_document(document, *, base):
     budgets = _table(document.get('budget', {}),
         {'max_tokens', 'max_seconds', 'max_steps', 'max_output_item_bytes',
          'max_output_total_bytes', 'node_targets', 'role_shares', 'breadth', 'correction',
-         'candidate_extra_slots', 'portfolio_review_after_cycles'}, 'budget')
+         'candidate_extra_slots', 'portfolio_review_after_cycles', 'storage'}, 'budget')
     for key in ('max_tokens', 'max_seconds', 'max_steps'):
         if key not in budgets:
             raise ValueError(f'budget.{key} is required')
@@ -175,6 +175,8 @@ def from_document(document, *, base):
     for key in ('max_output_item_bytes', 'max_output_total_bytes', 'candidate_extra_slots'):
         if key in budgets:
             result[key] = budgets[key]
+    if 'storage' in budgets:
+        result['storage_policy'] = budgets['storage']
     for source, target in (('node_targets', 'node_budget_policy'), ('role_shares', 'role_budget_policy'),
                            ('breadth', 'search_policy'), ('correction', 'correction_policy')):
         if source in budgets:
@@ -342,6 +344,9 @@ def to_document(root, settings=None):
         agent['native'] = extra
     budgets = {key: value[key] for key in ('max_tokens', 'max_seconds', 'max_steps',
                'max_output_item_bytes', 'max_output_total_bytes') if value.get(key) is not None}
+    if value.get('storage_policy') is not None:
+        # TOML has no null: omitted dimensions retain their disabled defaults.
+        budgets['storage'] = {key: item for key, item in value['storage_policy'].items() if item is not None}
     for source, target in (('node_budget_policy', 'node_targets'), ('role_budget_policy', 'role_shares'),
                            ('search_policy', 'breadth'), ('correction_policy', 'correction')):
         if value.get(source) is not None:
