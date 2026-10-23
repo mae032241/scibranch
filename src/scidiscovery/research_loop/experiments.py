@@ -445,13 +445,17 @@ def _scientific_projection_directory(config):
                 or not record_directory.is_absolute() or record_directory.resolve()!=record_directory
                 or not record_directory.is_dir()):
             raise IntegrityError('Scientific projection has no canonical standalone host directory')
-        projection_directory=record_directory.parent/'scientific-output-views'
+        # Standalone Records owns this whole explicit storage namespace. Views
+        # stay beside calls/ so its CAS, lock, quotas and aliases share one root.
+        projection_directory=record_directory/'scientific-output-views'
     else:
         task=c.digest(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
         if config['scope'].get('job_sha256')!=task:
             raise IntegrityError('Scientific projection differs from its exact original task')
         projection_directory=root/'host-runtime/experiment-control'/task/'scientific-output-views'
-    if projection_directory.resolve()!=projection_directory or projection_directory.is_relative_to(record_directory):
+    if (projection_directory.resolve()!=projection_directory
+            or root is not None and projection_directory.is_relative_to(record_directory)
+            or projection_directory.is_relative_to(record_directory/'calls')):
         raise IntegrityError('Scientific projection must remain outside original managed calls')
     projection_directory.mkdir(parents=True,exist_ok=True,mode=0o700)
     if not projection_directory.is_dir():raise IntegrityError('Scientific projection directory is unavailable')
@@ -539,16 +543,13 @@ def scientific_outputs(config, observation, *, adapter=None, include_logs=False)
                     rendered=rendered.replace(os.fsencode(source),os.fsencode(destination))
                 target=target_directory/(stream+'.txt')
                 if target.is_symlink():raise IntegrityError('Scientific log projection must be an original file')
-                if target.exists():
-                    if target.read_bytes()!=rendered:raise IntegrityError('Scientific log projection changed')
-                else:
-                    from . import atomic_files,storage_policy as storage,experiment_client
-                    limits=config.get('storage_policy')
-                    context=storage.Deadline(config['max_seconds'])
-                    storage.Inventory(limits,context=context).file(len(rendered))
-                    with storage.mutation(experiment_client.root_for_configuration(config,allow_standalone=True),
-                            len(rendered),policy=limits,context=context):
-                        atomic_files.publish_bytes(target,rendered,existing_ok=True)
+                from . import shared_originals,storage_policy as storage,experiment_client
+                limits=config.get('storage_policy')
+                context=storage.Deadline(config['max_seconds'])
+                root=experiment_client.root_for_configuration(config,allow_standalone=True) or Path(config['record_dir'])
+                original=shared_originals.publish_bytes(root,rendered,policy=limits,context=context)
+                shared_originals.link(original,target,sha256=hashlib.sha256(rendered).hexdigest(),
+                    size_bytes=len(rendered),root=root,policy=limits,context=context)
                 item=proof(target)
                 selected.append(LocalFileDescriptor(name=log_name+'/'+stream+'.txt',local_path=str(target),
                     sha256=item['sha256'],size_bytes=item['size_bytes'],media_type='text/plain'))
@@ -569,7 +570,7 @@ def _collected_view(config, call_id, observation, adapter):
     for descriptor in scientific_outputs(config,observation,adapter=adapter,include_logs=True):
         inventory.entry();inventory.file(descriptor.size_bytes)
         target = work / 'work/retained-experiments' / call_id / 'outputs' / descriptor.name
-        c._copy_bound(Path(descriptor.local_path), target, descriptor.sha256,context=context,policy=config.get('storage_policy'),root=root)
+        c._bind_original(Path(descriptor.local_path), target, descriptor.sha256, context=context, policy=config.get('storage_policy'), root=root, size_bytes=descriptor.size_bytes, source_kind='mutable')
         result.append(dict(name=descriptor.name, path=str(target), media_type=descriptor.media_type,
             size_bytes=descriptor.size_bytes, retention='retained_original'))
     return dict(status='collected', call_id=call_id, outputs=result)
@@ -844,8 +845,7 @@ class Records:
             if not files:inventory.file(descriptor.size_bytes)
             for item in files:
                 inventory.entry();inventory.file(item['size_bytes'])
-            c._copy_bound(Path(descriptor.local_path),source,descriptor.sha256,context=operation_context,
-                root=self.storage_root(),policy=self.config.get('storage_policy'))
+            c._bind_original(Path(descriptor.local_path), source, descriptor.sha256, context=operation_context, root=self.storage_root(), policy=self.config.get('storage_policy'), size_bytes=descriptor.size_bytes, source_kind='mutable')
             seen = set()
             for item in files:
                 name = item['name']; relative = Path(name)
@@ -857,8 +857,7 @@ class Records:
                 if any(original[key]!=item[key] for key in ('sha256','size_bytes')):
                     raise IntegrityError('Managed input changed before acceptance')
                 target=directory/'inputs'/relative
-                c._copy_bound(Path(item['path']),target,item['sha256'],context=operation_context,
-                    root=self.storage_root(),policy=self.config.get('storage_policy'))
+                c._bind_original(Path(item['path']), target, item['sha256'], context=operation_context, root=self.storage_root(), policy=self.config.get('storage_policy'), size_bytes=item['size_bytes'], source_kind='mutable')
             with self.lease():
                 if expected_calls is not None and [path.name for path in self.calls()]!=expected_calls:
                     raise ConcurrentExecution('Another original execution was accepted; query its identity')
@@ -1252,7 +1251,12 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
         if any(original[field]!=item[field] for field in ('sha256','size_bytes')):
             raise IntegrityError('Execution observation original changed during collection')
         target=directory/'observed-originals'/item['sha256']
+        # Host record publishers close and fsync these exact immutable slots.
+        # Arbitrary adapter/Worker outputs remain mutable until their first freeze.
+        managed = source in {directory/name for name in
+            ('accepted.json','source.py','submission.json')}
         frozen=shared_originals.retain(storage_root,source,sha256=item['sha256'],size_bytes=item['size_bytes'],
+            source_kind='managed_frozen' if managed else 'mutable',
             context=operation_context,policy=config.get('storage_policy'))
         shared_originals.link(frozen,target,sha256=item['sha256'],size_bytes=item['size_bytes'],context=operation_context,
             root=storage_root,policy=config.get('storage_policy'))

@@ -15,6 +15,7 @@ from execution_fixtures import execution_registry, remote_registry
 from scidiscovery.operations.execution import LocalFileDescriptor
 from scidiscovery.research_loop import atomic_files as files, contracts as c, experiments as e
 from scidiscovery.research_loop.protocol import CURRENT
+from scidiscovery.research_loop import shared_originals as shared
 
 
 @pytest.mark.parametrize('replace', [False, True])
@@ -153,18 +154,19 @@ class InterruptedCopy:
         return 1
 
 
-def test_bound_copy_interruption_leaves_no_final_target_and_retry_is_independent(tmp_path):
+def test_mutable_first_freeze_interruption_leaves_no_alias_and_retry_is_independent(tmp_path):
     source, target = tmp_path / 'source', tmp_path / 'retained/original'
     payload = b'a' * (2 * 1024 * 1024)
     source.write_bytes(payload)
     digest = hashlib.sha256(payload).hexdigest()
     with pytest.raises(TimeoutError):
-        c._copy_bound(source, target, digest, context=InterruptedCopy())
+        c._bind_original(source, target, digest, root=tmp_path, size_bytes=len(payload), source_kind='mutable', context=InterruptedCopy())
     assert not target.exists()
     assert not list(target.parent.glob('.*.partial'))
-    c._copy_bound(source, target, digest)
+    c._bind_original(source, target, digest, root=tmp_path, size_bytes=source.stat().st_size, source_kind='mutable')
     assert target.read_bytes() == payload
     assert target.stat().st_ino != source.stat().st_ino
+    assert target.stat().st_ino == (tmp_path/'host-history/objects'/digest).stat().st_ino
     source.write_bytes(b'mutated writable scientific input')
     assert target.read_bytes() == payload
 
@@ -231,16 +233,16 @@ def test_existing_damaged_or_linked_original_is_never_overwritten(tmp_path):
     target.write_bytes(b'damaged')
     digest = hashlib.sha256(b'exact').hexdigest()
     with pytest.raises(ValueError):
-        c._copy_bound(source, target, digest)
+        c._bind_original(source, target, digest, root=tmp_path, size_bytes=source.stat().st_size, source_kind='mutable')
     assert target.read_bytes() == b'damaged'
     target.unlink()
     target.symlink_to(source)
     with pytest.raises(ValueError):
-        c._copy_bound(source, target, digest)
+        c._bind_original(source, target, digest, root=tmp_path, size_bytes=source.stat().st_size, source_kind='mutable')
     assert target.is_symlink() and source.read_bytes() == b'exact'
 
 
-def test_tcad_original_copy_interruption_preserves_unowned_legacy_partial(tmp_path):
+def test_tcad_first_freeze_interruption_preserves_unowned_legacy_partial(tmp_path):
     from tcad_artifact import managed_execution as tcad
     source, target = tmp_path / 'source', tmp_path / 'target'
     source.write_bytes(b't' * (2 * 1024 * 1024))
@@ -249,13 +251,14 @@ def test_tcad_original_copy_interruption_preserves_unowned_legacy_partial(tmp_pa
     legacy_partial = tmp_path / '.target.partial'
     legacy_partial.write_bytes(b'Unowned bytes from a prior writer')
     with pytest.raises(TimeoutError):
-        tcad._copy_original(descriptor, target, InterruptedCopy())
+        tcad._retain_original(descriptor,target,InterruptedCopy(),root=tmp_path,policy=None)
     assert not target.exists()
     assert legacy_partial.read_bytes() == b'Unowned bytes from a prior writer'
     assert list(tmp_path.glob('.*.partial')) == [legacy_partial]
-    tcad._copy_original(descriptor, target, SimpleNamespace(remaining_seconds=lambda: 1))
+    tcad._retain_original(descriptor,target,SimpleNamespace(remaining_seconds=lambda: 1),root=tmp_path,policy=None)
     assert target.read_bytes() == source.read_bytes()
-    assert stat.S_IMODE(target.stat().st_mode) == 0o440
+    assert stat.S_IMODE(target.stat().st_mode) == 0o400
+    assert target.stat().st_ino == (tmp_path/'host-history/objects'/descriptor.sha256).stat().st_ino
 
 
 def test_original_submission_and_collection_recover_without_resubmission(tmp_path, monkeypatch, remote_registry):
@@ -293,15 +296,15 @@ def test_original_submission_and_collection_recover_without_resubmission(tmp_pat
     assert records.external(descriptor.name) is None
     assert adapter.lookup_submission(descriptor) == (external, state)
     records.bind_external(descriptor.name, external, state)
-    original_copy = c._copy_bound
+    original_link = shared.link
 
-    def interrupted_retention(source, target, digest, *, context=None):
-        if target.parent.name == 'observed-originals' and digest == descriptor.sha256:
-            context = InterruptedCopy()
-        return original_copy(source, target, digest, context=context)
+    def interrupted_retention(source, target, **options):
+        if target.parent.name == 'observed-originals' and options['sha256'] == descriptor.sha256:
+            raise TimeoutError('Original collection deadline reached')
+        return original_link(source, target, **options)
 
     with monkeypatch.context() as patch:
-        patch.setattr(c, '_copy_bound', interrupted_retention)
+        patch.setattr(shared, 'link', interrupted_retention)
         with pytest.raises(TimeoutError):
             e.record_observation(config, adapter, descriptor.name)
     directory = records.directory(descriptor.name)

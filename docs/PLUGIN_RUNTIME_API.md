@@ -97,6 +97,18 @@ Curve unit/operator/support/numeric checks and figure identity/calibration/ambig
 checks remain executable algorithms. Their computed output is evidence for Workers;
 control does not manufacture a scientific verdict from it.
 
+## Delivery input ownership
+
+Delivery adapters declare `readonly_inputs_version = 1` in their frozen adapter
+descriptor. Candidate inputs are read-only owning hardlinks staged on the instance
+filesystem; launchers must preserve read-only input access and provide separate
+writable scratch. Resolve, smoke, audit, replay, promote and confirm must not chmod
+or modify an input inode. Unsupported sharing fails before dispatch without a copy
+fallback. Built-in launchers retain their read-only input mounts. A final requested
+writable delivery artifact may be independently materialized; this is an explicit
+output, not a repeated copy of the entire input stage. Native permissions and
+same-original unknown-call reconciliation remain unchanged.
+
 ## Retained transport leaves
 
 `plugin_runtime.collection` provides finite-deadline process/transfer IO;

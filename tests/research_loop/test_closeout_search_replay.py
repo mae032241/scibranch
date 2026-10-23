@@ -24,7 +24,7 @@ def scene(tmp_path,*,begin_closeout=True):
         delivery_policy=dict(closeout_a=dict(max_observed_tokens=1000,max_seconds=30),inflight_tokens=100,
             cleanup_seconds=5,submit_seconds=20,confirm_seconds=10,
             adapter=dict(adapter=str(adapter),launcher_argv=[sys.executable,str(adapter)],config={},target={},
-                inputs=[],source_roots=[str(root)])))
+                inputs=[],source_roots=[str(root)],readonly_inputs_version=1)))
     finish(root,1,'H',[],action='experiment',search_choice=dict(scope='One unfinished scientific mechanism',
         commitments=[dict(label='P',minimal_test='A discriminating observation remains necessary',existing_ref=None)],
         focus=dict(label=None,action='screen')))

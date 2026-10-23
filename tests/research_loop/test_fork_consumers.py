@@ -138,7 +138,7 @@ def test_adapter_resolution_uses_original_id_and_rejects_foreign_reply(inherited
     settings=c.settings(root)
     monkeypatch.setattr(delivery,'_settings',lambda *args: dict(settings,
         delivery_policy=dict(cleanup_seconds=5)))
-    monkeypatch.setattr(delivery,'_adapter',lambda *args: dict(inputs=[],source_roots=[str(root)],
+    monkeypatch.setattr(delivery,'_adapter',lambda *args,**kwargs: dict(inputs=[],source_roots=[str(root)],readonly_inputs_version=1,
         config={},target={},capabilities=[]))
     def resolve(spec,request,*args,**kwargs):
         assert request['phase']=='resolve'

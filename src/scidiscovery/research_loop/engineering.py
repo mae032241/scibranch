@@ -168,8 +168,7 @@ def bind_inputs(root, job):
         proof=job['engineering_repair']['objects'].get(name)
         if proof is None:continue
         inventory.entry();inventory.file(proof['size_bytes'])
-        c._copy_bound(_repair_original(root,job['engineering_repair'],proof),c.workspace(root,job['step'])/'inputs/repair'/name,
-            proof['sha256'],root=root,policy=policy.get('storage_policy'),context=context)
+        c._bind_original(_repair_original(root,job['engineering_repair'],proof), c.workspace(root,job['step'])/'inputs/repair'/name, proof['sha256'], root=root, policy=policy.get('storage_policy'), context=context, size_bytes=proof['size_bytes'], source_kind='mutable')
 
 
 def _repair_original(root, repair, proof):

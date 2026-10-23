@@ -3,8 +3,10 @@ from test_history_handoff import selection_explanation
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -90,7 +92,7 @@ def descriptor(root, public, *, python=sys.executable):
     module = Path(cov_delivery.__file__).absolute()
     return dict(adapter=str(module), launcher_argv=[python, str(module), '--isolate'],
                 config=dict(runs='runs', namespace_runs='/opt/exp/runs', python=python),
-                target=dict(runs=str(root / 'runs'), submission=str(root / 'submission')),
+                target=dict(runs=str(root / 'runs'), submission=str(root / 'submission')), readonly_inputs_version=1,
                 inputs=[dict(label='harness/' + name, path=str(public / 'harness' / name))
                         for name in ('exp_cli.py', 'runner.py', 'train.csv', 'val.csv', 'meta.json')]
                        + [dict(label='runtime-python', path=python)],
@@ -176,7 +178,7 @@ def test_generic_descriptor_does_not_require_cov_config_fields(tmp_path):
     script = tmp_path / 'adapter.py';script.write_text('print("bounded")')
     supplied = dict(adapter=str(script), launcher_argv=[sys.executable, str(script)],
                     config=dict(domain_specific='opaque'), target=dict(domain_target='opaque'),
-                    inputs=[], source_roots=[str(tmp_path)])
+                    inputs=[], source_roots=[str(tmp_path)], readonly_inputs_version=1)
     result = delivery.policy(delivery_policy(supplied))
     assert result['adapter']['config'] == supplied['config']
     assert result['adapter']['target'] == supplied['target']
@@ -187,7 +189,7 @@ def test_delivery_tool_upgrade_preserves_scientific_input_checks(tmp_path,monkey
     python=tmp_path/'python';python.write_text('original interpreter')
     scientific=tmp_path/'data.csv';scientific.write_text('x,y\n1,2\n')
     spec=delivery.policy(delivery_policy(dict(adapter=str(adapter),launcher_argv=[str(python),str(adapter)],
-        config=dict(python=str(python)),target={},source_roots=[str(tmp_path)],
+        config=dict(python=str(python)),target={},source_roots=[str(tmp_path)],readonly_inputs_version=1,
         inputs=[dict(label='runtime-python',path=str(python)),dict(label='harness/data.csv',path=str(scientific))])))['adapter']
     runtime=next(item for item in spec['inputs'] if item['label']=='runtime-python')
     assert 'sha256' not in runtime
@@ -451,10 +453,11 @@ def test_complete_internal_adapter_reply_is_spooled_without_byte_truncation(tmp_
 
 def test_staged_audit_and_recovery_inputs_omit_delivery_destination(tmp_path,monkeypatch):
     original=tmp_path/'artifact';original.write_bytes(b'Exact retained scientific object')
-    proof=dict(sha256=c.digest(original))
+    original.chmod(0o400)
+    proof=dict(sha256=c.digest(original),size_bytes=original.stat().st_size)
     spec=dict(inputs=[],config={'scientific_contract':'bounded audit'},target={'credential':'private-destination'})
     source=dict(candidate_id='exact-candidate',objects={'artifact':proof},context={'kind':'scientific-result'})
-    monkeypatch.setattr(delivery,'_proof',lambda root,value:original)
+    monkeypatch.setattr(delivery,'_proof',lambda root,value,**kwargs:original)
     monkeypatch.setattr(delivery,'_settings',lambda *args:dict(handoff_protocol=c.HANDOFF_PROTOCOL))
     stage=tmp_path/'stage'
     request=delivery._staged(tmp_path,spec,source,'same-operation',stage)
@@ -463,4 +466,54 @@ def test_staged_audit_and_recovery_inputs_omit_delivery_destination(tmp_path,mon
     assert 'private-destination' not in json.dumps([request,recovery])
     assert request['candidate_id']==recovery['candidate_id']=='exact-candidate'
     assert request['object_digests']==recovery['object_digests']=={'artifact':proof['sha256']}
-    assert (stage/'inputs/artifact').read_bytes()==(stage/'recovery-1/inputs/artifact').read_bytes()==original.read_bytes()
+    assert (stage/'inputs/artifact').stat().st_ino == (stage/'recovery-1/inputs/artifact').stat().st_ino == original.stat().st_ino
+    assert stat.S_IMODE((stage/'inputs/artifact').stat().st_mode) == 0o400
+    (stage/'scratch/owned').write_text('writable independent audit work')
+    assert (stage/'scratch/owned').stat().st_ino != original.stat().st_ino
+
+
+def test_custom_delivery_requires_explicit_readonly_input_contract(tmp_path):
+    script = tmp_path / 'adapter.py'; script.write_text('pass\n')
+    supplied = dict(adapter=str(script), launcher_argv=[sys.executable, str(script)], config={}, target={},
+        inputs=[], source_roots=[str(tmp_path)])
+    with pytest.raises(ValueError, match='readonly_inputs_version'):
+        delivery.policy(delivery_policy(supplied))
+
+
+def test_delivery_stage_uses_owned_namespace_and_never_falls_back_to_copy(tmp_path, monkeypatch):
+    import errno
+    from scidiscovery.archive_io import SharingUnsupported
+    from scidiscovery.research_loop import atomic_files
+    original = tmp_path / 'artifact'; original.write_bytes(b'controlled immutable original'); original.chmod(0o400)
+    proof = dict(path='artifact', sha256=c.digest(original), size_bytes=original.stat().st_size)
+    source = dict(candidate_id='exact', objects={'artifact': proof}, context={})
+    monkeypatch.setattr(delivery, '_settings', lambda *args: dict(handoff_protocol=c.HANDOFF_PROTOCOL))
+    elsewhere = tmp_path / 'other-tmp'; elsewhere.mkdir()
+    monkeypatch.setenv('TMPDIR', str(elsewhere))
+    def no_copy(*args, **kwargs):
+        raise AssertionError('Stage construction must not copy payloads')
+    monkeypatch.setattr(atomic_files, 'copy_original', no_copy)
+    with delivery._stage(tmp_path, 'fixture-') as directory:
+        stage = Path(directory)
+        assert stage.parent == tmp_path / 'host-delivery'
+        delivery._staged(tmp_path, dict(inputs=[], config={}), source, 'same-call', stage)
+        assert (stage / 'inputs/artifact').stat().st_ino == original.stat().st_ino
+    assert original.read_bytes() == b'controlled immutable original'
+    def unsupported(*args, **kwargs):
+        raise OSError(errno.EXDEV, 'fixture cannot share this inode')
+    monkeypatch.setattr(os, 'link', unsupported)
+    with delivery._stage(tmp_path, 'fixture-') as directory, pytest.raises(SharingUnsupported):
+        delivery._staged(tmp_path, dict(inputs=[], config={}), source, 'same-call', Path(directory))
+
+
+def test_staging_deadline_expires_before_any_leaf_dispatch(tmp_path, monkeypatch):
+    original = tmp_path / 'artifact'; original.write_bytes(b'frozen'); original.chmod(0o400)
+    proof = dict(path='artifact', sha256=c.digest(original), size_bytes=original.stat().st_size)
+    monkeypatch.setattr(delivery, '_settings', lambda *args: dict(handoff_protocol=c.HANDOFF_PROTOCOL))
+    class Expired:
+        def remaining_seconds(self):
+            raise TimeoutError('original attempt exhausted')
+    with pytest.raises(TimeoutError, match='original attempt exhausted'):
+        delivery._staged(tmp_path, dict(inputs=[], config={}),
+            dict(candidate_id='exact', objects={'artifact': proof}, context={}), 'same-call', tmp_path / 'stage',
+            context=Expired())

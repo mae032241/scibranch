@@ -135,14 +135,14 @@ def source_configuration(public_root, declarations, originals):
     return result
 
 
-def freeze_sources(root, configured, originals, globals_):
+def freeze_sources(root, configured, originals, globals_, *, policy, context, source_kind):
     """Retain declared bytes and the explicit original-to-global-copy mapping."""
     root = Path(root).resolve()
     declarations = []
     for index, row in enumerate(configured):
         path = root / 'source-provenance' / 'originals' / f'{index:06d}'
         _check(row['origin'])
-        c._copy_bound(Path(row['origin']['path']), path, row['origin']['sha256'])
+        c._bind_original(Path(row['origin']['path']), path, row['origin']['sha256'], policy=policy, context=context, root=root, size_bytes=row['origin']['size_bytes'], source_kind=source_kind)
         declarations.append({**row, 'retained': _ref(root, path)})
     globals_map = []
     for original, material in zip(originals, globals_):

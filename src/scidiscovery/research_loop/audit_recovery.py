@@ -86,12 +86,12 @@ def recover_preflight(root, operation):
         return result
 
 
-def run(root, spec, source, request, seconds, *, on_process=None, author_required=True, job=None):
+def run(root, spec, source, request, seconds, *, on_process=None, author_required=True, job=None, deadline=None):
     from pathlib import Path
     import time
     from . import budget, delivery, native, runtime
     from .candidate_audit import _save
-    deadline = time.clock_gettime(time.CLOCK_BOOTTIME) + seconds
+    deadline = deadline if deadline is not None else time.clock_gettime(time.CLOCK_BOOTTIME) + seconds
 
     def call(item, callback, *, retry=False):
         if deadline-time.clock_gettime(time.CLOCK_BOOTTIME)<=0:
@@ -158,7 +158,8 @@ def run(root, spec, source, request, seconds, *, on_process=None, author_require
     deadline=time.clock_gettime(time.CLOCK_BOOTTIME)+intent['max_seconds']
     fresh=request
     try:
-        fresh = delivery._staged(root, spec, source, request['operation_id'], Path(request['stage'])/'recovery-1', job=job)
+        fresh = delivery._staged(root, spec, source, request['operation_id'], Path(request['stage'])/'recovery-1', job=job, context=delivery._Deadline(deadline))
+        fresh['deadline_boottime'] = deadline
         def process(phase, identity):
             _save(directory/'process.json', dict(phase=phase, identity=identity))
         result = call(fresh, process, retry=True)

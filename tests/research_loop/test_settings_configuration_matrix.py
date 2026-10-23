@@ -356,7 +356,7 @@ def test_history_observer_form_config_reaches_real_capture_for_bound_node(tmp_pa
 def delivery_instance(tmp_path):
     adapter = tmp_path / 'delivery.py'; adapter.write_text('# Frozen adapter; never invoked.\n')
     spec = dict(adapter=str(adapter), launcher_argv=[sys.executable, str(adapter)], config={},
-        target=dict(directory=str(tmp_path / 'target')), inputs=[], source_roots=[str(tmp_path)])
+        target=dict(directory=str(tmp_path / 'target')), inputs=[], source_roots=[str(tmp_path)],readonly_inputs_version=1)
     return instance(tmp_path, launcher=['codex'], node_budget_policy={role: dict(max_observed_tokens=1000,
         max_seconds=30) for role in 'HWAE'}, delivery_policy=delivery_policy(spec))
 

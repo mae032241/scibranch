@@ -429,3 +429,32 @@ def test_full_execution_proof_and_snapshot_stream_above_old_asset_cap(local,monk
     item=next(item for item in accepted['snapshot_files'] if item['name']=='inputs/large.bin')
     frozen=e.Records(config).directory(result['call_id'])/'inputs'/item['name']
     assert frozen.stat().st_size==33*1024*1024 and c.digest(frozen)==item['sha256']
+
+
+@pytest.mark.process_e2e
+def test_standalone_scientific_logs_share_explicit_records_namespace(local,monkeypatch):
+    from scidiscovery.research_loop import atomic_files
+    import hashlib
+    root,script,config,_=local
+    script.write_text('import pathlib\nprint(pathlib.Path(__file__).parent)\n')
+    result=e.dispatch(config,script,command_options=dict(experiment_directory=str(root),arguments=[]))
+    directory=e.Records(config).directory(result['call_id'])
+    observation=c.read(directory/'execution-observation.json')
+    published=[];publish=atomic_files.publish_bytes
+    def counted(path,payload,**options):
+        published.append(hashlib.sha256(payload).hexdigest())
+        return publish(path,payload,**options)
+    monkeypatch.setattr(atomic_files,'publish_bytes',counted)
+    views=[]
+    for _ in range(2):
+        outputs=e.scientific_outputs(config,observation,include_logs=True)
+        stdout=next(item for item in outputs if item.name.endswith('/stdout.txt'))
+        path=Path(stdout.local_path);views.append(path)
+        assert path.is_relative_to(Path(config['record_dir'])/'scientific-output-views')
+        assert not path.is_relative_to(Path(config['record_dir'])/'calls')
+        assert str(Path(config['record_dir'])) not in path.read_text()
+        cas=Path(config['record_dir'])/'host-history/objects'/stdout.sha256
+        assert (path.stat().st_dev,path.stat().st_ino)==(cas.stat().st_dev,cas.stat().st_ino)
+    assert views[0]==views[1]
+    assert published.count(stdout.sha256)==1
+    assert views[0].stat().st_mode & 0o777==0o400

@@ -106,7 +106,7 @@ def test_complex_cov_declaration_roundtrips_all_typed_controls_and_export(tmp_pa
     document['delivery'] = dict(closeout_a=dict(max_observed_tokens=100,max_seconds=20), inflight_tokens=100,
         cleanup_seconds=1,submit_seconds=5,confirm_seconds=5,
         adapter=dict(adapter='adapter.py',launcher_argv=['./harness','literal-relative-arg'],config=dict(evaluation_key='v1'),
-            target=dict(destination='original'),inputs=[dict(label='dataset',path='data/file')], source_roots=['public'],
+            target=dict(destination='original'),inputs=[dict(label='dataset',path='data/file')], source_roots=['public'],readonly_inputs_version=1,
             capabilities=['audit','submit'],effect_scope=dict(kind='declared')))
     document['policies'] = dict(formal_review=True,execution_authority=True,candidate_audit=False,decision_contract=True,
         worker_context='new_context',selection=dict(version=1,extra=dict(keep=[])),

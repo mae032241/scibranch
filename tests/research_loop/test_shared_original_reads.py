@@ -224,3 +224,23 @@ def test_link_during_cached_digest_hit_requires_a_fresh_hash(frozen_original, tm
         assert c.digest(path) == reference['sha256']
         assert len(streamed) == 1, 'The stable refreshed generation should be cached'
     assert (alias.stat().st_dev, alias.stat().st_ino) == (path.stat().st_dev, path.stat().st_ino)
+
+
+@pytest.mark.parametrize('resolver',['source','root'])
+def test_original_resolver_checks_deadline_during_content_hash(frozen_original,tmp_path,resolver,monkeypatch):
+    path,source,reference,_=frozen_original
+    def forbidden(*args,**kwargs):pytest.fail('Bounded original resolution used an unbounded digest')
+    monkeypatch.setattr(c,'digest',forbidden)
+    class Deadline:
+        checks=0
+        def remaining_seconds(self):
+            self.checks+=1
+            if self.checks==3:raise TimeoutError('Original content deadline')
+            return 1
+    context=Deadline()
+    with pytest.raises(TimeoutError,match='content deadline'):
+        if resolver=='source':originals.resolve_ref(source,reference,context=context)
+        else:
+            originals.resolve_root_ref(tmp_path,dict(path=path.relative_to(tmp_path).as_posix(),
+                sha256=reference['sha256'],size_bytes=reference['size_bytes']),context=context)
+    assert context.checks==3

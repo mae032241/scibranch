@@ -16,6 +16,7 @@ from scidiscovery.operations.execution import (
 from scidiscovery.operations.runtime_plugins import (RuntimePluginContribution, RuntimePluginFactory,
     HOST_EXECUTION_GATE_KEY, HOST_EXECUTION_GATE_SCHEMA, HOST_EXECUTION_GATE_CONTRACT)
 from scidiscovery.plugin_runtime.collection import CollectionContext
+from scidiscovery.archive_io import SharingUnsupported
 from scidiscovery.research_loop import experiments as e
 from scidiscovery.research_loop import contracts as c
 
@@ -83,17 +84,14 @@ def _write_original(path, value):
             raise e.IntegrityError('TCAD retained original changed')
 
 
-def _copy_original(descriptor, target, context):
-    from scidiscovery.research_loop import atomic_files
-    if target.exists() or target.is_symlink():
-        _verify_descriptor(descriptor.model_copy(update={'local_path': str(target)}), context)
-        target.chmod(0o440)
-        return
-    if target.resolve() != target or Path(descriptor.local_path).resolve() != Path(descriptor.local_path):
-        raise e.IntegrityError('Exact TCAD regular original required')
+def _retain_original(descriptor, target, context, *, root, policy):
+    """Freeze untrusted native bytes once, then hold a read-only shared alias."""
+    from scidiscovery.research_loop import storage_policy as storage
     try:
-        atomic_files.copy_original(descriptor.local_path, target, sha256=descriptor.sha256,
-            size_bytes=descriptor.size_bytes, mode=0o440, context=context)
+        c._bind_original(Path(descriptor.local_path),target,descriptor.sha256,root=root,
+            size_bytes=descriptor.size_bytes,source_kind='mutable',policy=policy,context=context)
+    except storage.StorageQuotaExceeded:
+        raise
     except ValueError as exc:
         raise e.IntegrityError('TCAD original changed during retention') from exc
 
@@ -239,7 +237,7 @@ class TCADManagedExecution:
         permit = self._check('prepare', payload.name, payload)
         stage = _directory(self._stage(payload.name))
         source = stage / 'package.json'
-        c._copy_bound(Path(payload.local_path), source, payload.sha256,context=self.operation_context)
+        c._bind_original(Path(payload.local_path), source, payload.sha256, context=self.operation_context, policy=self.config.get('storage_policy'), root=self.records.storage_root(), size_bytes=payload.size_bytes, source_kind='mutable')
         original = payload.model_copy(update={'local_path': str(source)})
         prepared = self.adapter.prepare(original, preparation_profile=profile,
             exchange_directory=stage, input_metadata=metadata, open_input=opener)
@@ -614,13 +612,17 @@ class TCADManagedExecution:
         return manifest
 
     def _retain(self, call, outputs, details, context):
+        from scidiscovery.research_loop import storage_policy as storage
+        inventory=storage.Inventory(self.config.get('storage_policy'),context=context)
+        for item in outputs:
+            inventory.entry();inventory.file(item.size_bytes)
         manifest = self._inventory(outputs, details['state'], context=context, verify_bytes=False)
         directory = self.records.directory(call)
         originals = _directory(directory / 'tcad-originals')
         retained = []
         for item in outputs:
             target = originals / item.sha256
-            _copy_original(item, target, context)
+            _retain_original(item,target,context,root=self.records.storage_root(),policy=self.config.get('storage_policy'))
             retained.append(item.model_copy(update={'local_path': str(target)}))
         receipt = directory / 'tcad-terminal-binding.json'
         context.remaining_seconds()
@@ -661,6 +663,8 @@ class TCADManagedExecution:
                     self._retain(call, outputs, details, context)
                 collected = self._collection(call, details['state'], context)
                 context.remaining_seconds()
+            except SharingUnsupported:
+                raise
             except (e.UnsupportedExecution, OSError, RuntimeError):
                 return unknown
             native = collected['native_state']

@@ -237,10 +237,17 @@ def test_self_contained_v2_terminal_keeps_exact_inputs_and_next_subject_review(c
     assert backend.submits==1
 
 
-def test_native_observation_new_subject_review_and_next_run_use_covered_inputs(chain, capsys):
+def test_native_observation_new_subject_review_and_next_run_use_covered_inputs(chain, capsys, monkeypatch):
     from copy import deepcopy
     from scidiscovery.research_loop import history, qualification as q
     root, backend, output, active, current, _ = _reviewed_execution(chain, capsys)
+    from scidiscovery.research_loop import atomic_files
+    log=b'synthetic input-chain terminal\n';log_sha=hashlib.sha256(log).hexdigest()
+    copies=[];copy=atomic_files.copy_original
+    def counted_copy(source,target,**options):
+        if options['sha256']==log_sha:copies.append(options['size_bytes'])
+        return copy(source,target,**options)
+    monkeypatch.setattr(atomic_files,'copy_original',counted_copy)
     assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
     call = json.loads(capsys.readouterr().out)['call_id']
     job_before = c.read(root / 'jobs/006.json')
@@ -250,6 +257,14 @@ def test_native_observation_new_subject_review_and_next_run_use_covered_inputs(c
     assert e.main(['--config', str(active), 'reconcile', '--call-id', call]) == 0
     capsys.readouterr()
     assert backend.submits == 1 and backend.prepared == [{'mesh': b'mesh'}]
+    observed=c.read(e.Records(current).directory(call)/'execution-observation.json')
+    retained=next(item for item in observed['outputs'] if item['name']=='tcad_log')
+    cas=root/'host-history/objects'/log_sha
+    inode=(cas.stat().st_dev,cas.stat().st_ino)
+    assert all((path.stat().st_dev,path.stat().st_ino)==inode
+        for path in (Path(retained['path']),Path(retained['source']['path'])))
+    assert (backend.output_root/'tcad_log').stat().st_ino!=cas.stat().st_ino
+    assert copies==[len(log)], 'Native output, call original and core observation freeze bytes only once'
     work = c.workspace(root, 6); authored = work / 'work/revised.json'
     author = c.read(chain[5]); author['input_slots'] = []
     author['files'][0]['content'] = 'Solve { Coupled { Poisson } }\n'
@@ -576,3 +591,40 @@ def test_reservation_gap_renews_authority_without_second_reservation_or_refund(l
     assert sum(row['kind']=='resource_rebind' for row in events)==1
     assert not any(row['kind']=='resource_release' for row in events)
     assert budget.execution_accounting(root)['remaining']==remaining
+
+
+def test_native_compile_publishes_same_package_once_before_acceptance(chain,capsys,monkeypatch):
+    from scidiscovery.research_loop import atomic_files
+    root,backend,options,config,config_path,author,aliases=chain
+    publications=[];copies=[]
+    publish=atomic_files.publish_bytes;copy=atomic_files.copy_original
+    def counted_publish(path,payload,**options):
+        publications.append(hashlib.sha256(payload).hexdigest())
+        return publish(path,payload,**options)
+    def counted_copy(source,path,**options):
+        copies.append(options['sha256'])
+        return copy(source,path,**options)
+    monkeypatch.setattr(atomic_files,'publish_bytes',counted_publish)
+    monkeypatch.setattr(atomic_files,'copy_original',counted_copy)
+    for name in ('first','second'):
+        output=c.workspace(root,2)/f'artifacts/{name}.json'
+        assert e.main(['--config',str(config_path),'compile','--implementation',str(author),
+            '--scientific-files',str(aliases),'--output',str(output)])==0
+        assert json.loads(capsys.readouterr().out)['status']=='compiled'
+    compiled=[c.read(path) for path in inputs._directory(root,2).glob('*/compiler.json')]
+    assert len(compiled)==2
+    outputs=[row['output'] for row in compiled]
+    sha=outputs[0]['sha256']
+    assert outputs[1]['sha256']==sha and outputs[0]['path']!=outputs[1]['path']
+    cas=root/'host-history/objects'/sha
+    original_inode=(cas.stat().st_dev,cas.stat().st_ino)
+    assert all((Path(row['path']).stat().st_dev,Path(row['path']).stat().st_ino)==original_inode for row in outputs)
+    descriptor=LocalFileDescriptor(name='storage-admission-only',local_path=outputs[0]['path'],
+        sha256=sha,size_bytes=outputs[0]['size_bytes'],media_type='application/json')
+    records=e.Records(config)
+    accepted=records.accept(descriptor,{},config['execution_interface'])
+    retained=Path(accepted['script']['path'])
+    assert accepted['source_script']==outputs[0]['path']
+    assert (retained.stat().st_dev,retained.stat().st_ino)==original_inode
+    assert publications.count(sha)==1 and copies.count(sha)==0
+    assert backend.submits==0

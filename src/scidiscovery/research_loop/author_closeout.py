@@ -78,7 +78,7 @@ def science_context(root, job, record, *, permit=None, attempt=None):
             original=execution_inputs.resolve_native_original(root,item['original'],compiler_job=owner)
             destination=public/item['alias']
             source=Path(original['source'])
-            c._copy_bound(source,destination,original['sha256'])
+            c._bind_original(source, destination, original['sha256'], policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=original['size_bytes'], source_kind='mutable')
             entries.append(dict(kind='source',source=_ref(root,source),display=_ref(root,destination)))
     paths.update((item['path'],'framework') for item in job['direct_refs'])
     paths.update((item['path'],'source' if item.get('kind')=='scientific_original' else 'framework')
@@ -99,14 +99,14 @@ def science_context(root, job, record, *, permit=None, attempt=None):
         target=public/name
         if kind=='compiler_author':
             item=compiled[name];author=item['compiler']['author'];source=_check(root,author)
-            c._copy_bound(source,target,author['sha256'])
+            c._bind_original(source, target, author['sha256'], policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=(source).stat().st_size, source_kind='managed_frozen')
             entries.append(dict(kind=kind,source=_ref(root,source),display=_ref(root,target),
                 material=item['material'],compiler=item['binding']['compiler'],client_binding=item['binding'].get('client_binding')))
             continue
         source=c.regular(work/name);original=_ref(root,source)
         if kind=='framework':
             c.write(target,_context_projection(name,c.read(source),references,texts));target.chmod(0o400)
-        else:c._copy_bound(source,target,original['sha256'])
+        else:c._bind_original(source, target, original['sha256'], policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=(source).stat().st_size, source_kind='managed_frozen')
         entries.append(dict(kind=kind,source=original,display=_ref(root,target)))
     own=[];masks=[];implementations=[]
     if job.get('worker_view_version')!=1 and permit is not None:
@@ -123,13 +123,13 @@ def science_context(root, job, record, *, permit=None, attempt=None):
             own.append(binding_ref)
             source_name=f'work/retained-implementations/I{number:03d}/implementation.json'
             scientific=public/source_name;author=_check(root,compiler['author'])
-            c._copy_bound(author,scientific,compiler['author']['sha256'])
+            c._bind_original(author, scientific, compiler['author']['sha256'], policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=(author).stat().st_size, source_kind='managed_frozen')
             entries.append(dict(kind='source',source=_ref(root,author),display=_ref(root,scientific)))
             owner=qualification._read(root,compiler['job']);aliases=[]
             for item in compiler['inputs']:
                 original=execution_inputs.resolve_native_original(root,item['original'],compiler_job=owner)
                 input_source=Path(original['source']);display=public/item['alias']
-                c._copy_bound(input_source,display,original['sha256']);aliases.append(item['alias'])
+                c._bind_original(input_source, display, original['sha256'], policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=original['size_bytes'], source_kind='mutable');aliases.append(item['alias'])
                 entries.append(dict(kind='source',source=_ref(root,input_source),display=_ref(root,display)))
             note=public/'artifact-notes'/f'I{number:03d}.txt'
             note.parent.mkdir(parents=True,exist_ok=True)
@@ -459,7 +459,7 @@ def science_facts(root, step):
             original=accepted['script']
         if original is not None:
             source=work/'work/retained-experiments'/row['call_id']/Path(original.get('source',original)['path']).name
-            c._copy_bound(Path(original['path']),source,original['sha256'])
+            c._bind_original(Path(original['path']), source, original['sha256'], policy=config.get('storage_policy'), root=root, size_bytes=(Path(original['path'])).stat().st_size, source_kind='mutable')
         value=dict(call_id=row['call_id'],candidate_id=row['candidate_id'],status=row['status'],
             mechanism={key:mechanism[key] for key in ('mechanism_ref',) if key in mechanism},
             source=source.relative_to(work).as_posix() if source is not None else None,
@@ -469,14 +469,14 @@ def science_facts(root, step):
         scientific=e.scientific_outputs(config,observation)
         for output in scientific:
             path=work/'work/retained-experiments'/row['call_id']/'outputs'/output.name
-            c._copy_bound(Path(output.local_path),path,output.sha256)
+            c._bind_original(Path(output.local_path), path, output.sha256, policy=config.get('storage_policy'), root=root, size_bytes=(Path(output.local_path)).stat().st_size, source_kind='mutable')
             value['outputs'].append(dict(name=output.name,path=path.relative_to(work).as_posix()))
         if config['execution_interface'].get('result_protocol')==e.LOCAL_RESULT_PROTOCOL:
             names={item.name for item in scientific};logs=[]
             for output in e.scientific_outputs(config,observation,include_logs=True):
                 if output.name in names:continue
                 path=work/'work/retained-experiments'/row['call_id']/'outputs'/output.name
-                c._copy_bound(Path(output.local_path),path,output.sha256)
+                c._bind_original(Path(output.local_path), path, output.sha256, policy=config.get('storage_policy'), root=root, size_bytes=(Path(output.local_path)).stat().st_size, source_kind='mutable')
                 logs.append(dict(stream=Path(output.name).stem,path=path.relative_to(work).as_posix()))
             if logs:
                 value['logs_ref']=dict(note='Read stdout/stderr only as scientifically needed; known execution snapshot paths use scientific source names.',
@@ -972,7 +972,7 @@ def accept_completed_output(root, step, *, attempt, pending_sha256, session, aut
         value=require_output_eligibility(root,c.read(c.regular(acceptance_path)))
         if (value['originals']['result.pending.json']!=pending or _check(root,value['session'])!=Path(session).absolute()):
             raise ValueError('Original completed-output acceptance cannot be replaced')
-        c._copy_bound(record/'result.pending.json',record/'science-output.json',pending_sha256)
+        c._bind_original(record/'result.pending.json', record/'science-output.json', pending_sha256, policy=c.settings(root).get('storage_policy'), root=root, size_bytes=(record/'result.pending.json').stat().st_size, source_kind='mutable')
         return c.seal_result(root,step)
     paths=execution.records(root,step);job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
     if (len(paths)!=3 or paths[-1]!=record or job['role']!='W'
@@ -1006,5 +1006,5 @@ def accept_completed_output(root, step, *, attempt, pending_sha256, session, aut
         session=_ref(root,Path(session).absolute()),facts=facts,admission=admission,usage_originals=_admission_usage_refs(root,step))
     require_output_eligibility(root,value)
     c.write(acceptance_path,value);acceptance_path.chmod(0o400)
-    c._copy_bound(record/'result.pending.json',record/'science-output.json',pending_sha256)
+    c._bind_original(record/'result.pending.json', record/'science-output.json', pending_sha256, policy=c.settings(root).get('storage_policy'), root=root, size_bytes=(record/'result.pending.json').stat().st_size, source_kind='mutable')
     return c.seal_result(root,step)

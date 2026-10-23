@@ -19,7 +19,7 @@ def test_prepare_cli_accepts_only_explicit_comparison_policy(tmp_path,policy,acc
     public=tmp_path/'public';public.mkdir()
     objective=public/'objective.md';objective.write_text('Retain candidate facts for explicit scientific choice.')
     adapter=tmp_path/'adapter.py';adapter.write_text('raise AssertionError("Prepare cannot execute domain code")\n')
-    descriptor=dict(adapter=str(adapter),launcher_argv=[sys.executable,str(adapter)],config={},target={},inputs=[],source_roots=[str(tmp_path)])
+    descriptor=dict(adapter=str(adapter),launcher_argv=[sys.executable,str(adapter)],config={},target={},inputs=[],source_roots=[str(tmp_path)],readonly_inputs_version=1)
     files=dict(node={role:dict(max_observed_tokens=2000,max_seconds=60) for role in 'HWAE'},
         delivery=delivery_policy(descriptor),observer=dict(adapter=str(OBSERVER),config=dict(runs='runs',evaluation_key='v1')),
         selection=policy)

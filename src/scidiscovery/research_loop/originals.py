@@ -224,13 +224,14 @@ def legacy_compilation(source):
     return value
 
 
-def resolve_root_ref(root, ref):
+def resolve_root_ref(root, ref, *, context=None):
+    if context is not None:context.remaining_seconds()
     if 'origin_identity' in ref:
-        return resolve_ref(for_origin(root, ref['origin_identity']), ref)
+        return resolve_ref(for_origin(root, ref['origin_identity']), ref, context=context)
     path = relative(ref['path'])
     actual = Path(root) / path
     if actual.exists() or _manifest(root) is None:
-        proof = files.hash_file(actual)
+        proof = files.hash_file(actual, context=context)
         if any(field in ref and proof[field] != ref[field] for field in ('sha256', 'size_bytes')):
             raise ValueError('Original bytes changed: ' + path)
         return actual
@@ -243,13 +244,13 @@ def resolve_root_ref(root, ref):
     elif len(parts) >= 3 and parts[:2] == ('project', 'nodes') and parts[2].isdecimal():
         step = int(parts[2])
     if step is not None:
-        return resolve_ref(node(root, step), ref)
+        return resolve_ref(node(root, step), ref, context=context)
     manifest = _manifest(root)
     matches = [row for row in manifest['entries'] if row['path'] == path
         and all(field not in ref or row[field] == ref[field] for field in ('sha256', 'size_bytes'))]
     if len(matches) != 1:
         raise ValueError('Original reference requires an explicit origin identity')
-    return resolve_ref(for_origin(root, matches[0]['origin_identity']), matches[0])
+    return resolve_ref(for_origin(root, matches[0]['origin_identity']), matches[0], context=context)
 
 
 def material_path(root, material):
@@ -317,7 +318,8 @@ def has_original(source, path):
     return True
 
 
-def resolve_ref(source, ref):
+def resolve_ref(source, ref, *, context=None):
+    if context is not None:context.remaining_seconds()
     if not isinstance(source, NodeSource) or not isinstance(ref, dict):
         raise ValueError('Exact original handle and reference required')
     origin = ref.get('origin_identity', source.origin_identity)
@@ -364,7 +366,8 @@ def resolve_ref(source, ref):
         if generation is None or binding is not None and generation[:-1] != binding:
             raise ValueError('Original changed while reading its binding')
         binding = generation[:-1]
-        checked = dict(sha256=c.digest(c.regular(actual)), size_bytes=actual.stat().st_size)
+        checked = (dict(sha256=c.digest(c.regular(actual)), size_bytes=actual.stat().st_size)
+            if context is None else files.hash_file(c.regular(actual), context=context))
         after = c._digest_generation(actual)
         if after != generation:
             if attempt < 2 and c._readonly_metadata_change(generation, after):

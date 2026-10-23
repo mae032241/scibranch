@@ -1,4 +1,5 @@
 """Small package and original-material checks; no model, HTTP or backend."""
+import errno
 import json
 
 import pytest
@@ -125,15 +126,16 @@ def test_export_preserves_pending_configuration_and_its_dependencies(tmp_path):
 
 def test_copy_race_never_publishes_or_rolls_back_original_changes(tmp_path, monkeypatch):
     root, material = scene(tmp_path); package = tmp_path / 'archive'
-    copy = archive.files.copy_verified
+    snapshot = archive._snapshot_original
 
-    def concurrent_write(source, destination, entry):
-        copy(source, destination, entry)
+    def concurrent_write(owner, source, entry, **options):
+        frozen = snapshot(owner, source, entry, **options)
         if source == material:
             source.write_bytes(b'Concurrent original writer changed these bytes.\n')
             (source.parent / 'new-original.txt').write_bytes(b'New original must not disappear silently.\n')
+        return frozen
 
-    monkeypatch.setattr(archive.files, 'copy_verified', concurrent_write)
+    monkeypatch.setattr(archive, '_snapshot_original', concurrent_write)
     with pytest.raises(archive.files.ArchiveError, match='scope changed|scope gained'):
         archive.archive_export(root, package)
     assert not package.exists() and material.read_bytes().startswith(b'Concurrent original')
@@ -357,14 +359,15 @@ def test_export_link_metadata_tolerance_is_limited_to_readonly_files(tmp_path, m
     root, material = scene(tmp_path); package = tmp_path / 'archive'
     material.chmod(mode)
     alias = tmp_path / 'sibling-reference'
-    copy = archive.files.copy_verified
+    snapshot = archive._snapshot_original
     before = material.stat()
-    def retain_sibling(source, destination, entry):
-        copy(source, destination, entry)
+    def retain_sibling(owner, source, entry, **options):
+        frozen = snapshot(owner, source, entry, **options)
         if source == material:
             os.link(material, alias)
             alias.unlink()
-    monkeypatch.setattr(archive.files, 'copy_verified', retain_sibling)
+        return frozen
+    monkeypatch.setattr(archive, '_snapshot_original', retain_sibling)
     if mode == 0o400:
         archive.archive_export(root, package)
         row = next(row for row in entries(package) if row['path'] == material.relative_to(root).as_posix())
@@ -382,11 +385,11 @@ def test_readonly_export_still_rejects_every_non_ctime_change(tmp_path, monkeypa
     import os
     root, material = scene(tmp_path); package = tmp_path / 'archive'
     material.chmod(0o400)
-    copy = archive.files.copy_verified
-    def change_original(source, destination, entry):
-        copy(source, destination, entry)
+    snapshot = archive._snapshot_original
+    def change_original(owner, source, entry, **options):
+        frozen = snapshot(owner, source, entry, **options)
         if source != material:
-            return
+            return frozen
         if mutation == 'bytes':
             material.chmod(0o600); material.write_bytes(b'different original bytes'); material.chmod(0o400)
         elif mutation == 'inode':
@@ -402,7 +405,121 @@ def test_readonly_export_still_rejects_every_non_ctime_change(tmp_path, monkeypa
             (material.parent / 'another-original').write_bytes(b'new original')
         else:
             material.unlink()
-    monkeypatch.setattr(archive.files, 'copy_verified', change_original)
+        return frozen
+    monkeypatch.setattr(archive, '_snapshot_original', change_original)
     with pytest.raises(archive.files.ArchiveError, match='scope changed|scope gained|scope lost'):
         archive.archive_export(root, package)
     assert not package.exists()
+
+
+def test_v2_unique_blobs_repeated_export_and_independent_source_lifetimes(tmp_path, monkeypatch):
+    import os
+    import shutil
+    from scidiscovery.research_loop import atomic_files, shared_originals, storage_policy
+    root, material = scene(tmp_path)
+    raw = b'opaque archive content\n' * 256
+    material.write_bytes(raw)
+    identity = {key: archive.files.hash_file(material)[key] for key in ('sha256', 'size_bytes')}
+    frozen = shared_originals.retain(root, material, source_kind='mutable', **identity)
+    alias = root / 'project/nodes/001/inputs/duplicate-original'
+    shared_originals.link(frozen, alias, root=root, **identity)
+    duplicate = root / 'project/global/writable-copy'
+    duplicate.write_bytes(raw)
+    first, second = tmp_path / 'first-archive', tmp_path / 'second-archive'
+    original_modes = {path: path.stat().st_mode & 0o777 for path in (material, duplicate)}
+    result = archive.archive_export(root, first)
+    rows = [row for row in entries(first) if row['kind'] == 'file']
+    payload_rows = [row for row in rows if row['sha256'] == identity['sha256']]
+    assert {row['blob'] for row in payload_rows} == {payload_rows[0]['blob']}
+    blob = first / payload_rows[0]['blob']
+    assert os.path.samefile(blob, frozen) and os.path.samefile(blob, alias)
+    assert not os.path.samefile(blob, material) and not os.path.samefile(blob, duplicate)
+    assert {path: path.stat().st_mode & 0o777 for path in original_modes} == original_modes
+    assert {row['storage'] for row in payload_rows} == {'immutable', 'independent'}
+    assert result['files'] == len(rows)
+    assert result['bytes'] == sum(row['size_bytes'] for row in rows)
+    unique = {row['blob']: row['size_bytes'] for row in rows}
+    assert result['unique_blobs'] == len(unique)
+    assert result['blob_bytes'] == sum(unique.values())
+    usage = storage_policy.usage(root)
+    def forbidden(*args, **options):
+        pytest.fail('Repeated archive export refroze already retained bytes')
+    monkeypatch.setattr(atomic_files, 'copy_original', forbidden)
+    archive.archive_export(root, second)
+    assert storage_policy.usage(root) == usage
+    assert os.path.samefile(second / payload_rows[0]['blob'], blob)
+    shutil.rmtree(root)
+    assert blob.read_bytes() == raw
+    shutil.rmtree(first)
+    assert (second / payload_rows[0]['blob']).read_bytes() == raw
+    assert archive.archive_inspect(second)['unique_blobs'] == len(unique)
+
+
+def test_readonly_unknown_source_is_independently_frozen_and_quota_is_not_bypassed(tmp_path):
+    from scidiscovery.research_loop import storage_policy as storage
+    root, material = scene(tmp_path)
+    material.chmod(0o400)
+    package = tmp_path / 'limited-archive'
+    policy = storage.configuration(dict(enabled=True, max_instance_bytes=storage.usage(root)))
+    with storage.bind(root, policy), pytest.raises(storage.StorageQuotaExceeded, match='max_instance_bytes'):
+        archive.archive_export(root, package)
+    assert not package.exists() and material.stat().st_mode & 0o777 == 0o400
+    archive.archive_export(root, package)
+    row = next(row for row in entries(package) if row['path'] == material.relative_to(root).as_posix())
+    assert row['storage'] == 'independent'
+    assert (package / row['blob']).stat().st_ino != material.stat().st_ino
+
+
+@pytest.mark.parametrize('error_number', [errno.EXDEV, errno.EPERM, errno.EMLINK])
+def test_archive_share_failure_never_copies_or_publishes(tmp_path, monkeypatch, error_number):
+    from scidiscovery.research_loop import atomic_files
+    root, _ = scene(tmp_path)
+    archive.archive_export(root, tmp_path / 'warm-archive')
+    def unsupported(*args, **options):
+        raise OSError(error_number, 'injected sharing failure')
+    def forbidden(*args, **options):
+        pytest.fail('Sharing failure triggered a copy fallback')
+    monkeypatch.setattr(archive.files.os, 'link', unsupported)
+    monkeypatch.setattr(atomic_files, 'copy_original', forbidden)
+    package = tmp_path / 'unsupported-archive'
+    with pytest.raises(archive.files.SharingUnsupported, match='hardlink'):
+        archive.archive_export(root, package)
+    assert not package.exists()
+
+
+def test_v2_rejects_unlisted_blobs_and_invalid_storage_and_v1_remains_inspectable(tmp_path):
+    root, _ = scene(tmp_path)
+    package = tmp_path / 'archive'
+    archive.archive_export(root, package)
+    rows = entries(package)
+    file_row = next(row for row in rows if row['kind'] == 'file')
+    malformed = [dict(row) for row in rows]
+    next(row for row in malformed if row['kind'] == 'file')['storage'] = 'writable_shared'
+    rewrite_manifest(package, malformed)
+    with pytest.raises(archive.files.ArchiveError, match='storage semantics'):
+        archive.archive_inspect(package)
+    rewrite_manifest(package, rows)
+    extra = package / 'blobs/unlisted'
+    extra.write_bytes(b'Unreferenced payload')
+    with pytest.raises(archive.files.ArchiveError, match='unlisted blob'):
+        archive.archive_inspect(package)
+    extra.unlink()
+    legacy = tmp_path / 'legacy'
+    (legacy / 'blobs').mkdir(parents=True)
+    old_rows = []
+    for row in rows:
+        old = dict(row)
+        if old['kind'] == 'file':
+            old.pop('storage')
+            old['blob'] = f'blobs/{old["index"]:012d}'
+            archive.files.copy_verified(package / row['blob'], legacy / old['blob'], old)
+        old_rows.append(old)
+    (legacy / 'manifest.jsonl').write_bytes(b''.join(archive.files.canonical(row) + b'\n' for row in old_rows))
+    (legacy / 'dependencies.jsonl').write_bytes((package / 'dependencies.jsonl').read_bytes())
+    metadata = json.loads((package / 'archive.json').read_bytes())
+    metadata.update(format=archive.LEGACY_FORMAT)
+    metadata.pop('unique_blobs'); metadata.pop('blob_bytes')
+    metadata['manifest'] = {key: archive.files.hash_file(legacy / 'manifest.jsonl')[key] for key in ('sha256', 'size_bytes')}
+    archive.files.durable_json(legacy / 'archive.json', metadata)
+    assert archive.archive_inspect(legacy)['files'] == sum(row['kind'] == 'file' for row in rows)
+    assert (package / file_row['blob']).stat().st_mode & 0o777 == 0o400

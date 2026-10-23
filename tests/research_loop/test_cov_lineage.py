@@ -97,6 +97,22 @@ def wrapper(tmp_path,execution_registry):
     return fixture
 
 
+def test_current_frozen_wrapper_configuration_roundtrips_and_rejects_undeclared_fields(wrapper):
+    frozen = json.loads(wrapper.config.read_text())
+    parsed, digest = cov_lineage._config(wrapper.config)
+    assert parsed == frozen
+    assert digest == hashlib.sha256(wrapper.config.read_bytes()).hexdigest()
+    invalid = [dict(frozen, undeclared_host_binding='not part of the wrapper contract'),
+        {key: value for key, value in frozen.items() if key != 'storage_policy'},
+        dict(frozen, storage_policy=dict(frozen['storage_policy'], undeclared_dimension=1)),
+        dict(frozen, storage_policy=dict(frozen['storage_policy'], enabled='yes'))]
+    for value in invalid:
+        wrapper.config.write_text(json.dumps(value))
+        with pytest.raises(ValueError):
+            cov_lineage._config(wrapper.config)
+    assert wrapper.accepted() == [] and wrapper.calls() == b''
+
+
 @pytest.mark.process_e2e
 def test_same_node_new_parent_branch_and_backtrack_without_carry(wrapper):
     p = wrapper.run('P', 'success', '--new-plan')
@@ -205,8 +221,12 @@ def test_incomplete_transport_rejects_even_exact_successful_receipt(wrapper):
     assert receipt['version']==1 and receipt['call_id']==accepted['call_id']
     assert receipt['accepted_sha256']==hashlib.sha256(experiments.encoded(accepted)).hexdigest()
     assert receipt['source_sha256']==accepted['script']['sha256']
-    assert cov_lineage._receipt(directory, accepted, rows, 0, True, transport_complete=True)['status'] == 'known_success'
-    assert cov_lineage._receipt(directory, accepted, rows, 0, True, transport_complete=False) is None
+    config = json.loads(wrapper.config.read_text())
+    from scidiscovery.research_loop import storage_policy as storage
+    arguments = dict(storage_root=experiments.Records(config).storage_root(),
+        policy=config.get('storage_policy'), context=storage.Deadline(10))
+    assert cov_lineage._receipt(directory, accepted, rows, 0, True, transport_complete=True, **arguments)['status'] == 'known_success'
+    assert cov_lineage._receipt(directory, accepted, rows, 0, True, transport_complete=False, **arguments) is None
     assert original == {path: path.read_bytes() for path in directory.iterdir() if path.is_file()}
 
 

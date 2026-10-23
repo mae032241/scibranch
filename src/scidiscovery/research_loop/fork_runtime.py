@@ -245,7 +245,7 @@ def build_selected_job(root, step):
     inventory=storage.Inventory(frozen.get('storage_policy'),context=context)
     for relative, source, digest in _selected_files(root, selected):
         inventory.entry();inventory.file(source.stat().st_size)
-        c._copy_bound(source,work/relative,digest,root=root,policy=frozen.get('storage_policy'),context=context)
+        c._bind_original(source, work/relative, digest, root=root, policy=frozen.get('storage_policy'), context=context, size_bytes=(source).stat().st_size, source_kind='managed_frozen')
     # Review inputs remain neutral; general advice waits for the next legal task.
     if job.get('formal_review'):
         statements = selected['job'].get('user_guidance', [])

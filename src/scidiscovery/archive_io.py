@@ -36,9 +36,11 @@ def check_path(path):
     return path
 
 
-def hash_file(path):
+def hash_file(path, *, context=None):
     binding = None
     for attempt in range(3):
+        if context is not None:
+            context.remaining_seconds()
         check_path(path)
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
@@ -52,6 +54,8 @@ def hash_file(path):
             sha = hashlib.sha256()
             with os.fdopen(fd, "rb", closefd=False) as stream:
                 for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    if context is not None:
+                        context.remaining_seconds()
                     sha.update(chunk)
             after = os.fstat(fd)
             checked = (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
@@ -91,12 +95,12 @@ def durable_json(path, value):
     fsync_directory(path.parent)
 
 
-def link_verified(source, destination, entry):
+def link_verified(source, destination, entry, *, context=None):
     """Retain one immutable inode without changing its bytes or permissions."""
     source, destination = check_path(source), check_path(destination)
     if entry['mode'] != 0o400:
         raise ArchiveError('Shared originals must have mode 0400')
-    original = hash_file(source)
+    original = hash_file(source, context=context)
     if any(original[key] != entry[key] for key in ('sha256', 'size_bytes', 'mode')):
         raise ArchiveError('Shared source differs from its immutable binding')
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -109,12 +113,12 @@ def link_verified(source, destination, entry):
             pass
         except OSError as error:
             if error.errno in {errno.EXDEV, errno.EOPNOTSUPP, errno.ENOSYS, errno.EPERM, errno.EMLINK}:
-                raise SharingUnsupported('Fork storage requires supported same-filesystem hardlinks') from error
+                raise SharingUnsupported('Managed originals require supported same-filesystem hardlinks') from error
             raise
-        actual = hash_file(destination)
+        actual = hash_file(destination, context=context)
         if any(actual[key] != entry[key] for key in ('sha256', 'size_bytes', 'mode')):
             raise ArchiveError('Shared destination differs from its immutable binding')
-        if created and actual['source_stat'][:2] != original['source_stat'][:2]:
+        if actual['source_stat'][:2] != original['source_stat'][:2]:
             raise ArchiveError('Shared source inode changed during publication')
         fsync_directory(destination.parent)
     except BaseException:
@@ -124,7 +128,7 @@ def link_verified(source, destination, entry):
         raise
 
 
-def copy_verified(source, destination, entry):
+def copy_verified(source, destination, entry, *, context=None):
     """Copy before unlink, including on the same filesystem, to preserve drafts."""
     check_path(source)
     check_path(destination)
@@ -132,7 +136,7 @@ def copy_verified(source, destination, entry):
         destination.mkdir(parents=True, exist_ok=True, mode=0o700)
         return
     if destination.exists():
-        actual = hash_file(destination)
+        actual = hash_file(destination, context=context)
         if any(actual[key] != entry[key] for key in ("sha256", "size_bytes", "mode")):
             raise ArchiveError("destination file collision")
         return
@@ -145,11 +149,13 @@ def copy_verified(source, destination, entry):
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         with os.fdopen(descriptor, "wb", closefd=False) as output, open(source, "rb") as input_file:
             for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+                if context is not None:
+                    context.remaining_seconds()
                 output.write(chunk)
             output.flush()
             os.fchmod(descriptor, entry["mode"])
             os.fsync(descriptor)
-        actual = hash_file(temporary)
+        actual = hash_file(temporary, context=context)
         if any(actual[key] != entry[key] for key in ("sha256", "size_bytes")):
             raise ArchiveError("copy verification failed")
         # CAS may acquire a new owner while this instance is restoring. Publish
@@ -157,7 +163,7 @@ def copy_verified(source, destination, entry):
         try:
             os.link(temporary, destination, follow_symlinks=False)
         except FileExistsError:
-            actual = hash_file(destination)
+            actual = hash_file(destination, context=context)
             if any(actual[key] != entry[key] for key in ("sha256", "size_bytes", "mode")):
                 raise ArchiveError("destination appeared with different content or permissions")
         fsync_directory(destination.parent)

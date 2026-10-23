@@ -197,9 +197,13 @@ isolation or a blanket guarantee for generic native execution.
 Managed execution outputs, observation originals and history retention reuse the
 instance's existing `host-history/objects/<sha256>` archive. Host-only immutable
 aliases may share an inode across calls; equal bytes do not merge original calls,
-origins or scientific paths. Accepted writable cwd snapshots and Worker input,
-collection and wake views use independent inodes: bounded reflinks where supported,
-otherwise bounded copies. Mode 0400 alone is not same-user write isolation.
+origins or scientific paths. Mutable external bytes are frozen independently once;
+accepted input snapshots, Worker inputs, collection and wake views then share
+read-only originals through owning hardlinks. Editing requires an explicit,
+file-scoped working copy under `work/`, never a pre-copied input tree. Sharing
+requires the same filesystem and fails explicitly without a copy fallback.
+Source ownership is supplied by its lifecycle, not inferred from mode or link
+count. Mode 0400 alone is not hostile same-user write isolation.
 
 `storage_policy` is frozen with the instance and exact job/call configuration.
 It defaults to `enabled=false`, with every limit null. Enabling it requires at least
@@ -292,7 +296,7 @@ Deterministic curve and figure algorithms are self-contained Skill scripts;
   scientific explanation; its rows, `keep`, rationale and evidence-step formatting
   do not grant or gate delivery. Actual audit and delivery actions still require
   an exact available candidate, qualification and execution permission. Null
-  does not authorize delivery. Protocol 23 rejects earlier frozen protocols without
+  does not authorize delivery. Protocol 24 rejects earlier frozen protocols without
   migrating their original bytes.
 - One advancing writer per instance; read views neither call models nor own scientific/budget state.
 - Exact immutable originals, configuration and calls; revisions inherit no prior qualification or approval.
@@ -384,7 +388,7 @@ exact identity checks and independent execution authorization still apply.
 Shared budget checks for new nodes remain unchanged. Author
 closeout token permits are also soft targets; their finite time limits remain
 enforced. Actual usage remains accounted without creating a new shared allowance.
-Protocol 23 accepts only soft node settings. Older protocols remain read-only;
+Protocol 24 accepts only soft node settings. Older protocols remain read-only;
 frozen hard settings are never silently changed to soft. A denied start
 advances the existing control journal to durable `FINAL` (`closeout_begin` mode
 `final`); it never reclassifies an ordinary A as final from the remaining balance.
@@ -503,8 +507,8 @@ separate mutable reference-count database. All shared sources and the target mus
 be on the same filesystem; unsupported links fail explicitly without copying as
 a fallback. A source requiring new snapshots must permit private-store writes.
 Existing copied manifests remain readable. Later task execution still prepares
-normal node-local input copies; sharing at fork creation is not a zero-copy
-execution-workspace guarantee.
+read-only node-local aliases to the selected originals. Writable scratch remains
+independent and is created only when needed.
 Pure readers tolerate link-induced metadata changes with at most three attempts
 per reader: only ctime may differ on a 0400 regular file, while its path, inode,
 mode, size and mtime remain fixed. Each attempt must finish with a stable generation
@@ -644,10 +648,15 @@ Adapter audit, smoke and scratch recovery requests contain staged candidate orig
 
 ## Selected framework Skill assets
 
-`skill_supply.py` freezes explicitly declared bundle sets once per instance and
-binds role/Worker selections to jobs and native intents. Ordinary bundle files
-remain instance-owned; `.agents/skills` is a validated, rebuildable discovery
-projection. Source installation updates do not refresh frozen bytes. Revisions
+`skill_supply.py` independently freezes selected bundle contents once in a private
+shared store and gives each instance its own hardlinks. `SCID_SHARED_STORE` selects
+an explicit store; otherwise the host user cache is used. The store and instance
+must support same-filesystem hardlinks; there is no per-instance copy fallback.
+One store writer lock covers first publication across different bundle trees.
+Role/Worker selections remain bound to jobs and native intents. Instance-owned
+references survive installation, shared-store or sibling-instance removal;
+`.agents/skills` is a validated, rebuildable discovery projection. Source
+installation updates do not refresh frozen bytes. Revisions
 select existing frozen sets only; new IDs/versions require a new instance.
 Archive/fork/cold restore retain ordinary objects and rebuild projections under
 the receiving root. They cannot depend on a surviving installation or parent.

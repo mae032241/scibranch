@@ -45,11 +45,36 @@ class Original:
 
     @staticmethod
     def _identity(info):
-        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
     def check(self):
-        if self._identity(os.fstat(self.stream.fileno())) != self.identity:
-            raise ValueError('Scientific original changed during reading')
+        descriptor = self.stream.fileno()
+        for attempt in range(3):
+            current = self._identity(os.fstat(descriptor))
+            if current == self.identity:
+                return
+            if current[:-1] != self.identity[:-1] or stat.S_IMODE(current[2]) != 0o400:
+                break
+            # Another owner may link/unlink this readonly inode while a download
+            # is open. Recheck its complete bytes through the same descriptor,
+            # preserving the stream position and requiring a stable generation.
+            digest = hashlib.sha256()
+            offset = 0
+            while offset < self.size:
+                block = os.pread(descriptor, min(1024 * 1024, self.size - offset), offset)
+                if not block:
+                    break
+                digest.update(block); offset += len(block)
+            after = self._identity(os.fstat(descriptor))
+            if after != current:
+                if attempt < 2 and after[:-1] == current[:-1]:
+                    continue
+                break
+            if offset != self.size or digest.hexdigest() != self.sha256:
+                break
+            self.identity = after
+            return
+        raise ValueError('Scientific original changed during reading')
 
     def copy_to(self, output):
         digest = hashlib.sha256()

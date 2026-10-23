@@ -53,9 +53,9 @@ def _write(path, value):
         json.dump(value,stream,ensure_ascii=False,allow_nan=False,sort_keys=True);stream.write('\n');stream.flush();os.fsync(stream.fileno())
 
 
-def _proof(path, limit=None):
+def _proof(path, limit=None, *, context=None):
     from scidiscovery.research_loop import experiments
-    return experiments.proof(path,limit)
+    return experiments.proof(path,limit,context=context)
 
 
 def _check(proof):
@@ -78,7 +78,7 @@ def _rows(path):
 
 def _config(path):
     data = _read(path);value = json.loads(data)
-    keys = {'contract_version','record_dir','runs_root','run_argv','scope','parents','evaluation_key','feedback_version','execution_interface','max_seconds','admission'}
+    keys = {'contract_version','record_dir','runs_root','run_argv','scope','parents','evaluation_key','feedback_version','execution_interface','max_seconds','admission','storage_policy'}
     if 'native_attempt' in value:keys.add('native_attempt')
     if 'breadth' in value:keys.add('breadth')
     if 'engineering_repair' in value:keys.add('engineering_repair')
@@ -99,7 +99,9 @@ def _config(path):
         keys.add('host_launch_implementation')
     if set(value) != keys or value['contract_version'] != 2 or value['feedback_version'] != 1:
         raise ValueError('Explicit wrapper contract2 configuration required')
-    from scidiscovery.research_loop import replay_check
+    from scidiscovery.research_loop import replay_check, storage_policy as storage
+    if storage.configuration(value['storage_policy']) != value['storage_policy']:
+        raise ValueError('Exact frozen storage policy required')
     replay_check.reserve_seconds(value)
     scope = value['scope']
     if set(scope) != ({'step','role','job_sha256','execution_key','mechanism_ref','handoff_protocol'} if 'handoff_protocol' in scope else {'step','role','job_sha256','execution_key','mechanism_ref'}) or type(scope['step']) is not int or scope['step'] <= 0 or scope['role'] not in {'H','W','A','E'}:
@@ -200,7 +202,7 @@ def _receipt_row(directory,accepted):
     return value['row']
 
 
-def _receipt(directory, accepted, rows, returncode, cleanup, transport_complete=True):
+def _receipt(directory, accepted, rows, returncode, cleanup, transport_complete=True, *, storage_root, policy, context):
     if not transport_complete:return None
     row=_receipt_row(directory,accepted)
     if not isinstance(row,dict) or type(row.get('run_id')) is not int or row.get('script') != accepted['source_script']:
@@ -208,20 +210,27 @@ def _receipt(directory, accepted, rows, returncode, cleanup, transport_complete=
     matches = [item for item in rows if item.get('run_id') == row['run_id']]
     if len(matches) != 1 or matches[0] != row:return None
     if not cleanup or returncode not in (0,1) or row.get('ok') is not (returncode == 0):return None
-    _check(accepted['script'])
-    if _proof(Path(accepted['source_script']))['sha256'] != accepted['script']['sha256']:
+    if _proof(Path(accepted['script']['path']), context=context) != accepted['script']:
+        raise IntegrityError('Executed source snapshot changed')
+    if _proof(Path(accepted['source_script']), context=context)['sha256'] != accepted['script']['sha256']:
         raise IntegrityError('Executed source changed')
     model = None
     if row['ok']:
         path = Path(row.get('model_path',''))
         if path != Path(accepted['runs_root'])/f'model_run{row["run_id"]}.pkl':
             raise IntegrityError('Returned artifact is outside the public run scope')
-        from scidiscovery.research_loop import contracts as c
-        original=_proof(path);archive=directory/'model.pkl'
-        c._copy_bound(path,archive,original['sha256'])
-        model=_proof(archive)
-    if not (directory/'row.json').exists():_write(directory/'row.json',row)
-    proofs = [_proof(directory/name) for name in ('accepted.json','source.py','stdout.raw','stderr.raw','receipt.json','row.json','terminal.json')]
+        from scidiscovery.research_loop import contracts as c, storage_policy as storage
+        storage.Inventory(policy, context=context).file(path.stat().st_size)
+        original=_proof(path, context=context);archive=directory/'model.pkl'
+        c._bind_original(path, archive, original['sha256'], size_bytes=original['size_bytes'],
+            root=storage_root, source_kind='mutable', context=context, policy=policy)
+        model=_proof(archive, context=context)
+    from scidiscovery.research_loop import shared_originals
+    payload = (json.dumps(row,ensure_ascii=False,allow_nan=False,sort_keys=True)+'\n').encode()
+    frozen = shared_originals.publish_bytes(storage_root, payload, context=context, policy=policy)
+    shared_originals.link(frozen, directory/'row.json', sha256=hashlib.sha256(payload).hexdigest(),
+        size_bytes=len(payload), root=storage_root, context=context, policy=policy)
+    proofs = [_proof(directory/name, context=context) for name in ('accepted.json','source.py','stdout.raw','stderr.raw','receipt.json','row.json','terminal.json')]
     if model:proofs.append(model)
     return dict(call_id=accepted['call_id'],status='known_success' if row['ok'] else 'known_failed',
         candidate_id=f'run-{row["run_id"]}',run_id=row['run_id'],model=model,parent=accepted['parent'],

@@ -120,6 +120,7 @@ def test_frozen_object_changes_fail_before_any_native_launch(tmp_path, damage):
     root, _ = prepare(tmp_path)
     job = c.build_job(root, 1, 'H', [])
     target = _object(root) / 'scripts/run.py'
+    target.parent.chmod(0o700)  # Deliberate trusted same-user tampering.
     if damage == 'bytes':
         target.chmod(0o600); target.write_text('changed'); target.chmod(0o400)
     elif damage == 'missing':
@@ -234,6 +235,8 @@ def test_fork_child_owns_readonly_skill_links_after_parent_and_source_removal(tm
     manifest = c.read(child / 'host-runtime/fork/manifest.json')
     assert all(row['visibility'] == 'private_snapshot' for row in manifest['entries']
                if row['path'].startswith(skill_supply.DIRECTORY + '/'))
+    for directory in (root / skill_supply.DIRECTORY / 'objects').rglob('*'):
+        if directory.is_dir():directory.chmod(0o700)
     shutil.rmtree(root); shutil.rmtree(source)
     job = fork_runtime.build_selected_job(child, 1)
     skill_supply.project(child, configuration_updates.for_job(child, job), job)
@@ -242,7 +245,10 @@ def test_fork_child_owns_readonly_skill_links_after_parent_and_source_removal(tm
     assert b'name: alpha' in projected.read_bytes()
 
 
-def test_empty_sets_keep_custom_backend_and_native_permissions_unchanged(tmp_path):
+def test_empty_sets_keep_custom_backend_and_native_permissions_unchanged(tmp_path, monkeypatch):
+    def no_store():
+        raise AssertionError('An empty Skill selection must not access the shared store')
+    monkeypatch.setattr(skill_supply, '_shared_store', no_store)
     permissions = dict(workspace='danger-full-access', network=True, web='live', subagents=True)
     root, _ = prepare(tmp_path, sets={'empty': dict(items=[])}, roles={'H': dict(skill_set='empty')},
         launcher=['custom'], native_backend='protocol', native_options=permissions)
@@ -440,3 +446,103 @@ def test_real_frozen_science_skill_clis_do_not_mutate_objects(tmp_path, monkeypa
     c.build_job(root, 2, 'H', [])
     assert skill_supply.validate(root, configuration_updates.for_step(root, 2)) == before
     assert profiles.validate_intent(settings, job, profiles.binding(settings, job)) == job['native_profile']
+
+
+def _freeze_selected(root, source, item):
+    root.mkdir()
+    declared, manifest = skill_supply.prepare(dict(root=str(source), sets={'selected': dict(items=[item])}),
+        backend='codex', launcher=['codex'])
+    settings = dict(skills=declared, native_launcher_argv=['codex'])
+    skill_supply.freeze(root, settings, manifest)
+    return settings, root / skill_supply.DIRECTORY / 'objects' / manifest['objects'][item]['tree_sha256']
+
+
+def test_independent_instances_share_content_across_trees_and_keep_their_own_lifetime(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import atomic_files
+    source = library(tmp_path)
+    payload = b'print("one shared resource")\n'
+    for item in ('alpha', 'beta'):
+        (source / item / 'scripts/run.py').write_bytes(payload)
+    copied = []
+    original_copy = atomic_files.copy_original
+    def counted(source, destination, **kwargs):
+        copied.append(kwargs['sha256'])
+        return original_copy(source, destination, **kwargs)
+    monkeypatch.setattr(atomic_files, 'copy_original', counted)
+    first, alpha = _freeze_selected(tmp_path / 'first', source, 'alpha')
+    second, beta = _freeze_selected(tmp_path / 'second', source, 'beta')
+    digest = c.digest(alpha / 'scripts/run.py')
+    blob = Path(os.environ['SCID_SHARED_STORE']) / 'skills/objects' / digest
+    assert copied.count(digest) == 1
+    assert (alpha / 'scripts/run.py').stat().st_ino == (beta / 'scripts/run.py').stat().st_ino == blob.stat().st_ino
+    assert (source / 'alpha/scripts/run.py').stat().st_ino != blob.stat().st_ino
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o500 for path in (alpha, alpha / 'scripts', alpha / 'empty'))
+    shutil.rmtree(source)
+    shutil.rmtree(Path(os.environ['SCID_SHARED_STORE']))
+    assert skill_supply.validate(tmp_path / 'first', first)
+    assert skill_supply.validate(tmp_path / 'second', second)
+    assert (alpha / 'scripts/run.py').read_bytes() == (beta / 'scripts/run.py').read_bytes() == payload
+
+
+def test_concurrent_different_skill_trees_freeze_shared_file_once(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from scidiscovery.research_loop import atomic_files
+    import threading
+    source = library(tmp_path)
+    for item in ('alpha', 'beta'):
+        (source / item / 'scripts/run.py').write_bytes(b'identical resource across different trees')
+    digest = c.digest(source / 'alpha/scripts/run.py')
+    original_copy = atomic_files.copy_original
+    copied = []
+    def counted(source, destination, **kwargs):
+        copied.append(kwargs['sha256'])
+        return original_copy(source, destination, **kwargs)
+    monkeypatch.setattr(atomic_files, 'copy_original', counted)
+    barrier = threading.Barrier(2)
+    def freeze(item):
+        barrier.wait(timeout=5)
+        return _freeze_selected(tmp_path / item, source, item)[1]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        alpha, beta = list(pool.map(freeze, ('alpha', 'beta')))
+    assert copied.count(digest) == 1
+    assert (alpha / 'scripts/run.py').stat().st_ino == (beta / 'scripts/run.py').stat().st_ino
+
+
+def test_skill_cache_damage_is_rejected_without_repair(tmp_path):
+    from scidiscovery.archive_io import ArchiveError
+    source = library(tmp_path)
+    _, alpha = _freeze_selected(tmp_path / 'first', source, 'alpha')
+    blob = Path(os.environ['SCID_SHARED_STORE']) / 'skills/objects' / c.digest(alpha / 'scripts/run.py')
+    blob.chmod(0o600); blob.write_bytes(b'damaged private cache'); blob.chmod(0o400)
+    with pytest.raises(ArchiveError):
+        _freeze_selected(tmp_path / 'second', source, 'alpha')
+    assert blob.read_bytes() == b'damaged private cache'
+
+
+def test_skill_shared_link_failure_is_explicit_and_never_copies_again(tmp_path, monkeypatch):
+    import errno
+    from scidiscovery import archive_io
+    from scidiscovery.research_loop import atomic_files
+    source = library(tmp_path)
+    _freeze_selected(tmp_path / 'first', source, 'alpha')
+    def no_copy(*args, **kwargs):
+        raise AssertionError('A cache hit must never copy a resource')
+    def unsupported(*args, **kwargs):
+        raise OSError(errno.EXDEV, 'fixture requires another filesystem')
+    monkeypatch.setattr(atomic_files, 'copy_original', no_copy)
+    monkeypatch.setattr(archive_io.os, 'link', unsupported)
+    with pytest.raises(archive_io.SharingUnsupported):
+        _freeze_selected(tmp_path / 'second', source, 'alpha')
+    assert not (tmp_path / 'second' / skill_supply.MANIFEST).exists()
+
+
+def test_skill_frozen_scan_limits_reject_before_hashing(tmp_path, monkeypatch):
+    from scidiscovery import archive_io
+    from scidiscovery.research_loop import storage_policy as storage
+    source = library(tmp_path)
+    def no_hash(*args, **kwargs):
+        raise AssertionError('File size admission must precede hashing')
+    monkeypatch.setattr(archive_io, 'hash_file', no_hash)
+    with pytest.raises(storage.StorageQuotaExceeded, match='max_file_bytes'):
+        skill_supply.prepare(dict(root=str(source), sets={'selected': dict(items=['alpha'])}),
+            backend='codex', launcher=['codex'], policy=dict(enabled=True, max_file_bytes=1))

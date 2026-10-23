@@ -376,15 +376,21 @@ worker = "analysis"
 
 A role's explicit fields override its named Worker's model fields and `skill_set`.
 The source is inspected only for the union of explicitly declared set items.
-Prepare freezes each selected ordinary bundle once in instance-owned immutable
-storage. Roles/nodes share those bytes through `.agents/skills` projections.
+Prepare independently freezes selected contents once in a host-private shared
+store, then creates instance-owned hardlinks. `SCID_SHARED_STORE` may select an
+exact store instead of the default user cache; it must support hardlinks to the
+instance filesystem. Unsupported sharing fails without copying each bundle again.
+Removing the store does not remove an instance's existing references. Roles/nodes
+share those bytes through `.agents/skills` projections.
 Changing the installation source or environment does not refresh an instance.
 Configuration revisions may select only its already frozen sets and Worker bindings;
 new bundle IDs or versions require a new instance. Existing jobs retain their binding.
 Missing, changed, linked or incomplete source assets fail before model launch.
 
 角色显式字段覆盖命名 Worker 的模型字段和 `skill_set`。初建只读取全部显式集合的有限并集，
-每个 Skill 普通文件树在实例内冻结一次，角色和节点通过 `.agents/skills` 共享投影。
+Skill 内容在宿主私有共享库首次独立冻结，实例取得自有硬链接，角色和节点通过 `.agents/skills` 共享投影。
+`SCID_SHARED_STORE` 可替代默认用户缓存，指定与实例支持同文件系统硬链接的精确库路径；
+共享不支持时明确拒绝，不重新复制整套资产。删除库目录不影响实例已持有的引用。
 安装来源或环境变更不刷新已建实例。配置修订只能改选已冻结集合与 Worker 绑定，新 ID 或版本
 要求新实例，既有任务保持原绑定。缺失、变更、链接或不完整资产在模型启动前拒绝。
 

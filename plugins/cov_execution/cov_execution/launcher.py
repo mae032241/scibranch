@@ -621,7 +621,7 @@ def main():
     if s['_author_closeout'] and facts.exists():
         if s['_worker_science_view']:
             target=w/'work/author-closeout-science.json'
-            contracts._copy_bound(facts,target,contracts.digest(facts))
+            contracts._bind_original(facts, target, contracts.digest(facts), root=Path(s['scene_root']), size_bytes=(facts).stat().st_size, source_kind='managed_frozen')
             s['_closeout_facts']=str(target)
         else:s['_closeout_facts']=str(facts)
     materials=direct_materials(s,w,os.environ.get('THIN_HWA_JOB_MANIFEST'));prepare_home(s,w,h,os.environ.get('THIN_HWA_AUTH_SOURCE'))
@@ -652,7 +652,7 @@ def main():
     public_result=Path(s['scene_root'])/'host-runtime/science-native-results'/w.name/f'{intent.get("attempt",0):03d}'
     public_result.mkdir(parents=True,exist_ok=True)
     schema=execution.origin(Path(s['scene_root']),job['step'])/'science-result.schema.json'
-    contracts._copy_bound(schema,public_result/'science-result.schema.json',contracts.digest(schema))
+    contracts._bind_original(schema, public_result/'science-result.schema.json', contracts.digest(schema), root=Path(s['scene_root']), size_bytes=(schema).stat().st_size, source_kind='managed_frozen')
     pending=record/'result.pending.json'
     args=list(args)
     args[args.index('--output-last-message')+1]='/task-result/result.pending.json'
@@ -680,7 +680,7 @@ def main():
                 except subprocess.TimeoutExpired:child.kill();child.wait(timeout=5)
             for sig,handler in previous.items():signal.signal(sig,handler)
         returned=public_result/'result.pending.json'
-        if returned.exists():contracts._copy_bound(returned,pending,contracts.digest(returned))
+        if returned.exists():contracts._bind_original(returned, pending, contracts.digest(returned), root=Path(s['scene_root']), size_bytes=(returned).stat().st_size, source_kind='mutable')
     raise SystemExit(code)
 
 if __name__=='__main__':main()

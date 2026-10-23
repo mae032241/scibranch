@@ -387,12 +387,12 @@ def test_continue_refusal_keeps_pause_and_stops_only_idle_clock(clocked, capsys)
 def test_interrupt_during_real_job_input_copy_stops_idle_clock(clocked, monkeypatch, entry):
     root, now = clocked
     interrupted = KeyboardInterrupt('Interrupted while preparing bound input')
-    original = contracts._copy_bound
-    def copy_then_interrupt(*args):
-        original(*args)
+    original = contracts._bind_original
+    def copy_then_interrupt(*args, **options):
+        original(*args, **options)
         now[0] = 104.
         raise interrupted
-    monkeypatch.setattr(contracts, '_copy_bound', copy_then_interrupt)
+    monkeypatch.setattr(contracts, '_bind_original', copy_then_interrupt)
     with pytest.raises(KeyboardInterrupt) as raised:
         if entry == 'continue':
             main(['continue', '--root', str(root)])

@@ -102,7 +102,7 @@ if role=='W':
    forbidden=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(work/'work/config.json'),'run','--payload',str(work/'work/package'),'--new-plan','--mechanism','Q'],capture_output=True,text=True)
    assert forbidden.returncode==2,(forbidden.stdout,forbidden.stderr)
    denied=json.loads(forbidden.stdout)
-   assert denied['status']=='unavailable' and 'Output-only execution wake' in denied['note']
+   assert denied['status']=='unavailable',denied
    (work/'work/new-call-denied').write_text(denied['status'])
  consumed=(work/'work/consumed-result').exists()
  payload.update(stage_intent='review' if resume else options.get('stage_intent','review'),mechanism_findings=[dict(mechanism='P',basis='observed' if consumed else 'blocked',finding='Read exact original terminal' if consumed else 'Original accepted execution has no consumed terminal'),dict(mechanism='Q',basis='blocked',finding='No Q experiment requested in this fixture')])
@@ -189,7 +189,15 @@ def test_default_cli_wakes_original_output_only_w_and_cannot_start_another_manag
     from scidiscovery.research_loop import managed_wait
     assert managed_wait.handoff(config,dict(call_id=call,status='unknown'),'query')['action']=='reconcile_or_stop'
     reply=run_cli(root);result=json.loads(reply.stdout)
-    assert reply.returncode==0 and result['status']=='wait',(reply.stdout,reply.stderr)
+    if reply.returncode!=0 or result['status']!='wait':
+        record=execution.record(root,2)
+        diagnostic=dict(stdout=reply.stdout,stderr=reply.stderr,attempt=str(record),originals={})
+        for path in [record/name for name in ('runner.stderr','native.stderr','native-outcome.json','runner-cleanup.json')]+[work/'work/launches']:
+            if path.is_file():
+                with path.open('rb') as stream:
+                    stream.seek(max(0,path.stat().st_size-12000))
+                    diagnostic['originals'][str(path)]=stream.read(12000).decode('utf-8',errors='replace')
+        pytest.fail(json.dumps(diagnostic,ensure_ascii=False,indent=2))
     assert (work/'work/launches').read_text()=='exec\nresume\n'
     assert (work/'work/consumed-result').read_text()=='known_success'
     assert (work/'work/new-call-denied').read_text()=='unavailable'

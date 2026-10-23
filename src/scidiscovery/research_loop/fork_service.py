@@ -304,6 +304,9 @@ def _finish_prepared(child, path, record):
                 or c.digest(stage / 'settings.json') != record['settings_sha256']):
             raise ForkError('fork_transaction_changed', 'Prepared fork lost its exact original child')
         from .instance_archive import _publish
+        from . import storage_policy as storage
+        with storage.mutation(stage, 0, policy=c.settings(stage).get('storage_policy'), context=storage.Deadline(65)):
+            pass
         _publish(stage, child)
     record['phase'] = 'published'
     files.durable_json(path, record)
@@ -377,6 +380,27 @@ def _prepare(plan, request, transaction, *, _on_created=None):
         texts.append(original.read_bytes().decode('utf-8'))
     if texts and texts[0] != plan['selected_settings']['objective']:
         raise ForkError('fork_origin_invalid', 'Selected objective differs from its exact original global')
+    from . import storage_policy as storage
+    context = storage.Deadline(65)
+    policy = storage.configuration(selected_settings.get('storage_policy'))
+    def seed_originals(storage_root):
+        if _on_created is not None:
+            _on_created(storage_root)
+        # Seed the already verified retained contents before controller globals
+        # or later task bindings can first-freeze inherited bytes a second time.
+        # Logical origins stay in their exact manifest entries, not in this CAS.
+        inventory = storage.Inventory(policy, context=context)
+        with storage.writer_lock(storage_root, context=context):
+            for reference in plan['entries']:
+                inventory.entry(); inventory.file(reference['size_bytes'])
+                target = storage_root / 'host-history/objects' / reference['sha256']
+                if target.exists():
+                    continue  # An earlier retained original with the same bytes.
+                original = source_store / reference['storage_path']
+                # This new stage contains only earlier seeded CAS names; a new
+                # content key therefore adds this one inode, once.
+                with storage.mutation(storage_root, reference['size_bytes'], policy=policy, context=context):
+                    _source_call(files.link_verified, original, target, dict(reference, mode=0o400), context=context)
     def source_facts(storage_root, global_materials):
         destination = storage_root / 'host-runtime/fork'
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -389,13 +413,13 @@ def _prepare(plan, request, transaction, *, _on_created=None):
         for index, declaration in enumerate(configured):
             origin = declaration['origin']
             source = Path(origin['path'])
-            if stat.S_IMODE(source.stat().st_mode) == 0o400:
-                retained = storage_root / 'source-provenance/originals' / f'{index:06d}'
-                _source_call(files.link_verified, source, retained, dict(origin, mode=0o400))
+            retained = storage_root / 'source-provenance/originals' / f'{index:06d}'
+            with storage.mutation(storage_root, 0, policy=policy, context=context):
+                _source_call(files.link_verified, source, retained, dict(origin, mode=0o400), context=context)
         return configured
     settings = controller.prepare(**options, _existing_settings=selected_settings, _identity_root=final,
         _public_identity_root=final / 'host-runtime/fork/public', _user_update_texts=texts[1:],
-        _source_facts_factory=source_facts, _on_created=_on_created)
+        _source_facts_factory=source_facts, _on_created=seed_originals)
     settings = c.settings(stage)
     changed = fork_runtime.changed_task_settings(selected_settings, settings)
     if changed:

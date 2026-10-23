@@ -119,3 +119,60 @@ def test_managed_deliverable_reads_only_its_existing_sealed_output_snapshot(tmp_
     snapshot.unlink()
     with pytest.raises(ValueError,match='missing|inaccessible'):
         science.artifact(root,2,1)
+
+
+def test_readonly_download_survives_cross_root_link_changes_without_reopening(tmp_path):
+    import os
+    source = tmp_path / 'source'
+    raw = b'opaque immutable download\n' * 50000
+    source.write_bytes(raw); source.chmod(0o400)
+    other_root = tmp_path / 'other-owner'; other_root.mkdir()
+    retained = other_root / 'retained-original'
+    proof = dict(sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw))
+    class LinkingOutput(io.BytesIO):
+        def write(self, block):
+            if not retained.exists():
+                os.link(source, retained)
+            else:
+                retained.unlink()
+            return super().write(block)
+    with science.Original(source, proof) as original:
+        output = LinkingOutput()
+        original.copy_to(output)
+        assert output.getvalue() == raw
+        if retained.exists():
+            retained.unlink()
+        original.check()
+    assert source.read_bytes() == raw and source.stat().st_mode & 0o777 == 0o400
+
+
+@pytest.mark.parametrize('mutation', ['mode', 'mtime', 'size', 'same_size_bytes'])
+def test_readonly_original_still_rejects_content_and_other_metadata_changes(tmp_path, mutation):
+    import os
+    source = tmp_path / 'source'
+    raw = b'Exact scientific original bytes.'
+    source.write_bytes(raw); source.chmod(0o400)
+    proof = dict(sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw))
+    with science.Original(source, proof) as original:
+        before = source.stat()
+        if mutation == 'mode':
+            source.chmod(0o600)
+        elif mutation == 'mtime':
+            os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns + 1000000000))
+        else:
+            source.chmod(0o600)
+            source.write_bytes(raw + b'changed size' if mutation == 'size' else b'X' * len(raw))
+            source.chmod(0o400)
+            os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+        with pytest.raises(ValueError, match='changed during reading'):
+            original.check()
+
+
+def test_mutable_original_does_not_ignore_link_metadata_changes(tmp_path):
+    import os
+    source = tmp_path / 'source'; source.write_bytes(b'Mutable original')
+    source.chmod(0o600)
+    with science.Original(source) as original:
+        os.link(source, tmp_path / 'alias')
+        with pytest.raises(ValueError, match='changed during reading'):
+            original.check()

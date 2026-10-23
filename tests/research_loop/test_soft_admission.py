@@ -15,7 +15,7 @@ def fixture(tmp_path, *, mode='soft', seconds=60, tokens=6_000_000, steps=24, sp
     adapter=tmp_path/'never-called.py';adapter.write_text('raise AssertionError("No delivery was requested in this fixture")\n')
     delivery=dict(closeout_a=dict(max_observed_tokens=300_000,max_seconds=300),inflight_tokens=100_000,
         cleanup_seconds=30,submit_seconds=60,confirm_seconds=60,
-        adapter=dict(adapter=str(adapter),launcher_argv=[sys.executable,str(adapter)],config={},target={},inputs=[],source_roots=[str(public)]))
+        adapter=dict(adapter=str(adapter),launcher_argv=[sys.executable,str(adapter)],config={},target={},inputs=[],source_roots=[str(public)],readonly_inputs_version=1))
     root=tmp_path/'instance'
     controller.prepare(root,objective,public,[sys.executable,str(launcher)],max_tokens=tokens,max_seconds=seconds,max_steps=steps,
         model='fixture',reasoning_effort='high',search_policy=None,node_budget_mode=mode,

@@ -412,6 +412,9 @@ def run_native(root: Path, step: int, attempt=0):
             basis='shared_authorization_minus_existing_final_or_closeout_reserve',
             observed_usage_is_lower_bound=True,unknown_usage=bool(budget.get('unknown_steps')),
             inflight_usage_unknown=True),ensure_ascii=False)+'\n')
+    prompt += ('\nManaged inputs/, materials, retained experiment outputs and execution-results are read-only shared originals. '
+        'To edit an input, copy only the specific files you need into work/ and edit those working files. '
+        'Do not chmod or write retained originals. Same-user access remains a soft trust boundary.\n')
     prompt += ('\nBudget mode: '+mode+'. Node/search limits are soft targets, not renewed grants. '+
         'Between bounded actions read work/budget-status.json when available; some read-only author views do not expose dynamic updates. '
         'This small advisory is not a grant, execution permission or scientific evidence. '

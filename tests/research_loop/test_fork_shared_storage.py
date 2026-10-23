@@ -1,5 +1,6 @@
 """Shared original storage through real fork transactions; no native calls."""
 import errno
+from collections import Counter
 import json
 import os
 from pathlib import Path
@@ -75,7 +76,7 @@ def _payload_entries(manifest):
 
 
 def test_sibling_forks_share_selected_originals_and_public_views(shared_source, tmp_path, monkeypatch):
-    from scidiscovery import archive_io
+    from scidiscovery.research_loop import atomic_files
     parent = shared_source
     plan = fork_sources.inspect_source(parent, 2)
     sources = {fork_sources._key(row['origin_identity'], row['path'], row):
@@ -85,14 +86,14 @@ def test_sibling_forks_share_selected_originals_and_public_views(shared_source, 
     first, second = tmp_path / 'first', tmp_path / 'second'
     _create(parent, first, 'shared-first')
     payload_sha = c.digest(parent / 'project/nodes/001/artifacts/shared.bin')
-    copy_verified = archive_io.copy_verified
+    copy_original = atomic_files.copy_original
 
-    def no_payload_copy(source, destination, entry):
-        assert entry['sha256'] != payload_sha, 'Second fork recopied the opaque selected payload'
-        return copy_verified(source, destination, entry)
+    def no_payload_copy(source, destination, **options):
+        assert options['sha256'] != payload_sha, 'Second fork recopied the opaque selected payload'
+        return copy_original(source, destination, **options)
 
     with monkeypatch.context() as patch:
-        patch.setattr(archive_io, 'copy_verified', no_payload_copy)
+        patch.setattr(atomic_files, 'copy_original', no_payload_copy)
         _create(parent, second, 'shared-second')
     first_manifest = _manifest(first)
     first_entries = {_entry_key(row): row for row in first_manifest['entries']}
@@ -105,7 +106,8 @@ def test_sibling_forks_share_selected_originals_and_public_views(shared_source, 
         key = fork_sources._key(row['origin_identity'], row['path'], row)
         source = sources[key]
         assert (stat.S_IMODE(source.stat().st_mode), _inode(source)) == before[key]
-        if before[key][0] == 0o400:
+        cas = parent / 'host-history/objects' / row['sha256']
+        if before[key][0] == 0o400 and cas.exists() and _inode(cas) == _inode(source):
             direct_readonly.append(source)
             assert _inode(right) == _inode(source)
         else:
@@ -153,7 +155,7 @@ def test_declared_public_payload_is_shared_through_child_source_freeze(tmp_path,
     retained = declared_original(parent)
     assert stat.S_IMODE(retained.stat().st_mode) == 0o400
     original_inode = _inode(retained)
-    copy_bound = c._copy_bound
+    bind_original = c._bind_original
     validated = []
 
     def verify_preseeded(source, destination, sha256, **options):
@@ -161,11 +163,11 @@ def test_declared_public_payload_is_shared_through_child_source_freeze(tmp_path,
             assert destination.exists(), 'Child source freezing recopied the declared opaque payload'
             assert _inode(destination) == original_inode
             validated.append(destination)
-        return copy_bound(source, destination, sha256, **options)
+        return bind_original(source, destination, sha256, **options)
 
     first, second = tmp_path / 'first', tmp_path / 'second'
     with monkeypatch.context() as patch:
-        patch.setattr(c, '_copy_bound', verify_preseeded)
+        patch.setattr(c, '_bind_original', verify_preseeded)
         _create(parent, first, 'declared-public-first')
         _create(parent, second, 'declared-public-second')
     assert len(validated) >= 2, 'Both child source-freeze paths must verify the retained payload'
@@ -230,14 +232,22 @@ def test_cli_shared_branch_survives_source_and_sibling_removal(shared_source, tm
 
 
 def test_nested_fork_reuses_original_inodes_after_ancestors_are_removed(shared_source, tmp_path, monkeypatch):
+    from scidiscovery.research_loop import atomic_files
     parent = shared_source
     child, grandchild = tmp_path / 'child', tmp_path / 'grandchild'
     _create(parent, child, 'nested-first')
     inherited = {_entry_key(row): _inode(_entry_path(child, row)) for row in _payload_entries(_manifest(child))}
-    _finish_without_native(monkeypatch, child, 2, 'A', [1], action='finish')
-    with controller._writer(child):
-        pass
-    _create(child, grandchild, 'nested-second')
+    payload_sha = _payload_entries(_manifest(child))[0]['sha256']
+    copy_original = atomic_files.copy_original
+    def no_second_freeze(source, destination, **options):
+        assert options['sha256'] != payload_sha, 'Inherited readonly payload was independently frozen again'
+        return copy_original(source, destination, **options)
+    with monkeypatch.context() as patch:
+        patch.setattr(atomic_files, 'copy_original', no_second_freeze)
+        _finish_without_native(monkeypatch, child, 2, 'A', [1], action='finish')
+        with controller._writer(child):
+            pass
+        _create(child, grandchild, 'nested-second')
     reused = [row for row in _payload_entries(_manifest(grandchild)) if _entry_key(row) in inherited]
     assert reused, 'Nested selected task must retain its original ancestor identity'
     assert all(_inode(_entry_path(grandchild, row)) == inherited[_entry_key(row)] for row in reused)
@@ -247,7 +257,7 @@ def test_nested_fork_reuses_original_inodes_after_ancestors_are_removed(shared_s
     assert all(_entry_path(grandchild, row).read_text() == PAYLOAD for row in reused)
 
 
-def test_failed_publication_unlinks_stage_without_discarding_shared_originals(shared_source, tmp_path, monkeypatch):
+def test_failed_publication_retains_exact_prepared_stage_until_same_operation_finishes(shared_source, tmp_path, monkeypatch):
     from scidiscovery.research_loop import instance_archive
     parent = shared_source
     first, retry = tmp_path / 'first', tmp_path / 'retry'
@@ -269,9 +279,25 @@ def test_failed_publication_unlinks_stage_without_discarding_shared_originals(sh
     assert not retry.exists()
     assert not [path for path in tmp_path.iterdir() if path.is_dir()
         and path.name.startswith('.scid-fork-') and path.name != '.scid-fork-operations']
-    assert {_entry_key(row): _entry_path(first, row).stat().st_nlink for row in _manifest(first)['entries']} == links_before
+    operation_path = next(path for path in (tmp_path / '.scid-fork-operations').glob('*.json')
+        if c.read(path)['operation_id'] == 'rollback-retry')
+    record = c.read(operation_path)
+    assert record['phase'] == 'prepared'
+    transaction = Path(record['transaction_path'])
+    stage = transaction / 'child'
+    assert fork_service._directory_identity(stage) == record['stage_identity']
+    stage_links = Counter(_inode(path) for path in stage.rglob('*') if path.is_file())
+    for row in _manifest(first)['entries']:
+        key = _entry_key(row)
+        assert _entry_path(first, row).stat().st_nlink == links_before[key] + stage_links[first_entries[key]]
     receipt, expected = _create(parent, retry, 'rollback-retry')
     assert expected == preview['preview_id']
+    assert fork_service._directory_identity(retry) == record['stage_identity']
+    assert not transaction.exists()
+    assert c.read(operation_path)['phase'] == 'published'
+    for row in _manifest(first)['entries']:
+        key = _entry_key(row)
+        assert _entry_path(first, row).stat().st_nlink == links_before[key] + stage_links[first_entries[key]]
     assert all(_inode(_entry_path(retry, row)) == first_entries[_entry_key(row)] for row in _manifest(retry)['entries'])
     shutil.rmtree(parent)
     fork_sources.validate_manifest(first, full=True)
@@ -281,28 +307,33 @@ def test_failed_publication_unlinks_stage_without_discarding_shared_originals(sh
 
 @pytest.mark.parametrize('published', [False, True])
 def test_interrupted_mutable_import_cannot_publish_partial_cache_object(shared_source, tmp_path, monkeypatch, published):
-    from scidiscovery import archive_io
+    from scidiscovery.research_loop import atomic_files
     parent, child = shared_source, tmp_path / 'retry-import'
-    original = parent / 'project/nodes/001/artifacts/shared.bin'
+    original = parent / 'host-delivery/cache-fixture.bin'
+    original.parent.mkdir(exist_ok=True)
+    original.write_text(PAYLOAD + 'Unconsumed private snapshot fixture.\n')
     original.chmod(0o600)
+    raw = original.read_bytes()
     payload_sha = c.digest(original)
     cache = parent / 'host-history/fork-cache' / payload_sha
     cache_before = set(cache.parent.iterdir()) if cache.parent.exists() else set()
     preview = fork_service.preview(parent, 2, child, budget=BUDGET)
     assert (set(cache.parent.iterdir()) if cache.parent.exists() else set()) == cache_before
-    link_verified = archive_io.link_verified
+    copy_original = atomic_files.copy_original
     interrupted = []
 
-    def fail_import(source, destination, entry):
+    def fail_import(source, destination, **options):
         if Path(destination) == cache:
-            interrupted.append(Path(source))
             if published:
-                link_verified(source, destination, entry)
-            raise OSError('injected interruption during normalized import')
-        return link_verified(source, destination, entry)
+                copy_original(source, destination, **options)
+            with atomic_files._temporary(Path(destination)) as (temporary, output):
+                interrupted.append(temporary)
+                output.write(b'Unpublished partial import')
+                raise OSError('injected interruption during normalized import')
+        return copy_original(source, destination, **options)
 
     with monkeypatch.context() as patch:
-        patch.setattr(archive_io, 'link_verified', fail_import)
+        patch.setattr(atomic_files, 'copy_original', fail_import)
         with pytest.raises(fork_service.ForkError, match='injected interruption'):
             fork_service.create(parent, 2, child, budget=BUDGET,
                 expected_preview_id=preview['preview_id'], operation_id='import-retry')
@@ -310,10 +341,10 @@ def test_interrupted_mutable_import_cannot_publish_partial_cache_object(shared_s
     assert all(not path.exists() for path in interrupted)
     assert cache.exists() is published
     if published:
-        assert cache.read_text() == PAYLOAD and stat.S_IMODE(cache.stat().st_mode) == 0o400
-    assert original.read_text() == PAYLOAD and stat.S_IMODE(original.stat().st_mode) == 0o600
+        assert cache.read_bytes() == raw and stat.S_IMODE(cache.stat().st_mode) == 0o400
+    assert original.read_bytes() == raw and stat.S_IMODE(original.stat().st_mode) == 0o600
     _create(parent, child, 'import-retry')
-    entry = next(row for row in _payload_entries(_manifest(child)) if row['path'] == original.relative_to(parent).as_posix())
+    entry = next(row for row in _manifest(child)['entries'] if row['path'] == original.relative_to(parent).as_posix())
     assert _inode(cache) == _inode(_entry_path(child, entry))
     assert stat.S_IMODE(cache.stat().st_mode) == 0o400
 
@@ -348,8 +379,11 @@ def test_cross_device_link_failure_is_explicit_without_copy_fallback(shared_sour
 def test_conflicting_cache_object_is_rejected_without_damaging_existing_branch(shared_source, tmp_path):
     parent = shared_source
     first, second = tmp_path / 'first', tmp_path / 'cache-conflict'
+    original = parent / 'host-delivery/cache-fixture.bin'
+    original.parent.mkdir(exist_ok=True)
+    original.write_text(PAYLOAD + 'Unconsumed private snapshot fixture.\n')
+    raw = original.read_bytes()
     _create(parent, first, 'cache-conflict-first')
-    original = parent / 'project/nodes/001/artifacts/shared.bin'
     cache = parent / 'host-history/fork-cache' / c.digest(original)
     original_inode = _inode(cache)
     cache.unlink()
@@ -360,9 +394,9 @@ def test_conflicting_cache_object_is_rejected_without_damaging_existing_branch(s
         fork_service.create(parent, 2, second, budget=BUDGET,
             expected_preview_id=preview['preview_id'], operation_id='cache-conflict-second')
     assert error.value.code == 'fork_origin_invalid' and not second.exists()
-    entry = next(row for row in _payload_entries(_manifest(first)) if row['path'] == original.relative_to(parent).as_posix())
+    entry = next(row for row in _manifest(first)['entries'] if row['path'] == original.relative_to(parent).as_posix())
     assert _inode(_entry_path(first, entry)) == original_inode
-    assert _entry_path(first, entry).read_text() == PAYLOAD
+    assert _entry_path(first, entry).read_bytes() == raw
     fork_sources.validate_manifest(first, full=True)
 
 

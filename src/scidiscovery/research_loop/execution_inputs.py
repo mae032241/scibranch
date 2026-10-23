@@ -878,7 +878,10 @@ class NativeInputHost:
 
     def compile(self, source, output, *, slots, aliases, capability, contract, builder):
         from . import execution_authority as authority
-        authority._remaining(self.root, self.config)
+        from . import shared_originals, storage_policy as storage
+        _, remaining=authority._remaining(self.root, self.config)
+        context=storage.Deadline(remaining)
+        policy=c.settings(self.root,self.job).get('storage_policy')
         work = c.workspace(self.root, self.job['step']); source = Path(source).absolute(); output = Path(output).absolute()
         private_output = type(self.job.get('worker_view_version')) is int and self.job['worker_view_version'] == 1
         if private_output:
@@ -927,17 +930,15 @@ class NativeInputHost:
             raise q.IntegrityError('Compiler original directory changed')
         directory.mkdir(parents=True, exist_ok=True)
         author_path = directory / 'author.json'
-        c._copy_bound(source, author_path, source_identity['sha256'])
-        c._copy_bound(Path(capability['path']), directory / 'capability.json', capability['sha256'])
+        c._bind_original(source, author_path, source_identity['sha256'], policy=policy, context=context, root=self.root, size_bytes=source_identity['size_bytes'], source_kind='mutable')
+        c._bind_original(Path(capability['path']), directory / 'capability.json', capability['sha256'], policy=policy, context=context, root=self.root, size_bytes=capability['size_bytes'], source_kind='mutable')
         snapshot = q._ref(self.root, directory / 'capability.json')
-        output.parent.mkdir(parents=True, exist_ok=True)
         if output.exists() or output.is_symlink():
-            if c.regular(output).read_bytes() != raw:
+            if c.regular(output).read_bytes()!=raw:
                 raise ValueError('Choose a new output for a changed implementation; sealed packages cannot be overwritten')
-        else:
-            with output.open('xb') as stream:
-                stream.write(raw)
-            output.chmod(0o400)
+        frozen=shared_originals.publish_bytes(self.root,raw,policy=policy,context=context)
+        shared_originals.link(frozen,output,sha256=frozen.name,size_bytes=len(raw),
+            root=self.root,policy=policy,context=context)
         attempt = self.config['native_attempt']['number']
         projection = self.root / 'host-runtime/experiment-control' / self.config['scope']['job_sha256'] / 'interfaces' / f'{attempt:03d}.json'
         value = dict(version=1, job=q._ref(self.root, self.root / 'jobs' / f'{self.job["step"]:03d}.json'),

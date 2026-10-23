@@ -63,7 +63,7 @@ def test_delivery_confirmation_uses_accepted_decision_adapter_after_update(tmp_p
     adapter = tmp_path / 'adapter.py'; adapter.write_text('# Frozen deterministic adapter fixture.\n')
     target = tmp_path / 'original-target'
     spec = dict(adapter=str(adapter), launcher_argv=[sys.executable, str(adapter)],
-        config={}, target=dict(directory=str(target)), inputs=[], source_roots=[str(tmp_path)])
+        config={}, target=dict(directory=str(target)), inputs=[], source_roots=[str(tmp_path)],readonly_inputs_version=1)
     root = prepare(tmp_path, delivery_policy=delivery_policy(spec),
         node_budget_policy={role:dict(max_observed_tokens=1000,max_seconds=30) for role in 'HWAE'})
     job, _, _ = finish(root, 1, 'A', [], action='wait')
@@ -72,7 +72,8 @@ def test_delivery_confirmation_uses_accepted_decision_adapter_after_update(tmp_p
     changed['delivery_policy']['adapter']['target'] = dict(directory=str(tmp_path / 'new-target'))
     snapshot(root, changed)
     assert delivery._adapter(root)['target'] != old_adapter['target']
-    artifact = root / 'host-delivery/objects/exact'; artifact.parent.mkdir(parents=True); artifact.write_bytes(b'original')
+    from scidiscovery.research_loop import shared_originals
+    artifact = shared_originals.publish_bytes(root, b'original')
     decision = candidate_audit._decision(root, 1)
     source = dict(candidate_id='original', context={}, objects=dict(artifact=q._ref(root, artifact)))
     bound = dict(candidate_id='original', operation_id='a'*64, decision=decision, source=source,

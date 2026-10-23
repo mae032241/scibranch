@@ -359,7 +359,7 @@ class _ManagedTCADBackend:
         return dict(found=False, retired=True, submission_sha256=descriptor.sha256)
 
 
-def _managed_tcad_case(tmp_path, *, retirement=False):
+def _managed_tcad_case(tmp_path, *, retirement=False, call_id='0001-original', storage_policy=None):
     from scidiscovery.artifact_agent.schema.execution import ExecutionAdmission, LocalFileDescriptor
     from scidiscovery.plugin_runtime.collection import CollectionContext
     from scidiscovery.research_loop import experiments as e
@@ -370,18 +370,18 @@ def _managed_tcad_case(tmp_path, *, retirement=False):
         mechanism_ref=None, handoff_protocol=CURRENT)
     config = dict(transport='socket', socket_path=str(tmp_path / 'unused.socket'),
         scope=scope, record_dir=str(tmp_path / 'records'), native_attempt=dict(number=0),
-        admission=dict(version=1, mode='hard'), max_seconds=60)
+        admission=dict(version=1, mode='hard'), max_seconds=60, storage_policy=storage_policy)
     # Trusted DI boundary only; this does not claim a real core freeze.
     config['execution_interface'] = dict(version=e.VERSION, executor='tcad_execution:tcad',
         observation_version=e.OBSERVATION_VERSION, terminal_evidence='adapter_result', result_protocol=None,
         config_sha256=hashlib.sha256(e.encoded(config)).hexdigest(),
         capabilities=vars(TCADManagedExecution.lifecycle_capabilities()))
     raw = canonical_json(_small_resolved_execution_package().model_dump(mode='json'))
-    source = tmp_path / 'execution-package.json'
+    source = tmp_path / (call_id+'-execution-package.json')
     source.write_bytes(raw)
-    payload = LocalFileDescriptor(name='0001-original', local_path=str(source),
+    payload = LocalFileDescriptor(name=call_id, local_path=str(source),
         sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw), media_type='application/json')
-    owner = tmp_path / 'trusted-owner-original.json'
+    owner = tmp_path / (call_id+'-trusted-owner-original.json')
     e.write(owner, dict(call_id=payload.name, scope=scope, payload=payload.model_dump(mode='json')))
     receipt = e.proof(owner)
     admission = ExecutionAdmission(outcome='policy', policy_digest='3' * 64, policy={},
@@ -516,18 +516,19 @@ def test_managed_tcad_collection_expiry_preserves_unknown_and_partial(tmp_path, 
     config, wrapper, backend, control, payload, prepared = _managed_tcad_case(tmp_path)
     wrapper.records.bind_external(payload.name, *wrapper.submit(prepared))
     backend.state = 'succeeded'
-    original_copy = managed._copy_original
+    original_retain = managed._retain_original
 
-    def expire_during_local_retention(descriptor, target, context):
+    def expire_during_local_retention(descriptor, target, context, **options):
         assert context is control.context
         context.deadline_monotonic = 0
-        return original_copy(descriptor, target, context)
+        return original_retain(descriptor, target, context, **options)
 
-    monkeypatch.setattr(managed, '_copy_original', expire_during_local_retention)
+    monkeypatch.setattr(managed, '_retain_original', expire_during_local_retention)
     assert e.record_observation(config, wrapper, payload.name) is None
     directory = wrapper.records.directory(payload.name)
     assert not (directory / 'completed.json').exists()
-    assert list((directory / 'tcad-originals').glob('.*.partial'))
+    assert not list((directory / 'tcad-originals').iterdir())
+    assert not (wrapper.records.storage_root()/'host-history/objects'/hashlib.sha256(b'synthetic native log\n').hexdigest()).exists()
     assert (tmp_path / 'tcad_log').read_bytes() == b'synthetic native log\n'
     assert e.record_observation(config, wrapper, payload.name) is None
     assert backend.events.count('collect') == 1  # The same expired authority is not reset.
@@ -688,3 +689,86 @@ def test_retirement_archive_and_recovery_share_original_validator(tmp_path, monk
     with pytest.raises(history.ObserverIntegrityError):
         execution_recovery.validate(tmp_path, [ref])
     assert old_path.read_bytes() == old_bytes  # No old scientific seal or accepted count is rewritten.
+
+
+def test_tcad_native_outputs_freeze_once_across_calls(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import atomic_files,experiments as e
+    sha=hashlib.sha256(b'synthetic native log\n').hexdigest()
+    copies=[];copy=atomic_files.copy_original
+    def counted(source,target,**options):
+        if options['sha256']==sha:copies.append(options['size_bytes'])
+        return copy(source,target,**options)
+    monkeypatch.setattr(atomic_files,'copy_original',counted)
+    paths=[];source_paths=[]
+    for call_id in ('first-original','second-original'):
+        config,wrapper,backend,_,payload,prepared=_managed_tcad_case(tmp_path,call_id=call_id)
+        wrapper.records.bind_external(payload.name,*wrapper.submit(prepared))
+        backend.state='succeeded'
+        completed=wrapper.result(payload.name)
+        assert completed['status']=='known_success'
+        collected=json.loads((wrapper.records.directory(payload.name)/'collected.json').read_bytes())
+        output=next(item for item in collected['outputs'] if item['name']=='tcad_log')
+        paths.append(Path(output['local_path']))
+        source_paths.append(output['local_path'])
+    cas=Path(config['record_dir'])/'host-history/objects'/sha
+    inode=(cas.stat().st_dev,cas.stat().st_ino)
+    assert len(set(source_paths))==2
+    assert all((path.stat().st_dev,path.stat().st_ino)==inode for path in paths)
+    assert copies==[len(b'synthetic native log\n')]
+    assert (tmp_path/'tcad_log').stat().st_ino!=cas.stat().st_ino
+    assert all(path.stat().st_mode & 0o777==0o400 for path in paths)
+
+
+def test_tcad_first_output_freeze_obeys_frozen_instance_quota(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import atomic_files,experiments as e,storage_policy as storage
+    limits=dict(enabled=True,max_instance_bytes=2*1024*1024)
+    config,wrapper,backend,_,payload,prepared=_managed_tcad_case(tmp_path,storage_policy=limits)
+    wrapper.records.bind_external(payload.name,*wrapper.submit(prepared))
+    backend.state='succeeded'
+    root=wrapper.records.storage_root()
+    filler=root/'filled-before-terminal-retention'
+    with filler.open('wb') as stream:stream.truncate(limits['max_instance_bytes']-storage.usage(root))
+    sha=hashlib.sha256(b'synthetic native log\n').hexdigest()
+    copy=atomic_files.copy_original
+    def forbidden(source,target,**options):
+        assert options['sha256']!=sha,'TCAD wrote payload before instance quota admission'
+        return copy(source,target,**options)
+    monkeypatch.setattr(atomic_files,'copy_original',forbidden)
+    with pytest.raises(storage.StorageQuotaExceeded,match='max_instance_bytes'):
+        wrapper.result(payload.name)
+    assert not (root/'host-history/objects'/sha).exists()
+    directory=wrapper.records.directory(payload.name)
+    assert not (directory/'tcad-originals'/sha).exists()
+    assert not (directory/'completed.json').exists()
+    assert backend.events.count('submit')==1
+
+
+
+def test_tcad_result_reports_unsupported_sharing_without_resubmission(tmp_path,monkeypatch):
+    import errno
+    from scidiscovery import archive_io
+    from scidiscovery.research_loop import atomic_files,experiments as e,shared_originals as shared
+    config,wrapper,backend,_,payload,prepared=_managed_tcad_case(tmp_path)
+    external,state=wrapper.submit(prepared)
+    wrapper.records.bind_external(payload.name,external,state)
+    backend.state='succeeded'
+    link=shared.os.link
+    def unsupported(source,target,*args,**options):
+        if Path(target).parent.name=='tcad-originals':raise OSError(errno.EXDEV,'sharing unsupported')
+        return link(source,target,*args,**options)
+    sha=hashlib.sha256(b'synthetic native log\n').hexdigest()
+    copies=[];copy=atomic_files.copy_original
+    def counted(source,target,**options):
+        if options['sha256']==sha:copies.append(options['size_bytes'])
+        return copy(source,target,**options)
+    monkeypatch.setattr(shared.os,'link',unsupported)
+    monkeypatch.setattr(atomic_files,'copy_original',counted)
+    with pytest.raises(archive_io.SharingUnsupported,match='hardlink'):
+        wrapper.result(payload.name)
+    directory=wrapper.records.directory(payload.name)
+    assert copies==[len(b'synthetic native log\n')]
+    assert not (directory/'tcad-originals'/sha).exists()
+    assert not (directory/'completed.json').exists() and not (directory/'collected.json').exists()
+    assert wrapper.records.external(payload.name)==external
+    assert [path.name for path in wrapper.records.calls()]==[payload.name]
+    assert backend.events.count('submit')==1 and backend.events.count('collect')==1

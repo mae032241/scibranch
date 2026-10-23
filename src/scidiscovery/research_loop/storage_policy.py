@@ -145,32 +145,13 @@ def usage(root, *, context=None):
 
 
 @contextmanager
-def mutation(root, growth, *, policy=None, context=None, target=None):
-    """Reserve the full possible partial while serializing managed writers.
-
-    No persistent reservation is needed: the lock covers the bounded copy and
-    publication, and the next owner counts surviving partials after a crash.
-    """
-    if type(growth) is not int or growth<0:
-        raise ValueError('Managed storage growth must be a nonnegative integer')
-    if root is None:
-        yield
-        return
+def writer_lock(root, *, context=None):
+    """Serialize content publication even when quota accounting is disabled."""
     root = Path(root)
-    policy = for_root(root) if policy is None else configuration(policy)
-    if not policy['enabled'] or policy['max_instance_bytes'] is None:
-        yield
-        return
-    context=context or Deadline(65)
-    key = (os.getpid(),str(root))
-    def available():
-        # A waiting publisher may now be reusing the winner's exact object.
-        # Decide growth under the same lock that protects admission/publication.
-        required=0 if target is not None and Path(target).exists() else growth
-        return usage(root,context=context)+required<=policy['max_instance_bytes']
+    context = context or Deadline(65)
+    key = (os.getpid(), str(root))
     if key in _writers.get():
-        if not available():
-            raise StorageQuotaExceeded('Managed storage limit exceeded: max_instance_bytes')
+        check(context)
         yield
         return
     lock = root / 'host-runtime/storage.lock'
@@ -188,10 +169,29 @@ def mutation(root, growth, *, policy=None, context=None, target=None):
             except BlockingIOError:
                 time.sleep(.01)
         token = _writers.set(_writers.get() | {key})
-        if not available():
-            raise StorageQuotaExceeded('Managed storage limit exceeded: max_instance_bytes')
         yield
     finally:
         if token is not None:
             _writers.reset(token)
         os.close(fd)
+
+
+@contextmanager
+def mutation(root, growth, *, policy=None, context=None, target=None):
+    """Reserve surviving partial bytes under the common storage writer lock."""
+    if type(growth) is not int or growth<0:
+        raise ValueError('Managed storage growth must be a nonnegative integer')
+    if root is None:
+        yield
+        return
+    root = Path(root)
+    policy = for_root(root) if policy is None else configuration(policy)
+    if not policy['enabled'] or policy['max_instance_bytes'] is None:
+        yield
+        return
+    context = context or Deadline(65)
+    with writer_lock(root, context=context):
+        required=0 if target is not None and Path(target).exists() else growth
+        if usage(root,context=context)+required>policy['max_instance_bytes']:
+            raise StorageQuotaExceeded('Managed storage limit exceeded: max_instance_bytes')
+        yield

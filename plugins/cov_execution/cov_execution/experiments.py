@@ -188,11 +188,12 @@ class CovExecution(LocalExecution):
         return {key: value[key] for key in ('status', 'note', 'diagnostic', 'diagnostic_omitted_bytes', 'samples', 'stage')} | dict(
             cleanup_confirmed=True, diagnostic_originals=diagnostics)
 
-    def completion(self,directory,accepted,returncode,cleanup,transport_complete):
+    def completion(self,directory,accepted,returncode,cleanup,transport_complete, *, context=None):
         result=cov._receipt(directory,accepted,cov._rows(Path(self.config['runs_root'])/'results.jsonl'),
-            returncode,cleanup,transport_complete=transport_complete)
+            returncode,cleanup,transport_complete=transport_complete,
+            storage_root=self.records.storage_root(), policy=self.config.get('storage_policy'), context=context)
         if result is None:
-            result=super().completion(directory,accepted,returncode,cleanup,False)
+            result=super().completion(directory,accepted,returncode,cleanup,False,context=context)
             result.update(change_intent=accepted['change_intent'],
                 proofs=[e.proof(directory/name) for name in ('accepted.json','source.py','stdout.raw','terminal.json')],
                 note='No exact completed public receipt; preserve without replay')

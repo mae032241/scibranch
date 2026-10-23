@@ -312,7 +312,7 @@ def rebind(settings_path, launcher_path, work, scid_python, fault=None):
             policy['adapter'] = dict(adapter=module, launcher_argv=[scid_python, module, *adapter['launcher_argv'][2:]],
                 config=_map(adapter['config'], maps), target=_map(adapter['target'], maps),
                 inputs=[dict(label=item['label'], path=_map(item['invoked_path'], maps)) for item in adapter['inputs']],
-                source_roots=_map(adapter['source_roots'], maps))
+                source_roots=_map(adapter['source_roots'], maps),readonly_inputs_version=1)
         kwargs['delivery_policy'] = policy
     launcher = [scid_python, str(LAUNCHER), '--config', str(work / 'launcher.json'), '--']
     return settings, config, manifest, maps, adopted, dict(root=root, objective=objective, public_root=public, launcher=launcher,

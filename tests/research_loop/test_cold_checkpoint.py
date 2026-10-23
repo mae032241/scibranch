@@ -15,11 +15,12 @@ from test_history_handoff import finish
 
 
 @pytest.fixture
-def cold(tmp_path, monkeypatch):
+def cold(tmp_path, monkeypatch, request):
     public=tmp_path/'public';public.mkdir();objective=public/'objective.md';objective.write_text('Preserve a complete sealed scientific instance.')
     root=tmp_path/'instance'
     controller.prepare(root,objective,public,[sys.executable],max_tokens=2000,max_seconds=60,max_steps=4,
-        model='fixture',reasoning_effort='high',search_policy=None,experiment_mode='external',node_budget_mode='soft')
+        model='fixture',reasoning_effort='high',search_policy=None,experiment_mode='external',node_budget_mode='soft',
+        storage_policy=getattr(request, 'param', None))
     seal=c.seal_result
     def cleaned(root,step):
         path=c.host_record(c.workspace(root,step))/'native-outcome.json'
@@ -206,3 +207,54 @@ def test_external_owner_lease_fences_cold_checkpoint(cold,tmp_path):
             stdout,stderr=process.communicate(timeout=5)
     assert process.returncode==0,(process.returncode,stdout,stderr)
     assert archive.checkpoint_export(root,tmp_path/'after-release')['status']=='checkpoint_exported'
+
+
+@pytest.mark.parametrize('cold', [dict(enabled=True, max_instance_bytes=512 * 1024)], indirect=True)
+def test_restore_shares_immutable_payloads_keeps_mutable_files_independent_and_checks_quota(cold, tmp_path, monkeypatch):
+    from scidiscovery.research_loop import shared_originals, storage_policy as storage
+    root, anchor = cold
+    limit = c.settings(root)['storage_policy']['max_instance_bytes']
+    raw = b'x' * (limit // 8)
+    source = root / 'project/global/ordinary-a'
+    source.write_bytes(raw)
+    other = root / 'project/global/ordinary-b'
+    other.write_bytes(raw)
+    proof = {key: archive.files.hash_file(source)[key] for key in ('sha256', 'size_bytes')}
+    frozen = shared_originals.retain(root, source, source_kind='mutable', **proof)
+    aliases = [root / f'project/nodes/001/inputs/alias-{number}' for number in range(20)]
+    for alias in aliases:
+        shared_originals.link(frozen, alias, root=root, **proof)
+    # The original prepared policy and ledger identities remain intact.
+    assert storage.usage(root) < limit
+    assert sum(alias.stat().st_size for alias in aliases) > limit
+    archive.checkpoint_enroll(root, anchor)
+    package = tmp_path / 'shared-checkpoint'
+    archive.checkpoint_export(root, package)
+    previous = tmp_path / 'previous'
+    root.rename(previous)
+    original_dependencies = archive._restore_dependencies
+    filler = root / 'host-runtime/quota-fixture'
+    def fill_before_activation(settings):
+        filler.write_bytes(b'q' * limit)
+        return original_dependencies(settings)
+    monkeypatch.setattr(archive, '_restore_dependencies', fill_before_activation)
+    with pytest.raises(storage.StorageQuotaExceeded, match='max_instance_bytes'):
+        archive.checkpoint_restore(root, package)
+    with pytest.raises(archive.files.ArchiveError, match='frozen|superseded'):
+        with controller._writer(root):
+            pass
+    filler.unlink()
+    monkeypatch.setattr(archive, '_restore_dependencies', original_dependencies)
+    result = archive.checkpoint_restore(root, package)
+    assert result['generation'] == 2 and result['paused'] is True
+    assert storage.usage(root) <= limit
+    rows = [json.loads(line) for line in (package / 'payload/manifest.jsonl').read_bytes().splitlines()]
+    blob = package / 'payload' / next(row['blob'] for row in rows if row.get('sha256') == proof['sha256'])
+    assert all(os.path.samefile(alias, frozen) for alias in aliases)
+    assert os.path.samefile(frozen, blob)
+    assert os.path.samefile(frozen, previous / frozen.relative_to(root))
+    assert not os.path.samefile(source, other)
+    assert not os.path.samefile(source, blob) and not os.path.samefile(other, blob)
+    assert not os.path.samefile(source, previous / source.relative_to(root))
+    source.write_bytes(b'Independent restored mutable state')
+    assert other.read_bytes() == blob.read_bytes() == raw

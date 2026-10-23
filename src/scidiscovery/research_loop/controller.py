@@ -84,6 +84,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
             raise ValueError(f"{name} must be a positive integer")
     if (type(max_seconds) not in (int, float) or not 0 < max_seconds < float("inf")):
         raise ValueError("max_seconds must be positive and finite")
+    storage_context = storage.Deadline(max_seconds)
     for name,value in (("max_output_item_bytes",max_output_item_bytes),("max_output_total_bytes",max_output_total_bytes)):
         if value is not None and (type(value) is not int or value<=0):
             raise ValueError(f"{name} must be a positive integer or null")
@@ -102,7 +103,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
         raise ValueError('The selected backend does not support Codex continuation policies')
     from . import profiles, skill_supply
     frozen_skills, skill_manifest = skill_supply.prepare(skills, backend=native_backend,
-        launcher=launcher, existing=_existing_settings)
+        launcher=launcher, existing=_existing_settings, policy=storage_limits, context=storage_context)
     frozen_profiles = profiles.normalize(role_profiles if role_profiles is not None else {}, dict(model=model, reasoning_effort=reasoning_effort,
         service_tier=service_tier), worker_profiles, (frozen_skills or {}).get('sets', {})) if role_profiles is not None or worker_profiles is not None else None
     if (not isinstance(launcher, list) or not launcher
@@ -292,8 +293,11 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
                 for index, update in enumerate(updates, 1)]]
             settings['global_materials'] = []
             for source, contents in sources:
-                source.write_text(contents, encoding='utf-8')
-                source.chmod(0o400)
+                from . import shared_originals
+                payload = contents.encode('utf-8')
+                original = shared_originals.publish_bytes(root,payload,policy=storage_limits,context=storage_context)
+                shared_originals.link(original,source,sha256=original.name,size_bytes=len(payload),
+                    root=root,policy=storage_limits,context=storage_context)
                 settings['global_materials'].append(dict(source=source.relative_to(root).as_posix(),
                     path='inputs/global/' + source.relative_to(globals_).as_posix(),
                     sha256=contracts.digest(source)))
@@ -303,7 +307,9 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
                 source_facts = _source_facts_factory(root, settings['global_materials'])
                 if not isinstance(source_facts, list):
                     raise ValueError('Staged source preparation must return exact configured declarations')
-            settings['source_provenance'] = qualification.freeze_sources(root, source_facts, original_globals, settings['global_materials'])
+            settings['source_provenance'] = qualification.freeze_sources(root, source_facts, original_globals, settings['global_materials'],
+                policy=storage_limits,context=storage_context,
+                source_kind='managed_frozen' if _source_facts_factory is not None else 'mutable')
             if identity_root != root.resolve() and (objective_text is not None or _user_update_texts is not None or _source_facts_factory is not None):
                 # This original is created by prepare itself. Freeze its final logical
                 # location before sealing; supplied external originals keep their identity.
@@ -328,7 +334,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
                 settings['formal_review_policy']=formal_review.freeze_contract(root)
             if authority_policy is not None:
                 settings['execution_authority_policy']=execution_authority.freeze_configuration(root)
-            skill_supply.freeze(root, settings, skill_manifest)
+            skill_supply.freeze(root, settings, skill_manifest,context=storage_context)
             skill_supply.validate(root, settings)
             contracts.write(root / "settings.json", settings)
             contracts.write(root / "settings-identity.json",

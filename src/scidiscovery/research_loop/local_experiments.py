@@ -283,13 +283,30 @@ class LocalExecution:
                     cleanup=runtime.cleanup_owned_group(identity)=='observed_group_cleaned'
                 returncode=process.returncode
                 process.stdout.close();process.stderr.close()
+            # The child owns pipe writers, never these host sink descriptors.
+            # Freeze only after draining/cleanup, before closing our final writers.
+            from . import atomic_files
+            atomic_files._finish(out,0o400)
+            atomic_files._finish(err,0o400)
         if finish is not None:finish(returncode,cleanup,transport_complete)
         self.records.publish(call_id,'terminal.json',dict(returncode=returncode,cleanup_confirmed=cleanup,
             transport_complete=transport_complete,wall_seconds=time.monotonic()-started,
             **(dict(storage_limit_reached=True) if log_limited else {})))
-        self.records.publish(call_id,'completed.json',self.completion(directory,accepted,returncode,cleanup,transport_complete))
+        completion_context=storage.Deadline(max(.001,deadline-time.monotonic()))
+        try:
+            for stream in ('stdout.raw','stderr.raw'):
+                source=directory/stream
+                identity=e.proof(source,context=completion_context)
+                shared_originals.retain(storage_root,source,sha256=identity['sha256'],size_bytes=identity['size_bytes'],
+                    source_kind='managed_frozen',context=completion_context,policy=limits)
+        except (TimeoutError,storage.StorageQuotaExceeded):
+            # Preserve original terminal/cleanup facts when retained-content
+            # admission is exhausted; never repeat the command to recover logs.
+            pass
+        self.records.publish(call_id,'completed.json',self.completion(directory,accepted,returncode,cleanup,transport_complete,
+            context=completion_context))
 
-    def completion(self,directory,accepted,returncode,cleanup,transport_complete):
+    def completion(self,directory,accepted,returncode,cleanup,transport_complete,*,context=None):
         known=cleanup and transport_complete and type(returncode) is int
         original=dict(call_id=accepted['call_id'],status=('known_success' if returncode==0 else 'known_failed') if known else 'unknown',
             candidate_id=None,run_id=None,model=None,parent=accepted['parent'],change_intent=None,scope=accepted['scope'],
@@ -304,10 +321,10 @@ class LocalExecution:
                 try:
                     from . import experiment_client
                     root = experiment_client.root_for_configuration(self.config, allow_standalone=True) or self.records.root
-                    context=storage.Deadline(self.config['max_seconds'])
+                    context=context or storage.Deadline(self.config['max_seconds'])
                     for item in self.files(directory/'inputs/artifacts',policy=self.config.get('storage_policy'),context=context):
                         source=Path(item['path']);target=directory/'outputs'/item['name']
-                        frozen_original=shared_originals.retain(root,source,sha256=item['sha256'],size_bytes=item['size_bytes'],
+                        frozen_original=shared_originals.retain(root,source,sha256=item['sha256'],size_bytes=item['size_bytes'],source_kind='mutable',
                             context=context,policy=self.config.get('storage_policy'))
                         shared_originals.link(frozen_original,target,sha256=item['sha256'],size_bytes=item['size_bytes'],context=context,
                             root=root,policy=self.config.get('storage_policy'))

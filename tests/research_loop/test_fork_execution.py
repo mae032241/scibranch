@@ -403,7 +403,7 @@ def test_selected_engineering_repair_uses_new_local_receipt_and_declines_old_del
     def external_descriptor(*args, **kwargs):
         value = original_descriptor(*args, **kwargs)
         return dict(value, target={name: str(path) for name, path in targets.items()},
-            source_roots=[str(tmp_path)])
+            source_roots=[str(tmp_path)],readonly_inputs_version=1)
     monkeypatch.setattr(managed_fixture, 'descriptor', external_descriptor)
     raw_parent=f'run-{first_run_id}'
     if first_run_id!=1:

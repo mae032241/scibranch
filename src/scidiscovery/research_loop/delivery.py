@@ -10,7 +10,6 @@ import json
 import math
 import os
 from pathlib import Path
-import shutil
 import selectors
 import signal
 import stat
@@ -20,6 +19,25 @@ import time
 
 from . import budget, contracts as c, history, originals, runtime
 from .instance_owner import effect as owner_effect
+
+class _Deadline:
+    def __init__(self, end):
+        self.end = end
+
+    def remaining_seconds(self):
+        remaining = self.end - time.clock_gettime(time.CLOCK_BOOTTIME)
+        if remaining <= 0:
+            raise TimeoutError('Original delivery preparation deadline reached')
+        return remaining
+
+
+def _stage(root, prefix):
+    directory = Path(root) / 'host-delivery'
+    if directory.resolve() != directory:
+        raise ValueError('Delivery staging namespace changed')
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return tempfile.TemporaryDirectory(prefix=prefix, dir=directory)
+
 
 MAX_BYTES = 256_000
 MAX_ASSET_BYTES = 32 * 1024 * 1024
@@ -70,8 +88,10 @@ def policy(value):
         return {**value, 'closeout_a': dict(a)}
     if value['submit_seconds'] <= 0 or value['confirm_seconds'] <= 0:
         raise ValueError('An adapter requires positive submit and confirm ceilings')
-    if not isinstance(adapter, dict) or set(adapter)-{'capabilities', 'effect_scope'} != {'adapter', 'launcher_argv', 'config', 'target', 'inputs', 'source_roots'}:
+    if not isinstance(adapter, dict) or set(adapter)-{'capabilities', 'effect_scope', 'readonly_inputs_version'} != {'adapter', 'launcher_argv', 'config', 'target', 'inputs', 'source_roots'}:
         raise ValueError('Adapter requires exact code, launcher, scoped inputs, configuration and target')
+    if type(adapter.get('readonly_inputs_version')) is not int or adapter['readonly_inputs_version'] != 1:
+        raise ValueError('Delivery provider must declare readonly_inputs_version 1')
     if 'effect_scope' in adapter and (not isinstance(adapter['effect_scope'], str)
             or not adapter['effect_scope'].strip()):
         raise ValueError('Adapter effect_scope must be nonempty public text')
@@ -115,7 +135,7 @@ def policy(value):
             raise ValueError('Provider read scopes require exact absolute originals')
     frozen = dict(adapter=str(script), launcher_argv=list(argv),
                   launcher_files=launcher_files, config=adapter['config'], target=adapter['target'],
-                  inputs=frozen_inputs, source_roots=list(roots))
+                  inputs=frozen_inputs, source_roots=list(roots), readonly_inputs_version=1)
     if 'capabilities' in adapter:frozen['capabilities']=list(adapter['capabilities'])
     if 'effect_scope' in adapter:frozen['effect_scope']=adapter['effect_scope']
     return {**value, 'closeout_a': dict(a), 'adapter': frozen}
@@ -139,22 +159,28 @@ def _settings(root, job=None):
     return configuration_updates.for_job(root, job) if job is not None else configuration_updates.current(root)
 
 
-def _adapter(root, job=None):
+def _adapter(root, job=None, *, context=None):
     spec = (_settings(root, job).get('delivery_policy') or {}).get('adapter')
     if spec is None:
         raise DeliveryUnresolved('delivery_adapter_unavailable')
+    if spec.get('readonly_inputs_version') != 1:
+        raise PreparationUnavailable('delivery_readonly_inputs_unsupported')
     for proof in spec['launcher_files']:
         if 'invoked_path' in proof and Path(proof['invoked_path']).resolve() != Path(proof['path']):
             raise ValueError('Frozen executable path now names another original')
         _file(proof['path'])
     _file(spec['adapter'])
+    from . import storage_policy as storage
+    inventory = storage.Inventory(_settings(root, job).get('storage_policy'), context=context)
     for proof in spec['inputs']:
         if 'invoked_path' in proof and Path(proof['invoked_path']).resolve() != Path(proof['path']):
             raise ValueError('Frozen executable or input path now names another original')
         if proof['label']=='runtime-python':
             _file(proof['path'])
             continue
-        if c.digest(_file(proof['path'])) != proof['sha256']:
+        inventory.entry(); inventory.file(_file(proof['path']).stat().st_size)
+        from . import experiments
+        if experiments.proof(_file(proof['path']), context=context)['sha256'] != proof['sha256']:
             raise ValueError('Frozen delivery executable or public harness changed')
     from . import generic_delivery
     if Path(spec['adapter']) == Path(generic_delivery.__file__).resolve():
@@ -164,7 +190,9 @@ def _adapter(root, job=None):
     from . import protocol
     source=Path(protocol.__file__).resolve()
     if any(item['label']=='scid-current-protocol' for item in spec['inputs']):raise ValueError('Reserved current protocol input label')
-    item=dict(label='scid-current-protocol',path=str(source),sha256=c.digest(source),size_bytes=source.stat().st_size)
+    from . import experiments
+    original=experiments.proof(source, context=context)
+    item=dict(label='scid-current-protocol', **original)
     return dict(spec,inputs=[*spec['inputs'],item])
 
 
@@ -266,7 +294,6 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
     from .protocol import require_current
     require_current(root)
     root = Path(root).resolve()
-    spec = _adapter(root, job)
     remaining = budget.snapshot(root)['seconds_remaining']
     allowance = min(SOURCE_SECONDS, _settings(root, job)['delivery_policy']['cleanup_seconds'])
     if budget.final_a_barrier(root) is None and (budget.closeout_state(root)['begin'] or {}).get('mode') != 'final':
@@ -274,31 +301,34 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
     if allowance <= 0:
         raise DeliveryUnresolved('delivery_source_preparation_unavailable')
     deadline = time.clock_gettime(time.CLOCK_BOOTTIME) + allowance
-    cache={}
-    def freeze(path):
-        path=_file(path)
-        if path in cache:return cache[path]
-        objects=root/'host-delivery/objects'
-        if objects.resolve()!=objects:raise ValueError('Delivery archive location changed')
-        objects.mkdir(parents=True,exist_ok=True)
-        temporary=None
-        try:
-            with tempfile.NamedTemporaryFile(dir=objects,prefix='.freeze-',delete=False) as out,path.open('rb') as stream:
-                temporary=Path(out.name);digest=hashlib.sha256();size=0
-                while block:=stream.read(1024*1024):
-                    if time.clock_gettime(time.CLOCK_BOOTTIME)>=deadline:
-                        raise DeliveryUnresolved('delivery_source_time_limit')
-                    out.write(block);digest.update(block);size+=len(block)
-                out.flush();os.fsync(out.fileno())
-            digest=digest.hexdigest();saved=objects/digest
-            if saved.exists() or saved.is_symlink():
-                if c.digest(_file(saved))!=digest:raise ValueError('Frozen delivery object changed')
-            else:
-                temporary.chmod(0o400);os.link(temporary,saved)
-            cache[path]=dict(path=saved.relative_to(root).as_posix(),sha256=digest,size_bytes=size)
+    from . import shared_originals, storage_policy as storage, experiments
+    io_context = _Deadline(deadline)
+    spec = _adapter(root, job, context=io_context)
+    limits = _settings(root, job).get('storage_policy')
+    inventory = storage.Inventory(limits, context=io_context)
+    cache = {}
+    def freeze(path, *, source_kind='mutable', proof=None, admitted=False):
+        io_context.remaining_seconds()
+        path = _file(path)
+        if not admitted:
+            inventory.entry(); inventory.file(path.stat().st_size)
+        if path in cache:
             return cache[path]
-        finally:
-            if temporary is not None:temporary.unlink(missing_ok=True)
+        original = experiments.proof(path, context=io_context)
+        if proof is not None and any(original[key] != proof[key] for key in ('sha256', 'size_bytes')):
+            raise ValueError('Delivery source changed before freezing')
+        frozen = shared_originals.retain(root, path, sha256=original['sha256'],
+            size_bytes=original['size_bytes'], source_kind=source_kind, context=io_context, policy=limits)
+        saved = root / 'host-delivery/objects' / original['sha256']
+        shared_originals.link(frozen, saved, sha256=original['sha256'], size_bytes=original['size_bytes'],
+            root=root, context=io_context, policy=limits)
+        cache[path] = dict(path=saved.relative_to(root).as_posix(), sha256=original['sha256'],
+            size_bytes=original['size_bytes'])
+        return cache[path]
+    def freeze_bound(proof, *, source):
+        inventory.entry(); inventory.file(proof['size_bytes'])
+        return freeze(_proof_path(root, proof, source=source, context=io_context), source_kind='managed_frozen',
+            proof=proof, admitted=True)
     candidates, known, evidence, contexts, direct = [], set(), {}, {}, []
     candidate_owners={}
     managed = (_settings(root, job).get('history_observer') or {}).get('contract_version') == 2
@@ -327,12 +357,12 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
             resolved = generic_results.sources(root, fact, candidate['id'], source=source)
             if resolved is not None:
                 resolved['audit_required'] = 'audit' in spec.get('capabilities', ['audit'])
-                resolved['ledger'] = freeze(_proof(root, resolved['ledger'], source=source))
-                resolved['objects'] = {label: freeze(_proof(root, proof, source=source)) for label, proof in resolved['objects'].items()}
+                resolved['ledger'] = freeze_bound(resolved['ledger'], source=source)
+                resolved['objects'] = {label: freeze_bound(proof, source=source) for label, proof in resolved['objects'].items()}
                 for proof in spec['inputs']:
                     if proof['label']=='runtime-python':continue
                     if proof['label'] in resolved['objects']:raise ValueError('Provider input collides with candidate original')
-                    frozen = freeze(proof['path'])
+                    frozen = freeze(proof['path'], proof=proof)
                     if frozen['sha256'] != proof['sha256']:raise ValueError('Frozen provider input changed before snapshot')
                     resolved['objects'][proof['label']] = frozen
                 direct.append(resolved)
@@ -341,7 +371,7 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
             for proof in candidate['evidence']:
                 if proof.get('retention') != 'archived':continue
                 bound = dict(path=proof['snapshot'], sha256=proof['sha256'], size_bytes=proof['size_bytes'])
-                bound = freeze(_proof(root, bound, source=source))
+                bound = freeze_bound(bound, source=source)
                 label = 'evidence/' + proof['sha256'] + '.jsonl'
                 evidence[label] = bound
                 proofs.append(dict(label=label, sha256=proof['sha256']))
@@ -351,7 +381,7 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
                      size_bytes=proof['size_bytes'], retention=proof.get('retention'), input_label=None)
         if proof.get('retention') == 'archived':
             bound = dict(path=proof['snapshot'], sha256=proof['sha256'], size_bytes=proof['size_bytes'])
-            bound = freeze(_proof(root, bound, source=source))
+            bound = freeze_bound(bound, source=source)
             label = 'execution/' + proof['sha256']
             if label in evidence and evidence[label] != bound:
                 raise ValueError('Execution archive alias changed')
@@ -371,19 +401,20 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
                 for source, context in contexts.get(candidate['candidate_id'], [])]
     if not candidates:
         return dict(items=direct,omitted_count=0,source_nodes=list(source_nodes),capabilities=spec.get('capabilities',[]))
-    with tempfile.TemporaryDirectory(prefix='scid-resolve-') as directory:
+    with _stage(root, 'scid-resolve-') as directory:
         stage = Path(directory)
         (stage / 'inputs').mkdir();(stage / 'scratch').mkdir()
         for label, proof in evidence.items():
             if time.clock_gettime(time.CLOCK_BOOTTIME) >= deadline:
                 raise DeliveryUnresolved('delivery_source_time_limit')
-            destination = stage / 'inputs' / label;destination.parent.mkdir(exist_ok=True)
-            shutil.copyfile(_proof(root, proof), destination);destination.chmod(0o400)
+            destination = stage / 'inputs' / label
+            shared_originals.link(_proof(root, proof, context=io_context), destination, sha256=proof['sha256'],
+                size_bytes=proof['size_bytes'], root=root, context=io_context, policy=limits)
         for proof in spec['inputs']:
             if proof['label']=='runtime-python':continue
-            destination = stage / 'inputs' / proof['label'];destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(_file(proof['path']), destination);destination.chmod(0o400)
-            if c.digest(destination) != proof['sha256']:raise ValueError('Frozen provider input changed during staging')
+            frozen = freeze(proof['path'], proof=proof)
+            shared_originals.link(_proof(root, frozen, context=io_context), stage / 'inputs' / proof['label'],
+                sha256=frozen['sha256'], size_bytes=frozen['size_bytes'], root=root, context=io_context, policy=limits)
         groups={}
         for candidate in candidates:
             owner=candidate_owners[candidate['candidate_id']]
@@ -402,7 +433,7 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
             request = dict(scope=dict(handoff_protocol=_settings(root, job)['handoff_protocol']),phase='resolve',
                 operation_id=hashlib.sha256(_bytes(dict(source_nodes=source_nodes,origin=origin))).hexdigest(),
                 candidate_id=None, artifact_sha256=None, root=str(root), source_roots=spec['source_roots'],
-                candidates=projected, inputs=spec['inputs'], config=spec['config'], target=spec['target'], stage=str(stage))
+                candidates=projected, inputs=spec['inputs'], config=spec['config'], target=spec['target'], stage=str(stage), deadline_boottime=deadline)
             resolved = _call(spec, request, deadline - time.clock_gettime(time.CLOCK_BOOTTIME), evidence=leaf_output(root))
             if (not isinstance(resolved,dict) or set(resolved)-{'capabilities'}!={'items'}
                     or not isinstance(resolved['items'],list) or not isinstance(resolved.get('capabilities',[]),list)):
@@ -421,7 +452,7 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
     static = {}
     for proof in spec['inputs']:
         if proof['label']=='runtime-python':continue
-        frozen = freeze(proof['path'])
+        frozen = freeze(proof['path'], proof=proof)
         if frozen['sha256'] != proof['sha256']:raise ValueError('Frozen provider input changed before snapshot')
         static[proof['label']] = frozen
     for item in value['items']:
@@ -448,14 +479,14 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
                     if label not in authorized or label not in evidence:
                         raise ValueError('Resolver selected an unbound execution original')
                     bound = evidence[label]
-                    obj = dict(label=obj['label'], path=str(_proof(root, bound)), sha256=bound['sha256'], size_bytes=bound['size_bytes'])
+                    obj = dict(label=obj['label'], path=str(_proof_path(root, bound, context=io_context)), sha256=bound['sha256'], size_bytes=bound['size_bytes'])
                 elif set(obj) != {'label', 'path', 'sha256', 'size_bytes'}:
                     raise ValueError('Resolver object fields changed')
                 _label(obj['label'])
                 path = Path(obj['path'])
                 if obj['label'] in objects or not path.is_absolute() or (not from_execution and not any(path.is_relative_to(Path(scope)) for scope in spec['source_roots'])):
                     raise ValueError('Resolver object is outside its frozen read scope')
-                proof = freeze(path)
+                proof = freeze(path, source_kind='managed_frozen' if from_execution else 'mutable', proof=obj)
                 if proof['sha256'] != obj['sha256'] or proof['size_bytes'] != obj['size_bytes']:
                     raise ValueError('Resolver object changed before freezing')
                 objects[obj['label']] = proof
@@ -496,13 +527,20 @@ def public_sources(refs, audits=(), *, nominated_ids=None):
     return result
 
 
-def _proof(root, proof, *, source=None):
+def _proof_path(root, proof, *, source=None, context=None):
     name = Path(proof['path'])
     if name.is_absolute() or '..' in name.parts:
         raise ValueError('Delivery object is outside its exact instance')
-    path = _file(originals.resolve_ref(source, proof) if source is not None
-        else originals.resolve_root_ref(root, proof))
-    if path.stat().st_size != proof['size_bytes'] or c.digest(path) != proof['sha256']:
+    path = _file(originals.resolve_ref(source, proof, context=context) if source is not None
+        else originals.resolve_root_ref(root, proof, context=context))
+    return path
+
+
+def _proof(root, proof, *, source=None, context=None):
+    path = _proof_path(root, proof, source=source, context=context)
+    from . import experiments
+    actual = experiments.proof(path, context=context)
+    if actual['size_bytes'] != proof['size_bytes'] or actual['sha256'] != proof['sha256']:
         raise ValueError('Frozen delivery original changed')
     return path
 
@@ -689,7 +727,7 @@ def _keep(evidence, request, outcome, returncode, streams):
 def _call(spec, request, seconds, *, on_process=None, evidence=None):
     if seconds <= 0:return None
     replay_deadline = None
-    if request.get('phase') == 'replay':
+    if request.get('phase') == 'replay' or 'deadline_boottime' in request:
         bound = request.get('deadline_boottime')
         if type(bound) not in (int, float) or not 0 < bound < float('inf'):
             return None
@@ -768,15 +806,18 @@ def _call(spec, request, seconds, *, on_process=None, evidence=None):
         except (ValueError,UnicodeDecodeError):return None
 
 
-def _staged(root, spec, source, operation_id, stage, *, job=None):
-    """Copy exact frozen candidate objects into a fresh stage; the leaf mounts only these."""
+def _staged(root, spec, source, operation_id, stage, *, job=None, context=None):
+    """Alias exact frozen objects; providers consume inputs readonly and own scratch."""
+    from . import shared_originals, storage_policy as storage
+    limits = _settings(root, job).get('storage_policy')
+    inventory = storage.Inventory(limits, context=context)
     (stage / 'inputs/harness').mkdir(parents=True)
     (stage / 'scratch').mkdir()
     for name, proof in source['objects'].items():
         _label(name)
-        (stage / 'inputs' / name).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(_proof(root, proof), stage / 'inputs' / name)
-        (stage / 'inputs' / name).chmod(0o400)
+        inventory.entry(); inventory.file(proof['size_bytes'])
+        shared_originals.link(_proof(root, proof, context=context), stage / 'inputs' / name,
+            sha256=proof['sha256'], size_bytes=proof['size_bytes'], root=root, context=context, policy=limits)
     candidate=source['candidate_id']
     if 'original_candidate_id' in source:
         from . import candidate_refs
@@ -797,14 +838,16 @@ def leaf_phase(root, source, operation_id, phase, seconds, *, on_process=None, j
     if (phase not in {'smoke', 'audit'} or source.get('status') != 'audit_pending'
             or type(seconds) not in (int, float) or not 0 < seconds < float('inf')):
         raise ValueError('Control screening requires an exact pending original and bounded phase')
-    spec = _adapter(Path(root).resolve(), job)
-    with tempfile.TemporaryDirectory(prefix='scid-selection-') as directory:
-        request = dict(_staged(root, spec, source, operation_id, Path(directory), job=job), phase=phase)
+    deadline = time.clock_gettime(time.CLOCK_BOOTTIME) + seconds
+    spec = _adapter(Path(root).resolve(), job, context=_Deadline(deadline))
+    with _stage(root, 'scid-selection-') as directory:
+        request = dict(_staged(root, spec, source, operation_id, Path(directory), job=job, context=_Deadline(deadline)),
+            phase=phase, deadline_boottime=deadline)
         if phase == 'audit':
             from . import audit_recovery
-            value, _, _ = audit_recovery.run(root, spec, source, request, seconds, on_process=on_process, job=job)
+            value, _, _ = audit_recovery.run(root, spec, source, request, seconds, on_process=on_process, job=job, deadline=deadline)
             return value
-        value = _call(spec, request, seconds, on_process=on_process, evidence=leaf_output(root))
+        value = _call(spec, request, max(0, deadline - time.clock_gettime(time.CLOCK_BOOTTIME)), on_process=on_process, evidence=leaf_output(root))
     if value is None:
         return dict(status='failed' if phase == 'audit' else 'unknown', note='bounded_' + phase + '_unverified', cleanup_confirmed=True)
     allowed = {'ok', 'failed', 'unknown'} if phase == 'smoke' else {'audited', 'failed', 'unknown'}
@@ -857,22 +900,23 @@ def invoke(root, intent, max_seconds, *, on_process=None, audit_only=False, coll
         if c.digest(_file(path)) != decision[key]:
             raise ValueError('Delivery scientific decision changed')
     job = c.read(root / 'jobs' / f'{step:03d}.json')
-    spec = _adapter(root, job)
+    spec = _adapter(root, job, context=_Deadline(deadline))
     if audit_only:
         candidate_audit.validate_binding(root, intent)
     elif binding(root, job, c.validate(c.workspace(root, step))) != bound:
         raise ValueError('Delivery input binding changed')
     if intent['action_kind'] not in (('audit',) if audit_only else ('submit', 'confirm')):
         raise ValueError('Unknown delivery action')
-    with tempfile.TemporaryDirectory(prefix='scid-delivery-') as directory:
-        request = _staged(root, spec, bound['source'], bound['operation_id'], Path(directory), job=job)
+    with _stage(root, 'scid-delivery-') as directory:
+        request = dict(_staged(root, spec, bound['source'], bound['operation_id'], Path(directory), job=job,
+            context=_Deadline(deadline)), deadline_boottime=deadline)
         phases = ('audit',) if audit_only else (('audit', 'promote') if bound['source'].get('audit_required', True)
             else ('promote',)) if intent['action_kind'] == 'submit' else ('confirm',)
         for phase in phases:
             remaining = deadline - time.clock_gettime(time.CLOCK_BOOTTIME)
             if phase == 'audit':
                 from . import audit_recovery
-                value, request, deadline = audit_recovery.run(root, spec, bound['source'], request, remaining, on_process=on_process, author_required=audit_only, job=job)
+                value, request, deadline = audit_recovery.run(root, spec, bound['source'], request, remaining, on_process=on_process, author_required=audit_only, job=job, deadline=deadline)
                 if value['status'] == 'audited':
                     if audit_only:
                         return dict(_result(bound, 'audited', value['note']), cleanup_confirmed=value['cleanup_confirmed'])

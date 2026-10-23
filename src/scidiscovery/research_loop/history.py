@@ -138,7 +138,7 @@ def _proof(root, source, *, context=None):
     sha = c.digest(path) if context is None else experiments.proof(path,context=context)['sha256']
     from . import shared_originals, storage_policy as storage
     limits=storage.for_path(root,path)
-    snapshot=shared_originals.retain(root,path,sha256=sha,size_bytes=size,context=context,policy=limits)
+    snapshot=shared_originals.retain(root,path,sha256=sha,size_bytes=size,source_kind='mutable',context=context,policy=limits)
     return dict(path=source, sha256=sha, size_bytes=size, retention='archived',
                 snapshot=snapshot.relative_to(root).as_posix())
 
@@ -1040,7 +1040,7 @@ def candidate_overview(records):
     return lineage.candidate_view(records)
 
 
-def page_writer(work, *, root=None, policy=None, context=None):
+def page_writer(work, *, root, policy=None, context=None):
     from .protocol import require_current
     from . import storage_policy as storage
     require_current(Path(work).parents[2])
@@ -1056,10 +1056,10 @@ def page_writer(work, *, root=None, policy=None, context=None):
             data=_bytes(value)
         destination = work / path
         inventory.entry();inventory.file(len(data))
-        # _copy_bound checks existing data and all destination directory symlinks.
-        with tempfile.TemporaryDirectory() as temporary:
-            original = Path(temporary) / 'page.json';original.write_bytes(data)
-            c._copy_bound(original, destination, hashlib.sha256(data).hexdigest(),root=root,policy=policy,context=context)
+        from . import shared_originals
+        original = shared_originals.publish_bytes(root,data,policy=policy,context=context)
+        shared_originals.link(original,destination,sha256=hashlib.sha256(data).hexdigest(),
+            size_bytes=len(data),root=root,policy=policy,context=context)
         files.append(dict(path=path, sha256=c.digest(destination), size_bytes=len(data)))
     def paged(rows, row_limit, key, prefix, source=None):
         groups, group = [], []

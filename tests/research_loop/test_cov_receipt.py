@@ -61,6 +61,20 @@ def test_confirmed_runner_output_takes_actual_record_object_and_keeps_candidate_
     assert receipt['row']['run_id']==1 and receipt['row']['ok'] is not failed
     assert '9001' in (directory/'stdout.raw').read_text()
     assert cov_lineage._completed(directory)['run_id']==1
+    if not failed:
+        records = experiments.Records(config)
+        public_model = runs / 'model_run1.pkl'
+        frozen_model = directory / 'model.pkl'
+        blob = records.storage_root() / 'host-history/objects' / result['model']['sha256']
+        assert public_model.stat().st_ino != frozen_model.stat().st_ino
+        assert frozen_model.stat().st_ino == blob.stat().st_ino
+        observation = json.loads((directory / 'execution-observation.json').read_text())
+        observed = next(item for item in observation['proofs'] if item['source']['path'] == str(frozen_model))
+        retained = Path(observed['path'])
+        assert retained.stat().st_ino == frozen_model.stat().st_ino
+        public_model.write_bytes(b'public producer may later replace its own output')
+        assert frozen_model.read_bytes() == b'original fixture artifact'
+
     before={p:p.read_bytes() for p in directory.iterdir() if p.is_file()}
     adapter=experiments.load(config);adapter.result(result['call_id']);adapter.collect_original(result['call_id'])
     assert before=={p:p.read_bytes() for p in directory.iterdir() if p.is_file()}
