@@ -7,6 +7,7 @@ first-observation order and only author/control records mark A or delivery.
 """
 from __future__ import annotations
 
+import copy
 import math
 from pathlib import Path
 import re
@@ -32,9 +33,10 @@ STATES = {
     'ready': '未开始', 'idle': '待继续', 'active': '进行中', 'pause_requested': '即将暂停', 'paused': '已暂停',
     'waiting': '等待条件', 'unknown': '需要核对', 'final': '最终评估', 'budget_exhausted': '预算已用完',
     'completed': '已完成', 'error': '状态不可读',
+    'external_wait': '等待原实验', 'unsealed': '结论待封存', 'not_submitted': '提交意图待核对',
 }
 EXPERIMENT_TOOLTIP = '本阶段实验数 = 封存观察中已接受的受管调用数；不等于独立实验设计数或科学覆盖。'
-EXTREME_TOOLTIP = '仅在同一口径（evaluation_key）内按作者声明的指标方向取数值极值；不代表科学排序。'
+EXTREME_TOOLTIP = '全部已观察数值，含失败记录；仅在同一口径（evaluation_key）内按作者声明的指标方向取数值极值；不代表科学排序。'
 CANDIDATE_LIMIT = 20
 ROUND_LIMIT = 5
 WINDOW = 50
@@ -169,22 +171,72 @@ class Reader:
         self._nodes = {}
         self._observations = {}
         self._roles = {}
+        self.memo = memo if memo is not None else {}
+
+    @staticmethod
+    def _fingerprint(paths):
+        return tuple((str(path), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+            for path in paths for info in [path.stat()])
 
     def node(self, step):
         if step not in self._nodes:
-            self._nodes[step] = display.node(self.root, step)
+            key = (str(self.root), step)
+            saved = self.memo.get(key)
+            if saved is not None:
+                try:
+                    if self._fingerprint(saved['paths']) == saved['fingerprint']:
+                        self._nodes[step] = copy.deepcopy(saved['node'])
+                        self._observations[step] = copy.deepcopy(saved['observation'])
+                        return self._nodes[step]
+                except (OSError, ValueError):
+                    pass
+                self.memo.pop(key, None)
+            # Use the same saved original/fork resolver as the display reader.
+            root, record, seal, raw = display._saved(self.root, step)
+            if isinstance(record, str):
+                paths = [root / 'settings.json', root / f'jobs/{step:03d}.json',
+                    root / record / 'result-identity.json', root / record / 'result.json', raw]
+                if seal.get('observations'):
+                    paths.append(root / seal['observations']['path'])
+            else:
+                from . import originals
+                paths = [root / 'settings.json', root / 'host-runtime/fork/manifest.json', raw,
+                    originals.source_record(record, 'result-identity.json'),
+                    originals.source_record(record, 'result.json'), originals.resolve_ref(record, dict(path=f'jobs/{step:03d}.json'))]
+                if seal.get('observations'):
+                    paths.append(originals.resolve_ref(record, seal['observations']))
+            try:
+                before = self._fingerprint(paths)
+            except OSError:
+                before = None
+            node = display.node(self.root, step)
+            observation = display.observation(self.root, step, node=node)
+            try:
+                fingerprint = self._fingerprint(paths)
+                if fingerprint != before or node['seal'] != seal:
+                    fingerprint = None
+            except OSError:
+                # Uncacheable evidence remains readable without retaining errors.
+                fingerprint = None
+            if fingerprint is not None:
+                while len(self.memo) >= 256:
+                    self.memo.pop(next(iter(self.memo)))
+                self.memo[key] = dict(paths=paths, fingerprint=fingerprint, node=copy.deepcopy(node),
+                    observation=copy.deepcopy(observation))
+            self._nodes[step], self._observations[step] = node, observation
         return self._nodes[step]
 
     def observation(self, step):
         """Sealed observer snapshot bound to this node's exact output, if any."""
-        if step not in self._observations:
-            node = self.node(step)
-            self._observations[step] = display.observation(self.root, step, node=node)
+        self.node(step)
         return self._observations[step]
 
     def role(self, step):
         if step not in self._roles:
-            self._roles[step] = c.read(self.root / 'jobs' / f'{step:03d}.json')['role']
+            try:
+                self._roles[step] = self.node(step)['job']['role']
+            except (OSError, ValueError):
+                self._roles[step] = c.read(self.root / 'jobs' / f'{step:03d}.json')['role']
         return self._roles[step]
 
 
@@ -487,6 +539,8 @@ def status_summary(presentation, view, *, final_phase=False, exhausted=None, wai
         state = 'waiting'
     elif presentation['state'] in {'unknown', 'native_intent_present_unknown'}:
         state = 'unknown'
+    elif presentation['state'] in {'waiting', 'native_outcome_unsealed', 'native_not_submitted'}:
+        state = {'waiting': 'external_wait', 'native_outcome_unsealed': 'unsealed', 'native_not_submitted': 'not_submitted'}[presentation['state']]
     elif view.get('paused') and presentation['active']:
         state = 'pause_requested'
     elif presentation['active']:
@@ -506,6 +560,9 @@ def status_summary(presentation, view, *, final_phase=False, exhausted=None, wai
         headline = completed_line or '研究已完成，可以查看结果'
     elif state == 'waiting':
         headline = 'A 等待：' + (waiting_reason or '请查看本阶段结论中的等待条件')
+    elif state in {'external_wait', 'unsealed', 'not_submitted'}:
+        headline = {'external_wait': '等待原外部执行结果', 'unsealed': '原生工作已结束，阶段结论尚未封存',
+            'not_submitted': '原任务尚未提交，需先核对原意图'}[state]
     elif state == 'unknown':
         headline = '上次任务结果不确定'
     elif state == 'pause_requested':
@@ -608,8 +665,8 @@ def usage_stats(view, *, used_steps=None, candidates=None):
     if budget.get('historical_time') not in (None, 'recorded'):
         duration['notes'].append('早期时间未完整记录')
     max_steps = budget.get('max_steps')
-    steps = dict(label='研究阶段', value=str(used_steps) if used_steps is not None else '未记录',
-                 limit=str(max_steps) if max_steps else '未记录', raw=used_steps, raw_limit=max_steps, notes=[])
+    steps = dict(label='控制动作', value=str(used_steps) if used_steps is not None else '未记录',
+                 limit=str(max_steps) if max_steps else '未记录', raw=used_steps, raw_limit=max_steps, notes=['包括科学节点、续接、审计和受控动作'])
     steps['percent'] = percent(used_steps, max_steps)
     steps['over'] = bool(used_steps is not None and max_steps and used_steps > max_steps)
     if view.get('fork'):
@@ -632,8 +689,9 @@ def usage_stats(view, *, used_steps=None, candidates=None):
     card = dict(label='历史候选记录', value=str(count) if count is not None else '未记录', limit=None, raw=count, notes=[])
     if candidates.get('unreadable'):
         card['notes'].append(str(candidates['unreadable']) + ' 个阶段的观察不可读，计数为下界')
+    card['href'] = '/candidates'
     if candidates.get('partial'):
-        card['notes'].append('最近 ' + str(WINDOW) + ' 个阶段内')
+        card['notes'].append('可读已封存观察的下界')
     if candidates.get('recommended'):
         card['notes'].append('A 推荐 1')
     if candidates.get('delivered'):
@@ -653,13 +711,16 @@ def project(root, view, *, final_step=None, objective=None, memo=None):
     mechanisms = guarded(mechanism_labels, reader, steps)
     mechanisms = {} if 'error' in mechanisms else mechanisms
     labels, references, candidate_ids, observed_any, unreadable = {}, {}, [], False, []
-    for node in nodes:
-        if node['role'] != 'W' or node.get('state') not in SEALED:
-            continue
+    from . import ui_saved_status
+    count_steps = ui_saved_status.visible_steps(root)
+    for step in count_steps:
         try:
-            observation = reader.observation(node['step'])
-        except Exception:  # noqa: BLE001 - shown on that node's role line and counted below
-            unreadable.append(node['step'])
+            saved = reader.node(step)
+            observation = reader.observation(step)
+        except Exception:
+            # Unsealed current nodes do not constitute missing sealed evidence.
+            if (root / 'native-evidence' / f'{step:03d}' / 'result-identity.json').exists():
+                unreadable.append(step)
             continue
         if observation is None:
             continue
@@ -691,7 +752,7 @@ def project(root, view, *, final_step=None, objective=None, memo=None):
     recommended = latest_a.get('recommendation') if latest_a else None
     confirmed = (closeout.get('last_confirmed') or {}).get('candidate_id')
     candidates = dict(count=len(candidate_ids) if observed_any or nodes else None,
-                      partial=bool(nodes) and nodes[0]['step'] > 1,
+                      partial=bool(unreadable),
                       recommended=recommended is not None, delivered=confirmed is not None)
     if unreadable:
         candidates['unreadable'] = len(unreadable)
@@ -726,7 +787,7 @@ def _delivery_state(closeout, chosen, recommended_value, *, unresolved_reference
     return 'recommended', '已推荐未交付'
 
 
-def candidate_projection(root, before_step, *, job=None, reader=None):
+def candidate_projection(root, before_step, *, job=None, reader=None, history_only=False):
     """Display the subject's saved input prefix without rerunning admission."""
     from . import candidate_nominations, candidate_refs, lineage
     reader = reader or Reader(root)
@@ -768,6 +829,32 @@ def candidate_projection(root, before_step, *, job=None, reader=None):
                 candidates[item['candidate_id']].update(
                     mechanism_ref=(item.get('mechanism_binding') or {}).get('mechanism_ref') or item.get('scope', {}).get('mechanism_ref'),
                     execution_status=item.get('status'))
+    unresolved = []
+    if history_only:
+        # An incomplete read-only history must not turn a dangling author
+        # reference into a usable candidate or hide unrelated observations.
+        # Ordinary subject projections keep the strict lineage contract below.
+        known = set()
+        projected = []
+        for record in records:
+            record = dict(record)
+            known.update(item['id'] for item in (record.get('observation') or {}).get('candidates', []))
+            if record['recommendation'] is not None and (not isinstance(record['recommendation'], str) or record['recommendation'] not in known):
+                unresolved.append(dict(step=record['step'], field='recommendation', count=1))
+                record['recommendation'] = None
+            declaration = record.get('candidate_nominations')
+            if declaration is not None:
+                declaration = copy.deepcopy(declaration)
+                omitted = 0
+                for kind in ('representatives', 'extras'):
+                    rows = declaration[kind]
+                    declaration[kind] = [row for row in rows if isinstance(row['candidate'], str) and row['candidate'] in known]
+                    omitted += len(rows) - len(declaration[kind])
+                if omitted:
+                    unresolved.append(dict(step=record['step'], field='nominations', count=omitted))
+                record['candidate_nominations'] = declaration
+            projected.append(record)
+        records = projected
     indexed = lineage.candidate_view(records)
     graph = dict(mechanisms=mechanisms, candidates=candidates)
     latest_w = next((record for record in reversed(records) if record['role'] == 'W'), None)
@@ -780,10 +867,11 @@ def candidate_projection(root, before_step, *, job=None, reader=None):
     return dict(index=indexed['candidate_index'], graph=graph, references=references,
                 nominated_ids=nominated_ids,
                 records=records, sources=sources, subject=job,
-                recommended=(indexed.get('a_recommended') or {}).get('candidate_id'))
+                recommended=(indexed.get('a_recommended') or {}).get('candidate_id'),
+                unresolved=unresolved)
 
 
-def candidate_rows(projection, *, recommended=None, delivered=None, audits=None, mechanisms=None, clean=None):
+def candidate_rows(projection, *, recommended=None, delivered=None, audits=None, mechanisms=None, clean=None, all_candidates=False):
     """Latest W nominees and exact A choice, in neutral observation order."""
     clean = clean or (lambda text, limit=16384: text)
     def text(value, limit=300):
@@ -797,7 +885,7 @@ def candidate_rows(projection, *, recommended=None, delivered=None, audits=None,
     nominated_ids = set(projection.get('nominated_ids', ()))
     if recommended is not None:
         nominated_ids.add(recommended)
-    nominated = [item for item in projection['index'] if item['id'] in nominated_ids]
+    nominated = [item for item in projection['index'] if all_candidates or item['id'] in nominated_ids]
     for order, item in enumerate(nominated, 1):
         identity = item['id']
         context = (graph.get('candidates') or {}).get(identity) or {}
@@ -826,14 +914,15 @@ def candidate_rows(projection, *, recommended=None, delivered=None, audits=None,
         rows.append(row)
         evaluation = item.get('evaluation_key')
         # Missing comparability never creates a numeric comparison group.
-        identity_key = evaluation if isinstance(evaluation, str) and evaluation.strip() else ('unknown', order)
+        identity_key = ((evaluation, ref) if all_candidates else evaluation) if isinstance(evaluation, str) and evaluation.strip() else ('unknown', order)
         groups.setdefault(identity_key, []).append(row)
     # The first CANDIDATE_LIMIT rows of every group show by default; marked
     # (author-recommended, delivered, failed) rows always stay visible.
     for group in groups.values():
         for index, row in enumerate(group):
             row['extra'] = index >= CANDIDATE_LIMIT and not row['marks']
-    display_groups = [dict(key=value[0]['evaluation_key'], rows=value) for value in groups.values()]
+    display_groups = [dict(key=value[0]['evaluation_key'], rows=value,
+        **(dict(mechanism=value[0]['mechanism']) if all_candidates else {})) for value in groups.values()]
     for group in display_groups:
         group['ambiguous_label'] = sum(other['key'] == group['key'] for other in display_groups) > 1
     return dict(total=len(rows), groups=display_groups,

@@ -57,7 +57,9 @@ def main(argv=None):
     prepare.add_argument('--role-profiles', type=Path, help='Optional H/W/A/E model, reasoning_effort and service_tier overrides; omitted roles/fields inherit global defaults')
     config_check = commands.add_parser('config-check', help='Read-only validation of the effective research TOML configuration')
     config_check.add_argument('--config', type=Path, required=True)
-    config_inspect = commands.add_parser('config-inspect', help='Inspect effective TOML or exact frozen instance settings; host-private output')
+    config_inspect = commands.add_parser('config-inspect', help='Inspect effective TOML or frozen/current instance configuration; host-private output')
+    config_inspect.add_argument('--view', choices=('frozen', 'current'), default='frozen',
+                                help='Instance view: frozen base (default), or active and pending operational revisions')
     for name in ('fork-preview', 'fork-create'):
         command = commands.add_parser(name, help='Preview or create a paused branch from an exact historical logical task; never starts native work')
         command.add_argument('--root', type=Path, required=True)
@@ -231,7 +233,7 @@ def main(argv=None):
                 result = fork_service.create(root, args.step, args.child_root, **options,
                     expected_preview_id=args.expected_preview_id, operation_id=args.operation_id)
         elif args.command in {'config-check', 'config-inspect'}:
-            result = research_config.inspect(config=args.config, root=root)
+            result = research_config.inspect(config=args.config, root=root, view=getattr(args, 'view', 'frozen'))
         elif args.command == 'prepare':
             if args.config is not None:
                 supplied = [token.split('=', 1)[0] for token in arguments[1:] if token.startswith('--')]

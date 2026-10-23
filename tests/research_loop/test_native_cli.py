@@ -185,6 +185,9 @@ args=sys.argv[1:]
 role=os.environ['THIN_HWA_ROLE']
 work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE'])
 prompt=sys.stdin.read()
+configs=[args[n+1] for n,value in enumerate(args) if value=='-c']
+developer=[json.loads(value.split('=',1)[1]) for value in configs if value.startswith('developer_instructions=')]
+(work/'work'/'captured-launch.json').write_text(json.dumps({'argv':args,'prompt':prompt,'developer':developer}))
 assert 'MCP' not in prompt
 job=json.loads((work/'science-task.json').read_text())
 assert job['role']==role and 'global' in job
@@ -205,14 +208,10 @@ if role == 'W':
         'reason':'No managed scientific candidate was produced by this transport fixture.'}
         for row in job['candidate_nomination_mechanisms'] if row['status']!='waived']}
 if role == 'A':
-    judgment=job['scientific_judgment']
-    assert judgment in prompt
-    for concept in ('original objective', 'authorized scope', 'locatable observations', 'experiment conditions',
-                    'measurements', 'inferences', 'assumptions', 'target metrics', 'proxies', 'sensitivity',
-                    'same goal criteria', 'conflicting evidence', 'uncertainty', 'missing inputs',
-                    'exact candidate', 'scientific rationale', 'budget exhaustion', 'unmet objectives'):
-        assert concept in judgment, concept
-    assert 'candidate ranking or default' in judgment and 'no mechanical proof or hash work' in judgment
+    from scidiscovery.research_loop.contracts import AUTHOR_EVIDENCE_GUIDANCE as judgment
+    assert 'scientific_judgment' not in job
+    occurrences=sum(text.count(judgment) for text in [prompt,*developer])
+    assert occurrences == 1, {'guidance_occurrences':occurrences,'developer_count':len(developer)}
     payload['candidate_recommendation'] = None
     payload['progress_assessment'] = None
     payload['decision_request'] = None
@@ -237,10 +236,25 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':100,'cached_in
     return root
 
 
+@pytest.mark.process_e2e
 def test_real_native_process_completes_without_root_or_loopx(instance):
     result = controller.run(instance)
-    assert result['status'] == 'finish', result
+    if result['status'] != 'finish':
+        errors = {}
+        for step in range(1, 4):
+            record = execution.origin(instance, step)
+            stderr = record / 'native.stderr'
+            if stderr.exists():
+                with stderr.open('rb') as stream:
+                    stream.seek(max(0, stderr.stat().st_size - 4096))
+                    errors[str(step)] = stream.read(4096).decode('utf-8', errors='replace')
+        pytest.fail(json.dumps(dict(result=result, native_stderr=errors), ensure_ascii=False))
     assert result['completed_steps'] == 3
+    author_launch=contracts.read(contracts.workspace(instance,3)/'work/captured-launch.json')
+    author_job=contracts.read(instance/'jobs/003.json')
+    author_rules=author_job['native_role_instruction']+'\n'+contracts.AUTHOR_EVIDENCE_GUIDANCE
+    assert author_launch['developer']==[author_rules]
+    assert author_rules not in author_launch['prompt']
     assert contracts.read(Path(result['scientific_output_path']))['scientific_result'].startswith('Evidence')
     assert result['usage'] == dict(input_tokens=300, cached_input_tokens=240, output_tokens=15,
                                     observed_tokens=315, unknown_steps=[], accounted_tokens=315,

@@ -632,7 +632,9 @@ def science_view(job, root=None):
         return fork_runtime.selected_science_view(root, job)
     from . import formal_review, user_guidance
     if job.get('formal_review'):
-        return dict(formal_review.public(root,job), **user_guidance.public(job))
+        view = dict(formal_review.public(root,job), **user_guidance.public(job))
+        view['review'] = {key: value for key, value in view['review'].items() if key != 'instruction'}
+        return view
     protocol = job.get('handoff_protocol', 1)
     context = job.get('decision_context')
     question = job['instruction']
@@ -692,7 +694,6 @@ def science_view(job, root=None):
     view = {key: value for key, value in {
         'role': job['role'], 'question': question,
         **user_guidance.public(job),
-        **(dict(scientific_judgment=AUTHOR_EVIDENCE_GUIDANCE) if job['role']=='A' and not job.get('formal_review') else {}),
         **(dict(formal_review_capability=dict(enabled=True,
             choices=formal_review.public_choices(root,job),
             instruction='formal_review requests an independent assessment of the single implementation selected through the existing scientific selection. Check formal_review_feedback for the current restriction and ordinary alternatives. The schema retains formal_review for a changed exact subject or newly verifiable identity; unchanged failure requires same-session output repair without sealing or dispatching another A. Control binds subject and identity; an unavailable response grants no qualification.'),
@@ -719,8 +720,6 @@ def science_view(job, root=None):
             candidate_nomination_mechanisms=job['candidate_nomination_mechanisms'])
            if job.get('candidate_nomination_mechanisms') else {}),
         **(dict(decision_context=context) if context is not None else {}),
-        **(dict(role_instruction=job['native_role_instruction']) if job.get('native_role_instruction') and not job.get('role_guidance') else {}),
-        **(dict(role_guidance=job['role_guidance']) if job.get('role_guidance') else {}),
         'global': dict(objective='inputs/global/objective.md',
                        updates=[row['path'] for row in job['global_materials'][1:]]),
         'public_root': job['public_root'],

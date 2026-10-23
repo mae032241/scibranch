@@ -53,8 +53,11 @@ scid-research operations --root /absolute/project/research-instance
 ```
 
 `config-check` validates without preparing an instance or submitting model work.
-`config-inspect --config` shows the effective declaration; `--root` shows that exact
-instance's frozen settings. Inspect output is host-private and may contain paths;
+`config-inspect --config` shows the effective declaration; `--root` defaults to
+`--view frozen`, showing that exact instance's base settings. `--root ... --view current`
+shows the base identity, active revision and configuration, and any separate pending
+revision and configuration. Shared budget ceilings reflect audited amendments; pending
+changes apply only at the next new node. Inspection binds no revision and launches no work. Inspect output is host-private and may contain paths;
 keep it out of scientific evidence. `prepare --config` cannot mix preparation flags.
 The explicit flag form in the [CLI guide](ROOTLESS_CLI.zh-CN.md) uses the same
 defaulting and validation path. Editing TOML affects future instances only. Existing
@@ -63,7 +66,10 @@ configuration page for operational changes from the next new node; never edit
 `settings.json` manually. Cumulative budget amendments retain their ledger and gates.
 
 `config-check` 只校验，不建实例、不提交模型工作。`config-inspect --config` 展示生效声明，
-`--root` 展示精确实例的冻结设置；输出属宿主私有内容，可能含路径，不应作为科学证据。
+`--root` 默认 `--view frozen`，展示精确实例的基础冻结设置。`--root ... --view current`
+分别展示基础身份、已生效 revision/配置及待生效 revision/配置；累计预算反映已审计修订，
+待生效项仅用于下一新节点。在途节点仍用原绑定；查看不绑定修订、不追加控制记录或启动工作。
+输出属宿主私有内容，可能含路径，不应作为科学证据。
 `prepare --config` 不能混入准备参数；CLI 显式参数方式走同一默认值与校验路径。
 修改 TOML 只影响未来新实例；已有实例通过当前研究配置页调整后续节点，不能手改
 `settings.json`。累计预算修订沿用原账本和准入条件，也可使用 `budget-amend`。

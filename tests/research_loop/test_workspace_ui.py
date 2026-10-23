@@ -236,6 +236,12 @@ def test_optional_external_config_import_edit_save_and_changed_source_reconfirm(
         status, page, _ = request(connection, 'POST', '/control/configure', cookie=cookie, fields=fields, origin=origin)
         assert status == 200 and (folder / 'saved.toml').exists()
         assert '配置已保存'.encode() in page and not (workspace / 'saved-instance').exists()
+        saved = (folder / 'saved.toml').read_bytes()
+        # The following mutating save consumed the original form once; a second
+        # save cannot replay it, and the parsed draft remains available.
+        status, retry, _ = request(connection, 'POST', '/control/configure', cookie=cookie, fields=fields, origin=origin)
+        assert status == 422 and b'Saved through form' in retry
+        assert (folder / 'saved.toml').read_bytes() == saved
 
 
 def test_workspace_home_and_new_do_not_read_implicit_research_config(tmp_path, monkeypatch):
@@ -262,3 +268,44 @@ def test_existing_root_cli_http_entry_retains_instance_mode(tmp_path):
         status, page, _ = request(connection, 'GET', '/', cookie=cookie)
         assert status == 200 and b'action="/control/start"' in page
     assert not list(root.glob('jobs/*.json'))
+
+
+@pytest.mark.process_e2e
+def test_workspace_delete_uses_exact_service_and_reconciles_original_mount_after_lost_response(tmp_path):
+    left = tmp_path / 'left'; left.mkdir()
+    right = tmp_path / 'right'; right.mkdir()
+    root, key = prepare(left, enabled=False)
+    sibling, _ = prepare(right, enabled=False)
+    sibling_original = (sibling / 'settings.json').read_bytes()
+    workspace = tmp_path / 'workbench'; workspace.mkdir()
+    with host(workspace, key, workspace=True) as (connection, url, endpoint):
+        cookie = login(connection, url)
+        origin = f'http://{url.netloc}'
+        for selected in (root, sibling):
+            _, page, _ = request(connection, 'GET', '/', cookie=cookie)
+            values = dict(form(page, 'open'), root=str(selected))
+            assert request(connection, 'POST', '/control/open', cookie=cookie, fields=values, origin=origin)[0] == 303
+        _, page, _ = request(connection, 'GET', '/', cookie=cookie)
+        manage = html.unescape(re.search(r'href="(/instances/1/manage\?token=[^"]+)"', page.decode())[1])
+        _, _, headers = request(connection, 'GET', manage)
+        child_cookie = headers['Set-Cookie'].split(';', 1)[0]
+        _, page, _ = request(connection, 'GET', '/instances/1/delete', cookie=child_cookie)
+        # controls() works on unmounted form actions; emulate the browser's
+        # namespace here while retaining exactly the issued binding values.
+        fields = controls(page.replace(b'action="/instances/1/control/delete"', b'action="/control/delete"'), 'delete')
+        assert fields['root'] == str(root) and fields['instance_id'] == c.settings(root)['goal_id']
+        original_operation = fields['operation_id']
+        fields['confirmation'] = 'DELETE'
+        deleted = request(connection, 'POST', '/instances/1/control/delete', cookie=child_cookie, fields=fields, origin=origin)
+        assert deleted[0] == 303 and deleted[2]['Location'] == '/instances'
+        assert not root.exists() and (sibling / 'settings.json').read_bytes() == sibling_original
+        # Treat the response as lost: the original mount still offers exact
+        # identity/operation reconciliation without reopening deleted settings.
+        _, page, _ = request(connection, 'GET', '/instances/1/delete', cookie=child_cookie)
+        retry = controls(page.replace(b'action="/instances/1/control/delete"', b'action="/control/delete"'), 'delete')
+        assert retry['operation_id'] == original_operation and retry['root'] == str(root)
+        retry['confirmation'] = 'DELETE'
+        assert request(connection, 'POST', '/instances/1/control/delete', cookie=child_cookie, fields=retry, origin=origin)[0] == 303
+        assert (sibling / 'settings.json').read_bytes() == sibling_original
+        _, remaining, _ = request(connection, 'GET', '/', cookie=cookie)
+        assert b'/instances/2/manage?token=' in remaining and b'/instances/1/manage?token=' not in remaining

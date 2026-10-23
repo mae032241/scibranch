@@ -5,6 +5,7 @@ forms. Transport subscriptions do not run, resume or qualify scientific work.
 """
 from __future__ import annotations
 
+import copy
 import json
 import threading
 import time
@@ -26,10 +27,35 @@ class SnapshotCache:
         with self.lock:
             now = time.monotonic()
             if not force and self.value is not None and now - self.checked < INTERVAL:
-                return self.value
+                return copy.deepcopy(self.value)
             value = load()
             self.value, self.checked, self.loaded = value, now, now
-            return self.value
+            return copy.deepcopy(self.value)
+
+
+def encode_snapshot(value):
+    """Budget the actual UTF-8 JSON frame; degrade complete components only."""
+    value = copy.deepcopy(value)
+    def encode():
+        return json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    fragments = value.get('fragments', {})
+    links = {'live-trail': '/results', 'live-mechanisms': '/results', 'live-operations': '/operations',
+        'live-instances': '/instances', 'live-activity': '/progress', 'live-usage': '/configuration',
+        'live-token-monitor': '/progress', 'live-hero': '/progress'}
+    # Keep the small authoritative status/current task while large histories
+    # fall back to the existing static pages. Never truncate HTML or JSON.
+    for key in sorted(fragments, key=lambda key: len(json.dumps(fragments[key], ensure_ascii=False).encode()), reverse=True):
+        encoded = encode()
+        if len(encoded) <= MAX_EVENT_BYTES:
+            return encoded
+        href = links.get(key, '/results')
+        if href != '/instances':
+            href = value.get('mount', '') + href
+        fragments[key] = '<p>此组件超出实时传输范围；<a href="' + href + '">打开完整页面</a>。</p>'
+    encoded = encode()
+    if len(encoded) > MAX_EVENT_BYTES:
+        raise ValueError('Public workbench status exceeds its transport budget')
+    return encoded
 
 
 class Stream:
@@ -52,10 +78,8 @@ class Stream:
             previous = None
             destination.write(b'retry: 1500\n\n')
             while not self.stop.is_set() and time.monotonic() < deadline:
-                value = self.snapshot(self.mount, force=previous is None)
-                encoded = json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode()
-                if len(encoded) > MAX_EVENT_BYTES:
-                    raise ValueError('Public workbench snapshot exceeds its transport budget')
+                value = self.snapshot(self.mount, force=False)
+                encoded = encode_snapshot(value)
                 if encoded != previous:
                     destination.write(b'event: snapshot\ndata: ' + encoded + b'\n\n')
                     previous = encoded

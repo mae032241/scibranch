@@ -16,6 +16,7 @@ from test_execution_authority import prepare
 from test_history_handoff import finish
 
 
+@pytest.mark.process_e2e
 def test_saved_workbench_results_and_downloads_do_not_requalify(tmp_path, monkeypatch):
     root, key = nominated_scene(tmp_path)
     ui, cookie = session(root, key)
@@ -60,6 +61,7 @@ def test_saved_workbench_results_and_downloads_do_not_requalify(tmp_path, monkey
     assert before == {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
 
 
+@pytest.mark.process_e2e
 def test_workspace_cards_do_not_construct_scientific_projection(tmp_path, monkeypatch):
     root, key = nominated_scene(tmp_path)
     workspace = tmp_path / 'workbench'; workspace.mkdir()
@@ -234,3 +236,30 @@ def test_saved_active_time_requires_its_original_start_anchor(tmp_path, monkeypa
     monkeypatch.setattr(budget, 'clock_stamp', lambda: dict(at_unix=105., at_boottime=15., boot_id='original'))
     value = ui_saved_status._budget(tmp_path, settings, events)
     assert value['consumed_seconds'] is None and value['seconds_remaining'] is None
+
+
+def test_saved_status_memo_caches_only_terminal_attempts_and_rechecks_changes(tmp_path, monkeypatch):
+    root, _ = prepare(tmp_path, enabled=False)
+    finish(root, 1, 'H', [], action='analyze')
+    memo, reads = {}, []
+    original = c.read
+    def counted(path, *args, **kwargs):
+        if path.name == 'usage.json': reads.append(str(path))
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(c, 'read', counted)
+    first = ui_saved_status.status(root, memo=memo)
+    ui_saved_status.status(root, memo=memo)
+    assert len(reads) == 1
+    usage = root / 'native-evidence/001/usage.json'
+    usage.chmod(0o600); c.write(usage, dict(input_tokens=10, cached_input_tokens=2, output_tokens=4))
+    updated = ui_saved_status.status(root, memo=memo)
+    assert len(reads) == 2 and updated['usage']['observed_tokens'] == 14
+    assert first['usage']['observed_tokens'] == 10
+    c.build_job(root, 2, 'A', [1])
+    record = root / 'native-evidence/002'; record.mkdir(exist_ok=True)
+    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/002.json')))
+    c.write(record / 'usage.json', dict(input_tokens=1, output_tokens=1))
+    ui_saved_status.status(root, memo=memo)
+    c.write(record / 'usage.json', dict(input_tokens=3, output_tokens=2))
+    assert ui_saved_status.status(root, memo=memo)['usage']['observed_tokens'] == 19
+    assert len(memo) <= 1024

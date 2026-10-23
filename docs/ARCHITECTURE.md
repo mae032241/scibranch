@@ -260,11 +260,20 @@ All listed files are in `src/scidiscovery/research_loop/` unless stated otherwis
 | Archive and same-host cold restore | `instance_archive.py`, `instance_owner.py`, shared `archive_io.py` |
 
 `scidiscovery.execution_interfaces` discovers execution implementations; instances freeze
-the selected executor, operator configuration and execution contract. Installed framework,
-plugin and tool source may be upgraded without invalidating a scientific task or its
-accepted calls. Historical source fingerprints are metadata, not admission gates.
+the selected executor, operator configuration and execution contract. Implementation upgrades use a fresh prefix and an explicit wrapper switch after
+stopping or reconciling old writers; retain the old prefix for rollback. Scientific
+originals remain preserved, but old protocol instances have no execution compatibility
+guarantee. Historical source fingerprints are metadata, not admission gates.
 Task/input/artifact originals, declared permissions, finite budgets and exact external
 call identities remain binding; an upgrade never authorizes replay of an unknown call.
+Stable role and evidence rules travel once: Codex standard/options launchers use the
+developer instruction; protocol and inherited custom launchers use the prompt. Task
+packets retain scientific questions, exact inputs and response fields. Formal review
+uses its independent review rules. Admission reuses facts only within one read-only
+calculation; writer boundaries and later admissions read fresh settings, ledger and usage.
+Reported input plus output is a lower bound; unknown coverage is not zero consumption.
+Ordinary accepted nodes finish across soft targets, with shared ceilings checked at the
+next boundary. Original external-call, FINAL and author-closeout deadlines remain finite.
 The non-execution plugin registry, Operation/compiler host, Artifact storage host,
 helpers and finalizers are retired. Narrow execution schemas, provenance rules,
 process IO and wire transports remain under their existing module paths to avoid

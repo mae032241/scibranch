@@ -100,9 +100,19 @@ def test_web_reconciles_exact_published_request_after_ui_failure_and_parent_remo
     def fail_after_publication(index):
         raise RuntimeError('Injected UI initialization failure after publication')
     monkeypatch.setattr(ui, '_child', fail_after_publication)
+    original_create, failures = fork_service.create, []
+    def capture_create(*args, **options):
+        try:
+            return original_create(*args, **options)
+        except Exception as error:
+            failures.append(dict(kind=type(error).__name__, code=getattr(error, 'code', ''), message=str(error)[:1200]))
+            raise
+    monkeypatch.setattr(fork_service, 'create', capture_create)
     status, page, _ = post(ui, cookie, 'fork-create', value)
     assert status >= 400 and '核对原操作结果' in page.decode()
-    receipt = c.read(child / 'host-runtime/fork/receipt.json')
+    receipt_path = child / 'host-runtime/fork/receipt.json'
+    assert receipt_path.exists(), dict(status=status, fork_failures=failures)
+    receipt = c.read(receipt_path)
     shutil.rmtree(parent)
     def no_source_read(*args, **options):
         pytest.fail('Web receipt reconciliation reread deleted parent')
@@ -120,3 +130,23 @@ def test_web_reconciles_exact_published_request_after_ui_failure_and_parent_remo
     assert status == 200 and '新分支已创建并暂停' in page.decode()
     assert c.read(child / 'host-runtime/fork/receipt.json') == receipt
     assert not (child / 'native-evidence').exists()
+
+
+def test_ui_private_state_is_excluded_from_fork_inventory_but_unknown_roots_remain_gaps(tmp_path):
+    from scidiscovery.research_loop import instance_archive
+    root, _ = prepare(tmp_path, enabled=False)
+    private = root / '.scid-ui'
+    (private / 'errors').mkdir(parents=True)
+    (private / 'translation-config.json').write_text('{"launcher_argv":["private-launcher-token"]}')
+    (private / 'translations.sqlite3').write_bytes(b'private cached reading text')
+    (private / 'errors/diagnostic.json').write_text('private diagnostic')
+    unknown = root / '.scid-ui-copy'; unknown.mkdir()
+    (unknown / 'SKILL.md').write_text('Unknown ownership is still a gap.')
+    rows = list(instance_archive._inventory(root))
+    excluded = next(row for row in rows if row['path'] == '.scid-ui')
+    assert excluded['kind'] == 'excluded'
+    assert excluded['reason'] == 'private_ui_cache_configuration_and_diagnostics'
+    assert not any(row['path'].startswith('.scid-ui/') for row in rows)
+    gap = next(row for row in rows if row['path'] == '.scid-ui-copy')
+    assert gap['kind'] == 'gap' and gap['reason'] == 'unrecognized_framework_ownership_not_traversed'
+    assert not any(row['path'].startswith('.scid-ui-copy/') for row in rows)

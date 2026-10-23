@@ -304,12 +304,6 @@ function connect() {
         const restoredFocus = focused?.isConnected ? focused : focusKey && Array.from(slot.querySelectorAll('[data-live-focus]')).find(item => item.dataset.liveFocus === focusKey);
         restoredFocus?.focus({preventScroll:true});
       }
-      for (const form of document.querySelectorAll('form[action]')) {
-        const action = form.getAttribute('action').split('/').pop();
-        if (!value.csrf[action]) continue;
-        const nonce = form.querySelector('[name="nonce"]'), csrf = form.querySelector('[name="csrf"]');
-        if (nonce && csrf) { nonce.value = value.nonce; csrf.value = value.csrf[action]; }
-      }
       follow(value.current);
       connection.textContent = '已连接 · 状态自动同步'; connection.dataset.state = 'connected';
     } catch (_) { connection.textContent = '状态暂不可用，正在重连'; connection.dataset.state = 'offline'; }
@@ -372,11 +366,22 @@ def result(step, job, payload, seal):
     return page('阶段结论 · 第 '+str(step),nav+result_body(step,job,payload,seal))
 
 
-def result_body(step, job, payload, seal):
+def result_body(step, job, payload, seal, *, clean=None):
     """The complete escaped original-result presentation, without page chrome."""
+    if clean is not None:
+        def project(value):
+            if isinstance(value, str):
+                return clean(value, max(1, len(value)))
+            if isinstance(value, dict):
+                return {clean(str(key), max(1, len(str(key)))): project(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [project(item) for item in value]
+            return value
+        job, payload = project(job), project(payload)
     base='/nodes/'+str(step)
     body=('<p class="links"><a href="'+base+'/science">下载完整结论原文</a> · <a href="'+base+'/materials">'
         +str(len(seal['materials']))+' 份本阶段研究文件</a></p>')
+    body+='<p class="note">以下为清洗后的展示，完整原件可下载；原件字节保持不变。</p>'
     body+='<section><h2>结论说明</h2><p>本阶段已留下结论原文。是否达到研究目标，请结合研究者写下的发现、局限和待解决问题判断。</p></section>'
     body+='<p class="note">已记录的阶段 '+str(step)+' · '+escape(job['role'])+'. 记录完成不等于科学结论已获认可。</p>'
     comparison=((job.get('history') or {}).get('view') or {}).get('candidates')

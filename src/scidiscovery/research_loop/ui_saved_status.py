@@ -1,4 +1,5 @@
 """Display saved control records without invoking scientific admission readers."""
+import copy
 import math
 
 from . import budget, contracts as c, instance_display as display, native_usage, runtime
@@ -6,6 +7,26 @@ from . import budget, contracts as c, instance_display as display, native_usage,
 
 def _read(path, default=None):
     return c.read(path) if path.exists() else default
+
+
+def _saved_read(path, memo):
+    """UI-only immutable record memo; never used by control admission."""
+    if memo is None:
+        return _read(path)
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    key = str(path)
+    identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    if key in memo and memo[key][0] == identity:
+        return copy.deepcopy(memo[key][1])
+    memo.pop(key, None)
+    value = c.read(path)
+    while len(memo) >= 1024:
+        memo.pop(next(iter(memo)))
+    memo[key] = (identity, copy.deepcopy(value))
+    return value
 
 
 def steps(root):
@@ -20,9 +41,16 @@ def visible_steps(root):
     return sorted(set(steps(root)) | inherited)
 
 
-def operations(root):
-    return sorted([c.read(path) for path in (root / 'host-control/operations').glob('*.json')],
-                  key=lambda row: row.get('sequence', 0))
+def operations(root, *, memo=None):
+    rows = []
+    for path in (root / 'host-control/operations').glob('*.json'):
+        cached = (memo or {}).get(str(path))
+        terminal = cached is not None and cached[1].get('status') in {'applied', 'completed', 'failed'}
+        row = _saved_read(path, memo if terminal else None)
+        if memo is not None and row.get('status') in {'applied', 'completed', 'failed'} and not terminal:
+            row = _saved_read(path, memo)
+        rows.append(row)
+    return sorted(rows, key=lambda row: row.get('sequence', 0))[-20:]
 
 
 def attempts(root, step):
@@ -79,16 +107,19 @@ def _node(root, step, job):
         budget_slice=intent.get('budget_slice'), budget_report=outcome.get('budget_slice'))
 
 
-def _usage(root, numbers):
+def _usage(root, numbers, memo=None):
     totals = dict(input_tokens=0, cached_input_tokens=0, output_tokens=0)
     unknown = []
     for step in numbers:
         for record in attempts(root, step):
             if not (record / 'native-intent.json').exists():
                 continue
-            value = _read(record / 'usage.json')
-            outcome = _read(record / 'native-outcome.json', {})
-            metadata = outcome.get('metering') or _read(record / 'usage-observation.json', {})
+            sealed = (root / 'native-evidence' / f'{step:03d}' / 'result-identity.json').exists()
+            terminal = sealed and (record / 'native-outcome.json').exists()
+            cache = memo if terminal else None
+            value = _saved_read(record / 'usage.json', cache)
+            outcome = _saved_read(record / 'native-outcome.json', cache) or {}
+            metadata = outcome.get('metering') or _saved_read(record / 'usage-observation.json', cache) or {}
             if value is None or metadata.get('coverage') == 'unknown':
                 if step not in unknown:
                     unknown.append(step)
@@ -253,10 +284,11 @@ def closeout(root, events=None, numbers=None):
     return value
 
 
-def status(root, *, after=0, limit=None):
+def status(root, *, after=0, limit=None, memo=None):
     settings = display.settings(root)
     numbers = steps(root)
-    events = [c.read(path) for path in sorted((root / 'control-ledger').glob('*.json'))]
+    paths = sorted((root / 'control-ledger').glob('*.json'))
+    events = [_saved_read(path, memo if index < len(paths) - 1 else None) for index, path in enumerate(paths)]
     from . import fork_runtime, fork_sources, originals
     manifest = fork_sources.validate_manifest(root) if fork_runtime.is_fork(root) else None
     inherited = {row['step']: row for row in manifest['prefix_entries']} if manifest else {}
@@ -269,7 +301,7 @@ def status(root, *, after=0, limit=None):
              state='seal_present_unverified', inherited=True) for step in selected]
     last = selected[-1] if selected else after
     return dict(instance=str(root), goal_id=settings['goal_id'], objective=settings['objective'],
-        paused=(root / 'pause.request').exists(), nodes=nodes, usage=_usage(root, numbers),
+        paused=(root / 'pause.request').exists(), nodes=nodes, usage=_usage(root, numbers, memo),
         budget=_budget(root, settings, events), correction=_correction(root), closeout=closeout(root, events, numbers),
         closeout_preparation=None, goal_completion='not_asserted', after=after,
         used_steps=used_steps(root, numbers, events),

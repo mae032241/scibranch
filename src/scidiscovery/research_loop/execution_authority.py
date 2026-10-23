@@ -536,13 +536,7 @@ def _remaining(root, config, allocation=None):
     if state['requested'] and state['enforced']:
         raise ValueError('Original task admission is unavailable: ' + str(state['reason']))
     seconds = available['seconds']
-    if budget.node_mode(root) == 'hard':
-        node = budget.node_limits(root, job)
-        if node is not None:
-            seconds = min(seconds, node['max_seconds'] - budget._node_duration(root, job, intent, limits))
-        if job.get('search') is not None:
-            seconds = min(seconds, job['search']['limits']['max_w_seconds'] -
-                          (limits['advance_seconds'] - intent['search_slice']['advance_seconds']))
+    budget.node_mode(root)
     if allocation is not None:
         if stamp['boot_id'] != allocation['boot_id']:
             raise ValueError('Original execution authorization belongs to another boot')

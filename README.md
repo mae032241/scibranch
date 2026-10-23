@@ -70,6 +70,7 @@ objective, public inputs, backend permissions and finite budgets, then use
 `scid-research config-check --config research.toml` and
 `scid-research prepare --config research.toml`. Inspect and start that exact instance
 with `config-inspect --root /absolute/instance` and `start --root /absolute/instance`.
+Add `--view current` to inspect the active configuration and any pending revision for the next new node.
 The declaration affects new instances; existing instances retain their frozen settings.
 See [configuration and backend reference](docs/RESEARCH_CONFIGURATION.md).
 The webpage is optional and uses the same state and control logic; detached research

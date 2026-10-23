@@ -123,6 +123,10 @@ class Codex:
         self.schema_transport = 'native_flag' if self.supports_native_schema_flag else 'scientific_task'
 
     @property
+    def instruction_transport(self):
+        return 'developer' if self.standard or self.options is not None else 'prompt'
+
+    @property
     def complete_authorship(self):
         return self.standard and not (self.options or {}).get('subagents',False)
 
@@ -241,6 +245,7 @@ class Protocol:
     complete_authorship = False
     supports_native_schema_flag = False
     schema_transport = 'protocol_request'
+    instruction_transport = 'prompt'
 
     def __init__(self, settings):self.settings=settings
     def launch(self, *args):return list(self.settings['native_launcher_argv'])

@@ -97,7 +97,7 @@ def handoff(config,result,command,call_id=None):
                 'Return normal scientific JSON now with this pending original call and limitations. The host monitors this same call; wake still requires the original session and budget.')
         if action=='reconcile_or_stop':return stop('original_terminal_unverified' if state in {'known_success','known_failed'} else 'original_state_or_query_unavailable')
         return hint(action,'host_wake_unavailable',
-            'Query only this same original call in this native turn at poll_interval_seconds while pending and queryable, until handoff changes or an actual original budget, time or host-stop limit is reached. No query-count limit. At an actual stop, return normal scientific JSON with the pending limitation.',
+            'Query only this same original call in this native turn at poll_interval_seconds while pending and queryable, until handoff changes or an original finite external-call deadline, resource boundary or host stop is reached. Shared soft targets do not terminate this accepted node; reported usage is a lower bound and unknown coverage is not zero usage. Shared ceilings are checked before the next node or wake. No query-count limit. At an actual stop, return normal scientific JSON with the pending limitation.',
             poll_interval_seconds=POLL_SECONDS)
     except (OSError,ValueError,KeyError,TypeError):
         return stop('original_handoff_unverified')

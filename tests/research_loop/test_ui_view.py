@@ -268,6 +268,7 @@ print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=N
     return root, key
 
 
+@pytest.mark.process_e2e
 def test_comparison_uses_latest_frozen_nominations_and_exact_a_choice_without_shrinking_pool(tmp_path):
     root, _ = nominated_scene(tmp_path)
     before = {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
@@ -543,3 +544,38 @@ def test_audit_facts_display_saved_receipts_and_candidate_artifact_scope(tmp_pat
     path = candidate_audit._directory(root, 3) / 'adapter-result.json'
     value = c.read(path); value['status'] = 'rejected'; c.write(path, value)
     assert ui_view.audit_facts(root, projection) == facts
+
+
+def test_sealed_reader_memo_avoids_repeat_reads_and_invalidates_replaced_original(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import instance_display as display
+    root, _ = prepare(tmp_path, enabled=False)
+    finish(root, 1, 'H', [], action='analyze', summary='Original finding')
+    memo, reads = {}, []
+    original = display.node
+    def counted(*args, **kwargs):
+        reads.append(args[1]); return original(*args, **kwargs)
+    monkeypatch.setattr(display, 'node', counted)
+    first = ui_view.Reader(root, memo).node(1)
+    first['payload']['summary'] = 'Mutated display copy'
+    assert ui_view.Reader(root, memo).node(1)['payload']['summary'] == 'Original finding'
+    assert reads == [1]
+    path = root / 'native-evidence/001/science-output.json'
+    value = json.loads(path.read_bytes()); value['summary'] = 'Replaced original display'
+    path.chmod(0o600); path.write_text(json.dumps(value))
+    assert ui_view.Reader(root, memo).node(1)['payload']['summary'] == 'Replaced original display'
+    assert reads == [1, 1]
+    path.write_text('{')
+    with pytest.raises(ValueError):
+        ui_view.Reader(root, memo).node(1)
+    path.write_text(json.dumps(value))
+    assert ui_view.Reader(root, memo).node(1)['payload']['summary'] == 'Replaced original display'
+    assert len(memo) <= 256
+
+
+@pytest.mark.parametrize('saved, state', [('waiting', 'external_wait'), ('native_outcome_unsealed', 'unsealed'),
+    ('native_not_submitted', 'not_submitted')])
+def test_saved_native_stops_have_distinct_non_idle_display_states(saved, state):
+    current = dict(step=2, role='W', state=saved)
+    presentation = dict(current=current, state=saved, completed=False, waiting=False, active=False)
+    summary = ui_view.status_summary(presentation, dict(paused=False))
+    assert summary['state'] == state and summary['state'] not in {'idle', 'ready', 'active'}

@@ -173,8 +173,13 @@ managed policy、额外可写根以及无法忠实投影后端权限的自定义
 
 上述文件均位于 `src/scidiscovery/research_loop/`，另有说明者除外。
 `scidiscovery.execution_interfaces` 发现执行接口，薄实例冻结所选执行器、操作者配置及执行合同。
-框架、插件及工具源码升级不使科学任务或已接受调用失效；历史源码指纹仅作元数据，不作准入条件。
+实现升级采用新前缀，在停止或核对旧 writer 后显式切换 wrapper，并保留旧前缀供回退。
+科学原件继续保留，但不承诺旧协议实例的执行兼容；历史源码指纹仅作元数据，不作准入条件。
 任务、输入、成果原件、声明权限、有限预算及外部调用身份仍须精确绑定，升级不授权重放未知调用。
+稳定角色与证据规则只传一份：Codex standard/options launcher 使用 developer，protocol 与继承配置的自定义 launcher 使用 prompt。
+任务包保留科学问题、精确输入与响应字段；正式独审使用专属独立审查规则。准入只在一次只读计算内复用事实，
+正式 writer 边界与后续准入重新读取配置、账本和用量。已报告 input+output 是观察下界，计量未知不等于零消费。
+普通已接受节点可完成超过软目标的工作，共享额度在下一边界检查；原外部调用、FINAL 与作者收尾的有限 deadline 保留。
 非执行插件 registry、Operation 编译宿主、Artifact 存储宿主、helper 与 finalizer 已退役。
 保留执行叶 schema、来源规则、有界进程 IO 和真实 wire transport；沿用其窄模块路径减少纯搬移，
 不再提供 catalog 或科学调度。曲线和图证据算法为自包含 Skill 脚本；执行扩展见[接口参考](PLUGIN_RUNTIME_API.md)。

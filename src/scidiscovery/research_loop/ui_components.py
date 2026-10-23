@@ -88,7 +88,7 @@ def stat(item):
         bar = progress(pct, over=over) + '<p class="stat-percent' + (' over' if over else '') + '">' + esc(str(pct) + '%') + '</p>'
     notes = ''.join('<p class="stat-note' + (' over' if over else '') + '">' + esc(note) + '</p>' for note in item.get('notes') or [])
     return Safe('<section class="stat' + (' over' if over else '') + '"' + attr('title', item.get('title'))
-                + '><h2>' + esc(item['label']) + '</h2>' + value + bar + notes + '</section>')
+                + '><h2>' + (link(item['label'], item['href']) if item.get('href') else esc(item['label'])) + '</h2>' + value + bar + notes + '</section>')
 
 
 def stats(usage):
@@ -276,8 +276,10 @@ def candidate_table(value, *, open_=True, ident='candidates'):
     if 'error' in value:
         return Safe('<section class="candidates" id="' + esc(ident) + '"><h2>候选比较</h2>' + error_inline(value, what='候选表') + '</section>')
     total = value['total']
+    description = ('全部已封存观察中的候选，含失败与未推荐记录；按首次观察顺序分页，并按评估口径与机制分组。'
+        if value.get('all_candidates') else '仅显示本阶段输入范围内最近 W 的提名候选及 A 选中的候选。默认按首次观察顺序排列，并按评估口径（evaluation_key）分组；不同口径的数值不可直接比较。')
     body = ('<section class="candidates" id="' + esc(ident) + '"><h2>候选比较（' + esc(total) + '）</h2>'
-            '<p class="note">仅显示本阶段输入范围内最近 W 的提名候选及 A 选中的候选。默认按首次观察顺序排列，并按评估口径（evaluation_key）分组；不同口径的数值不可直接比较。'
+            '<p class="note">' + description +
             '★ 为 A 的作者推荐，✓ 为控制记录的已确认交付，✕ 为执行失败；界面不提供科学排序或默认选择。</p>')
     if not total:
         return Safe(body + empty('未记录提名或 A 选中候选。') + '</section>')
@@ -291,10 +293,11 @@ def candidate_table(value, *, open_=True, ident='candidates'):
     for number, group in enumerate(value['groups'], 1):
         numeric = sum(1 for row in group['rows'] if _number(row['metric']))
         body += ('<div class="candidate-group" data-group="' + esc(number) + '"><div class="group-head"><h3>口径：' + esc(group['key'])
+                 + (' · 机制：' + esc(group['mechanism']) if group.get('mechanism') else '')
                  + '<span class="count">（' + esc(len(group['rows'])) + '）</span></h3>'
                  + ('<button type="button" class="secondary-button sort-button" data-sort-group="' + esc(number) + '">在此口径内按指标排序</button>'
                     '<p class="sort-note" data-sort-note hidden>仅按此口径数值排序，不代表科学排序。</p>' if numeric > 1 else '')
-                 + ('<p class="note">显示名称相同的口径保留各自原始身份，数值不可合并比较。</p>' if group.get('ambiguous_label') else '') + '</div>'
+                 + ('<p class="note">显示名称相同的评估口径或不同机制保留独立分组，数值不可合并比较。</p>' if group.get('ambiguous_label') else '') + '</div>'
                  '<div class="table-scroll"><table class="candidate-table"><thead><tr>'
                  '<th scope="col">标记</th><th scope="col">标签</th><th scope="col">机制</th><th scope="col">指标</th>'
                  '<th scope="col">方向</th><th scope="col">来源阶段</th><th scope="col">审计</th><th scope="col">状态</th></tr></thead><tbody>')

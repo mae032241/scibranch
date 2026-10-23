@@ -50,7 +50,7 @@ def _bytes(stream, offset, size):
     return stream.read(size)
 
 
-def read(root, step, *, attempt=0, cursor=None, limit_bytes=65536):
+def read(root, step, *, attempt=0, cursor=None, limit_bytes=65536, tail=False):
     """Read at most limit_bytes transport bytes, with bounded identity probes.
 
     Partial lines remain at their last complete boundary. An over-limit line is
@@ -127,7 +127,13 @@ def read(root, step, *, attempt=0, cursor=None, limit_bytes=65536):
             if not stat.S_ISREG(info.st_mode):
                 raise ValueError('Progress transport is not a regular file')
             identity = [info.st_dev, info.st_ino]
-            offset = previous['offset'] if previous else 0
+            offset = previous['offset'] if previous else max(0, info.st_size - limit_bytes) if tail else 0
+            tail_omitted = bool(tail and previous is None and offset)
+            tail_skipping = tail_omitted and _bytes(stream, offset - 1, 1) != b'\n'
+            if tail_omitted:
+                # A bounded tail starts inside a line; discard that first line
+                # even when its bytes happen to resemble a valid transport event.
+                result['tail_omitted'] = True
             if previous:
                 if identity != previous['stream']:
                     return dict(result, stream_state='replaced', restart_required=True)
@@ -138,7 +144,7 @@ def read(root, step, *, attempt=0, cursor=None, limit_bytes=65536):
                     return dict(result, stream_state='replaced', restart_required=True)
             data = _bytes(stream, offset, limit_bytes)
             result['bytes_read'] = len(data)
-            skipping = previous['skip'] if previous else False
+            skipping = previous['skip'] if previous else tail_skipping
             lines = data.split(b'\n')
             consumed = sum(len(line) + 1 for line in lines[:-1])
             complete = lines[:-1]
@@ -189,3 +195,8 @@ def read(root, step, *, attempt=0, cursor=None, limit_bytes=65536):
         return dict(result, stream_state='missing', restart_required=previous is not None)
     except (OSError, ValueError):
         return dict(result, status='progress_unavailable', stream_state='unavailable', restart_required=False)
+
+
+def tail(root, step, *, attempt=0, limit_bytes=65536):
+    """Overview-only cold tail; full progress remains forward-paginated."""
+    return read(root, step, attempt=attempt, limit_bytes=limit_bytes, tail=True)

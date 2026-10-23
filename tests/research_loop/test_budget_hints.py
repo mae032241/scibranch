@@ -65,7 +65,7 @@ def test_unreported_continuation_keeps_previous_consumption_and_unknown(advice,m
     monkeypatch.setattr(budget,'_node_duration',lambda *a:5.)
     shared.update(observed_tokens=30,accounted_tokens=30,unknown_steps=[1])
     hint=publish(dict(input_tokens=0,cached_input_tokens=0,output_tokens=0),observed=False)
-    assert hint['observed_tokens_lower_bound'] is None and hint['unknown_usage'] is True
+    assert hint['observed_tokens_lower_bound'] == 30 and hint['unknown_usage'] is True
     assert hint['metering']=='inflight_unknown'
     assert hint['current_work_observed_tokens_remaining_upper_bound']==970
     assert hint['shared_observed_tokens_remaining_upper_bound']==970
@@ -142,6 +142,7 @@ def test_one_large_report_reaches_soft_target_without_claiming_pre_request_cap(a
     assert budget.stop_node(root,job,intent,limits,meter) is None
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('role','HWAE')
 def test_soft_native_stdin_has_budget_advice_and_prelaunch_hint(tmp_path,role):
     root=instance(tmp_path,limits=policy())

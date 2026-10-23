@@ -581,8 +581,9 @@ def inspect_source(parent_root, selected_job_ref):
     from . import contracts as c
     root = files.check_path(Path(parent_root).absolute())
     initial = c.settings(root)
-    if initial.get('handoff_protocol') != 23:
-        raise ValueError('Fork source requires frozen protocol 23')
+    from .protocol import CURRENT
+    if type(initial.get('handoff_protocol')) is not int or initial['handoff_protocol'] != CURRENT:
+        raise ValueError(f'Fork source requires frozen protocol {CURRENT}')
     if isinstance(selected_job_ref, int) and not isinstance(selected_job_ref, bool):
         step = selected_job_ref
     elif isinstance(selected_job_ref, dict):

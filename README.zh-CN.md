@@ -51,7 +51,8 @@ scid-research --help
 
 开始研究时，复制 [research.example.toml](research.example.toml)，声明目标、公开输入、后端权限及有限预算，
 依次运行 `scid-research config-check --config research.toml` 和 `scid-research prepare --config research.toml`。
-再以 `config-inspect --root /absolute/instance` 查看冻结设置，`start --root /absolute/instance` 后台推进。
+再以 `config-inspect --root /absolute/instance` 查看冻结设置，增加 `--view current` 查看当前生效与下一新节点待生效的配置；
+`start --root /absolute/instance` 后台推进。
 配置文件只影响新实例；已有实例保留冻结设置，详见[配置与后端参考](docs/RESEARCH_CONFIGURATION.md)。
 网页是复用同一状态与控制逻辑的可选入口；网页服务退出不会停止 detached 研究。
 `result`、`materials`、`artifact` 可通过 CLI 读取或下载精确封存结果。[CLI 指南](docs/ROOTLESS_CLI.zh-CN.md)

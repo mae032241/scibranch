@@ -44,7 +44,7 @@ def test_unknown_error_has_private_bounded_durable_diagnostic_and_public_referen
     secret = 'private-unlabelled-fixture-token'
     error = LookupError(secret + '\n' + 'trace detail ' * 20000)
     monkeypatch.setattr(ui_errors, '_MAX_RECORDS', 3)
-    problems = [ui_errors.present(error, tmp_path) for _ in range(5)]
+    problems = [ui_errors.present(error, tmp_path, record_diagnostic=True) for _ in range(5)]
     assert len({problem.reference for problem in problems}) == 5
     records = list((tmp_path / '.scid-ui/errors').glob('*.json'))
     assert len(records) == 3
@@ -62,7 +62,7 @@ def test_unknown_error_has_private_bounded_durable_diagnostic_and_public_referen
 
 def test_diagnostic_failure_cannot_reenter_error_handler(tmp_path):
     (tmp_path / '.scid-ui').write_text('not a directory')
-    problem = ui_errors.present(AssertionError('private diagnostic'), tmp_path)
+    problem = ui_errors.present(AssertionError('private diagnostic'), tmp_path, record_diagnostic=True)
     assert problem.status == 500 and problem.reference and '诊断未能保存' in problem.hint
     assert 'private diagnostic' not in problem.markup()
 
@@ -74,13 +74,13 @@ def test_load_missing_configuration_preserves_path_and_new_form_nonce(tmp_path):
     _, _, headers = ui.get('/manage?token=' + ui.management_token, host=ui.host)
     cookie = headers['Set-Cookie']
     token = ui._browser(cookie)
-    nonce = ui.control_nonce
+    nonce = ui._form_nonce(token, 'load-config')
     chosen = str(workspace / 'missing "quoted".toml')
     status, page, _ = post(ui, cookie, 'load-config', dict(nonce=nonce,
         csrf=ui._csrf(token, 'load-config', nonce), config_path=chosen))
     assert status == 404 and '配置文件不存在'.encode() in page
     assert ('value="' + html.escape(chosen, quote=True) + '"').encode() in page
-    assert ui.control_nonce != nonce and not (workspace / 'settings.json').exists()
+    assert all(row[0] != nonce for row in ui.form_nonces.values()) and not (workspace / 'settings.json').exists()
     assert b'<details class="setup-tools" open>' in page
     ui.translation.close()
 
@@ -161,7 +161,7 @@ def test_handler_recovery_does_not_reread_damaged_settings_or_expose_traceback(t
     ui, _ = session(root, key)
     monkeypatch.setattr(instance_ui.display, 'settings', lambda *a: (_ for _ in ()).throw(AssertionError('recursive lookup')))
     status, page, headers = ui._error_response(AssertionError('private traceback and token'), '/bad')
-    assert status == 500 and '工作台内部错误'.encode() in page and '错误编号'.encode() in page
+    assert status == 500 and '工作台内部错误'.encode() in page and '错误编号'.encode() not in page
     assert b'private traceback' not in page and b'recursive lookup' not in page and b'<script' not in page
     status, value, headers = ui._error_response(BrowserAccessDenied('expired'), '/translation/lookup', json_response=True)
     error = json.loads(value)['error']
@@ -207,7 +207,7 @@ def test_real_handler_keeps_unknown_failures_private_and_sends_json_reason(tmp_p
         response = connection.getresponse(); payload = response.read()
         assert response.status == 500 and response.getheader('Content-Type').startswith('application/json')
         problem = json.loads(payload)['error']
-        assert problem['code'] == 'internal_error' and problem['reference']
+        assert problem['code'] == 'internal_error' and not problem['reference']
         assert b'unlabelled private' not in payload and b'Traceback' not in payload
         assert response.getheader('Cache-Control') == 'no-store'
         assert "default-src 'none'" in response.getheader('Content-Security-Policy')
@@ -240,3 +240,45 @@ def test_real_handler_keeps_unknown_failures_private_and_sends_json_reason(tmp_p
             servers[0].shutdown()
         worker.join(5)
     assert not worker.is_alive() and not errors
+
+
+def test_get_and_sse_failed_operation_projection_are_pure_and_stable(tmp_path):
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    from scidiscovery.research_loop import contracts as c
+    operation = root / 'host-control/operations' / ('a' * 32 + '.json')
+    c.write(operation, dict(operation_id='a' * 32, sequence=1, kind='controller', status='failed', error='private arbitrary error'))
+    token = ui._browser(cookie)
+    before = {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
+    first = ui.get('/operations', host=ui.host, cookie=cookie)[1]
+    assert first == ui.get('/operations', host=ui.host, cookie=cookie)[1]
+    one = ui._live_snapshot(token, '', force=True)['fragments']['live-operations']
+    two = ui._live_snapshot(token, '', force=True)['fragments']['live-operations']
+    assert one == two and 'a' * 32 in one and 'private arbitrary' not in one
+    assert before == {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
+    operation.write_text('{')
+    assert ui._snapshot_or_error(force=True) == ui._snapshot_or_error(force=True)
+    assert not (root / '.scid-ui/errors').exists()
+    ui.translation.close()
+
+
+@pytest.mark.parametrize('workspace', [False, True])
+def test_unknown_routes_are_404_before_workspace_or_approval_capability(tmp_path, workspace):
+    if workspace:
+        root = tmp_path / 'workspace'; root.mkdir()
+        key = operator_key(tmp_path)
+        ui = instance_ui.InstanceUI(root, secret_file=key, workspace=True); ui.host = '127.0.0.1:18753'
+        cookie = ui.get('/manage?token=' + ui.management_token, host=ui.host)[2]['Set-Cookie']
+    else:
+        root, key = prepare(tmp_path, enabled=False)
+        ui, cookie = session(root, key)
+    for path in ('/not-a-route', '/unknown/favicon'):
+        try:
+            ui.get(path, host=ui.host, cookie=cookie)
+        except Exception as error:
+            assert ui._error_response(error, path)[0] == 404
+        else:
+            pytest.fail('unknown route accepted')
+    assert ui.get('/favicon.ico', host=ui.host, cookie=cookie)[0] == 204
+    assert not (root / '.scid-ui/errors').exists()
+    ui.translation.close()

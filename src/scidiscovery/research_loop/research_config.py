@@ -317,11 +317,34 @@ def prepare(config=None, *, validate_only=False, **options):
     return controller.prepare(**normalize(options), validate_only=validate_only)
 
 
-def inspect(*, config=None, root=None):
-    """Inspect effective new configuration or the exact frozen existing settings."""
+def inspect(*, config=None, root=None, view='frozen'):
+    """Read declarations and operational revisions without binding a new node."""
+    if view not in {'frozen', 'current'}:
+        raise ValueError('Configuration view must be frozen or current')
+    if view == 'current' and root is None:
+        raise ValueError('The current configuration view requires an existing instance root')
     if (config is None) == (root is None):
         raise ValueError('Select exactly one config file or existing instance root')
     if root is not None:
+        if view == 'current':
+            from . import configuration_updates
+            root = Path(root).expanduser().resolve()
+            state = configuration_updates.status(root)
+            settings = contracts.settings(root)
+            from . import budget
+            active = copy.deepcopy(state['active_settings'])
+            active.update(budget.ceilings(root))
+            if active.get('execution_resource_policy') is not None:
+                grant = budget.execution_accounting(root)['grant']
+                if grant is not None:
+                    active['execution_resource_policy']['allowance'] = dict(grant['allowance'])
+            return dict(status='config_inspected', source='current_instance', instance=str(root),
+                base_identity=dict(goal_id=settings['goal_id'], settings_sha256=contracts.digest(root / 'settings.json')),
+                active_revision=state['active_revision'],
+                pending_revision=state['revision'] if state['pending'] else None,
+                effective_from=state['effective_from'],
+                active=to_document(root, active),
+                pending=state['configuration'] if state['pending'] else None)
         return dict(status='config_inspected', source='frozen_instance',
                     instance=str(Path(root).expanduser().resolve()), settings=contracts.settings(Path(root).expanduser().resolve()))
     settings = prepare(config, validate_only=True)

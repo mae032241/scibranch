@@ -266,3 +266,31 @@ def test_malformed_backend_type_is_omitted_and_later_public_events_survive(tmp_p
     _, body, _ = ui.get('/nodes/1/events', host=ui.host, cookie=cookie)
     assert b'private-malformed-content' not in body
     assert log.read_bytes().startswith(raw)
+
+
+def test_overview_cold_tail_is_bounded_and_full_forward_reader_stays_complete(tmp_path):
+    root, key, log = transport(tmp_path)
+    early = line(message('old message ' + 'x' * 1000))
+    newest = line(message('recent public scientific message'))
+    log.write_bytes(early * 300 + b'not-utf8\xff\n' + newest)
+    tail = progress.tail(root, 1)
+    assert tail['bytes_read'] <= 65536 and tail['tail_omitted']
+    assert tail['events'][-1]['text'] == 'recent public scientific message'
+    assert 'not-utf8' not in json.dumps(tail)
+    ui, cookie = session(root, key)
+    activity = ui._activity(dict(step=1, role='H'))
+    assert activity['messages'][-1] == 'recent public scientific message'
+    count, cursor = 0, None
+    while True:
+        page = progress.read(root, 1, cursor=cursor)
+        count += len(page['events'])
+        cursor = page['cursor']
+        if not page.get('has_more'):
+            break
+    assert count == 301
+    log.write_bytes(b'x' * 300000 + b'\n' + newest)
+    assert progress.tail(root, 1)['events'][-1]['text'] == 'recent public scientific message'
+    log.write_bytes(b'x' * 300000)
+    oversized = progress.tail(root, 1)
+    assert oversized['events'] == [] and oversized['bytes_read'] <= 65536
+    ui.translation.close()

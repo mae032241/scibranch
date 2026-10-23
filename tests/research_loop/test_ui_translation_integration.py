@@ -33,62 +33,37 @@ def save(host, cookie, **values):
         cookie=cookie, content_type='application/x-www-form-urlencoded', body=urlencode(values).encode())
 
 
-def test_translation_routes_are_cache_only_scoped_and_nonblocking(tmp_path, monkeypatch):
+def test_translation_routes_reject_new_calls_before_launch_and_keep_cached_lookup(tmp_path, monkeypatch):
+    import subprocess
     root, key = prepare(tmp_path, enabled=False)
     finish(root, 1, 'H', [], action='analyze', summary='An exact original finding')
-    original_settings = c.settings(root)
+    frozen = (root / 'settings.json').read_bytes()
     host, cookie = session(root, key)
-    entered, release = threading.Event(), threading.Event()
-    calls = []
-    def translate(selected, config, texts):
-        calls.append((config['target_language'], texts))
-        entered.set()
-        assert release.wait(5)
-        return ['<b>译文</b> ' + text for text in texts], None
-    monkeypatch.setattr(ui_translation.TranslationService, '_translate', translate)
+    def scientific_records():
+        records = {}
+        for name in ('jobs', 'native-evidence', 'control-ledger', 'host-control', 'host-runtime', 'host-delivery', 'execution-authority'):
+            directory = root / name
+            for path in [directory, *directory.rglob('*')]:
+                if path.exists():
+                    records[path.relative_to(root)] = path.read_bytes() if path.is_file() else None
+        return records
+    before = scientific_records()
+    monkeypatch.setattr(subprocess, 'Popen', lambda *a, **k: pytest.fail('translation launched'))
     try:
-        assert save(host, cookie, enabled='true', model='reading-only-model', target_language='zh-CN', backend='codex')[0] == 303
-        _, reading, _ = host.get('/reading', host=host.host, cookie=cookie)
-        assert '目标语言' in reading.decode() and 'name="target_language"' in reading.decode()
-        _, page, _ = host.get('/results/1', host=host.host, cookie=cookie)
-        assert b'data-translation-source="&quot;An exact original finding&quot;"' in page
-        assert json.loads(request(host, cookie, 'lookup', ['An exact original finding'])[1])['entries'][0]['status'] == 'missing'
-        assert not calls  # page render, SSE construction and cache reads cannot launch
-        host.get('/live', host=host.host, cookie=cookie)
-        assert not calls
-        value = json.loads(request(host, cookie, 'start', ['An exact original finding'])[1])
-        assert value['entries'][0]['status'] == 'pending'
-        assert entered.wait(2) and not release.is_set()  # POST already returned while provider is blocked
-        release.set()
-        host.translation.close()
-        host.translation = ui_translation.TranslationService(root / '.scid-ui')
-        value = json.loads(request(host, cookie, 'lookup', ['An exact original finding'])[1])
-        assert value['entries'][0]['translation'] == '<b>译文</b> An exact original finding'
-        assert len(calls) == 1
-        assert save(host, cookie, enabled='true', model='reading-only-model', target_language='ja', backend='codex')[0] == 303
-        assert json.loads(request(host, cookie, 'lookup', ['An exact original finding'])[1])['entries'][0]['status'] == 'missing'
-        save(host, cookie, enabled='true', model='reading-only-model', target_language='zh-CN', backend='codex')
-        assert json.loads(request(host, cookie, 'lookup', ['An exact original finding'])[1])['entries'][0]['status'] == 'cached'
-        assert json.loads(request(host, cookie, 'lookup', ['A changed finding'])[1])['entries'][0]['status'] == 'missing'
-        assert c.settings(root) == original_settings and len(calls) == 1
-
-        _, _, headers = host.get('/view?' + urlencode(dict(token=host.read_token)), host=host.host)
-        reader = headers['Set-Cookie']
-        assert set(state(host, reader)['csrf']) == {'lookup'}
-        assert json.loads(request(host, reader, 'lookup', ['An exact original finding'])[1])['entries'][0]['status'] == 'cached'
-        with pytest.raises(PermissionError):
-            request(host, reader, 'start', ['different'], credentials=state(host, cookie))
-        bad = state(host, cookie); bad['csrf']['start'] = 'bad'
-        with pytest.raises(PermissionError):
-            request(host, cookie, 'start', ['different'], credentials=bad)
-        with pytest.raises(PermissionError):
-            host.post('/translation/lookup', host=host.host, origin='http://elsewhere.invalid', cookie=cookie,
-                content_type='application/json', body=b'{}')
-        with pytest.raises(ValueError):
-            request(host, cookie, 'lookup', ['x' * 12001])
-        assert len(calls) == 1
+        assert save(host, cookie, enabled='true', model='reading-model', backend='codex')[0] == 303
+        profile = ui_translation._profile(host.translation._config)
+        host.translation._db.execute('INSERT INTO translations(profile, source, translation) VALUES (?, ?, ?)',
+            (profile, 'An exact original finding', '已有译文'))
+        host.translation._db.commit()
+        assert state(host, cookie)['supported'] is False
+        value = json.loads(request(host, cookie, 'start', ['An exact original finding', 'run shell'])[1])
+        assert value['status'] == 'unsupported'
+        assert value['entries'][0]['status'] == 'cached' and value['entries'][1]['status'] == 'missing'
+        assert json.loads(request(host, cookie, 'lookup', ['An exact original finding'])[1])['entries'][0]['translation'] == '已有译文'
+        assert frozen == (root / 'settings.json').read_bytes()
+        assert scientific_records() == before
     finally:
-        release.set(); host.translation.close()
+        host.translation.close()
 
 
 def test_workspace_translation_settings_are_shared_with_mounted_instances(tmp_path):

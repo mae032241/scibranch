@@ -32,7 +32,8 @@ def control_fields(ui, cookie, action):
     # Direct legacy-control boundary tests do not depend on the ordinary UI
     # exposing an exceptional recovery form.
     token = ui._browser(cookie)
-    return dict(nonce=ui.control_nonce, csrf=ui._csrf(token, action, ui.control_nonce))
+    nonce = ui._form_nonce(token, action)
+    return dict(nonce=nonce, csrf=ui._csrf(token, action, nonce))
 
 
 def post(ui, cookie, action, value):
@@ -56,9 +57,10 @@ def test_ordinary_instance_status_pages_and_browser_bound_controls(tmp_path):
         {key: node[key] for key in fields} for node in full['nodes']]
     assert second['next_after'] is None
     assert ui.get('/nodes/2', host=ui.host, cookie=cookie)[0] == 200
-    with pytest.raises(ValueError, match='Exact instance node'):
+    with pytest.raises(ValueError) as invalid_route:
         ui.get('/nodes/../../operator.key', host=ui.host, cookie=cookie)
-    with pytest.raises(ValueError, match='unavailable'):
+    assert ui._error_response(invalid_route.value, '/nodes/../../operator.key')[0] == 404
+    with pytest.raises(ValueError, match='审批入口'):
         ui.get('/requests', host=ui.host, cookie=cookie)
     _, _, read_headers = ui.get('/view?' + urlencode({'token': ui.read_token}), host=ui.host)
     read_cookie = read_headers['Set-Cookie']
@@ -496,13 +498,13 @@ def test_management_configuration_guidance_and_explicit_instance_selection(tmp_p
     assert b'id="research-config-edit-form"' in page and b'action="/control/configuration-update"' in page
     assert b'id="research-config-form"' not in page and b'action="/control/configure"' not in page
     assert b'id="research-config-form"' in ui.get('/new', host=ui.host, cookie=cookie)[1]
-    submit = dict(form(ui, cookie, 'pause'), text='Check uncertainty', target='W', kind='advice', scope='research', effective_step='')
+    submit = dict(control_fields(ui, cookie, 'guidance-submit'), text='Check uncertainty', target='W', kind='advice', scope='research', effective_step='')
     submit['csrf'] = ui._csrf(ui._browser(cookie), 'guidance-submit', submit['nonce'])
     assert post(ui, cookie, 'guidance-submit', submit)[2]['Location'] == '/guidance'
     assert b'Check uncertainty' in ui.get('/guidance', host=ui.host, cookie=reader)[1]
     config_dir = tmp_path / 'declarations'; config_dir.mkdir()
     config = declaration(config_dir)
-    value = dict(form(ui, cookie, 'pause'), config_path=str(config), config_text='', mode='prepare')
+    value = dict(control_fields(ui, cookie, 'configuration'), config_path=str(config), config_text='', mode='prepare')
     value['csrf'] = ui._csrf(ui._browser(cookie), 'configuration', value['nonce'])
     assert post(ui, cookie, 'configuration', value)[0] == 200
     created = config_dir / 'instance'
@@ -867,7 +869,7 @@ def test_goal_change_rejects_incomplete_binding_and_keeps_escaped_draft(tmp_path
     draft = dict(text='Compare <script>alert(1)</script> alternatives', target='global', kind='goal_change',
                  scope='research', effective_step='3')
     draft.update(overrides)
-    value = dict(draft, nonce=ui.control_nonce, csrf=ui._csrf(token, 'guidance-submit', ui.control_nonce))
+    value = dict(draft, **control_fields(ui, cookie, 'guidance-submit'))
     status, page, _ = post(ui, cookie, 'guidance-submit', value)
     assert status == 422 and user_guidance.list_guidance(root) == []
     page = page.decode()
@@ -878,10 +880,9 @@ def test_goal_change_rejects_incomplete_binding_and_keeps_escaped_draft(tmp_path
         assert 'value="' + draft[field] + '" selected' in selected
     # The retry uses the rotated nonce and a matching action/browser CSRF token.
     retry = re.search(r'<form method="post" action="/control/guidance-submit">(.*?)</form>', page, re.S).group(1)
-    assert 'value="' + ui.control_nonce + '"' in retry
-    assert ui._csrf(token, 'guidance-submit', ui.control_nonce) in retry
+    assert 'name="nonce"' in retry and 'name="csrf"' in retry
     value = dict(text=draft['text'], target='global', kind='goal_change', scope='research', effective_step='3',
-        nonce=ui.control_nonce, csrf=ui._csrf(token, 'guidance-submit', ui.control_nonce))
+        **control_fields(ui, cookie, 'guidance-submit'))
     assert post(ui, cookie, 'guidance-submit', value)[0] == 303
     row = user_guidance.list_guidance(root)[0]
     assert (row['kind'], row['target'], row['scope'], row['effective_step']) == ('goal_change', 'global', 'research', 3)
@@ -895,7 +896,7 @@ def test_guidance_read_only_csrf_bound_edits_and_future_revocation(tmp_path):
     token = ui._browser(cookie)
     row = user_guidance.submit(root, 'Retain uncertain alternatives', target='E', scope='research')
     value = dict(text='Forged draft', target='global', kind='advice', scope='next', effective_step='',
-        nonce=ui.control_nonce, csrf=ui._csrf(token, 'guidance-submit', ui.control_nonce))
+        **control_fields(ui, cookie, 'guidance-submit'))
     with pytest.raises(PermissionError):
         post(ui, reader, 'guidance-submit', value)
     value['csrf'] = 'invalid-csrf'
@@ -905,7 +906,7 @@ def test_guidance_read_only_csrf_bound_edits_and_future_revocation(tmp_path):
     # A task can already contain the advice before the application receipt is saved.
     c.write(root / 'jobs/001.json', dict(user_guidance=[row]))
     edit = dict(text='Preserve this <b>rejected edit</b>', guidance_id=row['guidance_id'], expected_revision='1',
-        nonce=ui.control_nonce, csrf=ui._csrf(token, 'guidance-edit', ui.control_nonce))
+        **control_fields(ui, cookie, 'guidance-edit'))
     status, page, _ = post(ui, cookie, 'guidance-edit', edit)
     assert status >= 400 and html.escape(edit['text']).encode() in page
     assert user_guidance.list_guidance(root)[0]['text'] == row['text']
@@ -1049,14 +1050,6 @@ network = false
         return value
     monkeypatch.setattr(ui_mechanisms, 'project', fixture_mechanisms)
     monkeypatch.setattr(control, 'start_background', detached)
-    translation_permission = tmp_path / 'explicit-translation-click'
-    translation_calls = []
-    def fixture_translate(service, settings, texts):
-        translation_calls.append((translation_permission.exists(), list(texts)))
-        if 'Browser translation failure fixture' in texts:
-            raise ui_translation._TranslationError('timeout')
-        return ['<b>译文</b> ' + text for text in texts], None
-    monkeypatch.setattr(ui_translation.TranslationService, '_translate', fixture_translate)
     ui = InstanceUI(workspace, secret_file=key, workspace=True); ready = threading.Event(); servers = []; errors = []
     ui.translation.configure(dict(enabled=True, model='fixture-reading-model', target_language='zh-CN'))
     server_type = instance_ui.ThreadingHTTPServer
@@ -1317,8 +1310,8 @@ await call('Page.navigate', {url:origin+'/instances/1/'});
 await waitFor(`document.getElementById('live-hero')?.innerText.includes('第 2 阶段') && document.querySelector('[data-live-url]')?.dataset.state==='connected'`);
 if (!(await evaluate(`!document.querySelector('form[action$="/control/budget"]') && document.querySelector('a[href$="/configuration#budget-settings"]')`))) throw new Error('Ordinary overview duplicates the canonical budget editor');
 await writeFile(process.env.SCID_TEST_ADVANCE, 'budget-recovery');
-await waitFor(`document.querySelector('#live-hero a[href$="/budget-recovery#budget"]') !== null`);
-await evaluate(`document.querySelector('#live-hero a[href$="/budget-recovery#budget"]').click();true`);
+await waitFor(`document.querySelector('#more-actions a[href$="/budget-recovery#budget"]') !== null`);
+await evaluate(`document.querySelector('#more-actions a[href$="/budget-recovery#budget"]').click();true`);
 await waitFor(`location.pathname.endsWith('/budget-recovery') && document.querySelector('details.budget-adjustment') !== null`);
 if (!(await evaluate(`document.querySelector('details.budget-adjustment > summary').textContent==='恢复前追加预算' && document.querySelector('#budget').innerText.includes('恢复仍须满足原有条件')`))) throw new Error('Exceptional recovery is not distinct from next-node settings');
 await waitFor(`document.querySelector('details.budget-adjustment').open && document.querySelector('#budget [name="max_tokens"]').checkVisibility({contentVisibilityAuto:true})`);
@@ -1399,32 +1392,11 @@ await noOverflow();
 await screenshot('research-process-mechanisms-live');
 await evaluate(`(()=>{const cards=document.querySelectorAll('.mechanism-card');window.neighborCardHeight=cards[1].getBoundingClientRect().height;window.previousMechanism=cards[0].querySelector('details');window.previousMechanism.open=true;window.previousMechanism.querySelector('summary').focus();return true})()`);
 if (!(await evaluate(`Math.abs(document.querySelectorAll('.mechanism-card')[1].getBoundingClientRect().height-window.neighborCardHeight)<1 && document.querySelector('.mechanism-details').innerText.includes('Original disposition caveat')`))) throw new Error('Opening a mechanism stretches its neighbor or hides the full A reason');
-// Cache lookups on navigation and SSE must not launch the fixture translator.
-await waitFor(`!document.querySelector('[data-translation-start]').disabled`);
-await writeFile(process.env.SCID_TEST_TRANSLATION_CLICK, 'explicit');
-await evaluate(`document.querySelector('[data-translation-start]').click(); true`);
-await waitFor(`document.querySelector('.mechanism-card h3 [data-translation-source]')?.textContent.startsWith('<b>译文</b>')`);
-if (await evaluate(`document.querySelector('.mechanism-card h3 b') !== null`)) throw new Error('Model text was interpreted as HTML');
-await evaluate(`document.querySelector('[data-translation-toggle]').click(); true`);
-await waitFor(`document.querySelector('.mechanism-card h3').textContent==='Transport-driven response'`);
-await evaluate(`document.querySelector('[data-translation-toggle]').click(); true`);
-await waitFor(`document.querySelector('.mechanism-card h3').textContent.startsWith('<b>译文</b>')`);
-// CRLF and LF source identities remain distinct through DOM attributes and toggles.
-// Hold the next cache lookup so the busy-state button contract is observable.
-await evaluate(`(()=>{const original=window.fetch;window.fetch=(input,options)=>{if(String(input).endsWith('/lookup') && options?.body && JSON.parse(options.body).texts.some(text=>text.startsWith('Line'))){return new Promise(resolve=>{window.releaseTranslationRead=()=>{window.fetch=original;resolve(original(input,options))}})}return original(input,options)};return true})()`);
-await evaluate(`(()=>{for(const [id,source] of [['crlf','Line'+String.fromCharCode(13,10)+'end'],['lf','Line'+String.fromCharCode(10)+'end']]){const span=document.createElement('span');span.id='translation-'+id;span.dataset.translationSource=JSON.stringify(source);span.textContent=source;document.querySelector('main').append(span)}return true})()`);
-await waitFor(`typeof window.releaseTranslationRead==='function'`);
-if (!(await evaluate(`document.querySelector('[data-translation-start]').disabled`))) throw new Error('Translation start stayed enabled during cache lookup');
-await evaluate(`window.releaseTranslationRead();true`);
-await waitFor(`document.querySelector('#translation-crlf')?.dataset.translationStatus==='missing' && document.querySelector('#translation-lf')?.dataset.translationStatus==='missing' && !document.querySelector('[data-translation-start]').disabled`);
-await evaluate(`document.querySelector('[data-translation-start]').click();true`);
-await waitFor(`document.querySelector('#translation-crlf')?.dataset.translationStatus==='cached' && document.querySelector('#translation-lf')?.dataset.translationStatus==='cached'`);
-await evaluate(`document.querySelector('[data-translation-toggle]').click();true`);
-if (!(await evaluate(`document.querySelector('#translation-crlf').textContent==='Line'+String.fromCharCode(13,10)+'end' && document.querySelector('#translation-lf').textContent==='Line'+String.fromCharCode(10)+'end'`))) throw new Error('Original toggle normalized source newlines');
-await evaluate(`document.querySelector('[data-translation-toggle]').click();true`);
+// Unsupported backends retain the original and disable new calls before enqueueing.
+await waitFor(`document.querySelector('[data-translation-start]').disabled && document.querySelector('[data-translation-status]').textContent.includes('执行前禁工具')`);
 await writeFile(process.env.SCID_TEST_ADVANCE, 'mechanisms-refresh');
 await waitFor(`!window.previousMechanism.isConnected && document.querySelector('.mechanism-details').open && document.activeElement===document.querySelector('.mechanism-details > summary') && document.querySelector('.mechanism-overview').innerText.includes('Updated public observation.')`);
-await waitFor(`document.querySelector('.mechanism-card h3').textContent.startsWith('<b>译文</b>')`);
+await waitFor(`document.querySelector('.mechanism-card h3').textContent==='Transport-driven response'`);
 if (!(await evaluate(`document.querySelector('.mechanism-overview').textContent.includes('Updated public observation.') && !Array.from(document.querySelectorAll('[data-translation-source]')).find(node=>JSON.parse(node.dataset.translationSource).startsWith('Updated public observation.'))?.textContent.startsWith('<b>译文</b>')`))) throw new Error('New live source used an old translation or launched automatically');
 await screenshot('research-process-mechanisms-expanded-desktop');
 await call('Emulation.setDeviceMetricsOverride',{width:375,height:812,deviceScaleFactor:1,mobile:true});
@@ -1436,7 +1408,7 @@ await noOverflow();
 await screenshot('research-process-mechanisms-mobile');
 await call('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
 await call('Page.reload');
-await waitFor(`document.querySelector('.mechanism-card h3')?.textContent.startsWith('<b>译文</b>')`);
+await waitFor(`document.querySelector('.mechanism-card h3')?.textContent==='Transport-driven response'`);
 // Settings edits subsequent research while independent creation remains available.
 await call('Page.navigate', {url:origin+'/instances/1/settings'});
 await waitFor(`document.querySelector('.settings-groups') !== null`);
@@ -1502,7 +1474,7 @@ await waitFor(`document.querySelector('[name="target_language"]') !== null`);
 await evaluate(`document.querySelector('[name="target_language"]').value='ja';document.querySelector('form[action$="/translation/configure"]').requestSubmit();true`);
 await waitFor(`document.querySelector('[name="target_language"]')?.value==='ja' && document.querySelector('[data-translation-status]')?.textContent.includes('ja')`);
 await call('Page.navigate', {url:origin+'/instances/1/results'});
-await waitFor(`document.querySelector('.mechanism-card h3')?.textContent==='Transport-driven response' && !document.querySelector('[data-translation-start]').disabled`);
+await waitFor(`document.querySelector('.mechanism-card h3')?.textContent==='Transport-driven response' && document.querySelector('[data-translation-start]').disabled`);
 await call('Page.navigate', {url:origin+'/instances/1/reading'});
 await waitFor(`document.querySelector('[name="target_language"]')?.value==='ja'`);
 await evaluate(`document.querySelector('[name="target_language"]').value='zh-CN';document.querySelector('form[action$="/translation/configure"]').requestSubmit();true`);
@@ -1513,16 +1485,6 @@ if (await evaluate(`document.querySelector('[name="target_language"]').value`) !
 await screenshot('reading-error-timeout-desktop');
 await evaluate(`document.querySelector('[name="timeout_seconds"]').value='120';document.querySelector('form[action$="/translation/configure"]').requestSubmit();true`);
 await waitFor(`document.querySelector('h1')?.textContent==='阅读与翻译'`);
-await evaluate(`(()=>{const node=document.createElement('p');node.id='translation-failure-fixture';node.dataset.translationSource=JSON.stringify('Browser translation failure fixture');node.textContent='Browser translation failure fixture';document.querySelector('main').append(node)})();true`);
-await waitFor(`document.querySelector('#translation-failure-fixture')?.dataset.translationStatus==='missing' && !document.querySelector('[data-translation-start]').disabled`);
-await evaluate(`document.querySelector('[data-translation-start]').click();true`);
-await waitFor(`document.querySelector('#translation-failure-fixture')?.dataset.translationStatus==='failed' && document.querySelector('[data-translation-status]').textContent.includes('超时')`);
-if (await evaluate(`document.querySelector('#translation-failure-fixture').textContent`) !== 'Browser translation failure fixture') throw new Error('Failed translation replaced original source');
-if (!(await evaluate(`document.querySelector('[data-translation-status]').textContent.includes('诊断编号')`))) throw new Error('Background translation failure lost diagnostic reference');
-await screenshot('reading-error-background-translation-desktop');
-await call('Page.navigate', {url:origin+'/instances/1/results'});
-await waitFor(`document.querySelector('.mechanism-card h3')?.textContent.startsWith('<b>译文</b>')`);
-
 await call('Page.navigate', {url:origin+'/instances/1/'});
 await waitFor(`document.getElementById('live-hero')?.innerText.includes('本次控制请求已停止推进') && document.querySelector('[data-live-url]')?.dataset.state==='connected'`);
 await evaluate(`(()=>{const note=document.querySelector('[name="authorization_note"]');note.value='Keep this expired-session draft';window.liveAuthChecks=0;const originalFetch=window.fetch;window.fetch=(url,options)=>{if(String(url).endsWith('/session')){window.liveAuthChecks++;window.checkedSessionURL=String(url);return Promise.resolve(new Response(JSON.stringify({error:{code:'browser_session_invalid',title:'浏览会话已失效',cause:'本地会话已过期。',hint:'请使用本次 management_url 重新打开。',reference:'live-fixture-ref'}}),{status:403,headers:{'Content-Type':'application/json'}}))}return originalFetch(url,options)};source.dispatchEvent(new Event('error'));return true})()`);
@@ -1539,8 +1501,7 @@ console.log(rendered);
         checked = subprocess.run([node, '--input-type=module', '-e', script, str(port), origin, str(record / 'native.jsonl')],
             env=dict(os.environ, SCID_TEST_UI_MANAGEMENT_TOKEN=ui.management_token,
                 SCID_TEST_INSTANCE_ROOT=str(root), SCID_TEST_PUBLIC_ROOT=str(workspace / 'public'),
-                SCID_TEST_CONFIG_PATH=str(config), SCID_TEST_LOG_DIR=str(log_dir), SCID_TEST_ADVANCE=str(advance),
-                SCID_TEST_TRANSLATION_CLICK=str(translation_permission)),
+                SCID_TEST_CONFIG_PATH=str(config), SCID_TEST_LOG_DIR=str(log_dir), SCID_TEST_ADVANCE=str(advance)),
             capture_output=True, text=True, timeout=60)
         assert checked.returncode == 0, checked.stderr
         assert '已连接' in checked.stdout
@@ -1559,12 +1520,309 @@ console.log(rendered);
         browser_stderr.close()
         browser_environment.cleanup()
     assert not thread.is_alive() and not errors
-    assert translation_calls and all(explicit for explicit, _ in translation_calls)
-    assert all(not source.startswith('Updated public observation.') for _, texts in translation_calls for source in texts)
-    # Restart the application cache independently; cached fields require no provider.
-    with_service = ui_translation.TranslationService(workspace / '.scid-ui')
-    try:
-        assert all(entry['status'] == 'cached' for entry in with_service.lookup(
-            ['Transport-driven response', 'Line\r\nend', 'Line\nend'])['entries'])
-    finally:
-        with_service.close()
+
+
+def test_independent_form_nonces_expiry_replay_and_session_binding_keep_drafts(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import instance_ui
+    from test_workspace_ui import controls
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    token = ui._browser(cookie)
+    page = ui.get('/configuration', host=ui.host, cookie=cookie)[1]
+    draft = controls(page, 'configuration-update')
+    draft['authorization_note'] = 'Retain my editing explanation <draft>'
+    captured = []
+    monkeypatch.setattr(ui, '_control_post', lambda browser, action, form: (captured.append((action, dict(form))) or (303, b'', {'Location': '/'})))
+    # Another tab consumes its own action; the configuration form stays valid.
+    pause = control_fields(ui, cookie, 'pause')
+    assert post(ui, cookie, 'pause', pause)[0] == 303
+    assert post(ui, cookie, 'configuration-update', draft)[0] == 303
+    assert len(captured) == 2
+    replay = post(ui, cookie, 'configuration-update', draft)
+    assert replay[0] == 422 and 'Retain my editing explanation &lt;draft&gt;'.encode() in replay[1]
+    assert len(captured) == 2
+    # Expired credentials retain parsed content and issue fresh credentials.
+    fresh = controls(ui.get('/configuration', host=ui.host, cookie=cookie)[1], 'configuration-update')
+    fresh['authorization_note'] = 'Expired draft survives'
+    ui.form_nonce_ttl = -1
+    expired = post(ui, cookie, 'configuration-update', fresh)
+    assert expired[0] == 422 and b'Expired draft survives' in expired[1]
+    assert len(captured) == 2
+    ui.form_nonce_ttl = 3600
+    other_cookie = ui.get('/manage?' + urlencode({'token': ui.management_token}), host=ui.host)[2]['Set-Cookie']
+    with pytest.raises(PermissionError):
+        post(ui, other_cookie, 'configuration-update', draft)
+    with pytest.raises(PermissionError):
+        post(ui, cookie, 'pause', {key: draft[key] for key in ('nonce', 'csrf')})
+    ui.form_nonce_limit = 3
+    for number in range(8):
+        ui._form_nonce(token, 'pause', str(number))
+    assert len(ui.form_nonces) <= 3
+    ui.translation.close()
+
+
+def test_save_toml_only_creates_and_never_replaces_regular_or_symlink(tmp_path):
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    path = tmp_path / 'new.toml'
+    assert ui._save_toml(path, 'title="new"\n') == path
+    for selected in (path, tmp_path / 'link.toml', tmp_path / 'dangling.toml'):
+        if selected.name == 'link.toml':
+            selected.symlink_to(path)
+        elif selected.name == 'dangling.toml':
+            selected.symlink_to(tmp_path / 'not-created.toml')
+        with pytest.raises(FileExistsError):
+            ui._save_toml(selected, 'overwrite')
+    assert path.read_text() == 'title="new"\n' and not (tmp_path / 'not-created.toml').exists()
+    # O_EXCL arbitrates concurrent creation without truncation.
+    winners, errors = [], []
+    target = tmp_path / 'race.toml'
+    def save(text):
+        try:
+            ui._save_toml(target, text); winners.append(text)
+        except FileExistsError:
+            errors.append(text)
+    threads = [threading.Thread(target=save, args=(str(number),)) for number in range(2)]
+    for thread in threads: thread.start()
+    for thread in threads: thread.join(2)
+    assert len(winners) == len(errors) == 1 and target.read_text() == winners[0]
+    # Legacy and current routes both reach the same exclusive helper.
+    fields = dict(control_fields(ui, cookie, 'configuration'), config_path=str(path), config_text='legacy', mode='save')
+    assert post(ui, cookie, 'configuration', fields)[0] == 409
+    assert path.read_text() == 'title="new"\n'
+    ui.translation.close()
+
+
+def test_result_display_and_translation_sources_are_cleaned_without_changing_original(tmp_path):
+    import json
+    from scidiscovery.research_loop import instance_render, ui_view
+    from test_instance_science import read
+    root, key = prepare(tmp_path, enabled=False)
+    private = f'Ordinary scientific result {root}/native-homes/001 api_key="credential-bytes" Bearer opaque-value'
+    finish(root, 1, 'H', [], action='analyze', summary=private)
+    ui, cookie = session(root, key)
+    original = (root / 'native-evidence/001/science-output.json').read_bytes()
+    page = ui.get('/results/1', host=ui.host, cookie=cookie)[1].decode()
+    sources = [json.loads(html.unescape(value)) for value in re.findall(r'data-translation-source="([^"]*)"', page)]
+    assert 'Ordinary scientific result' in page and '清洗后的展示' in page
+    for forbidden in (str(root), 'credential-bytes', 'opaque-value'):
+        assert forbidden not in page and all(forbidden not in source for source in sources)
+    # Nested historical task prose passes through the same presentation copy.
+    full = instance_render.result_body(1, dict(role='H', history=dict(view=dict(candidates=dict(candidate_facts=[dict(id=private)])))),
+        dict(summary=private, scientific_result=dict(nested=[private])), dict(materials=[]), clean=ui_view.cleaner(root))
+    assert str(root) not in full and 'credential-bytes' not in full
+    assert read(ui.get('/nodes/1/science', host=ui.host, cookie=cookie)[1]) == original
+    assert (root / 'native-evidence/001/science-output.json').read_bytes() == original
+    ui.translation.close()
+
+
+@pytest.mark.process_e2e
+def test_all_candidate_history_paginates_frozen_prefix_without_latest_nominee_filter(tmp_path):
+    from test_ui_view import nominated_scene
+    root, key = nominated_scene(tmp_path)
+    ui, cookie = session(root, key)
+    first = ui.get('/candidates', host=ui.host, cookie=cookie)[1].decode()
+    found = set(re.findall(r'Candidate (\d+)', first))
+    link = html.unescape(re.search(r'href="([^"]+)"[^>]*>下一页候选', first)[1])
+    second = ui.get(link, host=ui.host, cookie=cookie)[1].decode()
+    remaining = set(re.findall(r'Candidate (\d+)', second))
+    assert found.isdisjoint(remaining)
+    assert found | remaining == {str(number) for number in range(1, 38)}
+    assert 'Candidate 1' in first and '含失败' in first
+    before = ui.get(link, host=ui.host, cookie=cookie)[1]
+    from scidiscovery.research_loop import ui_view
+    finish(root, 7, 'H', [6], action='analyze', search_choice=ui_view.Reader(root).node(1)['payload']['search_plan'])
+    assert ui.get(link, host=ui.host, cookie=cookie)[1] == before
+    overview = ui.get('/', host=ui.host, cookie=cookie)[1]
+    assert b'href="/candidates"' in overview
+    ui.translation.close()
+
+
+def test_sse_component_budget_uses_final_utf8_json_and_keeps_small_status():
+    import json
+    from scidiscovery.research_loop import instance_live
+    value = dict(fragments={'live-hero': '<p>原任务待核对</p>', 'live-trail': '汉字\\\"<&>' * 70000},
+        current=dict(step=1, url='/nodes/1/events?attempt=0'))
+    encoded = instance_live.encode_snapshot(value)
+    assert len(encoded) <= instance_live.MAX_EVENT_BYTES
+    decoded = json.loads(encoded)
+    assert decoded['fragments']['live-hero'] == value['fragments']['live-hero']
+    assert '/results' in decoded['fragments']['live-trail'] and decoded['current'] == value['current']
+    assert len(value['fragments']['live-trail']) > 100000
+
+
+@pytest.mark.process_e2e
+def test_headless_browser_sse_preserves_draft_and_form_credentials(tmp_path):
+    """Run the production JS/CSP against only a bounded loopback fixture."""
+    import base64
+    import hashlib
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import json
+    import os
+    import shutil
+    import signal
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    from scidiscovery.research_loop import instance_render as render
+    chrome = shutil.which('google-chrome') or shutil.which('chromium')
+    if chrome is None:
+        pytest.skip('No local Chrome executable for the explicit browser case')
+    ready = threading.Event()
+    form_markup = ('<form method="post" action="/control/continue"><input name="nonce" value="form-original">'
+        '<input name="csrf" value="csrf-original"><input name="ack_correction" value="same-trigger">'
+        '<textarea name="authorization_note"></textarea><button type="submit">Submit</button></form>')
+    driver = '''document.addEventListener('DOMContentLoaded', () => {
+      const input = document.querySelector('textarea'); input.value = 'preserved browser draft';
+      input.dispatchEvent(new Event('input', {bubbles:true}));
+      const observer = new MutationObserver(() => {
+        if (!document.querySelector('[data-phase="2"]')) return;
+        const current = document.querySelector('textarea');
+        const ok = current.value === 'preserved browser draft' && document.querySelector('[name="nonce"]').value === 'form-original';
+        const result = document.createElement('output'); result.id = 'browser-result';
+        result.textContent = ok ? 'PASSED_STABLE_DRAFT' : 'FAILED_DRAFT';
+        document.body.append(result); observer.disconnect();
+      });
+      observer.observe(document.getElementById('live-hero'), {subtree:true, childList:true});
+      fetch('/fixture-ready');
+    });'''
+    driver_csp = "'sha256-" + base64.b64encode(hashlib.sha256(driver.encode()).digest()).decode() + "'"
+    page = render.page('Offline browser fixture', '<p data-live-url="/live"></p><div id="live-hero">' + form_markup
+        + '</div><script>' + driver + '</script>', live=True)
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_GET(self):
+            if self.path == '/live':
+                self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
+                if ready.wait(3):
+                    for phase in (1, 2):
+                        value = dict(fragments={'live-hero': form_markup + f'<p data-phase="{phase}">Updated</p>'},
+                            nonce='unrelated-tab-token', csrf={'continue': 'unrelated-csrf'}, current=None)
+                        self.wfile.write(b'event: snapshot\ndata: ' + json.dumps(value).encode() + b'\n\n')
+                    self.wfile.flush()
+                return
+            if self.path == '/fixture-ready':
+                ready.set(); body = b'{}'
+            elif self.path == '/': body = page
+            else: body = b'{}'
+            self.send_response(200); self.send_header('Content-Length', str(len(body)))
+            self.send_header('Content-Type', 'text/html; charset=utf-8' if self.path == '/' else 'application/json')
+            self.send_header('Content-Security-Policy', render.CSP.replace('script-src ', 'script-src ' + driver_csp + ' ', 1))
+            self.end_headers(); self.wfile.write(body)
+    with tempfile.TemporaryDirectory(prefix='scid-ui-browser-', dir='/tmp') as browser_directory, ThreadingHTTPServer(('127.0.0.1', 0), Handler) as server:
+        browser_base = Path(browser_directory)
+        browser_env = dict(os.environ)
+        for variable, name in (('XDG_CONFIG_HOME', 'config'), ('XDG_CACHE_HOME', 'cache'), ('XDG_STATE_HOME', 'state'), ('XDG_DATA_HOME', 'data'), ('XDG_RUNTIME_DIR', 'runtime'), ('TMPDIR', 'tmp')):
+            directory = browser_base / name; directory.mkdir(mode=0o700); browser_env[variable] = str(directory)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        command = [chrome, '--headless', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
+            '--disable-background-networking', '--disable-component-update', '--disable-default-apps',
+            '--disable-extensions', '--no-first-run', '--no-default-browser-check',
+            '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1', '--user-data-dir=' + str(browser_base / 'profile'),
+            '--virtual-time-budget=3000', '--dump-dom', f'http://127.0.0.1:{server.server_port}/']
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=browser_env, start_new_session=True)
+        try:
+            output, error = process.communicate(timeout=20)
+            assert process.returncode == 0, error[-2000:].decode(errors='replace')
+            assert b'<output id="browser-result">PASSED_STABLE_DRAFT</output>' in output
+        finally:
+            try: os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError: pass
+            process.wait(timeout=5)
+            server.shutdown(); thread.join(3)
+
+
+@pytest.mark.parametrize('kind, expected', [('external', '等待原外部执行结果'), ('unsealed', '阶段结论尚未封存'),
+    ('unsubmitted', '原任务尚未提交')])
+def test_saved_native_wait_and_stops_never_dispatch_from_get_or_sse(tmp_path, monkeypatch, kind, expected):
+    from scidiscovery.research_loop import contracts as c
+    root, key = prepare(tmp_path, enabled=False)
+    c.build_job(root, 1, 'H', [])
+    record = root / 'native-evidence/001'; record.mkdir(exist_ok=True)
+    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/001.json')))
+    c.write(record / 'native-outcome.json', dict(native_started=kind != 'unsubmitted', returncode=0))
+    if kind == 'external':
+        c.write(record / 'execution-wait.json', dict(status='waiting'))
+    ui, cookie = session(root, key)
+    monkeypatch.setattr(control, 'start_background', lambda *a, **k: pytest.fail('GET dispatched research'))
+    page = ui.get('/', host=ui.host, cookie=cookie)[1].decode()
+    hero = ui._live_snapshot(ui._browser(cookie), '', force=True)['fragments']['live-hero']
+    assert expected in page and expected in hero
+    assert 'class="primary"' in hero and 'href="/progress"' in hero
+    assert 'action="/control/start"' not in hero and 'action="/control/pause"' not in hero
+    ui.translation.close()
+
+
+def test_completed_research_has_no_attention_for_optional_budget_extension(tmp_path):
+    root, key = prepare(tmp_path, enabled=False)
+    finish(root, 1, 'H', [], action='analyze')
+    finish(root, 2, 'A', [1], action='finish')
+    ui, cookie = session(root, key)
+    snapshot = ui._snapshot()
+    status = ui._status(snapshot, ui._receipt(snapshot))
+    assert status['state'] == 'completed'
+    assert ui._attention(ui._browser(cookie), True, snapshot, status) == []
+    assert '追加预算' in ui._more_actions(ui._browser(cookie), dict(snapshot, view=dict(snapshot['view'], closeout=dict(status='final_a_completed'))))
+    ui.translation.close()
+
+
+def test_current_configure_save_route_keeps_existing_file_and_draft(tmp_path):
+    from scidiscovery.research_loop.instance_ui import InstanceUI
+    from test_workspace_ui import operator_key, controls
+    from test_research_config import declaration
+    workspace = tmp_path / 'workspace'; workspace.mkdir()
+    config = declaration(workspace)
+    original = config.read_bytes()
+    ui = InstanceUI(workspace, secret_file=operator_key(tmp_path), workspace=True); ui.host = '127.0.0.1:18753'
+    cookie = ui.get('/manage?token=' + ui.management_token, host=ui.host)[2]['Set-Cookie']
+    token = ui._browser(cookie)
+    imported = ui._import_config(token, config)[1]
+    fields = controls(imported)
+    fields.update(mode='save', save_path=str(config))
+    status, page, _ = post(ui, cookie, 'configure', fields)
+    assert status == 409 and config.read_bytes() == original
+    assert str(config).encode() in page and '配置文件已存在'.encode() in page
+    fresh = controls(page)
+    destination = workspace / 'saved-new.toml'
+    fresh.update(mode='save', save_path=str(destination))
+    assert post(ui, cookie, 'configure', fresh)[0] == 200
+    assert destination.exists() and config.read_bytes() == original
+    ui.translation.close()
+
+
+@pytest.mark.process_e2e
+def test_candidate_history_keeps_readable_candidates_when_earlier_recommended_source_is_missing(tmp_path):
+    from scidiscovery.research_loop import contracts as c, ui_view
+    public = tmp_path / 'public'; public.mkdir()
+    objective = public / 'objective.md'; objective.write_text('Retain incomplete candidate evidence without inventing associations.')
+    observer = tmp_path / 'observer.py'
+    observer.write_text('''import json,sys
+r=json.load(sys.stdin)
+step=r['step']
+rows=[dict(id=f'model-{step}',label=f'Observed candidate {step}',implementation=f'history/nodes/{step:03d}/artifacts/model.py',evaluation_key='val',metric=step/10,direction='max',status='ok',evidence=['project/global/objective.md'])] if step in (2,3) else []
+print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=None,coverage=dict(status='complete',note='Incomplete display fixture only'))))
+''')
+    root = tmp_path / 'instance'
+    controller.prepare(root, objective, public, ['never-invoked'], max_tokens=100000, max_seconds=600,
+        max_steps=6, model='fixture', reasoning_effort='high', experiment_mode='external',
+        search_policy=None, history_observer=dict(adapter=str(observer), config={}))
+    finish(root, 1, 'H', [], action='analyze')
+    finish(root, 2, 'W', [1], files={'model.py': '# original candidate 2\n'})
+    finish(root, 3, 'W', [2], files={'model.py': '# original candidate 3\n'},
+        candidate_nominations=dict(representatives=[], extras=[dict(candidate='model-2', reason='Retained earlier candidate')], gaps=[]))
+    finish(root, 4, 'A', [3], recommendation='model-2')
+    key = tmp_path / 'operator.key'; key.write_bytes(b'fixture-incomplete-history-key-32'); key.chmod(0o600)
+    ui, cookie = session(root, key)
+    original = root / 'native-evidence/002/science-output.json'
+    original.chmod(0o600); original.write_text('{')
+    status, page, _ = ui.get('/candidates', host=ui.host, cookie=cookie)
+    text = page.decode()
+    assert status == 200 and 'Observed candidate 3' in text and 'Observed candidate 2' not in text
+    assert '缺口阶段：2' in text and '计数为下界' in text
+    assert '1 条推荐的候选来源不可读' in text and '1 条提名的候选来源不可读' in text
+    # The ordinary subject projection remains strict for the same exact gap.
+    job = dict(history=dict(nodes=[dict(step=step) for step in (1,3,4)]))
+    with pytest.raises(ValueError, match='unknown candidate'):
+        ui_view.candidate_projection(root, 5, job=job)
+    ui.translation.close()

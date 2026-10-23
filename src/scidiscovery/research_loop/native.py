@@ -23,7 +23,7 @@ from .contracts import (ACTIONS, actions, ROLE_INSTRUCTIONS, digest, host_record
                         seal_result, workspace, write)
 
 
-def usage(root: Path):
+def usage(root: Path, *, budget_events=None):
     """Sum distinct node meters, never re-add cumulative observations."""
     totals = dict(input_tokens=0, cached_input_tokens=0, output_tokens=0)
     unknown = []
@@ -46,7 +46,7 @@ def usage(root: Path):
                 unknown.append(step)
             for key in totals:totals[key] += value[key]
     result=dict(**totals, observed_tokens=totals['input_tokens'] + totals['output_tokens'], unknown_steps=unknown)
-    result.update(control_budget.usage_accounting(root,result))
+    result.update(control_budget.usage_accounting(root,result,events=budget_events))
     return result
 
 
@@ -190,6 +190,7 @@ def run_native(root: Path, step: int, attempt=0):
         role_instruction=formal_review.public(root,job)['review']['instruction']
     schema_path = execution.origin(root, step) / 'science-result.schema.json'
     args = backend.launch(profile, work, pending, schema_path, role_instruction)
+    prompt_instruction = role_instruction + '\n' if backend.instruction_transport == 'prompt' else ''
     if settings.get('resume_policy') is not None:
         from . import continuation
         continuation.validate_launcher(root, step)
@@ -228,7 +229,7 @@ def run_native(root: Path, step: int, attempt=0):
     if job.get('scientific_work_unit'):
         completion=job['scientific_work_unit']+' Report findings, uncertainties '
     verification = '' if job.get('handoff_authority_version') == 1 else 'Leave further scientific verification requests to A. '
-    prompt = (role_instruction + '\nRead science-task.json, then the global files and direct '
+    prompt = (prompt_instruction + 'Read science-task.json, then the global files and direct '
               'parent conclusions it names. Read particular parent artifacts only as scientifically needed. '
               'Use work/ for scratch code, logs, diagnostics and intermediate models; artifacts/ contains only '
               'necessary deliverables for the next role. Experiments may use experiments/<name>/work for native '
@@ -251,10 +252,10 @@ def run_native(root: Path, step: int, attempt=0):
                       review_enabled=job.get('formal_review_version')==1),
                   shared_seconds_remaining=max(0, int(limits['seconds_remaining'])),
                   shared_observed_tokens_remaining=max(0, limits['max_tokens']-budget.get('accounted_tokens',budget['observed_tokens'])),
-                  metering='Native usage may be delayed; this is not a guaranteed billing cap.',
+                  metering='Reported input plus output is an observed lower bound; unknown coverage is not zero usage or a billing cap.',
                   **(dict(node_budget=intent['budget_slice']['limits']) if intent.get('budget_slice') else {})), ensure_ascii=False))
     if job.get('formal_review'):
-        prompt=(role_instruction+'\nRead science-task.json, its exact reviewed material and global inputs. '
+        prompt=(prompt_instruction+'Read science-task.json, its exact reviewed material and global inputs. '
             'Assess the evidence before requester explanations; no favorable verdict is presumed. '
             'Requester conclusions and full historical arguments are not default inputs. On-demand file reading is not completely observed; this is not blinded review or access isolation. '
             'Do not edit the subject. Return only the four scientific verdict/findings fields in final_response; '
@@ -317,9 +318,9 @@ def run_native(root: Path, step: int, attempt=0):
     if attempt and startup is None:
         remaining = dict(observed_tokens=max(0, intent['budget_slice']['limits']['max_observed_tokens'] - intent['budget_slice']['previous_tokens']),
                          active_seconds=max(0., intent['budget_slice']['limits']['max_seconds'] - control_budget._node_duration(root, job, intent, limits)))
-        if control_budget.node_mode(root)=='soft':
-            remaining.update(mode='soft_targets',previous_observed_tokens=intent['budget_slice']['previous_tokens'])
-        label = 'Original soft-target gaps (zero is not a new grant): ' if control_budget.node_mode(root)=='soft' else 'Original node remaining budget: '
+        control_budget.node_mode(root)
+        remaining.update(mode='soft_targets',previous_observed_tokens=intent['budget_slice']['previous_tokens'])
+        label = 'Original soft-target gaps (zero is not a new grant): '
         context = 'new context for this same task/workspace' if intent.get('context_mode') == 'new_context' else 'same task/session/workspace'
         recovery = ('Read the retained original execution results and complete only your final response. '
                     if output_only_wake else
@@ -383,7 +384,7 @@ def run_native(root: Path, step: int, attempt=0):
         if attempt==2:
             # This explicitly authorized successor needs preserved facts, not the
             # normal experiment/engineering workflow or a broad directory dump.
-            prompt=(role_instruction+'\nThis is the single explicitly authorized second author-only closeout for the exact original W. '
+            prompt=(prompt_instruction+'This is the single explicitly authorized second author-only closeout for the exact original W. '
                 +(f'First read work/{facts_name}, then science-task.json and the exact objective. '
                   if scientific_facts else f'First read {facts_name} beside the designated final-output file, then science-task.json and the exact objective. ')
                 +('The scientific view includes every retained terminal call, available results and limitations. Control retains original machine receipts privately. '
@@ -411,8 +412,7 @@ def run_native(root: Path, step: int, attempt=0):
             basis='shared_authorization_minus_existing_final_or_closeout_reserve',
             observed_usage_is_lower_bound=True,unknown_usage=bool(budget.get('unknown_steps')),
             inflight_usage_unknown=True),ensure_ascii=False)+'\n')
-    prompt += ('\nBudget mode: '+mode+'. '+('Node/search limits are soft targets, not renewed grants. ' if mode=='soft' else
-        'Node/search observed limits remain enforced. ')+
+    prompt += ('\nBudget mode: '+mode+'. Node/search limits are soft targets, not renewed grants. '+
         'Between bounded actions read work/budget-status.json when available; some read-only author views do not expose dynamic updates. '
         'This small advisory is not a grant, execution permission or scientific evidence. '
         'Each model request counts its entire input again; cached input is already included in input, counted once. '
@@ -421,8 +421,7 @@ def run_native(root: Path, step: int, attempt=0):
         'Near limits, targets or the existing delivery reserve, finish bounded actions and return your own scientific JSON promptly, '
         'preserving necessary evidence, uncertainty and limitations. '
         + ('The original finite call duration and resource boundaries still apply; the exact final completion exception follows.\n' if final_return is not None else
-           'Shared quotas are checked before the next node; finish this accepted node and report all usage, including overage. Original execution and resource limits still apply.\n' if mode=='soft' else
-           'Shared hard limits still apply.\n'))
+           'Shared quotas are checked before the next node; shared soft targets do not terminate this accepted node. Finish this accepted node and report all usage, including overage. Original finite external execution and resource limits still apply.\n'))
     if final_return is not None:
         prompt += ('\nThis is your final scientific return; no further scientific role or correction turn will be dispatched. '
             'Complete and submit your own final scientific JSON in this same execution. In summary, scientific_result and limitations, '
@@ -620,11 +619,6 @@ def run_native(root: Path, step: int, attempt=0):
                     # Pause is a next-node barrier. Accepted work can finish and
                     # seal; it must not become an unknown submission on resume.
                     limits = control_budget.snapshot(root, settings)
-                    if final_return is None and control_budget.node_mode(root) == 'hard' and limits['seconds_remaining'] <= 0:
-                        stop = 'wall_limit'
-                    else:
-                        shared=usage(root)
-                        if final_return is None and control_budget.node_mode(root) == 'hard' and shared.get('accounted_tokens',shared['observed_tokens'])>=limits['max_tokens']:stop='token_limit'
                     if final_return is None:
                         stop = stop or control_budget.exploration_stop(root, job, limits)
                     stop = stop or control_budget.stop_node(root, job, intent, limits, meter)

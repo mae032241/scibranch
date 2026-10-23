@@ -264,3 +264,98 @@ def test_controller_routes_completed_protocol_h_with_unknown_usage_without_repla
         record=execution.origin(root,step)
         assert originals[step]=={name:c.digest(record/name) for name in originals[step]}
         assert (c.workspace(root,step)/'work/launches').read_text()=='launch\n'
+
+
+CAPTURE_LAUNCHER = r"""#!/usr/bin/env python3
+import json,os,pathlib,sys
+work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE'])
+wire=sys.stdin.read()
+args=sys.argv[1:]
+protocol=not args
+request=json.loads(wire) if protocol else None
+prompt=request['prompt'] if protocol else wire
+configs=[args[i+1] for i,value in enumerate(args) if value=='-c']
+developer=[json.loads(value.split('=',1)[1]) for value in configs if value.startswith('developer_instructions=')]
+(work/'work/captured.json').write_text(json.dumps(dict(prompt=prompt,developer=developer,args=args)))
+task=json.loads((work/'science-task.json').read_text())
+properties=request['response_schema']['properties'] if protocol else {key:None for key in task['final_response']}
+result={key:None for key in properties}
+result.update(summary='Transport capture',scientific_result='No scientific qualification',limitations=['Local fake transport'],next_action='wait',route_reason='Bounded fixture')
+if protocol:
+ print(json.dumps(dict(type='result',result=result)),flush=True)
+ print(json.dumps(dict(type='completed',usage=dict(input_tokens=3,output_tokens=2))),flush=True)
+else:
+ pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(result))
+ print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=3,output_tokens=2))),flush=True)
+"""
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('transport,role', [('standard','H'), ('options','A'), ('protocol','A')])
+def test_role_rules_have_one_actual_launch_transport_and_task_data_remains(tmp_path, monkeypatch, transport, role):
+    import os
+    public=tmp_path/'public';public.mkdir();objective=public/'objective.md';objective.write_text('Retain exact evidence and limitations.')
+    program=tmp_path/('codex' if transport=='standard' else 'launcher.py')
+    program.write_text(CAPTURE_LAUNCHER);program.chmod(0o700)
+    monkeypatch.setenv('PATH',str(tmp_path)+os.pathsep+os.environ['PATH'])
+    monkeypatch.setenv('CODEX_HOME',str(tmp_path/'native-config'))
+    root=tmp_path/'instance'
+    controller.prepare(root,objective,public,['codex'] if transport=='standard' else [sys.executable,str(program)],
+        native_backend='protocol' if transport=='protocol' else 'codex',
+        native_options={} if transport in {'options','protocol'} else None,
+        model='fixture',reasoning_effort='high',max_tokens=1000,max_seconds=60,max_steps=4,search_policy=None,experiment_mode='external')
+    intent(root, role)
+    native.run_native(root,1)
+    work=c.workspace(root,1);captured=c.read(work/'work/captured.json');task=c.read(work/'science-task.json')
+    job=c.read(root/'jobs/001.json')
+    rules=job.get('native_role_instruction',c.ROLE_INSTRUCTIONS[role])
+    if role=='A':rules+='\n'+c.AUTHOR_EVIDENCE_GUIDANCE
+    assert sum(text.count(rules) for text in [captured['prompt'],*captured['developer']])==1
+    if transport in {'standard','options'}:
+        assert captured['developer']==[rules] and rules not in captured['prompt']
+        assert 'approval_policy="never"' in captured['args']
+    else:
+        assert not captured['developer'] and rules in captured['prompt']
+    assert all(key not in task for key in ('role_instruction','role_guidance','scientific_judgment'))
+    assert task['role']==role and task['global']['objective']=='inputs/global/objective.md'
+    assert task['final_response'] and 'schema' not in task
+
+
+def test_codex_resume_preserves_the_single_developer_instruction_and_permissions(tmp_path):
+    settings=backends.configuration('codex',['custom-launcher'],
+        dict(workspace='workspace-write',network=True,web='cached',subagents=True))
+    backend=backends.selected(settings)
+    args=backend.launch(dict(model='fixture'),tmp_path,tmp_path/'out',tmp_path/'schema','exact independent rules')
+    resumed,_=backend.resume(args,dict(model='fixture'),tmp_path,tmp_path/'out',tmp_path/'schema',dict(thread_id='original-thread'))
+    configurations=lambda values:[values[i+1] for i,value in enumerate(values) if value=='-c']
+    assert configurations(resumed)==configurations(args)
+    assert configurations(resumed).count('developer_instructions="exact independent rules"')==1
+    assert '--ignore-user-config' in resumed and '--skip-git-repo-check' in resumed
+    assert resumed[resumed.index('--sandbox')+1]=='workspace-write'
+
+
+def test_formal_review_task_retains_subject_and_uses_launcher_for_independent_rules(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import formal_review, user_guidance
+    public=dict(role='A',question='Assess exact claims',review=dict(subject='inputs/subject',instruction='Independent exact-subject assessment',scope='No execution permission'),final_response=['verdict','findings'])
+    monkeypatch.setattr(formal_review,'public',lambda *args:public)
+    monkeypatch.setattr(user_guidance,'public',lambda *args:{})
+    task=c.science_view(dict(formal_review={'exact':'original'}),tmp_path)
+    assert task['review']==dict(subject='inputs/subject',scope='No execution permission')
+    assert public['review']['instruction']=='Independent exact-subject assessment'
+
+    run=tmp_path/'run';run.mkdir()
+    root=prepare(run)
+    record=intent(root, 'A')
+    job=c.read(root/'jobs/001.json');job['formal_review']={'exact':'original'}
+    c.write(root/'jobs/001.json',job)
+    value=c.read(record/'native-intent.json');value['task_sha256']=c.digest(root/'jobs/001.json')
+    c.write(record/'native-intent.json',value)
+    class LaunchCaptured(RuntimeError):
+        pass
+    def launch(self, profile, work, pending, schema, instruction):
+        assert instruction==public['review']['instruction']
+        assert c.AUTHOR_EVIDENCE_GUIDANCE not in instruction
+        raise LaunchCaptured()
+    monkeypatch.setattr(backends.Protocol,'launch',launch)
+    with pytest.raises(LaunchCaptured):
+        native.run_native(root,1)

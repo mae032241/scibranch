@@ -511,3 +511,40 @@ def test_unchanged_file_only_plugin_configuration_is_not_reopened_for_model_edit
     document['executor']['config'] = dict(executor='third_party:binding', config_file=str(plugin))
     with pytest.raises(ValueError):
         updates.submit(root, document)
+
+
+def test_cli_current_inspect_separates_base_active_pending_without_writes(tmp_path, capsys):
+    import json
+    from scidiscovery.research_loop import cli
+    from test_history_handoff import finish
+    root = instance(tmp_path)
+    first, _, _ = finish(root, 1, 'H', [])
+    edit(root, model='active-model')
+    finish(root, 2, 'H', [])
+    edit(root, model='pending-model')
+    budget._amend_locked(root, max_tokens=14000, authorization_note='Extend actual shared ceiling')
+    originals = {path.relative_to(root): path.read_bytes() for path in root.rglob('*') if path.is_file()}
+    assert cli.main(['config-inspect', '--root', str(root)]) == 0
+    frozen = json.loads(capsys.readouterr().out)
+    assert frozen['source'] == 'frozen_instance' and frozen['settings']['model'] == 'original-model'
+    assert cli.main(['config-inspect', '--root', str(root), '--view', 'current']) == 0
+    current = json.loads(capsys.readouterr().out)
+    assert current['base_identity']['goal_id'] == frozen['settings']['goal_id']
+    assert current['active_revision'] == 1 and current['pending_revision'] == 2
+    assert current['active']['agent']['model'] == 'active-model'
+    assert current['active']['budget']['max_tokens'] == 14000
+    assert current['pending']['agent']['model'] == 'pending-model'
+    assert current['pending']['budget']['max_tokens'] == 14000
+    assert current['effective_from'] == 'next_new_node'
+    assert updates.for_job(root, first)['model'] == 'original-model'
+    assert {path.relative_to(root): path.read_bytes() for path in root.rglob('*') if path.is_file()} == originals
+    c.build_job(root, 3, 'H', [])
+    assert cli.main(['config-inspect', '--root', str(root), '--view', 'current']) == 0
+    bound = json.loads(capsys.readouterr().out)
+    assert bound['active_revision'] == 2 and bound['pending_revision'] is None and bound['pending'] is None
+    assert bound['active']['agent']['model'] == 'pending-model'
+
+
+def test_current_inspect_requires_instance_and_keeps_declaration_read_only(tmp_path):
+    with pytest.raises(ValueError, match='existing instance root'):
+        research_config.inspect(config=tmp_path / 'missing.toml', view='current')

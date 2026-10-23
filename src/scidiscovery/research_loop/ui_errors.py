@@ -174,7 +174,7 @@ _REQUEST_ERRORS = {
 }
 
 
-def present(error, root, *, context='', settings=None):
+def present(error, root, *, context='', settings=None, record_diagnostic=False, reference=''):
     href = {'configuration': '/new', 'load-config': '/new', 'open': '/instances', 'budget': '/#budget',
         'translation': '/reading', 'control': '/operations'}.get(context, '/')
     if isinstance(error, BrowserAccessDenied):
@@ -183,6 +183,9 @@ def present(error, root, *, context='', settings=None):
     if isinstance(error, PermissionError) and error.errno is None:
         return Problem(403, '浏览操作未获允许', '管理权限、同源检查或表单安全校验未通过。',
             '从本次管理入口重新打开相关页面，再提交表单；只读入口不能修改研究。', href=href, code='access_denied')
+    if isinstance(error, FileExistsError):
+        return Problem(409, '配置文件已存在', '保存仅创建新文件，已有文件和符号链接不会被覆盖。',
+            '选择新的 TOML 路径，或下载配置。', field='save_path', href=href, code='file_exists')
     if isinstance(error, FileNotFoundError):
         title = '配置文件不存在' if context == 'load-config' else '实例目录或记录不存在' if context == 'open' else '所需文件不存在'
         return Problem(404, title, '未找到此次操作需要的文件或目录。', '检查所填路径和文件是否存在，再重新提交。',
@@ -247,12 +250,15 @@ def present(error, root, *, context='', settings=None):
     if isinstance(error, json.JSONDecodeError) and context == 'translation':
         return Problem(422, '翻译命令 JSON 无效', '命令参数不是有效的 JSON 数组。',
             '使用双引号包围每个参数，例如 ["/path/to/launcher"]。', 'launcher_argv', href)
-    reference = uuid.uuid4().hex
-    saved = _diagnostic(root, error, context, reference)
+    saved = False
+    if record_diagnostic:
+        reference = uuid.uuid4().hex
+        saved = _diagnostic(root, error, context, reference)
     title = '研究控制请求失败' if isinstance(error, ControlFailure) else '工作台内部错误'
-    hint = '保留此错误编号，在本机检查工作台诊断记录；核对原操作状态后再决定下一步，勿重复提交。'
-    if not saved:
+    hint = ('保留此错误编号，在本机检查工作台诊断记录；核对原操作状态后再决定下一步，勿重复提交。'
+        if record_diagnostic else '核对保存的原记录与原操作编号后再决定下一步，勿重复提交。')
+    if record_diagnostic and not saved:
         hint += ' 诊断未能保存，请检查工作台目录写入权限。'
     return Problem(409 if isinstance(error, ControlFailure) else 500, title,
-        '此次操作未完成，详细原因已交由本机诊断记录。' if saved else '此次操作未完成。', hint,
+        '此次操作未完成，详细原因已交由本机诊断记录。' if saved else '此次操作未完成；请核对原记录。', hint,
         href=href, reference=reference, code='control_failed' if isinstance(error, ControlFailure) else 'internal_error')

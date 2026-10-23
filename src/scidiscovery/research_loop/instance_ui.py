@@ -3,18 +3,22 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import base64
+import copy
 import fcntl
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import html
+from html.parser import HTMLParser
 import hmac
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import shutil
 import threading
 import tempfile
+import time
 from urllib.parse import parse_qs, quote, urlsplit
 import uuid
 
@@ -74,11 +78,17 @@ class InstanceUI:
         self.browser = BrowserAccessService(secret=self.secret, ui_session_id=self.boot)
         self.management_token = secrets.token_urlsafe(32)
         self.read_token = secrets.token_urlsafe(32)
-        self.control_nonce = secrets.token_urlsafe(32)
+        self.form_nonces = {}
+        self.form_nonce_ttl = 3600.0
+        self.form_nonce_limit = 512
         self.control_lock = threading.Lock()
         self.control_result = None
         self.config_selections = {}
         self.fork_attempts = {}
+        self.delete_requests = {}
+        self.workspace_host = None
+        self.deleted_roots = set()
+        self.deleted_children = {}
         self.host = None
         self.live_cache = live.SnapshotCache()
         self.summary_cache = live.SnapshotCache()
@@ -89,6 +99,7 @@ class InstanceUI:
         # Display-only memo of verified sealed reads (identity-checked per use)
         # and candidate projections keyed by the instance metadata fingerprint.
         self.view_memo = {}
+        self.status_memo = {}
         self.candidate_cache = {}
         self._refresh_approval_host()
         self.translation = translation_service or ui_translation.TranslationService(self.root / ".scid-ui", config=translation_config)
@@ -121,8 +132,9 @@ class InstanceUI:
         marker = '<p class="connection" data-live-url="/live" role="status">正在连接工作台状态…</p>'
         return render.page(title, (marker if live else '') + body, live=live)
 
-    def _problem(self, error, *, context=''):
-        return ui_errors.present(error, self.root, context=context, settings=self.error_settings)
+    def _problem(self, error, *, context='', record=False, reference=''):
+        return ui_errors.present(error, self.root, context=context, settings=self.error_settings,
+            record_diagnostic=record, reference=reference)
 
     @staticmethod
     def _error_page(problem, body):
@@ -145,12 +157,18 @@ class InstanceUI:
         except Exception as error:
             return self._failure(error)
 
-    def _error_response(self, error, target, *, json_response=False):
+    def _fragment(self, renderer, *args, href='/results', **options):
+        try:
+            return renderer(*args, **options)
+        except Exception as error:
+            return ui.error_inline(self._failure(error)) + ui.link('打开完整页面', href)
+
+    def _error_response(self, error, target, *, json_response=False, record=False):
         path = target.partition('?')[0]
         context = ('translation' if '/translation/' in path else 'load-config' if path.endswith('/load-config')
             else 'configuration' if path.endswith(('/configure', '/create', '/configuration', '/configuration-update'))
             else 'open' if path.endswith('/open') else 'budget' if path.endswith('/budget') else 'control')
-        problem = self._problem(error, context=context)
+        problem = self._problem(error, context=context, record=record)
         if isinstance(error, json.JSONDecodeError) and path.endswith(('/lookup', '/start')):
             problem = ui_errors.Problem(400, '翻译请求 JSON 无效', '请求体不是有效的 JSON。',
                 '重新打开阅读页面后再提交翻译请求。', href='/reading', code='invalid_request')
@@ -160,7 +178,13 @@ class InstanceUI:
 
     def _control_error(self, token, action, form, error):
         context = 'configuration' if action in {'configure', 'create', 'configuration', 'configuration-update'} else action if action in {'open', 'load-config', 'budget'} else 'control'
-        problem = self._problem(error, context=context)
+        problem = self._problem(error, context=context, record=True)
+        if action == 'configuration':
+            fields = '<label>TOML 路径<input name="config_path" value="' + html.escape(form.get('config_path', ''), quote=True) + '"></label>'
+            fields += '<label>TOML 内容<textarea name="config_text">' + html.escape(form.get('config_text', '')) + '</textarea></label>'
+            return problem.status, self._error_page(problem, problem.markup() + self._form(token, action, fields, '另存为新 TOML', mode='save')), {}
+        if action == 'delete':
+            return self._delete_page(token, form=form, problem=problem)
         if action in {'fork-preview', 'fork-create'}:
             code = getattr(error, 'code', '')
             if code.startswith('fork_'):
@@ -224,25 +248,57 @@ class InstanceUI:
         return security.receipt_hmac(self.secret, security.canonical(
             ['scidiscovery.instance-control.v1', self.instance, self.boot, browser_token, action, nonce]))
 
-    def _control_form(self, browser_token, action, *, correction_trigger=None):
+    def _form_nonce(self, browser_token, action, identity='', *, bindings=None):
+        """Bounded, stable credentials for this session/action/logical form only."""
+        key = (browser_token, action, hashlib.sha256(identity.encode()).hexdigest())
         with self.control_lock:
-            nonce = self.control_nonce
-        body = ('<form method="post" action="/control/' + action + '">'
-            '<input type="hidden" name="nonce" value="' + nonce + '">'
-            '<input type="hidden" name="csrf" value="' + self._csrf(browser_token, action, nonce) + '">')
+            now = time.monotonic()
+            self.form_nonces = {key: row for key, row in self.form_nonces.items()
+                if now - row[1] < self.form_nonce_ttl}
+            if key not in self.form_nonces:
+                while len(self.form_nonces) >= self.form_nonce_limit:
+                    self.form_nonces.pop(next(iter(self.form_nonces)))
+                self.form_nonces[key] = (secrets.token_urlsafe(32), now, dict(bindings or {}))
+            return self.form_nonces[key][0]
+
+    def _consume_form(self, browser_token, action, form, *, consume=True):
+        with self.control_lock:
+            if not hmac.compare_digest(form['csrf'], self._csrf(browser_token, action, form['nonce'])):
+                raise PermissionError('Instance control CSRF or nonce mismatch')
+            match = next((key for key, row in self.form_nonces.items()
+                if key[:2] == (browser_token, action) and hmac.compare_digest(row[0], form['nonce'])), None)
+            if match is None or time.monotonic() - self.form_nonces[match][1] >= self.form_nonce_ttl:
+                if match is not None:
+                    self.form_nonces.pop(match)
+                raise ui_errors.InputError('nonce', '表单已过期或已提交；填写内容已保留。',
+                    '核对当前状态与原操作编号后，显式重新提交；工作台不会自动重试。')
+            issued = self.form_nonces.pop(match) if consume else self.form_nonces[match]
+            if any(form.get(key) != value for key, value in issued[2].items()):
+                raise ui_errors.InputError('nonce', '此表单绑定的原身份已变化。',
+                    '重新打开原表单，核对原版本与原操作编号后显式提交。')
+
+    def _control_form(self, browser_token, action, *, correction_trigger=None):
+        fields = ''
         if action == 'continue':
-            body += ('<input type="hidden" name="ack_correction" value="'
-                + html.escape(correction_trigger or '', quote=True) + '">')
-            body += ('<label>说明为什么继续本次研究 '
-                '<textarea name="authorization_note" required></textarea></label>' if correction_trigger else
-                '<input type="hidden" name="authorization_note" value="">')
-        return body + '<button type="submit">' + {'start': '开始研究', 'pause': '本阶段结束后暂停', 'continue': '继续研究'}[action] + '</button></form>'
+            fields = '<input type="hidden" name="ack_correction" value="' + html.escape(correction_trigger or '', quote=True) + '">'
+            fields += ('<label>说明为什么继续本次研究 <textarea name="authorization_note" required></textarea></label>'
+                if correction_trigger else '<input type="hidden" name="authorization_note" value="">')
+        return self._form(browser_token, action, fields,
+            {'start': '开始研究', 'pause': '本阶段结束后暂停', 'continue': '继续研究'}[action])
 
     def _continue(self, **options):
         self.control_result = control.start_background(self.root, continue_run=True, **options)
 
     def _form(self, browser_token, action, fields, label, *, mode=None):
-        nonce = self.control_nonce
+        class Bindings(HTMLParser):
+            def __init__(self):
+                super().__init__(); self.values = {}
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == 'input' and attrs.get('name') and (attrs.get('type') == 'hidden' or 'readonly' in attrs):
+                    self.values[attrs['name']] = attrs.get('value', '')
+        bindings = Bindings(); bindings.feed(fields)
+        nonce = self._form_nonce(browser_token, action, fields, bindings=bindings.values)
         submit = ' name="mode" value="' + mode + '"' if mode else ''
         return ('<form method="post" action="/control/' + action + '">'
             '<input type="hidden" name="nonce" value="' + nonce + '">'
@@ -254,13 +310,14 @@ class InstanceUI:
             raise PermissionError('Local management access required')
 
     def _child(self, index):
-        if not 0 < index < len(self.instance_roots):
+        if not 0 < index < len(self.instance_roots) or self.instance_roots[index] in self.deleted_roots:
             raise ValueError('Select an explicitly opened instance')
         with self.control_lock:
             if index not in self.children:
                 root = self.instance_roots[index]
                 source = display.settings(root).get('ui', {}).get('approval_secret_file') or self.secret_file
                 self.children[index] = InstanceUI(root, secret_file=source, approval_host=False, translation_service=self.translation)
+                self.children[index].workspace_host = self
             child = self.children[index]
             child.host = self.host
             child.live_stop = self.live_stop
@@ -283,7 +340,7 @@ class InstanceUI:
                 body = body.replace(attribute + b'="/', attribute + ('="' + prefix + '/').encode())
             body = body.replace(b'href="__INSTANCE_LIST__"', b'href="/instances"')
         headers = dict(headers)
-        if headers.get('Location', '').startswith('/'):
+        if headers.get('Location', '').startswith('/') and headers['Location'] != '/instances':
             headers['Location'] = prefix + headers['Location']
         return status, body, headers
 
@@ -310,7 +367,7 @@ class InstanceUI:
         fields = ('<input type="hidden" name="nonce" value="' + self.translation_nonce + '">'
             '<input type="hidden" name="csrf" value="' + self._csrf(token, 'translation-configure', self.translation_nonce) + '">'
             '<label class="check-label"><input type="checkbox" name="enabled" value="true"'
-            + (' checked' if value.get('enabled') else '') + '>允许调用翻译模型</label>'
+            + (' checked' if value.get('enabled') else '') + '>保留翻译模型授权设置（当前后端不支持新调用）</label>'
             + field('target_language', '目标语言', placeholder='zh-CN、en、ja…')
             + '<label>翻译后端<select name="backend">' + ''.join('<option value="' + backend + '"'
                 + (' selected' if value.get('backend') == backend else '') + '>' + label + '</option>'
@@ -325,7 +382,7 @@ class InstanceUI:
             + '<p class="note">留空保留已保存的启动命令。请使用本机后端的登录设置；此处不填写凭据。</p></details>')
         body = ('<nav><a href="/">返回工作台</a></nav><details open><summary>阅读与翻译</summary>'
             '<p>翻译仅用于阅读。设置在工作台内跨实例共享，独立于研究模型与预算。原文和下载文件保持原样。</p>'
-            '<p>保存语言后会读取该语言的缓存；点击“翻译缺失内容”才会调用模型。切回已有语言可继续使用缓存。</p>'
+            '<p>当前后端无法在工具执行前禁用全部工具，新翻译调用为 unsupported，不会入队或启动。保存语言后仍可读取既有缓存，原文始终可用。</p>'
              + (problem.markup() if problem else '') + '<form method="post" action="/translation/configure">' + fields + '<button type="submit">保存阅读设置</button></form></details>')
         return (problem.status if problem else 200), self._page(problem.title if problem else '阅读与翻译', body, live=False), {}
 
@@ -374,7 +431,7 @@ class InstanceUI:
                 self.translation.configure(config)
                 return 303, b'', {'Location': '/reading'}
             except Exception as error:
-                return self._reading_page(token, submitted=value, problem=self._problem(error, context='translation'))
+                return self._reading_page(token, submitted=value, problem=self._problem(error, context='translation', record=True))
         return self._translation_json(getattr(self.translation, action)(value['texts']))
 
     def _instances_page(self, token):
@@ -415,6 +472,7 @@ class InstanceUI:
         if problem:
             body += problem.markup()
         fields = ('<input type="hidden" name="expected_revision" value="' + html.escape(str(revision), quote=True) + '">'
+            + '<p class="note">相对路径基准：<code>' + html.escape(str(draft['base'])) + '</code>；推荐填写绝对路径。导入 TOML 时相对其所在目录。</p>'
             + configuration_form.render(draft, edit=True)
             + '<label>调整说明<textarea name="authorization_note" rows="2">' + html.escape(authorization_note)
             + '</textarea></label><p class="note">调整总预算时请填写原因；其他配置可留空。</p>')
@@ -503,6 +561,7 @@ class InstanceUI:
         if source:
             body += '<p class="import-notice">已导入配置：<code>'+html.escape(str(source['path']))+'</code>。请逐步检查任务、模型和预算；所有高级参数均已保留。</p>'
         fields = '<input type="hidden" name="selection" value="' + html.escape(selection, quote=True) + '">'
+        fields += '<p class="note">相对路径基准：<code>' + html.escape(str(draft['base'])) + '</code>；推荐填写绝对路径。导入 TOML 相对其所在目录。</p>'
         fields += configuration_form.render(draft)
         body += self._form(token, 'configure', fields, '检查配置，进入确认 →', mode='preview').replace(
             '<form ', '<form id="research-config-form" ', 1)
@@ -571,13 +630,38 @@ class InstanceUI:
         body += ('<details class="setup-tools"' + (' open' if isinstance(notice, ui_errors.Problem) and (config_path or save_path or notice.field in {'config_path', 'save_path'}) else '') + '><summary>配置文件工具<span class="summary-note">可选 · 导入、导出或保存</span></summary>'
             '<div class="tools-grid"><div><h3>导入已有配置</h3><p class="note">从服务器上的 TOML 文件开始，导入后仍需检查并确认。</p>'
             + self._form(token, 'load-config', '<label>服务器上的配置文件路径<input name="config_path" required value="' + html.escape(config_path, quote=True) + '" placeholder="/srv/research/research.toml"></label>', '导入配置')
-            + '</div><div><h3>保留当前配置</h3><p class="note">导出为浏览器下载，或保存到服务器。都不会创建、开始研究。</p>'
+            + '</div><div><h3>保留当前配置</h3><p class="note">下载配置，或在服务器排他新建 TOML；已有文件请另存。都不会开始研究。</p>'
             '<button class="secondary-button" form="research-config-form" name="mode" value="export" type="submit">下载 TOML 配置</button>'
             '<label>保存到服务器的文件路径<input form="research-config-form" name="save_path" value="' + html.escape(save_path, quote=True) + '" placeholder="/srv/research/research.toml"></label>'
             '<button class="secondary-button" form="research-config-form" name="mode" value="save" type="submit">保存到服务器</button></div></div></details>'
             +frozen+'</div>')
         return (notice.status if isinstance(notice, ui_errors.Problem) else 200), self._page(
             notice.title if isinstance(notice, ui_errors.Problem) else '创建你的研究', body), {}
+
+    def _save_toml(self, path, text):
+        """Create a new declaration only; never resolve the final path component."""
+        path = Path(path).expanduser().absolute()
+        if path.suffix.lower() != '.toml' or path.resolve() == self.secret_file:
+            raise ValueError('Select a research TOML declaration file')
+        data = text.encode('utf-8')
+        if len(data) > 256000:
+            raise ValueError('Research TOML exceeds its byte budget')
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        identity = os.fstat(descriptor)
+        try:
+            with os.fdopen(descriptor, 'wb') as destination:
+                destination.write(data)
+                destination.flush()
+                os.fsync(destination.fileno())
+        except BaseException:
+            try:
+                current = path.lstat()
+                if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+                    path.unlink()
+            except OSError:
+                pass
+            raise
+        return path
 
     def _selected_config(self, token, selection):
         selected = self.config_selections.get(token)
@@ -713,7 +797,7 @@ class InstanceUI:
             if isinstance(operation_id, str) and len(operation_id) == 32 and all(char in '0123456789abcdef' for char in operation_id):
                 body += '<p class="note">请求编号：<code>' + operation_id + '</code></p>'
             if row.get('error'):
-                body += self._problem(ui_errors.ControlFailure(str(row['error'])), context='control').markup()
+                body += self._problem(ui_errors.ControlFailure('Saved operation failed'), context='control', reference=operation_id or '').markup()
             body += '</section>'
         return body or '<p>还没有控制请求。</p>'
 
@@ -744,8 +828,8 @@ class InstanceUI:
         job, payload = node['job'], node['payload']
         return step if job['role'] == 'A' and not job.get('formal_review') and payload.get('next_action') == 'finish' else None
 
-    def _progress_value(self, step, attempt, cursor):
-        value = progress.read(self.root, step, attempt=attempt, cursor=cursor)
+    def _progress_value(self, step, attempt, cursor, *, tail=False):
+        value = progress.read(self.root, step, attempt=attempt, cursor=cursor, tail=tail)
         state = value.get('state') if value.get('observation_state') != 'unavailable' else None
         lifecycle = {
             'unstarted': '阶段已准备，尚未开始', 'intent_present': '已记录任务意图，运行状态待确认',
@@ -808,7 +892,7 @@ class InstanceUI:
     def _snapshot(self, *, force=False):
         def load():
             latest = self._latest_step()
-            view = saved_status.status(self.root, after=max(0, latest - ui_view.WINDOW), limit=ui_view.WINDOW)
+            view = saved_status.status(self.root, after=max(0, latest - ui_view.WINDOW), limit=ui_view.WINDOW, memo=self.status_memo)
             conclusion = None
             for node in reversed(view['nodes']):
                 if node['state'] == 'seal_present_unverified':
@@ -816,7 +900,7 @@ class InstanceUI:
                     job, payload = sealed['job'], sealed['payload']
                     conclusion = dict(step=node['step'], role=node['role'], ordinary=not job.get('formal_review') and job.get('purpose') != 'closeout', payload=payload)
                     break
-            operations = saved_status.operations(self.root)
+            operations = saved_status.operations(self.root, memo=self.status_memo)
             final = self._final_step()
             # One read-only projection per snapshot; components fail separately.
             projection = self._guarded(ui_view.project, self.root, view, final_step=final, memo=self.view_memo,
@@ -836,14 +920,14 @@ class InstanceUI:
         """Loaded-instance cards need saved status, not every scientific trail."""
         def load():
             latest = self._latest_step()
-            view = saved_status.status(self.root, after=max(0, latest - 1), limit=1)
+            view = saved_status.status(self.root, after=max(0, latest - 1), limit=1, memo=self.status_memo)
             conclusion = None
             if view['nodes'] and view['nodes'][-1]['state'] == 'seal_present_unverified':
                 node = display.node(self.root, latest)
                 job = node['job']
                 conclusion = dict(step=latest, role=job['role'],
                     ordinary=not job.get('formal_review') and job.get('purpose') != 'closeout', payload=node['payload'])
-            operations = saved_status.operations(self.root)
+            operations = saved_status.operations(self.root, memo=self.status_memo)
             return dict(view=view, conclusion=conclusion, final=self._final_step(),
                 operation=operations[-1] if operations else None, operations=operations[-20:],
                 ui=dict(header=ui_view.header(self.root, view['objective']),
@@ -853,7 +937,7 @@ class InstanceUI:
     def _loaded_instances(self, *, force=False):
         rows = []
         for index, root in enumerate(tuple(self.instance_roots)[:100]):
-            if not index and self.workspace:
+            if root in self.deleted_roots or not index and self.workspace:
                 continue
             heading = '实例 ' + str(index) + ' · ' + root.name
             try:
@@ -887,7 +971,7 @@ class InstanceUI:
                        and conclusion['payload'].get('next_action') == 'wait')
         completed = snapshot['final'] is not None or (view.get('closeout') or {}).get('status') in {'final_a_completed', 'delivery_confirmed', 'exported_unsubmitted'}
         # A durable sealed/terminal node outranks a transient accepted receipt.
-        active = state in {'running', 'waiting'} or (state in {'ready', 'prepared'} and receipt.get('status') in {'accepted', 'running'})
+        active = state == 'running' or (state in {'ready', 'prepared'} and receipt.get('status') in {'accepted', 'running'})
         title = ('最终结论已返回' if completed else '等待补充条件' if waiting else
             '暂停已请求：本阶段结束后停止' if view['paused'] and active else '研究已暂停' if view['paused'] else
             '研究正在进行' if active else '可以开始研究' if not current else self._state(state))
@@ -932,12 +1016,14 @@ class InstanceUI:
         key = (step, attempt)
         with self.activity_lock:
             entry = self.activity.get(key) or dict(cursor=None, messages=[], prepared_at=None, label='')
-            for _ in range(4):  # Catch up at most 4 bounded pages per snapshot.
-                value = self._progress_value(step, attempt, entry['cursor'])
+            for _ in range(1):  # One bounded window; cold views start at the tail.
+                value = self._progress_value(step, attempt, entry['cursor'], tail=entry['cursor'] is None)
                 if value.get('restart_required'):
                     entry = dict(cursor=None, messages=[], prepared_at=None, label='')
                     break
-                entry['label'] = value['progress_label']
+                if value.get('tail_omitted'):
+                    entry['tail_omitted'] = True
+                entry['label'] = value['progress_label'] + ('；仅显示最近日志窗口，较早或不完整首行已略去' if entry.get('tail_omitted') else '')
                 entry['prepared_at'] = value.get('prepared_at', entry['prepared_at'])
                 texts = [item['text'][:300] for item in value['events'] if item.get('type') == 'message' and item.get('text')]
                 entry['messages'] = (entry['messages'] + texts)[-3:]
@@ -961,6 +1047,8 @@ class InstanceUI:
                 item['form'] = ui.Safe('<p class="note">确认后继续研究，将由综合评估助手重新判断下一步；原结论与已用预算保留。</p>'
                     + self._control_form(token, 'continue', correction_trigger=(view['correction'].get('current_pause') or {}).get('trigger_id')))
             items.append(item)
+        if status['state'] in {'external_wait', 'unsealed', 'not_submitted'}:
+            items.append(dict(text=status['headline'] + '；请核对原任务，不会自动重新提交。', href='/progress', action='核对原任务'))
         if status['state'] == 'unknown':
             items.append(dict(text='上一次任务的结果还不确定。请核对原任务，勿重复提交。', href='/progress', action='查看原任务进度'))
         if (view.get('closeout') or {}).get('status') == 'delivery_unknown':
@@ -970,9 +1058,6 @@ class InstanceUI:
             items.append(dict(text='预算已用完：' + '、'.join(exhausted) + '。' + (
                 '打开恢复页面，填写新上限与调整说明。预算生效后返回总览继续研究。' if manager else '调整预算需使用本地管理入口。'),
                 **(dict(href='/budget-recovery#budget', action='恢复前追加预算') if manager else {})))
-        if view.get('closeout') is not None and display['completed'] and manager:
-            items.append(dict(text='最终评估已完成；如需继续探索，可先追加预算，再返回总览继续研究。',
-                href='/budget-recovery#budget', action='恢复前追加预算'))
         if self.approvals:
             pending = self._guarded(self._pending_requests)
             if 'error' in pending:
@@ -991,7 +1076,10 @@ class InstanceUI:
         state = status['state']
         view = snapshot['view']
         links = {'waiting': ('/results/' + str((status['display']['current'] or {}).get('step')), '查看等待原因'),
-                 'unknown': ('/progress', '查看原任务进度'), 'completed': ('/final-results', '查看结果'),
+                 'unknown': ('/progress', '查看原任务进度'),
+                 'external_wait': ('/progress', '核对原实验进度'),
+                 'unsealed': ('/progress', '核对原任务与未封存结论'),
+                 'not_submitted': ('/progress', '核对原提交意图'), 'completed': ('/final-results', '查看结果'),
                  'budget_exhausted': ('/budget-recovery#budget', '恢复前追加预算'), 'final': ('/budget-recovery#budget', '恢复前追加预算')}
         if state in links:
             href, label = links[state]
@@ -1054,7 +1142,7 @@ class InstanceUI:
             hero = ui.hero({}, status, attention=[dict(text='实例快照读取失败（' + error['error']['kind'] + '：'
                 + error['error']['message'] + '）。本页面只读，没有写入任何记录；请核对实例记录后重新打开。',
                 href='/results', action='查看阶段结论')])
-            return {'live-hero': hero, 'live-usage': ui.stats(error), 'live-activity': '', 'live-trail': ui.trail(error),
+            return {'live-hero': hero, 'live-usage': self._fragment(ui.stats, error), 'live-activity': '', 'live-trail': self._fragment(ui.trail, error),
                     'live-token-monitor': ''}
         view = snapshot['view']
         receipt = self._receipt(snapshot)
@@ -1073,12 +1161,12 @@ class InstanceUI:
                                     candidates=projection.get('candidates'))
             trail = projection.get('trail') or {}
             header = projection.get('header') or {}
-        hero = ui.hero(header, status, primary=self._primary(token, manager, snapshot, status),
+        hero = self._fragment(ui.hero, header, status, primary=self._primary(token, manager, snapshot, status),
                        attention=self._attention(token, manager, snapshot, status), notices=self._notices(snapshot, receipt))
         # A finished study shows every round as one line; otherwise the current round opens.
-        return {'live-hero': hero, 'live-usage': ui.stats(usage), 'live-activity': ui.activity(activity),
-                'live-trail': ui.trail(trail, older_href='/results', open_current=not display['completed']),
-                'live-token-monitor': '' if 'error' in usage else ui.token_monitor(
+        return {'live-hero': hero, 'live-usage': self._fragment(ui.stats, usage), 'live-activity': self._fragment(ui.activity, activity, href='/progress'),
+                'live-trail': self._fragment(ui.trail, trail, older_href='/results', open_current=not display['completed']),
+                'live-token-monitor': '' if 'error' in usage else self._fragment(ui.token_monitor,
                     usage['tokens'].get('details'), scope='整个研究 · 累计已记录用量')}
 
     def _live_snapshot(self, token, mount, *, force=False):
@@ -1094,12 +1182,12 @@ class InstanceUI:
             fragments = self._dashboard_parts(token, snapshot)
             projected = snapshot.get('ui') or {}
             mechanism_trails = (projected.get('mechanism_trails') if 'error' not in projected else projected)
-            fragments['live-mechanisms'] = ui_mechanisms.render(mechanism_trails or
+            fragments['live-mechanisms'] = self._fragment(ui_mechanisms.render, mechanism_trails or
                 dict(error=dict(kind='Unavailable', message='机制记录暂不可读')))
             if 'error' not in snapshot:
                 current = snapshot['view']['nodes'][-1] if snapshot['view']['nodes'] else None
                 if manager:
-                    fragments['live-operations'] = self._operation_rows(snapshot['operations'])
+                    fragments['live-operations'] = self._fragment(self._operation_rows, snapshot['operations'], href='/operations')
             if manager and not mount:
                 fragments['live-instances'] = self._loaded_instances(force=force)
         if mount:
@@ -1108,12 +1196,7 @@ class InstanceUI:
                 for attribute in ('href', 'action', 'data-progress'):
                     value = value.replace(attribute + '="/', attribute + '="' + mount + '/')
                 fragments[key] = value.replace('href="__WORKSPACE__"', 'href="/instances"')
-        with self.control_lock:
-            nonce = self.control_nonce
-            tokens = {action:self._csrf(token, action, nonce) for action in (
-                'start','pause','continue','resume','budget','guidance-submit','guidance-edit','guidance-revoke',
-                'open','configure','create','load-config','configuration')} if manager else {}
-        return dict(fragments=fragments, nonce=nonce if manager else None, csrf=tokens,
+        return dict(fragments=fragments, mount=mount,
             current=dict(step=current['step'], role=self._role(current['role']), attempt=current.get('continuations',0),
                 url=mount + '/nodes/' + str(current['step']) + '/events?attempt=' + str(current.get('continuations',0))) if current else None)
 
@@ -1143,7 +1226,7 @@ class InstanceUI:
             body += '<p id="budget"><a href="/budget-recovery#budget">恢复前追加预算</a></p>'
         else:
             body += '<p><a href="/configuration#budget-settings">在当前研究配置中调整总预算</a></p>'
-        body += '<p><a href="/operations">控制请求记录</a> · <a href="/?after=0">浏览全部阶段记录</a>'
+        body += '<p><a href="/delete">删除实例</a> · <a href="/candidates">全候选历史</a> · <a href="/operations">控制请求记录</a> · <a href="/?after=0">浏览全部阶段记录</a>'
         if self.approvals:
             body += ' · <a href="/requests">实验执行请求</a>'
         return body + '</p></details>'
@@ -1168,7 +1251,7 @@ class InstanceUI:
         '阶段结论是 H/W/A/E 研究者记录的原文；记录完成不等于科学结论已获认可。',
         '模型用量为已观测值；用量未知的阶段只计下界，预留用量单列。',
         'W 的“本阶段实验”是封存观察中已接受的受管调用数，不等于独立实验设计数或科学覆盖。',
-        '“最高/最低”只在同一评估口径内、按作者声明的指标方向取值；不同口径不可直接比较，界面不提供科学排序或默认选择。',
+        '“最高/最低”为全部已观察数值（含失败记录），只在同一评估口径内、按作者声明的指标方向取值；不同口径不可直接比较，界面不提供科学排序或默认选择。',
         '★ A 推荐来自作者原文，✓ 已交付来自控制层交付记录，两者各自保留。',
         '是否达到研究目标，请结合结论原文中的局限与待解决问题判断。',
         '方向建议只交给研究者参考，不授予实验执行权限或额外预算。',
@@ -1318,13 +1401,77 @@ class InstanceUI:
         return dict(rows=[(step, len(reader.node(step)['seal'].get('materials') or [])) for step in shown],
                     truncated=len(steps) > len(shown))
 
-    def _candidates(self, step, *, job=None, reader=None):
-        key = step
+    def _candidates(self, step, *, job=None, reader=None, history_only=False):
+        reader = reader or ui_view.Reader(self.root, self.view_memo)
+        job = job if job is not None else reader.node(step)['job']
+        # The exact immutable input job and every referenced saved observation
+        # identify this display projection; changing any source invalidates it.
+        steps = [row['step'] for row in (job.get('history') or {}).get('nodes', [])]
+        sources = [(number, reader.node(number), reader.observation(number)) for number in steps]
+        key = hashlib.sha256(json.dumps([str(self.root), job, sources, history_only], sort_keys=True).encode()).hexdigest()
         value = self.candidate_cache.get(key)
         if value is None:
-            value = ui_view.candidate_projection(self.root, step, job=job, reader=reader)
-            self.candidate_cache = {key: value}
-        return value
+            value = ui_view.candidate_projection(self.root, step, job=job, reader=reader, history_only=history_only)
+            while len(self.candidate_cache) >= 8:
+                self.candidate_cache.pop(next(iter(self.candidate_cache)))
+            self.candidate_cache[key] = copy.deepcopy(value)
+        return copy.deepcopy(value)
+
+    def _candidate_history(self, *, through=None, prefix=None, after=0):
+        numbers = self._sealed_steps()
+        through = max(numbers, default=0) if through is None else through
+        numbers = [step for step in numbers if step <= through]
+        reader = ui_view.Reader(self.root, self.view_memo)
+        entries, missing = [], []
+        for step in numbers:
+            try:
+                node = reader.node(step)
+                entries.append((step, node, reader.observation(step)))
+            except Exception:
+                missing.append(step)
+        identity = hashlib.sha256(json.dumps([self.instance, through, entries, missing], sort_keys=True).encode()).hexdigest()
+        if prefix is not None and not hmac.compare_digest(prefix, identity):
+            raise ui_errors.InputError('prefix', '候选历史原件身份已变化。', '从候选历史入口重新打开；旧分页不会静默混入新观察。')
+        # The comparison page keeps its original subject-input prefix. This
+        # independent history uses all readable sealed sources through the cut.
+        job = dict(history=dict(nodes=[dict(step=step) for step, _, _ in entries]))
+        projection = self._candidates(through + 1, job=job, reader=reader, history_only=True)
+        total = len(projection['index'])
+        projection['index'] = projection['index'][after:after + 20]
+        rows = ui_view.candidate_rows(projection, clean=ui_view.cleaner(self.root), all_candidates=True)
+        body = self._navigation() + '<p>全部已封存候选历史，按首次观察顺序分页；按评估口径与机制分组。全部已观察数值，含失败记录，不代表科学推荐。</p>'
+        body += '<p>固定已封存前缀：第 ' + str(through) + ' 阶段 · <code>' + identity + '</code>；已观察 ' + str(total) + ' 个候选。</p>'
+        if missing:
+            body += '<p class="gap">部分阶段不可读，计数为下界；缺口阶段：' + ', '.join(map(str, missing)) + '。</p>'
+        for gap in projection.get('unresolved', []):
+            label = '推荐' if gap['field'] == 'recommendation' else '提名'
+            body += '<p class="gap">第 ' + str(gap['step']) + ' 阶段有 ' + str(gap['count']) + ' 条' + label + '的候选来源不可读，未计为可用关联；' + ui.link('查看该阶段原文', '/results/' + str(gap['step'])) + '。</p>'
+        body += ui.candidate_table(dict(rows, all_candidates=True))
+        if after + 20 < total:
+            body += '<p><a href="/candidates?through=' + str(through) + '&amp;prefix=' + identity + '&amp;after=' + str(after + 20) + '">下一页候选</a></p>'
+        return 200, self._page('全候选历史', body, live=False), {}
+
+    def _delete_page(self, token, *, form=None, problem=None):
+        self._admin(token)
+        if self.workspace:
+            raise PermissionError('Open an explicit instance to delete')
+        if form is None:
+            if token in self.delete_requests:
+                form = self.delete_requests[token]
+                return self._delete_page(token, form=form, problem=problem)
+            settings = display.settings(self.root)
+            form = self.delete_requests.setdefault(token, dict(root=str(self.root), instance_id=settings['goal_id'],
+                settings_sha256=hashlib.sha256((self.root / 'settings.json').read_bytes()).hexdigest(), operation_id=uuid.uuid4().hex))
+        body = self._navigation() + '<p>永久删除此精确实例。服务会拒绝运行中、未知结果、挂载、嵌套实例或仍由 UI 持锁的目标。独立实例 UI 请先关闭，再从工作台加载删除；工作台不会释放其它持有者的锁。</p>'
+        if problem:
+            body += problem.markup()
+        fields = ''
+        for key in ('root', 'instance_id', 'settings_sha256', 'operation_id'):
+            value = form[key]
+            fields += '<label>' + {'root': '目标绝对路径', 'instance_id': 'goal_id', 'settings_sha256': 'settings_sha256', 'operation_id': 'operation_id'}[key] + '<input name="' + key + '" readonly value="' + html.escape(value, quote=True) + '"></label>'
+        fields += '<label>确认删除上述实例<input name="confirmation" required placeholder="DELETE"></label>'
+        body += self._form(token, 'delete', fields, '确认永久删除此实例')
+        return (problem.status if problem else 200), self._page('删除实例', body, live=False), {}
 
     def _result_page(self, step, *, final=False):
         clean = ui_view.cleaner(self.root)
@@ -1332,7 +1479,7 @@ class InstanceUI:
         node = reader.node(step)
         job, payload, seal = node['job'], node['payload'], node['seal']
         full = ('<details class="full-text"><summary>查看完整原文（第 ' + str(step) + ' 阶段）</summary>'
-                + render.result_body(step, job, payload, seal) + '</details>')
+                + render.result_body(step, job, payload, seal, clean=clean) + '</details>')
         role = job['role']
         label = ui_view.ROLE_LABELS.get(role, role)
         if role != 'A':
@@ -1410,7 +1557,9 @@ class InstanceUI:
             parts = parsed.path.split('/', 3)
             if len(parts) != 4 or not parts[2].isascii() or not parts[2].isdecimal():
                 raise ValueError('Exact explicit instance route required')
-            child = self._child(int(parts[2]))
+            index = int(parts[2])
+            child = self.deleted_children.get(index) if parts[3] in {'delete', 'control/delete'} else None
+            child = child or self._child(index)
             return self._mounted(child.get('/' + parts[3] + ('?' + parsed.query if parsed.query else ''), host=host, cookie=cookie), int(parts[2]))
         if parsed.path in {'/manage', '/view'}:
             query = parse_qs(parsed.query, strict_parsing=True)
@@ -1429,6 +1578,16 @@ class InstanceUI:
                 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': render.CSP.replace(
                     'script-src ', 'script-src ' + _ENTRY_SCRIPT_SOURCE + ' ', 1)}
         browser_token = self._browser(cookie, scope='read')
+        if parsed.path == '/favicon.ico':
+            return 204, b'', {}
+        known = {'/', '/new', '/instances', '/configuration', '/guidance', '/operations', '/settings',
+            '/budget-recovery', '/progress', '/final-results', '/results', '/session', '/reading',
+            '/translation/state', '/live', '/requests', '/candidates', '/delete'}
+        dynamic = (re.fullmatch(r'/nodes/[1-9][0-9]*(?:/(?:fork|progress|events|science|materials(?:/[1-9][0-9]*)?))?', parsed.path)
+            or re.fullmatch(r'/results/[1-9][0-9]*', parsed.path)
+            or re.fullmatch(r'/requests/[0-9a-f]{64}(?:/original)?', parsed.path))
+        if parsed.path not in known and not dynamic:
+            raise ValueError('Unknown instance UI path')
         if self.workspace and parsed.path not in {'/', '/new', '/instances', '/configuration', '/live', '/session', '/reading', '/translation/state'}:
             raise PermissionError('Open an explicit instance to access research pages')
         if parsed.path == '/session':
@@ -1462,6 +1621,20 @@ class InstanceUI:
             return {'/instances': self._instances_page, '/configuration': self._configuration_page,
                     '/guidance': self._guidance_page, '/operations': self._operations_page,
                     '/settings': self._settings_page, '/budget-recovery': self._budget_recovery_page}[parsed.path](browser_token)
+        if parsed.path == '/delete':
+            if parsed.query:
+                raise ValueError('Unknown instance UI path')
+            return self._delete_page(browser_token)
+        if parsed.path == '/candidates':
+            query = parse_qs(parsed.query, strict_parsing=True) if parsed.query else {}
+            if set(query) - {'through', 'prefix', 'after'} or any(len(row) != 1 for row in query.values()):
+                raise ValueError('Exact scientific result continuation required')
+            if query and not {'through', 'prefix', 'after'} <= set(query):
+                raise ValueError('Exact scientific result continuation required')
+            if any(not query[key][0].isascii() or not query[key][0].isdecimal() for key in ('through', 'after') if key in query):
+                raise ValueError('Exact scientific result continuation required')
+            return self._candidate_history(through=int(query['through'][0]) if query else None,
+                prefix=query['prefix'][0] if query else None, after=int(query['after'][0]) if query else 0)
         if parsed.path == '/progress':
             if parsed.query:
                 raise ValueError('Exact progress page required')
@@ -1538,7 +1711,7 @@ class InstanceUI:
                     'Content-Disposition':"attachment; filename=scientific-deliverable; filename*=UTF-8''"+quote(name,safe='')}
             raise ValueError('Exact instance node required')
         if not self.approvals:
-            raise ValueError('Execution approval routes are unavailable for this instance; status and controls remain available')
+            raise ui_errors.InputError('approval', '此实例未启用实验审批入口。', '使用研究总览和原任务进度核对当前状态。')
         if parsed.path == '/requests':
             query = parse_qs(parsed.query, strict_parsing=True) if parsed.query else {}
             if set(query) - {'after'} or any(len(values) != 1 for values in query.values()):
@@ -1599,20 +1772,21 @@ class InstanceUI:
             parts = parsed.path.split('/', 3)
             if len(parts) != 4 or not parts[2].isascii() or not parts[2].isdecimal():
                 raise ValueError('Exact explicit instance route required')
-            child = self._child(int(parts[2]))
+            index = int(parts[2])
+            child = self.deleted_children.get(index) if parts[3] in {'delete', 'control/delete'} else None
+            child = child or self._child(index)
             return self._mounted(child.post('/' + parts[3], host=host, origin=origin, cookie=cookie,
                 content_type=content_type, body=body), int(parts[2]))
         if parsed.path.startswith('/translation/'):
             return self._translation_post(parsed.path, cookie, content_type, body)
         browser_token = self._browser(cookie)
         parts = parsed.path.strip('/').split('/')
-        if self.workspace and parsed.path not in {'/control/open', '/control/configuration', '/control/create', '/control/load-config', '/control/configure'}:
-            raise PermissionError('Open an explicit instance to use research controls')
         if content_type != 'application/x-www-form-urlencoded':
             raise ValueError('Exact instance control or decision form required')
         if len(parts) == 2 and parts[0] == 'control':
             action = parts[1]
             schemas = {
+                'delete': {'root', 'instance_id', 'settings_sha256', 'operation_id', 'confirmation'},
                 'pause': set(), 'start': set(), 'resume': {'step'}, 'continue': {'ack_correction', 'authorization_note'},
                 'create': {'selection'}, 'load-config': {'config_path'}, 'configure': None, 'configuration-update': None,
                 'open': {'root'}, 'configuration': {'config_path', 'config_text', 'mode'},
@@ -1623,7 +1797,9 @@ class InstanceUI:
                 'fork-preview': fork_ui.FIELDS, 'fork-create': fork_ui.FIELDS,
             }
             if action not in schemas:
-                raise ValueError('Unknown instance control')
+                raise ValueError('Unknown instance UI path')
+            if self.workspace and action not in {'open', 'configuration', 'create', 'load-config', 'configure'}:
+                raise PermissionError('Open an explicit instance to use research controls')
             form = parse_qs(body.decode('utf-8'), keep_blank_values=True, strict_parsing=True)
             expected = schemas[action]
             if action == 'budget' and 'authorization_statement' in form:
@@ -1634,19 +1810,23 @@ class InstanceUI:
                     any(len(values) != 1 for values in form.values())):
                 raise ValueError('Control form contains missing or duplicate fields')
             form = {key: values[0] for key, values in form.items()}
-            with self.control_lock:
-                if (not hmac.compare_digest(form['nonce'], self.control_nonce) or not hmac.compare_digest(
-                        form['csrf'], self._csrf(browser_token, action, form['nonce']))):
-                    raise PermissionError('Instance control CSRF or nonce mismatch')
-                # A download leaves its source form visible in the browser.
-                if not (action == 'configure' and form.get('mode') == 'export'):
-                    self.control_nonce = secrets.token_urlsafe(32)
+            # Forged cross-session/action credentials remain a hard rejection.
+            if not hmac.compare_digest(form['csrf'], self._csrf(browser_token, action, form['nonce'])):
+                raise PermissionError('Instance control CSRF or nonce mismatch')
             try:
+                # Export is read-only and leaves its source form visible. The
+                # next mutating submit still atomically consumes this nonce.
+                self._consume_form(browser_token, action, form,
+                    consume=not (action == 'configure' and form.get('mode') == 'export'))
                 return self._control_post(browser_token, action, form)
             except Exception as error:
                 return self._control_error(browser_token, action, form, error)
+        if not re.fullmatch(r'/requests/[0-9a-f]{64}/(?:decision|revoke)', parsed.path):
+            raise ValueError('Unknown instance UI path')
+        if self.workspace:
+            raise PermissionError('Open an explicit instance to use research controls')
         if not self.approvals:
-            raise ValueError('Execution approval routes are unavailable for this instance')
+            raise ui_errors.InputError('approval', '此实例未启用实验审批入口。', '使用研究总览和原任务进度核对当前状态。')
         if (parsed.scheme or parsed.netloc or parsed.query or parsed.fragment or len(parts) != 3
                 or parts[0] != 'requests' or parts[2] not in {'decision', 'revoke'}
                 or content_type != 'application/x-www-form-urlencoded'):
@@ -1676,6 +1856,25 @@ class InstanceUI:
                 raise ui_errors.InputError(field, '此字段必须填写整数。', '修改此字段后重新提交。') from None
 
         location = '/'
+        if action == 'delete':
+            from . import instance_delete
+            if form['root'] != str(self.root) or form['confirmation'] != 'DELETE':
+                raise ui_errors.InputError('confirmation', '删除目标或确认文字不匹配。', '核对目标绝对路径、身份和原操作编号；填写 DELETE。')
+            instance_delete.delete_instance(self.root, instance_id=form['instance_id'],
+                settings_sha256=form['settings_sha256'], operation_id=form['operation_id'])
+            parent = self.workspace_host
+            if parent is None:
+                self.live_stop.set()
+            self.live_cache.value = self.summary_cache.value = None
+            self.view_memo.clear(); self.candidate_cache.clear(); self.status_memo.clear()
+            if parent is not None:
+                # Keep positional mount identities stable for other open tabs.
+                for index, child in tuple(parent.children.items()):
+                    if child is self:
+                        parent.deleted_children[index] = parent.children.pop(index)
+                parent.deleted_roots.add(self.root)
+                parent.summary_cache.value = parent.live_cache.value = None
+            return 303, b'', {'Location': '/instances'}
         if action in {'fork-preview', 'fork-create'}:
             from . import fork_service
             step = integer('step')
@@ -1766,23 +1965,13 @@ class InstanceUI:
                 draft = getattr(error, 'draft', draft)
                 selection = self._remember_config(browser_token, draft, source=source)
                 return self._new_research_page(browser_token, draft=draft, selection=selection,
-                    notice=self._problem(error, context='configuration'), save_path=form.get('save_path', ''))
+                    notice=self._problem(error, context='configuration', record=True), save_path=form.get('save_path', ''))
             if mode == 'export':
                 text = configuration_form.export_toml(draft)
                 return 200, text.encode('utf-8'), {'Content-Type': 'application/toml; charset=utf-8',
                     'Content-Disposition': 'attachment; filename="research.toml"'}
             if mode == 'save':
-                path = Path(form.get('save_path', '')).expanduser().absolute()
-                if path.suffix.lower() != '.toml' or path.resolve() == self.secret_file:
-                    raise ValueError('Select a research TOML declaration file')
-                if path.exists() or path.is_symlink():
-                    c.regular(path, limit=256000)
-                text = configuration_form.export_toml(draft)
-                if len(text.encode('utf-8')) > 256000:
-                    raise ValueError('Research TOML exceeds its byte budget')
-                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
-                with os.fdopen(descriptor, 'w', encoding='utf-8') as destination:
-                    destination.write(text)
+                path = self._save_toml(form.get('save_path', ''), configuration_form.export_toml(draft))
                 return self._import_config(browser_token, path, notice='配置已保存。创建实例前请检查并预览。')
             try:
                 task_source = self._draft_task(draft)
@@ -1792,7 +1981,7 @@ class InstanceUI:
             except Exception as error:
                 selection = self._remember_config(browser_token, draft, source=source)
                 return self._new_research_page(browser_token, draft=draft, selection=selection,
-                    notice=self._problem(error, context='configuration'), save_path=form.get('save_path', ''))
+                    notice=self._problem(error, context='configuration', record=True), save_path=form.get('save_path', ''))
             selection = self._remember_config(browser_token, draft, source=source, previewed=True, task_source=task_source)
             return self._new_research_page(browser_token, draft=draft, selection=selection, preview=preview)
         elif action == 'create':
@@ -1834,7 +2023,6 @@ class InstanceUI:
                 raise ValueError('Select a research TOML declaration file')
             if path.exists() or path.is_symlink():
                 c.regular(path, limit=256000)
-            path = path.resolve()
             text, mode = form['config_text'], form['mode']
             if mode not in {'load', 'check', 'save', 'prepare'}:
                 raise ValueError('Select an explicit TOML action')
@@ -1853,9 +2041,7 @@ class InstanceUI:
                 result = public_output.settings_view(checked)
                 result['source'] = 'research_config'
             if mode == 'save':
-                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
-                with os.fdopen(descriptor, 'w', encoding='utf-8') as destination:
-                    destination.write(text)
+                self._save_toml(path, text)
                 result = dict(status='config_saved')
             elif mode == 'prepare':
                 prepared = research_config.prepare(**options)
@@ -1912,7 +2098,7 @@ def serve(root, *, secret_file, port=None, instance_roots=(), workspace=False, t
                 if isinstance(body, (science.Original, display.Original)):
                     body.close()
                 status, body, headers = ui._error_response(error, self.path,
-                    json_response=(self.headers.get('Content-Type') == 'application/json'
+                    record=method == 'POST', json_response=(self.headers.get('Content-Type') == 'application/json'
                         or '/translation/state' in self.path.partition('?')[0]
                         or self.path.partition('?')[0].endswith('/session')
                         or '/events' in self.path.partition('?')[0]))

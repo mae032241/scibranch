@@ -73,8 +73,8 @@ SCRIPT = r'''
     }
     status.textContent = (state.configured && state.enabled ? state.target_language : '尚未启用翻译') + ' · 已缓存 ' + ready + '/' + texts.length
       + (pending ? ' · 处理中 ' + pending : '') + (failed ? ' · 失败 ' + failed + ' · ' + [...failures].slice(0, 3).join('；')
-        + (failures.size > 3 ? '；另有 ' + (failures.size - 3) + ' 类失败，悬停对应原文查看原因。' : '') : '') + (message ? ' · ' + message : '');
-    start.disabled = sessionExpired || !state.configured || !state.enabled || !state.csrf.start || busy || !texts.some(text => ['missing','failed'].includes(entries.get(text)?.status || 'missing'));
+        + (failures.size > 3 ? '；另有 ' + (failures.size - 3) + ' 类失败，悬停对应原文查看原因。' : '') : '') + (state.supported === false ? ' · ' + state.unsupported_reason : '') + (message ? ' · ' + message : '');
+    start.disabled = state.supported === false || sessionExpired || !state.configured || !state.enabled || !state.csrf.start || busy || !texts.some(text => ['missing','failed'].includes(entries.get(text)?.status || 'missing'));
     toggle.textContent = original ? '显示译文' : '显示原文';
     clearTimeout(timer);
     if (pending && !busy && !sessionExpired) timer = setTimeout(() => lookup(texts.filter(text => entries.get(text)?.status === 'pending')), 1500);

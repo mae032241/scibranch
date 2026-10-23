@@ -30,6 +30,8 @@
 - 一个检查必须说明能证伪哪个生产故障。固定成功JSON只证明传输时，不得当作科学质量或执行成功证据。
 - 去掉无效常量补丁、固定文件数量断言和无必要笛卡尔积；保留不同副作用入口的真实负控。
 - 修正后只重测受影响路径，不重建环境重跑整组功能。
+- 控制准入性能检查使用一次局部观察的读取计数，并在相邻边界追加 usage/预算修订验证失效；UI memo 不进入准入。
+- 角色提示检查捕获实际 launcher argv/request，核对规则只传一次及权限不漂移；配置 inspect 检查 active/pending 与原件无写入。
 - 独立审查默认只读，不另起验收批次。禁止并行测试/安装；必要锁竞争用例中的子进程不等于并行测试批次。
 
 串行入口为 `scripts/run_tests.py`。确认资源条件与执行范围后，使用精确目标和仓库本地持久日志目录。例如功能目标选择 `--lane source --output .trial/check-name tests/research_loop/<文件>::<用例>`；独立安装选择 `--lane installed --installation-cohort core --output .trial/check-name <精确目标>`；

@@ -48,6 +48,8 @@ def _path(value):
 
 
 def _excluded(root, parts):
+    if parts == ('.scid-ui',):
+        return 'private_ui_cache_configuration_and_diagnostics'
     if (len(parts) == 5 and parts[:2] == ('project', 'nodes')
             and parts[2].isascii() and parts[2].isdecimal() and int(parts[2]) > 0
             and parts[2] == f'{int(parts[2]):03d}' and parts[3:] == ('.agents', 'skills')):

@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts as c, controller, native, runtime, search
+from scidiscovery.research_loop import budget, contracts as c, controller, execution, native, runtime, search
 from scidiscovery.research_loop.cli import status
 from scidiscovery.research_loop.protocol import CURRENT
 from test_history_handoff import finish
@@ -402,3 +402,52 @@ def test_budget_race_preserves_unaccepted_job_and_enters_durable_final(tmp_path,
     # FINAL routing is durable, but the stub has accepted no native A return.
     assert budget.closeout_state(root)['begin'] == begin
     assert budget.final_a_barrier(root) is None
+
+
+def test_admission_reuses_one_local_observation_and_next_boundary_reads_mutations(tmp_path, monkeypatch):
+    root = instance(tmp_path, limits=policy(tokens=1000), max_tokens=100)
+    job = c.build_job(root, 1, 'H', [])
+    record = execution.origin(root, 1)
+    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/001.json')))
+    reads = []
+    original = budget._read_events
+    def observed(*args, **kwargs):
+        reads.append(True)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(budget, '_read_events', observed)
+    # Missing billing coverage leaves an observed lower bound; it is not an
+    # execution-completion fact and cannot turn into a guessed token charge.
+    assert budget.node_admission(root, job) is None
+    assert len(reads) == 1
+    c.write(record / 'usage.json', dict(input_tokens=90, cached_input_tokens=80, output_tokens=10))
+    reads.clear()
+    assert budget.node_admission(root, job) == 'node_budget_unavailable_tokens'
+    assert len(reads) == 1
+    # Accounting availability does not reconcile the original execution.
+    assert budget.execution_blocked(root)
+    with pytest.raises(RuntimeError, match='no running or unknown original execution'):
+        budget._amend_locked(root, max_tokens=101, authorization_note='Unreconciled original must block')
+    # A completed transport may still have incomplete billing coverage. This
+    # original has no process/managed call; its terminal fact releases only the
+    # execution barrier, while the 100 observed tokens remain consumed.
+    c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None,
+        native_backend='codex', cleanup='observed_group_cleaned',
+        metering=dict(source='turn.completed', coverage='unknown', reason='billing_unreported')))
+    assert budget.native_completion_known(c.read(record / 'native-outcome.json'), c.settings(root))
+    assert not budget.execution_blocked(root)
+    assert native.usage(root)['unknown_steps'] == [1]
+    budget._amend_locked(root, max_tokens=101, authorization_note='One more reported token')
+    reads.clear()
+    assert budget.node_admission(root, job) is None
+    assert len(reads) == 1
+    c.write(record / 'usage.json', dict(input_tokens=91, cached_input_tokens=80, output_tokens=10))
+    assert budget.node_admission(root, job) == 'node_budget_unavailable_tokens'
+
+
+def test_current_budget_ledger_rejects_retired_usage_reserve_event(tmp_path):
+    root = instance(tmp_path, limits=policy())
+    event = dict(seq=1, parent_sha256=None, settings_sha256=c.digest(root / 'settings.json'),
+                 kind='native_usage_reserve', **budget.clock_stamp())
+    c.write(root / 'control-ledger/000001.json', event)
+    with pytest.raises(ValueError, match='ledger identity'):
+        budget.snapshot(root)
