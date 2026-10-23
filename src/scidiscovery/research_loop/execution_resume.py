@@ -6,16 +6,18 @@ No current missing file or PID is interpreted as proof of non-submission.
 from pathlib import Path
 import hashlib
 import math
+import re
 import time
 
 from . import budget, contracts as c, execution, qualification as q, experiment_client
+from scidiscovery import archive_io as files
 
 
 def capture_pending(root, job):
     """Optional evidence failure never discards a valid scientific conclusion."""
     from . import execution_authority as authority
     root=Path(root).resolve()
-    if job['role']!='W' or not job.get('execution_authority'):return None
+    if job['role']!='W':return None
     path=execution.origin(root,job['step'])/'pending-execution-set.json'
     if path.exists():return q._ref(root,path)
     try:
@@ -23,23 +25,40 @@ def capture_pending(root, job):
     except BlockingIOError:
         # A live writer is a retryable sealing boundary, never missing evidence.
         raise
-    except (OSError,ValueError,KeyError,TypeError) as error:
+    except (OSError,ValueError,KeyError,TypeError,files.ArchiveError) as error:
         return q._save(root,path,dict(version=1,job=q._ref(root,root/'jobs'/f'{job["step"]:03d}.json'),
-                contract=authority.contract(root,job),attempts=[],allocations=[],calls_namespace=[],complete=False,
+                contract=authority.contract(root,job) if job.get('execution_authority') else None,
+                attempts=[],allocations=[],calls_namespace=[],host_preparations=[],complete=False,
                 unavailable_reason='Pending namespace or owner evidence could not be captured: '+type(error).__name__))
 
 
 def _capture_pending(root, job):
     from . import execution_authority as authority
     root = Path(root).resolve()
-    if job['role'] != 'W' or not job.get('execution_authority'):
+    if job['role'] != 'W':
         return None
     path = execution.origin(root, job['step']) / 'pending-execution-set.json'
     if path.exists():
         return q._ref(root, path)
     records=experiment_client.record_directory(root,job['step'])/'calls'
+    from . import preparation_recovery
+    if not job.get('execution_authority'):
+        bindings=records.parent/'host-preparations'
+        if not bindings.exists() and not bindings.is_symlink():return None
+        with c.record_writer(records.parent, blocking=False, exclusive=True):
+            pending=[q._ref(root,Path(row['binding']['path'])) for row in preparation_recovery.retained_preparations(root,records.parent)
+                if not row['resolved']]
+            if not pending:return None
+            namespace=sorted(item.name for item in records.iterdir()) if records.exists() else []
+            return q._save(root,path,dict(version=1,job=q._ref(root,root/'jobs'/f'{job["step"]:03d}.json'),
+                contract=None,attempts=[],allocations=[],calls_namespace=namespace,host_preparations=pending,
+                complete=False,unavailable_reason='Original host preparation is unknown; no execution authority or external preparation reconciliation is available'))
     with authority.writer(root,blocking=False), c.record_writer(records.parent,blocking=False,exclusive=True):
         allocations = []; complete = True
+        preparations=preparation_recovery.retained_preparations(root,records.parent)
+        pending=[q._ref(root,Path(row['binding']['path'])) for row in preparations if not row['resolved']]
+        unknown_calls={row['call_id'] for row in preparations if not row['resolved']}
+        if pending:complete=False
         job_ref=q._ref(root,root/'jobs'/f'{job["step"]:03d}.json')
         records=experiment_client.record_directory(root,job['step'])/'calls'
         namespace=sorted(item.name for item in records.iterdir()) if records.exists() else []
@@ -52,7 +71,7 @@ def _capture_pending(root, job):
             if allocation['binding']['scope']['job_sha256']==job_ref['sha256']:
                 calls.append((directory,allocation))
         # No pending authority allocation means no new attempt/request history IO.
-        if not calls and not namespace:return None
+        if not calls and not namespace and not pending:return None
         requests = {}
         for directory in sorted((root / 'execution-authority/requests').glob('*')):
             item=directory/'request.json'
@@ -110,7 +129,7 @@ def _capture_pending(root, job):
             refs['records']=originals
             allocations.append(dict(call_id=call, allocation=q._ref(root, original),
                 requests=requests.pop(call, []), **refs,
-                disposition='unprepared' if not prepare.exists() and call not in namespace else 'possibly_prepared'))
+                disposition='unprepared' if not prepare.exists() and call not in namespace and call not in unknown_calls else 'possibly_prepared'))
         if requests or any(name not in {row['call_id'] for row in allocations} for name in namespace):
             complete = False
         # Partial preparation directories also make absence unprovable.
@@ -119,7 +138,7 @@ def _capture_pending(root, job):
             complete = False
         return q._save(root, path, dict(version=1, job=q._ref(root, root / 'jobs' / f'{job["step"]:03d}.json'),
             contract=authority.contract(root,job), attempts=attempts, allocations=allocations,
-            calls_namespace=namespace, complete=complete))
+            calls_namespace=namespace, host_preparations=pending, complete=complete))
 
 
 def _source_path(source, proof):
@@ -157,6 +176,45 @@ def verify_pending_set(root, seal, allocation_ref=None, *, unprepared=False, req
         raise ValueError('Original seal has no positive pending execution evidence')
     value = read(ref)
     job = read(value['job'])
+    logical_root = Path(source.original_root) if source is not None else root
+    def preparation_refs():
+        from . import preparation_recovery
+        def read_preparation(proof):
+            if source is not None:return c.read(_source_path(source,proof))
+            return c.read(preparation_recovery._verify_ref(root,proof,context))
+        refs=value.get('host_preparations',[])
+        if not isinstance(refs,list):raise q.IntegrityError('Pending host preparation references changed')
+        for proof in refs:
+            if context is not None:context.remaining_seconds()
+            verify_bytes(proof); binding=read_preparation(proof)
+            token=binding.get('snapshot_token');call=binding.get('call_id')
+            config=read_preparation(binding['configuration'])
+            records=Path(config['record_dir'])
+            expected=records/'host-preparations'/str(call)/(str(token)+'.json')
+            original_path=Path(proof['path'])
+            original_path=original_path if original_path.is_absolute() else logical_root/original_path
+            if (binding.get('version')!=1 or binding.get('kind')!='host_preparation_snapshot'
+                    or not isinstance(token,str) or not preparation_recovery.TOKEN.fullmatch(token)
+                    or not isinstance(call,str) or not re.fullmatch(r'[A-Za-z0-9._-]{1,128}',call) or call in {'.','..'}
+                    or binding.get('instance',{}).get('root')!=str(logical_root)
+                    or not records.is_relative_to(logical_root)
+                    or original_path!=expected or binding.get('records')!=str(records)
+                    or binding.get('scope')!=config.get('scope')
+                    or binding['scope'].get('job_sha256')!=seal['job_sha256']
+                    or binding.get('job',{}).get('sha256')!=value['job']['sha256']):
+                raise q.IntegrityError('Pending host preparation escaped its original job')
+        return refs
+    if not job.get('execution_authority'):
+        if (value.get('version')!=1 or value.get('contract') is not None or value.get('complete') is not False
+                or value.get('attempts')!=[] or value.get('allocations')!=[]
+                or value['job']['sha256']!=seal['job_sha256']
+                or ref['path']!=(execution.origin(logical_root,job['step'])/'pending-execution-set.json').relative_to(logical_root).as_posix()
+                or not isinstance(value.get('unavailable_reason'),str)):
+            raise q.IntegrityError('Binding-only pending evidence is not conservative original evidence')
+        preparation_refs()
+        if unprepared or allocation_ref is not None:
+            raise ValueError('Binding-only incomplete evidence never authorizes dispatch or reservation rebind')
+        return value
     if source is None:
         expected_contract = authority.contract(root,job)
         logical_root = root
@@ -175,6 +233,7 @@ def verify_pending_set(root, seal, allocation_ref=None, *, unprepared=False, req
             or ref['path'] != (execution.origin(logical_root, job['step']) / 'pending-execution-set.json').relative_to(logical_root).as_posix()
             or value['contract'] != expected_contract):
         raise q.IntegrityError('Pending execution evidence differs from its original seal')
+    preparation_refs()
     for proofs in value['attempts']:
         for proof in proofs.values():
             read(proof)
@@ -231,6 +290,10 @@ def verify_pending_set(root, seal, allocation_ref=None, *, unprepared=False, req
         if ((prepare.parent / 'prepare-intent.json').exists()
                 or (experiment_client.record_directory(root, job['step']) / 'calls' / call).exists()):
             raise q.IntegrityError('New call artifacts contradict the sealed unprepared evidence')
+        from . import preparation_recovery
+        if any(row['call_id']==call for row in preparation_recovery.retained_preparations(
+                root,experiment_client.record_directory(root,job['step']),context=context)):
+            raise q.IntegrityError('Retained host preparation contradicts sealed unprepared evidence')
     return row
 
 
@@ -576,6 +639,9 @@ def resume(root,step,call_id,*,max_seconds,authorization_note,request_valid_seco
                 admission=operation.operation,origin='sealed_preparation_unknown')
     else:
         with authority.writer(root,context=operation.context):verify_pending_set(root,seal,allocation,unprepared=True)
+        from . import preparation_recovery
+        if any(not row['resolved'] for row in preparation_recovery.retained_preparations(root,records.root,context=operation.context)):
+            return dict(status='unknown',call_id=call_id,note='Retained original host preparation blocks fresh preparation without replay.')
         operation.check();operation.opportunity()
         adapter=e.load(config,host_services=operation.services())
         identity=original['binding']['payload_alias'];q._check(identity)

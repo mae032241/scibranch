@@ -178,6 +178,14 @@ def main(argv=None):
     execution_resume.add_argument('--authorization-note',required=True,help='Operator audit note only; not an execution decision')
     execution_resume.add_argument('--request-valid-seconds',type=float,help='Explicit finite replacement request validity when old request expired; no new execution allowance')
     execution_resume.add_argument('--maintenance',choices=['query','collect','cancel'],help='Maintain one existing accepted call within a current finite operation window; never prepare, submit or renew')
+    preparation = commands.add_parser('execution-preparation-maintain', help='Inspect or maintain one exact retained host snapshot; preserves unknown external preparation')
+    preparation.add_argument('--root', type=Path, required=True)
+    preparation.add_argument('--step', type=int, required=True)
+    preparation.add_argument('--call-id', required=True)
+    preparation.add_argument('--snapshot-token', required=True)
+    preparation.add_argument('--action', choices=['inspect', 'discard-partial', 'publish-accepted'], required=True)
+    preparation.add_argument('--max-seconds', type=float, required=True, help='Finite maintenance window; does not amend scientific or execution budgets')
+    preparation.add_argument('--authorization-note', required=True, help='Operator audit note only; grants no execution permission')
     serve = commands.add_parser('serve-ui', help='Serve an explicit instance or a workspace for configuration and opening instances')
     ui_source = serve.add_mutually_exclusive_group(required=True)
     ui_source.add_argument('--root', type=Path)
@@ -220,11 +228,11 @@ def main(argv=None):
     arguments = list(argv) if argv is not None else sys.argv[1:]
     args = parser.parse_args(arguments)
     root_arg = getattr(args, 'root', None)
-    root = ((root_arg.expanduser().absolute() if args.command in {'instance-delete', 'archive-export', 'archive-restore-material','checkpoint-enroll','checkpoint-export','checkpoint-restore'} else root_arg.expanduser().resolve())
+    root = ((root_arg.expanduser() if args.command == 'execution-preparation-maintain' else root_arg.expanduser().absolute() if args.command in {'instance-delete', 'archive-export', 'archive-restore-material','checkpoint-enroll','checkpoint-export','checkpoint-restore'} else root_arg.expanduser().resolve())
             if root_arg is not None else None)
     try:
         workspace_ui = args.command == 'serve-ui' and args.workspace is not None
-        if args.command not in {'instance-delete','prepare','config-check','config-inspect','status','archive-inspect','checkpoint-enroll','checkpoint-export','checkpoint-restore','fork-preview','fork-create'} and not workspace_ui:
+        if args.command not in {'execution-preparation-maintain','instance-delete','prepare','config-check','config-inspect','status','archive-inspect','checkpoint-enroll','checkpoint-export','checkpoint-restore','fork-preview','fork-create'} and not workspace_ui:
             from .protocol import require_current
             require_current(root)
         if args.command in {'fork-preview', 'fork-create'}:
@@ -374,6 +382,10 @@ def main(argv=None):
         elif args.command == 'execution-resume':
             result=controller.execution_resume(root,args.step,args.call_id,max_seconds=args.max_seconds,
                 authorization_note=args.authorization_note,request_valid_seconds=args.request_valid_seconds,maintenance=args.maintenance)
+        elif args.command == 'execution-preparation-maintain':
+            from . import preparation_recovery
+            result = preparation_recovery.maintain(root, args.step, args.call_id, args.snapshot_token,
+                action=args.action, max_seconds=args.max_seconds, authorization_note=args.authorization_note)
         elif args.command == 'native-startup-collect':
             from . import startup_recovery
             result = startup_recovery.collect_delivery(root,args.step,reconciliation=args.reconciliation,
@@ -424,6 +436,8 @@ def main(argv=None):
     print(json.dumps(result, ensure_ascii=False))
     if result.get('status') == 'instance_deleted':
         return 0
+    if args.command == 'execution-preparation-maintain':
+        return 0 if result.get('status') in {'partial', 'accepted_unpublished', 'already_published', 'partial_discarded', 'accepted_published'} else 2
     if args.command == 'execution-resume' and args.maintenance is not None:
         from scidiscovery.operations.execution import PENDING_EXECUTION_STATES, execution_status
         # Remote failure is a successfully maintained original, not a failed

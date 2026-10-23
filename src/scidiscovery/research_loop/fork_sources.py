@@ -107,6 +107,9 @@ def _parent_state(root):
             records = experiment_client.record_directory(root, job['step'])
             if any(records.glob('.prepared-*')):
                 blocked.append(dict(code='unknown_managed_preparation', path=records.relative_to(root).as_posix()))
+            from . import preparation_recovery
+            if any(not row['resolved'] for row in preparation_recovery.retained_preparations(root, records)):
+                blocked.append(dict(code='unknown_managed_preparation', path=records.relative_to(root).as_posix()))
             for directory in sorted((records / 'calls').glob('*')):
                 for lock in (records / 'node.lock', _accept_lock(root, job, records)):
                     if not lock.exists() and not (root / 'instance-owner.json').exists():

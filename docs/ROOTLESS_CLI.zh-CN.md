@@ -317,6 +317,25 @@ TCAD 支持可选编译、精确封存、正式审查与后继执行的非空输
 
 `execution-resume ... --maintenance query|collect|cancel` 为已经 accepted 的原调用提供有限的宿主维护窗口，须给 `--max-seconds` 和 `--authorization-note`。即使原科学时钟跨 boot 无法继续，也可查询、取消或收集同一调用；此模式不能准备、提交、新建授权请求或增加额度，不能与 `--request-valid-seconds` 合用。精确终态由既有资源账本结算；暂不能结算时不生成退款或新额度。
 
+### 未发布准备快照的准确维护
+
+`execution-preparation-maintain --root ... --step N --call-id ... --snapshot-token ...
+--action inspect|discard-partial|publish-accepted --max-seconds N --authorization-note ...`
+只处理明确实例、原调用及 token 对应的宿主准备快照。绑定保存在该调用记录目录的
+`host-preparations/<call-id>/<snapshot-token>.json`，不是按最近目录猜测原调用。
+有限维护窗口不增加科学预算，也不重做 prepare、提交或准入。
+
+- `inspect` 在原写者静止且取得原锁后检查准确快照。缺原绑定、身份不符或仍有写者时拒绝。
+- `publish-accepted` 仅对原准入已完成、完整 accepted 和输入均已持久写出、只差发布的快照，
+  补完成原来的不覆盖发布。原调用身份与已消耗额度保持；外部状态仍须用原 query/collect/cancel 核对。
+- `discard-partial` 只清理同一绑定 inode 的残缺快照，保留绑定、清理记录和可能已发生外部 prepare 的
+  unknown。完整 accepted 必须走发布；损坏的 accepted 不当作可删的残缺文件。清理成功不授权重提，
+  未决记录仍阻断新 prepare、fork 和归档，不把目录消失解释成从未准备。
+
+旧的无绑定 `.prepared-*` 目录不自动清理或补造来源；此入口也不接受任意 records 路径或批量删除。
+已发布的历史绑定随原件保留；冷恢复使用保留的原清单证明其来源，不要求旧目录 inode 继续存在。
+现场维护仍核对原宿主、owner 和目录身份，不由历史可读性授予新维护权限。
+
 ### 显式同宿主冷 checkpoint
 
 仅用于原实例完全静止、active 时间预算已暂停的情况：

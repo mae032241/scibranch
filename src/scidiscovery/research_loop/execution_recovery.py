@@ -273,12 +273,36 @@ def sealed_pending_rows(root,sources):
         value=c.read(originals.resolve_ref(source,ref))
         if (value['job']['sha256']!=seal['job_sha256'] or value['job']['path']!=f'jobs/{job["step"]:03d}.json'):
             raise history.ObserverIntegrityError('Pending execution metadata escaped its sealed source')
+        if (value.get('complete') is False and value.get('unavailable_reason')
+                and not value.get('allocations') and not value.get('host_preparations')):
+            raise history.ObserverIntegrityError('Original pending namespace was unavailable; no clean execution state can be proved')
         for row in value['allocations']:
             if row['disposition']!='possibly_prepared':continue
             allocation=c.read(originals.resolve_ref(originals.source_for_ref(source,row['allocation']),row['allocation']))
             if allocation['call_id']!=row['call_id'] or allocation['binding']['scope']['job_sha256']!=seal['job_sha256']:
                 raise history.ObserverIntegrityError('Unknown preparation lost its original allocation')
             result[(job['step'],row['call_id'])]=dict(row=None,phase='original_prepare_unknown',native_state=None)
+        # A host snapshot may precede any accepted call, including configurations
+        # without execution authority. Its durable identity survives local discard
+        # and remains an unknown original across later W nodes.
+        for ref in value.get('host_preparations', []):
+            from . import preparation_recovery
+            binding=c.read(q._source_path(source,ref))
+            config=c.read(q._source_path(source,binding['configuration']))
+            call=binding.get('call_id');token=binding.get('snapshot_token')
+            path=Path(ref['path'])
+            path=path if path.is_absolute() else Path(source.original_root)/path
+            records=Path(config['record_dir'])
+            if (binding.get('version')!=1 or binding.get('kind')!='host_preparation_snapshot'
+                    or not isinstance(call,str) or not e.ID.fullmatch(call) or call in {'.','..'}
+                    or not isinstance(token,str) or not preparation_recovery.TOKEN.fullmatch(token)
+                    or not records.is_relative_to(source.original_root)
+                    or path!=records/'host-preparations'/call/(token+'.json')
+                    or binding.get('records')!=str(records) or binding.get('scope')!=config.get('scope')
+                    or binding['scope'].get('job_sha256')!=seal['job_sha256']
+                    or binding.get('job',{}).get('sha256')!=value['job']['sha256']):
+                raise history.ObserverIntegrityError('Unknown host preparation lost its original binding')
+            result[(job['step'],call)]=dict(row=None,phase='original_prepare_unknown',native_state=None)
     return result
 
 

@@ -287,6 +287,9 @@ def _quiescent(root):
     for records in _managed_roots(root):
         if any(records.glob('.prepared-*')):
             raise files.ArchiveError('Original preparation has not completed acceptance')
+        from . import preparation_recovery
+        if any(not row['resolved'] for row in preparation_recovery.retained_preparations(root, records)):
+            raise files.ArchiveError('Retained original host preparation is unresolved')
         for call in sorted((records / 'calls').glob('*')):
             accepted = _read(call / 'accepted.json'); interface = accepted['interface']
             if (call / 'submission-retirement.json').exists():
@@ -995,7 +998,13 @@ def _validate_restored_payload(root, package, checkpoint, restored, metadata, *,
                 raise files.ArchiveError('Pending restore directory is unavailable or changed: ' + name)
     prefix = 'host-runtime/restore/' + checkpoint['transaction']
     extra = {'pause.request','host-runtime','host-runtime/restore',prefix,
-        prefix+'/checkpoint.json',prefix+'/transfer.json'}
+        prefix+'/checkpoint.json',prefix+'/transfer.json',prefix+'/archive.json',prefix+'/manifest.jsonl'}
+    for name, proof in (('archive.json', checkpoint['payload_ref']), ('manifest.jsonl', metadata['manifest'])):
+        retained = root / prefix / name
+        if retained.exists():
+            actual = files.hash_file(retained, context=context)
+            if any(actual[key] != proof[key] for key in ('sha256','size_bytes')):
+                raise files.ArchiveError('Pending restore retained manifest changed')
     for entry in _inventory(root, context=context):
         name = entry['path']
         if name == 'pause.request' and name not in expected and _read(root/name) != dict(reason='cold_checkpoint_restored'):
@@ -1094,6 +1103,16 @@ def checkpoint_restore(root, package, *, independent=False):
             source = package / 'checkpoint.json'
             files.copy_verified(source, receipt / 'checkpoint.json', dict(kind='file', **checkpoint_proof), context=context)
             checkpoint_ref = q._ref(root, receipt / 'checkpoint.json')
+            # Retain the two original control manifests so historical snapshot
+            # bindings can verify their cold inheritance without the package.
+            # Payload bytes remain solely in their original restored locations.
+            for name in ('archive.json', 'manifest.jsonl'):
+                source = package / 'payload' / name
+                original = files.hash_file(source, context=context)
+                expected = checkpoint['payload_ref'] if name == 'archive.json' else metadata['manifest']
+                if any(original[key] != expected[key] for key in ('sha256','size_bytes')):
+                    raise files.ArchiveError('Cold restore control manifest source changed')
+                files.copy_verified(source, receipt / name, dict(kind='file', **original), context=context)
             transfer = dict(version=1, kind='owner_restore', transaction=checkpoint['transaction'],
                 checkpoint_ref=checkpoint_ref, instance_id=binding['instance_id'], original_root=str(root),
                 anchor_id=binding['anchor_id'], host=binding['host'], from_generation=binding['generation'],

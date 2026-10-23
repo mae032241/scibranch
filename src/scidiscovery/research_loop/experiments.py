@@ -845,7 +845,13 @@ class Records:
         from .protocol import require_scope
         require_scope(self.config['scope'])
         from . import contracts as c, storage_policy as storage
+        from . import preparation_recovery, experiment_client
         operation_context = storage.Deadline(self.config['max_seconds'],operation_context)
+        instance=experiment_client.root_for_configuration(self.config,allow_standalone=True)
+        if instance is not None:
+            unresolved=[row for row in preparation_recovery.retained_preparations(instance,self.root,context=operation_context)
+                if not row['resolved']]
+            if unresolved:raise ConcurrentExecution('Original host preparation is unresolved; preserve its exact call without replay')
         inventory = storage.Inventory(self.config.get('storage_policy'),context=operation_context)
         original=proof(descriptor.local_path,context=operation_context)
         if original['sha256']!=descriptor.sha256 or original['size_bytes']!=descriptor.size_bytes:
@@ -859,7 +865,10 @@ class Records:
         accepted = dict(metadata, call_id=descriptor.name, scope=self.config['scope'],
             source_script=descriptor.local_path, script=source_proof,native_attempt=self.config.get('native_attempt'),
             prepared=descriptor.model_dump(mode='json'), interface=interface)
+        host_preparation=None
         try:
+            host_preparation=preparation_recovery.bind_snapshot(self.config,directory,descriptor,accepted,context=operation_context)
+            if host_preparation is not None:accepted['host_preparation']=host_preparation
             files = metadata.get('snapshot_files', [])
             if not isinstance(files,list):raise ValueError('Managed input inventory required')
             if not files:inventory.file(descriptor.size_bytes)
@@ -894,9 +903,14 @@ class Records:
                     write(directory/'accepted.json',accepted,root=self.storage_root(),
                         policy=self.config.get('storage_policy'),context=operation_context)
                     destination.parent.mkdir(exist_ok=True)
-                    directory.rename(destination)
+                    from . import instance_archive
+                    instance_archive._publish(directory,destination)
         finally:
-            if directory.exists():shutil.rmtree(directory)
+            if directory.exists():
+                if host_preparation is None:shutil.rmtree(directory)
+                elif not (directory/'accepted.json').exists():
+                    preparation_recovery.discard_owned_snapshot(self.config,host_preparation,
+                        reason='Original writer cleanup after incomplete acceptance',context=storage.Deadline(65))
         return accepted
 
     @_configuration_effect
@@ -1343,10 +1357,17 @@ def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None
     from .protocol import require_scope
     require_scope(config.get('scope'))
     _require_new_execution(config)
-    if config.get('host_execution_authority') is not None:
-        from . import execution_authority,execution_recovery
-        root,_,_=execution_authority._host_context(config)
-        if execution_recovery.pending(root):
+    from . import preparation_recovery, experiment_client, storage_policy as storage
+    instance=experiment_client.root_for_configuration(config,allow_standalone=True)
+    if instance is not None:
+        unresolved=[row for row in preparation_recovery.retained_preparations(instance,Path(config['record_dir']),context=storage.Deadline(65)) if not row['resolved']]
+        if unresolved:
+            row=unresolved[0]
+            return dict(status='unknown',call_id=row['call_id'],
+                note='Original host preparation is unresolved; no new preparation or submission is permitted.')
+    if instance is not None:
+        from . import execution_recovery
+        if execution_recovery.pending(instance):
             return dict(status='unknown',note='Original host execution recovery is unresolved; preserve its identity without a new call.')
     repair=config.get('engineering_repair')
     if repair is not None and (parent!=repair['candidate_id'] or new or not change or Records(config).calls()):
@@ -1633,7 +1654,36 @@ def main(argv=None):
                 parent=candidate_refs.resolve_reference(root,job,parent)
             result=dispatch(config,args.script or args.payload,parent=parent,new=args.new_plan,change=args.change_intent,mechanism=args.mechanism,
                 command_options=options if arguments or args.experiment_dir else None)
-            observation=Records(config).directory(result['call_id'])/'execution-observation.json' if isinstance(result.get('call_id'),str) else None
+            observation=None
+            if isinstance(result.get('call_id'),str):
+                call_id=result['call_id'];records=Records(config)
+                if not ID.fullmatch(call_id) or call_id in {'.','..'}:
+                    raise IntegrityError('Execution response changed its exact original call identity')
+                approval=result.get('status')=='authorization_required'
+                if approval:
+                    from . import execution_authority,qualification as q
+                    root,job,intent=execution_authority._host_context(config)
+                    request_ref=result.get('authorization_request')
+                    if not isinstance(request_ref,dict) or not isinstance(request_ref.get('path'),str):
+                        raise IntegrityError('Execution approval response has no original request')
+                    request,actual=execution_authority.request(root,Path(request_ref['path']).parent.name)
+                    if (request_ref!=actual or request.get('call_id')!=call_id
+                            or request.get('job')!=q._ref(root,root/'jobs'/f'{job["step"]:03d}.json')
+                            or request.get('native_intent')!=intent):
+                        raise IntegrityError('Execution approval response escaped its original task and call')
+                directory=records.root/'calls'/call_id
+                if directory.resolve()!=directory:
+                    raise IntegrityError('Execution response call namespace changed')
+                preaccept_unknown=False
+                if result.get('status')=='unknown' and not directory.exists():
+                    from . import preparation_recovery,experiment_client,storage_policy as storage
+                    root=experiment_client.root_for_configuration(config,allow_standalone=True)
+                    if root is not None:
+                        preaccept_unknown=any(row['call_id']==call_id and not row['resolved']
+                            for row in preparation_recovery.retained_preparations(root,records.root,context=storage.Deadline(65)))
+                if not (approval or preaccept_unknown) or directory.exists():
+                    records.accepted(call_id)
+                    observation=records.directory(call_id)/'execution-observation.json'
             if observation is not None and observation.exists():
                 observed=json.loads(read(observation))
                 verify_observation(observed,lambda item:Path(item['path']),interface=config['execution_interface'])

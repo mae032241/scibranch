@@ -682,6 +682,19 @@ either effective independent mode. Checkpoint export and restore freeze the mode
 in the original transaction; retries cannot switch it. New packages use archive
 format 3 and checkpoint format 2; older packages remain inspect-only. Derived
 workspace mount identities are excluded and rebuilt before a new native launch.
+Unpublished preparation snapshots retain one exact host binding before input
+materialization. Explicit maintenance can finish publication of an already durable,
+admitted accepted record, or discard only a partial snapshot with the original
+directory identity. Neither action reruns prepare, admission or submission. A
+discarded unresolved binding remains unknown in pending recovery and later Worker
+views, and blocks new preparation, fork and archive paths, including configurations
+without execution authority. Original permissions, reservations and consumption remain unchanged.
+Historical published bindings retain their original bytes across enrollment and
+cold restoration; restored archive metadata proves their provenance without the
+backup package remaining online. Reading that history grants no live maintenance
+authority over a different directory generation. Legacy unbound temporary
+directories remain unsupported for automatic cleanup.
+
 Ordinary read-only archives grant no advancing restore permission. Cross-host recovery,
 lost anchors and arbitrary native external reads remain outside support.
 Source/HTTP/synthetic-process checks do not qualify real browsers, native Codex continuation,

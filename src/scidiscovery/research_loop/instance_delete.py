@@ -79,7 +79,8 @@ def _check_mounts(root):
         raise DeleteError('delete_mount_unsafe', 'Delete target contains a mounted tree')
 
 
-def _preflight_tree(root, identity):
+def _preflight_tree(root, identity, *, context=None):
+    if context is not None:context.remaining_seconds()
     _same(root, identity)
     _check_mounts(root)
     if not shutil.rmtree.avoids_symlink_attacks:
@@ -87,9 +88,11 @@ def _preflight_tree(root, identity):
     def failed(error):
         raise error
     for current, directories, names in os.walk(root, followlinks=False, onerror=failed):
+        if context is not None:context.remaining_seconds()
         current = Path(current)
         originals = {}
         for name in directories + names:
+            if context is not None:context.remaining_seconds()
             path = current / name
             info = path.lstat()
             if stat.S_ISLNK(info.st_mode):
@@ -123,7 +126,7 @@ def _publish_retirement(root, tombstone):
     archive._publish(root, tombstone)  # Atomic no-replacement rename and parent fsync.
 
 
-def _remove_tree(root, identity):
+def _remove_tree(root, identity, *, context=None):
     # Directory inodes cannot be hard-linked by supported instance storage.
     # Open without following links, and never chmod a shared regular inode.
     if not shutil.rmtree.avoids_symlink_attacks:
@@ -132,6 +135,7 @@ def _remove_tree(root, identity):
     def failed(error):
         raise error
     for current, _, _ in os.walk(root, followlinks=False, onerror=failed):
+        if context is not None:context.remaining_seconds()
         path = Path(current)
         expected = path.lstat()
         fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -144,7 +148,47 @@ def _remove_tree(root, identity):
         finally:
             os.close(fd)
     _same(root, identity)
-    shutil.rmtree(root)
+    if context is None:
+        shutil.rmtree(root)
+    else:
+        # shutil's safe fd traversal has no per-entry deadline callback. Keep
+        # the same no-follow/inode fences while checking this finite operation
+        # before every unlink, open and rmdir; default instance deletion above
+        # retains its original traversal.
+        def remove(descriptor):
+            for name in os.listdir(descriptor):
+                context.remaining_seconds()
+                expected = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                if stat.S_ISDIR(expected.st_mode):
+                    child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        dir_fd=descriptor)
+                    try:
+                        actual = os.fstat(child)
+                        if ((actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino)
+                                or actual.st_dev != identity['dev']):
+                            raise DeleteError('delete_identity_changed', 'Delete directory changed during cleanup')
+                        remove(child)
+                    finally:
+                        os.close(child)
+                    context.remaining_seconds()
+                    current = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    if (current.st_dev,current.st_ino) != (expected.st_dev,expected.st_ino):
+                        raise DeleteError('delete_identity_changed', 'Delete directory changed before unlink')
+                    os.rmdir(name, dir_fd=descriptor)
+                else:
+                    context.remaining_seconds()
+                    os.unlink(name, dir_fd=descriptor)
+        descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            actual = os.fstat(descriptor)
+            if dict(dev=actual.st_dev, ino=actual.st_ino) != identity:
+                raise DeleteError('delete_identity_changed', 'Delete target directory identity changed')
+            remove(descriptor)
+        finally:
+            os.close(descriptor)
+        context.remaining_seconds()
+        _same(root, identity)
+        os.rmdir(root)
     files.fsync_directory(root.parent)
 
 
