@@ -75,7 +75,7 @@ def scene(tmp_path, actions, *, count=2, audit=True, selective_failure=False, ma
         assert not list((root/'control-ledger').glob('*.json')) and not list((root/'jobs').glob('*.json'))
         settings.pop('final_a_completion_policy')
         c.write(root/'settings.json',settings)
-        c.write(root/'settings-identity.json',dict(sha256=c.digest(root/'settings.json')))
+        c.write(root/'settings-identity.json',dict(path='settings.json'))
     (root/'runs').mkdir();(root/'submission').mkdir()
     (root/'runs/model.bin').write_bytes(b'exact original fixture model')
     finish(root,1,'H',[],action='experiment')
@@ -341,7 +341,7 @@ def test_ordinary_a_deliver_requires_one_final_author_with_exact_w_source(tmp_pa
     assert budget.closeout_state(root)['begin']['mode']=='final'
     assert budget.closeout_state(root)['begin']['source_cutoff']==3
     binding=budget.closeout_state(root)['actions'][0]['intent']['binding']
-    assert binding['source']['objects']['source.py']['sha256']==c.digest(c.workspace(root,2)/'artifacts/train.py')
+    assert Path(binding['source']['objects']['source.py']['path']).read_bytes()==(c.workspace(root,2)/'artifacts/train.py').read_bytes()
     phases=[c.read(path)['phase'] for path in (root/'host-delivery/leaf-output').glob('*.json')]
     assert phases.count('audit')==1 and phases.count('promote')==1 and phases.count('confirm')==1
     assert command(root,'run')['status']=='delivery_confirmed'
@@ -394,7 +394,7 @@ def test_ordinary_audit_failure_reselects_before_one_final_delivery_without_e(tm
     result=command(root,'run')
     assert result['status']=='exported_unsubmitted',result
     rejected=candidate_audit._outcome(root,3)
-    assert rejected['result']['status']=='rejected' and rejected['process_sha256']
+    assert rejected['result']['status']=='rejected' and rejected['process_ref']
     originals={path:path.read_bytes() for path in (root/'jobs/003.json',root/'native-evidence/003/result-identity.json',
         root/'native-evidence/003/science-output.json',candidate_audit._directory(root,3)/'outcome.json')}
     assert not budget.closeout_state(root)['actions'] and not (root/'submission/model.pkl').exists()

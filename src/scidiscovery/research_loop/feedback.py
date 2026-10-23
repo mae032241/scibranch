@@ -85,19 +85,19 @@ def live(root, job):
     intent_path = chains[-1] / 'native-intent.json'
     if not intent_path.exists():
         return result
-    task = c.digest(root / 'jobs' / f'{job["step"]:03d}.json')
+    task = c.record_ref(root / 'jobs' / f'{job["step"]:03d}.json')
     try:
         intent = c.read(c.regular(intent_path))
     except (json.JSONDecodeError, UnicodeDecodeError):
         return result
     except (OSError, ValueError, RecursionError) as error:
         raise history.ObserverIntegrityError('Live feedback original intent cannot be read') from error
-    if not isinstance(intent, dict) or intent.get('task_sha256') != task:
+    if not isinstance(intent, dict) or intent.get('task_ref') != task:
         raise history.ObserverIntegrityError('Live feedback original task identity changed')
     keys = [execution.identity(root, job['step'], attempt) for attempt in range(len(chains))]
     if not keys:
         return result
-    scope = dict(step=job['step'], role=job['role'], job_sha256=task,
+    scope = dict(step=job['step'], role=job['role'], job_ref=task,
         execution_keys=keys, mechanism_ref=None if (job.get('search') or {}).get('breadth') else ((job.get('search') or {}).get('focus') or {}).get('mechanism_ref'))
     request = dict(progress_version=VERSION, root=str(root), step=job['step'], scope=scope,
         config=config['config'] if not registered else None)
@@ -108,7 +108,7 @@ def live(root, job):
             if not path.exists():return result
             frozen=c.read(c.regular(path))
             bound=frozen['scope']
-            if (bound['step']!=scope['step'] or bound['role']!=scope['role'] or bound['job_sha256']!=task
+            if (bound['step']!=scope['step'] or bound['role']!=scope['role'] or bound['job_ref']!=task
                     or bound['execution_key'] not in keys or bound['mechanism_ref']!=scope['mechanism_ref']):
                 raise history.ObserverIntegrityError('Registered experiment observation escaped its frozen task')
             try:

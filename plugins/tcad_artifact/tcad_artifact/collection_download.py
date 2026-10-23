@@ -1,7 +1,6 @@
 """Extract a bounded result archive against the exact frozen file manifest."""
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,7 +13,7 @@ HEADER_LIMIT = 1024 * 1024
 
 def unpack_results(archive_path, items, records, *, context, on_complete):
     # Never extractall: only predetermined local paths may be written, and only
-    # after the corresponding regular member has matched its frozen digest.
+    # after the corresponding regular member has matched its frozen name and size.
     with tarfile.open(archive_path, mode="r|") as archive:
         manifest = archive.next()
         if (manifest is None or manifest.name != "manifest.json" or not manifest.isreg()
@@ -40,13 +39,13 @@ def unpack_results(archive_path, items, records, *, context, on_complete):
             fd, temporary = tempfile.mkstemp(prefix="." + path.name + ".", suffix=".download", dir=path.parent)
             temporary = Path(temporary)
             try:
-                digest = hashlib.sha256()
+                size = 0
                 with os.fdopen(fd, "wb") as target, archive.extractfile(member) as source:
                     for block in iter(lambda: source.read(1024 * 1024), b""):
                         check()
                         target.write(block)
-                        digest.update(block)
-                    if digest.hexdigest() != descriptor.sha256:
+                        size += len(block)
+                    if size != descriptor.size_bytes:
                         raise RuntimeError("downloaded result differs from remote descriptor")
                     target.flush()
                     os.fsync(target.fileno())

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
 import fcntl
-import hashlib
 import os
 from pathlib import Path
 import re
@@ -195,7 +194,7 @@ def _remove_tree(root, identity, *, context=None):
 def _verify_instance(root, request):
     settings = c.settings(root)
     if (settings.get('goal_id') != request['instance_id']
-            or c.digest(root / 'settings.json') != request['settings_sha256']):
+            or c.record_ref(root / 'settings.json') != request['settings_ref']):
         raise DeleteError('delete_identity_mismatch', 'Explicit instance identity differs from the frozen original')
     if type(settings.get('handoff_protocol')) is not int or settings['handoff_protocol'] != protocol.CURRENT:
         raise protocol.UnsupportedProtocol('Instance deletion')
@@ -222,7 +221,7 @@ def _retire_anchor(directory, anchor, record, state):
 
 def _receipt(path, record):
     return dict(status='instance_deleted', operation_id=record['request']['operation_id'],
-        instance_id=record['request']['instance_id'], settings_sha256=record['request']['settings_sha256'],
+        instance_id=record['request']['instance_id'], settings_ref=record['request']['settings_ref'],
         original_root=record['request']['root'], receipt=str(path))
 
 
@@ -239,9 +238,9 @@ def _validate_record(record, request, parent_identity, tombstone):
         raise DeleteError('delete_operation_conflict', 'Operation ID is bound to another request or storage identity')
     binding = record['owner_binding']
     if binding is not None and (not isinstance(binding, dict)
-            or set(binding) != {'version', 'instance_id', 'settings_sha256', 'root', 'host',
+            or set(binding) != {'version', 'instance_id', 'settings_ref', 'root', 'host',
                                 'anchor', 'anchor_id', 'generation'}
-            or any(binding.get(key) != request[key] for key in ('instance_id', 'settings_sha256', 'root'))
+            or any(binding.get(key) != request[key] for key in ('instance_id', 'settings_ref', 'root'))
             or binding.get('host') != owner._host()
             or type(binding.get('generation')) is not int or binding['generation'] <= 0):
         raise DeleteError('delete_owner_conflict', 'Delete receipt lost its exact external owner binding')
@@ -315,11 +314,11 @@ def _perform(root, path, record):
         return _receipt(path, record)
 
 
-def delete_instance(root, *, instance_id, settings_sha256, operation_id):
+def delete_instance(root, *, instance_id, settings_ref, operation_id):
     """Permanently delete only the exact named quiescent instance or its tombstone."""
     if (not isinstance(instance_id, str) or not instance_id
-            or not isinstance(settings_sha256, str) or not re.fullmatch('[0-9a-f]{64}', settings_sha256)):
-        raise DeleteError('delete_identity_required', 'Exact instance ID and frozen settings SHA256 are required')
+            or not isinstance(settings_ref, dict) or set(settings_ref) != {'path'}):
+        raise DeleteError('delete_identity_required', 'Exact instance ID and frozen settings reference are required')
     try:
         files.safe_id(operation_id)
     except files.ArchiveError as error:
@@ -339,11 +338,11 @@ def delete_instance(root, *, instance_id, settings_sha256, operation_id):
     directory.mkdir(mode=0o700, exist_ok=True)
     files.fsync_directory(parent)
     owner._private_stat(directory.lstat(), directory=True)
-    key = hashlib.sha256(operation_id.encode()).hexdigest()
+    key = operation_id
     path = directory / (key + '.json')
-    tombstone = parent / ('.scid-delete-' + key[:24])
-    target_key = hashlib.sha256(os.fsencode(root.name)).hexdigest()
-    request = dict(root=str(root), instance_id=instance_id, settings_sha256=settings_sha256,
+    tombstone = parent / ('.scid-delete-' + key)
+    target_key = 'all-targets'
+    request = dict(root=str(root), instance_id=instance_id, settings_ref=settings_ref,
                    operation_id=operation_id)
     with _lock(directory / (key + '.lock')), _lock(directory / ('target-' + target_key + '.lock')):
         _same(parent, parent_identity)

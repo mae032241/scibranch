@@ -54,7 +54,7 @@ def assess(root, job, payload, *, focus=None):
     sources = {}
     for ref in job['history']['nodes']:
         source = history._source(root, ref['step'])
-        if source[3] != ref['seal_sha256']:
+        if source[3] != ref['seal_ref']:
             raise ValueError('Decision request scientific prefix identity changed')
         sources[ref['step']] = source
     for original, prior, seal, _ in sources.values():

@@ -1,7 +1,5 @@
 """Overview, result and workspace pages: read-only display, unchanged controls."""
-import base64
 import copy
-import hashlib
 import re
 from urllib.parse import urlencode
 
@@ -11,7 +9,6 @@ from scidiscovery.research_loop import instance_render as render
 from test_execution_authority import prepare
 from test_history_handoff import finish
 from test_instance_ui import session
-from ui_html import element_texts
 
 
 def text(page):
@@ -78,7 +75,7 @@ def test_overview_and_live_usage_share_weighted_cache_and_latest_exact_context(t
     assert 'token-monitor' not in fragments['live-usage']
     assert page.index('id="live-hero"') < page.index('id="live-usage"') < page.index('id="live-activity"') < page.index('id="live-trail"') < page.index('id="live-token-monitor"') < page.index('class="more-actions"')
     continuation = root / 'native-evidence/002/continuations/001'
-    c.write(continuation / 'native-intent.json', dict(task_sha256='fixture'))
+    c.write(continuation / 'native-intent.json', dict(task_ref='fixture'))
     latest = ui_saved_status.status(root)['usage']
     assert latest['context'] == dict(status='unavailable', step=2, attempt=1)
     assert latest['observed_tokens'] == 407
@@ -204,10 +201,10 @@ def test_result_pages_lead_with_the_conclusion_and_keep_the_original(tmp_path):
     assert '未推荐' in page and 'L1' in page and 'L3' in page and '另有 1 条局限' in page
     assert '本阶段 0 份；截至本阶段，各阶段共 1 份研究文件' in page and 'href="/nodes/1/materials"' in page
     assert 'Final &lt;b&gt;judgment&lt;/b&gt;' in page and '研究发现' in page and '/nodes/2/science' in page
-    assert element_texts(page, 'script') == [render.translation_client.SCRIPT, render.PROGRESS_SCRIPT]
+    assert re.findall(r'<script src="([^"]+)"></script>', page) == ['/assets/translation.js', '/assets/progress.js']
     h = text(ui.get('/results/1', host=ui.host, cookie=cookie)[1])
     assert 'class="role-line"' in h and 'id="full-text"' not in h
-    assert element_texts(h, 'script') == [render.translation_client.SCRIPT]
+    assert re.findall(r'<script src="([^"]+)"></script>', h) == ['/assets/translation.js']
     listing = text(ui.get('/results', host=ui.host, cookie=cookie)[1])
     assert listing.count('href="/results/2"') == 1 and listing.index('/results/2') < listing.index('/results/1')
     assert files(root) == before
@@ -215,25 +212,26 @@ def test_result_pages_lead_with_the_conclusion_and_keep_the_original(tmp_path):
         ui.get('/results/3', host=ui.host, cookie=cookie)
 
 
-def test_csp_keeps_hash_only_inline_sources(tmp_path):
+def test_csp_uses_same_origin_static_assets_without_inline_sources(tmp_path):
     assert "'unsafe-inline'" not in render.CSP and "'unsafe-eval'" not in render.CSP
     directives = dict((parts[0], set(parts[1:])) for directive in render.CSP.split(';') if (parts := directive.split()))
-    assert {key: value for key, value in directives.items() if key not in {'script-src', 'style-src'}} == {
+    assert directives == {
         'default-src': {"'none'"}, 'connect-src': {"'self'"}, 'form-action': {"'self'"},
-        'frame-ancestors': {"'none'"}, 'base-uri': {"'none'"}}
+        'frame-ancestors': {"'none'"}, 'base-uri': {"'none'"},
+        'script-src': {"'self'"}, 'style-src': {"'self'"}}
     root, key = prepare(tmp_path, enabled=False)
     ui, cookie = session(root, key)
-    sources = {'script': set(), 'style': set()}
     for path in ('/', '/configuration', '/guidance'):
         status, body, _ = ui.get(path, host=ui.host, cookie=cookie)
         page = text(body)
-        assert status == 200 and not re.search(r'<script\b[^>]*\bsrc\s*=', page, re.I)
-        for tag in sources:
-            for inline in element_texts(page, tag):
-                digest = base64.b64encode(hashlib.sha256(inline.encode()).digest()).decode()
-                sources[tag].add("'sha256-" + digest + "'")
-    for tag, hashes in sources.items():
-        assert hashes and directives[tag + '-src'] == hashes
+        assert status == 200
+        assert '<link rel="stylesheet" href="/assets/style.css">' in page
+        assert '<style' not in page
+        scripts = re.findall(r'<script([^>]*)>(.*?)</script>', page, re.S)
+        assert scripts and all('src="/assets/' in attributes and not inline for attributes, inline in scripts)
+    for path in ('/assets/style.css', '/assets/translation.js', '/assets/progress.js'):
+        status, body, _ = ui.get(path, host=ui.host, cookie=cookie)
+        assert status == 200 and body
     ui.translation.close()
 
 

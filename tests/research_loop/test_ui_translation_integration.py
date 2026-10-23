@@ -101,7 +101,7 @@ def test_narrative_annotation_preserves_exact_text_and_static_page_script():
     assert '<script>' not in marked
     assert ui.esc(source) == html.escape(source, quote=True)
     page = render.page('Static result', ui.translatable(source), live=False).decode()
-    assert render.translation_client.SCRIPT in page and render.PROGRESS_SCRIPT not in page
+    assert '/assets/translation.js' in page and '/assets/progress.js' not in page
     assert render.translation_client.CSP in render.CSP
     assert 'node.textContent = text' in render.translation_client.SCRIPT
     assert 'innerHTML' not in render.translation_client.SCRIPT

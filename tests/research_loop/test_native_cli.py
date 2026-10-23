@@ -307,7 +307,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':7,'cached_inpu
         job['history'].pop('candidate_references')
         contracts.write(root / 'jobs/001.json', job)
         contracts.write(work / 'science-task.json', contracts.science_view(job, root))
-    intent = dict(task_sha256=contracts.digest(root / 'jobs/001.json'),
+    intent = dict(task_ref=contracts.record_ref(root / 'jobs/001.json'),
         **native.profiles.binding(contracts.settings(root), job))
     anchor = native.control_budget.accept_node(root, job)
     if anchor is not None:intent['budget_slice'] = anchor
@@ -412,7 +412,7 @@ c.write=held_write
         if runner.exists():
             receipt = contracts.read(runner)
             deadline = time.monotonic() + 5
-            while original_matches(receipt, receipt['task_sha256']):
+            while original_matches(receipt, receipt['task_ref']):
                 assert time.monotonic() < deadline, 'Released fixture runner did not exit'
                 time.sleep(.01)
 
@@ -425,12 +425,12 @@ def test_cli_entrypoint_status_is_read_only(instance):
                             capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr + result.stdout
     assert json.loads(result.stdout)['completed_steps'] == 3
-    before = {p: contracts.digest(p) for p in instance.rglob('*') if p.is_file()}
+    before = {p: (p).read_bytes() for p in instance.rglob('*') if p.is_file()}
     result = subprocess.run([sys.executable, '-m', 'scidiscovery.research_loop.cli',
                              'status', '--root', str(instance)], env=environment,
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0
-    assert {p: contracts.digest(p) for p in instance.rglob('*') if p.is_file()} == before
+    assert {p: (p).read_bytes() for p in instance.rglob('*') if p.is_file()} == before
 
 
 def test_pause_and_continue_between_nodes(instance, capsys):
@@ -461,9 +461,9 @@ def test_native_without_usage_is_not_replayed(instance):
     script.write_text(script.read_text().replace("'turn.completed'", "'usage_unavailable'"))
     assert controller.run(instance)['status'] == 'native_stopped'
     log = contracts.host_record(contracts.workspace(instance, 1)) / 'native.jsonl'
-    before = contracts.digest(log)
+    before = (log).read_bytes()
     assert controller.run(instance)['status'] == 'native_outcome_unsealed'
-    assert contracts.digest(log) == before
+    assert (log).read_bytes() == before
 
 
 def test_tampered_direct_result_never_reaches_next_role(instance):
@@ -518,7 +518,7 @@ def test_terminal_wait_seals_only_after_the_exact_original_runner_exits(tmp_path
     from scidiscovery.research_loop import checkpoint,continuation
     root=tmp_path/'instance';record=root/'native-evidence/001'
     contracts.write(root/'jobs/001.json',dict(role=role))
-    runner=dict(pid=12345,task_sha256='original-call')
+    runner=dict(pid=12345,task_ref='original-call')
     contracts.write(record/'runner-process.json',runner)
     before={path:path.read_bytes() for path in root.rglob('*') if path.is_file()}
     events=[];alive=iter([True,False])
@@ -548,8 +548,8 @@ def test_wait_preserves_unknown_or_failed_original_without_resubmission(tmp_path
     from scidiscovery.research_loop import checkpoint,continuation
     root=tmp_path/'instance';record=root/'native-evidence/001'
     contracts.write(root/'jobs/001.json',dict(role='H'))
-    contracts.write(record/'runner-process.json',dict(pid=12345,task_sha256='original-call'))
-    contracts.write(record/'native-intent.json',dict(task_sha256=contracts.digest(root/'jobs/001.json')))
+    contracts.write(record/'runner-process.json',dict(pid=12345,task_ref='original-call'))
+    contracts.write(record/'native-intent.json',dict(task_ref=contracts.record_ref(root/'jobs/001.json')))
     if state=='terminal':contracts.write(record/'native-outcome.json',dict(returncode=7,stop_reason=None))
     before={path:path.read_bytes() for path in root.rglob('*') if path.is_file()}
     monkeypatch.setattr(execution,'record',lambda *a:record)

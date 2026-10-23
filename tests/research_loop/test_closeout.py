@@ -70,7 +70,7 @@ def historical_delivery_reserve(monkeypatch):
         settings = c.settings(root)
         settings.pop('final_a_completion_policy')
         c.write(root/'settings.json', settings)
-        c.write(root/'settings-identity.json', dict(sha256=c.digest(root/'settings.json')))
+        c.write(root/'settings-identity.json', dict(path='settings.json'))
         assert settings['node_budget_mode']=='soft'
         assert budget.delivery_reserve(settings)==dict(tokens=1100, seconds=65., steps=3)
         assert budget.closeout_floor(settings)==dict(tokens=100, seconds=35., steps=2)
@@ -155,14 +155,14 @@ def test_audit_only_launch_window_and_malformed_phase_are_unknown(tmp_path):
     budget.action_process(root, submit, 'promote', identity)
     path = root/'host-delivery/action-processes'/ (submit['action_id']+'-promote.json')
     valid = path.read_bytes()
-    fact = c.read(path);fact['identity']['task_sha256']='wrong'
+    fact = c.read(path);fact['identity']['task_ref']='wrong'
     c.write(path, fact)
     assert budget.execution_blocked(root, ignore_operation=binding['operation_id'])
     path.write_bytes(valid)
     assert not budget.execution_blocked(root, ignore_operation=binding['operation_id'])
     confirm = accepted(root, binding, 'confirm')
     budget.action_outcome(root, confirm, dict(status='confirmed', operation_id=binding['operation_id'],
-        candidate_id=binding['candidate_id'], artifact_sha256=binding['source']['objects']['artifact']['sha256'],
+        candidate_id=binding['candidate_id'], artifact_ref=binding['source']['objects']['artifact'],
         note='Same exact target verified', cleanup_confirmed=True))
     assert not budget.execution_blocked(root)
     budget.inactive(root, 'query_finished')
@@ -192,7 +192,7 @@ def test_historical_actual_popen_protects_reserve_with_original_anchor(tmp_path,
     budget.transition(root, 'advance', 'Original accepted science')
     job = c.build_job(root,1,'H',[])
     record = c.host_record(c.workspace(root,1))
-    c.write(record/'native-intent.json',dict(step=1,task_sha256=c.digest(root/'jobs/001.json'),budget_slice=budget.accept_node(root,job)))
+    c.write(record/'native-intent.json',dict(step=1,task_ref=c.record_ref(root/'jobs/001.json'),budget_slice=budget.accept_node(root,job)))
     original=(record/'native-intent.json').read_bytes()
     prepared=(root/'jobs/001.json').read_bytes()
     now[0]=340.  # 60 seconds remain: below the minimal soft closeout reserve=65.
@@ -235,7 +235,7 @@ def test_export_only_does_not_seal_retained_success_or_write_status_cache(tmp_pa
     record=c.host_record(c.workspace(root,1))
     c.write(root/'host-started.json',budget.clock_stamp())
     budget.transition(root,'advance','Retained original')
-    c.write(record/'native-intent.json',dict(step=1,task_sha256=c.digest(root/'jobs/001.json'),budget_slice=budget.accept_node(root,job)))
+    c.write(record/'native-intent.json',dict(step=1,task_ref=c.record_ref(root/'jobs/001.json'),budget_slice=budget.accept_node(root,job)))
     native.run_native(root,1)  # Native success alone is not a science seal.
     original={str(p):p.read_bytes() for p in record.rglob('*') if p.is_file()}
     monkeypatch.setattr(c,'seal_result',lambda *a:pytest.fail('Pure export never seals'))
@@ -289,7 +289,7 @@ def test_historical_closeout_a_keeps_execution_floor_after_preparation(tmp_path,
         assert not (record/'native-intent.json').exists()
     else:
         anchor=budget.accept_node(root,job)
-        c.write(record/'native-intent.json',dict(step=3,task_sha256=c.digest(root/'jobs/003.json'),budget_slice=anchor))
+        c.write(record/'native-intent.json',dict(step=3,task_ref=c.record_ref(root/'jobs/003.json'),budget_slice=anchor))
         # Spend beyond the original A allocation, but less than its reserved
         # execution floor. Popen checks that floor using the original anchor.
         now[0]=368.  # Remaining 32s < cleanup(3)+submit(20)+confirm(10).

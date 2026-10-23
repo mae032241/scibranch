@@ -1,6 +1,5 @@
 """Explicit finite continuation of a known local failure, never a fresh replay."""
 import json
-import hashlib
 import os
 import time
 from pathlib import Path
@@ -105,7 +104,7 @@ def session(root, step, record, *, home=None, session_path=None, identity_proof=
             event = json.loads(line)
             if event.get('type') == 'thread.started':
                 if event.get('thread_id') != thread:raise ValueError('Native thread identity changed')
-                thread_event_sha256=hashlib.sha256(line).hexdigest()
+                thread_event=event
                 found = True
                 break
     if not found:raise ResumeUnavailable('worker_resume_thread_unavailable')
@@ -121,10 +120,10 @@ def session(root, step, record, *, home=None, session_path=None, identity_proof=
         event = json.loads(line)
         if event.get('type') == 'session_meta' and event.get('payload', {}).get('id') == thread:
             validate_session_header(line, thread, c.workspace(root, step))
-            matches.append(dict(path=str(path), header_sha256=hashlib.sha256(line).hexdigest()))
+            matches.append(dict(path=str(path), header=event))
     if len(matches) != 1:raise ResumeUnavailable('worker_resume_session_unavailable')
     return dict(thread_id=thread, home=str(home), workspace=str(c.workspace(root, step)),
-                **(dict(thread_event_sha256=thread_event_sha256) if identity_proof else {}), **matches[0])
+                **(dict(thread_event=thread_event) if identity_proof else {}), **matches[0])
 
 
 
@@ -217,7 +216,7 @@ def output_request(root, step, record, *, source_attempt=None, verify_task=True)
             raise ValueError('Missing final output identity changed')
         error = OutputRepairRequired('missing_output', 'Return the required final scientific JSON; the completed work and checkpoints are already retained.')
     else:
-        if c.digest(c.regular(raw, limit=None)) != outcome.get('raw_sha256'):
+        if c.file_ref(c.regular(raw, limit=None)) != outcome.get('raw_ref'):
             raise ValueError('Original final output changed before repair')
         try:
             science=c.science_payload(raw, job['role'], job.get('handoff_protocol', 1), 'selection' in job,**c.response_options(job))
@@ -236,8 +235,8 @@ def output_request(root, step, record, *, source_attempt=None, verify_task=True)
     if source_attempt is None:
         source_attempt = len(execution.records(root, step)) - 1
     return dict(**error.request(), source_attempt=source_attempt,
-                outcome_sha256=c.digest(record / 'native-outcome.json'), raw_sha256=outcome.get('raw_sha256'),
-                **(dict(work_evidence_sha256=c.digest(record/'work-evidence.json')) if isinstance(error,WorkRepairRequired) else {}))
+                outcome_ref=c.record_ref(record / 'native-outcome.json'), raw_ref=outcome.get('raw_ref'),
+                **(dict(work_evidence_ref=c.record_ref(record/'work-evidence.json')) if isinstance(error,WorkRepairRequired) else {}))
 
 
 def validate_repair(root, step, intent, *, prior_record=None, verify_task=True):
@@ -310,10 +309,10 @@ def _eligible_original(root, step, paths, *, successful=False, wait_runner=False
         raise ResumeUnavailable('worker_resume_terminal_ineligible')
     binding = execution.identity(root, step, len(paths) - 1)
     for name in ('runner-process.json', 'native-process.json'):
-        if c.digest(c.regular(last / name)) != outcome.get('execution_processes', {}).get(name):
+        if c.record_ref(c.regular(last / name)) != outcome.get('execution_processes', {}).get(name):
             raise ValueError('Original execution process receipt changed')
         identity = c.read(c.regular(last / name))
-        if (identity.get('task_sha256') != binding or identity.get('boot_id') != budget.clock_stamp()['boot_id']
+        if (identity.get('task_ref') != binding or identity.get('boot_id') != budget.clock_stamp()['boot_id']
                 or any(type(identity.get(key)) is not int or identity[key] <= 0
                        for key in ('pid', 'start_ticks', 'pgid', 'sid', 'ppid'))):
             raise ValueError('Original execution process identity is invalid')
@@ -374,10 +373,9 @@ def fragment_start(root, step):
     record = execution.origin(root, step) / 'continuations' / f'{number:03d}'
     record.mkdir(parents=True, exist_ok=True)
     intent = dict(step=step, attempt=number, continuation_kind='fragment', context_mode=mode, **profile_binding,
-                  task_sha256=c.digest(root / 'jobs' / f'{step:03d}.json'),
-                  root_intent_sha256=c.digest(paths[0] / 'native-intent.json'), previous=execution.proof(last),
-                  fragment_checkpoint=dict(path=(last / 'checkpoint.json').relative_to(root).as_posix(),
-                                           sha256=c.digest(last / 'checkpoint.json')), budget_slice=anchor)
+                  task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json'),
+                  root_intent_ref=c.record_ref(paths[0] / 'native-intent.json'), previous=execution.proof(last),
+                  fragment_checkpoint=dict(path=(last / 'checkpoint.json').relative_to(root).as_posix()), budget_slice=anchor)
     if session_ref is not None:
         intent['session'] = session_ref
     else:
@@ -442,7 +440,7 @@ def start(root, step):
         if (execution.origin(root, later) / 'native-intent.json').exists():
             raise ResumeUnavailable('worker_resume_successor_present')
     original_intent = c.read(c.regular(paths[0] / 'native-intent.json'))
-    if original_intent.get('task_sha256') != c.digest(root / 'jobs' / f'{step:03d}.json'):
+    if original_intent.get('task_ref') != c.record_ref(root / 'jobs' / f'{step:03d}.json'):
         raise ValueError('Original native task identity changed')
     validate_task(root, step)
     _eligible_original(root, step, paths, successful=repair is not None, wait_runner=repair is not None)
@@ -455,8 +453,8 @@ def start(root, step):
     anchor = budget.accept_continuation(root, job, paths, output_repair=repair if not work_repair else None)
     record = execution.origin(root, step) / 'continuations' / f'{number:03d}'
     record.mkdir(parents=True, exist_ok=True)
-    intent = dict(step=step, attempt=number, continuation_kind='repair', **profile_binding, task_sha256=c.digest(root / 'jobs' / f'{step:03d}.json'),
-                  root_intent_sha256=c.digest(paths[0] / 'native-intent.json'), previous=execution.proof(last),
+    intent = dict(step=step, attempt=number, continuation_kind='repair', **profile_binding, task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json'),
+                  root_intent_ref=c.record_ref(paths[0] / 'native-intent.json'), previous=execution.proof(last),
                   session=session_ref, budget_slice=anchor,
                   **({('work_repair' if work_repair else 'output_repair'):repair} if repair is not None else {}))
     with (record / 'native-intent.json').open('x') as stream:
@@ -512,7 +510,7 @@ def wake_start(root,step,observations):
     record=execution.origin(root,step)/'continuations'/f'{number:03d}'
     record.mkdir(parents=True,exist_ok=True)
     intent=dict(step=step,attempt=number,continuation_kind='execution_wake',**profile_binding,
-        task_sha256=c.digest(root/'jobs'/f'{step:03d}.json'),root_intent_sha256=c.digest(paths[0]/'native-intent.json'),
+        task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),root_intent_ref=c.record_ref(paths[0]/'native-intent.json'),
         previous=execution.proof(last),session=session_ref,budget_slice=anchor,execution_wake=request)
     validate_wake(root,step,intent,last)
     with (record/'native-intent.json').open('x') as stream:

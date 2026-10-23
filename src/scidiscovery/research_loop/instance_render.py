@@ -1,11 +1,7 @@
 """Small escaped scientific result presentation, with no state or service imports."""
-import base64
-import hashlib
 import html
 import json
 
-from .configuration_form import SCRIPT_CSP as CONFIG_SCRIPT_CSP
-from .ui_guidance import SCRIPT_CSP as GUIDANCE_SCRIPT_CSP
 from . import ui_components as ui, ui_translation_client as translation_client
 
 
@@ -335,9 +331,7 @@ for (const button of document.querySelectorAll('[data-sort-group]')) {
   });
 }
 """
-SCRIPT_SOURCE = "'sha256-" + base64.b64encode(hashlib.sha256(PROGRESS_SCRIPT.encode()).digest()).decode() + "'"
-STYLE_SOURCE = "'sha256-" + base64.b64encode(hashlib.sha256(CSS.encode()).digest()).decode() + "'"
-CSP = "default-src 'none'; style-src " + STYLE_SOURCE + "; script-src " + SCRIPT_SOURCE + " " + CONFIG_SCRIPT_CSP + " " + GUIDANCE_SCRIPT_CSP + " " + translation_client.CSP + "; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+CSP = "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 
 
 def escape(value):
@@ -347,8 +341,8 @@ def escape(value):
 def page(title, body, *, live=False):
     return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1"><title>'+escape(title)
-        +'</title><style>'+CSS+'</style></head><body><main><div class="app-brand"><span class="brand-mark" aria-hidden="true">S</span>SciDiscovery<span class="brand-caption">研究工作空间</span></div><h1>'+escape(title)+'</h1>'
-        +translation_client.TOOLBAR+body+'</main><script>'+translation_client.SCRIPT+'</script>'+('<script>'+PROGRESS_SCRIPT+'</script>' if live else '')+'</body></html>').encode()
+        +'</title><link rel="stylesheet" href="/assets/style.css"></head><body><main><div class="app-brand"><span class="brand-mark" aria-hidden="true">S</span>SciDiscovery<span class="brand-caption">研究工作空间</span></div><h1>'+escape(title)+'</h1>'
+        +translation_client.TOOLBAR+body+'</main><script src="/assets/translation.js"></script>'+('<script src="/assets/progress.js"></script>' if live else '')+'</body></html>').encode()
 
 
 def excerpt(value, limit):

@@ -213,7 +213,7 @@ def test_partial_discard_retains_unknown_and_blocks_prepare_and_pending(tmp_path
     assert pending['contract'] is None and pending['complete'] is False
     assert pending['attempts'] == pending['allocations'] == pending['calls_namespace'] == []
     assert pending['host_preparations'] == [_pending_binding(root, row)]
-    seal = dict(job_sha256=c.digest(root / 'jobs/002.json'), pending_executions=ref)
+    seal = dict(job_ref=c.record_ref(root / 'jobs/002.json'), pending_executions=ref)
     assert execution_resume.verify_pending_set(root, seal)['complete'] is False
     with pytest.raises(ValueError):
         execution_resume.verify_pending_set(root, seal, unprepared=True)

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -30,19 +31,18 @@ def _submission_fixture(tmp_path):
         entry = tarfile.TarInfo("input.txt")
         entry.size = len(raw)
         target.addfile(entry, io.BytesIO(raw))
-    base = {"schema_version": 4, "execution_purpose": "development_debug",
+    base = {"schema_version": 5, "execution_purpose": "development_debug",
             "tool_profile": tool["profile_id"], "solver_kind": tool["solver_kind"],
             "capability_sha256": runner._capability_sha256(tool),
             "input_archive": runner._descriptor("input", str(archive), "application/x-tar"),
-            "archive_entries": [{"relative_path": "input.txt", "size_bytes": len(raw),
-                                 "sha256": runner._sha(raw)}],
+            "archive_entries": [{"relative_path": "input.txt", "size_bytes": len(raw)}],
             "arguments": [], "expected_outputs": [], "collect_generated_outputs": False,
             "limits": {"wall_time_seconds": 1, "cpu_time_seconds": 1,
                        "max_memory_bytes": 134217728, "max_output_bytes": 4096,
                        "max_storage_bytes": 131072}}
     submissions = []
     for identity in ("first", "second"):
-        job = dict(base, arguments=[identity])
+        job = dict(base, request_id=uuid.uuid4().hex, arguments=[identity])
         path = tmp_path / (identity + ".json")
         path.write_bytes(runner._canonical(job))
         submissions.append(runner._descriptor(identity, str(path), "application/json"))
@@ -176,7 +176,7 @@ def test_uncertain_remote_start_keeps_host_slot_reserved(tmp_path, monkeypatch, 
     monkeypatch.setattr(runner.subprocess, "Popen", unexpected_launch)
     with pytest.raises(RuntimeError, match="concurrent limit"):
         runner._submit(config, submissions[0])
-    assert runner._lookup_submission(config, submissions[0]["sha256"]) == {"found": False}
+    assert runner._lookup_submission(config, json.loads(Path(submissions[0]["local_path"]).read_bytes())["request_id"]) == {"found": False}
 
 
 def test_failed_remote_launch_is_not_retried_or_treated_as_free_capacity(tmp_path, monkeypatch):

@@ -1,5 +1,4 @@
 """Many-file collection uses the real runner protocol, bounded archive IO and checkpoints."""
-import hashlib
 import io
 import json
 import os
@@ -21,11 +20,11 @@ from scidiscovery.plugin_runtime.collection import CollectionContext
 def _descriptor(path, name=None):
     raw = path.read_bytes()
     return FileDescriptor(name=name or path.name, local_path=str(path), media_type="application/octet-stream",
-                          size_bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+                          size_bytes=len(raw))
 
 
 def _record(descriptor):
-    return {"local_path": descriptor.local_path, "size_bytes": descriptor.size_bytes, "sha256": descriptor.sha256}
+    return {"local_path": descriptor.local_path, "size_bytes": descriptor.size_bytes}
 
 
 def _archive(tmp_path, *, invalid=None):
@@ -44,14 +43,14 @@ def _archive(tmp_path, *, invalid=None):
         add('manifest.json', json.dumps([] if invalid == 'manifest' else records).encode())
         if invalid != 'missing':
             add('../escape' if invalid == 'path' else 'files/0',
-                b'wrong' if invalid == 'digest' else b'valid',
+                b'wrong-size' if invalid == 'size' else b'valid',
                 tarfile.SYMTYPE if invalid == 'symlink' else tarfile.REGTYPE)
         if invalid == 'extra':
             add('files/1', b'extra')
     return archive_path, [(descriptor, tmp_path / 'output')], records
 
 
-@pytest.mark.parametrize('invalid', ['manifest', 'missing', 'path', 'symlink', 'digest', 'extra'])
+@pytest.mark.parametrize('invalid', ['manifest', 'missing', 'path', 'symlink', 'size', 'extra'])
 def test_archive_rejects_invalid_members_without_accepting_collection(tmp_path, invalid):
     archive, items, records = _archive(tmp_path, invalid=invalid)
     with pytest.raises(RuntimeError):
@@ -97,7 +96,7 @@ def _client(tmp_path):
 
 
 @pytest.mark.process_e2e
-def test_900_generated_files_use_one_archive_and_reuse_verified_cache(tmp_path):
+def test_900_generated_files_use_one_archive_and_reuse_bound_copies(tmp_path):
     client, config, count, resolver_count = _client(tmp_path)
     run_id = 'run_' + 'a' * 32
     root = Path(config['result_root']) / run_id
@@ -108,9 +107,9 @@ def test_900_generated_files_use_one_archive_and_reuse_verified_cache(tmp_path):
         relative = f'profile_{index}.dat'
         path = work / relative
         path.write_bytes(b'' if index == 0 else (str(index).encode() + b'\n') * 128)
-        descriptor = _descriptor(path, 'generated_' + hashlib.sha256(relative.encode()).hexdigest())
+        descriptor = _descriptor(path, 'generated_' + str(index))
         outputs.append(dict(name=descriptor.name, relative_path=relative, media_type=descriptor.media_type,
-                            size_bytes=descriptor.size_bytes, sha256=descriptor.sha256))
+                            size_bytes=descriptor.size_bytes))
     (root/'submitted_at').write_text('2026-09-27T00:00:00Z')
     (root/'done').touch()
     (root/'worker.log').write_bytes(b'done\n')
@@ -133,7 +132,7 @@ def test_900_generated_files_use_one_archive_and_reuse_verified_cache(tmp_path):
     assert transport._collect(run_id, context=context) == result
     assert not stale.exists()
     assert len(count.read_text().splitlines()) == 3  # only manifest, no data
-    Path(result['outputs'][1]['local_path']).write_bytes(b'x' * result['outputs'][1]['size_bytes'])
+    Path(result['outputs'][1]['local_path']).write_bytes(b'wrong-size')
     assert transport._collect(run_id, context=context) == result
     assert len(count.read_text().splitlines()) == 5  # one-file repair archive
     evidence = Path(os.environ['SCID_TEST_LOG_DIR'])
@@ -159,8 +158,8 @@ def test_remote_archive_failure_cleans_partial_package_and_can_retry(tmp_path):
     assert destination.read_bytes() == b'good' and not list(tmp_path.glob('*.download'))
 
 
-@pytest.mark.parametrize('damage', ['none', 'checksum', 'truncated', 'overflow'])
-def test_archive_transport_checksum_fragmentation_and_cleanup(tmp_path, monkeypatch, damage):
+@pytest.mark.parametrize('damage', ['none', 'truncated', 'overflow'])
+def test_archive_transport_fragmentation_and_cleanup(tmp_path, monkeypatch, damage):
     client, config, _, _ = _client(tmp_path)
     source = Path(config['result_root']) / 'source'
     source.parent.mkdir(parents=True)
@@ -169,10 +168,9 @@ def test_archive_transport_checksum_fragmentation_and_cleanup(tmp_path, monkeypa
     wire = io.BytesIO()
     runner._stream_get_archive(config, {'files': [_record(descriptor)]}, wire)
     raw = wire.getvalue()
-    if damage == 'checksum':
-        raw = raw[:-2] + (b'0' if raw[-2:-1] != b'0' else b'1') + b'\n'
-    elif damage == 'truncated':
-        raw = raw[:-20]
+    if damage == 'truncated':
+        header,body=raw.split(b'\n',1)
+        raw=header+b'\n'+body[:1539]  # Three of seven bytes in the actual file member.
     elif damage == 'overflow':
         raw += b'x' * 20000
     monkeypatch.setattr(client, '_destination', lambda: 'fixture@local')
@@ -189,7 +187,7 @@ def test_archive_transport_checksum_fragmentation_and_cleanup(tmp_path, monkeypa
         client.get_many_to([(descriptor, target)], on_complete=lambda *_: None, on_progress=lambda _: None)
         assert target.read_bytes() == b'payload'
     else:
-        with pytest.raises(RuntimeError):
+        with pytest.raises((RuntimeError,tarfile.ReadError)):
             client.get_many_to([(descriptor, target)], on_complete=lambda *_: None, on_progress=lambda _: None)
         assert not target.exists()
     assert not list(tmp_path.glob('*.download'))
@@ -203,7 +201,7 @@ def test_archive_request_paginates_metadata_without_per_file_calls(tmp_path, mon
     monkeypatch.setattr('tcad_artifact.ssh_transport.HEADER_LIMIT', 1024)
     batches = []
     def batch(items, records, *_):
-        request = {'schema_version': 1, 'operation': 'get_archive', 'payload': {'files': records}}
+        request = {'schema_version': 2, 'operation': 'get_archive', 'payload': {'files': records}}
         from tcad_artifact.ssh_transport import _canonical
         assert len(_canonical(request)) + 1 <= 1024
         batches.append(len(items))
@@ -218,22 +216,20 @@ def test_archive_streams_large_member_without_full_file_buffers(tmp_path):
     source = Path(config['result_root'])/'large'
     source.parent.mkdir(parents=True)
     block = b'0123456789abcdef' * 65536
-    digest = hashlib.sha256()
     with source.open('wb') as stream:
         for _ in range(32):
             stream.write(block)
-            digest.update(block)
     descriptor = FileDescriptor(name='large', local_path=str(source), media_type='application/octet-stream',
-                                size_bytes=32*1024*1024, sha256=digest.hexdigest())
+                                size_bytes=32*1024*1024)
     target = tmp_path / 'result'
     progress = []
     client.context = CollectionContext.for_seconds(20)
     client.get_many_to([(descriptor, target)], on_complete=lambda *_: None, on_progress=progress.append)
     assert target.stat().st_size == descriptor.size_bytes
-    observed = hashlib.sha256()
-    with target.open('rb') as stream:
-        for data in iter(lambda: stream.read(1024*1024), b''):
-            observed.update(data)
-    assert observed.hexdigest() == descriptor.sha256
+    with source.open('rb') as expected,target.open('rb') as observed:
+        while True:
+            expected_block=expected.read(1024*1024)
+            assert observed.read(1024*1024)==expected_block
+            if not expected_block:break
     assert len(progress) >= 2 and progress[-1] >= descriptor.size_bytes
     assert not list(tmp_path.glob('*.download'))

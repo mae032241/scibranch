@@ -19,14 +19,14 @@ def advance(root,executor,options):
     anchor=budget.accept_continuation(root,job,[origin])
     assert anchor['previous_tokens']==10
     later=origin/'continuations/001';later.mkdir(parents=True)
-    c.write(later/'native-intent.json',dict(attempt=1,task_sha256=c.digest(root/'jobs/002.json'),
-        previous=execution.proof(origin),root_intent_sha256=c.digest(origin/'native-intent.json'),budget_slice=anchor))
+    c.write(later/'native-intent.json',dict(attempt=1,task_ref=c.record_ref(root/'jobs/002.json'),
+        previous=execution.proof(origin),root_intent_ref=c.record_ref(origin/'native-intent.json'),budget_slice=anchor))
     path=c.workspace(root,2)/'work/current-config.json'
     return e.configure(root,2,executor,options,path),path
 
 
 def projection(root,config):
-    return root/'host-runtime/experiment-control'/config['scope']['job_sha256']/'interfaces/000.json'
+    return root/'host-runtime/experiment-control'/f'{config["scope"]["step"]:03d}'/'interfaces/000.json'
 
 
 @pytest.mark.process_e2e
@@ -101,10 +101,10 @@ def test_original_projection_missing_or_tampered_fails_closed(tmp_path,monkeypat
         target=e.Records(old).directory(call)/'accepted.json';value=c.read(target)
         value['native_attempt']['number']=True;c.write(target,value)
     else:
-        if fault=='scope':value['scope']['execution_key']='f'*64
+        if fault=='scope':value['scope']['execution_key']=dict(path='/wrong/original.json')
         elif fault=='record':value['record_dir']+='/other'
-        elif fault=='attempt':value['native_attempt']['execution_key']='f'*64
-        elif fault=='interface':value['execution_interface']['config_sha256']='f'*64
+        elif fault=='attempt':value['native_attempt']['execution_key']=dict(path='/wrong/original.json')
+        elif fault=='interface':value['execution_interface']['config_record']='f'*64
         else:value['outcome']='known_failed'
         c.write(target,value)
     assert cli('query','--call-id',call,config_file=path,expected=3)['status']=='integrity_error'

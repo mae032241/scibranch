@@ -28,7 +28,7 @@ def case(tmp_path, monkeypatch, outcome='known_success', executor='remote_execut
     job=c.build_job(root,2,'W',[1]);record=execution.record(root,2)
     node_anchor=budget.accept_node(root,job)
     anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,job))
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json'),**anchor))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),**anchor))
     config_path=c.workspace(root,2)/'work/experiment-config.json'
     options=dict(outcome=outcome) if executor.startswith('remote_') else dict(run_argv=[sys.executable])
     options.update(extra or {})
@@ -77,11 +77,11 @@ def test_remote_cli_terminal_collect_history_worker_a_and_successor_admission(tm
     assert {row['name'] for row in saved['materials']}==expected_names
     outputs={f'experiments/{call["call_id"]}/artifacts/original':call['outputs'][0]
         for call in facts['managed_calls']}
-    assert len({output['sha256'] for output in outputs.values()})==1
+    assert len({(root/output['snapshot']).read_bytes() for output in outputs.values()})==1
     for row in saved['materials']:
         output=outputs[row['name']]
         assert row['original']['retention']=='archived'
-        assert all(row['original'][key]==output[key] for key in ('snapshot','sha256','size_bytes'))
+        assert all(row['original'][key]==output[key] for key in ('snapshot','size_bytes'))
         assert (root/row['original']['snapshot']).read_bytes()==b'opaque remote package; never interpreted as local Python'
     preview=checkpoint.brief(root,job,record)
     assert {row['name'] for row in preview['direct_files']}==expected_names and preview['omitted_files']==0
@@ -89,7 +89,6 @@ def test_remote_cli_terminal_collect_history_worker_a_and_successor_admission(tm
         and row['retention']=='archived' for row in preview['direct_files'])
     assert 'host-history' not in json.dumps(preview) and '/objects/' not in json.dumps(preview)
     assert str(root) not in json.dumps(preview)
-    assert all(output['sha256'] not in json.dumps(preview) for output in outputs.values())
     for row in facts['managed_calls']:
         assert row['terminal'] is None and row['observation']['retention']=='archived'
         assert len(row['outputs'])==1 and row['outputs'][0]['retention']=='archived'
@@ -97,12 +96,12 @@ def test_remote_cli_terminal_collect_history_worker_a_and_successor_admission(tm
         assert all(item['retention']=='archived' for item in row['originals'])
     a_job=c.build_job(root,3,'A',[1,2]);a_record=execution.record(root,3)
     materials=a_job['direct_materials']
-    assert len(materials)==2 and materials[0]['source']==materials[1]['source']
+    assert len(materials)==2 and materials[0]['source']!=materials[1]['source']
     assert materials[0]['path']!=materials[1]['path']
     assert not any(edge['kind']=='unknown' for edge in q._inputs(root,a_job)['edges'])
     unchanged_job=copy.deepcopy(a_job)
     before_negative={path:path.read_bytes() for path in root.rglob('*') if path.is_file()}
-    for key,value in (('sha256','0'*64),('size_bytes',materials[0]['size_bytes']+1),
+    for key,value in (('size_bytes',materials[0]['size_bytes']+1),
                       ('path',materials[0]['path']+'/forged')):
         forged=copy.deepcopy(a_job)
         forged['direct_materials'][0][key]=value
@@ -127,15 +126,15 @@ def test_remote_cli_terminal_collect_history_worker_a_and_successor_admission(tm
         next_action='continue_w',route_reason='Improve the chosen synthetic mechanism',
         decision_request=dict(decision='mechanism',question='Which observation changes the mechanism choice?',
             change_criterion='A new discriminating observation changes the choice'))
-    c.write(a_record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/003.json')))
+    c.write(a_record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/003.json')))
     c.write(a_record/'science-output.json',payload);c.write(a_record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
-    c.write(a_record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_sha256=c.digest(a_record/'science-output.json')))
+    c.write(a_record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_ref=c.file_ref(a_record/'science-output.json')))
     c.seal_result(root,3)
     assert search.project(root,4)['mechanisms']['h001.m1']['status']=='screened'
     successor=c.build_job(root,4,'W',[1,2,3]);next_record=execution.record(root,4)
     node_anchor=budget.accept_node(root,successor)
     anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,successor))
-    c.write(next_record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/004.json'),**anchor))
+    c.write(next_record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/004.json'),**anchor))
     next_config=e.configure(root,4,'remote_execution:fixture',{},c.workspace(root,4)/'work/experiment-config.json')
     assert not next_config['breadth']['prior_unknown']
     package=c.workspace(root,4)/'work/new-package';package.write_bytes(b'new authorized opaque input')
@@ -290,8 +289,8 @@ def test_managed_outputs_first_configured_on_later_attempt_use_that_host_interfa
     anchor=budget.accept_continuation(root,job,[origin])
     assert anchor['previous_tokens']==10
     later=origin/'continuations/001';later.mkdir(parents=True)
-    c.write(later/'native-intent.json',dict(attempt=1,task_sha256=c.digest(root/'jobs/002.json'),
-        previous=execution.proof(origin),root_intent_sha256=c.digest(origin/'native-intent.json'),budget_slice=anchor))
+    c.write(later/'native-intent.json',dict(attempt=1,task_ref=c.record_ref(root/'jobs/002.json'),
+        previous=execution.proof(origin),root_intent_ref=c.record_ref(origin/'native-intent.json'),budget_slice=anchor))
     path=c.workspace(root,2)/'work/later-config.json'
     current=e.configure(root,2,'remote_execution:fixture',{},path)
     package=c.workspace(root,2)/'work/later-package';package.write_bytes(b'later attempt opaque input')
@@ -311,7 +310,7 @@ def test_managed_outputs_first_configured_on_later_attempt_use_that_host_interfa
     anchor=budget.accept_continuation(root,job,[origin,later])
     assert anchor['previous_tokens']==17
     last=origin/'continuations/002';last.mkdir()
-    c.write(last/'native-intent.json',dict(attempt=2,task_sha256=c.digest(root/'jobs/002.json'),
-        previous=execution.proof(later),root_intent_sha256=c.digest(origin/'native-intent.json'),budget_slice=anchor))
+    c.write(last/'native-intent.json',dict(attempt=2,task_ref=c.record_ref(root/'jobs/002.json'),
+        previous=execution.proof(later),root_intent_ref=c.record_ref(origin/'native-intent.json'),budget_slice=anchor))
     assert execution.record(root,2)==last and not (last/'experiment-config.json').exists()
     assert c.collect_materials(root,2)==materials  # A later native closeout need not rerun the executor.

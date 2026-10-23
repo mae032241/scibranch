@@ -22,7 +22,7 @@ def pure_upgrade(tmp_path):
     # accepted native execution or a sealed scientific result.
     root=tmp_path/'instance';root.mkdir();code=tmp_path/'launcher';code.write_text('old implementation')
     c.write(root/'settings.json',dict(native_launcher_argv=[str(code)]))
-    c.write(root/'settings-identity.json',dict(sha256=c.digest(root/'settings.json')))
+    c.write(root/'settings-identity.json',dict(path='settings.json'))
     c.write(root/'jobs/001.json',dict(step=1,role='W'))
     origin=execution.origin(root,1)
     for name,value in [('native-intent.json',{}),('native-outcome.json',dict(returncode=-15,stop_reason='token_limit',cleanup='observed_group_cleaned')),
@@ -32,15 +32,15 @@ def pure_upgrade(tmp_path):
         job=author._ref(root,root/'jobs/001.json'),settings=author._ref(root,root/'settings.json'),
         original_intent=author._ref(root,origin/'native-intent.json'),original_outcome=author._ref(root,origin/'native-outcome.json'),
         original_usage=author._ref(root,origin/'usage.json'),original_experiment_config=author._ref(root,origin/'experiment-config.json'),
-        calls=author._calls(root,1),implementation=[dict(path=str(code),sha256=c.digest(code))])
+        calls=author._calls(root,1),implementation=[dict(path=str(code))])
     permit=root/'host-recovery/author-closeout/001.json';c.write(permit,old)
     first=origin/'continuations/001'
     c.write(first/'native-intent.json',dict(attempt=1,continuation_kind='author_closeout',context_mode='new_context',
-        root_intent_sha256=old['original_intent']['sha256'],author_closeout=author._ref(root,permit),task_sha256=old['job']['sha256'],
+        root_intent_ref=c.record_ref(root/old['original_intent']['path']),author_closeout=author._ref(root,permit),task_ref=c.record_ref(root/old['job']['path']),
         budget_slice=dict(boot_id='synthetic-pure-validator-boot')))
     for name in ('runner-process.json','native-process.json'):
-        c.write(first/name,dict(task_sha256=c.digest(first/'native-intent.json'),boot_id='synthetic-pure-validator-boot'))
-    processes={name:c.digest(first/name) for name in ('runner-process.json','native-process.json')}
+        c.write(first/name,dict(task_ref=c.record_ref(first/'native-intent.json'),boot_id='synthetic-pure-validator-boot'))
+    processes={name:c.record_ref(first/name) for name in ('runner-process.json','native-process.json')}
     for name,value in [('native-outcome.json',dict(returncode=-15,stop_reason='author_closeout_wall_limit',cleanup='observed_group_cleaned',execution_processes=processes)),
                        ('usage.json',{}),('usage-observation.json',{}),('native.jsonl',{})]:c.write(first/name,value)
     code.write_text('new implementation')
@@ -68,7 +68,7 @@ def test_author_successor_rejects_tampered_old_new_or_source_identity(pure_upgra
     elif tamper=='source_outcome':c.write(root/value['source_originals']['native-outcome.json']['path'],dict(returncode=0))
     elif tamper in {'source_context','source_root_intent'}:
         path=root/value['source_originals']['native-intent.json']['path'];changed=c.read(path)
-        changed['context_mode' if tamper=='source_context' else 'root_intent_sha256']='unapproved'
+        changed['context_mode' if tamper=='source_context' else 'root_intent_ref']='unapproved'
         c.write(path,changed);value['source_originals']['native-intent.json']=author._ref(root,path)
     elif tamper=='source_step':
         path=root/value['original_permit']['path'];c.write(path,dict(old,step=2));value['original_permit']=author._ref(root,path)
@@ -78,7 +78,7 @@ def test_author_successor_rejects_tampered_old_new_or_source_identity(pure_upgra
         if tamper in {'rebound_process','process_boot'}:value['source_originals'][name]=author._ref(root,path)
         if tamper=='process_boot':
             outcome=root/value['source_originals']['native-outcome.json']['path'];changed=c.read(outcome)
-            changed['execution_processes'][name]=c.digest(path);c.write(outcome,changed)
+            changed['execution_processes'][name]=c.record_ref(path);c.write(outcome,changed)
             value['source_originals']['native-outcome.json']=author._ref(root,outcome)
     else:value['attempt']=3
     if tamper in {'source_outcome','runner_process','native_process','rebound_process','process_boot'}:
@@ -217,13 +217,13 @@ def test_stopped_first_author_reserves_unknown_then_one_successor_seals_w_or_blo
         assert execution.record(root,2)==current
         assert checks==dict(chains=1,finals=1,inventories=1)
         job=c.read(root/'jobs/002.json')
-        bad=dict(accepted,author_closeout=dict(accepted['author_closeout'],sha256='0'*64))
+        bad=dict(accepted,author_closeout=dict(accepted['author_closeout'],path='host-recovery/author-closeout/unapproved.json'))
         with pytest.raises(ValueError,match='^Author closeout original changed$'):
             author.validate_intent(root,job,bad)
         with pytest.raises(ValueError,match='^Author closeout accepted intent required$'):
             author.validate_intent(root,job,dict(accepted,context_mode='same_session'))
         with pytest.raises(ValueError,match='^Author closeout accepted a different scientific task$'):
-            author.validate_intent(root,job,dict(accepted,task_sha256='0'*64))
+            author.validate_intent(root,job,dict(accepted,task_ref=dict(path='/fixture/jobs/002.json')))
         injected=calls/'unexpected-new-call/accepted.json';c.write(injected,dict(call_id='not-authorized'))
         try:
             with pytest.raises(ValueError,match='^Author closeout cannot change or add managed calls$'):

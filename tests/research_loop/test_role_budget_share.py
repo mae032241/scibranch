@@ -43,12 +43,12 @@ def seal(root, step, role, parents, *, action='wait', tokens=10, plan=None, revi
             if job.get('candidate_nomination_mechanisms') else None)
         payload.update(stage_intent='review', mechanism_findings=findings, candidate_nominations=nominations)
     if role in {'H', 'A'}:payload.update(next_action=action, route_reason='Exact scientific question')
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(path)))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(path)))
     if isinstance(payload.get('candidate_recommendation'),str):payload['selection_explanation']=selection_explanation()
     c.write(record / 'science-output.json', payload)
     c.write(record / 'usage.json', dict(input_tokens=tokens - 1, cached_input_tokens=0, output_tokens=1))
     c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, usage=native.usage(root),
-                                                 raw_sha256=c.digest(record / 'science-output.json')))
+                                                 raw_ref=c.file_ref(record / 'science-output.json')))
     c.seal_result(root, step)
     return job, payload
 

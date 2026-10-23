@@ -201,8 +201,8 @@ def test_real_live_runner_identity_preserves_cursor_namespace_across_polls(tmp_p
     root, _, log = transport(tmp_path)
     log.write_bytes(line(message('first live runner update')))
     record = log.parent
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/001.json'), prepared_at=1.0))
-    c.write(record / 'runner-process.json', runtime.process_identity(os.getpid(), c.digest(root / 'jobs/001.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json'), prepared_at=1.0))
+    c.write(record / 'runner-process.json', runtime.process_identity(os.getpid(), c.record_ref(root / 'jobs/001.json')))
     first = progress.read(root, 1)
     assert first['state'] == 'running'
     with log.open('ab') as stream:

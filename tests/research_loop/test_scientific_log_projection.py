@@ -1,6 +1,5 @@
 """Small exact ordered-replacement cases; no scientific execution."""
 from contextlib import contextmanager
-import hashlib
 import os
 from pathlib import Path
 
@@ -52,7 +51,7 @@ def test_replacement_order_uses_string_lengths_and_preserves_equal_length_insert
 def test_raw_projection_reads_only_bounded_blocks_and_rechecks_identity(tmp_path,monkeypatch):
     raw=b'prefix /private/source suffix'*8
     path=tmp_path/'stdout.raw';path.write_bytes(raw)
-    identity=dict(sha256=hashlib.sha256(raw).hexdigest(),size_bytes=len(raw))
+    identity=dict(size_bytes=len(raw))
     regular=atomic_files._regular_stream
     reads=[]
 

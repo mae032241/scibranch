@@ -314,7 +314,7 @@ def test_host_status_malformed_live_original_reports_bounded_integrity_error(tmp
             config=dict(runs='data/runs', calls='project/nodes', evaluation_key='public-fixture-v1')))
     job = c.build_job(root, 1, 'H', [])
     record = c.host_record(c.workspace(root, 1))
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/001.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json')))
     c.write(record / name, intent)
     before = {p: p.read_bytes() for p in root.rglob('*') if p.is_file()}
     if name == 'native-intent.json':
@@ -344,15 +344,15 @@ def test_host_status_observes_unsealed_w_through_frozen_adapter_without_writer_l
     finish(root, 1, 'H', [], action='experiment')
     job = c.build_job(root, 2, 'W', [1], instruction='Exact scientific question')
     record = c.host_record(c.workspace(root, 2))
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/002.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/002.json')))
     backend = tmp_path / 'backend.py'
     backend.write_text(BACKEND)
     config_path = tmp_path / 'configured.json'
     cov_lineage.configure(root, 2, [sys.executable, str(backend), '--runs-root', str(root / 'data/runs')], root / 'data/runs', config_path,receipt_channel='backend_file')
-    config, config_sha = cov_lineage._config(config_path)
+    config = cov_lineage._config(config_path)
     script = tmp_path / 'candidate.json'
     script.write_text(json.dumps(dict(mode='success')))
-    cov_lineage.run(config, config_sha, script, new=True)
+    cov_lineage.run(config, script, new=True)
     assert not (record / 'result-identity.json').exists()
     hint(c.workspace(root, 2))
     import fcntl
@@ -367,7 +367,7 @@ def test_host_status_observes_unsealed_w_through_frozen_adapter_without_writer_l
     assert second['nodes'][1]['live_feedback']['counts'] == live['counts']
     assert live['budget']['inflight_usage_unknown'] is True
     encoded = json.dumps(live)
-    assert str(root) not in encoded and 'job_sha256' not in encoded and 'proofs' not in encoded
+    assert str(root) not in encoded and 'job_ref' not in encoded and 'proofs' not in encoded
     assert not (record / 'result-identity.json').exists() and not (root / 'host-history/observations/002.json').exists()
 
 
@@ -426,7 +426,7 @@ def test_registered_local_host_feedback_requires_no_domain_observer(tmp_path):
     controller.prepare(root,objective,public,['never-launched'],max_tokens=1000,max_seconds=60,
         max_steps=4,model='fixture',reasoning_effort='high',search_policy=None)
     job=c.build_job(root,1,'H',[]);record=c.host_record(c.workspace(root,1))
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/001.json')))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/001.json')))
     path=tmp_path/'local-config.json'
     experiments.configure(root,1,'local_execution:command',dict(run_argv=[sys.executable],max_seconds=10),path)
     source=tmp_path/'ordinary.py';source.write_text('print("public output without domain metric")\n')

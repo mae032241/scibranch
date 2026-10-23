@@ -79,7 +79,7 @@ def test_legacy_a_packet_cannot_seal_or_rebuild_without_changing_originals(tmp_p
     # These are retained archive bytes, never output from a retired write path.
     root = tmp_path / 'archive'
     c.write(root / 'settings.json', dict(handoff_protocol=retired))
-    c.write(root / 'settings-identity.json', dict(sha256=c.digest(root / 'settings.json')))
+    c.write(root / 'settings-identity.json', dict(path='settings.json'))
     c.write(root / 'jobs/003.json', dict(step=3, role='A', handoff_protocol=retired))
     work = c.workspace(root, 3);record = c.host_record(work)
     c.write(work / 'science-task.json', dict(preserved_task='Original scientific limitations'))

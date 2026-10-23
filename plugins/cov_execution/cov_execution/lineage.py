@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -19,6 +18,7 @@ if __package__ in {None, ''}:
     checkout=Path(__file__).resolve().parents[3]
     if (checkout/'pyproject.toml').is_file() and (checkout/'src/scidiscovery').is_dir():
         sys.path.insert(0,str(checkout/'src'))
+        sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 MAX_BYTES = 256_000
 MAX_ASSET = 32 * 1024 * 1024
 MAX_SCAN = 4 * 1024 * 1024
@@ -91,9 +91,8 @@ def _config(path):
     if 'host_launch_implementation' in value:
         implementations=value['host_launch_implementation']
         if (not isinstance(implementations,list) or any(not isinstance(item,dict)
-                or set(item)!={'path','sha256','size_bytes'} or not isinstance(item['path'],str)
-                or not Path(item['path']).is_absolute() or not isinstance(item['sha256'],str)
-                or len(item['sha256'])!=64 or any(char not in '0123456789abcdef' for char in item['sha256'])
+                or set(item)!={'path','size_bytes'} or not isinstance(item['path'],str)
+                or not Path(item['path']).is_absolute()
                 or type(item['size_bytes']) is not int or item['size_bytes']<0 for item in implementations)):
             raise ValueError('Host launcher implementation metadata is malformed')
         keys.add('host_launch_implementation')
@@ -104,10 +103,10 @@ def _config(path):
         raise ValueError('Exact frozen storage policy required')
     replay_check.reserve_seconds(value)
     scope = value['scope']
-    if set(scope) != ({'step','role','job_sha256','execution_key','mechanism_ref','handoff_protocol'} if 'handoff_protocol' in scope else {'step','role','job_sha256','execution_key','mechanism_ref'}) or type(scope['step']) is not int or scope['step'] <= 0 or scope['role'] not in {'H','W','A','E'}:
+    if set(scope) != ({'step','role','job_ref','execution_key','mechanism_ref','handoff_protocol'} if 'handoff_protocol' in scope else {'step','role','job_ref','execution_key','mechanism_ref'}) or type(scope['step']) is not int or scope['step'] <= 0 or scope['role'] not in {'H','W','A','E'}:
         raise ValueError('Exact frozen scientific execution scope required')
-    for key in ('job_sha256','execution_key'):
-        if not isinstance(scope[key],str) or len(scope[key]) != 64:raise ValueError('Execution digest required')
+    for key in ('job_ref','execution_key'):
+        if not isinstance(scope[key],dict) or set(scope[key])!={'path'} or not isinstance(scope[key]['path'],str) or not Path(scope[key]['path']).is_absolute():raise ValueError('Exact execution reference required')
     if not isinstance(value['parents'],list):
         raise ValueError('Bounded frozen parents required')
     for key in ('record_dir','runs_root'):
@@ -115,7 +114,7 @@ def _config(path):
         if not p.is_absolute() or p.resolve() != p:raise ValueError('Original namespace directories required')
     if not isinstance(value['run_argv'],list) or not value['run_argv'] or not Path(value['run_argv'][0]).is_absolute():
         raise ValueError('Exact run executable required')
-    return value, hashlib.sha256(data).hexdigest()
+    return value
 
 
 def _completed(directory, *, verify_assets=True):
@@ -184,9 +183,12 @@ def _parent(config, name, new):
 
 
 def _binding(context, completion):
-    model=context['model']
-    return dict(call_id=context['call_id'],step=context['scope']['step'],completion_sha256=completion['sha256'],
-                model_sha256=model['sha256'],model_size_bytes=model['size_bytes'])
+    root = Path(context['scope']['job_ref']['path']).parent.parent
+    def reference(value):
+        path = Path(value['path'])
+        return dict(path=str(path if path.is_absolute() else root/path),size_bytes=value['size_bytes'])
+    return dict(call_id=context['call_id'],step=context['scope']['step'],
+                completion_ref=reference(completion),model_ref=reference(context['model']))
 
 
 def _receipt_row(directory,accepted):
@@ -194,11 +196,8 @@ def _receipt_row(directory,accepted):
     try:
         value=json.loads(_read(directory/'receipt.json'))
     except (OSError,ValueError):return None
-    from scidiscovery.research_loop import experiments
-    if (not isinstance(value,dict) or set(value)!={'version','call_id','accepted_sha256','source_sha256','row'}
-            or type(value['version']) is not int or value['version']!=1 or value['call_id']!=accepted['call_id']
-            or value['accepted_sha256']!=hashlib.sha256(experiments.encoded(accepted)).hexdigest()
-            or value['source_sha256']!=accepted['script']['sha256']):return None
+    from cov_execution.receipt import envelope
+    if not isinstance(value,dict) or value!=envelope(accepted,value.get('row')):return None
     return value['row']
 
 
@@ -212,7 +211,7 @@ def _receipt(directory, accepted, rows, returncode, cleanup, transport_complete=
     if not cleanup or returncode not in (0,1) or row.get('ok') is not (returncode == 0):return None
     if _proof(Path(accepted['script']['path']), context=context) != accepted['script']:
         raise IntegrityError('Executed source snapshot changed')
-    if _proof(Path(accepted['source_script']), context=context)['sha256'] != accepted['script']['sha256']:
+    if _proof(Path(accepted['source_script']), context=context) != dict(path=accepted['prepared']['local_path'],size_bytes=accepted['prepared']['size_bytes']):
         raise IntegrityError('Executed source changed')
     model = None
     if row['ok']:
@@ -222,13 +221,13 @@ def _receipt(directory, accepted, rows, returncode, cleanup, transport_complete=
         from scidiscovery.research_loop import contracts as c, storage_policy as storage
         storage.Inventory(policy, context=context).file(path.stat().st_size)
         original=_proof(path, context=context);archive=directory/'model.pkl'
-        c._bind_original(path, archive, original['sha256'], size_bytes=original['size_bytes'],
+        c._bind_original(path, archive, size_bytes=original['size_bytes'],
             root=storage_root, source_kind='mutable', context=context, policy=policy)
         model=_proof(archive, context=context)
     from scidiscovery.research_loop import shared_originals
     payload = (json.dumps(row,ensure_ascii=False,allow_nan=False,sort_keys=True)+'\n').encode()
     frozen = shared_originals.publish_bytes(storage_root, payload, context=context, policy=policy)
-    shared_originals.link(frozen, directory/'row.json', sha256=hashlib.sha256(payload).hexdigest(),
+    shared_originals.link(frozen, directory/'row.json',
         size_bytes=len(payload), root=storage_root, context=context, policy=policy)
     proofs = [_proof(directory/name, context=context) for name in ('accepted.json','source.py','stdout.raw','stderr.raw','receipt.json','row.json','terminal.json')]
     if model:proofs.append(model)
@@ -254,7 +253,7 @@ def status(config, *, verify_assets=True):
     return results
 
 
-def run(config, config_sha, script, parent=None, new=False, change=None, mechanism=None):
+def run(config, script, parent=None, new=False, change=None, mechanism=None):
     from scidiscovery.research_loop.experiments import dispatch
     return dispatch(config,script,parent=parent,new=new,change=change,mechanism=mechanism)
 
@@ -289,7 +288,7 @@ def _progress(config, scope):
             if not isinstance(accepted, dict) or not isinstance(accepted.get('scope'), dict):
                 raise IntegrityError('Published live acceptance is malformed')
             bound = accepted['scope']
-            if (type(bound['step']) is not int or bound['step'] != scope['step'] or bound['role'] != scope['role'] or bound['job_sha256'] != scope['job_sha256']
+            if (type(bound['step']) is not int or bound['step'] != scope['step'] or bound['role'] != scope['role'] or bound['job_ref'] != scope['job_ref']
                     or bound['execution_key'] not in scope['execution_keys'] or bound['mechanism_ref'] != scope['mechanism_ref']
                     or accepted['call_id'] != directory.name):
                 raise IntegrityError('Live call differs from the exact accepted scientific task')
@@ -306,8 +305,8 @@ def _progress(config, scope):
                 if not isinstance(identity, dict):
                     raise IntegrityError('Published live process identity is malformed')
                 from scidiscovery.research_loop import experiments
-                key = hashlib.sha256(experiments.encoded(accepted) if 'interface' in accepted else _bytes(accepted)).hexdigest()
-                if identity.get('task_sha256') != key:
+                key = dict(path=str(directory/'accepted.json'))
+                if identity.get('task_ref') != key:
                     raise IntegrityError('Live process binding differs from the accepted call')
                 if runtime.process_matches(identity, key):
                     state = 'running'
@@ -361,7 +360,7 @@ def observe(request):
             result=dict(call_id=accepted['call_id'],scope=accepted['scope'],status='unknown',candidate_id=None,run_id=None,model=None,
                 parent=accepted['parent'],change_intent=accepted['change_intent'],proofs=[_proof(directory/'accepted.json')],note='Accepted original without exact completion')
         if result['status']=='unknown' and 'mechanism_binding' in accepted:result['mechanism_binding']=accepted['mechanism_binding']
-        if result['status']=='known_success':models[result['candidate_id']]=result['model']
+        if result['status']=='known_success':models[result['candidate_id']]=dict(result['model'])
         if result['scope']['step'] != request['step']:continue
         if result and result['call_id'] not in set(request.get('known_contexts',[])):
             # _completed checks immutable proofs; relative names let core archive once.
@@ -386,8 +385,20 @@ def observe(request):
             artifact=_proof(model);run_id=fact.get('run_id')
             candidate=f'run-{run_id}' if type(run_id) is int and run_id>0 else None
             original=models.get(candidate)
-            if (fact.get('model_path')!=str(model) or candidate not in known|{row['id'] for row in candidates} or original is None
-                    or artifact['sha256']!=original['sha256'] or artifact['size_bytes']!=original['size_bytes']):
+            matched=False
+            marker_path=root/config['runs']/'rootless-delivery-operation.json'
+            if original is not None and marker_path.exists():
+                marker=json.loads(_read(marker_path))
+                reference=marker.get('artifact_origin')
+                info=model.stat()
+                generation=[info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns]
+                if (marker.get('candidate_id')==candidate and marker.get('audit')==fact
+                        and isinstance(marker.get('operation_id'),str) and marker['operation_id']
+                        and isinstance(reference,dict) and reference==original
+                        and marker.get('published',{}).get('run_model')==generation):
+                    matched=True
+            if (fact.get('model_path')!=str(model) or candidate not in known|{row['id'] for row in candidates}
+                    or not matched):
                 candidate=None;partial=True;submission_note=' Submitted artifact is observed but candidate binding is unknown.'
             actual=dict(candidate_id=candidate,artifact=str(model.relative_to(root)),evidence=[str(submitted.relative_to(root))])
     return dict(candidates=candidates,current_candidate=None,actual_submission=actual,contexts=contexts,
@@ -405,7 +416,7 @@ def configure(root, step, run_argv, runs_root, output, *, receipt_channel='publi
     root=Path(root).resolve();job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
     c._validate_inputs(root,c.workspace(root,step),job)
     record=execution.record(root,step)
-    if c.read(c.regular(record/'native-intent.json')).get('task_sha256')!=c.digest(root/'jobs'/f'{step:03d}.json'):
+    if c.read(c.regular(record/'native-intent.json')).get('task_ref')!=c.record_ref(root/'jobs'/f'{step:03d}.json'):
         raise IntegrityError('Launcher preparation has no accepted scientific task')
     parents=[]
     for candidate,item in lineage.build(root,step)['candidates'].items():
@@ -420,7 +431,7 @@ def configure(root, step, run_argv, runs_root, output, *, receipt_channel='publi
                 path=originals.resolve_ref(source,dict(model,path=model['snapshot']))
             completion=next((p for p in context['proofs'] if Path(p['path']).name=='completed.json'),None)
             if completion is None:continue
-            parents.append(dict(name=candidate,candidate_id=candidate,model=dict(path=str(path),sha256=model['sha256'],size_bytes=model['size_bytes']),
+            parents.append(dict(name=candidate,candidate_id=candidate,model=dict(path=str(path),size_bytes=model['size_bytes']),
                                 binding=_binding(context,completion)))
     from scidiscovery.research_loop.protocol import stage_scope
     value=dict(contract_version=2,feedback_version=1,record_dir=str(experiment_client.record_directory(root,step)),runs_root=str(runs_root),run_argv=run_argv,
@@ -443,7 +454,7 @@ def public_feedback(config, result, *, include_model=False):
         path=Path(config['record_dir'])/'calls'/result['call_id']/'row.json'
         data=_read(path)
         proof=next((item for item in result['proofs'] if item['path']==str(path)),None)
-        if proof is None or hashlib.sha256(data).hexdigest()!=proof['sha256'] or len(data)!=proof['size_bytes']:
+        if proof is None or len(data)!=proof['size_bytes']:
             raise IntegrityError('Public feedback original changed')
         row=json.loads(data)
         value['evaluation_key']=config['evaluation_key']
@@ -469,7 +480,7 @@ def main(argv=None):
     group=r.add_mutually_exclusive_group();group.add_argument('--parent-plan');group.add_argument('--new-plan',action='store_true')
     r.add_argument('--change-intent');r.add_argument('--mechanism');sub.add_parser('lineage-status');args=parser.parse_args(argv)
     try:
-        config,digest=_config(args.config)
+        config=_config(args.config)
         if args.command=='lineage-status':
             from scidiscovery.research_loop import experiments
             result = experiments.progress(config)
@@ -481,7 +492,7 @@ def main(argv=None):
                 if not default or not Path(default).is_absolute():
                     raise ValueError('Absolute EXP_DEFAULT_SCRIPT is unavailable; pass --script explicitly')
                 script=Path(default)
-            result=run(config,digest,script,args.parent_plan,args.new_plan,args.change_intent,args.mechanism)
+            result=run(config,script,args.parent_plan,args.new_plan,args.change_intent,args.mechanism)
             code={'known_success':0,'known_failed':1,'unknown':2}.get(result['status'],2)
     except IntegrityError as error:result=dict(status='integrity_error',note=str(error));code=3
     except ValueError as error:result=dict(status='unresolved',note=str(error));code=2

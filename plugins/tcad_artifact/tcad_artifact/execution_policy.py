@@ -100,8 +100,9 @@ def execution_admission(snapshot: ExecutionPolicySnapshot, reviewed) -> Executio
     return snapshot.admission(
         budget={"max_storage_bytes": limits.max_storage_bytes,
                 "wall_time_seconds": limits.wall_time_seconds},
-        budget_key=canonical_sha256({"project": reviewed.project.model_dump(mode="json"),
-            "resolved_inputs": [item.model_dump(mode="json") for item in reviewed.resolved_inputs]}),
+        budget_key=canonical_sha256({"kind":"unbound_execution_budget",
+            "tool_profile":reviewed.project.tool_profile,
+            "max_storage_bytes":limits.max_storage_bytes,"wall_time_seconds":limits.wall_time_seconds}),
     )
 
 

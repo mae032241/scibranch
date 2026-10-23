@@ -64,7 +64,7 @@ def main() -> int:
                 "release": item["release"],
                 "solver_kind": item["solver_kind"],
                 "title": item["title"],
-                "manual_sha256": item["sha256"],
+                "manual_ref": {"path":item["relative_path"],"size_bytes":item["size_bytes"]},
                 "start_page": args.start_page,
                 "end_page": args.end_page,
                 "text": completed.stdout.decode("utf-8", errors="replace"),

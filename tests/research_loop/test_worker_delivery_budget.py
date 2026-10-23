@@ -26,7 +26,7 @@ def continuing_stage(tmp_path, *, max_tokens=100000):
     job=c.build_job(root,2,'W',[1])
     anchor=budget.accept_node(root,job)
     record=execution.record(root,2)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json'),budget_slice=anchor))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),budget_slice=anchor))
     config=experiments.configure(root,2,'local_execution:command',dict(run_argv=[sys.executable]),tmp_path/'config-2.json')
     run(root,config,'P')
     record,_=output(root,findings('P'),intent='continue');stopped_native(root,record)

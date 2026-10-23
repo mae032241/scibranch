@@ -41,7 +41,7 @@ def case(tmp_path,options,observer=None):
         dict(label=label,minimal_test='Read the exact backend observation',existing_ref=None) for label in ('P','Q')],
         focus=dict(label=None,action='screen')))
     job=c.build_job(root,2,'W',[1]);record=execution.record(root,2)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json'),
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),
         search_slice=search.accept(root,job)))
     path=c.workspace(root,2)/'work/config.json';config=e.configure(root,2,'composed_execution:fixture',options,path)
     package=c.workspace(root,2)/'work/package';package.write_bytes(b'opaque original job package')
@@ -137,15 +137,15 @@ def test_async_without_collect_reconciles_same_call_before_seal(tmp_path,compose
             next_focus=dict(mechanism_ref='h001.m1',action='improve')),
         next_action='continue_w',route_reason='Improve the observed mechanism',
         decision_request=dict(decision='mechanism',question='What changes the mechanism choice?',change_criterion='A discriminating observation'))
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/003.json')))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/003.json')))
     c.write(record/'science-output.json',payload);c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
-    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_sha256=c.digest(record/'science-output.json')))
+    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_ref=c.file_ref(record/'science-output.json')))
     c.seal_result(root,3)
     assert search.project(root,4)['mechanisms']['h001.m1']['status']=='screened'
     successor_job=c.build_job(root,4,'W',[1,2,3]);record=execution.record(root,4)
     node_anchor=budget.accept_node(root,successor_job)
     anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,successor_job))
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/004.json'),**anchor))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/004.json'),**anchor))
     successor=e.configure(root,4,'composed_execution:fixture',dict(synchronous=True),c.workspace(root,4)/'work/config.json')
     assert not successor['breadth']['prior_unknown']
     package=c.workspace(root,4)/'work/package';package.write_bytes(b'new opaque input')
@@ -189,8 +189,8 @@ def test_reconcile_rejects_changed_original_identity_and_native_evidence(tmp_pat
     value=c.read(path)
     if fault=='accepted-interface':value['interface']=dict(value['interface'],result_protocol=e.LOCAL_RESULT_PROTOCOL)
     elif fault=='external-id':value['external_run_id']='remote-other'
-    elif fault=='backend-proof':value['scope']=dict(value['scope'],execution_key='f'*64)
-    else:value['prepared_sha256']='f'*64
+    elif fault=='backend-proof':value['scope']=dict(value['scope'],execution_key=dict(path='/fixture/native-evidence/002/native-intent.json'))
+    else:value['prepared_ref']='f'*64
     c.write(path,value)
     assert cli('reconcile','--call-id',call,expected=3)['status']=='integrity_error'
     assert len(e.Records(config).calls())==1 and not (directory/'execution-observation.json').exists()

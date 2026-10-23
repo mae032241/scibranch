@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 import uuid
@@ -56,7 +55,7 @@ class TCADExecutorAdapter:
 
     def validate_submission_protocol(self):
         value = self._call("tcad_submission_protocol", {})
-        if value != {"version": 1, "submit": "tcad_submit_retirable", "retire": "tcad_retire_submission"}:
+        if value != {"version": 2, "submit": "tcad_submit_retirable", "retire": "tcad_retire_submission"}:
             raise RuntimeError("TCAD submission protocol is incompatible; upgrade the service before submitting.")
         return value
 
@@ -167,7 +166,7 @@ class TCADExecutorAdapter:
     ) -> tuple[str, str] | None:
         value = self._call(
             "tcad_lookup_submission",
-            {"submission_sha256": submission.sha256},
+            {"submission_id": _submission_id(submission)},
         )
         if value.get("found") is False:
             return None
@@ -183,10 +182,10 @@ class TCADExecutorAdapter:
         return (str(value["run_id"]), str(value["state"])) if value["found"] else None
 
     def retire_submission_details(self, submission: LocalFileDescriptor) -> dict:
-        value = self._call("tcad_retire_submission", {"submission_sha256": submission.sha256})
+        value = self._call("tcad_retire_submission", {"submission_id": _submission_id(submission)})
         if value.get("found") is True:
             return value
-        if value.get("found") is False and value.get("retired") is True and value.get("submission_sha256") == submission.sha256:
+        if value.get("found") is False and value.get("retired") is True and value.get("submission_id") == _submission_id(submission):
             return value
         raise RuntimeError("TCAD service did not confirm exact submission retirement")
 
@@ -313,23 +312,26 @@ def _read_bound_descriptor(
     metadata = path.lstat()
     if path.is_symlink() or not path.is_file():
         raise ValueError("development debug file is not regular")
+    if metadata.st_size != descriptor.size_bytes:
+        raise ValueError("development file differs from its declared size")
     if not read_content:
-        digest, size = hashlib.sha256(), 0
-        with path.open("rb") as source:
-            for block in iter(lambda: source.read(1024 * 1024), b""):
-                digest.update(block)
-                size += len(block)
-        if size != descriptor.size_bytes or digest.hexdigest() != descriptor.sha256:
-            raise ValueError("development archive differs from its descriptor")
         return b""
+
     raw = path.read_bytes()
     if (
         metadata.st_size != descriptor.size_bytes
         or len(raw) != descriptor.size_bytes
-        or hashlib.sha256(raw).hexdigest() != descriptor.sha256
     ):
         raise ValueError("development debug file differs from its descriptor")
     return raw
 
 
 __all__ = ["TCADExecutorAdapter"]
+
+
+def _submission_id(submission):
+    value=json.loads(Path(submission.local_path).read_bytes())
+    # Command transports return a marker retaining the exact remote request.
+    if 'request_id' in value:return value['request_id']
+    if 'submission_id' in value:return value['submission_id']
+    raise ValueError('Prepared submission has no exact request identity')

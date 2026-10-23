@@ -50,10 +50,10 @@ def _binding(root, job, record):
     if record not in chain:
         raise ValueError('Fragment must name an accepted original native attempt')
     intent = c.read(c.regular(record / 'native-intent.json'))
-    digest = c.digest(path)
-    if intent.get('task_sha256') != digest:
+    digest = c.record_ref(path)
+    if intent.get('task_ref') != digest:
         raise ValueError('Fragment native intent changed its scientific job')
-    return dict(step=job['step'], attempt=chain.index(record), job_sha256=digest,
+    return dict(step=job['step'], attempt=chain.index(record), job_ref=digest,
                 stage_owner=digest, record=record.relative_to(root).as_posix())
 
 
@@ -66,7 +66,7 @@ def _science(root, job, originals):
         receipt = c.read(root / outcome['path']) if outcome else None
     except (json.JSONDecodeError, UnicodeDecodeError):
         receipt = None
-    if not isinstance(receipt, dict) or receipt.get('raw_sha256') != row['sha256']:
+    if not isinstance(receipt, dict) or receipt.get('raw_ref') != dict(path=str(Path(root)/row['path']),size_bytes=row['size_bytes']):
         return dict(status='unverified', diagnostic='unbound_final_output'), None
     try:
         payload = c.science_payload(root / row['path'], 'W', job.get('handoff_protocol', 1))
@@ -103,8 +103,7 @@ def capture(root, job, record):
             missing.append(name)
             continue
         original = c.regular(path)
-        originals.append(dict(path=original.relative_to(root).as_posix(),
-                              sha256=c.digest(original), size_bytes=original.stat().st_size))
+        originals.append(dict(path=original.relative_to(root).as_posix(), size_bytes=original.stat().st_size))
     science, _ = _science(root, job, originals)
     try:
         direct = c.collect_materials(root, job['step'])
@@ -118,7 +117,7 @@ def capture(root, job, record):
     materials = []
     for row in direct:
         source = Path(row['source'])
-        snapshot = history._proof(root, source.relative_to(root).as_posix())
+        snapshot = history._proof(root, source.relative_to(root).as_posix(), source_kind='managed_frozen')
         materials.append(dict(name=c.material_name(work,row), original=snapshot))
     value = dict(version=VERSION, binding=binding, originals=originals,
                  missing_native_originals=missing, science=science, materials=materials,
@@ -139,7 +138,7 @@ def validate(root, job, record):
     for row in value['originals']:
         path = root / row['path']
         if (path.parent != record or path.name not in NATIVE_ORIGINALS
-                or c.digest(c.regular(path)) != row['sha256']
+                or c.regular(path).resolve()!=path
                 or path.stat().st_size != row['size_bytes']):
             raise ValueError('Fragment native original changed')
     expected, _ = _science(root, job, value['originals'])
@@ -149,8 +148,8 @@ def validate(root, job, record):
         original = row['original']
         if original['retention'] == 'archived':
             path = root / original['snapshot']
-            if (path.resolve() != path or not path.is_relative_to(root / 'host-history/objects')
-                    or c.digest(c.regular(path)) != original['sha256']
+            if (path.resolve() != path or not path.is_relative_to(root)
+                    or c.regular(path).resolve()!=path
                     or path.stat().st_size != original['size_bytes']):
                 raise ValueError('Fragment direct-deliverable snapshot changed')
     return value
@@ -168,8 +167,8 @@ def end_stage(root, job, record, reason, *, work_exit=None):
     root, record = Path(root), Path(record)
     saved = validate(root, job, record)
     value = dict(version=VERSION, binding=saved['binding'], reason=reason,
-                 checkpoint_sha256=c.digest(record / 'checkpoint.json'),
-                 raw_sha256=c.digest(c.regular(record / 'science-output.json')),
+                 checkpoint_ref=c.record_ref(record / 'checkpoint.json'),
+                 raw_ref=c.file_ref(c.regular(record / 'science-output.json')),
                  **(dict(work_exit=work_exit) if work_exit is not None else {}))
     path = record / 'stage-end.json'
     if path.exists() or path.is_symlink():
@@ -187,8 +186,8 @@ def stage_end(root, job, record):
     root, record = Path(root), Path(record)
     value = c.read(c.regular(record / 'stage-end.json'))
     if (value.get('version') != VERSION or value.get('binding') != _binding(root, job, record)
-            or value.get('checkpoint_sha256') != c.digest(c.regular(record / 'checkpoint.json'))
-            or value.get('raw_sha256') != c.digest(c.regular(record / 'science-output.json'))
+            or value.get('checkpoint_ref') != c.record_ref(c.regular(record / 'checkpoint.json'))
+            or value.get('raw_ref') != c.file_ref(c.regular(record / 'science-output.json'))
             or not isinstance(value.get('reason'), str) or not value['reason'].strip() or len(value['reason']) > 128):
         raise ValueError('Scientific stage ending differs from its exact fragment originals')
     return value

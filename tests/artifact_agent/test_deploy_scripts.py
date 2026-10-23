@@ -1,20 +1,16 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
-import shlex
 from pathlib import Path
 
 import pytest
 
 from deploy.install_transaction import (
-    _directory_digest,
     _verify_managed_directory,
     begin_transaction,
     mark_managed_directory,
@@ -572,3 +568,81 @@ def test_release_scan_still_rejects_sensitive_test_fixtures(tmp_path, content):
     path.write_text(content)
     with pytest.raises(RuntimeError, match="release scan failed"):
         release["_scan_release"](tmp_path)
+
+
+def test_managed_directory_marker_names_owner_without_reading_scientific_contents(tmp_path,monkeypatch):
+    target=tmp_path/"managed";target.mkdir()
+    scientific=target/"data.csv";scientific.write_bytes(b"scientific original")
+    nested=target/"skills";nested.mkdir();(nested/"SKILL.md").write_text("Exact selected Skill.")
+    marker=target/".scidiscovery-managed.json"
+    temporary=target/"..scidiscovery-managed.json.tmp"
+    original_open=Path.open
+    def open_selected(path,*args,**kwargs):
+        assert path in (marker,temporary), "Must not read scientific originals or Skills"
+        return original_open(path,*args,**kwargs)
+    def no_scan(*args,**kwargs):
+        pytest.fail("Ownership marker must not scan directory entries")
+    monkeypatch.setattr(Path,"open",open_selected)
+    monkeypatch.setattr(Path,"rglob",no_scan)
+    monkeypatch.setattr(Path,"iterdir",no_scan)
+    mark_managed_directory(target,name="selected-skills")
+    _verify_managed_directory(target,name="selected-skills")
+    assert json.loads(marker.read_bytes())==dict(manager="scidiscovery-install",name="selected-skills",schema_version=2)
+
+
+@pytest.mark.parametrize("mutation",["manager","name","schema","extra","format"])
+def test_managed_directory_rejects_changed_owner_marker(tmp_path,mutation):
+    target=tmp_path/"managed";target.mkdir()
+    mark_managed_directory(target,name="selected-skills")
+    marker=target/".scidiscovery-managed.json"
+    value=json.loads(marker.read_bytes())
+    if mutation=="manager":value["manager"]="another-manager"
+    elif mutation=="name":value["name"]="another-directory"
+    elif mutation=="schema":value["schema_version"]=1
+    elif mutation=="extra":value["content_sha256"]="retired-content-checksum"
+    marker.write_bytes(json.dumps(value,sort_keys=True,separators=(",",":")).encode()+(b"\n" if mutation=="format" else b""))
+    with pytest.raises(RuntimeError,match="ownership has changed"):
+        _verify_managed_directory(target,name="selected-skills")
+
+
+@pytest.mark.parametrize("operation",["mark","verify"])
+@pytest.mark.parametrize("redirect",["root","marker"])
+def test_managed_directory_rejects_symlink_root_or_marker(tmp_path,operation,redirect):
+    actual=tmp_path/"actual";actual.mkdir()
+    mark_managed_directory(actual,name="selected-skills")
+    target=actual
+    if redirect=="root":
+        target=tmp_path/"linked";target.symlink_to(actual,target_is_directory=True)
+    else:
+        marker=actual/".scidiscovery-managed.json"
+        external=tmp_path/"owner.json";marker.rename(external);marker.symlink_to(external)
+    function=mark_managed_directory if operation=="mark" else _verify_managed_directory
+    with pytest.raises(RuntimeError):function(target,name="selected-skills")
+
+
+@pytest.mark.parametrize("mismatch",["name","path","owner"])
+def test_managed_directory_removal_requires_exact_transaction_target_and_owner(tmp_path,mismatch):
+    target=tmp_path/"managed";target.mkdir();(target/"data.csv").write_bytes(b"original")
+    mark_managed_directory(target,name="selected-skills")
+    transaction=tmp_path/"transaction"
+    begin_transaction(transaction,targets=(("skills",target),))
+    other=tmp_path/"other";other.mkdir();mark_managed_directory(other,name="selected-skills")
+    with pytest.raises(RuntimeError):
+        remove_transaction_target(transaction,name="different" if mismatch=="name" else "skills",
+            path=other if mismatch=="path" else target,
+            managed_directory_name="different-owner" if mismatch=="owner" else "selected-skills")
+    assert target.is_dir() and (target/"data.csv").read_bytes()==b"original"
+    assert other.is_dir()
+
+
+def test_managed_directory_removal_uses_owner_marker_after_contents_change(tmp_path):
+    target=tmp_path/"managed";target.mkdir();(target/"data.csv").write_bytes(b"original")
+    mark_managed_directory(target,name="selected-skills")
+    transaction=tmp_path/"transaction"
+    begin_transaction(transaction,targets=(("skills",target),))
+    (target/"data.csv").write_bytes(b"updated scientific bytes")
+    remove_transaction_target(transaction,name="skills",path=target,managed_directory_name="selected-skills")
+    assert not target.exists()
+    rollback_transaction(transaction)
+    assert (target/"data.csv").read_bytes()==b"original"
+    _verify_managed_directory(target,name="selected-skills")

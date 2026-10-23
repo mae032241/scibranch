@@ -162,7 +162,7 @@ def test_detached_resume_binds_original_and_keeps_the_existing_writer(root, monk
     original = (root / 'jobs/001.json').read_bytes()
     monkeypatch.setattr(controls.subprocess, 'Popen', lambda *args, **kwargs: SimpleNamespace(pid=os.getpid()))
     receipt = controls.start_background(root, resume_step=1)
-    assert receipt['action'] == dict(kind='worker_resume', step=1, job_sha256=contracts.digest(root / 'jobs/001.json'))
+    assert receipt['action'] == dict(kind='worker_resume', step=1, job_ref=contracts.record_ref(root / 'jobs/001.json'))
     seen = []
 
     def resume_locked(instance, step):
@@ -252,7 +252,7 @@ def die_before_popen(command, **options):
     value = contracts.read(path)
     assert value['status'] == 'accepted' and 'process' not in value
     with witness.open('x') as stream:
-        json.dump(dict(operation_id=operation_id, sha256=contracts.digest(path)), stream)
+        json.dump(dict(operation_id=operation_id, record=contracts.record_ref(path)), stream)
         stream.flush(); os.fsync(stream.fileno())
     os.kill(os.getpid(), signal.SIGKILL)
 controls.subprocess.Popen = die_before_popen
@@ -267,7 +267,7 @@ raise AssertionError('Killed starter returned')
     assert starter.returncode == -signal.SIGKILL, (starter.stdout, starter.stderr)
     boundary = contracts.read(witness)
     path = controls._path(root, boundary['operation_id'])
-    assert contracts.digest(path) == boundary['sha256']
+    assert contracts.record_ref(path) == boundary['record']
     original = contracts.read(path)
     assert original['status'] == 'accepted' and 'process' not in original
     final = None

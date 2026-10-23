@@ -56,7 +56,7 @@ def writers_stopped(root,job,record):
             receipt=c.read(c.regular(path))
             if name=='runner-process.json' and receipt.get('pid')==os.getpid():
                 outcome=c.read(c.regular(record/'native-outcome.json'))
-                if c.digest(path)==outcome.get('execution_processes',{}).get(name) and receipt.get('task_sha256')==identity:
+                if c.record_ref(path)==outcome.get('execution_processes',{}).get(name) and receipt.get('task_ref')==identity:
                     continue  # The original leased owner is publishing its final checkpoint.
             if not runtime.process_matches(receipt,identity):continue
             raise ValueError('Original native writer still owns this attempt; no delivery snapshot can be captured')
@@ -69,7 +69,7 @@ def _prefix_calls(root,job):
     for receipt in job['history']['nodes']:
         source=originals.node(root,receipt['step'])
         seal_path=originals.source_record(source,'result-identity.json')
-        if c.digest(seal_path)!=receipt['seal_sha256']:
+        if history.source_seal_ref(source)!=receipt['seal_ref']:
             raise history.ObserverIntegrityError('Worker evidence prefix changed')
         seal=c.read(seal_path);owner=originals.source_job(source)
         if seal.get('observations') is None:continue
@@ -89,6 +89,9 @@ def _evidence(source,row):
     if source.inherited:
         proofs={key:(dict(proof,origin_identity=source.origin_identity) if proof is not None else None)
             for key,proof in proofs.items()}
+    for key in ('originals','outputs'):
+        proofs[key]=[dict(item,origin_identity=source.origin_identity) if source.inherited else dict(item)
+                     for item in row.get(key,[])]
     return dict(mechanism_ref=row['mechanism_binding']['mechanism_ref'],**proofs)
 
 
@@ -110,8 +113,8 @@ def capture(root,job,record):
     require_current(root,job)
     root,record=Path(root),Path(record);path=record/FACT_NAME
     number=execution.records(root,job['step']).index(record)
-    binding=dict(job_sha256=c.digest(root/'jobs'/f'{job["step"]:03d}.json'),
-        raw_sha256=c.digest(c.regular(record/'science-output.json',limit=None)),source_attempt=number)
+    binding=dict(job_ref=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json'),
+        raw_ref=c.file_ref(c.regular(record/'science-output.json',limit=None)),source_attempt=number)
     if path.exists():return validate(root,job,record)
     writers_stopped(root,job,record)
     needed={row['mechanism_ref'] for row in job['search']['coverage_obligation']}
@@ -129,6 +132,7 @@ def capture(root,job,record):
         if attempt['number']>number:continue
         proofs={key:row[key] for key in ('accepted','completed','terminal')}
         if 'observation' in row:proofs['observation']=row['observation']
+        proofs.update(originals=row.get('originals',[]),outputs=row.get('outputs',[]))
         if row['status'] in {'known_success','known_failed'}:
             ref=accepted['mechanism_binding']['mechanism_ref']
             if ref in needed:rows.append(dict(mechanism_ref=ref,**proofs))
@@ -141,7 +145,7 @@ def capture(root,job,record):
         original=row['accepted']
         if original.get('retention')!='archived':capacity=True;continue
         value=accepted_original(root,original);mechanism=value.get('mechanism_binding') or {};ref=row['mechanism_ref'];expected=obligations[ref]
-        if all(mechanism.get(key)==expected[key] for key in ('mechanism_ref','source_h','source_h_sha256')):selected[ref]=row
+        if all(mechanism.get(key)==expected[key] for key in ('mechanism_ref','source_h','source_h_ref')):selected[ref]=row
     value=dict(version=1,binding=binding,evidence=list(selected.values()),unknown=unknown,
         prior_unknown=job['search']['breadth']['prior_unknown'],capacity=capacity,omitted_evidence=0,omitted_unknown=0)
     c.write(path,value);path.chmod(0o400)
@@ -150,8 +154,8 @@ def capture(root,job,record):
 
 def validate(root,job,record):
     value=c.read(c.regular(record/FACT_NAME,limit=None))
-    expected=dict(job_sha256=c.digest(root/'jobs'/f'{job["step"]:03d}.json'),
-        raw_sha256=c.digest(c.regular(record/'science-output.json',limit=None)),
+    expected=dict(job_ref=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json'),
+        raw_ref=c.file_ref(c.regular(record/'science-output.json',limit=None)),
         source_attempt=execution.records(root,job['step']).index(record))
     if value.get('version')!=1 or value.get('binding')!=expected:raise history.ObserverIntegrityError('Worker fact snapshot binding changed')
     inherited=None
@@ -173,7 +177,7 @@ def validate(root,job,record):
             elif history.managed_status(root,row) not in {'known_success','known_failed'}:
                 raise history.ObserverIntegrityError('Worker observation differs from accepted terminal originals')
             ref=row['mechanism_ref'];target=next((item for item in job['search']['coverage_obligation'] if item['mechanism_ref']==ref),None)
-            if target is None or any(accepted['mechanism_binding'].get(key)!=target[key] for key in ('mechanism_ref','source_h','source_h_sha256')):
+            if target is None or any(accepted['mechanism_binding'].get(key)!=target[key] for key in ('mechanism_ref','source_h','source_h_ref')):
                 raise history.ObserverIntegrityError('Worker observation differs from assigned H version')
     return value
 
@@ -199,7 +203,7 @@ def assessment(root,job,science,record):
         else 'scientific_findings_unresolved' if unresolved else 'worker_decision' if science.get('stage_intent')=='decision'
         else 'scientific_blocked' if blocked else None)
     return dict(status='partial' if reason else 'incomplete' if missing else 'complete',missing=missing,blocked=blocked,reason=reason,
-        facts_sha256=c.digest(c.regular(record/FACT_NAME)))
+        facts_ref=c.record_ref(c.regular(record/FACT_NAME)))
 
 
 def require_delivery(root,job,science,record):
@@ -221,13 +225,13 @@ def authorize_exit(root,job,record,reason):
     """Freeze a host exception from original policy/receipts, never a Worker hint."""
     from . import budget,continuation,experiments,native
     paths=execution.records(root,job['step']);number=paths.index(record)
-    value=dict(reason=reason,job_sha256=c.digest(root/'jobs'/f'{job["step"]:03d}.json'),
-        source_attempt=number,outcome_sha256=c.digest(c.regular(record/'native-outcome.json')))
+    value=dict(reason=reason,job_ref=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json'),
+        source_attempt=number,outcome_ref=c.record_ref(c.regular(record/'native-outcome.json')))
     policy=configuration_updates.for_job(root, job).get('resume_policy')
     repairs=sum(c.read(path/'native-intent.json').get('continuation_kind','repair')=='repair' for path in paths[1:number+1])
     if (reason=='worker_resume_unsupported' and policy is None
             or reason=='worker_resume_output_only' and policy is not None and policy.get('output_only') is True):
-        return dict(value,kind='resume_policy',settings_sha256=c.digest(root/'settings.json'))
+        return dict(value,kind='resume_policy',settings_ref=c.record_ref(root/'settings.json'))
     if reason=='worker_resume_limit' and policy is not None and repairs>=policy['max_attempts']:
         return dict(value,kind='repair_cap',max_attempts=policy['max_attempts'])
     if reason.startswith('worker_resume_') and reason not in {'worker_resume_terminal_ineligible','worker_resume_original_running','worker_resume_usage_unknown'}:
@@ -257,14 +261,14 @@ def validate_exit(root,job,record,value):
     """A hand-written stage-end reason is insufficient to bypass ordinary review."""
     from . import budget
     number=execution.records(root,job['step']).index(record)
-    if (not isinstance(value,dict) or value.get('job_sha256')!=c.digest(root/'jobs'/f'{job["step"]:03d}.json')
-            or value.get('source_attempt')!=number or value.get('outcome_sha256')!=c.digest(c.regular(record/'native-outcome.json'))):
+    if (not isinstance(value,dict) or value.get('job_ref')!=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json')
+            or value.get('source_attempt')!=number or value.get('outcome_ref')!=c.record_ref(c.regular(record/'native-outcome.json'))):
         raise history.ObserverIntegrityError('Worker exit differs from original attempt')
     policy=configuration_updates.for_job(root, job).get('resume_policy');kind=value.get('kind');reason=value['reason']
     if kind=='resume_policy':
         unsupported=reason=='worker_resume_unsupported' and policy is None
         output_only=reason=='worker_resume_output_only' and policy is not None and policy.get('output_only') is True
-        if not (unsupported or output_only) or value.get('settings_sha256')!=c.digest(root/'settings.json'):
+        if not (unsupported or output_only) or value.get('settings_ref')!=c.record_ref(root/'settings.json'):
             raise history.ObserverIntegrityError('Worker exit has no original unsupported policy')
     elif kind=='repair_cap':
         paths=execution.records(root,job['step'])[:number+1]
@@ -283,10 +287,10 @@ def validate_exit(root,job,record,value):
         from . import experiments
         proof=value['review'];history._validate_proof(root,proof)
         expected=(budget._review_directory(root,job)/'review.json').relative_to(root).as_posix()
-        if proof.get('path')!=expected or proof.get('retention')!='archived':raise history.ObserverIntegrityError('Worker exit did not use protected host review')
+        if proof.get('path',)!=expected or proof.get('retention')!='archived':raise history.ObserverIntegrityError('Worker exit did not use protected host review')
         review=c.read(root/proof['snapshot']);sample=value['sample']
         from .protocol import stage_scope
-        if (review['scope']!=stage_scope(root,job) or review['stage_anchor']!=c.digest(root/'jobs'/f'{job["step"]:03d}.json')
+        if (review['scope']!=stage_scope(root,job) or review['stage_anchor']!=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json')
                 or review['native_attempt']!=dict(number=number,execution_key=execution.identity(root,job['step'],number))
                 or sample['boot_id']!=review['boot_id']):raise history.ObserverIntegrityError('Worker host review scope changed')
         actual=experiments._review_observation(review,sample)

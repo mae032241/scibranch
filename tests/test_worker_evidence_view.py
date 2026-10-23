@@ -1,5 +1,4 @@
 """Mechanical evidence export contracts; no scientist or external execution."""
-import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -27,13 +26,11 @@ def packet(tmp_path, entries):
         source = public / alias
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_bytes(raw)
-        digest = hashlib.sha256(raw).hexdigest()
-        evidence.append(dict(alias=alias, kind=kind, sha256=digest, size_bytes=len(raw),
-                             source_original_sha256=digest, projection='retained original'))
+        evidence.append(dict(alias=alias, kind=kind, size_bytes=len(raw), projection='retained original'))
         originals[alias] = raw
     index = public / 'index.json'
-    index.write_bytes(encoded(dict(version=1, evidence=evidence)))
-    return index, hashlib.sha256(index.read_bytes()).hexdigest(), originals
+    index.write_bytes(encoded(dict(version=2, evidence=evidence)))
+    return index, originals
 
 
 def read(path):
@@ -53,7 +50,7 @@ def test_new_science_view_retains_exact_private_bindings_and_small_omission_summ
             subsequent_exact_cache_restoration_verified=True, science_replay_repeated=False),
         task_completion='Original stopping conditions remain unfinished.',
         limitation='Unknown submissions are not completed experiments. Full original-byte reproduction is unavailable.')
-    index, expected, originals = packet(tmp_path, [
+    index, originals = packet(tmp_path, [
         ('sources/train.py', 'source', source),
         ('instruction.md', 'original_task', b'User original: retain sha256 as a scientific metric name.\n'),
         ('scientist.json', 'sealed_scientist', scientist),
@@ -63,34 +60,34 @@ def test_new_science_view_retains_exact_private_bindings_and_small_omission_summ
                 decision='keep'), dict(candidate_id=alternative, key_risk='The alternative has stronger shift sensitivity.',
                 decision='replace')], rationale='Prefer observed recovery while retaining the stronger-perturbation loss.', evidence_steps=[2]))),
         ('carry/index.json', 'limitation', dict(version=1, known_terminal_experiments=[dict(alias='experiment-1',
-            source='experiment-1/train.py', facts='experiment-1/facts.json', source_sha256=digest)],
+            source='experiment-1/train.py', facts='experiment-1/facts.json', source_ref=digest)],
             original_unresolved_submission_count=1, unresolved_submission_is_completed=False,
             stopping_condition='Original stopping conditions remain unresolved.')),
-        ('metrics/identity.json', 'metrics', dict(source_sha256=digest, public_manifest_sha256=digest,
-            task_python_sha256=digest, qualification='Public observations only; no scientific verdict.')),
+        ('metrics/identity.json', 'metrics', dict(source_ref=digest, public_manifest_ref=digest,
+            task_python_ref=digest, qualification='Public observations only; no scientific verdict.')),
         ('metrics/scientific-data.json', 'metrics', dict(sha256='A named scientific variable', values=[1, 2])),
         ('calls/accepted.json', 'accepted_projection', dict(call_id=digest, candidate_id=candidate,
-            prepared=dict(name=digest, sha256=digest, size_bytes=7), scope=dict(job_sha256=digest))),
+            prepared=dict(name=digest, sha256=digest, size_bytes=7), scope=dict(job_ref=digest))),
         ('calls/completed.json', 'terminal_projection', dict(call_id=digest, candidate_id=candidate,
-            status='unknown', scope=dict(job_sha256=digest), outputs=[dict(name=digest, sha256=digest,
+            status='unknown', scope=dict(job_ref=digest), outputs=[dict(name=digest, sha256=digest,
                 size_bytes=7, media_type='application/json')])),
         ('completion/closeout-outcome.json', 'completion_projection', dict(status='delivery_confirmed',
             goal_completion='not_asserted', last_confirmed=dict(candidate_id=candidate,
-                operation_id=digest, artifact_sha256=digest, status='confirmed', cleanup_confirmed=True))),
+                operation_id=digest, artifact_ref=digest, status='confirmed', cleanup_confirmed=True))),
         ('audit/submitted.json', 'audit_projection', dict(run_id=1, val_score=0.7, audit_score=0.6,
-            leakage_flag=False, artifact_sha256=digest)),
+            leakage_flag=False, artifact_ref=digest)),
         ('run/results.jsonl', 'metrics_projection', [dict(run_id=1, ok=False, metric=0.2, sha256=digest)]),
         ('withheld.json', 'publication_inventory', inventory),
     ])
     output = tmp_path / 'new-view'
     # Exercise the actual operator entry point consumed by future packet preparation.
-    view.main(['--index', str(index), '--expected-index-sha256', expected, '--output', str(output)])
+    view.main(['--index', str(index), '--output', str(output)])
     assert json.loads(capsys.readouterr().out)['science_index'] == str(output / 'science/index.json')
     assert (output / 'control/index.json').read_bytes() == index.read_bytes()
     for alias, raw in originals.items():
         assert (output / 'control/originals' / alias).read_bytes() == raw
     bindings = read(output / 'control/bindings.json')
-    assert bindings['original_index'] == dict(path=str(index), sha256=expected)
+    assert bindings['original_index'] == dict(path=str(index), size_bytes=index.stat().st_size)
     assert len(bindings['bindings']) == len(originals)
     omitted = next(row for row in bindings['bindings'] if row['kind'] == 'publication_inventory')
     assert omitted['omitted_originals'] == inventory['withheld']
@@ -140,50 +137,50 @@ def test_new_science_view_retains_exact_private_bindings_and_small_omission_summ
 
 @pytest.mark.parametrize('mutation', ['index', 'missing', 'changed', 'redirected'])
 def test_exact_index_and_every_indexed_original_are_mandatory(tmp_path, mutation):
-    index, expected, _ = packet(tmp_path, [('source.py', 'source', b'x = 1\n')])
+    index, _ = packet(tmp_path, [('source.py', 'source', b'x = 1\n')])
     source = index.parent / 'source.py'
     if mutation == 'index':
-        index.write_bytes(index.read_bytes() + b'\n')
+        index.write_bytes(b'{invalid index')
     elif mutation == 'missing':
         source.unlink()
     elif mutation == 'changed':
-        source.write_bytes(b'x = 2\n')
+        source.write_bytes(b'x = 22\n')
     else:
         target = tmp_path / 'redirect.py'
         source.rename(target)
         source.symlink_to(target)
     with pytest.raises(ValueError):
-        view.export_view(index, expected, tmp_path / 'new-view')
+        view.export_view(index, tmp_path / 'new-view')
     assert not (tmp_path / 'new-view').exists()
 
 
 def test_unsupported_mechanical_producer_fails_without_scrubbing_scientific_data(tmp_path):
     original = dict(candidate_id='b' * 64, custom_metric=dict(sha256='a legitimate scientific variable'))
-    index, expected, originals = packet(tmp_path, [('metrics.json', 'metrics', original)])
+    index, originals = packet(tmp_path, [('metrics.json', 'metrics', original)])
     with pytest.raises(ValueError, match='Unsupported mechanical metrics producer'):
-        view.export_view(index, expected, tmp_path / 'new-view')
+        view.export_view(index, tmp_path / 'new-view')
     assert not (tmp_path / 'new-view').exists()
     assert (index.parent / 'metrics.json').read_bytes() == originals['metrics.json']
 
 
 def test_exclusive_output_and_indexed_receipt_kind(tmp_path):
-    index, expected, _ = packet(tmp_path, [('completed.json', 'limitation', dict(status='unknown'))])
+    index, _ = packet(tmp_path, [('completed.json', 'limitation', dict(status='unknown'))])
     with pytest.raises(ValueError, match='Mechanical receipt requires'):
-        view.export_view(index, expected, tmp_path / 'new-view')
+        view.export_view(index, tmp_path / 'new-view')
     output = tmp_path / 'already-used'
     output.mkdir()
     (output / 'retained').write_bytes(b'existing failed preparation')
     with pytest.raises(ValueError, match='Exclusive new view'):
-        view.export_view(index, expected, output)
+        view.export_view(index, output)
     assert (output / 'retained').read_bytes() == b'existing failed preparation'
 
 
 def test_omission_unknown_categories_fail_closed(tmp_path):
     inventory = dict(withheld=[dict(public_alias='missing/result.json', sha256='a' * 64,
                                    size_bytes=1, reason='new_unreviewed_reason')])
-    index, expected, _ = packet(tmp_path, [('withheld.json', 'publication_inventory', inventory)])
+    index, _ = packet(tmp_path, [('withheld.json', 'publication_inventory', inventory)])
     with pytest.raises(ValueError, match='Unsupported omission category'):
-        view.export_view(index, expected, tmp_path / 'new-view')
+        view.export_view(index, tmp_path / 'new-view')
     assert not (tmp_path / 'new-view').exists()
 
 
@@ -198,9 +195,9 @@ def test_omission_details_are_bounded_readable_and_retain_each_missing_material(
              size_bytes=20, reason='stdout_contains_private_host_paths'),
     ])
     inventory = dict(version=1, withheld=withheld, task_completion='Unknown calls remain unresolved.')
-    index, expected, originals = packet(tmp_path, [('withheld.json', 'publication_inventory', inventory)])
+    index, originals = packet(tmp_path, [('withheld.json', 'publication_inventory', inventory)])
     output = tmp_path / 'new-view'
-    view.export_view(index, expected, output)
+    view.export_view(index, output)
     science = output / 'science'
     public = read(science / 'index.json')
     assert public['evidence'] == []
@@ -242,7 +239,7 @@ def test_omission_details_are_bounded_readable_and_retain_each_missing_material(
     assert bindings['omitted_originals'] == withheld
     assert {row['alias'] for row in bindings['science_details']} == set(page_aliases)
     for row in bindings['science_details']:
-        assert hashlib.sha256((science / row['alias']).read_bytes()).hexdigest() == row['view_sha256']
+        assert (science / row['alias']).stat().st_size == row['size_bytes']
     assert (output / 'control/originals/withheld.json').read_bytes() == originals['withheld.json']
 
 
@@ -250,10 +247,10 @@ def test_candidate_comparison_with_unrecognized_mechanical_fields_fails_closed(t
     candidate = 'local-' + 'a' * 64
     original = dict(scientific_result='Scientific explanation remains exact.',
         candidate_comparison=dict(rows=[dict(candidate_id=candidate, key_risk='Observed loss.', decision='keep')],
-            rationale='Scientific reason.', evidence_steps=[2], artifact_sha256='b' * 64))
-    index, expected, originals = packet(tmp_path, [('scientist-a.json', 'sealed_scientist', original)])
+            rationale='Scientific reason.', evidence_steps=[2], artifact_ref='b' * 64))
+    index, originals = packet(tmp_path, [('scientist-a.json', 'sealed_scientist', original)])
     with pytest.raises(ValueError, match='Unsupported candidate comparison producer'):
-        view.export_view(index, expected, tmp_path / 'new-view')
+        view.export_view(index, tmp_path / 'new-view')
     assert not (tmp_path / 'new-view').exists()
     assert (index.parent / 'scientist-a.json').read_bytes() == originals['scientist-a.json']
 
@@ -305,9 +302,9 @@ def test_omission_long_text_has_byte_bounded_pages_and_exact_reconstruction(tmp_
     # JSON escapes, multibyte characters and surrogate-pair encoding all count.
     text = ('Unresolved counterevidence: 中文实验😀 "quoted" \\path\n\t' * 1600) + ' final loss.'
     inventory = dict(withheld=[], task_completion=text, limitation='')
-    index, expected, originals = packet(tmp_path, [('withheld.json', 'publication_inventory', inventory)])
+    index, originals = packet(tmp_path, [('withheld.json', 'publication_inventory', inventory)])
     output = tmp_path / 'new-view'
-    view.export_view(index, expected, output)
+    view.export_view(index, output)
     science = output / 'science'
     summary, = omission_summaries(science)
     assert complete_omission_text(science, summary, 'task_completion') == text
@@ -326,9 +323,9 @@ def test_omission_long_material_names_and_scopes_remain_complete_and_pages_fit_b
     withheld = [dict(public_alias=f'{scope}/case-{i}/model-{"模型😀" * 900}.pkl',
         sha256=digest, size_bytes=i, reason='binary_model_private_filenames') for i in range(24)]
     inventory = dict(withheld=withheld)
-    index, expected, _ = packet(tmp_path, [('withheld.json', 'publication_inventory', inventory)])
+    index, _ = packet(tmp_path, [('withheld.json', 'publication_inventory', inventory)])
     output = tmp_path / 'new-view'
-    view.export_view(index, expected, output)
+    view.export_view(index, output)
     science = output / 'science'
     summary, = omission_summaries(science)
     assert scope not in json.dumps(summary)
@@ -362,10 +359,10 @@ def test_omission_multiple_inventory_summary_navigation_is_byte_bounded_and_comp
         size_bytes=i, reason='binary_model_private_filenames')],
         task_completion=f'Inventory {i}: ' + ('未完成😀 "failure"\n' * 180),
         limitation=f'Counterevidence {i}: ' + ('Loss remains unresolved.\t' * 180)) for i in range(24)]
-    index, expected, originals = packet(tmp_path, [(f'withheld-{i}.json', 'publication_inventory', value)
+    index, originals = packet(tmp_path, [(f'withheld-{i}.json', 'publication_inventory', value)
                                                  for i, value in enumerate(inventories)])
     output = tmp_path / 'new-view'
-    view.export_view(index, expected, output)
+    view.export_view(index, output)
     science = output / 'science'
     public = read(science / 'index.json')
     assert public['evidence'] == [] and public['omissions_next'].startswith('omissions/')
@@ -386,7 +383,7 @@ def test_omission_multiple_inventory_summary_navigation_is_byte_bounded_and_comp
     for row in private_pages:
         path = science / row['alias']
         assert path.stat().st_size <= view.OMISSION_PAGE_MAX_BYTES
-        assert hashlib.sha256(path.read_bytes()).hexdigest() == row['view_sha256']
+        assert path.stat().st_size == row['size_bytes']
     for alias, raw in originals.items():
         assert (output / 'control/originals' / alias).read_bytes() == raw
 
@@ -395,7 +392,18 @@ def test_omission_multiple_inventory_summary_navigation_is_byte_bounded_and_comp
 @pytest.mark.parametrize('value', [None, 7, [], {}])
 def test_omission_text_bad_types_fail_closed(tmp_path, field, value):
     inventory = dict(withheld=[], **{field: value})
-    index, expected, _ = packet(tmp_path, [('withheld.json', 'publication_inventory', inventory)])
+    index, _ = packet(tmp_path, [('withheld.json', 'publication_inventory', inventory)])
     with pytest.raises(ValueError, match='Known omission text fields must be strings'):
-        view.export_view(index, expected, tmp_path / 'new-view')
+        view.export_view(index, tmp_path / 'new-view')
     assert not (tmp_path / 'new-view').exists()
+
+
+def test_selected_same_size_source_is_copied_without_content_fingerprinting(tmp_path):
+    index, _ = packet(tmp_path, [('source.py', 'source', b'x = 1\n')])
+    source=index.parent/'source.py';source.write_bytes(b'x = 2\n')
+    output=tmp_path/'new-view'
+    view.export_view(index,output)
+    assert (output/'science/source.py').read_bytes()==b'x = 2\n'
+    binding=read(output/'control/bindings.json')['bindings'][0]
+    assert binding['source_ref']==dict(path=str(source),size_bytes=source.stat().st_size)
+    assert 'sha256' not in json.dumps(binding)

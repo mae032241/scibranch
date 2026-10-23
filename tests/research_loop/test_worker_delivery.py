@@ -28,7 +28,7 @@ def output(root,rows,*,intent='review'):
     c.write(record/'science-output.json',payload)
     c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
     c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),
-        raw_sha256=c.digest(record/'science-output.json')))
+        raw_ref=c.file_ref(record/'science-output.json')))
     return record,payload
 
 
@@ -136,7 +136,7 @@ def test_unknown_native_and_invalid_json_keep_original_unsealed(tmp_path,executi
     outcome['usage']['unknown_steps']=[]
     outcome['usage']['blocking_unknown_steps']=[]
     (record/'science-output.json').write_text('not JSON')
-    outcome['raw_sha256']=c.digest(record/'science-output.json');c.write(record/'native-outcome.json',outcome)
+    outcome['raw_ref']=c.file_ref(record/'science-output.json');c.write(record/'native-outcome.json',outcome)
     with pytest.raises(OutputRepairRequired) as caught:c.seal_result(root,2)
     assert not isinstance(caught.value,WorkRepairRequired)
     assert not (record/'result-identity.json').exists()
@@ -146,11 +146,11 @@ def stopped_native(root,record):
     """Exact known native originals without an optional node-budget slice."""
     identity=execution.identity(root,2)
     for index,name in enumerate(('runner-process.json','native-process.json')):
-        c.write(record/name,dict(task_sha256=identity,boot_id=budget.clock_stamp()['boot_id'],
+        c.write(record/name,dict(task_ref=identity,boot_id=budget.clock_stamp()['boot_id'],
             pid=os.getpid()+10000+index,start_ticks=1,pgid=1,sid=1,ppid=1))
     outcome=c.read(record/'native-outcome.json')
     outcome.update(cleanup='observed_group_cleaned',execution_processes={
-        name:c.digest(record/name) for name in ('runner-process.json','native-process.json')})
+        name:c.record_ref(record/name) for name in ('runner-process.json','native-process.json')})
     c.write(record/'native-outcome.json',outcome)
 
 

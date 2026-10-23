@@ -55,7 +55,7 @@ def accepted(tmp_path,monkeypatch,request):
             worker_fragment_policy=dict(context='same_session' if getattr(request,'param',None) else 'new_context'),
             resume_policy=dict(policies()['resume_policy'],output_repair=getattr(request,'param',None)=='repair')))
     job=c.build_job(root,1,'W',[]);record=execution.record(root,1)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/001.json'),budget_slice=budget.accept_node(root,job)))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/001.json'),budget_slice=budget.accept_node(root,job)))
     binding=execution.identity(root,1)
     c.write(record/'runner-process.json',runtime.process_identity(os.getppid(),binding))
     c.write(record/'native-process.json',runtime.process_identity(os.getpid(),binding))
@@ -119,15 +119,15 @@ def next_context(root,job,first,monkeypatch):
     meter=dict(input_tokens=10,cached_input_tokens=0,output_tokens=0);c.write(first/'usage.json',meter)
     intent=c.read(first/'native-intent.json')
     c.write(first/'native-outcome.json',dict(returncode=0,stop_reason=None,cleanup='observed_group_cleaned',
-        raw_sha256=c.digest(first/'science-output.json'),usage=native.usage(root),
+        raw_ref=c.file_ref(first/'science-output.json'),usage=native.usage(root),
         budget_slice=dict(budget.node_report(root,job,intent,meter),usage_observed=True)))
     checkpoint.capture(root,job,first)
     record=first/'continuations/001'
     home=root/'native-homes/001/context-001';home.mkdir(parents=True)
     c.write(record/'native-intent.json',dict(step=1,attempt=1,continuation_kind='fragment',context_mode='new_context',
-        native_home=str(home),task_sha256=c.digest(root/'jobs/001.json'),previous=execution.proof(first),
-        root_intent_sha256=c.digest(first/'native-intent.json'),budget_slice=budget.accept_continuation(root,job,[first]),
-        fragment_checkpoint=dict(path=(first/'checkpoint.json').relative_to(root).as_posix(),sha256=c.digest(first/'checkpoint.json'))))
+        native_home=str(home),task_ref=c.record_ref(root/'jobs/001.json'),previous=execution.proof(first),
+        root_intent_ref=c.record_ref(first/'native-intent.json'),budget_slice=budget.accept_continuation(root,job,[first]),
+        fragment_checkpoint=dict(path=(first/'checkpoint.json').relative_to(root).as_posix())))
     binding=execution.identity(root,1,1)
     c.write(record/'runner-process.json',runtime.process_identity(os.getppid(),binding))
     c.write(record/'native-process.json',runtime.process_identity(os.getpid(),binding))
@@ -171,7 +171,7 @@ def test_current_backend_permission_overrides_are_exact(launcher,accepted,damage
 def test_cov_namespace_rejects_unsupported_frozen_native_permissions(launcher,accepted,change):
     root,job,record=accepted
     settings=c.settings(root);settings['native_options'].update(change)
-    c.write(root/'settings.json',settings);c.write(root/'settings-identity.json',dict(sha256=c.digest(root/'settings.json')))
+    c.write(root/'settings.json',settings);c.write(root/'settings-identity.json',dict(path='settings.json'))
     args=arguments(root,record)
     with pytest.raises(ValueError,match='native_permissions_not_supported_by_cov_launcher'):
         launcher.native_args(spec(root),c.workspace(root,1),args)
@@ -209,16 +209,16 @@ def next_session(root,job,first,monkeypatch,*,repair=False):
     meter=dict(input_tokens=10,cached_input_tokens=0,output_tokens=0);c.write(first/'usage.json',meter)
     original=c.read(first/'native-intent.json')
     c.write(first/'native-outcome.json',dict(returncode=0,stop_reason=None,cleanup='observed_group_cleaned',
-        thread_id=THREAD,raw_sha256=c.digest(first/'science-output.json'),usage=native.usage(root),
+        thread_id=THREAD,raw_ref=c.file_ref(first/'science-output.json'),usage=native.usage(root),
         budget_slice=dict(budget.node_report(root,job,original,meter),usage_observed=True)))
     if not repair:checkpoint.capture(root,job,first)
     reference=continuation.session(root,1,first)
     record=first/'continuations/001'
     value=dict(step=1,attempt=1,continuation_kind='repair' if repair else 'fragment',context_mode='same_session',
-        task_sha256=c.digest(root/'jobs/001.json'),previous=execution.proof(first),session=reference,
-        root_intent_sha256=c.digest(first/'native-intent.json'),budget_slice=budget.accept_continuation(root,job,[first]))
+        task_ref=c.record_ref(root/'jobs/001.json'),previous=execution.proof(first),session=reference,
+        root_intent_ref=c.record_ref(first/'native-intent.json'),budget_slice=budget.accept_continuation(root,job,[first]))
     if repair:value['output_repair']=continuation.output_request(root,1,first,source_attempt=0)
-    else:value['fragment_checkpoint']=dict(path=(first/'checkpoint.json').relative_to(root).as_posix(),sha256=c.digest(first/'checkpoint.json'))
+    else:value['fragment_checkpoint']=dict(path=(first/'checkpoint.json').relative_to(root).as_posix())
     c.write(record/'native-intent.json',value)
     binding=execution.identity(root,1,1)
     c.write(record/'runner-process.json',runtime.process_identity(os.getppid(),binding))
@@ -268,14 +268,14 @@ def test_resumed_dispatch_rejects_identity_changes_without_writes(launcher,accep
         settings=c.settings(root)
         if damage=='schema_transport':settings['native_capabilities']['response_schema_transport']='native_flag'
         else:settings['native_capabilities'].pop('response_schema_transport')
-        c.write(root/'settings.json',settings);c.write(root/'settings-identity.json',dict(sha256=c.digest(root/'settings.json')))
+        c.write(root/'settings.json',settings);c.write(root/'settings-identity.json',dict(path='settings.json'))
     elif damage=='fresh_shape':args=arguments(root,record)
     elif damage=='old_output':args[args.index('--output-last-message')+1]=str(first/'result.pending.json')
     elif damage=='unknown_pid':
         value=c.read(record/'native-process.json');value['pid']=os.getppid();c.write(record/'native-process.json',value)
     elif damage=='terminal':c.write(record/'native-outcome.json',dict(returncode=0))
     else:
-        value=c.read(record/'native-intent.json');value['root_intent_sha256']='0'*64;c.write(record/'native-intent.json',value)
+        value=c.read(record/'native-intent.json');value['root_intent_ref']=dict(path='/wrong/original.json');c.write(record/'native-intent.json',value)
     before={str(p):p.read_bytes() for p in root.rglob('*') if p.is_file()}
     with pytest.raises(ValueError):launcher.native_args(spec(root),c.workspace(root,1),args)
     assert {str(p):p.read_bytes() for p in root.rglob('*') if p.is_file()}==before

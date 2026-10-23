@@ -1,6 +1,5 @@
 """Cov single-source admission and public contracts; no executor is started."""
 from copy import deepcopy
-import hashlib
 import json
 
 import pytest
@@ -47,7 +46,7 @@ def test_cov_single_source_contract_is_frozen_discoverable_and_exact(wrapper, ca
     listed = json.loads(capsys.readouterr().out)['contracts']
     scientific_fields={'key','kind','schema_id','payload_schema_version','media_type','public_summary'}
     assert all(set(item)==scientific_fields for item in listed)
-    assert all(set(item)==scientific_fields|{'sha256','size_bytes'} for item in frozen)
+    assert all(set(item)==scientific_fields|{'size_bytes'} for item in frozen)
     assert listed == [{key:item[key] for key in scientific_fields} for item in frozen]
     summary = next(item['public_summary'] for item in listed if item['key'] == 'cov_single_source')
     assert summary['accepted_source'] == 'exact source.py snapshot'
@@ -57,13 +56,12 @@ def test_cov_single_source_contract_is_frozen_discoverable_and_exact(wrapper, ca
     capsys.readouterr()
     assert json.loads(output.read_text()) == summary
     bound=next(item for item in frozen if item['key']=='cov_single_source')
-    assert hashlib.sha256(output.read_bytes()).hexdigest()==bound['sha256']
     assert output.stat().st_size==bound['size_bytes']
     changed = deepcopy(config)
     changed['execution_interface']['public_capabilities'] = []
     with pytest.raises(e.IntegrityError, match='contract or configuration changed'):
         e.load(changed, path=wrapper.config)
-    for field,value in (('sha256','0'*64),('size_bytes',bound['size_bytes']+1)):
+    for field,value in (('public_summary',dict(unapproved=True)),('size_bytes',bound['size_bytes']+1)):
         changed=deepcopy(config)
         next(item for item in changed['execution_interface']['public_capabilities'] if item['key']=='cov_single_source')[field]=value
         with pytest.raises(e.IntegrityError,match='contract or configuration changed'):
@@ -76,14 +74,14 @@ def test_public_contracts_freeze_without_managed_source_key(tmp_path, remote_reg
     from scidiscovery.research_loop.protocol import CURRENT
     options = dict(registered_implementation=dict(factory='previous-installation:factory',plugin_version='old',code=[])) if registered else {}
     config = e.freeze(dict(options, record_dir=str(tmp_path / 'records'),
-        scope=dict(handoff_protocol=CURRENT, step=2, role='W', job_sha256='a' * 64,
-            execution_key='b' * 64, mechanism_ref=None)), 'remote_execution:fixture', path=tmp_path / 'config.json')
+        scope=dict(handoff_protocol=CURRENT, step=2, role='W', job_ref=dict(path='/fixture/jobs/002.json'),
+            execution_key=dict(path='/fixture/native-evidence/002/native-intent.json'), mechanism_ref=None)), 'remote_execution:fixture', path=tmp_path / 'config.json')
     assert ('registered_implementation' in config) is registered
     contracts = config['execution_interface']['public_capabilities']
     assert [item['key'] for item in contracts] == ['opaque_input']
     assert contracts == e._public_capabilities(e.load(config, path=tmp_path / 'config.json'))
     changed = deepcopy(config)
-    changed['execution_interface']['public_capabilities'][0]['sha256'] = '0' * 64
+    changed['execution_interface']['public_capabilities'][0]['size_bytes'] += 1
     with pytest.raises(e.IntegrityError, match='contract or configuration changed'):
         e.load(changed, path=tmp_path / 'config.json')
 
@@ -95,8 +93,8 @@ def test_empty_capability_adapter_preserves_public_contract_presence(tmp_path, r
     monkeypatch.setattr(DifferentExternalIdentity, 'capabilities', lambda self: ())
     options = dict(registered_implementation=dict(factory='previous-installation:factory',plugin_version='old',code=[])) if registered else {}
     config = e.freeze(dict(options, record_dir=str(tmp_path / 'records'),
-        scope=dict(handoff_protocol=CURRENT, step=2, role='W', job_sha256='a' * 64,
-            execution_key='b' * 64, mechanism_ref=None)), 'remote_execution:fixture', path=tmp_path / 'config.json')
+        scope=dict(handoff_protocol=CURRENT, step=2, role='W', job_ref=dict(path='/fixture/jobs/002.json'),
+            execution_key=dict(path='/fixture/native-evidence/002/native-intent.json'), mechanism_ref=None)), 'remote_execution:fixture', path=tmp_path / 'config.json')
     interface = config['execution_interface']
     assert ('public_capabilities' in interface) is registered
     if registered:

@@ -5,7 +5,7 @@ from __future__ import annotations
 DEVELOPMENT_ARTIFACT_LIMIT_BYTES = 64 * 1024 * 1024
 
 import base64
-import hashlib
+import uuid
 import io
 import json
 import math
@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Annotated, Any, BinaryIO, Callable, ContextManager, Literal, Mapping
 
 from pydantic import ConfigDict, Field, ValidationError, field_validator, model_validator
-from scidiscovery.artifact_agent.schema.common import canonical_json, canonical_sha256
+from scidiscovery.artifact_agent.schema.common import canonical_json
 from scidiscovery.artifact_agent.schema.experiment import ExperimentPortfolio
 from scidiscovery.operation_contract import SemanticRuleViolation, declared_violation
 from scidiscovery.artifact_agent.schema.refs import ArtifactRef
@@ -112,7 +112,6 @@ class NativeSealRef(StrictModel):
     """An exact instance-relative original; the host must verify its bytes."""
 
     path: str = Field(min_length=1, max_length=4096)
-    sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
     size_bytes: int = Field(ge=0)
 
     _safe_path = field_validator("path")(_safe_relative_path)
@@ -125,7 +124,6 @@ class NativeOriginalRef(StrictModel):
     producer_step: int = Field(gt=0)
     producer_seal: NativeSealRef
     material_path: str = Field(min_length=1, max_length=4096)
-    sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
     size_bytes: int = Field(ge=0)
 
     _safe_material_path = field_validator("material_path")(_safe_relative_path)
@@ -178,9 +176,6 @@ class ParameterBinding(StrictModel):
     materialization_kind: Literal["agent_declared", "control_generated"] = (
         "agent_declared"
     )
-    source_sha256: str | None = Field(
-        default=None, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
     source_line_start: int | None = Field(default=None, ge=1)
     source_line_end: int | None = Field(default=None, ge=1)
     derivation: str | None = Field(default=None, min_length=1, max_length=4096)
@@ -201,8 +196,7 @@ class ParameterBinding(StrictModel):
             raise ValueError("parameter evidence fields must be supplied together")
         if self.materialization_kind == "control_generated":
             if (
-                self.source_sha256 is None
-                or self.source_line_start is None
+                self.source_line_start is None
                 or self.source_line_end is None
                 or self.derivation is None
             ):
@@ -214,7 +208,6 @@ class ParameterBinding(StrictModel):
         elif any(
             value is not None
             for value in (
-                self.source_sha256,
                 self.source_line_start,
                 self.source_line_end,
                 self.derivation,
@@ -253,9 +246,6 @@ class CaseParameterBinding(StrictModel):
     materialization_kind: Literal["agent_declared", "control_generated"] = (
         "agent_declared"
     )
-    source_sha256: str | None = Field(
-        default=None, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
     source_line_start: int | None = Field(default=None, ge=1)
     source_line_end: int | None = Field(default=None, ge=1)
     derivation: str | None = Field(default=None, min_length=1, max_length=4096)
@@ -266,8 +256,7 @@ class CaseParameterBinding(StrictModel):
     def _materialization_evidence_is_complete(self) -> CaseParameterBinding:
         if self.materialization_kind == "control_generated":
             if (
-                self.source_sha256 is None
-                or self.source_line_start is None
+                self.source_line_start is None
                 or self.source_line_end is None
                 or self.derivation is None
             ):
@@ -279,7 +268,6 @@ class CaseParameterBinding(StrictModel):
         elif any(
             value is not None
             for value in (
-                self.source_sha256,
                 self.source_line_start,
                 self.source_line_end,
                 self.derivation,
@@ -326,9 +314,6 @@ class MaterializationFinding(StrictModel):
 class ProjectMaterializationReport(StrictModel):
     schema_version: Annotated[int, Field(ge=1, le=1)] = 1
     profile: Literal["tcad.project-materializer.declared-source.v2"]
-    source_tree_sha256: str = Field(
-        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
     status: Literal["pass", "fail"]
     generated_case_bindings: int = Field(ge=0, le=100000)
     generated_parameter_bindings: int = Field(ge=0, le=100000)
@@ -348,16 +333,7 @@ class ProjectPreflightAttestation(StrictModel):
 
     schema_version: Annotated[int, Field(ge=1, le=1)] = 1
     profile: Literal["tcad.project-preflight.v1"] = "tcad.project-preflight.v1"
-    source_tree_sha256: str = Field(
-        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
     mode: Literal["preflight"] = "preflight"
-    project_sha256: str | None = Field(
-        default=None, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
-    declarations_sha256: str | None = Field(
-        default=None, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
     terminal_state: Literal["succeeded", "failed", "cancelled"]
     exit_code: int
     diagnostic_layer: Literal[
@@ -664,13 +640,6 @@ class DeckProjectDraft(ScientificDeckImplementation):
                 raise ValueError("parameter binding file must exist")
             if binding.locator not in contents[binding.relative_path]:
                 raise ValueError("parameter binding locator is absent from its file")
-            if binding.materialization_kind == "control_generated":
-                if hashlib.sha256(
-                    contents[binding.relative_path].encode("utf-8")
-                ).hexdigest() != binding.source_sha256:
-                    raise ValueError(
-                        "control-generated parameter binding source digest differs"
-                    )
         for binding in self.case_parameter_bindings:
             if binding.relative_path not in contents:
                 raise ValueError("case parameter binding file must exist")
@@ -685,13 +654,6 @@ class DeckProjectDraft(ScientificDeckImplementation):
                 raise ValueError(
                     "case parameter binding value is not present in its exact locator"
                 )
-            if binding.materialization_kind == "control_generated":
-                if hashlib.sha256(
-                    contents[binding.relative_path].encode("utf-8")
-                ).hexdigest() != binding.source_sha256:
-                    raise ValueError(
-                        "control-generated case binding source digest differs"
-                    )
 
         requirement_keys = tuple(
             item.requirement_key for item in self.realization_manifest
@@ -737,33 +699,9 @@ class DeckProjectDraft(ScientificDeckImplementation):
             for item in self.runtime_assertions
         ):
             raise ValueError("runtime assertion must reference an expected output")
-        source_tree = hashlib.sha256()
-        for path, content in sorted(contents.items()):
-            source_tree.update(path.encode("utf-8"))
-            source_tree.update(b"\0")
-            source_tree.update(content.encode("utf-8"))
-            source_tree.update(b"\0")
-        source_tree_sha256 = source_tree.hexdigest()
-        if self.materialization_report is not None:
-            if source_tree_sha256 != self.materialization_report.source_tree_sha256:
-                raise ValueError("materialization report source digest differs")
-            if self.materialization_report.status != "pass":
-                raise ValueError("canonical project materialization did not pass")
-        for report in (self.preflight_attestation, self.initialization_attestation):
-            if report is not None:
-                if report.source_tree_sha256 != source_tree_sha256:
-                    raise ValueError("debug attestation source digest differs")
-                if report.project_sha256 is not None and report.project_sha256 != project_debug_sha256(self):
-                    raise ValueError("debug attestation project digest differs")
+        if self.materialization_report is not None and self.materialization_report.status != "pass":
+            raise ValueError("canonical project materialization did not pass")
         return self
-
-
-def project_debug_sha256(project: DeckProjectDraft) -> str:
-    """Bind diagnostic results to source, invocation, and materialized declarations."""
-    return hashlib.sha256(canonical_json(project.model_dump(
-        mode="json",
-        exclude={"preflight_attestation", "initialization_attestation", "materialization_report", "development_diagnostics"},
-    ))).hexdigest()
 
 
 class DeckRequirementReview(StrictModel):
@@ -936,15 +874,10 @@ def validate_execution_package_eligibility(reviewed: ExecutionPackage | NativeEx
     model.model_validate_json(canonical_json(reviewed.model_dump(mode="json")), strict=True)
 
 
-def _input_sha256(item: ResolvedProjectInput | NativeResolvedProjectInput) -> str:
-    return item.original.sha256 if isinstance(item, NativeResolvedProjectInput) else item.artifact_ref.sha256
-
-
 class RuntimeOutputRecord(StrictModel):
     name: str = Field(min_length=1, max_length=256)
     relative_path: str = Field(min_length=1, max_length=1024)
     media_type: str = Field(min_length=3, max_length=255)
-    sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
     size_bytes: int = Field(ge=0, le=2**50)
     output_class: Literal[
         "solver_native", "transport_derived", "parser_derived"
@@ -1010,7 +943,7 @@ class RuntimeAttestation(StrictModel):
 
 @dataclass(frozen=True)
 class PackagedTCADProject:
-    project_sha256: str
+    package_id: str
     package_directory: Path
     archive: FileDescriptor
     job_spec_file: FileDescriptor
@@ -1174,26 +1107,20 @@ def package_deck_project(
             raise PackagerError("resolved execution input differs from its project slot")
         raw = payloads[name]
         if isinstance(raw, Path):
-            digest, size = _file_identity(raw,context)
+            size = _file_size(raw,context)
         elif type(raw) is bytes:
-            digest, size = hashlib.sha256(raw).hexdigest(), len(raw)
+            size = len(raw)
         else:
             raise PackagerError("execution input must be verified bytes or a staged file")
-        if size != item.size_bytes or digest != _input_sha256(item):
+        if size != item.size_bytes:
             raise PackagerError("resolved execution input differs from its exact original")
         binary_files[item.target_relative_path] = raw
-    project_raw = _canonical(project.model_dump(mode="python"))
-    project_sha256 = hashlib.sha256(project_raw).hexdigest()
-    package_sha256 = hashlib.sha256(
-        project_raw
-        + _canonical(snapshot.model_dump(mode="python"))
-        + _canonical([item.model_dump(mode="python") for item in resolved_inputs])
-    ).hexdigest()
+    package_id = uuid.uuid4().hex
     root = Path(output_root).expanduser().absolute()
     root.mkdir(parents=True, exist_ok=True, mode=0o770)
     if root.is_symlink() or not root.is_dir():
         raise PackagerError("package root must be a non-symlink directory")
-    target = root / f"pkg_{package_sha256}"
+    target = root / f"pkg_{package_id}"
     temporary: Path | None = Path(tempfile.mkdtemp(prefix=".package-", dir=root))
     try:
         assert temporary is not None
@@ -1224,17 +1151,13 @@ def package_deck_project(
         os.chmod(archive_path, 0o440)
         os.chmod(job_path, 0o440)
 
-        if target.exists():
-            if not _same_package(temporary, target,context=context):
-                raise PackagerError("existing package differs from deterministic build")
-        else:
-            os.replace(temporary, target)
-            temporary = None
+        os.rename(temporary, target)
+        temporary = None
 
         final_archive = target / "project.tar"
         final_job = target / "job.json"
         return PackagedTCADProject(
-            project_sha256=project_sha256,
+            package_id=package_id,
             package_directory=target,
             archive=_descriptor("input_archive", final_archive, "application/x-tar",context=context),
             job_spec_file=_descriptor(
@@ -1357,7 +1280,6 @@ def attest_runtime_contract(
         descriptor = observed[name]
         passed = (
             len(raw) == descriptor.size_bytes
-            and hashlib.sha256(raw).hexdigest() == descriptor.sha256
         )
         checks.append(
             RuntimeContractCheck(
@@ -1409,7 +1331,7 @@ def attest_runtime_contract(
         if item.output_class == "solver_native" and name not in declared
         and not (
             reviewed.project.collect_generated_outputs
-            and name == "generated_" + hashlib.sha256(item.relative_path.encode("utf-8")).hexdigest()
+            and name == "generated_" + str(list(manifest.outputs).index(item))
         )
     )
     generated_count = sum(
@@ -1593,16 +1515,11 @@ def _finite_number(value: str) -> bool:
         return False
 
 
-def _file_identity(path: Path,context=None) -> tuple[str, int]:
+def _file_size(path: Path,context=None) -> int:
+    if context is not None:context.remaining_seconds()
     if path.is_symlink() or not path.is_file():
         raise PackagerError("execution input must be a regular file")
-    digest, size = hashlib.sha256(), 0
-    with path.open("rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            if context is not None:context.remaining_seconds()
-            size += len(block)
-            digest.update(block)
-    return digest.hexdigest(), size
+    return path.stat().st_size
 
 
 def materialize_execution_inputs(
@@ -1658,19 +1575,13 @@ def materialize_execution_inputs(
         if (type(size_bytes) is not int or not isinstance(media_type, str)
                 or size_bytes != item.size_bytes or media_type != item.media_type):
             raise PackagerError("resolved input metadata differs from exact original")
-        expected_sha256 = _input_sha256(item)
-        target = directory / expected_sha256
+        target = directory / item.semantic_name
         if target.exists() or target.is_symlink():
-            if target.is_symlink() or not target.is_file():
-                raise PackagerError("execution input must be a regular file")
-            if (target.stat().st_size != item.size_bytes
-                    or _file_identity(target,context) != (expected_sha256, item.size_bytes)):
-                raise PackagerError("cached input differs from exact original")
-            os.chmod(target, 0o440)
+            raise PackagerError("scientific input staging slot already exists; reconcile original preparation")
         else:
             created = False
             try:
-                digest, actual_size = hashlib.sha256(), 0
+                actual_size = 0
                 with open_input(item) as source, target.open("xb") as output:
                     created = True
                     for block in iter(lambda: source.read(chunk_bytes), b""):
@@ -1678,9 +1589,8 @@ def materialize_execution_inputs(
                         actual_size += len(block)
                         if actual_size > item.size_bytes:
                             raise PackagerError("original exceeds its declared input size")
-                        digest.update(block)
                         output.write(block)
-                    if actual_size != item.size_bytes or digest.hexdigest() != expected_sha256:
+                    if actual_size != item.size_bytes:
                         raise PackagerError("input bytes differ from exact original")
                     output.flush()
                     os.fsync(output.fileno())
@@ -1707,7 +1617,7 @@ def _write_archive(
     with tarfile.open(archive_path, "w", format=tarfile.USTAR_FORMAT) as archive:
         for relative_path, raw in sorted(contents.items()):
             info = tarfile.TarInfo(relative_path)
-            digest, size = _file_identity(raw,context) if isinstance(raw, Path) else (hashlib.sha256(raw).hexdigest(), len(raw))
+            size = _file_size(raw,context) if isinstance(raw, Path) else len(raw)
             info.size = size
             info.mode = 0o440
             info.uid = 0
@@ -1720,7 +1630,6 @@ def _write_archive(
             entries.append(
                 ArchiveEntry(
                     relative_path=relative_path,
-                    sha256=digest,
                     size_bytes=size,
                 )
             )
@@ -1736,20 +1645,6 @@ class _ContextReader:
         return value
 
 
-def _same_package(candidate: Path, existing: Path, *, context=None) -> bool:
-    names = ("job.json", "project.tar")
-    if existing.is_symlink() or not existing.is_dir():
-        return False
-    if {item.name for item in existing.iterdir()} != set(names):
-        return False
-    return all(
-        not (existing / name).is_symlink()
-        and (existing / name).is_file()
-        and _file_identity(candidate / name,context) == _file_identity(existing / name,context)
-        for name in names
-    )
-
-
 def _descriptor(
     name: str,
     path: Path,
@@ -1758,11 +1653,10 @@ def _descriptor(
     reported_path: Path | None = None,
     context=None,
 ) -> FileDescriptor:
-    digest, size = _file_identity(path,context)
+    size = _file_size(path,context)
     return FileDescriptor(
         name=name,
         local_path=str(reported_path or path),
-        sha256=digest,
         size_bytes=size,
         media_type=media_type,
     )

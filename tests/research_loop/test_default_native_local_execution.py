@@ -257,7 +257,7 @@ def _process_tree(identity):
     observed={}
     for entry in Path('/proc').iterdir():
         if not entry.name.isdecimal():continue
-        try:current=runtime.process_identity(int(entry.name),identity['task_sha256'])
+        try:current=runtime.process_identity(int(entry.name),identity['task_ref'])
         except (OSError,ValueError,IndexError):continue
         if current['state']!='Z':observed[current['pid']]=current
     owned={identity['pid']:identity}
@@ -288,7 +288,7 @@ def _check_active_backend_shutdown(root,work,target):
         assert len(calls)==1
         call=calls[0];accepted=(call/'accepted.json').read_bytes()
         identity=c.read(call/'process.json');identities=_process_tree(identity)
-        assert len(identities)>1 and all(runtime.process_matches(item,item['task_sha256']) for item in identities)
+        assert len(identities)>1 and all(runtime.process_matches(item,item['task_ref']) for item in identities)
         from scidiscovery.research_loop import worker_execution_bridge
         assert config['max_seconds']==3
         with pytest.raises(BlockingIOError):
@@ -299,8 +299,8 @@ def _check_active_backend_shutdown(root,work,target):
         assert not (record/'result-identity.json').exists()
         assert not (work/'artifacts/backend-finished').exists()
         deadline=time.monotonic()+3
-        while any(runtime.process_matches(item,item['task_sha256']) for item in identities) and time.monotonic()<deadline:time.sleep(.02)
-        alive=[item['pid'] for item in identities if runtime.process_matches(item,item['task_sha256'])]
+        while any(runtime.process_matches(item,item['task_ref']) for item in identities) and time.monotonic()<deadline:time.sleep(.02)
+        alive=[item['pid'] for item in identities if runtime.process_matches(item,item['task_ref'])]
         assert alive==[],f'Original scientific backend processes survived native exit: {alive}'
         assert len(e.Records(config).calls())==1 and (call/'accepted.json').read_bytes()==accepted
         state=e.Records(config).state(call.name)
@@ -326,7 +326,7 @@ def _check_active_backend_shutdown(root,work,target):
         release.touch();original.join(timeout=5)
         # A failing negative control must still clean its exact accepted group;
         # cleanup here never turns the earlier survivor assertion into a pass.
-        if any(runtime.process_matches(item,item['task_sha256']) for item in identities):
+        if any(runtime.process_matches(item,item['task_ref']) for item in identities):
             from scidiscovery.research_loop import local_experiments
             local_experiments.cleanup(root,c.read(root/'jobs/002.json'))
 
@@ -343,14 +343,14 @@ def test_unproven_native_permissions_refuse_managed_launch_without_overrides(tmp
     controller.prepare(root,objective,public,['custom-launcher'],experiment_mode='local',
         max_tokens=1000,max_seconds=30,max_steps=2,model='no-model',reasoning_effort='high',search_policy=None)
     job=c.build_job(root,1,'W',[]);work=c.workspace(root,1);record=execution.origin(root,1)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/001.json')))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/001.json')))
     home=tmp_path/'home';home.mkdir()
     (home/'config.toml').write_text('default_permissions="named"\n[permissions.named.network]\nenabled=true\n')
     arguments=['custom-launcher','exec','-']
     applied,launch=native_execution.prepare(root,1,record,work,home,arguments,standard=standard)
     assert applied==arguments
     snapshot=c.read(record/'native-execution-permissions.json')
-    scope=dict(job_sha256=snapshot['task_sha256'])
+    scope=dict(job_ref=snapshot['task_ref'])
     accepted=dict(native_attempt=snapshot['native_attempt'],scope=scope)
     with pytest.raises(e.UnsupportedExecution,match='unsupported'):
         launch(dict(scope=scope),accepted,['must-never-be-spawned'],str(work))
@@ -373,14 +373,14 @@ def test_declared_public_root_overlap_refuses_before_scientific_launch(tmp_path,
     controller.prepare(root,objective,public,[str(actual)],experiment_mode='local',
         max_tokens=1000,max_seconds=30,max_steps=2,model='no-model',reasoning_effort='high',search_policy=None)
     c.build_job(root,1,'W',[]);work=c.workspace(root,1);record=execution.origin(root,1)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/001.json')))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/001.json')))
     (home/'config.toml').write_text('[sandbox_workspace_write]\nnetwork_access=false\n')
     monkeypatch.setenv('CODEX_HOME',str(home))
     arguments=[str(actual),'exec','--sandbox','workspace-write','-C',str(work),'-']
     _,launch=native_execution.prepare(root,1,record,work,home,arguments,standard=True)
     snapshot=c.read(record/'native-execution-permissions.json')
     assert 'public root overlaps' in snapshot['unsupported']
-    scope=dict(job_sha256=snapshot['task_sha256'])
+    scope=dict(job_ref=snapshot['task_ref'])
     accepted=dict(native_attempt=snapshot['native_attempt'],scope=scope)
     with pytest.raises(e.UnsupportedExecution,match='public root overlaps'):
         launch(dict(scope=scope),accepted,['must-never-be-spawned'],str(work))
@@ -425,7 +425,7 @@ def test_real_exec_parser_accepts_the_applied_legacy_permission_arguments(tmp_pa
     controller.prepare(root,objective,public,[str(actual)],max_tokens=1000,max_seconds=30,max_steps=2,
         model='resume',reasoning_effort='high',search_policy=None)
     c.build_job(root,1,'W',[]);work=c.workspace(root,1);record=execution.origin(root,1)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/001.json')))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/001.json')))
     home=tmp_path/'home';home.mkdir()
     (home/'config.toml').write_text('[sandbox_workspace_write]\nnetwork_access=false\n')
     monkeypatch.setenv('CODEX_HOME',str(home))

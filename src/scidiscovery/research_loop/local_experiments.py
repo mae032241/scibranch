@@ -1,7 +1,6 @@
 """Ordinary local scientific commands under the caller's native permissions."""
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
@@ -76,7 +75,7 @@ class LocalExecution:
     def prepare(self,payload,*,preparation_profile,exchange_directory):
         if preparation_profile!='research_loop.v1' or Path(exchange_directory)!=self.records.root:
             raise ValueError('Exact managed preparation context required')
-        if e.proof(payload.local_path)['sha256']!=payload.sha256:
+        if e.proof(payload.local_path)['size_bytes']!=payload.size_bytes:
             raise e.IntegrityError('Prepared command source changed')
         argv=self.config['run_argv']
         if not isinstance(argv,list) or not argv or not all(isinstance(item,str) and item for item in argv):
@@ -97,7 +96,7 @@ class LocalExecution:
         metadata=dict(parent=dict(status='unknown',candidate_id=None,source='none'),change_intent=None,
             local_observation_version=1,
             command=[*self.config['run_argv'],payload.local_path,*arguments],script_index=len(self.config['run_argv']),cwd=self.config.get('cwd'),
-            config_sha256=hashlib.sha256(e.encoded(self.config)).hexdigest())
+            config_record=self.config)
         if options.get('experiment_directory') is not None:
             root=Path(options['experiment_directory']).absolute()
             if root.resolve()!=root or not root.is_dir() or self.records.root.is_relative_to(root):
@@ -109,7 +108,7 @@ class LocalExecution:
                 snapshot_files=self.files(root,exclude_artifacts=True,policy=self.config.get('storage_policy'),
                     context=storage.Deadline(self.config['max_seconds'])))
             entry=next(item for item in metadata['snapshot_files'] if item['name']==metadata['entry'])
-            if entry['sha256']!=payload.sha256 or entry['size_bytes']!=payload.size_bytes:
+            if entry['size_bytes']!=payload.size_bytes:
                 raise e.IntegrityError('Experiment script changed during preparation')
             metadata['cwd']=str(self.records.root/'calls'/payload.name/'inputs')
         snapshot=self.records.root/'calls'/payload.name
@@ -188,8 +187,8 @@ class LocalExecution:
         identity=None
         if path.exists():
             identity=json.loads(e.read(path))
-            key=e.hashlib.sha256(e.encoded(accepted)).hexdigest()
-            if (not isinstance(identity,dict) or identity.get('task_sha256')!=key
+            key=dict(path=str(directory/'accepted.json'))
+            if (not isinstance(identity,dict) or identity.get('task_ref')!=key
                     or any(type(identity.get(field)) is not int or identity[field]<=0
                            for field in ('pid','start_ticks','pgid','sid'))):
                 raise e.IntegrityError('Original local process identity is malformed or changed')
@@ -203,7 +202,7 @@ class LocalExecution:
             if state!=('succeeded' if terminal['returncode']==0 else 'failed'):
                 raise e.IntegrityError('Completed local execution differs from its transport')
             return state
-        return 'running' if identity and runtime.process_matches(identity,identity['task_sha256']) else 'unknown'
+        return 'running' if identity and runtime.process_matches(identity,identity['task_ref']) else 'unknown'
 
     def _execution_deadline(self,accepted):
         """Optional local partition; ordinary and previously accepted calls keep their limit."""
@@ -236,7 +235,7 @@ class LocalExecution:
                 stderr=subprocess.PIPE,start_new_session=True)
             identity=None
             try:
-                identity=runtime.process_identity(process.pid,hashlib.sha256(e.encoded(accepted)).hexdigest())
+                identity=runtime.process_identity(process.pid,dict(path=str(directory/'accepted.json')))
                 self.records.publish(call_id,'process.json',identity)
                 with selectors.DefaultSelector() as selector:
                     selector.register(process.stdout,selectors.EVENT_READ);selector.register(process.stderr,selectors.EVENT_READ)
@@ -268,13 +267,13 @@ class LocalExecution:
                 # An identity/receipt/IO exception after Popen must not leave an
                 # unregistered running child. Preserve that original exception.
                 if process.poll() is None:
-                    if identity is not None and runtime.process_matches(identity,identity['task_sha256']):
+                    if identity is not None and runtime.process_matches(identity,identity['task_ref']):
                         try:os.killpg(identity['pgid'],signal.SIGTERM)
                         except ProcessLookupError:pass
                     else:process.terminate()
                 try:process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    if identity is not None and runtime.process_matches(identity,identity['task_sha256']):
+                    if identity is not None and runtime.process_matches(identity,identity['task_ref']):
                         try:os.killpg(identity['pgid'],signal.SIGKILL)
                         except ProcessLookupError:pass
                     else:process.kill()
@@ -297,7 +296,7 @@ class LocalExecution:
             for stream in ('stdout.raw','stderr.raw'):
                 source=directory/stream
                 identity=e.proof(source,context=completion_context)
-                shared_originals.retain(storage_root,source,sha256=identity['sha256'],size_bytes=identity['size_bytes'],
+                shared_originals.retain(storage_root,source,size_bytes=identity['size_bytes'],
                     source_kind='managed_frozen',context=completion_context,policy=limits)
         except (TimeoutError,storage.StorageQuotaExceeded):
             # Preserve original terminal/cleanup facts when retained-content
@@ -324,11 +323,11 @@ class LocalExecution:
                     context=context or storage.Deadline(self.config['max_seconds'])
                     for item in self.files(directory/'inputs/artifacts',policy=self.config.get('storage_policy'),context=context):
                         source=Path(item['path']);target=directory/'outputs'/item['name']
-                        frozen_original=shared_originals.retain(root,source,sha256=item['sha256'],size_bytes=item['size_bytes'],source_kind='mutable',
+                        frozen_original=shared_originals.retain(root,source,size_bytes=item['size_bytes'],source_kind='mutable',
                             context=context,policy=self.config.get('storage_policy'))
-                        shared_originals.link(frozen_original,target,sha256=item['sha256'],size_bytes=item['size_bytes'],context=context,
+                        shared_originals.link(frozen_original,target,size_bytes=item['size_bytes'],context=context,
                             root=root,policy=self.config.get('storage_policy'))
-                        frozen=dict(path=str(target),sha256=item['sha256'],size_bytes=item['size_bytes'])
+                        frozen=dict(path=str(target),size_bytes=item['size_bytes'])
                         outputs.append(dict(frozen,name=item['name']))
                     result=self.read_result(directory/'outputs',outputs)
                 except storage.StorageQuotaExceeded:
@@ -426,11 +425,11 @@ class LocalExecution:
         for item in result['proofs']:
             if e.proof(item['path'])!=item:raise e.IntegrityError('Completed execution original changed')
         for item in result.get('outputs',[]):
-            if e.proof(item['path'])!={key:item[key] for key in ('path','sha256','size_bytes')}:
+            if e.proof(item['path'])!={key:item[key] for key in ('path','size_bytes')}:
                 raise e.IntegrityError('Completed output original changed')
         for item in accepted.get('snapshot_files',[]):
             original=e.proof(directory/'inputs'/item['name'])
-            if any(original[key]!=item[key] for key in ('sha256','size_bytes')):
+            if any(original[key]!=item[key] for key in ('size_bytes',)):
                 raise e.IntegrityError('Accepted input snapshot changed')
         return result
 
@@ -472,7 +471,7 @@ class LocalExecution:
         directory=self.records.directory(external_run_id)
         paths=[directory/name for name in ('stdout.raw','stderr.raw')]+[Path(item['path']) for item in result.get('outputs',[])]
         return tuple(LocalFileDescriptor(name=f'output-{index}',local_path=str(path),
-            sha256=e.proof(path)['sha256'],size_bytes=path.stat().st_size,
+            size_bytes=path.stat().st_size,
             media_type='application/octet-stream') for index,path in enumerate(paths))
 
     @staticmethod
@@ -547,8 +546,8 @@ def cleanup(root,job,*,watchdog=False):
             if value.get('cleanup_confirmed') is True:continue
         process=directory/'process.json'
         if not process.exists():result='cleanup_unknown';continue
-        identity=json.loads(e.read(process));key=hashlib.sha256(e.encoded(accepted)).hexdigest()
-        if identity.get('task_sha256')!=key or identity.get('pgid')!=identity.get('pid') or identity.get('sid')!=identity.get('pid'):
+        identity=json.loads(e.read(process));key=dict(path=str(directory/'accepted.json'))
+        if identity.get('task_ref')!=key or identity.get('pgid')!=identity.get('pid') or identity.get('sid')!=identity.get('pid'):
             raise e.IntegrityError('Local cleanup process binding differs')
         status=runtime.signal_observed_group(identity) if watchdog else runtime.cleanup_owned_group(identity)
         if status!='observed_group_cleaned':result='cleanup_unknown'

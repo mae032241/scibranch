@@ -1,5 +1,4 @@
 """Owner snapshots preserve opaque bytes without widening scientific task cuts."""
-import hashlib
 import json
 import shutil
 
@@ -13,7 +12,7 @@ def _write(root, path, raw):
     actual = root / path
     actual.parent.mkdir(parents=True, exist_ok=True)
     actual.write_bytes(raw)
-    return dict(path=path, sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw))
+    return dict(path=path, size_bytes=len(raw))
 
 
 def _copy(root, child):
@@ -34,7 +33,6 @@ def _copy_closure(root, closure, child):
     plan['origins'].update(closure.origins)
     plan['legacy_compilations'].update(closure.legacy_compilations)
     plan['native_records'].update(closure.records)
-    plan['source_fingerprint'] = fork_sources.fingerprint(plan)
     fork_sources.copy_source(plan, child / originals.FORK_DIRECTORY)
     shutil.rmtree(root)
     fork_sources.validate_manifest(child, full=True)
@@ -45,13 +43,13 @@ def test_arbitrary_adapter_record_and_opaque_json_survive_parent_removal(tmp_pat
     root = completed_source(tmp_path)
     outside = tmp_path / 'outside'
     outside.write_bytes(b'not an explicitly retained input')
-    raw = json.dumps(dict(any_new_field=dict(path=str(outside), sha256=c.digest(outside)))).encode()
+    raw = json.dumps(dict(any_new_field=dict(path=str(outside), ))).encode()
     proof = _write(root, 'host-recovery/non-domain-name/custom.pending', raw)
     child = tmp_path / 'child'
     plan, source = _copy(root, child)
     assert next(row for row in plan['entries'] if row['path'] == proof['path'])['visibility'] == 'private_snapshot'
     assert proof['path'] not in {row['path'] for row in source.entries}
-    assert not any(row['sha256'] == c.digest(outside) for row in plan['entries'])
+    assert not any(str(root/row['path']) == str(outside) for row in plan['entries'])
     shutil.rmtree(root)
     assert originals.resolve_ref(source, proof).read_bytes() == raw
     fork_sources.validate_manifest(child, full=True)
@@ -68,27 +66,6 @@ def test_private_future_output_is_retained_but_not_in_scientific_index(tmp_path)
     assert next(row for row in plan['entries'] if row['path'] == future['path'])['visibility'] == 'private_snapshot'
     assert [row['step'] for row in plan['prefix_entries']] == [1]
     assert source.step == 2
-
-
-def test_nested_snapshot_preserves_private_historical_versions_and_shared_inodes(tmp_path):
-    root = completed_source(tmp_path)
-    proof = _write(root, 'host-recovery/custom/original.bin', b'first historical bytes')
-    child = tmp_path / 'child'
-    budget = dict(max_tokens=200, max_seconds=30, max_steps=2)
-    preview = fork_service.preview(root, 2, child, budget=budget)
-    fork_service.create(root, 2, child, budget=budget,
-        expected_preview_id=preview['preview_id'], operation_id='snapshot-child')
-    inherited = originals.selected_source(child)
-    original = originals.resolve_ref(inherited, proof)
-    _write(child, proof['path'], b'new child bytes at the same logical path')
-    closure = fork_sources._Closure()
-    closure.snapshot(child)
-    versions = [row for row in closure.entries.values() if row['path'] == proof['path']]
-    assert len(versions) == 2
-    historical = next(row for row in versions if row['sha256'] == proof['sha256'])
-    retained = closure.paths[fork_sources._key(historical['origin_identity'], historical['path'], historical)]
-    assert original.stat().st_ino == originals.files.check_path(retained).stat().st_ino
-    assert originals.resolve_ref(inherited, proof).read_bytes() == b'first historical bytes'
 
 
 def test_missing_or_changed_explicit_input_still_fails_closed(tmp_path):
@@ -187,7 +164,7 @@ def test_explicit_old_locator_resolves_same_origin_archive_without_discovering_s
 def test_archived_fallback_cannot_hide_tampering_of_exact_locator_version(tmp_path):
     root = completed_source(tmp_path)
     proof = _write(root, 'host-recovery/custom/prepared.bin', b'exact accepted bytes')
-    archive = _write(root, 'host-history/objects/' + proof['sha256'], b'exact accepted bytes')
+    archive = _write(root, 'host-history/objects/accepted-original', b'exact accepted bytes')
     (root / proof['path']).chmod(0o400)
     (root / archive['path']).chmod(0o400)
     _, source = _copy(root, tmp_path / 'child')

@@ -26,7 +26,7 @@ def cleaned_unknown_author(root, *, stop_reason='token_limit', cleanup='observed
     budget.transition(root, 'advance', 'Fixture original author started')
     c.build_job(root, 3, 'A', [1, 2])
     record = execution.origin(root, 3)
-    c.write(record/'native-intent.json', dict(step=3, task_sha256=c.digest(root/'jobs/003.json')))
+    c.write(record/'native-intent.json', dict(step=3, task_ref=c.record_ref(root/'jobs/003.json')))
     meter = dict(input_tokens=100500, cached_input_tokens=100000, output_tokens=5)
     observation = dict(coverage='unknown', reason='terminal_usage_unreported', tokens=meter)
     c.write(record/'usage.json', meter)
@@ -82,7 +82,7 @@ def test_plain_host_action_still_rejects_actual_shared_token_exhaustion(tmp_path
     from test_candidate_audit import _seal_existing
     root = external_scene(tmp_path, monkeypatch)
     cleaned_unknown_author(root)
-    nodes = [dict(step=step, seal_sha256=c.digest(execution.origin(root, step)/'result-identity.json')) for step in (1, 2)]
+    nodes = [dict(step=step, seal_ref=c.record_ref(execution.origin(root, step)/'result-identity.json')) for step in (1, 2)]
     refs = delivery.catalogue_sources(root, nodes)
     budget.begin_closeout(root, 2, 4, 'Ordinary model closeout', delivery_sources=refs)
     job = c.build_job(root, 4, 'A', [1, 2], purpose='closeout', source_cutoff=2, delivery_sources=refs)
@@ -266,12 +266,12 @@ def test_final_unknown_submission_confirms_same_original_once_per_explicit_run(t
                 changed['operation_id'] = 'another-operation'
                 changed['binding']['operation_id'] = changed['operation_id']
             elif change == 'decision':
-                changed['decision']['raw_sha256'] = '0' * 64
+                changed['decision']['raw_ref'] = '0' * 64
                 changed['binding']['decision'] = changed['decision']
             elif change == 'candidate':
                 changed['binding']['source']['candidate_id'] = 'another-candidate'
             elif change == 'claim':
-                changed['final_return']['sha256'] = '0' * 64
+                changed['final_return']['record'] = dict(path='/unapproved/control-ledger/000001.json')
             else:
                 changed['max_seconds'] += 1
             with pytest.raises(ValueError, match='Final delivery'):
@@ -437,7 +437,7 @@ def test_formal_review_after_resume_keeps_exact_subject_history_and_resume_bindi
     monkeypatch.setattr(review,'authors',lambda *args:dict(complete=True,participants=[['fixture','author']]))
     route = review.request_route(root,requester,c.validate(c.workspace(root,3)),[1,2,3])
     assert route[3]['kind'] == 'formal_review'
-    refs = [dict(step=number,seal_sha256=c.digest(execution.record(root,number)/'result-identity.json')) for number in (1,2,3)]
+    refs = [dict(step=number,seal_ref=c.record_ref(execution.record(root,number)/'result-identity.json')) for number in (1,2,3)]
     cursor = dict(role='A',parents=route[1],instruction=route[2],evidence_return=route[3],
         correction_request=None,author_correction=None,source_refs=refs)
     begin = budget.begin_closeout(root,3,4,'known shared admission boundary',final_only=True,resume_cursor=cursor)
@@ -450,6 +450,6 @@ def test_formal_review_after_resume_keeps_exact_subject_history_and_resume_bindi
     assert [row['step'] for row in job['history']['nodes']] == [2]
     assert budget.scientific_steps(root,5) == [1,2,3]
     c._validate_inputs(root,c.workspace(root,5),job)
-    changed = dict(job,normal_resume={**job['normal_resume'],'sha256':'0'*64})
+    changed = dict(job,normal_resume={**job['normal_resume'],'path':'host-recovery/unapproved.json'})
     with pytest.raises(ValueError,match='normal resume boundary'):
         c._validate_inputs(root,c.workspace(root,5),changed)

@@ -34,7 +34,7 @@ def h(root, step=1, parents=(), labels=('P','Q','R'), existing=None):
 
 def worker(root, tmp_path, step, parents, *, cov=False):
     job=c.build_job(root,step,'W',parents);record=execution.record(root,step)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs'/f'{step:03d}.json'),
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),
         search_slice=search.accept(root,job)))
     output=tmp_path/f'config-{step}.json'
     if cov:
@@ -76,13 +76,12 @@ def a(root,step,parents,*,focus=None,dispositions=(),action='continue_w',mode='s
         next_action=action,route_reason='Resolve the mechanism comparison under the original constraints',
         decision_request=dict(decision='mechanism',question='Can the failed discriminating measurement be repaired?' if mode=='repair' else 'Which mechanism should receive the next independent comparison?',
             change_criterion='A trustworthy discriminating measurement would change the mechanism choice') if action in {'continue_w','revise_h'} else None)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs'/f'{step:03d}.json')))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json')))
     c.write(record/'science-output.json',payload)
     c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
-    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_sha256=c.digest(record/'science-output.json')))
+    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_ref=c.file_ref(record/'science-output.json')))
     c.seal_result(root,step)
     return job
-
 
 
 def test_multi_mechanism_cov_originals_bind_candidates_and_a_screens_exactly(tmp_path,execution_registry):

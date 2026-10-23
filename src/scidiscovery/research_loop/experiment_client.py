@@ -16,7 +16,7 @@ def record_directory(root, step):
     job_path = root / 'jobs' / f'{step:03d}.json'
     job = c.read(c.regular(job_path))
     if type(job.get('worker_view_version')) is int and job['worker_view_version'] == VERSION:
-        return root / 'host-runtime/experiment-control' / c.digest(job_path) / 'records'
+        return root / 'host-runtime/experiment-control' / f'{step:03d}' / 'records'
     return c.workspace(root, step) / 'work/lineage'
 
 
@@ -61,7 +61,7 @@ def location(path):
 
 def binding_path(root, job, path):
     from . import contracts as c
-    return (root / 'host-runtime/experiment-control' / c.digest(root / 'jobs' / f'{job["step"]:03d}.json')
+    return (root / 'host-runtime/experiment-control' / f'{job["step"]:03d}'
             / 'clients' / Path(path).name)
 
 
@@ -88,14 +88,14 @@ def resolve(path, value):
         raise IntegrityError('Execution client original configuration changed')
     config = c.read(c.regular(host_path))
     intent = c.read(c.regular(record / 'native-intent.json'))
-    task = c.digest(root / 'jobs' / f'{step:03d}.json')
-    if intent.get('task_sha256') != task or attempt and intent.get('attempt') != attempt:
+    task = c.record_ref(root / 'jobs' / f'{step:03d}.json')
+    if intent.get('task_ref') != task or attempt and intent.get('attempt') != attempt:
         raise IntegrityError('Execution client has no exact accepted native task')
-    expected_attempt = dict(number=attempt, execution_key=c.digest(record / 'native-intent.json') if attempt else task)
+    expected_attempt = dict(number=attempt, execution_key=c.record_ref(record / 'native-intent.json') if attempt else task)
     if (config.get('scope') != stage_scope(root, job) or config.get('native_attempt') != expected_attempt
             or config.get('record_dir') != str(record_directory(root, step))):
         raise IntegrityError('Execution client original scope or native attempt changed')
-    projection = root / 'host-runtime/experiment-control' / task / 'interfaces' / f'{attempt:03d}.json'
+    projection = root / 'host-runtime/experiment-control' / f'{step:03d}' / 'interfaces' / f'{attempt:03d}.json'
     if c.read(c.regular(projection)) != config:
         raise IntegrityError('Execution client original host interface changed')
     return config
@@ -122,7 +122,7 @@ def payload_path(config, path):
     if materials:
         if len(materials)!=1:raise IntegrityError('Scientific implementation input is ambiguous')
         material=next(iter(materials.values()));actual=proof(path)
-        if any(actual[key]!=material[key] for key in ('sha256','size_bytes')):
+        if any(actual[key]!=material[key] for key in ('size_bytes',)):
             raise IntegrityError('Scientific implementation input differs from its bound original')
         package=execution_inputs.compiled_payload(root,material)
         if proof(package['path'])!=package:

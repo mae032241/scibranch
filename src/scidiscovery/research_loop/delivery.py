@@ -4,8 +4,8 @@ from __future__ import annotations
 from . import configuration_updates
 from . import execution
 
+from scidiscovery import execution_security as security
 import copy
-import hashlib
 import json
 import math
 import os
@@ -39,10 +39,6 @@ def _stage(root, prefix):
     return tempfile.TemporaryDirectory(prefix=prefix, dir=directory)
 
 
-MAX_BYTES = 256_000
-MAX_ASSET_BYTES = 32 * 1024 * 1024
-MAX_READ_BYTES = 128 * 1024 * 1024
-MAX_SOURCES = 128
 SOURCE_SECONDS = 5  # Mechanical transport safety, never a scientific cost estimate.
 MAX_LEAF_TAIL = 64 * 1024  # Host-only stream tail retained per isolated leaf call.
 CAPABILITIES = {'smoke', 'audit'}  # Explicit optional adapter phases; legacy adapters require audit.
@@ -128,7 +124,7 @@ def policy(value):
         invoked = Path(item['path']).absolute()
         path = _file(invoked.resolve())
         proof=dict(label=label,path=str(path),invoked_path=str(invoked))
-        if label!='runtime-python':proof.update(sha256=c.digest(path),size_bytes=path.stat().st_size)
+        if label!='runtime-python':proof.update(size_bytes=path.stat().st_size)
         frozen_inputs.append(proof)
     for path in roots:
         if not isinstance(path, str) or not Path(path).is_absolute() or Path(path).resolve() != Path(path):
@@ -180,7 +176,7 @@ def _adapter(root, job=None, *, context=None):
             continue
         inventory.entry(); inventory.file(_file(proof['path']).stat().st_size)
         from . import experiments
-        if experiments.proof(_file(proof['path']), context=context)['sha256'] != proof['sha256']:
+        if experiments.proof(_file(proof['path']), context=context) != {key:proof[key] for key in ('path','size_bytes')}:
             raise ValueError('Frozen delivery executable or public harness changed')
     from . import generic_delivery
     if Path(spec['adapter']) == Path(generic_delivery.__file__).resolve():
@@ -213,13 +209,13 @@ def _catalogue_sources(root, source_nodes, *, job=None):
     items, known = [], set()
     for receipt in source_nodes:
         source_job, _, seal, seal_sha = history._source(root, receipt['step'])
-        if seal_sha != receipt['seal_sha256']:
+        if seal_sha != receipt['seal_ref']:
             raise ValueError('Delivery source scientific seal changed')
         observation = seal.get('observations')
         if observation is None:
             continue
         fact = history.read_observation(root, source_job, seal)
-        if fact['binding']['source_sha256'] != seal['raw_sha256']:
+        if fact['binding']['source_ref'] != seal['raw_ref']:
             raise ValueError('Delivery observer source binding changed')
         for candidate in fact['candidates']:
             if candidate['id'] in known:
@@ -241,10 +237,7 @@ def selected_sources(root, refs, candidate_id, *, prepare=False, job=None):
         return refs
     if candidate_id not in {row['candidate_id'] for row in refs['items']}:
         raise DeliveryUnresolved('delivery_source_unavailable')
-    identity = dict(source_nodes=refs['source_nodes'], candidate_id=candidate_id)
-    if job is not None and job.get('configuration_revision') is not None:
-        identity['configuration_revision'] = job['configuration_revision']
-    key = hashlib.sha256(_bytes(identity)).hexdigest()
+    key = f'{refs["items"].index(next(row for row in refs["items"] if row["candidate_id"] == candidate_id)):04d}-{(job or {}).get("step", 0):03d}-{((job or {}).get("configuration_revision") or {}).get("revision", 0):06d}'
     path = root / 'host-delivery/resolved' / (key + '.json')
     if not path.exists():
         if not prepare:
@@ -315,32 +308,34 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
         if path in cache:
             return cache[path]
         original = experiments.proof(path, context=io_context)
-        if proof is not None and any(original[key] != proof[key] for key in ('sha256', 'size_bytes')):
+        if proof is not None and any(original[key] != proof[key] for key in ('size_bytes',)):
             raise ValueError('Delivery source changed before freezing')
-        frozen = shared_originals.retain(root, path, sha256=original['sha256'],
+        frozen = shared_originals.retain(root, path,
             size_bytes=original['size_bytes'], source_kind=source_kind, context=io_context, policy=limits)
-        saved = root / 'host-delivery/objects' / original['sha256']
-        shared_originals.link(frozen, saved, sha256=original['sha256'], size_bytes=original['size_bytes'],
-            root=root, context=io_context, policy=limits)
-        cache[path] = dict(path=saved.relative_to(root).as_posix(), sha256=original['sha256'],
+        cache[path] = dict(path=frozen.relative_to(root).as_posix(),
             size_bytes=original['size_bytes'])
         return cache[path]
     def freeze_bound(proof, *, source):
         inventory.entry(); inventory.file(proof['size_bytes'])
-        return freeze(_proof_path(root, proof, source=source, context=io_context), source_kind='managed_frozen',
+        owner=originals.source_for_ref(source,proof)
+        return freeze(_proof_path(root, proof, source=owner, context=io_context), source_kind='managed_frozen',
             proof=proof, admitted=True)
+    def original_reference(source, proof):
+        owner=originals.source_for_ref(source,proof)
+        return dict(path=str(Path(owner.original_root)/proof['path']),size_bytes=proof['size_bytes'])
     candidates, known, evidence, contexts, direct = [], set(), {}, {}, []
+    evidence_origins = {}; evidence_labels = {}; execution_labels = {}
     candidate_owners={}
     managed = (_settings(root, job).get('history_observer') or {}).get('contract_version') == 2
     for receipt in source_nodes:
         source_job, _, seal, seal_sha = history._source(root, receipt['step'])
-        if seal_sha != receipt['seal_sha256']:
+        if seal_sha != receipt['seal_ref']:
             raise ValueError('Delivery source scientific seal changed')
         observation = seal.get('observations')
         if observation is None:
             continue
         fact = history.read_observation(root, source_job, seal)
-        if fact['binding']['source_sha256'] != seal['raw_sha256']:
+        if fact['binding']['source_ref'] != seal['raw_ref']:
             raise ValueError('Delivery observer source binding changed')
         source = originals.node(root, receipt['step'])
         for context in fact.get('contexts', []):
@@ -356,6 +351,14 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
             from . import generic_results
             resolved = generic_results.sources(root, fact, candidate['id'], source=source)
             if resolved is not None:
+                call=resolved['context']['call_id']
+                artifact=resolved['objects']['artifact']
+                name=resolved['context']['candidate']['artifact'].removeprefix('artifacts/')
+                origins=[proof for row in fact['managed_calls'] if row['call_id']==call
+                    for proof in row.get('outputs',[]) if proof['name']==name
+                    and proof['snapshot']==artifact['path'] and proof['size_bytes']==artifact['size_bytes']]
+                if len(origins)!=1:raise ValueError('Managed artifact has no exact original call output')
+                resolved['artifact_origin']=original_reference(source,origins[0])
                 resolved['audit_required'] = 'audit' in spec.get('capabilities', ['audit'])
                 resolved['ledger'] = freeze_bound(resolved['ledger'], source=source)
                 resolved['objects'] = {label: freeze_bound(proof, source=source) for label, proof in resolved['objects'].items()}
@@ -363,29 +366,34 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
                     if proof['label']=='runtime-python':continue
                     if proof['label'] in resolved['objects']:raise ValueError('Provider input collides with candidate original')
                     frozen = freeze(proof['path'], proof=proof)
-                    if frozen['sha256'] != proof['sha256']:raise ValueError('Frozen provider input changed before snapshot')
                     resolved['objects'][proof['label']] = frozen
                 direct.append(resolved)
                 continue
             proofs = []
             for proof in candidate['evidence']:
                 if proof.get('retention') != 'archived':continue
-                bound = dict(path=proof['snapshot'], sha256=proof['sha256'], size_bytes=proof['size_bytes'])
+                bound = dict(path=proof['snapshot'], size_bytes=proof['size_bytes'],
+                    **({'origin_identity':proof['origin_identity']} if 'origin_identity' in proof else {}))
                 bound = freeze_bound(bound, source=source)
-                label = 'evidence/' + proof['sha256'] + '.jsonl'
+                identity=(originals.identity_key(source.origin_identity),proof['path'],proof['snapshot'],proof['size_bytes'])
+                label=evidence_labels.setdefault(identity,f'evidence/{len(evidence_labels)+1:06d}.jsonl')
                 evidence[label] = bound
-                proofs.append(dict(label=label, sha256=proof['sha256']))
+                evidence_origins[label] = original_reference(source,proof)
+                proofs.append(dict(label=label))
             candidates.append(dict(candidate_id=candidate['id'], status=candidate['status'], evidence=proofs))
     def execution_proof(source, proof):
-        value = dict(name=Path(proof['path']).name, sha256=proof['sha256'],
+        value = dict(name=Path(proof['path']).name,
                      size_bytes=proof['size_bytes'], retention=proof.get('retention'), input_label=None)
         if proof.get('retention') == 'archived':
-            bound = dict(path=proof['snapshot'], sha256=proof['sha256'], size_bytes=proof['size_bytes'])
+            bound = dict(path=proof['snapshot'], size_bytes=proof['size_bytes'],
+                **({'origin_identity':proof['origin_identity']} if 'origin_identity' in proof else {}))
             bound = freeze_bound(bound, source=source)
-            label = 'execution/' + proof['sha256']
+            identity=(originals.identity_key(source.origin_identity),proof['path'],proof['snapshot'],proof['size_bytes'])
+            label=execution_labels.setdefault(identity,f'execution/{len(execution_labels)+1:06d}')
             if label in evidence and evidence[label] != bound:
                 raise ValueError('Execution archive alias changed')
             evidence[label] = bound
+            evidence_origins[label] = original_reference(source,proof)
             value['input_label'] = label
         return value
     for candidate in candidates:
@@ -397,7 +405,7 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
                     and (value is None or isinstance(value,(str,int,float,bool)))},
                 proofs=[execution_proof(source, proof) for proof in context['proofs']],
                 **{key:execution_proof(source,value) for key,value in context.items()
-                    if isinstance(value,dict) and {'path','sha256','size_bytes','retention'} <= set(value)})
+                    if isinstance(value,dict) and {'path','size_bytes','retention'} <= set(value)})
                 for source, context in contexts.get(candidate['candidate_id'], [])]
     if not candidates:
         return dict(items=direct,omitted_count=0,source_nodes=list(source_nodes),capabilities=spec.get('capabilities',[]))
@@ -408,13 +416,12 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
             if time.clock_gettime(time.CLOCK_BOOTTIME) >= deadline:
                 raise DeliveryUnresolved('delivery_source_time_limit')
             destination = stage / 'inputs' / label
-            shared_originals.link(_proof(root, proof, context=io_context), destination, sha256=proof['sha256'],
+            shared_originals.link(_proof(root, proof, context=io_context), destination,
                 size_bytes=proof['size_bytes'], root=root, context=io_context, policy=limits)
         for proof in spec['inputs']:
             if proof['label']=='runtime-python':continue
             frozen = freeze(proof['path'], proof=proof)
-            shared_originals.link(_proof(root, frozen, context=io_context), stage / 'inputs' / proof['label'],
-                sha256=frozen['sha256'], size_bytes=frozen['size_bytes'], root=root, context=io_context, policy=limits)
+            shared_originals.link(_proof(root, frozen, context=io_context), stage / 'inputs' / proof['label'], size_bytes=frozen['size_bytes'], root=root, context=io_context, policy=limits)
         groups={}
         for candidate in candidates:
             owner=candidate_owners[candidate['candidate_id']]
@@ -431,8 +438,8 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
                 for context in row.get('execution_contexts') or []:
                     context['candidate_id']=candidate_refs.original_id(owner.origin_identity,context['candidate_id'])
             request = dict(scope=dict(handoff_protocol=_settings(root, job)['handoff_protocol']),phase='resolve',
-                operation_id=hashlib.sha256(_bytes(dict(source_nodes=source_nodes,origin=origin))).hexdigest(),
-                candidate_id=None, artifact_sha256=None, root=str(root), source_roots=spec['source_roots'],
+                operation_id=security.request_digest(dict(source_nodes=source_nodes,origin=origin)),
+                candidate_id=None, artifact_ref=None, root=str(root), source_roots=spec['source_roots'],
                 candidates=projected, inputs=spec['inputs'], config=spec['config'], target=spec['target'], stage=str(stage), deadline_boottime=deadline)
             resolved = _call(spec, request, deadline - time.clock_gettime(time.CLOCK_BOOTTIME), evidence=leaf_output(root))
             if (not isinstance(resolved,dict) or set(resolved)-{'capabilities'}!={'items'}
@@ -453,7 +460,6 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
     for proof in spec['inputs']:
         if proof['label']=='runtime-python':continue
         frozen = freeze(proof['path'], proof=proof)
-        if frozen['sha256'] != proof['sha256']:raise ValueError('Frozen provider input changed before snapshot')
         static[proof['label']] = frozen
     for item in value['items']:
         if (not isinstance(item, dict) or item.get('candidate_id') not in candidate_originals or item['candidate_id'] in seen
@@ -466,6 +472,7 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
         if evidence_label not in {proof['label'] for proof in candidate_originals[item['candidate_id']]['evidence']}:
             raise ValueError('Resolver used another candidate original')
         objects = dict(static)
+        artifact_origin=None
         try:
             if not isinstance(item.get('objects'),list) or not isinstance(item.get('context'),dict):
                 raise ValueError('Resolver objects require bounded references and context')
@@ -479,22 +486,28 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
                     if label not in authorized or label not in evidence:
                         raise ValueError('Resolver selected an unbound execution original')
                     bound = evidence[label]
-                    obj = dict(label=obj['label'], path=str(_proof_path(root, bound, context=io_context)), sha256=bound['sha256'], size_bytes=bound['size_bytes'])
-                elif set(obj) != {'label', 'path', 'sha256', 'size_bytes'}:
+                    name=obj['label']
+                    _label(name)
+                    if name in objects:raise ValueError('Resolver object label collides with provider input')
+                    objects[name]=bound
+                    if name=='artifact':artifact_origin=evidence_origins[label]
+                    continue
+                elif set(obj) != {'label', 'path', 'size_bytes'}:
                     raise ValueError('Resolver object fields changed')
                 _label(obj['label'])
                 path = Path(obj['path'])
-                if obj['label'] in objects or not path.is_absolute() or (not from_execution and not any(path.is_relative_to(Path(scope)) for scope in spec['source_roots'])):
+                if obj['label'] in objects or not path.is_absolute() or not any(path.is_relative_to(Path(scope)) for scope in spec['source_roots']):
                     raise ValueError('Resolver object is outside its frozen read scope')
-                proof = freeze(path, source_kind='managed_frozen' if from_execution else 'mutable', proof=obj)
-                if proof['sha256'] != obj['sha256'] or proof['size_bytes'] != obj['size_bytes']:
+                proof = freeze(path, source_kind='mutable', proof=obj)
+                if proof['size_bytes'] != obj['size_bytes']:
                     raise ValueError('Resolver object changed before freezing')
                 objects[obj['label']] = proof
-            if 'artifact' not in objects:raise DeliveryUnresolved('delivery_artifact_unavailable')
+                if obj['label']=='artifact':artifact_origin=dict(path=str(path),size_bytes=obj['size_bytes'])
+            if 'artifact' not in objects or artifact_origin is None:raise DeliveryUnresolved('delivery_artifact_unavailable')
             owner=candidate_owners[item['candidate_id']]
             raw_id=candidate_refs.original_id(owner.origin_identity,item['candidate_id'])
             items.append(dict(candidate_id=item['candidate_id'], status='audit_pending',
-                              context=item['context'], ledger=evidence[evidence_label], objects=objects,
+                              context=item['context'], ledger=evidence[evidence_label], objects=objects,artifact_origin=artifact_origin,
                               **(dict(origin_identity=owner.origin_identity,original_candidate_id=raw_id) if raw_id!=item['candidate_id'] else {}),
                               **(dict(audit_required='audit' in spec['capabilities']) if 'capabilities' in spec else {})))
         except DeliveryUnresolved as error:
@@ -528,6 +541,9 @@ def public_sources(refs, audits=(), *, nominated_ids=None):
 
 
 def _proof_path(root, proof, *, source=None, context=None):
+    if (not isinstance(proof,dict) or set(proof)-{'origin_identity'}!={'path','size_bytes'}
+            or not isinstance(proof['path'],str) or type(proof['size_bytes']) is not int or proof['size_bytes']<0):
+        raise ValueError('Exact delivery file reference required')
     name = Path(proof['path'])
     if name.is_absolute() or '..' in name.parts:
         raise ValueError('Delivery object is outside its exact instance')
@@ -540,7 +556,7 @@ def _proof(root, proof, *, source=None, context=None):
     path = _proof_path(root, proof, source=source, context=context)
     from . import experiments
     actual = experiments.proof(path, context=context)
-    if actual['size_bytes'] != proof['size_bytes'] or actual['sha256'] != proof['sha256']:
+    if actual['size_bytes'] != proof['size_bytes']:
         raise ValueError('Frozen delivery original changed')
     return path
 
@@ -548,7 +564,7 @@ def _proof(root, proof, *, source=None, context=None):
 def validate_sources(root, refs, *, job=None):
     _adapter(root, job)
     for receipt in refs['source_nodes']:
-        if history._source(root, receipt['step'])[3] != receipt['seal_sha256']:
+        if history._source(root, receipt['step'])[3] != receipt['seal_ref']:
             raise ValueError('Delivery source scientific identity changed')
     seen = {}
     for item in refs['items']:
@@ -559,12 +575,18 @@ def validate_sources(root, refs, *, job=None):
                 raise ValueError('Adapter candidate differs from its exact original instance')
         if item['status'] == 'audit_pending':
             for proof in [item['ledger'], *item['objects'].values()]:
-                identity = (proof['sha256'], proof['size_bytes'])
+                identity = (proof['path'], proof['size_bytes'])
                 if proof['path'] in seen:
                     if seen[proof['path']] != identity:raise ValueError('Conflicting delivery aliases for one original')
                 else:
                     _proof(root, proof)
                     seen[proof['path']] = identity
+            origin=item['artifact_origin']
+            if (not isinstance(origin,dict) or set(origin)!={'path','size_bytes'}
+                    or not isinstance(origin['path'],str) or not Path(origin['path']).is_absolute()
+                    or '..' in Path(origin['path']).parts or Path(origin['path']).as_posix()!=origin['path']
+                    or origin['size_bytes']!=item['objects']['artifact']['size_bytes']):
+                raise ValueError('Delivery artifact lost its exact original source')
     return refs
 
 
@@ -640,8 +662,8 @@ def binding(root, job, result):
     for repair_step in engineering.steps(root,job['step']):
         owner=originals.node(root,repair_step)
         repair=originals.source_job(owner)['engineering_repair']
-        producer=originals.dependency(owner,repair['source']['step'],seal_sha256=repair['source']['seal_sha256'])
-        if c.digest(originals.source_record(producer,'result-identity.json'))!=repair['source']['seal_sha256']:
+        producer=originals.dependency(owner,repair['source']['step'],seal_ref=repair['source']['seal_ref'])
+        if history.source_seal_ref(producer)!=repair['source']['seal_ref']:
             raise ValueError('Engineering repair candidate source seal changed')
         original=(candidate_refs.origin_candidate(producer.origin_identity,repair['candidate_id'])
             if producer.inherited else repair['candidate_id'])
@@ -652,7 +674,7 @@ def binding(root, job, result):
         if (outcome is not None and outcome['result']['status'] == 'rejected'
                 and outcome['result'].get('failure_phase') == 'audit'
                 and row['intent']['binding']['candidate_id'] == chosen
-                and row['intent']['binding']['source']['objects']['artifact']['sha256'] == item['objects']['artifact']['sha256']):
+                and row['intent']['binding']['source']['artifact_origin'] == item['artifact_origin']):
             # The original author remains a valid historical binding. A new
             # decision cannot replay the same failed candidate bytes.
             if row['intent']['decision']['step'] < job['step']:
@@ -660,17 +682,17 @@ def binding(root, job, result):
     # c.validate already checks this entire frozen source pack once. Re-reading
     # every candidate/static object here would multiply mechanical I/O by count.
     record = c.host_record(c.workspace(root, job['step']))
-    decision = dict(step=job['step'], job_sha256=c.digest(path),
-                    raw_sha256=c.digest(execution.raw(root, job['step'])), seal_sha256=c.digest(record / 'result-identity.json'))
+    decision = dict(step=job['step'], job_ref=c.record_ref(path),
+                    raw_ref=c.file_ref(execution.raw(root, job['step'])), seal_ref=c.record_ref(record / 'result-identity.json'))
     result = dict(candidate_id=chosen, decision=decision, source=item,
                   target=_settings(root, job)['delivery_policy']['adapter']['target'])
-    result['operation_id'] = hashlib.sha256(_bytes(dict(settings_sha256=c.digest(root / 'settings.json'), **result))).hexdigest()
+    result['operation_id'] = security.request_digest(dict(settings_ref=c.record_ref(root / 'settings.json'), **result))
     return result
 
 
 def _result(binding, status, note, *, cleanup_confirmed=True):
     return dict(status=status, operation_id=binding['operation_id'], candidate_id=binding['candidate_id'],
-                artifact_sha256=binding['source']['objects']['artifact']['sha256'], note=note,
+                artifact_ref=binding['source']['objects']['artifact'], note=note,
                 cleanup_confirmed=cleanup_confirmed)
 
 
@@ -681,7 +703,7 @@ def leaf_output(root):
 def leaf_refs(root, operation_id):
     """Exact host diagnostics for one operation; outcome receipts reference these."""
     directory = leaf_output(root)
-    return [dict(path=path.relative_to(root).as_posix(), sha256=c.digest(path))
+    return [dict(path=path.relative_to(root).as_posix())
             for path in sorted(directory.glob(operation_id + '-*.json'))] if directory.is_dir() else []
 
 
@@ -712,11 +734,11 @@ def _keep(evidence, request, outcome, returncode, streams):
                     if not (directory / f"{request['operation_id']}-{request['phase']}-{n}.json").exists())
         index = dict(operation_id=request['operation_id'], phase=request['phase'], outcome=outcome, returncode=returncode, streams={})
         for label, (size, data) in streams.items():
-            entry = dict(total_bytes=size, kept_bytes=len(data), truncated=size > len(data), path=None, sha256=None)
+            entry = dict(total_bytes=size, kept_bytes=len(data), truncated=size > len(data), path=None)
             if data:
                 path = directory / f'{stem}.{label}'
                 with path.open('xb') as stream:stream.write(data)
-                path.chmod(0o400);entry.update(path=path.name, sha256=hashlib.sha256(data).hexdigest())
+                path.chmod(0o400);entry.update(path=path.name)
             index['streams'][label] = entry
         with (directory / (stem + '.json')).open('x') as stream:stream.write(json.dumps(index, sort_keys=True) + '\n')
         (directory / (stem + '.json')).chmod(0o400)
@@ -758,14 +780,14 @@ def _call(spec, request, seconds, *, on_process=None, evidence=None):
             try:
                 on_process(request['phase'], identity)
             except BaseException:
-                if runtime.process_matches(identity, identity['task_sha256']):os.killpg(identity['pgid'], signal.SIGKILL)
+                if runtime.process_matches(identity, identity['task_ref']):os.killpg(identity['pgid'], signal.SIGKILL)
                 process.wait(timeout=5)
                 process.stdout.close();process.stderr.close()
                 if runtime.cleanup_owned_group(identity) != 'observed_group_cleaned':
                     raise DeliveryUnresolved('delivery_cleanup_unknown')
                 raise
         deadline = replay_deadline if replay_deadline is not None else time.clock_gettime(time.CLOCK_BOOTTIME) + seconds
-        total, failed = 0, False
+        failed = False
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
             selector.register(process.stderr, selectors.EVENT_READ)
@@ -775,13 +797,12 @@ def _call(spec, request, seconds, *, on_process=None, evidence=None):
                 for key, _ in selector.select(min(.1, remaining)):
                     block = os.read(key.fileobj.fileno(), 65536)
                     if not block:selector.unregister(key.fileobj);continue
-                    total += len(block)
                     if key.fileobj is process.stdout:
                         output_file.write(block);output.extend(block);del output[:-MAX_LEAF_TAIL];totals['stdout']+=len(block)
                     else:errors.extend(block);del errors[:-MAX_LEAF_TAIL];totals['stderr'] += len(block)
                 if failed:break
         if failed:
-            if runtime.process_matches(identity, identity['task_sha256']):
+            if runtime.process_matches(identity, identity['task_ref']):
                 os.killpg(identity['pgid'], signal.SIGKILL)
             process.wait(timeout=5)
             process.stdout.close();process.stderr.close()
@@ -816,8 +837,7 @@ def _staged(root, spec, source, operation_id, stage, *, job=None, context=None):
     for name, proof in source['objects'].items():
         _label(name)
         inventory.entry(); inventory.file(proof['size_bytes'])
-        shared_originals.link(_proof(root, proof, context=context), stage / 'inputs' / name,
-            sha256=proof['sha256'], size_bytes=proof['size_bytes'], root=root, context=context, policy=limits)
+        shared_originals.link(_proof(root, proof, context=context), stage / 'inputs' / name, size_bytes=proof['size_bytes'], root=root, context=context, policy=limits)
     candidate=source['candidate_id']
     if 'original_candidate_id' in source:
         from . import candidate_refs
@@ -825,8 +845,8 @@ def _staged(root, spec, source, operation_id, stage, *, job=None, context=None):
             raise ValueError('Adapter candidate differs from its exact original instance')
         candidate=source['original_candidate_id']
     return dict(scope=dict(handoff_protocol=_settings(root, job)['handoff_protocol']), operation_id=operation_id, candidate_id=candidate,
-                artifact_sha256=source['objects']['artifact']['sha256'], context=source['context'],
-                object_digests={name: proof['sha256'] for name, proof in source['objects'].items()},
+                artifact_ref=source['objects']['artifact'],artifact_origin=source['artifact_origin'], context=source['context'],
+                object_refs={name: proof for name, proof in source['objects'].items()},
                 inputs=spec['inputs'], config=spec['config'], stage=str(stage))
 
 
@@ -851,8 +871,8 @@ def leaf_phase(root, source, operation_id, phase, seconds, *, on_process=None, j
     if value is None:
         return dict(status='failed' if phase == 'audit' else 'unknown', note='bounded_' + phase + '_unverified', cleanup_confirmed=True)
     allowed = {'ok', 'failed', 'unknown'} if phase == 'smoke' else {'audited', 'failed', 'unknown'}
-    if (not isinstance(value, dict) or set(value) != {'status', 'operation_id', 'candidate_id', 'artifact_sha256', 'note'}
-            or any(value.get(key) != request[key] for key in ('operation_id', 'candidate_id', 'artifact_sha256'))
+    if (not isinstance(value, dict) or set(value) != {'status', 'operation_id', 'candidate_id', 'artifact_ref', 'note'}
+            or any(value.get(key) != request[key] for key in ('operation_id', 'candidate_id', 'artifact_ref'))
             or value['status'] not in allowed or not isinstance(value['note'], str) or len(value['note'].encode()) > 1024):
         return dict(status='failed' if phase == 'audit' else 'unknown', note='invalid_' + phase + '_result', cleanup_confirmed=True)
     return dict(status=value['status'], note=value['note'], cleanup_confirmed=True)
@@ -895,9 +915,9 @@ def invoke(root, intent, max_seconds, *, on_process=None, audit_only=False, coll
         raise ValueError('Delivery action identity differs from frozen decision')
     decision = bound['decision'];step = decision['step']
     record = c.host_record(c.workspace(root, step))
-    for path, key in [(root / 'jobs' / f'{step:03d}.json', 'job_sha256'),
-                      (execution.raw(root, step), 'raw_sha256'), (record / 'result-identity.json', 'seal_sha256')]:
-        if c.digest(_file(path)) != decision[key]:
+    for path, key in [(root / 'jobs' / f'{step:03d}.json', 'job_ref'),
+                      (execution.raw(root, step), 'raw_ref'), (record / 'result-identity.json', 'seal_ref')]:
+        if (c.file_ref(_file(path)) if key=='raw_ref' else c.record_ref(_file(path))) != decision[key]:
             raise ValueError('Delivery scientific decision changed')
     job = c.read(root / 'jobs' / f'{step:03d}.json')
     spec = _adapter(root, job, context=_Deadline(deadline))
@@ -931,8 +951,8 @@ def invoke(root, intent, max_seconds, *, on_process=None, audit_only=False, coll
             if value is None:
                 result = _result(bound, 'failed' if phase == 'audit' else 'unknown', 'bounded_' + phase + '_unverified')
                 return dict(result, failure_phase='audit') if phase == 'audit' else result
-            if (not isinstance(value, dict) or set(value) != {'status', 'operation_id', 'candidate_id', 'artifact_sha256', 'note'}
-                    or any(value.get(key) != request[key] for key in ('operation_id', 'candidate_id', 'artifact_sha256'))
+            if (not isinstance(value, dict) or set(value) != {'status', 'operation_id', 'candidate_id', 'artifact_ref', 'note'}
+                    or any(value.get(key) != request[key] for key in ('operation_id', 'candidate_id', 'artifact_ref'))
                     or not isinstance(value['note'], str) or len(value['note'].encode()) > 1024):
                 result = _result(bound, 'failed' if phase == 'audit' else 'unknown', 'invalid_' + phase + '_result')
                 return dict(result, failure_phase='audit') if phase == 'audit' else result

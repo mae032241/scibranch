@@ -98,7 +98,7 @@ costs remain visible; prior review or execution permission does not authorize ne
 subjects. See [fork semantics](docs/ARCHITECTURE.md#historical-task-forks) and the
 [CLI workflow](docs/ROOTLESS_CLI.zh-CN.md#从历史任务创建分支).
 
-All H/W/A/E node token budgets and W stage targets are advisory: reaching a target requests a bounded conclusion without rejecting new managed experiments or forcing A review. Actual input plus output is fully accounted; no whole-node token allocation is prepaid. Current protocol 23 accepts only soft node settings; older instances remain read-only without rewriting their frozen settings. Shared budget checks for new nodes, finite execution time, permissions and cleanup limits remain enforced.
+All H/W/A/E node token budgets and W stage targets are advisory: reaching a target requests a bounded conclusion without rejecting new managed experiments or forcing A review. Actual input plus output is fully accounted; no whole-node token allocation is prepaid. Current protocol 26 accepts only soft node settings; older instances remain read-only without rewriting their frozen settings. Shared budget checks for new nodes, finite execution time, permissions and cleanup limits remain enforced.
 
 New instances freeze a final-A completion policy with one A per FINAL cycle: insufficient, zero or
 exceeded shared token, time or step budgets do not deny the final A's admission,
@@ -123,8 +123,8 @@ scientific-work continuation.
 
 Workers write ordinary scientific files and use the thin experiment submission and
 wait interface. Their instructions add no hash calculation, comparison, verification
-or hash inventories. Control performs those checks automatically and retains
-the mechanical bindings privately on the host.
+or hash inventories. Control retains exact path, producer and size references
+privately under the [architecture's hash allowlist](docs/ARCHITECTURE.md).
 
 The operator evidence exporter keeps default omission metadata within 8 KiB and
 links to complete scientific details in pages of at most 16 KiB. This limit applies
@@ -141,7 +141,7 @@ The active controller lives in `src/scidiscovery/research_loop/`; execution adap
 live in `plugins/`, and deterministic scientific tools and guidance live in `skills/`. Use the [test lanes](tests/README.md)
 with supervised, serial, exact targets. Functional tests do not build or install
 packages. `scripts/build_git_release.py` creates a source distribution with a
-per-file SHA256 manifest from explicitly selected source, current references,
+per-file path and size manifest from explicitly selected source, current references,
 tools and functional fixtures.
 
 Development plans, audits, handoffs and trial outputs are local working records.

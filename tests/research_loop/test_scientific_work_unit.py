@@ -102,9 +102,9 @@ def prefix(tmp_path, action, monkeypatch, *, custom=False):
 
 
 def execute(root, job):
-    before = c.digest(root/'jobs/004.json')
+    before = (root/'jobs/004.json').read_bytes()
     native.execute_native(root,4)
-    assert c.digest(root/'jobs/004.json') == before
+    assert (root/'jobs/004.json').read_bytes() == before
     work = c.workspace(root,4)
     prompts = [json.loads(line)['prompt'] for line in (work/'work/received-prompts.jsonl').read_text().splitlines()]
     assert c.validate(work)['role'] == 'W'

@@ -170,14 +170,14 @@ def prepare_namespace(tmp_path,*,search_enabled=False,fake_source=FAKE_NATIVE,co
     for name in ('train.csv','val.csv','meta.json'):(harness/name).write_text('{}')
     manifest=tmp_path/'public-manifest.json'
     c.write(manifest,dict(task_revision='d78f5eb52ad754c5ee9154741af73130a85a65b8',
-        public_files_sha256={p.relative_to(public).as_posix():c.digest(p) for p in public.rglob('*') if p.is_file()}))
+        public_files=[p.relative_to(public).as_posix() for p in public.rglob('*') if p.is_file()]))
     fake=tmp_path/'fake-codex';fake.write_text('#!'+sys.executable+'\nEXPECTED_RECEIPT='+repr(str(Path(cov_receipt.__file__).resolve()))+
         '\nEXPECTED_RUNNER='+repr(str(harness/'runner.py'))+'\n'+fake_source);fake.chmod(0o555)
     root=tmp_path/'instance';config=tmp_path/'launcher.json';codehost=Path('/usr/bin/true').resolve()
     assert str(repo) not in runtime_paths
     c.write(config,dict(scene_root=str(root),public_root=str(public),public_manifest=str(manifest),
-        runs_dir=str(root/'runs'),submission_dir=str(root/'submission'),native=str(fake),native_sha256=c.digest(fake),
-        code_mode_host=dict(path=str(codehost),sha256=c.digest(codehost)),task_python=python,scid_python=scid_python,
+        runs_dir=str(root/'runs'),submission_dir=str(root/'submission'),native=str(fake),
+        code_mode_host=dict(path=str(codehost)),task_python=python,scid_python=scid_python,
         runtime_paths=[*runtime_paths,str(Path(cov_receipt.__file__).resolve())],
         model='no-model',reasoning_effort='high',profile='namespace-no-model',cov_receipt_channel='public_runner_main'))
     launch=[scid_python,'-B','-I','-m','cov_execution.launcher','--config',str(config),'--']
@@ -235,8 +235,8 @@ def assert_public_submission(root,step):
     assert c.read(original/'accepted.json')['native_attempt']['number']==0
     evidence=c.read(claim/'outcome.json')['calls']
     assert len(evidence)==1 and evidence[0]['call_id']==call
-    assert evidence[0]['accepted']['sha256']==c.digest(original/'accepted.json')
-    assert evidence[0]['completed']['sha256']==c.digest(original/'completed.json')
+    assert evidence[0]['accepted']==c.file_ref(original/'accepted.json')
+    assert evidence[0]['completed']==c.file_ref(original/'completed.json')
     for rejected in c.read(work/'work/rejected-caller-options.json'):
         assert rejected['result']['accepted'] is False and 'call_id' not in rejected['result']
         if rejected['submission_ref'] is not None:

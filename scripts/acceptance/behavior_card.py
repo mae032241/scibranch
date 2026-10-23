@@ -4,7 +4,7 @@ Reads original jobs, meters, sealed outputs, observations and the control ledger
 It writes nothing, takes no lock and never reads hidden or official scores.
 """
 from pathlib import Path
-import argparse,hashlib,json
+import argparse,json
 
 MAX_NODES=64
 MAX_ROWS=32
@@ -72,8 +72,7 @@ def delivered(root):
 
 def review_reason(root,step):
     value=read(root/'native-evidence'/f'{step:03d}'/'result-identity.json') or {}
-    job=root/'jobs'/f'{step:03d}.json'
-    review=read(root/'host-runtime/experiment-control'/hashlib.sha256(job.read_bytes()).hexdigest()/'review.json') or {}
+    review=read(root/'host-runtime/experiment-control'/f'{step:03d}'/'review.json') or {}
     return review.get('reason'),value.get('control_outcome') or {}
 
 

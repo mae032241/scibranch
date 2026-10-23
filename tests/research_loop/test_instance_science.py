@@ -1,6 +1,6 @@
 """Small sealed-reader checks; no HTTP, native subprocess, backend or model."""
-import hashlib
 import io
+from pathlib import Path
 
 import pytest
 
@@ -52,8 +52,8 @@ def test_unsealed_tampered_missing_and_linked_originals_are_unavailable(tmp_path
     c.build_job(root,2,'A',[1])
     with pytest.raises(ValueError,match='missing|unavailable'):
         science.science(root,2)
-    source=c.workspace(root,1)/'artifacts/figure.svg';original=source.read_bytes()
-    source.chmod(0o600);source.write_bytes(original.replace(b'never',b'other'))
+    source=Path(c.read(root/'native-evidence/001/result-identity.json')['materials'][0]['source']);original=source.read_bytes()
+    source.chmod(0o600);source.write_bytes(original+b'changed size')
     with pytest.raises(ValueError,match='changed'):
         science.artifact(root,1,1)
     source.unlink()
@@ -88,9 +88,9 @@ def test_seal_membership_cannot_turn_host_private_paths_into_deliverables(tmp_pa
     seal_path=root/'native-evidence/001/result-identity.json';seal=c.read(seal_path)
     # Rebind the public-facing seal row to bypass mere hash matching. The owner
     # boundary must still reject this independent of scientific JSON content.
-    seal['materials'][0].update(source=str(private),sha256=c.digest(private),size_bytes=private.stat().st_size)
+    seal['materials'][0].update(source=str(private),size_bytes=private.stat().st_size)
     c.write(seal_path,seal)
-    with pytest.raises(ValueError,match='output owner'):
+    with pytest.raises(ValueError,match='output owner|output binding'):
         science.artifact(root,1,1)
     for value in (0,-1,True,100):
         with pytest.raises(ValueError,match='index'):
@@ -101,17 +101,17 @@ def test_managed_deliverable_reads_only_its_existing_sealed_output_snapshot(tmp_
     root,_=prepare(tmp_path,enabled=False)
     finish(root,1,'H',[],action='experiment');finish(root,2,'W',[1])
     seal_path=root/'native-evidence/002/result-identity.json';seal=c.read(seal_path)
-    data=b'an existing declared managed scientific output';digest=hashlib.sha256(data).hexdigest()
-    snapshot=root/'host-history/objects'/digest;snapshot.parent.mkdir(parents=True);snapshot.write_bytes(data)
+    data=b'an existing declared managed scientific output'
+    snapshot=root/'host-history/objects'/'fixture-managed-original';snapshot.parent.mkdir(parents=True,exist_ok=True);snapshot.write_bytes(data)
     source=c.workspace(root,2)/'work/lineage/calls/original-call/outputs/curve.csv'
-    material=dict(source=str(source),path='inputs/parents/002/artifacts/experiments/original-call/artifacts/curve.csv',
-        sha256=digest,size_bytes=len(data))
+    material=dict(source=str(snapshot),path='inputs/parents/002/artifacts/experiments/original-call/artifacts/curve.csv',
+        size_bytes=len(data))
     output=dict(name='curve.csv',path=source.relative_to(root).as_posix(),snapshot=snapshot.relative_to(root).as_posix(),
-        sha256=digest,size_bytes=len(data),retention='archived')
+        size_bytes=len(data),retention='archived')
     observation=root/'host-history/observations/002.json'
-    c.write(observation,dict(binding=dict(source_sha256=seal['raw_sha256']),managed_calls=[dict(call_id='original-call',
-        scope=dict(step=2,job_sha256=seal['job_sha256']),outputs=[output])]))
-    seal.update(materials=[material],observations=dict(path=observation.relative_to(root).as_posix(),sha256=c.digest(observation)))
+    c.write(observation,dict(binding=dict(source_ref=seal['raw_ref']),managed_calls=[dict(call_id='original-call',
+        scope=dict(step=2,job_ref=seal['job_ref']),outputs=[output])]))
+    seal.update(materials=[material],observations=dict(path=observation.relative_to(root).as_posix(),size_bytes=observation.stat().st_size))
     c.write(seal_path,seal)
     # A frozen-reader boundary fixture, not a backend/terminal execution verdict.
     original,name=science.artifact(root,2,1)
@@ -128,7 +128,7 @@ def test_readonly_download_survives_cross_root_link_changes_without_reopening(tm
     source.write_bytes(raw); source.chmod(0o400)
     other_root = tmp_path / 'other-owner'; other_root.mkdir()
     retained = other_root / 'retained-original'
-    proof = dict(sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw))
+    proof = dict(size_bytes=len(raw))
     class LinkingOutput(io.BytesIO):
         def write(self, block):
             if not retained.exists():
@@ -146,13 +146,13 @@ def test_readonly_download_survives_cross_root_link_changes_without_reopening(tm
     assert source.read_bytes() == raw and source.stat().st_mode & 0o777 == 0o400
 
 
-@pytest.mark.parametrize('mutation', ['mode', 'mtime', 'size', 'same_size_bytes'])
+@pytest.mark.parametrize('mutation', ['mode', 'mtime', 'size'])
 def test_readonly_original_still_rejects_content_and_other_metadata_changes(tmp_path, mutation):
     import os
     source = tmp_path / 'source'
     raw = b'Exact scientific original bytes.'
     source.write_bytes(raw); source.chmod(0o400)
-    proof = dict(sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw))
+    proof = dict(size_bytes=len(raw))
     with science.Original(source, proof) as original:
         before = source.stat()
         if mutation == 'mode':

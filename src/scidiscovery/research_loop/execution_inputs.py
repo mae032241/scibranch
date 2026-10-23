@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import hashlib
 import json
 from pathlib import Path
 import re
+import uuid
 
 from . import contracts as c, qualification as q, execution, experiment_client
 
@@ -21,7 +21,7 @@ def source_contract():
     raw = e.encoded(SOURCE_CONTRACT)
     return dict(key=e.INPUT_SOURCES_KEY, kind='source_provenance', schema_id=SOURCE_SCHEMA,
         payload_schema_version=1, media_type='application/json', content=raw.decode('utf-8'),
-        sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw))
+        size_bytes=len(raw))
 
 
 def declared_sources(root, job):
@@ -62,14 +62,13 @@ def validate_source_view(root, job, view, *, source=None):
                     and edge['seal'] == original['producer_seal'] for edge in edges):
                 raise q.IntegrityError('Declared producer is absent from frozen source edges')
             seal = q._read(root, original['producer_seal'], source=source)
-            contributions.append(dict(origin_step=original['producer_step'], origin_result_sha256=seal['sha256'], material=material))
+            contributions.append(dict(origin_step=original['producer_step'], origin_result_ref=seal['result_ref'], material=material))
         elif origin.get('kind') == 'global' and set(origin) == {'kind','material'}:
             if not any(edge['kind'] == 'global' and edge['material'] == origin['material'] for edge in edges):
                 raise q.IntegrityError('Declared global is absent from frozen source edges')
             material = origin['material']
             logical = Path(source.original_root) if source is not None else Path(root)
-            q._check(dict(path=str(logical / material['source']), sha256=material['sha256'],
-                size_bytes=material['size_bytes']), source=source)
+            q._check(dict(path=str(logical / material['source']), size_bytes=material['size_bytes']), source=source)
         elif origin.get('kind') == 'current_author' and set(origin) == {'kind','step'}:
             if type(origin['step']) is not int or origin['step'] != job['step']:
                 raise q.IntegrityError('Declared current author belongs to another job')
@@ -89,7 +88,7 @@ def validate_exact_input_sources(root, job, accepted, *, source=None):
     declared = [row for row in accepted['interface'].get('public_capabilities', []) if row['key'] == e.INPUT_SOURCES_KEY]
     contract = source_contract()
     if len(declared) != 1 or any(declared[0].get(key) != contract[key] for key in
-            ('key','kind','schema_id','payload_schema_version','media_type','sha256','size_bytes')):
+            ('key','kind','schema_id','payload_schema_version','media_type','size_bytes')):
         raise q.IntegrityError('Declared input view has no unique frozen capability')
     view = original['view']
     if view is None:
@@ -98,7 +97,7 @@ def validate_exact_input_sources(root, job, accepted, *, source=None):
         raise q.IntegrityError('Declared input view changed its host owner')
     root = Path(source.original_root) if source is not None else Path(root).resolve()
     attempt = accepted.get('native_attempt') or {}
-    projection = root / 'host-runtime/experiment-control' / accepted['scope']['job_sha256'] / 'interfaces' / f'{attempt["number"]:03d}.json'
+    projection = root / 'host-runtime/experiment-control' / f'{accepted["scope"]["step"]:03d}' / 'interfaces' / f'{attempt["number"]:03d}.json'
     config = q._read(root, view['configuration'], source=source)
     if (view['job'] != q._ref(root, root / 'jobs' / f'{job["step"]:03d}.json', source=source)
             or q._read(root, view['job'], source=source) != job or job['role'] != 'W'
@@ -107,8 +106,8 @@ def validate_exact_input_sources(root, job, accepted, *, source=None):
             or config['execution_interface'] != accepted['interface']
             or view['prepared'] != accepted['prepared']
             or view['native_intent'] != q._ref(root, _native_record(root, job['step'], attempt['number'], source=source) / 'native-intent.json', source=source)
-            or q._read(root, view['native_intent'], source=source)['task_sha256'] != view['job']['sha256']
-            or accepted['interface']['config_sha256'] != hashlib.sha256(e.encoded({key:value for key,value in config.items() if key != 'execution_interface'})).hexdigest()):
+            or q._read(root, view['native_intent'], source=source)['task_ref'] != dict(path=str(root/view['job']['path']))
+            or accepted['interface']['config_record'] != {key:value for key,value in config.items() if key != 'execution_interface'}):
         raise q.IntegrityError('Declared input view differs from its original native owner')
     if not isinstance(view['evidence'], list) or not view['evidence']:
         raise q.IntegrityError('Declared input view omitted its actual preparation evidence')
@@ -146,12 +145,12 @@ def _producer(root, material, *, source=None):
         matches = []
         for edge in q._original_inputs(source, job)['edges']:
             if edge['kind'] != 'producer':continue
-            owner = originals.dependency(source, edge['step'], seal_sha256=edge['seal']['sha256'])
+            owner = originals.dependency(source, edge['step'], seal_ref=edge['seal'])
             seal = q._read(root, edge['seal'], source=owner)
             if material in seal['materials']:
                 matches.append(dict(instance_id=owner.origin_identity['goal_id'], producer_step=owner.step,
                     producer_seal=edge['seal'], material_path=material['path'],
-                    sha256=material['sha256'], size_bytes=material['size_bytes']))
+                    size_bytes=material['size_bytes']))
         if len(matches) != 1:
             raise q.IntegrityError('Original scientific input has no exact unique producer')
         return matches[0]
@@ -167,33 +166,33 @@ def _producer(root, material, *, source=None):
                 originals.material_path(root, material)
                 return dict(instance_id=source.origin_identity['goal_id'], producer_step=source.step,
                     producer_seal=originals.original_ref(source, f'native-evidence/{source.step:03d}/result-identity.json'),
-                    material_path=material['path'], sha256=material['sha256'], size_bytes=material['size_bytes'])
+                    material_path=material['path'], size_bytes=material['size_bytes'])
     source = Path(material['source'])
-    try:
-        relative = source.relative_to(root / 'project/nodes')
-        step = int(relative.parts[0])
-    except (ValueError, IndexError) as error:
-        raise ValueError('Scientific input needs an exact sealed instance original') from error
-    if step <= 0 or relative.parts[0] != f'{step:03d}':
+    parts = Path(material['path']).parts
+    if (len(parts)<5 or parts[:2]!=('inputs','parents') or not parts[2].isdecimal()
+            or parts[3]!='artifacts'):
+        raise ValueError('Scientific input needs an exact sealed instance original')
+    step=int(parts[2])
+    if step<=0 or parts[2]!=f'{step:03d}':
         raise q.IntegrityError('Scientific input producer namespace changed')
     path = c.host_record(c.workspace(root, step)) / 'result-identity.json'
     seal = c.read(c.regular(path))
     if [row for row in seal['materials'] if row['path'] == material['path']] != [material]:
         raise q.IntegrityError('Scientific input is not its exact producer material')
     record = c.host_record(c.workspace(root, step))
-    if (seal['job_sha256'] != c.digest(c.regular(root / 'jobs' / f'{step:03d}.json'))
-            or seal['sha256'] != c.digest(c.regular(record / 'result.json'))
-            or seal['raw_sha256'] != c.digest(c.regular(c._execution_raw(root, step)))
+    if (seal['job_ref'] != c.record_ref(root / 'jobs' / f'{step:03d}.json')
+            or seal['result_ref'] != c.file_ref(record / 'result.json')
+            or seal['raw_ref'] != c.file_ref(c._execution_raw(root, step))
             or source.resolve() != source or q._identity(source) != dict(
-                path=str(source), sha256=material['sha256'], size_bytes=material['size_bytes'])):
+                path=str(source), size_bytes=material['size_bytes'])):
         raise q.IntegrityError('Scientific input producer or original bytes changed')
     return dict(instance_id=c.settings(root)['goal_id'], producer_step=step,
         producer_seal=q._ref(root, path), material_path=material['path'],
-        sha256=material['sha256'], size_bytes=material['size_bytes'])
+        size_bytes=material['size_bytes'])
 
 
 def resolve_native_original(root, original, *, compiler_job, source=None):
-    """Membership and origin are exact; a matching digest never selects a source."""
+    """Membership and origin are exact; a matching size never selects a source."""
     root = Path(root).resolve()
     if (not isinstance(original, dict) or type(original.get('producer_step')) is not int
             or type(original.get('size_bytes')) is not int):
@@ -219,7 +218,7 @@ def _private_compile_output(root, job, config, output, *, source=None):
     if source is not None:
         from . import originals
         job_ref = originals.original_ref(source, f'jobs/{job["step"]:03d}.json')
-        directory = Path(source.original_root) / 'host-runtime/experiment-control' / job_ref['sha256'] / 'records'
+        directory = Path(source.original_root) / 'host-runtime/experiment-control' / f'{job["step"]:03d}' / 'records'
     else:
         directory = experiment_client.record_directory(root, job['step'])
     return (type(config.get('worker_view_version')) is int and config['worker_view_version'] == 1
@@ -278,7 +277,7 @@ def _legacy_authorization(root, job, compiler_ref, original_material, permit_ref
         path = root / 'native-evidence' / f'{job["step"]:03d}' / 'continuations' / f'{attempt:03d}' / 'native-intent.json'
         intent = c.read(c.regular(path)) if source is None else author_closeout._read_original(root, path, source)
         if (type(intent.get('attempt')) is not int or intent['attempt'] != attempt
-                or intent.get('task_sha256') != original['job']['sha256']
+                or intent.get('task_ref') != dict(path=str(root/original['job']['path']))
                 or intent.get('author_closeout') != permit_ref or intent.get('continuation_kind') != 'author_closeout'
                 or intent.get('context_mode') != 'new_context'
                 or type(intent.get('worker_view_version')) is not int or intent['worker_view_version'] != 1):
@@ -392,11 +391,11 @@ def verify_compilation(root, ref, *, material=None, client_binding=None, source=
     native_record = execution.origin(root, step)
     if attempt:
         native_record = native_record / 'continuations' / f'{attempt:03d}'
-    expected = root / 'host-runtime/experiment-control' / config['scope']['job_sha256'] / 'interfaces' / f'{attempt:03d}.json'
+    expected = root / 'host-runtime/experiment-control' / f'{config["scope"]["step"]:03d}' / 'interfaces' / f'{attempt:03d}.json'
     if (value['configuration'] != q._ref(root, expected)
             or value['native_intent'] != q._ref(root, native_record / 'native-intent.json')
-            or q._read(root, value['native_intent'])['task_sha256'] != value['job']['sha256']
-            or config['scope']['step'] != step or config['scope']['job_sha256'] != value['job']['sha256']):
+            or q._read(root, value['native_intent'])['task_ref'] != dict(path=str(root/value['job']['path']))
+            or config['scope']['step'] != step or config['scope']['job_ref'] != dict(path=str(root/value['job']['path']))):
         raise q.IntegrityError('Compiler native task/configuration original changed')
     if value['implementation'] != config['execution_interface']:
         raise q.IntegrityError('Compiler implementation differs from its frozen interface')
@@ -404,19 +403,19 @@ def verify_compilation(root, ref, *, material=None, client_binding=None, source=
                 if item['key'] == 'implementation_authoring']
     if len(declared) != 1 or value['contract'] != declared[0]:
         raise q.IntegrityError('Compiler public contract changed')
-    if any(value['capability'][key] != value['capability_source'][key] for key in ('sha256', 'size_bytes')):
+    if any(value['capability'][key] != value['capability_source'][key] for key in ('size_bytes',)):
         raise q.IntegrityError('Compiler retained capability differs from its operator original')
     q._read(root, value['capability']); q._read(root, value['author'])
     author_origin = Path(value['author_origin']['path'])
     if (not author_origin.is_relative_to(c.workspace(root, step))
             or author_origin.resolve() != author_origin
-            or any(value['author'][key] != value['author_origin'][key] for key in ('sha256', 'size_bytes'))):
+            or any(value['author'][key] != value['author_origin'][key] for key in ('size_bytes',))):
         raise q.IntegrityError('Compiler author snapshot differs from its declared source')
     author_input = value.get('author_input')
     if author_input is not None:
         author_material = resolve_native_original(root, author_input, compiler_job=job)
         if (author_origin != c.workspace(root, step) / author_material['path']
-                or any(value['author'][key] != author_material[key] for key in ('sha256', 'size_bytes'))):
+                or any(value['author'][key] != author_material[key] for key in ('size_bytes',))):
             raise q.IntegrityError('Compiler author input differs from its exact bound original')
     elif author_origin.is_relative_to(c.workspace(root, step) / 'inputs'):
         raise q.IntegrityError('Compiler author input has no declared original contribution')
@@ -442,7 +441,7 @@ def verify_compilation(root, ref, *, material=None, client_binding=None, source=
                 raise q.IntegrityError('Compiler client binding is not its sealed original')
             binding = q._read(root, client_binding)
             expected = dict(worker_implementation_version=1, implementation_ref=path.parent.name)
-            source = Path(material['source'])
+            source = Path(material.get('original_source',material['source']))
             if (not isinstance(binding, dict) or set(binding) != {'client', 'public_path', 'package'}
                     or not isinstance(binding['client'], dict)
                     or type(binding['client'].get('worker_implementation_version')) is not int
@@ -450,14 +449,14 @@ def verify_compilation(root, ref, *, material=None, client_binding=None, source=
                     or binding['public_path'] != str(source) or not source.is_relative_to(c.workspace(root, step) / 'artifacts')
                     or _implementation_client(material) != expected):
                 raise q.IntegrityError('Compiler client differs from its exact scientific material and private package')
-            q._check(dict(path=str(source), sha256=material['sha256'], size_bytes=material['size_bytes']))
+            q._check(dict(path=material['source'], size_bytes=material['size_bytes']))
         elif client_binding is not None:
             binding, _ = verify_legacy_author_client(root, job, client_binding)
-            if (binding['legacy_authorization']['compiler'] != ref or binding['public_path'] != material['source']
+            if (binding['legacy_authorization']['compiler'] != ref or binding['public_path'] != material.get('original_source',material['source'])
                     or _implementation_client(material) != binding['client']):
                 raise q.IntegrityError('Legacy compiler client is not the exact sealed scientific material')
-            q._check(dict(path=material['source'], sha256=material['sha256'], size_bytes=material['size_bytes']))
-        elif value['output'] != dict(path=material['source'], sha256=material['sha256'], size_bytes=material['size_bytes']):
+            q._check(dict(path=material['source'], size_bytes=material['size_bytes']))
+        elif value['output'] != dict(path=material.get('original_source',material['source']), size_bytes=material['size_bytes']):
             raise q.IntegrityError('Compiler output is not the exact sealed material')
     return value
 
@@ -472,12 +471,12 @@ def _original_input(source, original, compiler_job):
     if type(step) is not int or not 0 < step < compiler_job['step']:
         raise q.IntegrityError('Original compiler input crossed its producer boundary')
     seal_ref = original['producer_seal']
-    owner = originals.dependency(source, step, seal_sha256=seal_ref['sha256'])
+    owner = originals.dependency(source, step, seal_ref=seal_ref)
     seal = c.read(originals.resolve_ref(owner, seal_ref))
     if (original.get('instance_id') != owner.origin_identity['goal_id']
             or seal_ref['path'] != f'native-evidence/{step:03d}/result-identity.json'
             or material not in seal['materials']
-            or any(original.get(field) != material[field] for field in ('sha256', 'size_bytes'))):
+            or any(original.get(field) != material[field] for field in ('size_bytes',))):
         raise q.IntegrityError('Original compiler input changed its exact producer/material')
     material_owner, path = originals.material_owner(owner, material)
     originals.resolve_ref(material_owner, dict(material, path=path))
@@ -501,34 +500,34 @@ def verify_original_compilation(source, ref, *, material=None, client_binding=No
             or Path(ref['path']).parent.parent != Path(f'native-evidence/{step:03d}/compiled-implementations')):
         raise q.IntegrityError('Original compiler has no exact W owner')
     job_ref = originals.original_ref(source, value['job']['path'])
-    if any(value['job'][field] != job_ref[field] for field in ('sha256', 'size_bytes')):
+    if any(value['job'][field] != job_ref[field] for field in ('size_bytes',)):
         raise q.IntegrityError('Original compiler task identity changed')
     config = read_ref(value['configuration'])
     attempt = config['native_attempt']['number']
     if type(attempt) is not int or not 0 <= attempt < 10000:
         raise q.IntegrityError('Original compiler native attempt changed')
     record = f'native-evidence/{step:03d}' + (f'/continuations/{attempt:03d}' if attempt else '')
-    expected_config = f'host-runtime/experiment-control/{job_ref["sha256"]}/interfaces/{attempt:03d}.json'
+    expected_config = f'host-runtime/experiment-control/{step:03d}/interfaces/{attempt:03d}.json'
     if (value['configuration']['path'] != expected_config or value['native_intent']['path'] != record + '/native-intent.json'
-            or read_ref(value['native_intent'])['task_sha256'] != job_ref['sha256']
-            or config['scope']['step'] != step or config['scope']['job_sha256'] != job_ref['sha256']
+            or read_ref(value['native_intent'])['task_ref'] != dict(path=str(root/job_ref['path']))
+            or config['scope']['step'] != step or config['scope']['job_ref'] != dict(path=str(root/job_ref['path']))
             or value['implementation'] != config['execution_interface']):
         raise q.IntegrityError('Original compiler lost its frozen native configuration')
     declarations = [item for item in value['implementation'].get('public_capabilities', []) if item['key'] == 'implementation_authoring']
     if len(declarations) != 1 or value['contract'] != declarations[0]:
         raise q.IntegrityError('Original compiler capability contract changed')
-    if any(value['capability'][field] != value['capability_source'][field] for field in ('sha256', 'size_bytes')):
+    if any(value['capability'][field] != value['capability_source'][field] for field in ('size_bytes',)):
         raise q.IntegrityError('Original compiler capability snapshot changed')
     for opaque in ('capability', 'author'):
         originals.resolve_ref(originals.source_for_ref(source, value[opaque]), value[opaque])
     author = Path(value['author_origin']['path'])
     if (not author.is_relative_to(source.logical_workspace)
-            or any(value['author'][field] != value['author_origin'][field] for field in ('sha256', 'size_bytes'))):
+            or any(value['author'][field] != value['author_origin'][field] for field in ('size_bytes',))):
         raise q.IntegrityError('Original compiler author snapshot changed its source')
     if value.get('author_input') is not None:
         author_material = _original_input(source, value['author_input'], job)
         if author != source.logical_workspace / author_material['path'] or any(
-                value['author'][field] != author_material[field] for field in ('sha256', 'size_bytes')):
+                value['author'][field] != author_material[field] for field in ('size_bytes',)):
             raise q.IntegrityError('Original compiler author input changed')
     elif author.is_relative_to(source.logical_workspace / 'inputs'):
         raise q.IntegrityError('Original compiler author input has no declared producer')
@@ -557,18 +556,18 @@ def verify_original_compilation(source, ref, *, material=None, client_binding=No
             binding = read_ref(client_binding)
             expected = dict(worker_implementation_version=1, implementation_ref=expected_path.parent.name)
             if (set(binding) != {'client', 'public_path', 'package'} or binding['client'] != expected
-                    or binding['package'] != output or binding['public_path'] != material['source']
-                    or not Path(material['source']).is_relative_to(source.logical_workspace / 'artifacts')
+                    or binding['package'] != output or binding['public_path'] != material.get('original_source',material['source'])
+                    or not Path(material.get('original_source',material['source'])).is_relative_to(source.logical_workspace / 'artifacts')
                     or _implementation_client(material, source=source) != expected):
                 raise q.IntegrityError('Original compiler client changed its reviewed material/package')
         elif client_binding is not None:
             binding, _ = verify_legacy_author_client(root, job, client_binding, source=source)
             expected_compiler = {key:value for key,value in ref.items() if key != 'origin_identity'}
             if (binding['legacy_authorization']['compiler'] != expected_compiler
-                    or binding['public_path'] != material['source']
+                    or binding['public_path'] != material.get('original_source',material['source'])
                     or _implementation_client(material, source=source) != binding['client']):
                 raise q.IntegrityError('Legacy compiler client is not the exact sealed scientific material')
-        elif output != dict(path=material['source'], sha256=material['sha256'], size_bytes=material['size_bytes']):
+        elif output != dict(path=material.get('original_source',material['source']), size_bytes=material['size_bytes']):
             raise q.IntegrityError('Original compiler output is not its exact sealed material')
     return value
 
@@ -600,14 +599,14 @@ def capture(root, job, materials):
         else:
             source = value['output']['path']
             clients = sorted(path.parent.glob('author-client-*.json'))
-            matching = [item for item in clients if c.read(c.regular(item)).get('public_path') in {row['source'] for row in materials}]
+            matching = [item for item in clients if c.read(c.regular(item)).get('public_path') in {row.get('original_source',row['source']) for row in materials}]
             if matching:
                 client_binding = q._ref(root, matching[-1])
                 client, _ = verify_legacy_author_client(root, job, client_binding)
                 source = client['public_path']
-                if any(row['source'] == value['output']['path'] for row in materials):
+                if any(row.get('original_source',row['source']) == value['output']['path'] for row in materials):
                     raise q.IntegrityError('Legacy machine package must remain separate from its new scientific client')
-        matches = [row for row in materials if row['source'] == source]
+        matches = [row for row in materials if row.get('original_source',row['source']) == source]
         if not matches:
             continue
         if len(matches) != 1 or matches[0]['source'] in seen:
@@ -644,12 +643,12 @@ def compiled_payload(root, material, *, source=None):
     from . import originals
     if source is not None:
         if _implementation_client(material, source=source) is None:
-            identity = dict(path=material['source'], sha256=material['sha256'], size_bytes=material['size_bytes'])
+            identity = dict(path=material['source'], size_bytes=material['size_bytes'])
             owner, path = originals.material_owner(source, material)
             originals.resolve_ref(owner, dict(identity, path=path))
             return identity
         native = _producer(root, material, source=source)
-        owner = originals.dependency(source, native['producer_step'], seal_sha256=native['producer_seal']['sha256'])
+        owner = originals.dependency(source, native['producer_step'], seal_ref=native['producer_seal'])
         seal = q._read(root, native['producer_seal'], source=owner)
         found = [row for row in seal.get('compiled_implementations', []) if row['material'] == material]
         if len(found) != 1:
@@ -659,7 +658,7 @@ def compiled_payload(root, material, *, source=None):
     try:
         if _implementation_client(material, root=root) is None:
             identity = q._identity(originals.material_path(root, material))
-            if any(identity[field] != material[field] for field in ('sha256', 'size_bytes')):
+            if any(identity[field] != material[field] for field in ('size_bytes',)):
                 raise q.IntegrityError('Execution material differs from its exact source')
             return identity
     except q.IntegrityError:
@@ -695,7 +694,7 @@ def execution_input_coverage(root, job, subject):
     seal = q._read(root, subject['producer_seal'])
     selected = [row for row in job.get('selected_inputs', [])
         if row['origin_step'] == subject['producer_step'] and row['material'] == subject['material']
-        and row['origin_result_sha256'] == seal['sha256']]
+        and row['origin_result_ref'] == seal['result_ref']]
     if not selected:
         return None
     found = [row for row in seal.get('compiled_implementations', []) if row['material'] == subject['material']]
@@ -742,7 +741,7 @@ def _local_source(root, job, item, authoring, *, source=None):
     if matches:
         origin = next(iter(matches.values()))
         material = origin.get('material', origin.get('original'))
-        if any(item[key] != material[key] for key in ('sha256','size_bytes')):
+        if any(item[key] != material[key] for key in ('size_bytes',)):
             raise q.IntegrityError('Local read copy differs from its exact original')
         return origin
     if authoring is not None and path.is_relative_to(authoring):
@@ -773,14 +772,14 @@ def local_input_sources(config, interface, payload, metadata):
     attempt = config.get('native_attempt') or {}
     if type(attempt.get('number')) is not int:
         return None
-    projection = root / 'host-runtime/experiment-control' / config['scope']['job_sha256'] / 'interfaces' / f'{attempt["number"]:03d}.json'
+    projection = root / 'host-runtime/experiment-control' / f'{config["scope"]["step"]:03d}' / 'interfaces' / f'{attempt["number"]:03d}.json'
     frozen = q._read(root, q._ref(root, projection))
     from .protocol import stage_scope
     if (job['role'] != 'W' or config['scope'] != stage_scope(root, job)
             or frozen != dict(config, execution_interface=interface)):
         raise q.IntegrityError('Local authoring differs from its frozen host task')
     intent = q._ref(root, execution.record(root, step, attempt['number']) / 'native-intent.json')
-    if q._read(root, intent)['task_sha256'] != c.digest(root / 'jobs' / f'{step:03d}.json'):
+    if q._read(root, intent)['task_ref'] != c.record_ref(root / 'jobs' / f'{step:03d}.json'):
         raise q.IntegrityError('Local authoring has no exact native intent')
     directory = Path(metadata['experiment_directory']); authoring = _local_authoring(work, directory)
     return dict(job=q._ref(root, root / 'jobs' / f'{step:03d}.json'), native_intent=intent,
@@ -797,12 +796,12 @@ def validate_local_input_sources(root, job, accepted, *, source=None):
         return None
     expected = dict(key=e.INPUT_SOURCES_KEY,kind='source_provenance',schema_id=e.INPUT_SOURCES_SCHEMA,
         payload_schema_version=1,media_type='application/json',content=e.encoded(e.INPUT_SOURCES_CONTRACT).decode('utf-8'),
-        sha256=hashlib.sha256(e.encoded(e.INPUT_SOURCES_CONTRACT)).hexdigest(),size_bytes=len(e.encoded(e.INPUT_SOURCES_CONTRACT)))
+        size_bytes=len(e.encoded(e.INPUT_SOURCES_CONTRACT)))
     if original['contract'] != expected:
         return None  # Another contract has no implicit interpretation here.
     declared=[item for item in accepted['interface'].get('public_capabilities',[]) if item['key']==e.INPUT_SOURCES_KEY]
     if (len(declared)!=1 or any(declared[0].get(key)!=expected[key] for key in
-            ('key','kind','schema_id','payload_schema_version','media_type','sha256','size_bytes'))):
+            ('key','kind','schema_id','payload_schema_version','media_type','size_bytes'))):
         raise q.IntegrityError('Local input view has no unique frozen source capability')
     view = original['view']
     if view is None:
@@ -810,7 +809,7 @@ def validate_local_input_sources(root, job, accepted, *, source=None):
     root = Path(source.original_root) if source is not None else Path(root).resolve()
     work = c.workspace(root, job['step'])
     config = q._read(root, view['configuration'], source=source); attempt = accepted.get('native_attempt') or {}
-    projection = root / 'host-runtime/experiment-control' / accepted['scope']['job_sha256'] / 'interfaces' / f'{attempt["number"]:03d}.json'
+    projection = root / 'host-runtime/experiment-control' / f'{accepted["scope"]["step"]:03d}' / 'interfaces' / f'{attempt["number"]:03d}.json'
     if (set(view) != {'job','native_intent','configuration','prepared','files'}
             or view['job'] != q._ref(root, root / 'jobs' / f'{job["step"]:03d}.json', source=source)
             or q._read(root, view['job'], source=source) != job or job['role'] != 'W'
@@ -820,12 +819,12 @@ def validate_local_input_sources(root, job, accepted, *, source=None):
             or accepted.get('local_observation_version') != 1
             or view['prepared'] != accepted['prepared']
             or view['native_intent'] != q._ref(root, _native_record(root, job['step'], attempt['number'], source=source) / 'native-intent.json', source=source)
-            or q._read(root, view['native_intent'], source=source)['task_sha256'] != view['job']['sha256']
-            or accepted['config_sha256'] != hashlib.sha256(e.encoded({key:value for key,value in config.items() if key != 'execution_interface'})).hexdigest()):
+            or q._read(root, view['native_intent'], source=source)['task_ref'] != dict(path=str(root/view['job']['path']))
+            or accepted['config_record'] != {key:value for key,value in config.items() if key != 'execution_interface'}):
         raise q.IntegrityError('Local input view lost its exact host owner')
     directory = Path(accepted['experiment_directory']); authoring = _local_authoring(work, directory)
     if source is not None:
-        records = (root / 'host-runtime/experiment-control' / accepted['scope']['job_sha256'] / 'records'
+        records = (root / 'host-runtime/experiment-control' / f'{accepted["scope"]["step"]:03d}' / 'records'
             if type(job.get('worker_view_version')) is int and job['worker_view_version'] == 1 else work / 'work/lineage')
     else:
         records = experiment_client.record_directory(root, job['step'])
@@ -846,7 +845,7 @@ def validate_local_input_sources(root, job, accepted, *, source=None):
                 or name in seen or declared['name'] != name or Path(item['path']) != directory / relative):
             raise q.IntegrityError('Local input view changed a declared file')
         seen.add(name)
-        q._check(dict(path=str(snapshot / 'inputs' / relative), sha256=item['sha256'], size_bytes=item['size_bytes']), source=source)
+        q._check(dict(path=str(snapshot / 'inputs' / relative), size_bytes=item['size_bytes']), source=source)
         origin = declared['origin']
         # Verify the published classification, not a fresh adapter-generated view.
         if origin != _local_source(root, job, item, authoring, source=source):
@@ -857,7 +856,7 @@ def validate_local_input_sources(root, job, accepted, *, source=None):
                     and edge['seal'] == native['producer_seal'] for edge in edges):
                 raise q.IntegrityError('Local input producer is absent from original source edges')
             seal = q._read(root, native['producer_seal'], source=source)
-            contributions.append(dict(origin_step=native['producer_step'], origin_result_sha256=seal['sha256'], material=material))
+            contributions.append(dict(origin_step=native['producer_step'], origin_result_ref=seal['result_ref'], material=material))
         elif origin['kind'] == 'global':
             if not any(edge['kind'] == 'global' and edge['material'] == origin['material'] for edge in edges):
                 raise q.IntegrityError('Local global input is absent from original source edges')
@@ -898,8 +897,12 @@ class NativeInputHost:
                 or any(parent.is_symlink() for parent in output.parents)):
             raise ValueError('Compile source/output must be original files in this task and its host-owned output namespace'
                              if private_output else 'Compile source/output must be original files in this task and artifacts')
-        authored = c.regular(source).read_bytes(); source_identity = q._identity(source)
-        if (len(authored), hashlib.sha256(authored).hexdigest()) != (source_identity['size_bytes'], source_identity['sha256']):
+        from . import atomic_files
+        source_generation=atomic_files._generation(c.regular(source).lstat())
+        authored = source.read_bytes(); source_identity = q._identity(source)
+        if atomic_files._generation(source.lstat())!=source_generation:
+            raise q.IntegrityError('Compiler author changed while reading')
+        if len(authored) != source_identity['size_bytes']:
             raise q.IntegrityError('Compiler author changed between reading and identity capture')
         author_input = None
         if source.is_relative_to(work / 'inputs'):
@@ -907,7 +910,7 @@ class NativeInputHost:
             if len(found) != 1:
                 raise ValueError('Author input must name one exact frozen scientific document')
             material = next(iter(found.values())); author_input = _producer(self.root, material)
-            if any(source_identity[key] != material[key] for key in ('sha256', 'size_bytes')):
+            if any(source_identity[key] != material[key] for key in ('size_bytes',)):
                 raise q.IntegrityError('Author read copy differs from its original scientific document')
         if set(aliases) != {slot['semantic_name'] for slot in slots}:
             raise ValueError('Select one exact bound scientific-file alias for every slot')
@@ -923,29 +926,42 @@ class NativeInputHost:
             inputs.append(dict(slot, alias=alias, original=original, size_bytes=material['size_bytes']))
         if c.output_quota_exceeded(c.settings(self.root, self.job), (item['size_bytes'] for item in inputs)):
             raise ValueError('Scientific inputs exceed the explicit frozen handoff quota')
+        if output.exists() or output.is_symlink():
+            matches=[]
+            for receipt in _directory(self.root,self.job['step']).glob('*/compiler.json'):
+                value=q._read(self.root,q._ref(self.root,receipt))
+                if value.get('output',{}).get('path')==str(output):matches.append((receipt,value))
+            if len(matches)!=1:
+                raise q.IntegrityError('Existing compiled output has no unique original call')
+            receipt,value=matches[0]
+            if (value.get('author_origin')!=source_identity or value.get('inputs')!=inputs
+                    or value.get('capability_source')!=capability or value.get('contract')!=contract
+                    or value.get('implementation')!=self.config['execution_interface']):
+                raise q.IntegrityError('Existing compiled output differs from its original invocation')
+            verify_compilation(self.root,q._ref(self.root,receipt))
+            return dict(status='compiled',path=str(output) if private_output else str(output.relative_to(work)),
+                qualification='Unreviewed compiled material; no execution permission')
         raw = builder(authored, [{key: item[key] for key in item if key != 'alias'} for item in inputs])
-        if type(raw) is not bytes or q._identity(source) != source_identity:
+        if type(raw) is not bytes or atomic_files._generation(source.lstat()) != source_generation:
             raise q.IntegrityError('Compiler author original changed during compilation')
         if c.output_quota_exceeded(c.settings(self.root, self.job), [len(raw)]):
             raise ValueError('Compiled package exceeds explicit output quota')
-        identity = hashlib.sha256(json.dumps(dict(output=str(output), sha256=hashlib.sha256(raw).hexdigest()),
-            sort_keys=True).encode()).hexdigest()
+        identity = uuid.uuid4().hex
         directory = _directory(self.root, self.job['step']) / identity
         if directory.resolve() != directory:
             raise q.IntegrityError('Compiler original directory changed')
         directory.mkdir(parents=True, exist_ok=True)
         author_path = directory / 'author.json'
-        c._bind_original(source, author_path, source_identity['sha256'], policy=policy, context=context, root=self.root, size_bytes=source_identity['size_bytes'], source_kind='mutable')
-        c._bind_original(Path(capability['path']), directory / 'capability.json', capability['sha256'], policy=policy, context=context, root=self.root, size_bytes=capability['size_bytes'], source_kind='mutable')
+        c._bind_original(source, author_path, policy=policy, context=context, root=self.root, size_bytes=source_identity['size_bytes'], source_kind='mutable')
+        c._bind_original(Path(capability['path']), directory / 'capability.json', policy=policy, context=context, root=self.root, size_bytes=capability['size_bytes'], source_kind='mutable')
         snapshot = q._ref(self.root, directory / 'capability.json')
         if output.exists() or output.is_symlink():
-            if c.regular(output).read_bytes()!=raw:
-                raise ValueError('Choose a new output for a changed implementation; sealed packages cannot be overwritten')
+            raise ValueError('Choose a new output; sealed packages cannot be overwritten')
         frozen=shared_originals.publish_bytes(self.root,raw,policy=policy,context=context)
-        shared_originals.link(frozen,output,sha256=frozen.name,size_bytes=len(raw),
+        shared_originals.link(frozen,output,size_bytes=len(raw),
             root=self.root,policy=policy,context=context)
         attempt = self.config['native_attempt']['number']
-        projection = self.root / 'host-runtime/experiment-control' / self.config['scope']['job_sha256'] / 'interfaces' / f'{attempt:03d}.json'
+        projection = self.root / 'host-runtime/experiment-control' / f'{self.config["scope"]["step"]:03d}' / 'interfaces' / f'{attempt:03d}.json'
         value = dict(version=1, job=q._ref(self.root, self.root / 'jobs' / f'{self.job["step"]:03d}.json'),
             native_intent=self.intent, configuration=q._ref(self.root, projection),
             implementation=self.config['execution_interface'], contract=contract,

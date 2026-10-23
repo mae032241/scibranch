@@ -30,7 +30,7 @@ def snapshot(root, settings):
     assert result['status'] == 'configuration_saved'
     number = result['revision']
     path = root / f'host-control/configuration/revisions/{number:06d}.json'
-    return dict(revision=number, path=path.relative_to(root).as_posix(), sha256=c.digest(path))
+    return dict(revision=number, path=path.relative_to(root).as_posix(), )
 
 
 def test_review_and_authority_enable_after_legacy_job_keep_original_contracts(tmp_path):
@@ -87,7 +87,7 @@ def test_delivery_confirmation_uses_accepted_decision_adapter_after_update(tmp_p
     def confirm(spec, request, seconds, **kwargs):
         calls.append((spec['target'], request['phase']))
         return dict(status='unknown', operation_id=request['operation_id'], candidate_id='original',
-                    artifact_sha256=c.digest(artifact), note='Original call remains unknown')
+                    artifact_ref=source['objects']['artifact'], note='Original call remains unknown')
     monkeypatch.setattr(delivery, '_call', confirm)
     result = delivery.invoke(root, intent, 10)
     assert result['status'] == 'unknown'
@@ -100,9 +100,9 @@ def test_disabled_policy_keeps_unknown_execution_from_enabled_revision(tmp_path)
     settings['formal_review_policy'] = settings['execution_authority_policy'] = dict(version=1)
     snapshot(root, settings)
     settings = updates.current(root)
-    pending = dict(path='native-evidence/001/pending.json', sha256='b'*64)
+    pending = dict(path='native-evidence/001/pending.json', size_bytes=0)
     seal = root / 'native-evidence/001/result-identity.json'
-    c.write(seal, dict(job_sha256='a'*64, pending_executions=pending))
+    c.write(seal, dict(job_ref=dict(path='/fixture/jobs/002.json'), pending_executions=pending))
     disabled = copy.deepcopy(settings); disabled['execution_authority_policy'] = None
     snapshot(root, disabled)
     assert updates.current(root).get('execution_authority_policy') is None
@@ -150,7 +150,7 @@ def test_cov_accepted_attempt_uses_private_skill_context_and_rejects_changed_rol
         record = execution.record(root, 1)
         frozen = updates.for_job(root, job)
         c.write(record / 'native-intent.json', dict(
-            task_sha256=c.digest(root / 'jobs/001.json'),
+            task_ref=c.record_ref(root / 'jobs/001.json'),
             budget_slice=budget.accept_node(root, job), **profiles.binding(frozen, job)))
         identity = execution.identity(root, 1)
         c.write(record / 'runner-process.json', runtime.process_identity(os.getppid(), identity))

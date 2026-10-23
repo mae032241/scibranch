@@ -108,7 +108,7 @@ def test_model_edit_preserves_hidden_native_and_role_guidance_options(tmp_path):
     original.update(backends.configuration('codex', original['native_launcher_argv'], None))
     original.pop('role_guidance', None)
     c.write(root / 'settings.json', original)
-    c.write(root / 'settings-identity.json', dict(sha256=c.digest(root / 'settings.json')))
+    c.write(root / 'settings-identity.json', dict(path='settings.json'))
     assert original['native_options'] is None
     edit(root, model='changed')
     changed = updates.current(root)

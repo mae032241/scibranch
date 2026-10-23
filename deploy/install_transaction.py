@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -94,14 +93,16 @@ def mark_managed_directory(path: Path | str, *, name: str) -> None:
     if not target.is_dir() or target.is_symlink():
         raise RuntimeError("managed directory target is unsafe")
     marker = target / _MANAGED_DIRECTORY_MARKER
+    if marker.is_symlink() or marker.exists() and not marker.is_file():
+        raise RuntimeError("managed directory ownership marker is unsafe")
     payload = {
-        "content_sha256": _directory_digest(target),
         "manager": "scidiscovery-install",
         "name": name,
-        "schema_version": 1,
+        "schema_version": 2,
     }
     temporary = marker.with_name(f".{marker.name}.tmp")
-    temporary.write_bytes(_canonical(payload))
+    with temporary.open("xb") as stream:
+        stream.write(_canonical(payload))
     os.replace(temporary, marker)
 
 
@@ -141,44 +142,12 @@ def _verify_managed_directory(path: Path, *, name: str) -> None:
     except (OSError, ValueError) as error:
         raise RuntimeError("managed directory ownership is unavailable") from error
     expected = {
-        "content_sha256": _directory_digest(path),
         "manager": "scidiscovery-install",
         "name": name,
-        "schema_version": 1,
+        "schema_version": 2,
     }
     if value != expected or raw != _canonical(expected):
-        raise RuntimeError("managed directory ownership or content has changed")
-
-
-def _directory_digest(path: Path) -> str:
-    entries: list[dict[str, str]] = []
-    for item in sorted(path.rglob("*"), key=lambda value: value.relative_to(path).as_posix()):
-        relative = item.relative_to(path).as_posix()
-        if relative == _MANAGED_DIRECTORY_MARKER:
-            if item.is_symlink() or not item.is_file():
-                raise RuntimeError("managed directory ownership marker is unsafe")
-            continue
-        if item.is_symlink():
-            raise RuntimeError("managed directory contains a symlink")
-        if item.is_dir():
-            entries.append({"kind": "directory", "path": relative})
-        elif item.is_file():
-            entries.append({
-                "kind": "file",
-                "path": relative,
-                "sha256": _file_digest(item),
-            })
-        else:
-            raise RuntimeError("managed directory contains an unsupported entry")
-    return hashlib.sha256(_canonical(entries)).hexdigest()
-
-
-def _file_digest(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+        raise RuntimeError("managed directory ownership has changed")
 
 
 def _backup_sqlite(source: Path, destination: Path) -> None:

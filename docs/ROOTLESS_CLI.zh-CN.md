@@ -90,7 +90,7 @@ scid-research guidance-revoke --root /absolute/instance --guidance-id ID --expec
 
 ## 从历史任务创建分支
 
-`fork-preview` 与 `fork-create` 只接受已完成且静止、冻结协议 25 的明确父实例，以及精确逻辑
+`fork-preview` 与 `fork-create` 只接受已完成且静止、冻结协议 26 的明确父实例，以及精确逻辑
 步骤 N。新分支从 N 首次科学输入在新 session 重跑，N 输出和后缀不继承；不能选择任意 attempt
 断点。普通、FINAL、正式审查、工程修复及已有 continuation 的任务边界见
 [架构中的分支语义](ARCHITECTURE.zh-CN.md#历史任务分支)。缺真实原件、历史 cut 不足或协议不支持
@@ -161,14 +161,14 @@ solver 和运行环境仍须满足自身声明与准入条件。
 ## 删除明确实例
 
 `instance-delete` 永久移除明确实例的本地数据和证据，不提供撤销或安全擦除。命令必须同时指定
-canonical 绝对路径、实例 ID、冻结 settings 文件摘要和本次操作 ID；没有默认实例或强制绕过。请在目标实例目录之外执行。
-先用 `status --root /absolute/instance` 核对 `goal_id`，并用
-`sha256sum /absolute/instance/settings.json` 核对冻结 settings 摘要。确认这正是要删除的实例，
-将准确值填入请求；不要根据目录最新时间选择目标。
+canonical 绝对路径、实例 ID、冻结 settings 文件引用和本次操作 ID；没有默认实例或强制绕过。请在目标实例目录之外执行。
+先用 `status --root /absolute/instance` 核对 `goal_id` 与精确 settings 路径，
+再将准确值填入请求；不要根据目录最新时间选择目标。`--settings-ref` 接收 JSON 对象，
+引用合同及哈希白名单见[架构](ARCHITECTURE.zh-CN.md)。
 
 ```sh
 scid-research instance-delete --root /absolute/instance \
-  --instance-id EXACT_GOAL_ID --settings-sha256 EXACT_SETTINGS_SHA256 \
+  --instance-id EXACT_GOAL_ID --settings-ref '{"path":"/absolute/instance/settings.json"}' \
   --operation-id delete-instance-001
 ```
 
@@ -253,7 +253,7 @@ workspace 本身没有科学身份、预算或启动/恢复控件；准备新实
 密钥由操作者提供，须为现有普通文件、权限0600且至少32字节。命令监听 loopback 并输出独立只读/管理链接，重启后旧浏览凭据失效。普通本地实例无需启用正式审查或执行审批，也能查看节点状态、请求暂停和继续。暂停只阻止下一节点；已接受工作继续完成。继续复用原实例写锁，推进由 detached 控制进程拥有；关闭网页服务不停止已接受推进。页面提供实例状态、精确封存科学原文和成果入口，不提供任意路径或完整私有会话读取。
 
 `--instance-root` 可重复传入其它明确实例，管理页也可按精确已有根打开；不扫描目录、不按最近时间选择。
-工作台可从已加载实例的管理入口确认删除静止实例，确认页展示目标绝对路径、goal_id、settings_sha256 和 operation_id，沿用精确实例删除服务与原操作回执。独立 `--root` UI 自身持锁时会拒绝删除；须先关闭，再由工作台加载删除，工作台不会释放其他持有者的锁。
+工作台可从已加载实例的管理入口确认删除静止实例，确认页展示目标绝对路径、goal_id、settings_ref 和 operation_id，沿用精确实例删除服务与原操作回执。独立 `--root` UI 自身持锁时会拒绝删除；须先关闭，再由工作台加载删除，工作台不会释放其他持有者的锁。
 实例“设置”集中提供研究配置、方向建议与阅读偏好；控制请求和执行审批单列为记录与操作。创建、加载及切换研究由工作台入口负责。普通研究的预算编辑统一使用研究配置；预算耗尽或已进入收尾时，概览提供明确的“恢复前追加预算”链接，进入独立 `/budget-recovery` 页面，继续沿用原预算修订与恢复条件；预算生效后返回总览开始或继续研究，提交预算本身不启动研究。
 实例内 `/configuration` 可编辑当前研究的模型、角色、预算、权限、实验执行、交付及可选策略，并区分已生效与待生效配置。保存后从下一个新节点开始生效；已准备或运行的节点及其原调用继续使用原配置。修改总预算须填写调整说明，累计消费不会重置。实例路径、原始目标、来源记录及网页服务设置不通过此入口修改。
 新建研究使用独立 `/new` 入口，支持可选配置导入、保存、导出、检查及新实例准备。独立工作台的 `/configuration` 保留为新建入口。
@@ -273,7 +273,7 @@ protocol/自定义 launcher 权限为 hint_only、实际访问未知；详见[�
 - **结果**：查看最终综合结论、作者推荐与交付记录。A 阶段的候选比较只显示其输入范围内最后 W 提名与 A 选中的候选，去重后按首次观察顺序、按评估口径分组；只有主动点击组内排序按钮才按该口径数值排序，可恢复观察顺序。不同口径不能合并比较，数值排序不代表科学排序。
 - **设置**：集中提供研究配置、方向建议、阅读偏好，操作记录与审批另列。方向建议提供可选填写示例，并说明接收角色与生效范围；下一适用阶段指下一项匹配角色的新任务，不会改写正在执行或已准备的任务。记录区区分待交付、已交给研究者及撤回后续，交付不代表科学采纳。创建与加载研究放在工作台；保存当前配置与方向建议一样，只影响后续新节点。普通预算修改使用当前配置表单；预算耗尽或进入收尾后的追加与恢复使用独立恢复页，调整说明随变更记录保存。
 
-`/results?after=N` 每页列20个封存节点，`/results/<step>` 显示精确结果；原科学 JSON 与附件入口保留。候选事实展示使用该节点输入时冻结的候选摘要；本节点 A 推荐为 null 时不回填旧推荐。HTML/SVG 成果仍下载，不内嵌执行。
+`/results?after=N` 每页列20个封存节点，`/results/<step>` 显示精确结果；历史分页使用随机不透明 token 绑定固定快照，不以科学内容摘要生成身份。静态 JS/CSS 从同源资产路径加载，不使用 CSP 内容哈希。原科学 JSON 与附件入口保留。候选事实展示使用该节点输入时冻结的候选摘要；本节点 A 推荐为 null 时不回填旧推荐。HTML/SVG 成果仍下载，不内嵌执行。
 独立 `/candidates`“全候选历史”入口按首次观察顺序、每页20个列出可读封存来源中的全部候选，包含未推荐和失败记录，并按评估口径与机制分组。分页固定已封存前缀；不可读阶段或候选关联明确公开缺口，计数标明下界，不将缺失关联算作可用证据。
 
 页面的“阅读与翻译”保留目标语言、后端、模型及高级参数配置，没有默认翻译模型。设置与缓存保存在工作台目录的 `.scid-ui/`（独立实例入口则为该实例的 `.scid-ui/`），重启后继续使用；工作台内打开的实例共享同一套设置与缓存。这些应用设置独立于冻结的科学配置、角色模型及研究预算，不授予科学执行权限。
@@ -296,13 +296,14 @@ TCAD 支持可选编译、精确封存、正式审查与后继执行的非空输
 
 `execution-resume --root ... --step N --call-id ... --max-seconds N --authorization-note ...` 显式推进一个原 W 调用；操作窗口不增加原科学或 solver 额度。只有原封存已记录完整的未准备证据，才能首次准备；可能提交过的调用只查询/核验，不能重放。仍有效的精确决定复用；过期时可显式给 `--request-valid-seconds N` 创建有限的新请求，再由原审批入口决定，不能借续接绕过批准。旧封存缺证据、清理不完整或余额不足不自动补造/续额。
 
-`archive-export --root ... --output ...` 仅在可证明静止时导出到新的只读目录包；不会取消活动作业或创建可推进副本。`archive-inspect --package ... --after N --limit N` 检查包并分页展示清单，也可用 `--section dependencies` 查看范围缺口；每页仍验证全包，不应当作廉价轮询。原件流式保留，`native-homes` 与审批密钥/私有定位文件按范围排除，缺外部依赖明确标注。这两个入口不提供可写恢复资格。
+`archive-export --root ... --output ...` 仅在可证明静止时导出到新的只读目录包；不会取消活动作业或创建可推进副本。`archive-inspect --package ... --after N --limit N` 检查包的路径/大小清单并分页展示，也可用 `--section dependencies` 查看范围缺口；不扫描科学内容来校验哈希。原件流式保留，`native-homes` 与审批密钥/私有定位文件按范围排除，缺外部依赖明确标注。这两个入口不提供可写恢复资格。
 
-新包将逻辑路径/权限与内容 blob 分离，相同内容只保存一份；同文件系统的冻结原件通过硬链接
-共享，仍可写来源先独立冻结到可复用的私有快照缓存。多个别名或重复导出不重新复制相同内容。
+新包只登记逻辑路径、权限、大小、blob 与原 inode 的别名关系，不计算内容指纹或按相同字节去重。
+同文件系统、生命周期已证明为受管冻结的原件通过硬链接共享；可变来源先独立复制冻结。
+同一冻结 inode 的多个逻辑别名共享一个 blob，独立来源即使字节相同也保留各自身份。
 默认不支持跨文件系统共享，明确失败，不退回逐文件复制。包和实例各自持有链接，删除其中一方
 不移除另一方的原件。冷恢复共享只读内容，真正可变的运行状态独立物化，不能改写包内共享 inode。
-旧包仍可只读 inspect，不据此授予新协议推进或恢复权限。
+旧包不兼容当前恢复入口；旧原件保留，不迁移或授予新协议推进权限。
 
 默认共享包不是独立备份。`archive-export`、`checkpoint-export` 可显式加 `--independent`，
 按唯一 blob 独立写入一次，包内逻辑别名不重复复制。独立包恢复自动保持与实例的 inode 隔离；
@@ -310,10 +311,10 @@ TCAD 支持可选编译、精确封存、正式审查与后继执行的非空输
 恢复的不可变别名链接到首个已恢复目标，可变文件各自独立。有效独立模式下，已有目标若仍与包
 共享 inode 则拒绝，不能因字节相同而跳过。checkpoint 的导出和恢复模式随原事务冻结，重试
 不得更换。独立模式允许源与目标跨文件系统，但目标仍须支持原子硬链接发布及内部别名共享；
-不支持时明确失败。新包采用 archive v3/checkpoint v2；独立模式不改变原宿主、原路径、anchor 与预算
+不支持时明确失败。新包采用 archive v4/checkpoint v3；独立模式不改变原宿主、原路径、anchor 与预算
 门槛，不增加任意迁移资格。宿主动态挂载目录的临时 inode 绑定不进入包，在新原生启动前重建。
 
-`archive-restore-material --root ... --package ... --step N --index N` 只把一个缺失的普通封存成果恢复到原实例的原位置；index 取该节点科学资料页的封存成员序号。须保留当前 settings、job/科学原文/result/seal、ledger、审批与调用证据，且所有原 owner 静止；包须包含同一当前 producer seal 与精确路径/hash/大小的成果。仅支持普通 artifacts 和 nested experiment 成果，已有相同字节幂等，不同文件或链接拒绝；不修 call/control/managed 证据，不新建实例、不覆盖旧消费、不自动继续或续权，也不替代后续预算/资格准入。该命令本身不提供完整灾备或可推进恢复；跨 boot 补回字节也不解除原 clock 或 unknown 限制。
+`archive-restore-material --root ... --package ... --step N --index N` 只把一个缺失的普通封存成果恢复到原实例的原位置；index 取该节点科学资料页的封存成员序号。须保留当前 settings、job/科学原文/result/seal、ledger、审批与调用证据，且所有原 owner 静止；包须包含同一当前 producer seal 与精确路径/大小的成果。仅支持普通 artifacts 和 nested experiment 成果；重试须核对原发布事务绑定的目标 inode，不把同大小、相同字节或其他目标视为已恢复，不同文件或链接拒绝；不修 call/control/managed 证据，不新建实例、不覆盖旧消费、不自动继续或续权，也不替代后续预算/资格准入。该命令本身不提供完整灾备或可推进恢复；跨 boot 补回字节也不解除原 clock 或 unknown 限制。
 
 `execution-resume ... --maintenance query|collect|cancel` 为已经 accepted 的原调用提供有限的宿主维护窗口，须给 `--max-seconds` 和 `--authorization-note`。即使原科学时钟跨 boot 无法继续，也可查询、取消或收集同一调用；此模式不能准备、提交、新建授权请求或增加额度，不能与 `--request-valid-seconds` 合用。精确终态由既有资源账本结算；暂不能结算时不生成退款或新额度。
 
@@ -353,7 +354,7 @@ anchor 目录须已存在、独立于实例。export 冻结旧写者；restore �
 
 ## 受管本地实验
 
-协议 25 的普通原生 Worker 同样需要实际可用的 Linux `bwrap` 只读挂载能力，以保护共享输入、
+协议 26 的普通原生 Worker 同样需要实际可用的 Linux `bwrap` 只读挂载能力，以保护共享输入、
 选定 Skill 与动态 collect/wake 目录。自定义 launcher 也须保护；准确注册的模块启动器
 在宿主准备后，于最终科学进程施加同一挂载。其 provider/module 身份无论是否选择 Skill
 均冻结；普通包装脚本不能据名字豁免。不能挂载时明确拒绝启动，
@@ -459,16 +460,16 @@ H 提出竞争机制和最小判别依据，决定是否请求 E。W 在用户�
 
 H 应先比较可信的竞争机制，再说明集中深挖的理由；单机制范围的合理性由科学作者解释，不设机制数量下限。参数扫描次数不能代替不同机制的判别证据。A 的 `screened` 只表示已评价精确 W 证据，仍可深挖；`deferred` 暂缓并保留未决路线，`waived` 才明确排除。每个排除须在既有 reason/scientific_result 中给出针对原目标与约束、由证据支持的科学否定或不可行理由；暂时相对落后、缺输入或缺证据应说明暂缓，控制不按关键词、分数或运行次数判理由质量。
 
-后继角色可从 `lineage.indexes.mechanisms` 读取所有机制；已采纳的 A 处置提供理由预览、截断标记及完整科学 JSON 原件入口，长原文不受导航页大小上限省略。同状态重述或遗漏不替换已采纳依据，H 修订会清掉当前旧依据，历史原件保留。所有 search 实例默认向 H/A 持续展示完整组合，包括 screened；局部 improve/repair/validate 不抹去全局视野。机制页展示实际 accepted 调用、初始/额外剩余机会、独立完整 W→A 投入及未服务周期；它们不代表科学覆盖或每机制资源成本。按稳定身份展示，不按指标或欠服务周期排序；说明理由与 H 修订不清零投入。A 在既有 scientific_result / route_reason 中说明比较、集中、暂缓和排除。`--search-policy` JSON 可用正整数 `initial_calls` 配置每机制初始受管调用机会；`--portfolio-review-after-cycles N` 只冻结可选提醒间隔，覆盖所有未 waived 路线，不要求 portfolio_review 表单、不强迫换路线、不阻科学封存或 FINAL。当前协议 25 冻结这些提示与谱系合同；旧协议实例保持原件，拒绝按新协议继续运行。
+后继角色可从 `lineage.indexes.mechanisms` 读取所有机制；已采纳的 A 处置提供理由预览、截断标记及完整科学 JSON 原件入口，长原文不受导航页大小上限省略。同状态重述或遗漏不替换已采纳依据，H 修订会清掉当前旧依据，历史原件保留。所有 search 实例默认向 H/A 持续展示完整组合，包括 screened；局部 improve/repair/validate 不抹去全局视野。机制页展示实际 accepted 调用、初始/额外剩余机会、独立完整 W→A 投入及未服务周期；它们不代表科学覆盖或每机制资源成本。按稳定身份展示，不按指标或欠服务周期排序；说明理由与 H 修订不清零投入。A 在既有 scientific_result / route_reason 中说明比较、集中、暂缓和排除。`--search-policy` JSON 可用正整数 `initial_calls` 配置每机制初始受管调用机会；`--portfolio-review-after-cycles N` 只冻结可选提醒间隔，覆盖所有未 waived 路线，不要求 portfolio_review 表单、不强迫换路线、不阻科学封存或 FINAL。当前协议 26 冻结这些提示与谱系合同；旧协议实例保持原件，拒绝按新协议继续运行。
 
 广度预算应依据普通探索可用量及 `work/budget-status.json`；当前 protected FINAL 模式按 provider 已报告消费计算 token 余额，未知账单继续列为未知，不估算扣费，也不扣旧收口预留。旧预算内收口实例仍用原冻结预留。真实执行未知仍须先按原调用核对。初始调用机会不预留实际资源，首次昂贵调用仍可能耗尽余额；使用已有执行配置 `max_seconds` 和 W 阶段时间/token 目标约束，控制不自动分配广度比例或强制科学机制数。
 H 只重写需要变更的 commitment；遗漏保留原承诺及已采纳 A 处置。修订同一 `existing_ref`
 后仍可 repair 旧 W 的精确观测：稳定机制 ref 与当前新 H/A 授权分开绑定，旧 W/call/accepted/
 terminal 仍以原 H seal 校验。来源须为精确直接 W，或通过已有 `implementation_selection` 选定的
-原 accepted 输入；多个来源须精确选择，不能按 label、相同输出字节或最近对象推断。内容去重
+原 accepted 输入；多个来源须精确选择，不能按 label、相同输出字节或最近对象推断。共享
 归档的共用物理路径也不能证明逻辑输入身份，此类输出不能用于 repair 来源消歧。已知进程成功
 也可能需科学修复；unknown、来源模糊、原件缺失/改变及 repair 次数不足仍拒绝。结构性来源问题
-在作者回执提前诊断，Worker 仅见科学 ref、原 W/call 与当前授权步骤，不见控制 hash 或私有路径。
+在作者回执提前诊断，Worker 仅见科学 ref、原 W/call 与当前授权步骤，不见私有控制绑定或路径。
 旧筛选资格不继承，原投入不退款。H scope 未变时，A 可在 review 后通过 `continue_w` 加显式
 局部 focus 请求下一有限 W stage，无需为了续配而重述 H；各 stage 原消费与总额度继续累计。
 
@@ -494,7 +495,7 @@ project/
       artifacts/                 # 子实验必要成果
       conclusion.md              # 可选的简短科学观察
     conclusion.json              # 控制层保存的最终科学回答
-native-evidence/<node>/           # 私有原生轨迹、schema、哈希与封装
+native-evidence/<node>/           # 私有原生轨迹、schema、引用与封装
 ```
 
 角色使用原生文件工具。模型只做科学工作、选择必要成果，最终直接回答简短科学 JSON。
@@ -507,7 +508,7 @@ native-evidence/<node>/           # 私有原生轨迹、schema、哈希与封�
 角色在科学结论里自然使用 `[比较结果](artifacts/comparison.csv)` 这类相对 Markdown 链接；
 控制层验证它指向本节点已采集的成果，并解析为后继节点的实际路径。无需另填附件清单。
 普通文字路径不自动推断；外部链接与前驱材料引用保持科学原文，不冒充本节点新成果。
-哈希、封装、路径校验、来源记录、输出 schema 和封存回执只由控制层维护。
+封装、路径校验、来源记录、输出 schema 和封存回执只由控制层维护；科学内容不自动计算哈希。
 旧科学结论通过 `history` 给出的只读分页入口在当前节点按需读取，默认只投递不超过 4096 字节的历史简报。
 旧实现保留在原拥有节点。角色需要给后继复用时，在科学结论明确链接
 `[旧实现](history/nodes/002/artifacts/candidate.py#reuse-implementation)`，或标记当前已绑定的输入路径。
@@ -533,12 +534,13 @@ scid-research continue --root /absolute/path/new-instance
 
 同实例只有一个运行写者；status 不调用模型。pause 允许当前角色完成并封存，在下一节点前停止。
 N1a 已增加本地持久 runner：前台控制器退出后，已接受的原生节点继续运行并记录日志、用量和终态。
-再次 `run` 按任务哈希、系统启动标识及进程启动身份核对同一 runner，并等待原完成通知，再封存和路由。
+再次 `run` 按任务引用、系统启动标识及进程启动身份核对同一 runner，并等待原完成通知，再封存和路由。
 `status` 区分 `prepared / running / native_not_submitted / native_outcome_unsealed / seal_present_unverified / unknown`；
 封存存在仍需 `run` 验证。原生成功但封存失败只重试封存；执行身份丢失、失败或缺量仍不自动重放。
 实际模型提交前再查预算；已确证未提交时记录 `native_not_submitted` 和零用量。
-控制层保留该节点及原意图；预算修订或重试不自动删除这些记录。独立工程审查以精确原件和正向源码路径证明确未提交模型时，新安装的兼容 runtime 可显式执行 `native-startup-successor --root INSTANCE --step N --reconciliation REPORT --reconciliation-sha256 SHA256 --native-home ORIGINAL_HOME --authorization-statement STATEMENT`。该入口冻结工程报告及其局限、原调用归属、原权限与最终 A claim，只追加唯一的新上下文 attempt 1；旧失败、unknown 原件、已消费时间和 dispatch 保留。它仅允许同一逻辑最终 A 的首次实际模型提交，不授权新的科学循环或新额度；重复命令只收集同一 attempt，后继未知时不再提交。空日志、空 thread 或操作者文字本身均不构成未提交证明，既有外部未知效果仍阻断恢复。框架及工具升级不要求保留旧安装；启用正式审查时仍核对原审查合同的科学语义，不迁移审查 verdict 或产生新资格。原有交付资格及提交内必要机械审计保持有效。
-已封存最终 A 后，若独立工程原件以正向调用顺序证明确切原交付 intent 尚未首次调用，可在当前 host runtime 使用 `native-startup-collect --root INSTANCE --step N --reconciliation REPORT --reconciliation-sha256 SHA256 --authorization-statement STATEMENT`。它追加精确工程核对原件和原操作绑定，只执行已有科学选择的 host 交付与同操作确认，不进入 native 或科学路由。首次实际调用沿用原声明的有限调用时长；原全局消费、失败、unknown 和身份均保留。收集 intent 一旦持久化，重复命令只核对同操作，绝不再次 submit。授权引用校验、当前准入和结果/科学资格校验分开；旧交付/审查合同原件保持不变。
+控制层保留该节点及原意图；预算修订或重试不自动删除这些记录。`--reconciliation-ref` 接收绝对
+path 与精确 size_bytes 的 JSON，以下 1234 是须替换的字节大小示例。独立工程审查以精确原件和正向源码路径证明确未提交模型时，新安装的兼容 runtime 可显式执行 `native-startup-successor --root INSTANCE --step N --reconciliation REPORT --reconciliation-ref '{"path":"/absolute/reconciliation.json","size_bytes":1234}' --native-home ORIGINAL_HOME --authorization-statement STATEMENT`。该入口冻结工程报告及其局限、原调用归属、原权限与最终 A claim，只追加唯一的新上下文 attempt 1；旧失败、unknown 原件、已消费时间和 dispatch 保留。它仅允许同一逻辑最终 A 的首次实际模型提交，不授权新的科学循环或新额度；重复命令只收集同一 attempt，后继未知时不再提交。空日志、空 thread 或操作者文字本身均不构成未提交证明，既有外部未知效果仍阻断恢复。框架及工具升级不要求保留旧安装；启用正式审查时仍核对原审查合同的科学语义，不迁移审查 verdict 或产生新资格。原有交付资格及提交内必要机械审计保持有效。
+已封存最终 A 后，若独立工程原件以正向调用顺序证明确切原交付 intent 尚未首次调用，可在当前 host runtime 使用 `native-startup-collect --root INSTANCE --step N --reconciliation REPORT --reconciliation-ref '{"path":"/absolute/reconciliation.json","size_bytes":1234}' --authorization-statement STATEMENT`。它追加精确工程核对原件和原操作绑定，只执行已有科学选择的 host 交付与同操作确认，不进入 native 或科学路由。首次实际调用沿用原声明的有限调用时长；原全局消费、失败、unknown 和身份均保留。收集 intent 一旦持久化，重复命令只核对同操作，绝不再次 submit。授权引用校验、当前准入和结果/科学资格校验分开；旧交付/审查合同原件保持不变。
 暂停只阻止新节点，恢复时也允许原已接受节点完成和封存。
 科学角色的 `wait` 仍表示停止等待。W 已接受且同一 external execution 明确 running 时，控制在科学封存前保留原 checkpoint 并进入 `waiting`；默认 `run` 自动监控原 call，终态后 reconcile 并在合格的原会话中续接 W 消费原件，再封存。等待不调用模型、不增加 native dispatch 或 `advance_seconds`，但真实执行的 `waiting_seconds` 仍消耗原授权总运行时限；旧 elapsed 口径继续按总经过时间计量。暂停阻止唤醒的新 native turn，允许核对原终态；控制进程同 boot 重启后从原 waiting 恢复，未知提交不重放。续接仍受原预算/有限次数与冻结 launcher/session 能力约束；能力不足保留 checkpoint 并报告 unavailable。
 
@@ -574,7 +576,7 @@ scid-research budget-amend --root /absolute/path/instance \
 ```
 
 修订须持有实例写锁，并确认没有活动或未知执行。仅变更声明上限，不重置消费、不清除原意图、不自动启动模型。
-时间与修订共用 `control-ledger/` 追加账本，记录序号、前记录哈希、冻结 settings 哈希、前后上限、时间和授权说明。
+时间与修订共用 `control-ledger/` 追加账本，记录序号、前记录引用、冻结 settings 引用、前后上限、时间和授权说明。
 累计控制步数包括已准备节点、原生续接、审计和交付动作。修订步数须额外提供 `--max-steps N --authorization-statement '用户授权原话'`；账本记录前后上限及差额，`status.budget.original_max_steps / max_steps` 分别展示原始和有效上限，不修改原 settings 或重置已用步数。普通 `continue` 仍不续额。 合法降低有效上限不隐藏此前的原件：历史节点、累计用量、未知执行及恢复核对仍按冻结 settings 与完整修订链中曾授权的最高步数验证。这个历史范围不授予新额度；普通新的 native turn、续接和审计仍须满足当前有效上限及余额，FINAL 的最后 A 与已有封存 W 的原授权交付不因共享余额不足被挡。
 
 token 记账只累计 provider 已报告的真实消费：`usage.observed_tokens` 与 `accounted_tokens`
@@ -597,18 +599,19 @@ scid-research worker-closeout --root /精确原实例 --step N \
 
 后继额度来自原有累计预算，不重置消费、不自动续额。每个失败 attempt 与新 turn 的已报告消费均计入原有累计账；操作者独立保留的评价额度及当前交付预留不得挪作新 turn。时间上限及已消费时间不因接续增加。新 W 先读当前 attempt 的紧凑机械事实索引，按需取完整科学原件；索引不替作者排名、判定方法多样性或推导审计平台期，科学结论仍由真实 W 编写。原实验、模型及旧 native attempt 只读；当前 attempt、必要 artifacts 与新上下文权限按原隔离启动器保留。这只授权作者完成既有工作，不授权新训练，受管入口仍拒绝 run、compile、submit、query、collect、cancel；同 uid 原生代码仍是信任的软边界，并非任意计算的强隔离保证。
 
-以下 `worker-output-accept` 只说明历史 token-stop 原件的接纳记录。协议 25 的作者 token 目标统一为 soft，越线后原返回正常完成，不会生成 `author_closeout_token_limit`；旧协议原件只读，不能据此继续运行。有限时间停止不能按 token 超额接纳为完成。
+以下 `worker-output-accept` 只说明历史 token-stop 原件的接纳记录。`--pending-ref` 的 path
+按该入口的私有绑定使用实例相对路径；示例中的 NNN 与 1234 须换成精确节点目录及文件字节大小。协议 26 的作者 token 目标统一为 soft，越线后原返回正常完成，不会生成 `author_closeout_token_limit`；旧协议原件只读，不能据此继续运行。有限时间停止不能按 token 超额接纳为完成。
 
 ```sh
 scid-research worker-output-accept --root /精确原实例 --step N --attempt 2 \
-  --pending-sha256 精确最终pendingSHA256 --session /精确原session.jsonl \
+  --pending-ref '{"path":"native-evidence/NNN/continuations/002/result.pending.json","size_bytes":1234}' --session /精确原session.jsonl \
   --authorization-note '仅接纳这份已完整返回的原文' \
   --authorization-statement '操作者授权原话'
 ```
 
 仅接受原返回码为 0、进程已清理、最终消息先于唯一完成事件且完成后没有新的 turn/item 活动、该消息与 pending 字节一致、终态用量和精确 session 的实时计数完全匹配，并且没有同时越过原作者 wall 上限的 author attempt 2。未知、部分返回、其他 stop、活动写者、错误任务/原件或不合法的 W 结果不能由此变成成功。当前累计账、时间、控制步数和交付预留仍须足够；不增加额度、不抹去历史 unknown、不接受新 unknown，不授权 attempt 3 或任何新训练。
 
-此入口先追加绑定精确 successor 和操作者授权的 `NNN-output-upgrade.json`；该记录不要求保留旧框架源码，本身不接纳输出，也不授权封存。当前准入通过后才追加 `NNN-output-acceptance.json`，绑定精确 job、intent、outcome、完整用量/原生流/session、process、pending 和授权原件。pending 精确复制为 `science-output.json`，原 pending、outcome、局部上限及 stop marker 全部保留。接纳记录记录已发生的局部超额及限制，封存引用该记录提供的 raw SHA，仍执行原有输入、schema、科学路由、受管实验、材料和来源检查，不改写 W 结论，不宣称科学资格或审计通过。重复操作只能核对同一接纳和既有后继，不创建新作者 turn。
+此入口先追加绑定精确 successor 和操作者授权的 `NNN-output-upgrade.json`；该记录不要求保留旧框架源码，本身不接纳输出，也不授权封存。当前准入通过后才追加 `NNN-output-acceptance.json`，绑定精确 job、intent、outcome、完整用量/原生流/session、process、pending 和授权原件。pending 精确复制为 `science-output.json`，原 pending、outcome、局部上限及 stop marker 全部保留。接纳记录记录已发生的局部超额及限制，封存引用该记录提供的 raw_ref，仍执行原有输入、schema、科学路由、受管实验、材料和来源检查，不改写 W 结论，不宣称科学资格或审计通过。重复操作只能核对同一接纳和既有后继，不创建新作者 turn。
 
 这一例外仅用于原 W 收口并转入 `purpose=closeout` 的 A 审查、审计与交付；不放宽普通 search/correction 的历史直接来源资格，不重新开放探索。同 uid 信任和隔离启动器的软边界不变。实施记录及具体阶段额度保留在本地 ignored 原件中，不作为长期产品默认值。
 
@@ -630,7 +633,7 @@ runner 意外退出时，本地 watchdog 仅清理能精确核对的标准进程
 JSON 必须恰有 `H/W/A/E` 四个对象，每个对象恰有正整数 `max_observed_tokens`
 和正有限数 `max_seconds`。没有节点策略默认数值；操作者必须为每个角色明确冻结两项目标。
 应保留参数所依据的已观察成本或试用假设；历史最大完成事件不是下一次请求的成本保证。
-当前协议 25 的 `--node-budget-mode` 仅接受 `soft`；API prepare 同样拒绝 hard。旧协议实例只读，不追加策略、不迁移或改写冻结设置。
+当前协议 26 的 `--node-budget-mode` 仅接受 `soft`；API prepare 同样拒绝 hard。旧协议实例只读，不追加策略、不迁移或改写冻结设置。
 
 H/W/A/E 单节点 token 目标统一为软上限，W 的 token/time 目标分别取该策略与原 search policy 的较小值。
 启动前核对共享余额与原节点锚点，不预付整个节点 token 额度。运行中的节点达到 input+output
@@ -718,7 +721,7 @@ A 可在新协议最终科学 JSON 可选填写 `candidate_recommendation`（已
 代理记录提供原科学结论页以回查适用条件与盲区，不能当成目标最优或模型已留存证明。
 
 观察调用上限仍为 5 秒；完整输入、输出、候选/上下文清单及内部传输不再设置框架固定字节或累计项数上限。超时或格式问题保留明确不可用事实，不冒充完整观察。
-配置、封存绑定和归档原件篡改仍拒绝恢复。完整公开台账及提交模型的原观察字节由宿主按内容去重封存，使用流式哈希和复制，不设原单件 32MiB、总对象 128MiB 上限；既有 `digest_only` 或 `unavailable` 记录不因新规则被追认成可回读原件。
+恢复核对配置、封存原件的路径、producer 与声明大小，不提供内容篡改检测。完整公开台账及提交模型的原观察字节由宿主按 UUID 对象保留，可变原件首次独立复制、已受管冻结原件共享硬链接，不按内容去重或计算哈希，不设原单件 32MiB、总对象 128MiB 上限；既有 `digest_only` 或 `unavailable` 记录不因新规则被追认成可回读原件。
 历史默认投递紧凑简报（最多 4096 字节），按需读取的历史分页每页最多 64000 字节；可选 overview 超限时明确省略，完整观察和索引仍保留。归档私有原件不因此全部挂给科学角色；读取仍按冻结来源与权限解析。
 最后一个节点也更新 `host-history/overview.json` 投影；投影删失可由封存科学原件和观察快照重建，观察快照不是可删除缓存。
 
@@ -731,7 +734,7 @@ A 可在新协议最终科学 JSON 可选填写 `candidate_recommendation`（已
 普通 A 明确 `finish` 即结束本轮并拒绝交付；明确 `deliver` 则只消费该 A 原封存的精确候选授权，不强制再起 FINAL A。启用 `selection_policy` 时，普通 A 原任务已经冻结并展示完整候选比较目录，交付核对该原目录及资格。失败或缺少资格保留未决状态，不自动改选、启动新 A 或生成 FINAL。只有预算阻断下一动作或显式 closeout 才按上文进入 FINAL；预算阻断先保留原待执行路线，显式增额并通过准入后可恢复。角色份额按当前账本有效总 token 授权计算；增额不抹去此前消费。以下预留及多轮收口规则只描述缺少该冻结策略的历史实例。
 
 旧实例的预留来自原总额度，不是追加额度。默认 soft 模式预留一次收口 A 目标、在途缓冲、清理及提交/确认；有预留之外的正额度即可准入探索，不要求剩余额度容纳完整下一节点目标。进入收口前为下一次 A 保留声明的 token/时间目标与机械交付底线；接受后的 soft A 仍按共享剩余预算运行。额外 A 逐次准入，可选审计另保留一个后续 A 的完整目标。
-旧协议实例（包括 hard 或未记录模式）仅保留只读原件，不能按协议 25 继续运行，也不自动迁移。soft 提示不能保证在途节点及时返回；真实执行的有限时间与权限边界仍有效。
+旧协议实例（包括 hard 或未记录模式）仅保留只读原件，不能按协议 26 继续运行，也不自动迁移。soft 提示不能保证在途节点及时返回；真实执行的有限时间与权限边界仍有效。
 
 适配器是独立的领域接口。核心冻结其代码、启动器、输入原件及读取范围，不解释领域台账。
 收口先冻结完整候选目录，`science-task.json` 给出目录文件；启用分类提名时默认只预览 W 提名并注明其余数量，完整目录保留全部精确候选 ID 和来源节点，不按紧凑摘要容量截断。控制层仅为 A 明确选择的操作解析并冻结原件；候选目录本身不启动 smoke、审计或自动排除候选。可用性与审计资格分别展示；精确原件的审计结果、工件匹配和适用范围沿历史传递，不额外制造未知泄漏待办。A 选择不等于审计通过。原生 `exp submit` 保留公共命令，但只使用 run 声明的路径，不解析历史跨节点原件；受管 wrapper 的 submit/help 会提示历史交付使用 A `deliver`，不会阻断或改写命令。
@@ -766,7 +769,7 @@ scid-research closeout --root /绝对路径/实例 --export-only
 `exported_unsubmitted`、`closeout_unresolved`、`delivery_failed`、`delivery_unknown` 分别保留未提交、
 未决、失败和未知，不等同科研任务完成。旧预算内模式配置交付但预算不足时返回 `closeout_budget_unavailable`，保留 model 边界；当前 FINAL 不以共享余额不足拒绝最终 A，实际未提交仍给明确原因，不伪装成操作者 export_only。暂时来源准备失败返回 `closeout_preparation_unavailable`，保留失败原件，重复 `run/closeout` 可在原预算内重试准备并复用已封存 A；它不固化为操作者 `export_only`。清理未知继续阻止任何新执行。`status` 由相同原件重建状态和最新收口 A 推荐；此前实际提交观察与当前确认结果仍分开。真实科学效果须另行验收。
 
-当前写协议为 **25**。协议 24 及更早的真实场和证据保持归档只读，不能用新代码续接、重解释或原地迁移；新场必须重新 `prepare`。此变更不增加预算，不对冻结旧场执行任何恢复。
+当前写协议为 **26**。协议 25 及更早的真实场和证据保持归档只读，不能用新代码续接、重解释或原地迁移；新场必须重新 `prepare`。此变更不增加预算，不对冻结旧场执行任何恢复。
 
 适配器只冻结声明的脚本 `source.py`、模型和静态输入。受管 call 的封存脚本可来自旧 W scratch；审计台账局部改写为 `/inputs/source.py` 与 `/inputs/artifact`，旧 W workspace 不挂载到审计命名空间。脚本的任意本地兄弟模块或未声明依赖不会递归捕获；缺依赖属于工程故障，不能据此声明审计已完成或所有脚本都可交付。
 

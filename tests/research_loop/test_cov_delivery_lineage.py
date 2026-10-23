@@ -48,22 +48,22 @@ def managed_scene(tmp_path, *, alias_correct=True, rewrite_script=True, launcher
     finish(root, 1, 'H', [], action='experiment')
     c.build_job(root, 2, 'W', [1],instruction='Exact scientific question')
     record = c.host_record(c.workspace(root, 2))
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/002.json'),
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/002.json'),
         budget_slice=budget.accept_node(root,c.read(root/'jobs/002.json'))))
     backend = tmp_path / 'backend.py';backend.write_text(BACKEND)
     config_path = tmp_path / 'config.json'
     cov_lineage.configure(root, 2, [sys.executable, str(backend), '--runs-root', str(root / 'runs')], root / 'runs', config_path,receipt_channel='backend_file')
-    config, digest = cov_lineage._config(config_path)
+    config = cov_lineage._config(config_path)
     script = c.workspace(root, 2) / 'work/train.py'
     script.write_text(json.dumps(dict(mode='success', revision='P')))
-    first = cov_lineage.run(config, digest, script, new=True)
+    first = cov_lineage.run(config, script, new=True)
     source_p = script.read_bytes();model_p = Path(first['model']['path']).read_bytes()
     script.write_text(json.dumps(dict(mode='success', revision='Q')))
-    second = cov_lineage.run(config, digest, script, parent=first['candidate_id'])
+    second = cov_lineage.run(config, script, parent=first['candidate_id'])
     finish(root, 2, 'W', [1])
     c.write(root / 'host-started.json', budget.clock_stamp())
     budget.transition(root, 'advance', 'Bounded delivery preparation')
-    nodes = [dict(step=step, seal_sha256=c.digest(c.host_record(c.workspace(root, step)) / 'result-identity.json')) for step in (1,2)]
+    nodes = [dict(step=step, seal_ref=c.record_ref(c.host_record(c.workspace(root, step)) / 'result-identity.json')) for step in (1,2)]
     return root, nodes, first, second, script, source_p, model_p
 
 
@@ -101,7 +101,7 @@ def current_managed_scene(tmp_path,monkeypatch,*,native_launcher=None,native_pro
     finish(root,1,'H',[],action='experiment')
     job=c.build_job(root,2,'W',[1],instruction='Exact scientific question');work=c.workspace(root,2)
     record=execution.origin(root,2)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json'),budget_slice=budget.accept_node(root,job)))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),budget_slice=budget.accept_node(root,job)))
     # The production callback freezes the native home and exact source/runner,
     # then runs the actual installed sandbox inside its bwrap mounts. No model.
     repo=Path(__file__).resolve().parents[2]
@@ -143,7 +143,7 @@ def current_managed_scene(tmp_path,monkeypatch,*,native_launcher=None,native_pro
         calls=experiments.Records(configuration).calls()
         second=cov_lineage._completed(calls[-1])
     finish(root,2,'W',[1],preserve_native_intent=True)
-    nodes=[dict(step=step,seal_sha256=c.digest(c.host_record(c.workspace(root,step))/'result-identity.json')) for step in (1,2)]
+    nodes=[dict(step=step,seal_ref=c.record_ref(c.host_record(c.workspace(root,step))/'result-identity.json')) for step in (1,2)]
     return root,nodes,first,second,source,source_p,model_p
 
 
@@ -162,7 +162,7 @@ def test_real_resolver_uses_p_archives_after_same_script_model_and_calls_change(
     seal = c.read(c.host_record(c.workspace(root, 2)) / 'result-identity.json')
     observation = c.read(root / seal['observations']['path'])
     candidate = next(row for row in observation['candidates'] if row['id'] == first['candidate_id'])
-    assert chosen['ledger']['sha256'] == candidate['evidence'][0]['sha256']
+    assert (root/chosen['ledger']['path']).read_bytes() == (root/candidate['evidence'][0]['snapshot']).read_bytes()
     assert chosen['context']['identity_note'].startswith('Exact sealed managed')
 
 
@@ -187,7 +187,7 @@ def test_archived_original_hash_tamper_is_hard_before_resolver(tmp_path):
 
 @pytest.mark.parametrize('kind', ['missing', 'ambiguous', 'unknown', 'unretained'])
 def test_managed_context_problem_never_falls_back_to_current_source(kind):
-    proof = dict(name='source.py', sha256='a'*64, size_bytes=1, retention='digest_only', input_label=None)
+    proof = dict(name='source.py', size_bytes=1, retention='digest_only', input_label=None)
     context = dict(candidate_id='run-1', run_id=1, status='known_success',
         proofs=[proof, dict(proof, name='model.pkl'), dict(proof, name='row.json')], model=dict(proof, name='model.pkl'))
     contexts = [context]
@@ -228,7 +228,7 @@ def test_direct_delivery_audits_frozen_w_scratch_without_mounting_old_workspace(
         job=c.read(root/'jobs/003.json')
         assert job['role']=='A' and job['final_only'] and job['purpose']=='closeout'
         record=c.host_record(c.workspace(root,step))
-        intent=dict(step=step,task_sha256=c.digest(root/'jobs/003.json'),budget_slice=budget.accept_node(root,job))
+        intent=dict(step=step,task_ref=c.record_ref(root/'jobs/003.json'),budget_slice=budget.accept_node(root,job))
         c.write(record/'native-intent.json',intent)
         c.write(record/'science-output.json',dict(summary='Select the exact original P candidate',
             scientific_result='Retain synthetic P evidence; target applicability remains unresolved.',
@@ -245,7 +245,7 @@ def test_direct_delivery_audits_frozen_w_scratch_without_mounting_old_workspace(
         assert accepted is not None
         c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,cleanup='observed_group_cleaned',
             native_backend=backend.name,metering=observation,usage=usage,
-            raw_sha256=c.digest(record/'science-output.json'),
+            raw_ref=c.file_ref(record/'science-output.json'),
             final_a_completion=budget.final_a_receipt(accepted,intent,meter,usage)))
         c.seal_result(root,step)
     # Complete the controller's exact FINAL job; an ordinary legacy A fixture

@@ -23,7 +23,7 @@ def compilation(root, step, options, implementation, aliases):
     job = c.build_job(root, step, 'W', [1])
     work = c.workspace(root, step)
     record = c.host_record(work)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / f'jobs/{step:03d}.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / f'jobs/{step:03d}.json')))
     config = e.configure(root, step, 'tcad_execution:tcad', options, work / 'work/execution.json')
     source = work / 'work/implementation.json'
     c.write(source, implementation)

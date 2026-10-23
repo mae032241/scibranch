@@ -116,7 +116,7 @@ def management_token(header: str | None) -> str | None:
 
 
 def cookie_name(instance_id: str) -> str:
-    return "scid_view_" + hashlib.sha256(instance_id.encode("utf-8")).hexdigest()[:16]
+    return "scid_view_" + base64.urlsafe_b64encode(instance_id.encode("utf-8")).rstrip(b"=").decode("ascii")
 
 
 def access_cookie(instance_id: str, token: str, *, max_age: int = 4*60*60) -> str:

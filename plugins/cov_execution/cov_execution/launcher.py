@@ -1,6 +1,6 @@
 """Isolated cov launcher: host binds lineage; native receives public work only."""
 from pathlib import Path
-import argparse, hashlib, json, os, shlex, sys
+import argparse, json, os, shlex, sys
 from scidiscovery.research_loop.worker_execution_bridge import SUBMISSION_DIRECTORY
 
 def engineering_reserve(s):
@@ -26,15 +26,6 @@ def regular(p, bound=None):
         raise ValueError('regular_bounded_file_required')
     return p.read_bytes()
 
-def file_digest(p):
-    p=Path(p).absolute()
-    if p.is_symlink() or not p.is_file() or p.resolve()!=p:
-        raise ValueError('bounded_native_binary_required')
-    h=hashlib.sha256()
-    with p.open('rb') as f:
-        for chunk in iter(lambda:f.read(1024*1024),b''):h.update(chunk)
-    return h.hexdigest()
-
 def load(p):
     s=json.loads(regular(p));public=Path(s['public_root'])
     engineering_reserve(s)
@@ -46,7 +37,7 @@ def load(p):
     if m['task_revision']!='d78f5eb52ad754c5ee9154741af73130a85a65b8':
         raise ValueError('exact_cov_revision_required')
     expected_files={'task.toml','instruction.md','environment/Dockerfile',*(f'environment/harness/{n}' for n in ['exp_cli.py','runner.py','train.csv','val.csv','meta.json'])}
-    if set(m['public_files_sha256'])!=expected_files:raise ValueError('public_whitelist_mismatch')
+    if set(m['public_files'])!=expected_files:raise ValueError('public_whitelist_mismatch')
     expected={}
     for name in expected_files:
         q=Path(name)
@@ -54,12 +45,13 @@ def load(p):
     for directory,names in expected.items():
         q=public/directory
         if q.is_symlink() or not q.is_dir() or {v.name for v in q.iterdir()}!=names:raise ValueError('public_directory_whitelist_changed')
-    for name,h in m['public_files_sha256'].items():
+    for name in m['public_files']:
         n=Path(name)
-        if n.is_absolute() or '..' in n.parts or hashlib.sha256(regular(public/n)).hexdigest()!=h:
+        if n.is_absolute() or '..' in n.parts or (public/n).resolve()!=public/n or not (public/n).is_file():
             raise ValueError('frozen_public_input_changed')
     for p in (s['native'],s['code_mode_host']['path']):
-        regular(p)
+        path=Path(p)
+        if path.resolve()!=path or not path.is_file():raise ValueError('native_runtime_path_required')
     return s
 
 def controlled(s, workspace, home):
@@ -84,7 +76,7 @@ def direct_materials(s,w,job_path):
     if not isinstance(items,list):raise ValueError('direct_material_list_required')
     result=[];totals={};targets=set();managed={}
     for item in items:
-        if not isinstance(item,dict) or set(item)!= {'source','path','sha256','size_bytes'}:
+        if not isinstance(item,dict) or set(item)!= {'source','path','size_bytes'}:
             raise ValueError('exact_direct_material_fields_required')
         source=Path(item['source']).absolute();dest=Path(item['path'])
         nodes=root/'project/nodes'
@@ -103,8 +95,8 @@ def direct_materials(s,w,job_path):
                 raise ValueError('intermediate_material_not_exportable')
             exported=inner
         elif (len(inner.parts)==6 and inner.parts[:3]==('work','lineage','calls')
-                and inner.parts[4]=='observed-originals' and inner.name==item['sha256']):
-            # Common execution outputs are content-addressed retained originals,
+                and inner.parts[4]=='observed-originals'):
+            # Common execution outputs are exact retained call originals,
             # not arbitrary work files. Reuse the sealed control observation and
             # its descriptor validation; never rediscover a live backend here.
             from scidiscovery.research_loop import contracts as c
@@ -118,7 +110,7 @@ def direct_materials(s,w,job_path):
             materials,calls=managed[node]
             matching=[(call,output) for call in calls for output in call.get('outputs',[])
                 if call['call_id']==inner.parts[3] and root/output['path']==source
-                and output['sha256']==item['sha256'] and output['size_bytes']==item['size_bytes']
+                and output['size_bytes']==item['size_bytes']
                 and dest==Path('inputs/parents')/node/'artifacts/experiments'/call['call_id']/'artifacts'/output['name']]
             if item not in materials or len(matching)!=1:
                 raise ValueError('exact_managed_material_required')
@@ -132,8 +124,8 @@ def direct_materials(s,w,job_path):
             raise ValueError('direct_material_file_bound')
         if source.is_symlink() or not source.is_file() or source.resolve()!=source:
             raise ValueError('regular_original_file_required')
-        if source.stat().st_size!=item['size_bytes'] or file_digest(source)!=item['sha256']:
-            raise ValueError('direct_material_digest_mismatch')
+        if source.stat().st_size!=item['size_bytes']:
+            raise ValueError('direct_material_size_mismatch')
         target=w/dest
         if str(target) in targets:raise ValueError('duplicate_direct_material_target')
         targets.add(str(target));target.parent.mkdir(parents=True,exist_ok=True)
@@ -254,7 +246,7 @@ def prepare_home(s,w,h, auth_source=None):
         '/submission':'write','/task-tmp':'write',s['runs_dir']:'write',s['submission_dir']:'write',
         s['native']:'read',s['code_mode_host']['path']:'read',str(helper):'read'}
     grants.update({str(target):'read' for source,target in native_skill_mounts(s,w)})
-    control=Path(s['scene_root'])/'host-runtime/experiment-control'/hashlib.sha256(regular(os.environ['THIN_HWA_JOB_MANIFEST'])).hexdigest()
+    control=Path(s['scene_root'])/'host-runtime/experiment-control'/Path(os.environ['THIN_HWA_JOB_MANIFEST']).stem
     if s.get('_worker_science_view'):
         grants['/task-result']='write'
     else:
@@ -284,9 +276,6 @@ def prepare_home(s,w,h, auth_source=None):
     if auth_source:
         auth=h/'auth.json'
         if not auth.exists():auth.write_bytes(regular(auth_source));auth.chmod(0o600)
-    # This metadata is operator-owned outside the scientific workspace.
-    if not s.get('_worker_science_view'):
-        (h/'launcher-config-sha256.txt').write_text(hashlib.sha256(content.encode()).hexdigest()+'\n')
 
 def outer(s,w,h,command,materials=()):
     from scidiscovery.research_loop import contracts, shared_input_views, worker_execution_bridge
@@ -362,7 +351,7 @@ def outer(s,w,h,command,materials=()):
     if not s.get('_worker_science_view'):
         c.extend(['--ro-bind', str(Path(s['scene_root'])/'host-runtime'/('lineage-'+w.name+'.json')), str(w/'work/lineage-config.json')])
     manifest=Path(s['scene_root'])/'jobs'/(w.name+'.json')
-    control=Path(s['scene_root'])/'host-runtime/experiment-control'/hashlib.sha256(regular(manifest)).hexdigest()
+    control=Path(s['scene_root'])/'host-runtime/experiment-control'/manifest.stem
     if control.exists() and not s.get('_worker_science_view'):c.extend(['--ro-bind',str(control),str(control)])
     for source,target,mode in s.get('_backend_materials',()):
         c.extend([mode,source,target])
@@ -411,7 +400,7 @@ def backend_launcher(s,w,h,materials):
                 row_path=outputs/'row.json'
                 if not row_path.exists():return
                 if (e.proof(directory/'source.py')!=accepted['script']
-                        or e.proof(source)['sha256']!=accepted['script']['sha256']):
+                        or e.proof(source)!=dict(path=accepted['prepared']['local_path'],size_bytes=accepted['prepared']['size_bytes'])):
                     raise e.IntegrityError('Scientific source changed during original execution')
                 row=json.loads(e.read(row_path,cov_receipt.MAX_BYTES))
                 # The existing completion owner still checks aggregate row,
@@ -482,7 +471,7 @@ def accepted_attempt(s,w,output,*,resume_thread=None,schema=None):
     if (record/'native-outcome.json').exists() or output.exists():
         raise ValueError('original_dispatch_already_terminal_or_returned')
     intent=c.read(c.regular(record/'native-intent.json'))
-    if intent.get('task_sha256')!=c.digest(job_path):raise ValueError('accepted_native_task_changed')
+    if intent.get('task_ref')!=c.record_ref(job_path):raise ValueError('accepted_native_task_changed')
     profiles.validate_intent(frozen,job,intent)
     profiles.validate_intent(frozen,job,c.read(execution.origin(root,step)/'native-intent.json'))
     if Path(os.environ['THIN_HWA_NATIVE_HOME']).absolute()!=execution.home(root,step,number):
@@ -643,7 +632,7 @@ def main():
     if s['_author_closeout'] and facts.exists():
         if s['_worker_science_view']:
             target=w/'work/author-closeout-science.json'
-            contracts._bind_original(facts, target, contracts.digest(facts), root=Path(s['scene_root']), size_bytes=(facts).stat().st_size, source_kind='managed_frozen')
+            contracts._bind_original(facts, target, root=Path(s['scene_root']), size_bytes=(facts).stat().st_size, source_kind='managed_frozen')
             s['_closeout_facts']=str(target)
         else:s['_closeout_facts']=str(facts)
     materials=direct_materials(s,w,os.environ.get('THIN_HWA_JOB_MANIFEST'));prepare_home(s,w,h,os.environ.get('THIN_HWA_AUTH_SOURCE'))
@@ -674,7 +663,7 @@ def main():
     public_result=Path(s['scene_root'])/'host-runtime/science-native-results'/w.name/f'{intent.get("attempt",0):03d}'
     public_result.mkdir(parents=True,exist_ok=True)
     schema=execution.origin(Path(s['scene_root']),job['step'])/'science-result.schema.json'
-    contracts._bind_original(schema, public_result/'science-result.schema.json', contracts.digest(schema), root=Path(s['scene_root']), size_bytes=(schema).stat().st_size, source_kind='managed_frozen')
+    contracts._bind_original(schema, public_result/'science-result.schema.json', root=Path(s['scene_root']), size_bytes=(schema).stat().st_size, source_kind='managed_frozen')
     pending=record/'result.pending.json'
     args=list(args)
     args[args.index('--output-last-message')+1]='/task-result/result.pending.json'
@@ -702,7 +691,7 @@ def main():
                 except subprocess.TimeoutExpired:child.kill();child.wait(timeout=5)
             for sig,handler in previous.items():signal.signal(sig,handler)
         returned=public_result/'result.pending.json'
-        if returned.exists():contracts._bind_original(returned, pending, contracts.digest(returned), root=Path(s['scene_root']), size_bytes=(returned).stat().st_size, source_kind='mutable')
+        if returned.exists():contracts._bind_original(returned, pending, root=Path(s['scene_root']), size_bytes=(returned).stat().st_size, source_kind='mutable')
     raise SystemExit(code)
 
 if __name__=='__main__':main()

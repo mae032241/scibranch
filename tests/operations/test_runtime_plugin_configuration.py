@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 from pathlib import Path
@@ -9,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from scidiscovery.artifact_agent.schema.common import canonical_json
+from scidiscovery.execution_security import request_digest
 from scidiscovery.artifact_agent.schema.refs import ArtifactRef
 from tcad_artifact.execution_control import (
     SolverCapability,
@@ -40,10 +40,6 @@ def _execution_package(resolved_input_count: int = 0) -> bytes:
         public_release_label="Synthetic SDevice",
     ).public_snapshot()
     source = "Solve {}\n"
-    source_tree = hashlib.sha256()
-    source_tree.update(b"main.cmd\0")
-    source_tree.update(source.encode("utf-8"))
-    source_tree.update(b"\0")
     input_slots = tuple(
         ProjectInputSlot(
             semantic_name=f"input_{index:03d}",
@@ -58,7 +54,6 @@ def _execution_package(resolved_input_count: int = 0) -> bytes:
             target_relative_path=slot.target_relative_path,
             artifact_ref=ArtifactRef(
                 artifact_id=f"art_execution_input_{index:03d}",
-                sha256=hashlib.sha256(f"input-{index}".encode()).hexdigest(),
                 kind="execution_input",
                 schema_id="fixture.execution-input.v1",
             ),
@@ -76,7 +71,6 @@ def _execution_package(resolved_input_count: int = 0) -> bytes:
         entrypoint="main.cmd",
         expected_outputs=(),
         preflight_attestation=ProjectPreflightAttestation(
-            source_tree_sha256=source_tree.hexdigest(),
             terminal_state="succeeded",
             exit_code=0,
             diagnostic_layer="complete",
@@ -133,66 +127,46 @@ def test_abandoned_execution_manifest_remains_attestable(tmp_path: Path) -> None
 
 def _small_resolved_execution_package() -> ExecutionPackage:
     value = json.loads(_execution_package(1))
-    value["resolved_inputs"][0]["artifact_ref"]["sha256"] = hashlib.sha256(b"{}").hexdigest()
     return ExecutionPackage.model_validate_json(json.dumps(value), strict=True)
 
 
-def test_exact_input_callbacks_recheck_metadata_and_cached_bytes(tmp_path: Path, monkeypatch) -> None:
-    reviewed = _small_resolved_execution_package()
-    item = reviewed.resolved_inputs[0]
-    seen = []
-
+def test_exact_input_callbacks_preserve_first_bound_staging_slot(tmp_path: Path) -> None:
+    reviewed=_small_resolved_execution_package();item=reviewed.resolved_inputs[0]
+    seen=[]
     def metadata(bound):
         seen.append(bound)
-        assert bound == item  # Full frozen slot/ref, not a guessed path.
-        return 2, "application/json"
-
+        assert bound==item
+        return 2,"application/json"
     def original(bound):
-        assert bound == item
+        assert bound==item
         return io.BytesIO(b"{}")
-
-    paths = materialize_execution_inputs(reviewed, None, tmp_path, 1,
-        input_metadata=metadata, open_input=original)
-    target = paths["input_001"]
-    assert target.read_bytes() == b"{}"
-    assert target.stat().st_mode & 0o222 == 0
-    assert materialize_execution_inputs(reviewed, None, tmp_path, 1,
-        input_metadata=metadata,
-        open_input=lambda _: pytest.fail("valid cache must not reopen original")) == paths
-    assert seen == [item, item]
-    target.chmod(0o600)
-    target.write_bytes(b"[]")
-    with pytest.raises(PackagerError, match="cached input"):
-        materialize_execution_inputs(reviewed, None, tmp_path, 1,
-            input_metadata=metadata, open_input=original)
-    assert target.read_bytes() == b"[]"  # Failure must not delete an existing cache.
-    target.write_bytes(b"[]x")
-    with monkeypatch.context() as patch:
-        patch.setattr("tcad_artifact.project_packager._file_identity",
-            lambda _: pytest.fail("wrong-size cache must be rejected before hashing"))
-        with pytest.raises(PackagerError, match="cached input"):
-            materialize_execution_inputs(reviewed, None, tmp_path, 1,
-                input_metadata=metadata, open_input=original)
+    paths=materialize_execution_inputs(reviewed,None,tmp_path,1,
+        input_metadata=metadata,open_input=original)
+    target=paths['input_001']
+    assert target.read_bytes()==b"{}" and target.stat().st_mode&0o222==0
+    with pytest.raises(PackagerError,match='staging slot already exists'):
+        materialize_execution_inputs(reviewed,None,tmp_path,1,input_metadata=metadata,
+            open_input=lambda _:pytest.fail('Existing original must not be reopened or replaced'))
+    assert seen==[item,item] and target.read_bytes()==b"{}"
     target.unlink()
-    original_path = tmp_path / "original.json"
-    original_path.write_bytes(b"{}")
+    original_path=tmp_path/'original.json';original_path.write_bytes(b"{}")
     target.symlink_to(original_path)
-    with pytest.raises(PackagerError, match="regular file"):
-        materialize_execution_inputs(reviewed, None, tmp_path, 1,
-            input_metadata=metadata, open_input=original)
-    assert original_path.read_bytes() == b"{}"
+    with pytest.raises(PackagerError,match='staging slot already exists'):
+        materialize_execution_inputs(reviewed,None,tmp_path,1,
+            input_metadata=metadata,open_input=original)
+    assert original_path.read_bytes()==b"{}"
 
 
 def test_exact_input_callbacks_reject_wrong_original_and_metadata(tmp_path: Path) -> None:
     reviewed = _small_resolved_execution_package()
-    target = tmp_path / "scientific-inputs" / reviewed.resolved_inputs[0].artifact_ref.sha256
+    target = tmp_path / "scientific-inputs" / reviewed.resolved_inputs[0].semantic_name
     for metadata in ((1, "application/json"), (2, "text/plain"), (True, "application/json")):
         with pytest.raises(PackagerError, match="metadata"):
             materialize_execution_inputs(reviewed, None, tmp_path, 1,
                 input_metadata=lambda _, value=metadata: value,
                 open_input=lambda _: pytest.fail("bad metadata must not open original"))
         assert not target.exists()
-    for content in (b"[]", b"{", b"{}x"):
+    for content in (b"{", b"{}x"):
         with pytest.raises(PackagerError, match="input size|input bytes"):
             materialize_execution_inputs(reviewed, None, tmp_path, 1,
                 input_metadata=lambda _: (2, "application/json"),
@@ -254,7 +228,7 @@ def test_tcad_prepare_adapters_use_exact_input_callbacks(tmp_path: Path, monkeyp
         payload_path = exchange / "package.json"
         payload_path.write_bytes(raw)
         payload = LocalFileDescriptor(name="execution-package", local_path=str(payload_path),
-            sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw), media_type="application/json")
+            size_bytes=len(raw), media_type="application/json")
         monkeypatch.setattr(adapter, "capabilities", lambda: (SimpleNamespace(
             content=canonical_json(reviewed.capability.model_dump(mode="json"))),))
         monkeypatch.setattr(adapter, "execution_policy", lambda: SimpleNamespace(
@@ -270,7 +244,7 @@ def test_tcad_prepare_adapters_use_exact_input_callbacks(tmp_path: Path, monkeyp
         with pytest.raises(PackagerError, match="input bytes"):
             adapter.prepare(payload, preparation_profile="tcad.execution-package.v2",
                 exchange_directory=exchange, input_metadata=lambda _: (2, "application/json"),
-                open_input=lambda _: io.BytesIO(b"[]"))
+                open_input=lambda _: io.BytesIO(b"[]x"))
         assert commands == []
         submission = adapter.prepare(payload, preparation_profile="tcad.execution-package.v2",
             exchange_directory=exchange, input_metadata=lambda _: (2, "application/json"),
@@ -301,7 +275,7 @@ class _ManagedTCADBackend:
     def lookup_submission(self, descriptor):
         self.events.append('lookup')
         if self.found is not None:
-            assert descriptor.sha256 == self.prepared_sha256
+            assert descriptor.model_dump(mode='json') == self.prepared_ref
             return self.found, self.state
         return None
 
@@ -309,7 +283,7 @@ class _ManagedTCADBackend:
         self.events.append('submit')
         if self.fenced:
             raise RuntimeError('exact synthetic submission was fenced')
-        self.prepared_sha256 = descriptor.sha256
+        self.prepared_ref = descriptor.model_dump(mode='json')
         if self.lost:
             raise RuntimeError('synthetic lost response')
         self.found = 'run_0123456789abcdef0123456789abcdef'
@@ -335,7 +309,7 @@ class _ManagedTCADBackend:
             path = self.root / name
             path.write_bytes(raw)
             outputs.append(LocalFileDescriptor(name=name, local_path=str(path),
-                sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw), media_type=media))
+                size_bytes=len(raw), media_type=media))
         return tuple(outputs)
 
     def cancel(self, external):
@@ -346,17 +320,17 @@ class _ManagedTCADBackend:
 
     def validate_submission_protocol(self):
         self.events.append('protocol')
-        return dict(version=1, submit='tcad_submit_retirable', retire='tcad_retire_submission')
+        return dict(version=2, submit='tcad_submit_retirable', retire='tcad_retire_submission')
 
     def retire_submission_details(self, descriptor):
         self.events.append('retire')
         if self.found is not None:
-            assert descriptor.sha256 == self.prepared_sha256
+            assert descriptor.model_dump(mode='json') == self.prepared_ref
             return dict(found=True, run_id=self.found, state=self.state)
         self.fenced = True
         if self.retire_lost:
             raise TimeoutError('synthetic fence acknowledgment lost')
-        return dict(found=False, retired=True, submission_sha256=descriptor.sha256)
+        return dict(found=False, retired=True, submission_id=json.loads(Path(descriptor.local_path).read_bytes())['request_id'])
 
 
 def _managed_tcad_case(tmp_path, *, retirement=False, call_id='0001-original', storage_policy=None):
@@ -366,7 +340,9 @@ def _managed_tcad_case(tmp_path, *, retirement=False, call_id='0001-original', s
     from scidiscovery.research_loop.protocol import CURRENT
     from tcad_artifact.managed_execution import TCADManagedExecution
 
-    scope = dict(step=1, role='W', job_sha256='1' * 64, execution_key='2' * 64,
+    job=tmp_path/'job.json'
+    if not job.exists():e.write(job,dict(step=1,role='W'))
+    scope = dict(step=1, role='W', job_ref=dict(path=str(job)), execution_key=dict(path=str(job)),
         mechanism_ref=None, handoff_protocol=CURRENT)
     config = dict(transport='socket', socket_path=str(tmp_path / 'unused.socket'),
         scope=scope, record_dir=str(tmp_path / 'records'), native_attempt=dict(number=0),
@@ -374,20 +350,20 @@ def _managed_tcad_case(tmp_path, *, retirement=False, call_id='0001-original', s
     # Trusted DI boundary only; this does not claim a real core freeze.
     config['execution_interface'] = dict(version=e.VERSION, executor='tcad_execution:tcad',
         observation_version=e.OBSERVATION_VERSION, terminal_evidence='adapter_result', result_protocol=None,
-        config_sha256=hashlib.sha256(e.encoded(config)).hexdigest(),
+        config_record=dict(config),
         capabilities=vars(TCADManagedExecution.lifecycle_capabilities()))
     raw = canonical_json(_small_resolved_execution_package().model_dump(mode='json'))
     source = tmp_path / (call_id+'-execution-package.json')
     source.write_bytes(raw)
     payload = LocalFileDescriptor(name=call_id, local_path=str(source),
-        sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw), media_type='application/json')
+        size_bytes=len(raw), media_type='application/json')
     owner = tmp_path / (call_id+'-trusted-owner-original.json')
     e.write(owner, dict(call_id=payload.name, scope=scope, payload=payload.model_dump(mode='json')))
     receipt = e.proof(owner)
-    admission = ExecutionAdmission(outcome='policy', policy_digest='3' * 64, policy={},
+    admission = ExecutionAdmission(outcome='policy', policy_digest=request_digest({}), policy={},
         budget=dict(max_storage_bytes=2_000_000_000, wall_time_seconds=60),
         allowance=dict(max_storage_bytes=2_000_000_000, wall_time_seconds=60),
-        outside_allowance='deny', budget_key='4' * 64, reason='synthetic trusted dependency only')
+        outside_allowance='deny', budget_key=request_digest(dict(owner=str(owner))), reason='synthetic trusted dependency only')
     control = SimpleNamespace(phases=[], collect=True, context=CollectionContext.for_seconds(60))
 
     def gate(phase, **bound):
@@ -431,7 +407,7 @@ def test_managed_tcad_default_factory_blocks_before_any_backend_call(tmp_path, m
     source.write_bytes(_execution_package())
     identity = e.proof(source)
     self_contained = LocalFileDescriptor(name='0002-default-blocked', local_path=str(source),
-        sha256=identity['sha256'], size_bytes=identity['size_bytes'], media_type='application/json')
+        size_bytes=identity['size_bytes'], media_type='application/json')
     with pytest.raises(e.UnsupportedExecution, match='production blocked'):
         actual.prepare(self_contained, preparation_profile='research_loop.v1', exchange_directory=actual.records.root)
     assert backend.events == []
@@ -474,7 +450,7 @@ def test_managed_tcad_retains_cancelled_original_without_requery(tmp_path):
     assert backend.events == calls and backend.events.count('submit') == 1
     assert control.phases == ['prepare', 'submit', 'cancel', 'collect']
     binding = wrapper.records.directory(payload.name) / 'tcad-backend-binding.json'
-    value = json.loads(binding.read_bytes()); value['prepared_sha256'] = '0' * 64
+    value = json.loads(binding.read_bytes()); value['prepared_ref'] = dict(path=str(tmp_path/'other-original'),size_bytes=0)
     binding.write_bytes(e.encoded(value))
     with pytest.raises(e.IntegrityError):
         wrapper.result(payload.name)
@@ -528,7 +504,6 @@ def test_managed_tcad_collection_expiry_preserves_unknown_and_partial(tmp_path, 
     directory = wrapper.records.directory(payload.name)
     assert not (directory / 'completed.json').exists()
     assert not list((directory / 'tcad-originals').iterdir())
-    assert not (wrapper.records.storage_root()/'host-history/objects'/hashlib.sha256(b'synthetic native log\n').hexdigest()).exists()
     assert (tmp_path / 'tcad_log').read_bytes() == b'synthetic native log\n'
     assert e.record_observation(config, wrapper, payload.name) is None
     assert backend.events.count('collect') == 1  # The same expired authority is not reset.
@@ -554,6 +529,7 @@ def test_managed_tcad_collected_crash_window_revalidates_retained_facts(tmp_path
     retained = directory / 'collected.json'
     original = retained.read_bytes()
     value = json.loads(original); value['native_state'] = 'failed'
+    retained.chmod(0o600)
     retained.write_bytes(e.encoded(value))
     before = list(backend.events)
     with pytest.raises(e.IntegrityError, match='terminal state'):
@@ -618,9 +594,9 @@ def test_managed_tcad_lost_retirement_and_independent_identity_validation(tmp_pa
     backend.retire_lost = False
     e.retire_original(config, wrapper, payload.name)
     value = e.retirement(config, payload.name)
-    wrong = tmp_path / 'wrong-protocol.json'; e.write(wrong, dict(version=0))
-    with pytest.raises(e.IntegrityError, match='backend protocol'):
-        e.verify_retirement(dict(value, protocol=e.proof(wrong)), lambda item: Path(item['path']))
+    wrong = tmp_path / 'wrong-assertion.json'; e.write(wrong, dict(version=0))
+    with pytest.raises(e.IntegrityError, match='Normalized retirement'):
+        e.verify_retirement(dict(value, assertion=e.proof(wrong)), lambda item: Path(item['path']))
     original = Path(prepared.local_path).read_bytes()
     Path(prepared.local_path).chmod(0o600)
     Path(prepared.local_path).write_bytes(b'changed native prepared bytes')
@@ -646,21 +622,17 @@ def test_managed_tcad_retirement_found_job_never_becomes_non_submission(tmp_path
     assert not (wrapper.records.directory(payload.name) / 'submission-retirement.json').exists()
 
 
-def test_retirement_archive_and_recovery_share_original_validator(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import experiments as e, history, execution_recovery, protocol
+def test_retirement_archive_shares_original_validator(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import experiments as e, history, protocol
     config, wrapper, _, _, payload, _ = _managed_tcad_case(tmp_path, retirement=True)
     e.retire_original(config, wrapper, payload.name)
     value = e.retirement(config, payload.name)
     accepted = wrapper.records.accepted(payload.name)
-    objects = tmp_path / 'host-history/objects'; objects.mkdir(parents=True)
-
     def archive(original):
-        raw = Path(original['path']).read_bytes()
-        assert hashlib.sha256(raw).hexdigest() == original['sha256']
-        target = objects / original['sha256']; target.write_bytes(raw)
-        return dict(path=Path(original['path']).relative_to(tmp_path).as_posix(),
-            sha256=original['sha256'], size_bytes=original['size_bytes'], retention='archived',
-            snapshot=target.relative_to(tmp_path).as_posix())
+        path=Path(original['path'])
+        assert path.is_relative_to(tmp_path) and path.stat().st_size==original['size_bytes']
+        relative=path.relative_to(tmp_path).as_posix()
+        return dict(path=relative,size_bytes=original['size_bytes'],retention='archived',snapshot=relative)
 
     directory = wrapper.records.directory(payload.name)
     row = dict(call_id=payload.name, scope=config['scope'], mechanism_binding=None, status='not_submitted',
@@ -671,32 +643,16 @@ def test_retirement_archive_and_recovery_share_original_validator(tmp_path, monk
     monkeypatch.setattr(history, '_execution_interface', lambda root, bound: config['execution_interface'])
     monkeypatch.setattr(protocol, 'stage_scope', lambda root, job: config['scope'])
     assert history.managed_status(tmp_path, row) == 'not_submitted'
-    old = {key: item for key, item in row.items() if key not in {'retirement', 'originals'}}
-    old['status'] = 'unknown'
-    old_path = tmp_path / 'sealed-observation.json'; e.write(old_path, dict(managed_calls=[old]))
-    old_bytes = old_path.read_bytes()
-    job = dict(step=1, role='W')
-    seal = dict(observations=dict(path=old_path.name))
-    monkeypatch.setattr(history, '_source', lambda root, step: (job, {}, seal, '9' * 64))
-    recovery = dict(source_step=1, seal_sha256='9' * 64,
-        old_row_sha256=hashlib.sha256(e.encoded(old)).hexdigest(), row=row)
-    path = tmp_path / 'host-history/execution-recoveries/001' / (payload.name + '.json')
-    path.parent.mkdir(parents=True); e.write(path, recovery)
-    ref = dict(path=path.relative_to(tmp_path).as_posix(), sha256=e.proof(path)['sha256'])
-    resolved = execution_recovery.resolved(tmp_path, [ref])
-    assert resolved[(1, payload.name)]['status'] == 'not_submitted'
-    native = objects / value['response']['sha256']; native.write_bytes(b'changed response original')
-    with pytest.raises(history.ObserverIntegrityError):
-        execution_recovery.validate(tmp_path, [ref])
-    assert old_path.read_bytes() == old_bytes  # No old scientific seal or accepted count is rewritten.
+    response=next(item for item in value['native_originals'] if Path(item['path']).name.startswith('response-'))
+    native=Path(response['path']);native.chmod(0o600);native.write_bytes(b'changed response original')
+    with pytest.raises(history.ObserverIntegrityError):history.managed_status(tmp_path,row)
 
 
-def test_tcad_native_outputs_freeze_once_across_calls(tmp_path,monkeypatch):
+def test_tcad_native_outputs_freeze_once_per_exact_call(tmp_path,monkeypatch):
     from scidiscovery.research_loop import atomic_files,experiments as e
-    sha=hashlib.sha256(b'synthetic native log\n').hexdigest()
     copies=[];copy=atomic_files.copy_original
     def counted(source,target,**options):
-        if options['sha256']==sha:copies.append(options['size_bytes'])
+        if Path(source)==tmp_path/'tcad_log':copies.append(options['size_bytes'])
         return copy(source,target,**options)
     monkeypatch.setattr(atomic_files,'copy_original',counted)
     paths=[];source_paths=[]
@@ -710,12 +666,12 @@ def test_tcad_native_outputs_freeze_once_across_calls(tmp_path,monkeypatch):
         output=next(item for item in collected['outputs'] if item['name']=='tcad_log')
         paths.append(Path(output['local_path']))
         source_paths.append(output['local_path'])
-    cas=Path(config['record_dir'])/'host-history/objects'/sha
-    inode=(cas.stat().st_dev,cas.stat().st_ino)
     assert len(set(source_paths))==2
-    assert all((path.stat().st_dev,path.stat().st_ino)==inode for path in paths)
-    assert copies==[len(b'synthetic native log\n')]
-    assert (tmp_path/'tcad_log').stat().st_ino!=cas.stat().st_ino
+    assert len({(path.stat().st_dev,path.stat().st_ino) for path in paths})==2
+    assert copies==[len(b'synthetic native log\n')]*2
+    assert all(not path.samefile(tmp_path/'tcad_log') for path in paths)
+    (tmp_path/'tcad_log').write_bytes(b'changed external native file')
+    assert all(path.read_bytes()==b'synthetic native log\n' for path in paths)
     assert all(path.stat().st_mode & 0o777==0o400 for path in paths)
 
 
@@ -728,17 +684,15 @@ def test_tcad_first_output_freeze_obeys_frozen_instance_quota(tmp_path,monkeypat
     root=wrapper.records.storage_root()
     filler=root/'filled-before-terminal-retention'
     with filler.open('wb') as stream:stream.truncate(limits['max_instance_bytes']-storage.usage(root))
-    sha=hashlib.sha256(b'synthetic native log\n').hexdigest()
     copy=atomic_files.copy_original
     def forbidden(source,target,**options):
-        assert options['sha256']!=sha,'TCAD wrote payload before instance quota admission'
+        assert Path(source)!=tmp_path/'tcad_log','TCAD wrote payload before instance quota admission'
         return copy(source,target,**options)
     monkeypatch.setattr(atomic_files,'copy_original',forbidden)
     with pytest.raises(storage.StorageQuotaExceeded,match='max_instance_bytes'):
         wrapper.result(payload.name)
-    assert not (root/'host-history/objects'/sha).exists()
     directory=wrapper.records.directory(payload.name)
-    assert not (directory/'tcad-originals'/sha).exists()
+    assert not (directory/'tcad-originals'/'tcad_log').exists()
     assert not (directory/'completed.json').exists()
     assert backend.events.count('submit')==1
 
@@ -756,10 +710,9 @@ def test_tcad_result_reports_unsupported_sharing_without_resubmission(tmp_path,m
     def unsupported(source,target,*args,**options):
         if Path(target).parent.name=='tcad-originals':raise OSError(errno.EXDEV,'sharing unsupported')
         return link(source,target,*args,**options)
-    sha=hashlib.sha256(b'synthetic native log\n').hexdigest()
     copies=[];copy=atomic_files.copy_original
     def counted(source,target,**options):
-        if options['sha256']==sha:copies.append(options['size_bytes'])
+        if Path(source)==tmp_path/'tcad_log':copies.append(options['size_bytes'])
         return copy(source,target,**options)
     monkeypatch.setattr(shared.os,'link',unsupported)
     monkeypatch.setattr(atomic_files,'copy_original',counted)
@@ -767,7 +720,7 @@ def test_tcad_result_reports_unsupported_sharing_without_resubmission(tmp_path,m
         wrapper.result(payload.name)
     directory=wrapper.records.directory(payload.name)
     assert copies==[len(b'synthetic native log\n')]
-    assert not (directory/'tcad-originals'/sha).exists()
+    assert not (directory/'tcad-originals'/'tcad_log').exists()
     assert not (directory/'completed.json').exists() and not (directory/'collected.json').exists()
     assert wrapper.records.external(payload.name)==external
     assert [path.name for path in wrapper.records.calls()]==[payload.name]

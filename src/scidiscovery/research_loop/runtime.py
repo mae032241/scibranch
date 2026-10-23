@@ -18,19 +18,19 @@ import time
 from . import budget, contracts, execution
 
 
-def process_identity(pid, task_sha256):
+def process_identity(pid, task_ref):
     # comm may contain spaces and parentheses; fields follow its final ')'.
     fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
     return dict(pid=pid, boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
                 start_ticks=int(fields[19]), pgid=int(fields[2]), sid=int(fields[3]),
                 ppid=int(fields[1]), state=fields[0],
-                task_sha256=task_sha256)
+                task_ref=task_ref)
 
 
-def process_matches(identity, task_sha256):
+def process_matches(identity, task_ref):
     try:
-        current = process_identity(identity['pid'], task_sha256)
-        return (current['state'] != 'Z' and identity['task_sha256'] == task_sha256
+        current = process_identity(identity['pid'], task_ref)
+        return (current['state'] != 'Z' and identity['task_ref'] == task_ref
                 and all(current[key] == identity[key]
                         for key in ('pid', 'boot_id', 'start_ticks', 'pgid', 'sid')))
     except (OSError, ValueError, KeyError, TypeError, IndexError):
@@ -54,7 +54,7 @@ def cleanup_owned_group(child):
             if not entry.name.isdecimal():
                 continue
             try:
-                member = process_identity(int(entry.name), child['task_sha256'])
+                member = process_identity(int(entry.name), child['task_ref'])
                 if (member['pgid'] == child['pgid'] and member['sid'] == child['sid']
                         and member['boot_id'] == child['boot_id']
                         and member['start_ticks'] >= child['start_ticks'] and member['state'] != 'Z'):
@@ -64,7 +64,7 @@ def cleanup_owned_group(child):
         if not members:
             return 'observed_group_cleaned'
         for member in members:
-            if member['ppid'] == os.getpid() and process_matches(member, child['task_sha256']):
+            if member['ppid'] == os.getpid() and process_matches(member, child['task_ref']):
                 try:
                     os.kill(member['pid'], signal.SIGKILL)
                 except ProcessLookupError:
@@ -78,7 +78,7 @@ def cleanup_owned_group(child):
 
 def signal_observed_group(child):
     """Watchdog fallback: signal exact members while their original leader is live."""
-    key=child['task_sha256']
+    key=child['task_ref']
     if not process_matches(child,key):return 'cleanup_unknown'
     members=[]
     for entry in Path('/proc').iterdir():
@@ -114,7 +114,7 @@ def node_state(root, step):
         contracts.settings(root)
         binding = execution.identity(root, step)
         intent = contracts.read(record / 'native-intent.json')
-        if intent['task_sha256'] != contracts.digest(root / 'jobs' / f'{step:03d}.json'):
+        if intent['task_ref'] != contracts.record_ref(root / 'jobs' / f'{step:03d}.json'):
             return 'unknown'
         runner = contracts.read(record / 'runner-process.json')
         if process_matches(runner, binding):
@@ -234,7 +234,7 @@ def _run(root, step, attempt=0):
     with _runner_lease(record):
         contracts.settings(root)
         binding = execution.identity(root, step, attempt)
-        if contracts.read(record / 'native-intent.json').get('task_sha256') != contracts.digest(root / 'jobs' / f'{step:03d}.json'):
+        if contracts.read(record / 'native-intent.json').get('task_ref') != contracts.record_ref(root / 'jobs' / f'{step:03d}.json'):
             raise ValueError('Runner task binding changed')
         if any((record / name).exists() for name in
                ('runner-process.json', 'native-process.json', 'native-outcome.json')):

@@ -97,7 +97,7 @@ def test_legacy_soft_reserve_cannot_kill_current_node_but_blocks_next_admission(
     # controller integration coverage in test_final_a_completion.py.
     settings=c.read(root/'settings.json');settings.pop('final_a_completion_policy')
     c.write(root/'settings.json',settings)
-    c.write(root/'settings-identity.json',dict(sha256=c.digest(root/'settings.json')))
+    c.write(root/'settings-identity.json',dict(path='settings.json'))
     assert 'final_a_completion_policy' not in c.settings(root)
     assert not list((root/'control-ledger').glob('*.json')) and not list((root/'jobs').glob('*.json'))
     result=controller.run(root)
@@ -137,7 +137,7 @@ def test_hint_symlink_does_not_write_outside_workspace(tmp_path):
     start_clock(root,'test accepted hint');anchor=budget.accept_node(root,job)
     outside=tmp_path/'untouched';outside.write_text('Original outside file')
     path=c.workspace(root,1)/'work/budget-status.json';path.symlink_to(outside)
-    intent=dict(task_sha256=c.digest(root/'jobs/001.json'),budget_slice=anchor)
+    intent=dict(task_ref=c.record_ref(root/'jobs/001.json'),budget_slice=anchor)
     c.write(execution.record(root,1)/'native-intent.json',intent)
     budget.write_node_hint(root,job,intent,budget.snapshot(root),dict(input_tokens=0,output_tokens=0),observed=False)
     assert outside.read_text()=='Original outside file' and path.is_symlink()

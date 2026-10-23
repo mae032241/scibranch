@@ -99,7 +99,7 @@ def _node(root, step, job):
     else:
         runner = _read(record / 'runner-process.json', {})
         try:
-            state = 'running' if runner and runtime.process_matches(runner, runner.get('task_sha256')) else 'unknown'
+            state = 'running' if runner and runtime.process_matches(runner, runner.get('task_ref')) else 'unknown'
         except (OSError, ValueError, KeyError):
             state = 'unknown'
     return dict(step=step, role=job['role'], state=state, continuations=len(records) - 1,

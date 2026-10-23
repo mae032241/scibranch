@@ -12,7 +12,7 @@ from execution_fixtures import execution_registry
 
 def combination(*,ambiguous=False,grant=None,baseline=None,prior_unknown=False):
     rows=[dict(mechanism_ref=f'h001.m{index}',label='same' if ambiguous else label,source_h=1,
-        source_h_sha256='c'*64,minimal_test='A distinguishable scientific prediction',status='pending')
+        source_h_ref=dict(path='/fixture/native-evidence/001/result-identity.json'),minimal_test='A distinguishable scientific prediction',status='pending')
         for index,label in enumerate(('P','Q'),1)]
     return dict(version=1,initial_calls=1,mechanisms=rows,
         baseline=baseline or [dict(mechanism_ref=row['mechanism_ref'],accepted_count=0) for row in rows],
@@ -61,8 +61,8 @@ def test_first_branch_second_call_waits_for_another_branch_then_shared_search_co
     assert (directory/'process.json').is_file() and (directory/'completed.json').is_file()
     original=originals(lane)[0]
     assert original['scope']['mechanism_ref'] is None
-    assert original['mechanism_binding']==dict(mechanism_ref='h001.m1',source_h=1,source_h_sha256='c'*64,
-        job_sha256=original['scope']['job_sha256'],grant=None)
+    assert original['mechanism_binding']==dict(mechanism_ref='h001.m1',source_h=1,source_h_ref=dict(path='/fixture/native-evidence/001/result-identity.json'),
+        job_ref=original['scope']['job_ref'],grant=None)
     rejected(lane,lane.source('P-extra'))
     other=run(lane,'Q-initial','h001.m2')
     assert other['status']=='known_success'
@@ -80,7 +80,7 @@ def test_large_combination_preserves_initial_opportunities_and_exact_extra_call_
         for index in range(1, 130)]
     value['baseline'] = [dict(mechanism_ref=row['mechanism_ref'], accepted_count=0) for row in value['mechanisms']]
     value['initial_calls'] = 2
-    scope = dict(job_sha256='a' * 64)
+    scope = dict(job_ref=dict(path='/fixture/jobs/002.json'))
     accepted = []
     for _ in range(2):
         binding = breadth.admit(value, 'h001.m129', scope, accepted)
@@ -89,9 +89,9 @@ def test_large_combination_preserves_initial_opportunities_and_exact_extra_call_
     with pytest.raises(breadth.OpportunityRequired, match='initial call opportunities'):
         breadth.admit(value, 'h001.m129', scope, accepted)
     assert breadth.admit(value, 'h001.m1', scope, accepted)['grant'] is None
-    value['grant'] = dict(mechanism_ref='h001.m129', source_a=3, source_a_sha256='d' * 64, extra_calls=1, used_calls=0)
+    value['grant'] = dict(mechanism_ref='h001.m129', source_a=3, source_a_ref=dict(path='/fixture/native-evidence/003/result-identity.json'), extra_calls=1, used_calls=0)
     binding = breadth.admit(value, 'h001.m129', scope, accepted)
-    assert binding['grant'] == dict(source_a=3, source_a_sha256='d' * 64)
+    assert binding['grant'] == dict(source_a=3, source_a_ref=dict(path='/fixture/native-evidence/003/result-identity.json'))
     accepted.append(dict(mechanism_binding=binding))
     with pytest.raises(breadth.OpportunityRequired, match='initial call opportunities'):
         breadth.admit(value, 'h001.m129', scope, accepted)
@@ -107,7 +107,7 @@ def test_failed_call_changed_script_and_forged_native_attempt_do_not_reset_oppor
     original=copy.deepcopy(originals(lane)[0])
     rejected(lane,lane.source('different-script-P'))
     original_config=lane.config.read_bytes()
-    configure(lane,combination(),native_attempt=dict(number=1,execution_key='e'*64))
+    configure(lane,combination(),native_attempt=dict(number=1,execution_key=dict(path='/fixture/native-evidence/002/continuations/001/native-intent.json')))
     before=tree(lane.records)
     invalid=lane.cli('run','--script',lane.source('unbound-repair-P'),'--mechanism','P','--new-plan',expected=3)
     assert invalid['status']=='integrity_error' and invalid['note']=='Original execution native attempt is unavailable'
@@ -143,14 +143,14 @@ def test_lost_terminal_originals_cannot_be_replayed_under_any_mechanism(lane):
 
 @pytest.mark.process_e2e
 def test_exact_a_extra_one_call_is_consumed_once_and_queries_collect_remain_available(lane):
-    grant=dict(mechanism_ref='h001.m1',source_a=3,source_a_sha256='d'*64,extra_calls=1,used_calls=0)
+    grant=dict(mechanism_ref='h001.m1',source_a=3,source_a_ref=dict(path='/fixture/native-evidence/003/result-identity.json'),extra_calls=1,used_calls=0)
     baseline=[dict(mechanism_ref='h001.m1',accepted_count=1),dict(mechanism_ref='h001.m2',accepted_count=0)]
     configured=combination(grant=grant,baseline=baseline)
     configure(lane,configured)
     result=run(lane,'A-extra-P')
     binding=originals(lane)[0]['mechanism_binding']
-    assert binding['grant']==dict(source_a=3,source_a_sha256='d'*64)
-    assert binding['mechanism_ref']=='h001.m1' and binding['source_h_sha256']=='c'*64
+    assert binding['grant']==dict(source_a=3,source_a_ref=dict(path='/fixture/native-evidence/003/result-identity.json'))
+    assert binding['mechanism_ref']=='h001.m1' and binding['source_h_ref']==dict(path='/fixture/native-evidence/001/result-identity.json')
     rejected(lane,lane.source('do-not-reuse-A-extra'))
     # Re-loading the same frozen grant does not erase its accepted original.
     configure(lane,configured)
@@ -159,7 +159,7 @@ def test_exact_a_extra_one_call_is_consumed_once_and_queries_collect_remain_avai
     assert lane.cli('lookup','--call-id',result['call_id'])['state']=='succeeded'
     collected=lane.cli('collect','--call-id',result['call_id'])
     assert collected['status']=='collected' and collected['outputs']
-    assert all(e.proof(item['local_path'])['sha256']==item['sha256'] for item in collected['outputs'])
+    assert all(e.proof(item['local_path'])['size_bytes']==item['size_bytes'] for item in collected['outputs'])
     assert len(originals(lane))==len(list(lane.records.glob('calls/*/process.json')))==1
 
 
@@ -179,12 +179,12 @@ def test_scientific_label_must_resolve_exactly_before_accept_or_process(lane,kin
 
 @pytest.mark.process_e2e
 def test_completed_receipt_cannot_change_exact_a_authorization(lane):
-    grant=dict(mechanism_ref='h001.m1',source_a=3,source_a_sha256='d'*64,extra_calls=1,used_calls=0)
+    grant=dict(mechanism_ref='h001.m1',source_a=3,source_a_ref=dict(path='/fixture/native-evidence/003/result-identity.json'),extra_calls=1,used_calls=0)
     configure(lane,combination(grant=grant,baseline=[dict(mechanism_ref='h001.m1',accepted_count=1),
         dict(mechanism_ref='h001.m2',accepted_count=0)]))
     result=run(lane,'exact-A-original')
     path=lane.records/'calls'/result['call_id']/'completed.json'
-    receipt=json.loads(path.read_text());receipt['mechanism_binding']['grant']['source_a_sha256']='e'*64
+    receipt=json.loads(path.read_text());receipt['mechanism_binding']['grant']['source_a_ref']=dict(path='/fixture/native-evidence/005/result-identity.json')
     path.write_text(json.dumps(receipt))
     reply=lane.cli('query','--call-id',result['call_id'],expected=3)
     assert reply['status']=='integrity_error'

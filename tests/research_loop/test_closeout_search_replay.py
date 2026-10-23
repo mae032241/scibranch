@@ -33,7 +33,7 @@ def scene(tmp_path,*,begin_closeout=True):
     baseline=search.project(root,3)
     assert baseline['focus']==dict(mechanism_ref='h001.m1',action='screen')
     assert baseline['order']['allocation'] is not None
-    nodes=[dict(step=step,seal_sha256=c.digest(execution.origin(root,step)/'result-identity.json')) for step in (1,2)]
+    nodes=[dict(step=step,seal_ref=c.record_ref(execution.origin(root,step)/'result-identity.json')) for step in (1,2)]
     refs=dict(items=[],omitted_count=0,source_nodes=nodes)
     c.write(root/'host-started.json',budget.clock_stamp());budget.transition(root,'advance','Original zero-model fixture host start')
     if begin_closeout:budget.begin_closeout(root,2,3,'Original exploration is closed',delivery_sources=refs)
@@ -47,11 +47,11 @@ def closeout(root,refs,step,parents,action='audit'):
         limitations=['No candidate is available in this fixture'],implementation_selection=None,candidate_recommendation=None,
         progress_assessment=None,search_review=None,decision_request=None,
         next_action=action,route_reason='Use only the frozen closeout inputs')
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs'/f'{step:03d}.json')))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json')))
     c.write(record/'science-output.json',payload)
     c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
     c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),
-        raw_sha256=c.digest(record/'science-output.json')))
+        raw_ref=c.file_ref(record/'science-output.json')))
     c.seal_result(root,step)
     return job,payload,c.read(record/'result-identity.json')
 

@@ -21,7 +21,7 @@ def resume_native(repair,*,shallow=False):
     source=source.replace("output.write_text(json.dumps(payload))", """if not later and REPAIR:payload.pop('scientific_result')
 output.write_text(json.dumps(payload))
 if not later:
-  (work/'work/first-transport.json').write_text(json.dumps(dict(raw_sha256=hashlib.sha256(output.read_bytes()).hexdigest(),
+  (work/'work/first-transport.json').write_text(json.dumps(dict(raw_text=output.read_text(),
   session_header=session.read_text(),home_config=(home/'config.toml').read_text(),home=str(home))))
 """)
     if shallow:
@@ -47,13 +47,13 @@ def test_actual_same_session_preserves_call_and_frozen_originals(tmp_path,mode):
     assert intent['continuation_kind']==('repair' if repair else 'fragment')
     assert intent['session']==continuation.session(root,1,first)
     assert intent['previous']==execution.proof(first)
-    assert intent['root_intent_sha256']==c.digest(first/'native-intent.json')
+    assert intent['root_intent_ref']==c.record_ref(first/'native-intent.json')
     assert execution.home(root,1,0)==execution.home(root,1,1)
     assert c.read(first/'native-outcome.json')['thread_id']==THREAD
     assert c.read(second/'native-outcome.json')['thread_id']==THREAD
     assert native.usage(root)['observed_tokens']==2
     work=c.workspace(root,1);snapshot=c.read(work/'work/first-transport.json')
-    assert snapshot['raw_sha256']==c.digest(first/'science-output.json')
+    assert snapshot['raw_text']==(first/'science-output.json').read_text()
     assert snapshot['session_header']==(execution.home(root,1)/'sessions/current.jsonl').read_text()
     assert snapshot['home_config']==(execution.home(root,1)/'config.toml').read_text()
     assert c.read(work/'work/second-context-query.json')['state']=='succeeded'
@@ -67,7 +67,8 @@ def test_actual_same_session_preserves_call_and_frozen_originals(tmp_path,mode):
     assert args[args.index('--output-last-message')+1]=='/task-result/result.pending.json'
     public=root/'host-runtime/science-native-results/001/001'
     assert (public/'science-result.schema.json').read_bytes()==(first/'science-result.schema.json').read_bytes()
-    assert c.digest(public/'result.pending.json')==c.read(second/'native-outcome.json')['raw_sha256']
+    assert c.file_ref(second/'science-output.json')==c.read(second/'native-outcome.json')['raw_ref']
+    assert (public/'result.pending.json').read_bytes()==(second/'science-output.json').read_bytes()
 
 
 @pytest.mark.process_e2e
@@ -110,12 +111,12 @@ def test_actual_incomplete_screen_returns_same_w_and_only_adds_missing_q(tmp_pat
     assert intent.get('output_repair') is None
     assert intent['session']==continuation.session(root,2,first)
     assert intent['previous']==execution.proof(first)
-    assert intent['root_intent_sha256']==c.digest(first/'native-intent.json')
+    assert intent['root_intent_ref']==c.record_ref(first/'native-intent.json')
     assert c.read(first/'science-output.json')['mechanism_findings'][0]['mechanism']=='P'
     final=c.validate(c.workspace(root,2))
     assert {finding['mechanism'] for finding in final['mechanism_findings']}=={'P','Q'}
     work=c.workspace(root,2);snapshot=c.read(work/'work/first-transport.json')
-    assert snapshot['raw_sha256']==c.digest(first/'science-output.json')
+    assert snapshot['raw_text']==(first/'science-output.json').read_text()
     assert snapshot['session_header']==(execution.home(root,2)/'sessions/current.jsonl').read_text()
     assert snapshot['home_config']==(execution.home(root,2)/'config.toml').read_text()
     assert execution.home(root,2,0)==execution.home(root,2,1)

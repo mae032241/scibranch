@@ -65,7 +65,7 @@ def prepare(tmp_path, *, launcher=None, executor='resource_fixture:fixture', opt
         execution_config=dict(executor=executor, configuration=options or {}),
         formal_review_policy={'version': 1}, execution_authority_policy={'version': 1},
         execution_resource_policy=dict(version=1, allowance=dict(wall_time_seconds=10, max_storage_bytes=100)),
-        source_restrictions=[dict(source=str(objective), sha256=c.digest(objective), restriction='clear')])
+        source_restrictions=[dict(source=str(objective),  restriction='clear')])
     return root
 
 
@@ -134,7 +134,7 @@ def test_configure_rejects_old_factory_that_ignores_host_services(tmp_path, exec
     root = prepare(tmp_path, executor='local_execution:command', options=dict(run_argv=[sys.executable]))
     finish(root, 1, 'H', [], action='experiment')
     job = c.build_job(root, 2, 'W', [1]); record = execution.record(root, 2)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/002.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/002.json')))
     with pytest.raises(e.UnsupportedExecution, match='does not declare'):
         e.configure(root, 2, 'local_execution:command', dict(run_argv=[sys.executable]),
             c.workspace(root, 2) / 'work/experiment-config.json')
@@ -149,7 +149,7 @@ def test_public_run_rejects_sealed_w_config_before_provider_or_reservation(tmp_p
     root = prepare(tmp_path, launcher=[str(launcher)])
     assert controller.run(root)['status'] == 'finish'
     job = c.build_job(root, 6, 'W', [2, 5]); record = execution.record(root, 6)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/006.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/006.json')))
     path = c.workspace(root, 6) / 'work/experiment-config.json'
     config = e.configure(root, 6, 'resource_fixture:fixture', {}, path)
     finish(root, 6, 'W', [2, 5])
@@ -157,8 +157,7 @@ def test_public_run_rejects_sealed_w_config_before_provider_or_reservation(tmp_p
     subject = q._read(root, job['execution_qualifications'][0])['subject']
     original = c.workspace(root, 6) / subject['material']['path']; identity = e.proof(original)
     from scidiscovery.operations.execution import LocalFileDescriptor
-    payload = LocalFileDescriptor(name='ignored', local_path=str(original), sha256=identity['sha256'],
-        size_bytes=identity['size_bytes'], media_type='application/octet-stream')
+    payload = LocalFileDescriptor(name='ignored', local_path=str(original), size_bytes=identity['size_bytes'], media_type='application/octet-stream')
     with pytest.raises(ValueError, match='attempt has ended'):
         e.dispatch_descriptor(config, payload)
     assert not list(root.glob('**/accepted.json')) and not budget.execution_accounting(root)['reservations']
@@ -175,10 +174,10 @@ def test_dispatch_checks_eligibility_and_admission_before_provider_or_reservatio
     request_id=Path(request_ref['path']).parent.name
     job=q._read(root,q._ref(root,root/'jobs/002.json'))
     intent=arguments['native_intent'];subject=arguments['subject'];review_ref=arguments['review_ref']
-    alias={key:subject['material']['source' if key=='path' else key] for key in ('path','sha256','size_bytes')}
-    payload=LocalFileDescriptor(name=arguments['call_id'],local_path=alias['path'],sha256=alias['sha256'],
+    alias={key:subject['material']['source' if key=='path' else key] for key in ('path','size_bytes')}
+    payload=LocalFileDescriptor(name=arguments['call_id'],local_path=alias['path'],
         size_bytes=alias['size_bytes'],media_type='application/octet-stream')
-    config=dict(scope=dict(step=2,job_sha256=q._ref(root,root/'jobs/002.json')['sha256']),
+    config=dict(scope=dict(step=2,job_ref=c.record_ref(root/'jobs/002.json')),
         native_attempt=dict(number=0),execution_interface=dict(executor='fixture-declaration-only'))
     allocation=dict(call_id=arguments['call_id'],native_intent=intent,
         binding=dict(scope=config['scope'],native_attempt=config['native_attempt'],interface=config['execution_interface'],
@@ -225,20 +224,20 @@ def test_gate_rejects_actual_request_for_another_payload_before_decision_or_effe
     root,secret,arguments=declared_request(tmp_path)
     job=q._read(root,q._ref(root,root/'jobs/002.json'))
     subject=arguments['subject'];review_ref=arguments['review_ref'];intent=arguments['native_intent']
-    alias={key:subject['material']['source' if key=='path' else key] for key in ('path','sha256','size_bytes')}
+    alias={key:subject['material']['source' if key=='path' else key] for key in ('path','size_bytes')}
     Path(alias['path']).write_text('Gate-order transport fixture; no scientific qualification')
     policy={};owner_key='e'*64
     admission=ExecutionAdmission(outcome='policy',policy=policy,
         policy_digest=hashlib.sha256(security.canonical(policy)).hexdigest(),budget=arguments['resources'],
         allowance=arguments['resources'],outside_allowance='deny',budget_key=owner_key,
         reason='Scope-binding negative control; no backend or scientific qualification is supplied')
-    wrong=dict(alias,path=str(tmp_path/'another-private-package.py'),sha256='f'*64,size_bytes=53)
+    wrong=dict(alias,path=str(tmp_path/'another-private-package.py'),size_bytes=53)
     request_ref=authority.create_request(root,**dict(arguments,policy=admission.model_dump(mode='json')),payload_binding=wrong)
     request_id=Path(request_ref['path']).parent.name
     assert authority.request(root,request_id)[0]['payload']==wrong
-    payload=LocalFileDescriptor(name=arguments['call_id'],local_path=alias['path'],sha256=alias['sha256'],
+    payload=LocalFileDescriptor(name=arguments['call_id'],local_path=alias['path'],
         size_bytes=alias['size_bytes'],media_type='application/octet-stream')
-    config=dict(scope=dict(step=2,job_sha256=q._ref(root,root/'jobs/002.json')['sha256']),
+    config=dict(scope=dict(step=2,job_ref=c.record_ref(root/'jobs/002.json')),
         native_attempt=dict(number=0),execution_interface=dict(executor='fixture-declaration-only'))
     allocation=dict(call_id=arguments['call_id'],native_intent=intent,
         binding=dict(scope=config['scope'],native_attempt=config['native_attempt'],interface=config['execution_interface'],

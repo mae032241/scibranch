@@ -31,7 +31,7 @@ def review(ref):
 def observe(root,step,*labels):
     record=execution.record(root,step)
     job=c.read(root/'jobs'/f'{step:03d}.json')
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs'/f'{step:03d}.json'),search_slice=search.accept(root,job)))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),search_slice=search.accept(root,job)))
     path=c.workspace(root,step)/'work/experiment-config.json'
     experiments.configure(root,step,'local_execution:command',dict(run_argv=[sys.executable]),path)
     config=c.read(path)
@@ -59,10 +59,10 @@ def seal(root,step,role,parents,*,action='wait',choice=None,question='What targe
         decision_request=dict(decision='mechanism',question=question,change_criterion='A conflicting qualified target observation') if action in decision.ACTIONS else None)
     record=execution.record(root,step)
     if not (record/'native-intent.json').exists():
-        c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs'/f'{step:03d}.json')))
+        c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json')))
     c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
     c.write(record/'science-output.json',payload)
-    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_sha256=c.digest(record/'science-output.json')))
+    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_ref=c.file_ref(record/'science-output.json')))
     c.seal_result(root,step)
     return job,payload,c.read(record/'result-identity.json')
 

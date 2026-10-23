@@ -1,7 +1,6 @@
 """Scientific routing and recovery controls, without native model execution."""
 from __future__ import annotations
 
-import hashlib
 import importlib
 import json
 import multiprocessing
@@ -31,8 +30,8 @@ def scene(tmp_path, monkeypatch):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value))
 
-    def digest(path):
-        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    reference_api = importlib.import_module("scidiscovery.research_loop.contracts")
+    record_ref, file_ref = reference_api.record_ref, reference_api.file_ref
 
     def workspace(root, step):
         return root / "project/nodes" / f"{step:03d}"
@@ -45,7 +44,7 @@ def scene(tmp_path, monkeypatch):
         refs = []
         for parent in parents:
             source = root / "native-evidence" / f"{parent:03d}" / "science-output.json"
-            ref = dict(path=f"inputs/parents/{parent:03d}/conclusion.json", sha256=digest(source))
+            ref = dict(path=f"inputs/parents/{parent:03d}/conclusion.json", size_bytes=source.stat().st_size)
             destination = work / ref["path"]
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, destination)
@@ -63,18 +62,18 @@ def scene(tmp_path, monkeypatch):
 
     def validate(work):
         identity = read(root / "native-evidence" / work.name / "result-identity.json")
-        if identity["sha256"] != digest(root / "native-evidence" / work.name / "result.json"):
+        if identity["result_ref"] != file_ref(root / "native-evidence" / work.name / "result.json"):
             raise ValueError("Result changed")
-        if identity["raw_sha256"] != digest(root / "native-evidence" / work.name / "science-output.json"):
+        if identity["raw_ref"] != file_ref(root / "native-evidence" / work.name / "science-output.json"):
             raise ValueError("Original science changed")
         job = read(root / "jobs" / (work.name + ".json"))
-        if identity["job_sha256"] != digest(root / "jobs" / (work.name + ".json")):
+        if identity["job_ref"] != record_ref(root / "jobs" / (work.name + ".json")):
             raise ValueError("Job changed")
         result = read(root / "native-evidence" / work.name / "result.json")
         assert result["role"] == job["role"]
         assert result["direct_refs"] == job["direct_refs"]
         for ref in job["direct_refs"]:
-            if digest(work / ref["path"]) != ref["sha256"]:
+            if (work / ref["path"]).stat().st_size != ref["size_bytes"]:
                 raise ValueError("Direct original changed")
         return result
 
@@ -98,8 +97,8 @@ def scene(tmp_path, monkeypatch):
         result = dict(payload, role=job['role'], direct_refs=job['direct_refs'],
             next_action=payload.get('next_action', ''), route_reason=payload.get('route_reason', ''))
         write(record / 'result.json', result)
-        write(record / 'result-identity.json', dict(sha256=digest(record / 'result.json'),
-            job_sha256=digest(job_path), raw_sha256=digest(record / 'science-output.json'),control_outcome={}))
+        write(record / 'result-identity.json', dict(result_ref=file_ref(record / 'result.json'),
+            job_ref=record_ref(job_path), raw_ref=file_ref(record / 'science-output.json'),control_outcome={}))
         return validate(work)
 
     def execute_native(root, step):
@@ -109,7 +108,7 @@ def scene(tmp_path, monkeypatch):
         role, action = plan[step - 1]
         assert role == job["role"]
         record = root / "native-evidence" / f"{step:03d}"
-        write(record / "native-intent.json", dict(step=step, task_sha256=digest(job_path)))
+        write(record / "native-intent.json", dict(step=step, task_ref=record_ref(job_path)))
         result = dict(role=role, next_action=action, route_reason="Evidence requests this route" if action else "",
             direct_refs=job["direct_refs"], summary=f"Contribution {step}",
             scientific_result="A bounded finding", limitations=["Goal is not fully tested"])
@@ -122,10 +121,10 @@ def scene(tmp_path, monkeypatch):
         write(root / "native-evidence" / work.name / "result.json", result)
         write(record / "native-outcome.json", dict(returncode=0, stop_reason=None,
             usage=dict(observed_tokens=10, unknown_steps=[])))
-        write(record / "result-identity.json", dict(sha256=digest(root / "native-evidence" / work.name / "result.json"),
-            job_sha256=digest(job_path), raw_sha256=digest(record / "science-output.json"),control_outcome={}))
+        write(record / "result-identity.json", dict(result_ref=file_ref(root / "native-evidence" / work.name / "result.json"),
+            job_ref=record_ref(job_path), raw_ref=file_ref(record / "science-output.json"),control_outcome={}))
 
-    contracts = SimpleNamespace(read=read, write=write, digest=digest,
+    contracts = SimpleNamespace(read=read, write=write, record_ref=record_ref, file_ref=file_ref,
         workspace=workspace, build_job=build_job, validate=validate,
         seal_result=seal_result,
         regular=importlib.import_module('scidiscovery.research_loop.contracts').regular,
@@ -319,7 +318,7 @@ def test_real_sealing_and_materials_compose_with_controller(tmp_path, monkeypatc
         job_path = root / "jobs" / f"{step:03d}.json"
         assert contracts.read(job_path)["role"] == role
         record = contracts.host_record(work)
-        contracts.write(record / "native-intent.json", dict(task_sha256=contracts.digest(job_path)))
+        contracts.write(record / "native-intent.json", dict(task_ref=contracts.record_ref(job_path)))
         payload = dict(summary=f"Original contribution {step}", scientific_result="Bounded evidence",
             limitations=["Unobserved goal conditions"])
         if contracts.read(job_path).get('handoff_protocol', 1) >= 7:
@@ -342,7 +341,7 @@ def test_real_sealing_and_materials_compose_with_controller(tmp_path, monkeypatc
         contracts.write(record / "science-output.json", payload)
         contracts.write(record / "usage.json", dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
         contracts.write(record / "native-outcome.json", dict(returncode=0, stop_reason=None,
-            usage=native.usage(root), raw_sha256=contracts.digest(record / 'science-output.json')))
+            usage=native.usage(root), raw_ref=contracts.file_ref(record / 'science-output.json')))
         contracts.seal_result(root, step)
 
     monkeypatch.setattr(controller, "native", SimpleNamespace(execute_native=execute, usage=native.usage))
@@ -384,14 +383,14 @@ def real_node(tmp_path, monkeypatch, request):
     work = contracts.workspace(root, 1)
     record = contracts.host_record(work)
     contracts.write(record / 'native-intent.json',
-        dict(task_sha256=contracts.digest(root / 'jobs/001.json')))
+        dict(task_ref=contracts.record_ref(root / 'jobs/001.json')))
     contracts.write(record / 'science-output.json', dict(summary='Bounded result',
         scientific_result='A scientific observation', limitations=['Scope is bounded'],
         next_action='wait', route_reason='Await further measurements', search_plan=None,
         **(dict(implementation_selection=None) if job['handoff_protocol'] >= 7 else {})))
     contracts.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=0, output_tokens=3))
     contracts.write(record / 'native-outcome.json',
-        dict(returncode=0, stop_reason=None, usage=native.usage(root), raw_sha256=contracts.digest(record / 'science-output.json')))
+        dict(returncode=0, stop_reason=None, usage=native.usage(root), raw_ref=contracts.file_ref(record / 'science-output.json')))
     return SimpleNamespace(controller=controller, contracts=contracts, native=native,
         root=root, work=work, record=record, job=job)
 
@@ -425,12 +424,12 @@ def test_nested_experiment_deliverables_exclude_scratch_and_need_no_manifest(rea
     assert not list((child_work / 'inputs').rglob('large-model.bin'))
     child_record = n.contracts.host_record(child_work)
     n.contracts.write(child_record / 'native-intent.json',
-        dict(task_sha256=n.contracts.digest(n.root / 'jobs/002.json')))
+        dict(task_ref=n.contracts.record_ref(n.root / 'jobs/002.json')))
     n.contracts.write(child_record / 'science-output.json', dict(summary='Local W finding',
         scientific_result='No further selected output', limitations=['One experiment'],
         implementation_selection=None, stage_intent='review', mechanism_findings=None))
     n.contracts.write(child_record / 'native-outcome.json', dict(returncode=0, stop_reason=None,
-        usage=dict(unknown_steps=[]), raw_sha256=n.contracts.digest(child_record / 'science-output.json')))
+        usage=dict(unknown_steps=[]), raw_ref=n.contracts.file_ref(child_record / 'science-output.json')))
     n.contracts.seal_result(n.root, 2)
     grandchild = n.contracts.build_job(n.root, 3, 'A', [2])
     assert grandchild['direct_materials'] == []
@@ -503,7 +502,7 @@ def test_ineligible_native_work_cannot_use_sealing_recovery(real_node, monkeypat
         outcome['usage']['blocking_unknown_steps'] = [1]
     else:
         n.contracts.write(n.record / 'science-output.json', {'summary': 'Incomplete'})
-        outcome['raw_sha256'] = n.contracts.digest(n.record / 'science-output.json')
+        outcome['raw_ref'] = n.contracts.file_ref(n.record / 'science-output.json')
     n.contracts.write(n.record / 'native-outcome.json', outcome)
     launches = []
     monkeypatch.setattr(n.controller, 'native', SimpleNamespace(
@@ -535,7 +534,7 @@ def _set_terminal_science(node, text):
     node.contracts.write(node.record / 'science-output.json', dict(payload, scientific_result=text))
     outcome = node.contracts.read(node.record / 'native-outcome.json')
     node.contracts.write(node.record / 'native-outcome.json', dict(outcome,
-        raw_sha256=node.contracts.digest(node.record / 'science-output.json')))
+        raw_ref=node.contracts.file_ref(node.record / 'science-output.json')))
 
 
 def test_scientific_markdown_links_become_direct_readable_entry_points(real_node):

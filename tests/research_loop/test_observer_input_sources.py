@@ -17,7 +17,7 @@ def test_observer_declared_sources_bind_authors_and_never_upgrade_display_covera
     root=tmp_path/'instance'
     controller.prepare(root,objective,public,[str(launcher)],max_tokens=1000,max_seconds=60,max_steps=5,
         model='fixture',reasoning_effort='high',search_policy=None,experiment_mode='external',
-        formal_review_policy={'version':1},source_restrictions=[dict(source=str(objective),sha256=c.digest(objective),restriction='clear')],
+        formal_review_policy={'version':1},source_restrictions=[dict(source=str(objective),restriction='clear')],
         history_observer=dict(adapter=str(adapter),config={},source_contract=inputs.SOURCE_CONTRACT))
     original_seal=c.seal_result;calls=[]
 

@@ -41,7 +41,7 @@ def _scene(tmp_path, *, unknown=False, action='finish', legacy=False, review=Fal
         for step,role,parents,action_ in [(1,'H',[],'experiment'),(2,'W',[1],'wait')]:
             job=c.build_job(root,step,role,parents)
             c.write(execution.origin(root,step)/'native-intent.json',dict(
-                task_sha256=c.digest(root/'jobs'/f'{step:03d}.json'),
+                task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),
                 **profiles.binding(configuration_updates.for_job(root,job),job)))
             finish(root,step,role,parents,action=action_,preserve_native_intent=True)
         document=research_config.to_document(root)
@@ -53,7 +53,7 @@ def _scene(tmp_path, *, unknown=False, action='finish', legacy=False, review=Fal
     if legacy:
         job=c.build_job(root,3,'A',[1,2])
         settings=c.settings(root);limits=budget.snapshot(root)
-        anchor=dict(task_sha256=c.digest(root/'jobs/003.json'),role='A',boot_id=budget.clock_stamp()['boot_id'],
+        anchor=dict(task_ref=c.record_ref(root/'jobs/003.json'),role='A',boot_id=budget.clock_stamp()['boot_id'],
             advance_seconds=limits['advance_seconds'],limits=budget.node_limits(root,job),
             shared_limits={key:limits[key] for key in ('max_tokens','max_seconds')})
         events,parent=budget._events(root,settings)
@@ -61,7 +61,7 @@ def _scene(tmp_path, *, unknown=False, action='finish', legacy=False, review=Fal
             basis='last_authorized_node',anchor=anchor,
             selection=dict(max_steps=12,used_steps=3,accounted_tokens=20,seconds_remaining=limits['seconds_remaining'],blocked_role=None,stopped_original=None),
             reserve=budget._final_a_reserve(settings,job,events))
-        anchor=dict(anchor,final_return=dict(seq=claim['seq'],sha256=c.digest(root/'control-ledger'/f'{claim["seq"]:06d}.json')))
+        anchor=dict(anchor,final_return=dict(seq=claim['seq'],record=c.record_ref(root/'control-ledger'/f'{claim["seq"]:06d}.json')))
     else:
         budget.begin_closeout(root,2,3,'fixture final',final_only=True)
         job=c.build_job(root,3,'A',[1,2],final_report=dict(source_cutoff=2,stopped_original=None))
@@ -72,11 +72,11 @@ def _scene(tmp_path, *, unknown=False, action='finish', legacy=False, review=Fal
 def failed_original(tmp_path,root,job,anchor,home):
     from scidiscovery.research_loop import profiles
     record=execution.origin(root,3)
-    intent=dict(step=3,task_sha256=c.digest(root/'jobs/003.json'),
+    intent=dict(step=3,task_ref=c.record_ref(root/'jobs/003.json'),
         **profiles.binding(configuration_updates.for_job(root,job),job),budget_slice=anchor)
     c.write(record/'native-intent.json',intent)
     identity=dict(pid=99999999,start_ticks=1,pgid=99999999,sid=99999999,ppid=1,
-        boot_id=budget.clock_stamp()['boot_id'],task_sha256=intent['task_sha256'])
+        boot_id=budget.clock_stamp()['boot_id'],task_ref=intent['task_ref'])
     for name in ('runner-process.json','native-process.json'):c.write(record/name,identity)
     (record/'native.jsonl').write_bytes(b'');(record/'native.stderr').write_text('Pinned fixture app bootstrap failed before provider submission.\n')
     observation=dict(coverage='unknown',has_observation=False,tokens=dict(input_tokens=0,cached_input_tokens=0,output_tokens=0))
@@ -89,15 +89,15 @@ def failed_original(tmp_path,root,job,anchor,home):
     for name in ('formal_review.py','contracts.py','native.py','continuation.py','backends.py'):shutil.copyfile(Path(recovery.__file__).parent/name,package/name)
     originals=recovery._originals(root,3)
     report=dict(version=1,kind='native_startup_engineering_reconciliation',author='Independent fixture engineering reviewer',
-        subject=dict(goal_id=c.settings(root)['goal_id'],step=3,role='A',attempt=0,task_sha256=intent['task_sha256'],final_return=anchor['final_return']),
-        originals={name:dict(sha256=originals['observation' if name=='usage_observation' else name]['sha256']) for name in
+        subject=dict(goal_id=c.settings(root)['goal_id'],step=3,role='A',attempt=0,task_ref=intent['task_ref'],final_return=anchor['final_return']),
+        originals={name:originals['observation' if name=='usage_observation' else name] for name in
             ('settings','job','intent','outcome','stream','stderr','usage_observation')},
         engineering_judgment=dict(provider_submission='provider_not_submitted',provider_model_tokens=0,product_meter_remains_unknown=True),
-        positive_source_flow_evidence=dict(sources=[dict(url='https://example.invalid/pinned-fixture-source',sha256='a'*64,
+        positive_source_flow_evidence=dict(sources=[dict(url='https://example.invalid/pinned-fixture-source',
             finding='Deterministic fixture source fails before its provider submission function; empty logs are not the proof.')]),
-        native_implementation_attribution=dict(postcall_sha256=c.digest(Path(sys.executable).resolve()),limitations=['Synthetic source attribution; no real provider claim.']))
+        native_implementation_attribution=dict(postcall_ref=c.record_ref(Path(sys.executable).resolve()),limitations=['Synthetic source attribution; no real provider claim.']))
     evidence=tmp_path/'reconciliation.json';c.write(evidence,report)
-    options=dict(reconciliation=evidence,reconciliation_sha256=c.digest(evidence),
+    options=dict(reconciliation=evidence,reconciliation_ref=c.file_ref(evidence),
         native_home=home,authorization_statement='Accept this exact independent engineering reconciliation and its limitations for one first model submission only.')
     return root,options
 
@@ -125,6 +125,7 @@ def originals(root):
     return {file:file.read_bytes() for file in (root/'settings.json',root/'jobs/003.json',record/'native-intent.json',record/'native-outcome.json',record/'native.jsonl',record/'native.stderr')}
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('legacy',[False,True])
 def test_positive_reconciliation_runs_one_fresh_successor_and_preserves_old_unknown(tmp_path,legacy):
     root,options=scene(tmp_path,legacy=legacy);saved=originals(root);claim=budget.final_a_barrier(root)
@@ -151,6 +152,7 @@ def test_positive_reconciliation_runs_one_fresh_successor_and_preserves_old_unkn
     assert not (execution.origin(root,3)/'continuations/002').exists()
 
 
+@pytest.mark.process_e2e
 def test_successor_unknown_remains_blocking_and_is_never_restarted(tmp_path):
     root,options=scene(tmp_path,unknown=True);saved=originals(root)
     first=recovery.start(root,3,**options)
@@ -172,9 +174,9 @@ def test_empty_stream_null_thread_and_missing_meter_do_not_authorize_successor(t
     report=c.read(options['reconciliation'])
     if mutation=='no_positive_source':report['positive_source_flow_evidence']['sources']=[]
     elif mutation=='not_positive_judgment':report['engineering_judgment']['provider_submission']='unknown'
-    elif mutation=='wrong_original':report['originals']['intent']['sha256']='0'*64
+    elif mutation=='wrong_original':report['originals']['intent']['path']='/wrong/original-intent.json'
     else:report['author']=''
-    c.write(options['reconciliation'],report);options['reconciliation_sha256']=c.digest(options['reconciliation'])
+    c.write(options['reconciliation'],report);options['reconciliation_ref']=c.file_ref(options['reconciliation'])
     with pytest.raises(ValueError):recovery.start(root,3,**options)
     assert not recovery.path(root,3).exists()
     assert not (execution.origin(root,3)/'continuations/001/native-intent.json').exists()
@@ -250,7 +252,7 @@ def test_enabled_old_review_contract_is_exactly_bound_without_new_review(tmp_pat
     result=recovery.start(root,3,**options)
     assert result['status']=='final_a_completed',json.dumps(result,indent=2)
     permit=recovery.validate(root,3)
-    assert permit['review_contract']['sha256']==c.digest(root/'qualification/review-contract.json')
+    assert permit['review_contract']['path']==str(root/'qualification/review-contract.json')
     assert formal_review.contract(root)==c.settings(root)['formal_review_policy']['contract']
     assert (root/'qualification/review-contract.json').read_bytes()==frozen
     assert not any(c.read(file).get('formal_review') for file in (root/'jobs').glob('*.json'))
@@ -282,7 +284,7 @@ def external_startup(tmp_path):
     root=protocol.scene(tmp_path,[dict(action='deliver',candidate='run-1')])
     home=tmp_path/'native-home';home.mkdir();(home/'config.toml').write_text('fixture=true\n')
     c.write(root/'host-started.json',budget.clock_stamp());budget.transition(root,'advance','fixture original external startup')
-    nodes=[dict(step=step,seal_sha256=c.digest(execution.origin(root,step)/'result-identity.json')) for step in (1,2)]
+    nodes=[dict(step=step,seal_ref=c.record_ref(execution.origin(root,step)/'result-identity.json')) for step in (1,2)]
     sources=delivery.catalogue_sources(root,nodes)
     budget.begin_closeout(root,2,3,'fixture final external',delivery_sources=sources,final_only=True)
     job=c.build_job(root,3,'A',[1,2],purpose='closeout',source_cutoff=2,delivery_sources=sources)
@@ -309,7 +311,7 @@ def delivery_report(root,tmp_path):
         positive_source_flow_evidence=dict(mandatory_failure_chain=['Fixture raises at mandatory synchronous transition before invoke'],
             first_external_dispatch='delivery.invoke after transition',conclusion='The deterministic injected failure occurs before first managed invoke.'))
     evidence=tmp_path/'delivery-reconciliation.json';c.write(evidence,report)
-    return dict(reconciliation=evidence,reconciliation_sha256=c.digest(evidence),
+    return dict(reconciliation=evidence,reconciliation_ref=c.file_ref(evidence),
         authorization_statement='Accept exact independent engineering non-dispatch evidence for this original delivery only; preserve all usage and its original finite cap.')
 
 
@@ -353,15 +355,12 @@ def test_proven_accepted_not_dispatched_delivery_collects_original_operation(tmp
     receipt=recovery.validate_collection(root,3)
     assert receipt['action_id']==original['action_id'] and receipt['operation_id']==original['operation_id']
     assert receipt['limits']==dict(max_seconds=original['max_seconds'],max_invocations=1,native_dispatches=0)
-    read,digest=c.read,c.digest
+    read=c.read
     def no_result_read(file):
         if 'native-evidence' in Path(file).parts:pytest.fail('Authorization validator opened execution results')
         return read(file)
-    def no_result_hash(file):
-        if 'native-evidence' in Path(file).parts:pytest.fail('Authorization validator hashed execution results')
-        return digest(file)
     with monkeypatch.context() as auth_only:
-        auth_only.setattr(c,'read',no_result_read);auth_only.setattr(c,'digest',no_result_hash)
+        auth_only.setattr(c,'read',no_result_read)
         assert recovery.validate_collection(root,3)==receipt
     assert budget.closeout_state(root)['actions'][0]['intent']==original
     assert recovery.collect_delivery(root,3,**options)['status']=='delivery_confirmed'
@@ -390,15 +389,12 @@ def test_collection_intent_before_effect_crash_never_submits_again(tmp_path,monk
 def test_final_delivery_ledger_replay_never_reads_execution_results(tmp_path,monkeypatch):
     root,options=pending_delivery(tmp_path,monkeypatch)
     settings=c.settings(root)
-    read,digest=c.read,c.digest
+    read=c.read
     forbidden={'science-output.json','result-identity.json','result.json','native-outcome.json','usage.json'}
     def guard_read(file):
         if Path(file).name in forbidden:pytest.fail('Authorization replay read execution results')
         return read(file)
-    def guard_digest(file):
-        if Path(file).name in forbidden:pytest.fail('Authorization replay hashed execution results')
-        return digest(file)
-    monkeypatch.setattr(c,'read',guard_read);monkeypatch.setattr(c,'digest',guard_digest)
+    monkeypatch.setattr(c,'read',guard_read)
     events,_=budget._events(root,settings)
     assert events[-1]['kind']=='action_intent'
 
@@ -414,29 +410,15 @@ def test_delivery_eligibility_still_rejects_changed_scientific_raw(tmp_path,monk
     assert not (root/'runs/submitted.json').exists()
 
 
-@pytest.mark.parametrize('attribution',[None,{},dict(postcall_sha256='x'*64,limitations=['Unknown original flow.']),dict(postcall_sha256='a'*64,limitations=[])])
+@pytest.mark.parametrize('attribution',[None,{},dict(postcall_ref='invalid_reference',limitations=['Unknown original flow.']),dict(postcall_ref=dict(path='/fixture/original-native'),limitations=[])])
 def test_startup_requires_original_source_attribution_independent_of_current_tool(tmp_path,attribution):
     root,options=scene(tmp_path)
     report=c.read(options['reconciliation'])
     report['native_implementation_attribution']=attribution
-    c.write(options['reconciliation'],report);options['reconciliation_sha256']=c.digest(options['reconciliation'])
+    c.write(options['reconciliation'],report);options['reconciliation_ref']=c.file_ref(options['reconciliation'])
     with pytest.raises(ValueError,match='source attribution'):
         recovery.start(root,3,**options)
     assert not recovery.path(root,3).exists()
-
-
-def test_startup_accepts_original_attribution_without_pinning_current_executable(tmp_path):
-    root,options=scene(tmp_path)
-    report=c.read(options['reconciliation'])
-    report['native_implementation_attribution']['postcall_sha256']='a'*64
-    c.write(options['reconciliation'],report);options['reconciliation_sha256']=c.digest(options['reconciliation'])
-    recovery.start(root,3,**options)
-    permit=recovery.validate(root,3)
-    assert permit['native_program']['sha256']=='a'*64
-    changed=dict(permit,native_program=dict(permit['native_program'],sha256='b'*64))
-    with pytest.raises(ValueError,match='source attribution'):
-        recovery.validate(root,3,changed)
-
 
 
 @pytest.mark.process_e2e
@@ -454,7 +436,7 @@ def test_startup_recovery_binds_original_skill_revision_instead_of_initial_or_la
     assert result['status']=='final_a_completed',json.dumps(result,indent=2)
     permit=recovery.validate(root,3)
     assert permit['originals']['settings']['path']==str(selected)
-    assert permit['originals']['settings']['sha256']==c.digest(selected)
+    assert permit['originals']['settings']==c.file_ref(selected)
     assert selected.read_bytes()==selected_bytes
     assert configuration_updates.current(root)['role_profiles']['A']['skill_set']=='initial'
     intent=c.read(execution.record(root,3)/'native-intent.json')

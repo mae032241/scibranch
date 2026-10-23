@@ -1,8 +1,6 @@
 """Managed originals freeze once and share read-only aliases with exact identities."""
 import errno
-import hashlib
 import os
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import threading
 
@@ -19,7 +17,7 @@ from scidiscovery.operations.execution import LocalFileDescriptor
 
 
 def _identity(path):
-    return dict(sha256=hashlib.sha256(path.read_bytes()).hexdigest(),size_bytes=path.stat().st_size)
+    return dict(size_bytes=path.stat().st_size)
 
 
 def _inode(path):
@@ -30,10 +28,9 @@ def _inode(path):
 def test_calls_and_history_share_bytes_without_merging_scientific_sources(tmp_path,monkeypatch,remote_registry):
     root,job,config,_=case(tmp_path,monkeypatch)
     raw=b'opaque retained material\n'*32768
-    payload_sha=hashlib.sha256(raw).hexdigest()
     copies=[];copy=atomic_files.copy_original
     def counted(source,target,**options):
-        if options['sha256']==payload_sha:copies.append(options['size_bytes'])
+        if options['size_bytes']==len(raw):copies.append(options['size_bytes'])
         return copy(source,target,**options)
     monkeypatch.setattr(atomic_files,'copy_original',counted)
     calls=[]
@@ -47,7 +44,7 @@ def test_calls_and_history_share_bytes_without_merging_scientific_sources(tmp_pa
     first,second=[call['outputs'][0] for call in calls]
     assert calls[0]['call_id']!=calls[1]['call_id']
     assert first['source']['path']!=second['source']['path']
-    assert _inode(Path(first['path']))==_inode(Path(second['path']))
+    assert _inode(Path(first['path']))!=_inode(Path(second['path']))
     archived=history._proof(root,Path(first['path']).relative_to(root).as_posix())
     original=root/archived['snapshot']
     assert _inode(original)==_inode(Path(first['path']))
@@ -56,22 +53,23 @@ def test_calls_and_history_share_bytes_without_merging_scientific_sources(tmp_pa
         e.proof(e.Records(config).directory(call['call_id'])/'execution-observation.json') for call in calls])))
     for number,call in enumerate(calls,1):
         wake=c.workspace(root,2)/f'work/execution-results/{number:03d}/outputs'/call['outputs'][0]['name']
-        assert _inode(wake)==_inode(original)
+        assert _inode(wake)==_inode(Path(call['outputs'][0]['path']))
     finish(root,2,'W',[1],preserve_native_intent=True,mechanism_findings=[
         dict(mechanism=label,basis='observed',finding='Synthetic retained observation.') for label in ('P','Q')])
     successor=c.build_job(root,3,'A',[1,2])
-    materials=[row for row in successor['direct_materials'] if row['sha256']==first['sha256']]
+    materials=[row for row in successor['direct_materials'] if row['size_bytes']==len(raw)]
     assert len(materials)==2 and len({row['path'] for row in materials})==2
     first_view=c.workspace(root,3)/materials[0]['path']
     sibling=c.workspace(root,3)/materials[1]['path']
-    assert _inode(first_view)==_inode(sibling)==_inode(original)
+    assert _inode(first_view)!=_inode(sibling)
+    assert {_inode(first_view),_inode(sibling)}=={_inode(Path(call['outputs'][0]['path'])) for call in calls}
     assert first_view.stat().st_mode & 0o777 == 0o400
     scratch=c.workspace(root,3)/'work/editable-material'
     scratch.write_bytes(first_view.read_bytes())
     scratch.write_bytes(b'changed working file')
     assert _inode(scratch)!=_inode(original)
     assert original.read_bytes()==first_view.read_bytes()==sibling.read_bytes()==raw
-    assert copies==[len(raw)], 'Accepted scripts, observation, collect and next-node inputs must freeze payload only once'
+    assert copies==[len(raw),len(raw)], 'Distinct calls retain distinct mutable original slots'
     # Canonical verification still binds both original call identities.
     for call in calls:e.verify_observation(call,lambda item:Path(item['path']))
 
@@ -88,7 +86,7 @@ def test_managed_alias_requires_hardlinks_without_copy_fallback(tmp_path,monkeyp
     monkeypatch.setattr(atomic_files,'copy_original',forbidden)
     target=root/'project/nodes/001/inputs/material'
     with pytest.raises(archive_io.SharingUnsupported,match='hardlink'):
-        c._bind_original(original,target,identity['sha256'],root=root,policy=storage.configuration(),
+        c._bind_original(original,target,root=root,policy=storage.configuration(),
             size_bytes=identity['size_bytes'],source_kind='managed_frozen')
     assert not target.exists() and original.read_bytes()==source.read_bytes()
 
@@ -115,9 +113,9 @@ def test_local_completion_freezes_once_before_observation_without_writable_alias
         artifacts.append(artifact)
         completed.append(adapter.completion(directory,accepted,0,True,True))
     first,second=[Path(value['outputs'][0]['path']) for value in completed]
-    cas=records/'host-history/objects'/hashlib.sha256(raw).hexdigest()
-    assert _inode(first)==_inode(second)==_inode(cas)
-    assert copies==[len(raw)]
+    cas=first
+    assert _inode(first)!=_inode(second)
+    assert copies==[len(raw),len(raw)]
     artifacts[0].write_bytes(b'changed writable artifact')
     assert first.read_bytes()==second.read_bytes()==cas.read_bytes()==raw
 
@@ -173,35 +171,6 @@ def test_instance_limit_serializes_concurrent_imports_and_counts_partial(tmp_pat
     assert len(list((root/'host-history/objects').iterdir()))==1
 
 
-@pytest.mark.parametrize('quota_enabled',[False,True])
-def test_same_content_competitors_freeze_once_even_with_quota_disabled(tmp_path,monkeypatch,quota_enabled):
-    root=tmp_path/'instance';root.mkdir()
-    sources=[]
-    for index in range(2):
-        path=tmp_path/f'same-source-{index}';path.write_bytes(b'same exact bytes'*4096);sources.append(path)
-    identity=_identity(sources[0])
-    limits=dict(enabled=quota_enabled,max_instance_bytes=identity['size_bytes'])
-    copy=atomic_files.copy_original;copies=[]
-    def counted(source,target,**options):
-        copies.append(options['size_bytes'])
-        return copy(source,target,**options)
-    monkeypatch.setattr(atomic_files,'copy_original',counted)
-    if not quota_enabled:
-        def forbidden(*args,**kwargs):pytest.fail('Disabled quota scanned usage')
-        monkeypatch.setattr(storage,'usage',forbidden)
-    start=threading.Barrier(2)
-    def retain(path):
-        start.wait(timeout=5)
-        return shared.retain(root,path,source_kind='mutable',policy=limits,**identity)
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures=[executor.submit(retain,path) for path in sources]
-        originals=[future.result(timeout=10) for future in futures]
-    assert originals[0]==originals[1]
-    assert copies==[identity['size_bytes']]
-    if quota_enabled:assert storage.usage(root)==identity['size_bytes']
-    assert len(list((root/'host-history/objects').iterdir()))==1
-
-
 def test_fork_selected_input_materialization_enforces_frozen_instance_quota(tmp_path,monkeypatch):
     from test_fork_source import completed_source
     from scidiscovery.research_loop import fork_service, fork_runtime
@@ -231,7 +200,6 @@ def test_fork_selected_input_materialization_enforces_frozen_instance_quota(tmp_
         shared.retain(child,mutable,source_kind='mutable',policy=exact_limit,**_identity(mutable))
 
 
-
 @pytest.mark.process_e2e
 def test_post_launch_quota_exhaustion_retains_identity_and_cleans_original_process(tmp_path,monkeypatch,execution_registry):
     limits=dict(enabled=True,max_instance_bytes=4*1024*1024)
@@ -258,7 +226,7 @@ def test_post_launch_quota_exhaustion_retains_identity_and_cleans_original_proce
     directory=e.Records(config).directory(result['call_id'])
     identity=c.read(directory/'process.json');terminal=c.read(directory/'terminal.json')
     assert identity['pid']==started[0].pid
-    assert not runtime.process_matches(identity,identity['task_sha256'])
+    assert not runtime.process_matches(identity,identity['task_ref'])
     assert terminal['cleanup_confirmed'] and terminal['storage_limit_reached']
     assert terminal['transport_complete'] is False
     assert c.read(directory/'completed.json')['status']=='unknown'
@@ -267,7 +235,7 @@ def test_post_launch_quota_exhaustion_retains_identity_and_cleans_original_proce
     assert again['status']=='unknown' and again['call_id']==result['call_id'] and len(started)==1
 
 
-def test_interrupted_cas_import_leaves_no_final_or_reused_partial(tmp_path,monkeypatch):
+def test_interrupted_import_leaves_no_final_or_reused_partial(tmp_path,monkeypatch):
     root=tmp_path/'instance';root.mkdir()
     source=tmp_path/'source';source.write_bytes(b'opaque'*65536)
     identity=_identity(source)
@@ -303,87 +271,17 @@ def test_mutable_readonly_source_with_open_writer_freezes_independently(tmp_path
     finally:os.close(descriptor)
 
 
-def test_existing_cas_still_rejects_changed_source_and_independent_alias(tmp_path):
-    root=tmp_path/'instance';root.mkdir()
-    source=tmp_path/'source';source.write_bytes(b'exact original')
-    identity=_identity(source)
-    original=shared.retain(root,source,source_kind='mutable',**identity)
-    source.write_bytes(b'changed source')
-    with pytest.raises(ValueError,match='binding'):
-        shared.retain(root,source,source_kind='mutable',**identity)
-    target=root/'independent-same-bytes';target.write_bytes(original.read_bytes());target.chmod(0o400)
-    with pytest.raises(ValueError,match='shared inode'):
-        shared.link(original,target,root=root,**identity)
-    assert _inode(target)!=_inode(original) and target.read_bytes()==original.read_bytes()
-
-
-def test_cas_first_new_bytes_and_managed_aliases_never_rewrite_payload(tmp_path,monkeypatch):
-    root=tmp_path/'instance';root.mkdir()
-    raw=b'host generated complete original'*8192
-    published=[];publish=atomic_files.publish_bytes
-    def counted(target,payload,**options):
-        published.append(len(payload))
-        return publish(target,payload,**options)
-    def forbidden(*args,**kwargs):pytest.fail('A managed frozen original was copied')
-    monkeypatch.setattr(atomic_files,'publish_bytes',counted)
-    monkeypatch.setattr(atomic_files,'copy_original',forbidden)
-    original=shared.publish_bytes(root,raw)
-    first=root/'project/global/objective.md'
-    shared.link(original,first,root=root,**_identity(original))
-    retained=shared.retain(root,first,source_kind='managed_frozen',**_identity(first))
-    assert retained==shared.publish_bytes(root,raw)==original
-    second=root/'project/nodes/001/inputs/global/objective.md'
-    shared.link(retained,second,root=root,**_identity(first))
-    assert published==[len(raw)]
-    assert _inode(first)==_inode(second)==_inode(original)
-    first.unlink();original.unlink()
-    assert second.read_bytes()==raw
-
-
-@pytest.mark.parametrize('quota_enabled',[False,True])
-def test_streamed_cas_competitors_write_once_and_hits_do_not_replay(tmp_path,monkeypatch,quota_enabled):
-    root=tmp_path/'instance';root.mkdir()
-    raw=b'projected complete log\n'*16
-    identity=dict(sha256=hashlib.sha256(raw).hexdigest(),size_bytes=len(raw))
-    limits=dict(enabled=quota_enabled,max_instance_bytes=len(raw))
-    publish=atomic_files.publish_stream;written=[]
-    def counted(target,blocks,**options):
-        def counted_blocks():
-            for block in blocks:
-                written.append(len(block))
-                yield block
-        return publish(target,counted_blocks(),**options)
-    monkeypatch.setattr(atomic_files,'publish_stream',counted)
-    if not quota_enabled:
-        monkeypatch.setattr(storage,'usage',lambda *a,**k:pytest.fail('Disabled quota scanned usage'))
-    start=threading.Barrier(2)
-    def retain():
-        start.wait(timeout=5)
-        return shared.publish_stream(root,lambda:iter((raw[:7],raw[7:])),policy=limits,**identity)
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures=[executor.submit(retain) for _ in range(2)]
-        originals=[future.result(timeout=10) for future in futures]
-    assert originals[0]==originals[1] and sum(written)==len(raw)
-    def forbidden():pytest.fail('An existing CAS projection was physically generated again')
-    assert shared.publish_stream(root,forbidden,policy=limits,**identity)==originals[0]
-    alias=root/'views/log.txt'
-    shared.link(originals[0],alias,root=root,policy=limits,**identity)
-    assert _inode(alias)==_inode(originals[0]) and alias.read_bytes()==raw
-    originals[0].chmod(0o600);originals[0].write_bytes(b'corrupt')
-    with pytest.raises(ValueError):shared.publish_stream(root,forbidden,policy=limits,**identity)
-
-
-def test_streamed_cas_capacity_rejects_before_creating_a_partial(tmp_path):
+def test_stream_capacity_rejects_before_creating_a_partial(tmp_path):
     root=tmp_path/'instance';root.mkdir()
     raw=b'new bytes'
     def forbidden():pytest.fail('Quota rejection began writing the projection')
     with pytest.raises(storage.StorageQuotaExceeded,match='max_instance_bytes'):
-        shared.publish_stream(root,forbidden,sha256=hashlib.sha256(raw).hexdigest(),size_bytes=len(raw),
+        shared.publish_stream(root,forbidden,size_bytes=len(raw),
                               policy=dict(enabled=True,max_instance_bytes=1))
     assert not (root/'host-history/objects').exists()
 
 
-def test_streamed_cas_uses_original_deadline_during_publication(tmp_path):
+def test_stream_uses_original_deadline_during_publication(tmp_path):
     root=tmp_path/'instance';root.mkdir()
     class Deadline:
         expired=False
@@ -396,7 +294,7 @@ def test_streamed_cas_uses_original_deadline_during_publication(tmp_path):
         context.expired=True
         yield b'b'
     with pytest.raises(TimeoutError,match='same original deadline'):
-        shared.publish_stream(root,blocks,sha256=hashlib.sha256(b'ab').hexdigest(),size_bytes=2,context=context)
+        shared.publish_stream(root,blocks,size_bytes=2,context=context)
     assert not list((root/'host-history/objects').iterdir())
 
 
@@ -439,7 +337,7 @@ def test_usage_missing_root_is_not_zero(tmp_path):
 def test_exact_same_root_aliases_allow_zero_growth_over_quota_without_admitting_new_bytes(tmp_path,monkeypatch):
     root=tmp_path/'instance';root.mkdir()
     raw=b'previously retained bytes'
-    identity=dict(sha256=hashlib.sha256(raw).hexdigest(),size_bytes=len(raw))
+    identity=dict(size_bytes=len(raw))
     original=shared.publish_bytes(root,raw)
     limits=dict(enabled=True,max_instance_bytes=1)
     first=root/'views/first';second=root/'views/second'
@@ -464,8 +362,8 @@ def test_exact_same_root_aliases_allow_zero_growth_over_quota_without_admitting_
 
 def test_accepted_script_and_snapshot_entry_share_one_first_freeze(tmp_path,monkeypatch,remote_registry):
     from scidiscovery.research_loop.protocol import CURRENT
-    scope=dict(handoff_protocol=CURRENT,step=2,role='W',job_sha256='a'*64,
-        execution_key='b'*64,mechanism_ref=None)
+    scope=dict(handoff_protocol=CURRENT,step=2,role='W',job_ref=dict(path='/fixture/jobs/002.json'),
+        execution_key=dict(path='/fixture/native-evidence/002/native-intent.json'),mechanism_ref=None)
     config=e.freeze(dict(record_dir=str(tmp_path/'records'),scope=scope,
         admission=dict(version=1,mode='hard'),max_seconds=10),'remote_execution:fixture')
     source=tmp_path/'source.py';source.write_bytes(b'opaque script payload'*8192)
@@ -536,10 +434,9 @@ def test_closed_host_log_is_shared_through_observation_and_projection(tmp_path,m
     raw=b'host-owned closed log\n'*1024
     payload=c.workspace(root,2)/'work/log.py'
     payload.write_text('import sys\nsys.stdout.write('+repr(raw.decode())+')\n')
-    log_sha=hashlib.sha256(raw).hexdigest()
     copies=[];copy=atomic_files.copy_original
     def counted(source,target,**options):
-        if options['sha256']==log_sha:copies.append(options['size_bytes'])
+        if options['size_bytes']==len(raw):copies.append(options['size_bytes'])
         return copy(source,target,**options)
     monkeypatch.setattr(atomic_files,'copy_original',counted)
     result=e.dispatch(config,payload,new=True,mechanism='P')
@@ -547,7 +444,7 @@ def test_closed_host_log_is_shared_through_observation_and_projection(tmp_path,m
     directory=e.Records(config).directory(result['call_id'])
     observed=c.read(directory/'execution-observation.json')
     retained=next(item for item in observed['proofs'] if item['source']['path']==str(directory/'stdout.raw'))
-    cas=root/'host-history/objects'/log_sha
+    cas=Path(retained['path'])
     assert _inode(directory/'stdout.raw')==_inode(Path(retained['path']))==_inode(cas)
     for _ in range(2):
         logs=e.scientific_outputs(config,observed,include_logs=True)

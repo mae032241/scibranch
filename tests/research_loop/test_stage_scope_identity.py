@@ -21,7 +21,7 @@ def scope_scene(tmp_path):
 
 def test_stage_identity_reads_exact_job_without_settings_or_attempt_policy(scope_scene,tmp_path):
     root,job=scope_scene;expected=protocol.stage_scope(root,job)
-    assert expected['execution_key']==expected['job_sha256']==c.digest(root/'jobs/001.json')
+    assert expected['execution_key']==expected['job_ref']==c.record_ref(root/'jobs/001.json')
     (root/'settings.json').rename(tmp_path/'private-settings.json')
     # Origin identity remains stable even if an attempt directory exists. This
     # grants no continuation permission and does not read its hidden policy.
@@ -49,21 +49,22 @@ def test_stage_identity_rejects_nonoriginal_or_noncurrent_job(scope_scene,tmp_pa
 def test_initial_local_source_view_uses_bound_public_scope_and_fails_closed(local_scene,tmp_path,damage):
     root,job,config,path=local_scene;directory,script=authored(root)
     adapter=e.load(config,path=path)
-    payload=e.LocalFileDescriptor(name='namespace-source-view',local_path=str(script),sha256=c.digest(script),
+    payload=e.LocalFileDescriptor(name='namespace-source-view',local_path=str(script),
         size_bytes=script.stat().st_size,media_type='text/x-python')
     metadata=adapter.acceptance_metadata(payload,command_options=dict(experiment_directory=str(directory)))
     (root/'settings.json').rename(tmp_path/'private-settings.json')
     if damage=='projection':
-        projection=root/'host-runtime/experiment-control'/config['scope']['job_sha256']/'interfaces/000.json'
-        value=c.read(projection);value['scope']['job_sha256']='0'*64;c.write(projection,value)
+        projection=root/'host-runtime/experiment-control'/f'{config["scope"]["step"]:03d}'/'interfaces/000.json'
+        value=c.read(projection);value['scope']['job_ref']=dict(path='/wrong/original.json');c.write(projection,value)
     elif damage=='native_intent':
-        c.write(root/'native-evidence/002/native-intent.json',dict(task_sha256='0'*64))
+        c.write(root/'native-evidence/002/native-intent.json',dict(task_ref=dict(path='/wrong/job.json')))
     elif damage=='continued_policy_unavailable':
         (root/'native-evidence/002/continuations').mkdir()
     if damage is None:
         view=adapter.input_sources(payload,metadata)
         assert view['files']==[dict(name='run.py',origin=dict(kind='author',step=2))]
-        assert view['job']['sha256']==config['scope']['job_sha256']
+        assert dict(path=str(root/view['job']['path']))==config['scope']['job_ref']
+        assert view['job']['size_bytes']==(root/view['job']['path']).stat().st_size
     else:
         with pytest.raises(ValueError):adapter.input_sources(payload,metadata)
     assert not list((c.workspace(root,2)/'work/lineage/calls').glob('*/accepted.json'))

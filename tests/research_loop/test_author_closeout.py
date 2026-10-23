@@ -53,7 +53,7 @@ def test_closeout_native_wrapper_denies_effects_before_any_call(launcher,tmp_pat
 def test_author_start_requires_positive_actual_shared_balance(unknown_original):
     root,record,_=unknown_original
     receipt=dict(pid=999999999,start_ticks=1,pgid=999999999,sid=999999999,ppid=1,
-        boot_id=budget.clock_stamp()['boot_id'],task_sha256=c.digest(root/'jobs/001.json'))
+        boot_id=budget.clock_stamp()['boot_id'],task_ref=c.record_ref(root/'jobs/001.json'))
     for name in ('runner-process.json','native-process.json'):c.write(record/name,receipt)
     meter=native.usage(root)
     assert meter['observed_tokens']==meter['accounted_tokens']==120 and meter['unknown_steps']==[1]

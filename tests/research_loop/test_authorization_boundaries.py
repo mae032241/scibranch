@@ -57,7 +57,7 @@ def test_audit_permission_and_consumption_ignore_broken_results(tmp_path, monkey
         candidate_audit.validate_intent(root, intent)
         assert list(candidate_audit.intents(root)) == [intent]
         assert budget.used_steps(root) == 4
-    changed = dict(intent, decision=dict(intent['decision'], job_sha256='0'*64))
+    changed = dict(intent, decision=dict(intent['decision'], job_ref=dict(path='/fixture/jobs/002.json')))
     changed['operation_id'] = changed['action_id'] = candidate_audit._operation(root, changed['decision'], 'run-1')
     with pytest.raises(ValueError, match='declared requester'):
         candidate_audit._validate_request(root, changed)
@@ -104,9 +104,9 @@ def test_native_consumption_reads_accepted_intents_not_results(tmp_path, monkeyp
     record = execution.origin(root, 2)
     later = record/'continuations/001'
     later.mkdir(parents=True)
-    intent = dict(step=2, attempt=1, task_sha256=c.digest(root/'jobs/002.json'),
-                  root_intent_sha256=c.digest(record/'native-intent.json'),
-                  previous={'native-intent.json': c.digest(record/'native-intent.json'),
+    intent = dict(step=2, attempt=1, task_ref=c.record_ref(root/'jobs/002.json'),
+                  root_intent_ref=c.record_ref(record/'native-intent.json'),
+                  previous={'native-intent.json': c.record_ref(record/'native-intent.json'),
                             'native-outcome.json': '0'*64, 'usage.json': '0'*64})
     c.write(later/'native-intent.json', intent)
     for name in ('native-outcome.json', 'usage.json'):
@@ -116,13 +116,13 @@ def test_native_consumption_reads_accepted_intents_not_results(tmp_path, monkeyp
         _forbid_results(pure)
         assert budget.used_steps(root) == 3
     if damage == 'task':
-        c.write(later/'native-intent.json', dict(intent, task_sha256='0'*64))
+        c.write(later/'native-intent.json', dict(intent, task_ref=dict(path='/fixture/jobs/002.json')))
     elif damage == 'attempt':
         c.write(later/'native-intent.json', dict(intent, attempt=True))
     elif damage == 'step':
         c.write(later/'native-intent.json', dict(intent, step=True))
     elif damage == 'root':
-        c.write(later/'native-intent.json', dict(intent, root_intent_sha256='0'*64))
+        c.write(later/'native-intent.json', dict(intent, root_intent_ref='0'*64))
     elif damage == 'previous':
         c.write(later/'native-intent.json', dict(intent, previous={'native-intent.json': '0'*64}))
     elif damage == 'gap':
@@ -140,7 +140,7 @@ def test_audit_retry_consumption_ignores_results_but_rejects_bad_intent(tmp_path
     root = audit_fixture(tmp_path)
     operation = 'e'*64
     path = root/'host-delivery/audit-recovery'/operation/'intent.json'
-    intent = dict(settings_sha256=c.digest(root/'settings.json'), operation_id=operation,
+    intent = dict(settings_ref=c.record_ref(root/'settings.json'), operation_id=operation,
                   attempt=1, reason='audit_source_missing', max_seconds=20, advance_seconds=0)
     c.write(path, intent)
     path.with_name('outcome.json').write_text('Broken result')
@@ -176,8 +176,8 @@ def test_startup_and_final_permissions_never_read_execution_results(tmp_path, mo
     original = c.read(Path(permit['originals']['intent']['path']))
     job = c.read(root/'jobs/003.json')
     intent = dict(step=3, attempt=1, continuation_kind='startup_successor', context_mode='new_context',
-        task_sha256=permit['originals']['job']['sha256'], native_profile=permit['native_profile'],
-        root_intent_sha256=permit['originals']['intent']['sha256'], previous=recovery.original_proof(root, 3),
+        task_ref=c.record_ref(root/permit['originals']['job']['path']), native_profile=permit['native_profile'],
+        root_intent_ref=c.record_ref(root/permit['originals']['intent']['path']), previous=recovery.original_proof(root, 3),
         startup_recovery=recovery._ref(recovery.path(root, 3)), budget_slice=original['budget_slice'])
     with monkeypatch.context() as pure:
         _forbid_results(pure)
@@ -224,7 +224,7 @@ def test_startup_grant_does_not_prove_positive_engineering_facts(tmp_path, monke
 @pytest.mark.process_e2e
 def test_final_cursor_permission_is_separate_from_sealed_source_eligibility(tmp_path, monkeypatch):
     root = audit_fixture(tmp_path)
-    refs = [dict(step=step, seal_sha256=c.digest(execution.origin(root, step)/'result-identity.json')) for step in (1, 2)]
+    refs = [dict(step=step, seal_ref=c.record_ref(execution.origin(root, step)/'result-identity.json')) for step in (1, 2)]
     cursor = dict(role='A', parents=[1, 2], instruction='Review existing evidence', evidence_return=None,
                   correction_request=None, author_correction=None, source_refs=refs)
     begin = budget.begin_closeout(root, 2, 3, 'fixture final', final_only=True, resume_cursor=cursor)
@@ -256,7 +256,7 @@ def test_final_report_grant_replay_does_not_revalidate_stopped_results(tmp_path,
 def test_final_delivery_scope_read_is_pure_but_acceptance_keeps_result_gate(tmp_path, monkeypatch):
     from scidiscovery.research_loop import startup_recovery as recovery
     root, _, permit = _startup_permit(tmp_path, monkeypatch)
-    decision = dict(step=3, job_sha256=permit['originals']['job']['sha256'], raw_sha256='a'*64, seal_sha256='b'*64)
+    decision = dict(step=3, job_ref=c.record_ref(root/permit['originals']['job']['path']), raw_ref='a'*64, seal_ref=dict(path='/fixture/native-evidence/002/result-identity.json'))
     bound = dict(decision=decision, operation_id='c'*64)
     with monkeypatch.context() as pure:
         _forbid_results(pure)
@@ -290,9 +290,9 @@ def test_author_permissions_never_read_outcomes_call_results_or_scientific_conte
     c.write(author.successor_path(root, 1), successor)
     job = c.read(root/'jobs/001.json')
     intent = dict(attempt=2, continuation_kind='author_closeout', context_mode='new_context',
-                  author_closeout=author._ref(root, author.successor_path(root, 1)), task_sha256=original['job']['sha256'],
+                  author_closeout=author._ref(root, author.successor_path(root, 1)), task_ref=c.record_ref(root/original['job']['path']),
                   author_closeout_facts=dict(path='native-evidence/001/continuations/002/author-closeout-facts.json',
-                                             sha256='a'*64, size_bytes=0))
+                                             size_bytes=0))
     with monkeypatch.context() as pure:
         _forbid_results(pure)
         pure.setattr(author, '_calls', lambda *args: pytest.fail('Permission enumerated retained execution results'))
@@ -321,7 +321,7 @@ def test_legacy_author_permission_does_not_validate_scientific_compilation(legac
         _forbid_results(pure)
         pure.setattr(inputs, 'verify_compilation', lambda *args, **kwargs: pytest.fail('Permission required scientific compiler output'))
         original=inputs._legacy_authorization(root, job, compiler, material, permit, 1, require_intent=True)
-        assert original['job']['sha256']==c.digest(root/'jobs/002.json')
+        assert c.record_ref(root/original['job']['path'])==c.record_ref(root/'jobs/002.json')
 
 
 @pytest.mark.parametrize('failure', ['author', 'compiler'])
@@ -333,7 +333,7 @@ def test_legacy_client_requires_eligibility_before_publication(legacy_compiler, 
         monkeypatch.setattr(author, 'require_original_eligibility', invalid)
     else:
         value=inputs.q._read(root,compiler)
-        monkeypatch.setattr(inputs, 'verify_compilation', lambda *args, **kwargs:dict(value, job=dict(value['job'], sha256='0'*64)))
+        monkeypatch.setattr(inputs, 'verify_compilation', lambda *args, **kwargs:dict(value, job=dict(value['job'], path='jobs/unapproved.json')))
     with pytest.raises(ValueError):
         inputs.create_legacy_author_client(root, job, compiler, material, permit, 1, public)
     assert not public.exists()

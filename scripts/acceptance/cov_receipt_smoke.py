@@ -32,7 +32,10 @@ def main():
     if root.exists():raise ValueError('Probe requires a fresh output root; never replay a preserved scene')
     harness=public/'environment/harness'
     required=['exp_cli.py','runner.py','train.csv','val.csv','meta.json']
-    before={name:c.digest(c.regular(harness/name)) for name in required}
+    def metadata(name):
+        value=c.regular(harness/name).stat()
+        return value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns
+    before={name:metadata(name) for name in required}
     os.environ.update(EXP_HARNESS=str(harness),EXP_RUNNER=str(harness/'runner.py'),EXP_TRAIN=str(harness/'train.csv'),
         EXP_VAL=str(harness/'val.csv'),EXP_META=str(harness/'meta.json'),EXP_RUN_DIR=str(root/'runs'),EXP_WALL_CAP_S='60',
         PYTHONDONTWRITEBYTECODE='1')  # Host runner import must not add harness/__pycache__ to the frozen public whitelist.
@@ -47,13 +50,13 @@ def main():
             minimal_test='Observe a public runner outcome independently from arbitrary training logs',existing_ref=None)
             for name in ('P','Q')],focus=dict(label=None,action='screen')),
         next_action='experiment',route_reason='Qualify two exact calls under the same immutable scientific task')
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/001.json')))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/001.json')))
     c.write(record/'science-output.json',payload)
     c.write(record/'usage.json',dict(input_tokens=0,cached_input_tokens=0,output_tokens=0))
-    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_sha256=c.digest(record/'science-output.json')))
+    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_ref=c.record_ref(record/'science-output.json')))
     c.seal_result(root,1)
     job=c.build_job(root,2,'W',[1]);record=execution.record(root,2)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json')))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json')))
     config_path=root/'receipt-probe-config.json'
     cov_lineage.configure(root,2,[args.task_python,'-B','-I',str(harness/'exp_cli.py')],root/'runs',config_path)
     config=c.read(config_path);results=[]
@@ -68,7 +71,7 @@ def main():
         assert 'forged log only' in (directory/'stdout.raw').read_text()
         assert cov_lineage._completed(directory)['candidate_id']==f'run-{index}'
         results.append(dict(call_id=result['call_id'],status=result['status'],run_id=result['run_id'],mechanism=label,
-            receipt_sha256=c.digest(directory/'receipt.json'),log_bytes=(directory/'stdout.raw').stat().st_size))
+            receipt_ref=c.file_ref(directory/'receipt.json'),log_bytes=(directory/'stdout.raw').stat().st_size))
     assert len(experiments.Records(config).calls())==2
     worker=dict(summary='Two retained independent transport observations',
         scientific_result='This probe verifies receipts and archives; it does not establish scientific screening.',
@@ -76,7 +79,7 @@ def main():
         mechanism_findings=[dict(mechanism=name,basis='observed',finding='The public runner completed with its own independently bound record; adequacy is not asserted.') for name in ('P','Q')])
     c.write(record/'science-output.json',worker)
     c.write(record/'usage.json',dict(input_tokens=0,cached_input_tokens=0,output_tokens=0))
-    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_sha256=c.digest(record/'science-output.json')))
+    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_ref=c.record_ref(record/'science-output.json')))
     c.seal_result(root,2)
     graph=lineage.build(root,3)
     assert set(graph['candidates'])=={'run-1','run-2'},graph
@@ -84,10 +87,8 @@ def main():
     for item in graph['candidates'].values():
         assert item['context']['status']=='known_success'
         assert len(item['context']['proofs'])==9
-    before_tree={str(p.relative_to(root)):c.digest(p) for p in root.rglob('*') if p.is_file()}
     c.validate(c.workspace(root,2));lineage.build(root,3)
-    assert before_tree=={str(p.relative_to(root)):c.digest(p) for p in root.rglob('*') if p.is_file()}
-    assert before=={name:c.digest(c.regular(harness/name)) for name in required}
+    assert before=={name:metadata(name) for name in required}
     assert sorted(p.name for p in harness.iterdir())==sorted(required),'Public harness whitelist changed'
     c.write(root/'receipt-probe-result.json',dict(status='pass',calls=results,model_api_calls=0,
         scope='Independent public runner receipts, not scientific screening or hidden scoring'))

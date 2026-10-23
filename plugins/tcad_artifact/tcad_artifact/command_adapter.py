@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import stat
@@ -135,7 +134,7 @@ class CommandTCADExecutorAdapter:
 
     def validate_submission_protocol(self):
         value = self._call("submission_protocol", {})
-        if value != {"version": 1, "submit": "tcad_submit_retirable", "retire": "tcad_retire_submission"}:
+        if value != {"version": 2, "submit": "tcad_submit_retirable", "retire": "tcad_retire_submission"}:
             raise RuntimeError("TCAD submission protocol is incompatible; upgrade the runner before submitting.")
         return value
 
@@ -278,7 +277,7 @@ class CommandTCADExecutorAdapter:
         value = self._call("retire_submission", {"submission": _without_schema(submission)})
         if value.get("found") is True:
             return value
-        if value.get("found") is False and value.get("retired") is True and value.get("submission_sha256") == submission.sha256:
+        if value.get("found") is False and value.get("retired") is True and value.get("submission_id") == _submission_id(submission):
             return value
         raise RuntimeError("TCAD transport did not confirm exact submission retirement")
 
@@ -333,13 +332,7 @@ class CommandTCADExecutorAdapter:
             metadata = os.lstat(path)
             if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
                 raise RuntimeError("transport output is not a regular file")
-            digest = hashlib.sha256()
-            with path.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    if context is not None:
-                        context.remaining_seconds()
-                    digest.update(chunk)
-            if metadata.st_size != item.size_bytes or digest.hexdigest() != item.sha256:
+            if metadata.st_size != item.size_bytes:
                 raise RuntimeError("transport output differs from its descriptor")
         return outputs
 
@@ -361,7 +354,7 @@ class CommandTCADExecutorAdapter:
             raise TimeoutError("TCAD transport request deadline exhausted before start")
         request = _canonical(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "operation": operation,
                 "payload": payload,
             }
@@ -396,11 +389,11 @@ class CommandTCADExecutorAdapter:
         except json.JSONDecodeError as error:
             log = preserve_log(self.local_result_root, "stdout", completed.stdout)
             raise RuntimeError(f"TCAD transport returned invalid JSON; stdout log: {log}") from error
-        if (not isinstance(response, dict) or response.get("schema_version") != 1
+        if (not isinstance(response, dict) or response.get("schema_version") != 2
                 or response.get("operation") != operation or response.get("ok") is not True
                 or not isinstance(response.get("payload"), dict)):
             preserve_log(self.local_result_root, "stdout", completed.stdout)
-        if not isinstance(response, dict) or response.get("schema_version") != 1:
+        if not isinstance(response, dict) or response.get("schema_version") != 2:
             raise RuntimeError("TCAD transport response has an invalid envelope")
         if response.get("operation") != operation:
             raise RuntimeError("TCAD transport response operation differs")
@@ -465,19 +458,14 @@ def _read_bound_descriptor(
     metadata = os.lstat(path)
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         raise ValueError("development debug file is not regular")
+    if metadata.st_size != descriptor.size_bytes:
+        raise ValueError("development file differs from its declared size")
     if not read_content:
-        digest, size = hashlib.sha256(), 0
-        with path.open("rb") as source:
-            for block in iter(lambda: source.read(1024 * 1024), b""):
-                digest.update(block)
-                size += len(block)
-        if size != descriptor.size_bytes or digest.hexdigest() != descriptor.sha256:
-            raise ValueError("development archive differs from its descriptor")
         return b""
+
     raw = path.read_bytes()
     if (
         len(raw) != descriptor.size_bytes
-        or hashlib.sha256(raw).hexdigest() != descriptor.sha256
     ):
         raise ValueError("development debug file differs from its descriptor")
     return raw
@@ -513,3 +501,11 @@ def _adapter_capability(value: SolverCapabilitySnapshot) -> AdapterCapability:
 
 
 __all__ = ["CommandAdapterConfig", "CommandTCADExecutorAdapter", "validate_command_configuration", "bundled_ssh_configuration"]
+
+
+def _submission_id(submission):
+    value=json.loads(Path(submission.local_path).read_bytes())
+    # Command transports return a marker retaining the exact remote request.
+    if 'request_id' in value:return value['request_id']
+    if 'submission_id' in value:return value['submission_id']
+    raise ValueError('Prepared submission has no exact request identity')

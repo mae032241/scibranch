@@ -24,12 +24,12 @@ def path(root, step):
 
 def _ref(file):
     file = c.regular(Path(file).absolute())
-    return dict(path=str(file),sha256=c.digest(file),size_bytes=file.stat().st_size)
+    return dict(path=str(file),size_bytes=file.stat().st_size)
 
 
 def _check(ref):
     file = c.regular(Path(ref['path']))
-    if file.resolve() != file or file.stat().st_size != ref['size_bytes'] or c.digest(file) != ref['sha256']:
+    if file.resolve() != file or file.stat().st_size != ref['size_bytes'] or c.file_ref(file) != ref:
         raise ValueError('Native startup recovery original or implementation changed')
     return file
 
@@ -65,9 +65,7 @@ def _bound_settings(originals):
 def _native_attribution(report):
     """Retained evidence about the original source flow, not the current tool."""
     value=report.get('native_implementation_attribution')
-    if (not isinstance(value,dict) or not isinstance(value.get('postcall_sha256'),str)
-            or len(value['postcall_sha256'])!=64
-            or any(char not in '0123456789abcdef' for char in value['postcall_sha256'])
+    if (not isinstance(value,dict) or not isinstance(value.get('postcall_ref'),dict) or set(value['postcall_ref'])!={'path'}
             or not isinstance(value.get('limitations'),list) or not value['limitations']
             or any(not isinstance(item,str) or not item.strip() for item in value['limitations'])):
         raise ValueError('Original native source attribution and its limitations are required')
@@ -83,7 +81,7 @@ def _evidence(root, step, report, originals, *, initial=False):
     if (report.get('kind') != 'native_startup_engineering_reconciliation'
             or subject.get('goal_id') != settings['goal_id'] or subject.get('step') != step
             or subject.get('attempt') != 0 or subject.get('role') != 'A'
-            or subject.get('task_sha256') != originals['job']['sha256']
+            or subject.get('task_ref') != dict(path=originals['job']['path'])
             or judgment.get('provider_submission') != 'provider_not_submitted'
             or type(judgment.get('provider_model_tokens')) is not int or judgment['provider_model_tokens'] != 0
             or not judgment.get('product_meter_remains_unknown') or not sources
@@ -91,13 +89,11 @@ def _evidence(root, step, report, originals, *, initial=False):
         raise ValueError('Positive independent engineering non-submission evidence is required')
     for name in ('settings','job','intent','outcome','stream','stderr','usage_observation'):
         own = 'observation' if name == 'usage_observation' else name
-        if (report.get('originals',{}).get(name) or {}).get('sha256') != originals[own]['sha256']:
+        if report.get('originals',{}).get(name) != originals[own]:
             raise ValueError('Engineering reconciliation does not bind the exact startup originals')
     for source in sources:
         if (not isinstance(source,dict) or not isinstance(source.get('url'),str) or not source['url']
-                or not isinstance(source.get('finding'),str) or not source['finding'].strip()
-                or not isinstance(source.get('sha256'),str) or len(source['sha256']) != 64
-                or any(char not in '0123456789abcdef' for char in source['sha256'])):
+                or not isinstance(source.get('finding'),str) or not source['finding'].strip()):
             raise ValueError('Positive source-flow evidence and its limitations must be retained')
     outcome = c.read(Path(originals['outcome']['path']))
     intent = c.read(Path(originals['intent']['path']))
@@ -115,8 +111,8 @@ def _evidence(root, step, report, originals, *, initial=False):
         raise ValueError('Startup recovery requires the original single final-A claim')
     claim_path = Path(root)/'control-ledger'/f'{marker["seq"]:06d}.json'
     claim = c.read(c.regular(claim_path))
-    if (c.digest(claim_path) != marker['sha256'] or claim.get('kind') != 'final_a_return'
-            or claim.get('step') != step or claim['anchor']['task_sha256'] != originals['job']['sha256']
+    if (c.record_ref(claim_path) != marker['record'] or claim.get('kind') != 'final_a_return'
+            or claim.get('step') != step or claim['anchor']['task_ref'] != dict(path=originals['job']['path'])
             or intent['budget_slice'] != dict(claim['anchor'],final_return=marker)):
         raise ValueError('Startup recovery changed the exact final-A authorization')
     profiles.validate_intent(settings,job,intent)
@@ -138,26 +134,24 @@ def validate(root, step, value=None):
     expected = _original_paths(root,step)
     if set(originals) != set(expected):raise ValueError('Startup successor original bindings changed')
     for name,ref in originals.items():
-        if (not isinstance(ref,dict) or set(ref) != {'path','sha256','size_bytes'}
-                or ref['path'] != str(expected[name]) or type(ref['size_bytes']) is not int or ref['size_bytes'] < 0
-                or not isinstance(ref['sha256'],str) or len(ref['sha256']) != 64
-                or any(char not in '0123456789abcdef' for char in ref['sha256'])):
+        if (not isinstance(ref,dict) or set(ref) != {'path','size_bytes'}
+                or ref['path'] != str(expected[name]) or type(ref['size_bytes']) is not int or ref['size_bytes'] < 0):
             raise ValueError('Startup successor original declaration changed')
         if name in {'settings','job','intent','schema','assignment'}:_check(ref)
     report = c.read(_check(value['reconciliation']))
-    if value['native_program'].get('sha256')!=_native_attribution(report)['postcall_sha256']:
+    if value['native_program']!=_native_attribution(report)['postcall_ref']:
         raise ValueError('Native source attribution differs from its accepted engineering evidence')
     intent = c.read(Path(originals['intent']['path']))
     marker = (intent.get('budget_slice') or {}).get('final_return')
-    if (not isinstance(marker,dict) or set(marker) != {'seq','sha256'} or type(marker['seq']) is not int
+    if (not isinstance(marker,dict) or set(marker) != {'seq','record'} or type(marker['seq']) is not int
             or marker['seq'] <= 0):raise ValueError('Startup successor lost its original final claim')
     claim_path = root/'control-ledger'/f'{marker["seq"]:06d}.json'
     claim = c.read(c.regular(claim_path))
     job = c.read(Path(originals['job']['path']))
-    if (c.digest(claim_path) != marker['sha256'] or claim.get('kind') != 'final_a_return'
+    if (c.record_ref(claim_path) != marker['record'] or claim.get('kind') != 'final_a_return'
             or claim.get('step') != step or job['role'] != 'A' or job.get('formal_review') is not None
-            or 'attempt' in intent or intent.get('task_sha256') != originals['job']['sha256']
-            or claim['anchor']['task_sha256'] != originals['job']['sha256']
+            or 'attempt' in intent or intent.get('task_ref') != dict(path=originals['job']['path'])
+            or claim['anchor']['task_ref'] != dict(path=originals['job']['path'])
             or intent['budget_slice'] != dict(claim['anchor'],final_return=marker)):
         raise ValueError('Startup successor changed its original final claim')
     profiles.validate_intent(_bound_settings(originals),job,intent)
@@ -240,9 +234,9 @@ def review_contract(root, policy, current):
 
 def original_proof(root, step, value=None):
     value = validate(root,step,value)
-    return {'native-intent.json':value['originals']['intent']['sha256'],
-            'native-outcome.json':value['originals']['outcome']['sha256'], 'usage.json':None,
-            'startup_reconciliation':c.digest(path(root,step))}
+    return {'native-intent.json':dict(path=value['originals']['intent']['path']),
+            'native-outcome.json':dict(path=value['originals']['outcome']['path']), 'usage.json':None,
+            'startup_reconciliation':c.record_ref(path(root,step))}
 
 
 def validate_intent(root, job, intent):
@@ -251,8 +245,8 @@ def validate_intent(root, job, intent):
     if (intent.get('attempt') != 1 or intent.get('continuation_kind') != 'startup_successor'
             or intent.get('context_mode') != 'new_context' or 'session' in intent
             or intent.get('startup_recovery') != _ref(path(root,job['step']))
-            or intent.get('step') != job['step'] or intent.get('task_sha256') != value['originals']['job']['sha256']
-            or intent.get('root_intent_sha256') != value['originals']['intent']['sha256']
+            or intent.get('step') != job['step'] or intent.get('task_ref') != dict(path=value['originals']['job']['path'])
+            or intent.get('root_intent_ref') != dict(path=value['originals']['intent']['path'])
             or intent.get('previous') != original_proof(root,job['step'],value)
             or intent.get('budget_slice') != original['budget_slice']
             or intent.get('native_profile') != value['native_profile']
@@ -280,7 +274,7 @@ def _admission(root, step, value):
             raise ValueError('Original finite final-A time or control-step authorization is exhausted')
 
 
-def start(root, step, *, reconciliation, reconciliation_sha256, native_home, authorization_statement):
+def start(root, step, *, reconciliation, reconciliation_ref, native_home, authorization_statement):
     """Explicit supported entry; subsequent calls collect only the same attempt."""
     from . import budget,execution,native,runtime
     from .controller import _writer,_inactive_on_error,_run
@@ -290,18 +284,18 @@ def start(root, step, *, reconciliation, reconciliation_sha256, native_home, aut
         permit_path = path(root,step)
         if permit_path.exists():
             value = validate(root,step)
-            if (value['reconciliation']['sha256'] != reconciliation_sha256 or value['native_home'] != str(Path(native_home).resolve())
+            if (value['reconciliation_input'] != reconciliation_ref or value['native_home'] != str(Path(native_home).resolve())
                     or value['authorization_statement'] != authorization_statement):
                 raise ValueError('The accepted startup successor authorization cannot be replaced')
         else:
             source = c.regular(Path(reconciliation).resolve())
-            if c.digest(source) != reconciliation_sha256:raise ValueError('Exact engineering reconciliation hash is required')
+            if c.file_ref(source) != reconciliation_ref:raise ValueError('Exact engineering reconciliation reference is required')
             originals = _originals(root,step)
             report = c.read(source)
             marker = _evidence(root,step,report,originals,initial=True)
             for name in ('runner','native'):
                 identity = c.read(Path(originals[name]['path']))
-                if runtime.process_matches(identity,originals['job']['sha256']):
+                if runtime.process_matches(identity,dict(path=originals['job']['path'])):
                     raise ValueError('Original startup writer is still live')
             settings = configuration_updates.for_step(root, step)
             program = shutil.which(settings['native_launcher_argv'][0])
@@ -309,8 +303,7 @@ def start(root, step, *, reconciliation, reconciliation_sha256, native_home, aut
             if Path(program).resolve().name == 'codex.js':
                 from .native_execution import _native_program
                 program = _native_program(settings['native_launcher_argv'])
-            program_ref = dict(path=str(Path(program).resolve()),
-                sha256=_native_attribution(report)['postcall_sha256'])
+            program_ref = dict(path=str(Path(program).resolve()))
             home = Path(native_home).resolve()
             if not home.is_dir() or not os.access(home,os.W_OK):raise ValueError('Explicit original writable native home is required')
             evidence = permit_path.parent/f'{step:03d}-reconciliation.json'
@@ -321,7 +314,7 @@ def start(root, step, *, reconciliation, reconciliation_sha256, native_home, aut
                 evidence.chmod(0o400)
             original_job = c.read(Path(originals['job']['path']))
             value = dict(version=1,scope='first_model_submission_after_reconciled_startup',root=str(root),step=step,
-                successor_attempt=1,originals=originals,reconciliation=_ref(evidence),final_return=marker,
+                successor_attempt=1,originals=originals,reconciliation=_ref(evidence),reconciliation_input=reconciliation_ref,final_return=marker,
                 native_profile=profiles.for_job(settings,original_job),
                 **({'skill_binding':original_job['skill_binding']} if 'skill_binding' in original_job else {}),
                 native_home=str(home),
@@ -342,9 +335,9 @@ def start(root, step, *, reconciliation, reconciliation_sha256, native_home, aut
             _admission(root,step,value)
             original = c.read(Path(value['originals']['intent']['path']))
             intent = dict(step=step,attempt=1,continuation_kind='startup_successor',context_mode='new_context',
-                task_sha256=value['originals']['job']['sha256'],native_profile=value['native_profile'],
+                task_ref=dict(path=value['originals']['job']['path']),native_profile=value['native_profile'],
                 **({'skill_binding':value['skill_binding']} if 'skill_binding' in value else {}),
-                root_intent_sha256=value['originals']['intent']['sha256'],previous=original_proof(root,step,value),
+                root_intent_ref=dict(path=value['originals']['intent']['path']),previous=original_proof(root,step,value),
                 startup_recovery=_ref(permit_path),budget_slice=original['budget_slice'])
             validate_intent(root,job,intent)
             budget.transition(root,'advance','explicit_native_startup_successor')
@@ -394,8 +387,8 @@ def _collection_report(root, original, report):
     if len(prefix) != action['seq'] or any(ref != _ref(Path(root)/'control-ledger'/f'{number:06d}.json')
             for number,ref in enumerate(prefix,1)):
         raise ValueError('Delivery reconciliation changed its exact accepted ledger prefix')
-    decision = dict(step=step,job_sha256=refs['job']['sha256'],raw_sha256=refs['successor_scientific_raw']['sha256'],
-        seal_sha256=refs['origin_scientific_seal']['sha256'])
+    decision = dict(step=step,job_ref=dict(path=refs['job']['path']),raw_ref=refs['successor_scientific_raw'],
+        seal_ref=dict(path=refs['origin_scientific_seal']['path']))
     if (action.get('kind') != 'action_intent' or action.get('action_kind') != 'submit'
             or action.get('final_return') != original['final_return'] or action.get('decision') != decision
             or action['binding']['decision'] != decision or action['binding']['operation_id'] != action['operation_id']
@@ -404,7 +397,7 @@ def _collection_report(root, original, report):
         raise ValueError('Only the exact accepted original delivery operation can be collected')
     outcome,meter = c.read(current/'native-outcome.json'),c.read(current/'usage.json')
     if (outcome.get('returncode') != 0 or outcome.get('stop_reason') or outcome.get('cleanup') != 'observed_group_cleaned'
-            or outcome.get('raw_sha256') != decision['raw_sha256']
+            or outcome.get('raw_ref') != decision['raw_ref']
             or outcome.get('metering',{}).get('coverage') != 'terminal'
             or any(type(meter.get(key)) is not int or meter[key] < 0 for key in ('input_tokens','cached_input_tokens','output_tokens'))):
         raise ValueError('Collection requires the existing sealed, known-terminal final A')
@@ -436,7 +429,7 @@ def _collection_binding(root, original):
     if (action.get('kind') != 'action_intent' or action.get('action_kind') != 'submit'
             or action.get('final_return') != original['final_return']
             or action.get('decision',{}).get('step') != original['step']
-            or action['decision'].get('job_sha256') != original['originals']['job']['sha256']
+            or action['decision'].get('job_ref') != dict(path=original['originals']['job']['path'])
             or action['binding'].get('decision') != action['decision'] or action['binding'].get('operation_id') != action['operation_id']
             or receipt.get('limits') != dict(max_seconds=action['max_seconds'],max_invocations=1,native_dispatches=0)
             or receipt.get('action_id') != action['action_id'] or receipt.get('operation_id') != action['operation_id']
@@ -467,7 +460,7 @@ def collection_dispatch(root, intent):
     return receipt
 
 
-def collect_delivery(root, step, *, reconciliation, reconciliation_sha256, authorization_statement):
+def collect_delivery(root, step, *, reconciliation, reconciliation_ref, authorization_statement):
     """Host delivery only. Never enter generic run or any native dispatch path."""
     from . import budget,delivery,correction,controller
     root = Path(root).resolve()
@@ -477,11 +470,11 @@ def collect_delivery(root, step, *, reconciliation, reconciliation_sha256, autho
         existed = file.exists()
         if existed:
             value = _collection_binding(root,original)
-            if value['reconciliation']['sha256'] != reconciliation_sha256 or value['authorization_statement'] != authorization_statement:
+            if value['reconciliation_input'] != reconciliation_ref or value['authorization_statement'] != authorization_statement:
                 raise ValueError('The collector-only authorization cannot be replaced')
         else:
             source = c.regular(Path(reconciliation).resolve())
-            if c.digest(source) != reconciliation_sha256:raise ValueError('Exact delivery reconciliation hash is required')
+            if c.file_ref(source) != reconciliation_ref:raise ValueError('Exact delivery reconciliation reference is required')
             action = _collection_report(root,original,c.read(source))
             evidence = file.with_name(f'{step:03d}-collection-reconciliation.json')
             if evidence.exists() and evidence.read_bytes() != source.read_bytes():raise ValueError('Original delivery evidence cannot be replaced')
@@ -489,7 +482,7 @@ def collect_delivery(root, step, *, reconciliation, reconciliation_sha256, autho
                 with evidence.open('xb') as stream:stream.write(source.read_bytes())
                 evidence.chmod(0o400)
             value = dict(version=1,scope='sealed_final_a_original_delivery_only',root=str(root),step=step,
-                startup_permit=_ref(path(root,step)),reconciliation=_ref(evidence),
+                startup_permit=_ref(path(root,step)),reconciliation=_ref(evidence),reconciliation_input=reconciliation_ref,
                 action_id=action['action_id'],operation_id=action['operation_id'],
                 limits=dict(max_seconds=action['max_seconds'],max_invocations=1,native_dispatches=0),
                 boot_id=c.read(root/'control-ledger'/f'{original["final_return"]["seq"]:06d}.json')['anchor']['boot_id'],

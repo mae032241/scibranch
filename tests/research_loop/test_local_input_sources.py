@@ -23,7 +23,7 @@ def local_scene(tmp_path, monkeypatch, execution_registry):
     controller.prepare(root,goal,public,[str(launcher)],max_tokens=4000,max_seconds=120,max_steps=5,
         model='fixture',reasoning_effort='high',search_policy=None,experiment_mode='local',node_budget_mode='soft',
         execution_config=dict(executor='local_execution:command',configuration=options),
-        formal_review_policy={'version':1},source_restrictions=[dict(source=str(goal),sha256=c.digest(goal),restriction='clear')])
+        formal_review_policy={'version':1},source_restrictions=[dict(source=str(goal),restriction='clear')])
     original_seal=c.seal_result
 
     def seal(root,step):
@@ -41,7 +41,7 @@ def local_scene(tmp_path, monkeypatch, execution_registry):
     code='from pathlib import Path\nPath("artifacts/value.txt").write_text(Path("value.txt").read_text())\n'
     finish(root,1,'H',[],action='experiment',files={'base/run.py':code,'base/value.txt':'42'})
     job=c.build_job(root,2,'W',[1]);work=c.workspace(root,2);record=c.host_record(work)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json')))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json')))
     path=work/'work/experiment-config.json'
     config=e.configure(root,2,'local_execution:command',options,path)
     return root,job,config,path
@@ -86,10 +86,10 @@ def test_public_local_inputs_authoring_and_unselected_contributors_reach_exact_r
     assert back['kind']=='formal_review'
     assert q._read(root,back['request'])['subject']['material']==material
     c.build_job(root,4,role,parents,instruction,back);review_record=c.host_record(c.workspace(root,4))
-    c.write(review_record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/004.json')))
+    c.write(review_record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/004.json')))
     c.write(review_record/'science-output.json',dict(verdict='pass',summary='Exact Local fixture',scientific_result='Declared input/author coverage only.',limitations=['Synthetic native identities; two tiny local processes.']))
     c.write(review_record/'usage.json',dict(input_tokens=1,cached_input_tokens=0,output_tokens=1))
-    c.write(review_record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_sha256=c.digest(review_record/'science-output.json')))
+    c.write(review_record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_ref=c.file_ref(review_record/'science-output.json')))
     c.seal_result(root,4)
     verdict=q._read(root,c.read(review_record/'result-identity.json')['formal_review'])
     assert verdict['status']=='passed' and verdict['independence']=='independent' and verdict['subject']['material']==material
@@ -123,7 +123,7 @@ def test_local_source_contract_unknown_originals_and_unknown_execution_do_not_up
     with pytest.raises(q.IntegrityError,match='unique frozen source capability'):
         inputs.validate_local_input_sources(root,job,missing)
     outside=tmp_path/'external';outside.mkdir();source=outside/'run.py';source.write_text('print("external")\n')
-    descriptor=e.LocalFileDescriptor(name='outside',local_path=str(source),sha256=c.digest(source),size_bytes=source.stat().st_size,media_type='text/x-python')
+    descriptor=e.LocalFileDescriptor(name='outside',local_path=str(source),size_bytes=source.stat().st_size,media_type='text/x-python')
     adapter=e.load(config,path=path);metadata=adapter.acceptance_metadata(descriptor,command_options=dict(experiment_directory=str(outside)))
     view=adapter.input_sources(descriptor,metadata)
     assert view['files']==[dict(name='run.py',origin=dict(kind='unknown'))]

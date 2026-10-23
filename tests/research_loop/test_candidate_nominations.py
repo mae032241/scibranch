@@ -19,7 +19,7 @@ def accepted_worker(root,tmp_path):
     job=c.build_job(root,2,'W',[1]);record=execution.record(root,2)
     node_anchor=budget.accept_node(root,job)
     anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,job))
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json'),**anchor))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),**anchor))
     config=experiments.configure(root,2,'local_execution:command',dict(run_argv=[sys.executable]),tmp_path/'config-2.json')
     return job,config
 
@@ -172,9 +172,9 @@ def test_same_node_interface_identity_does_not_read_execution_results(tmp_path,e
     root=prepare(tmp_path);h(root,labels=('P',))
     _,config=accepted_worker(root,tmp_path);origin=execution.origin(root,2)
     later=origin/'continuations/001';later.mkdir(parents=True)
-    c.write(later/'native-intent.json',dict(attempt=1,task_sha256=c.digest(root/'jobs/002.json'),
-        root_intent_sha256=c.digest(origin/'native-intent.json'),
-        previous={'native-intent.json':c.digest(origin/'native-intent.json')}))
+    c.write(later/'native-intent.json',dict(attempt=1,task_ref=c.record_ref(root/'jobs/002.json'),
+        root_intent_ref=c.record_ref(origin/'native-intent.json'),
+        previous={'native-intent.json':c.record_ref(origin/'native-intent.json')}))
     c.write(later/'experiment-config.json',c.read(origin/'experiment-config.json'))
     for directory in (origin,later):
         for name in ('native-outcome.json','science-output.json','usage.json'):
@@ -196,7 +196,7 @@ def test_same_node_interface_identity_does_not_read_execution_results(tmp_path,e
         wrong=dict(accepted,scope=dict(config['scope'],role='A'))
         with pytest.raises(history.ObserverIntegrityError,match='differs from frozen'):
             history._execution_interface(root,wrong)
-    damaged=c.read(later/'native-intent.json');damaged['root_intent_sha256']='0'*64
+    damaged=c.read(later/'native-intent.json');damaged['root_intent_ref']='0'*64
     c.write(later/'native-intent.json',damaged)
     with pytest.raises(ValueError,match='continuation identity changed'):
         history._execution_interface(root,accepted)

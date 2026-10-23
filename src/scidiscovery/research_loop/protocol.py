@@ -6,7 +6,7 @@ is compatibility information, never permission or scientific qualification.
 from pathlib import Path
 
 
-CURRENT = 25
+CURRENT = 26
 
 
 class UnsupportedProtocol(ValueError):
@@ -78,11 +78,11 @@ def stage_scope(root,job):
         raise ValueError('Scientific job requires its canonical original path')
     if c.read(c.regular(path))!=job:
         raise ValueError('Scientific job differs from its frozen original')
-    digest=c.digest(path)
-    # Attempt zero's execution identity is the original job hash, including when
+    reference=c.record_ref(path)
+    # Attempt zero's execution identity is the original job reference, including when
     # later native attempts exist. Scope identity must not load their policies.
     return dict(step=job['step'],role=job['role'],handoff_protocol=job['handoff_protocol'],
-        job_sha256=digest,execution_key=digest,
+        job_ref=reference,execution_key=reference,
         mechanism_ref=(None if (job.get('search') or {}).get('breadth') is not None
             else ((job.get('search') or {}).get('focus') or {}).get('mechanism_ref')))
 
@@ -105,9 +105,9 @@ def archive_status(root):
             attempt=(identity.get('execution_ref') or {}).get('attempt',0)
             if type(attempt) is not int or attempt<0:raise ValueError('Preserved native reference is malformed')
             terminal=record/'continuations'/f'{attempt:03d}' if attempt else record
-            if (c.digest(c.regular(path))!=identity['job_sha256']
-                    or c.digest(c.regular(record/'result.json'))!=identity['sha256']
-                    or c.digest(c.regular(terminal/'science-output.json',limit=None))!=identity['raw_sha256']):
+            if (c.record_ref(c.regular(path))!=identity['job_ref']
+                    or c.file_ref(c.regular(record/'result.json'))!=identity['result_ref']
+                    or c.file_ref(c.regular(terminal/'science-output.json',limit=None))!=identity['raw_ref']):
                 raise ValueError('Preserved scientific originals changed')
             state='seal_present_originals_verified'
         elif (record/'native-outcome.json').exists():state='native_outcome_unsealed'

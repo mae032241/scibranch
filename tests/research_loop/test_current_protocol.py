@@ -37,12 +37,12 @@ def archived_job(root, step, *, sealed=False):
     record = c.host_record(c.workspace(root, step))
     record.mkdir(parents=True, exist_ok=True)
     if sealed:
-        c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs' / f'{step:03d}.json')))
+        c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json')))
         c.write(record / 'science-output.json', dict(legacy_scientific_text='Preserved original; qualification is not reinterpreted.'))
         c.write(record / 'result.json', dict(legacy_result='Preserved original scientific envelope.'))
         c.write(record / 'usage.json', dict(input_tokens=10, cached_input_tokens=3, output_tokens=4))
-        c.write(record / 'result-identity.json', dict(job_sha256=c.digest(root / 'jobs' / f'{step:03d}.json'),
-            sha256=c.digest(record / 'result.json'), raw_sha256=c.digest(record / 'science-output.json')))
+        c.write(record / 'result-identity.json', dict(job_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json'),
+             result_ref=c.file_ref(record / 'result.json'), raw_ref=c.file_ref(record / 'science-output.json')))
     return job, record
 
 
@@ -53,7 +53,7 @@ def archive(tmp_path):
     settings = dict(handoff_protocol=13, goal_id='archived-original', max_steps=600,
                     objective='Keep original scientific limitations.', max_tokens=1000, max_seconds=1000)
     c.write(root / 'settings.json', settings)
-    c.write(root / 'settings-identity.json', dict(sha256=c.digest(root / 'settings.json')))
+    c.write(root / 'settings-identity.json', dict(path='settings.json'))
     job, record = archived_job(root, 1, sealed=True)
     c.write(root / 'pause.request', dict(reason='preserved_operator_pause'))
     c.write(root / 'host-history/pages/0001.json', dict(legacy_page='Retained unchanged.'))
@@ -84,7 +84,7 @@ def test_current_instance_cannot_accept_old_retained_job_from_current_caller_cop
     settings = c.settings(root)
     settings['handoff_protocol'] = protocol.CURRENT
     c.write(root / 'settings.json', settings)
-    c.write(root / 'settings-identity.json', dict(sha256=c.digest(root / 'settings.json')))
+    c.write(root / 'settings-identity.json', dict(path='settings.json'))
     caller = dict(job, handoff_protocol=protocol.CURRENT)
     before = tree(root)
     with pytest.raises(protocol.UnsupportedProtocol, match='Retained scientific job'):
@@ -209,8 +209,8 @@ def test_archive_original_tamper_is_reported_without_schema_repair_or_cache_writ
 def test_registered_scope_guard_precedes_factory_load_and_original_acceptance(archive, execution_registry, monkeypatch):
     root, job, _ = archive
     work = c.workspace(root, 1)
-    digest = c.digest(root / 'jobs/001.json')
-    scope = dict(step=1, role='W', job_sha256=digest, execution_key=digest, mechanism_ref=None,
+    digest = c.record_ref(root / 'jobs/001.json')
+    scope = dict(step=1, role='W', job_ref=digest, execution_key=digest, mechanism_ref=None,
                  handoff_protocol=protocol.CURRENT)
     current = experiments.freeze(dict(record_dir=str(work / 'work/lineage'), scope=scope,
         native_attempt=dict(number=0, execution_key=digest),
@@ -219,7 +219,7 @@ def test_registered_scope_guard_precedes_factory_load_and_original_acceptance(ar
     old = copy.deepcopy(current)
     old['scope']['handoff_protocol'] = 13
     script = work / 'public.py'
-    payload = LocalFileDescriptor(name='not-accepted', local_path=str(script), sha256=c.digest(script),
+    payload = LocalFileDescriptor(name='not-accepted', local_path=str(script),
         size_bytes=script.stat().st_size, media_type='application/octet-stream')
     def forbidden(*args, **kwargs):
         raise AssertionError('Scope protocol must be checked before loading a factory')

@@ -4,7 +4,6 @@ Native session files and scheduling eligibility are synthetic trusted fixture
 inputs. This is not real platform independence, backend or solver qualification.
 """
 import json
-import hashlib
 from pathlib import Path
 import uuid
 
@@ -43,13 +42,13 @@ class InputBackend:
         return LocalFileDescriptor.model_validate(packed.job_spec_file.model_dump(mode='json'), strict=True)
 
     def lookup_submission(self, prepared):
-        external = self.submissions.get(prepared.sha256)
+        external = self.submissions.get(prepared.local_path)
         return (external, self.state) if external is not None else None
 
     def submit(self, prepared, *, authorization):
         self.submits += 1
         external = 'native-remote-id' if self.submits == 1 else f'native-remote-id-{self.submits}'
-        self.submissions[prepared.sha256] = external
+        self.submissions[prepared.local_path] = external
         return external, self.state
 
     def status_details(self, external):
@@ -66,7 +65,7 @@ class InputBackend:
                 ('tcad_manifest', e.encoded(manifest), 'application/json')]:
             path = self.output_root / name; path.write_bytes(raw)
             result.append(LocalFileDescriptor(name=name, local_path=str(path),
-                sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw), media_type=media))
+                 size_bytes=len(raw), media_type=media))
         return tuple(result)
 
 
@@ -89,7 +88,7 @@ def chain(tmp_path, monkeypatch, request):
         formal_review_policy={'version': 1}, execution_authority_policy={'version': 1},
         execution_resource_policy=dict(version=1, allowance=dict(wall_time_seconds=100, max_storage_bytes=1000000)),
         source_restrictions=[] if getattr(request, 'param', None) == 'unknown_source' else [
-            dict(source=str(objective), sha256=c.digest(objective), restriction='clear')])
+            dict(source=str(objective), restriction='clear')])
     # Only the native scheduling/identity boundary is synthetic. Source binding,
     # compiler proofs, formal qualification rules, gate and resource ledger run
     # through their actual production functions if this test is later authorized.
@@ -111,7 +110,7 @@ def chain(tmp_path, monkeypatch, request):
     monkeypatch.setattr(c, 'seal_result', seal)
     finish(root, 1, 'H', [], action='experiment', files={'mesh.tdr': 'mesh'})
     job = c.build_job(root, 2, 'W', [1]); work = c.workspace(root, 2); record = c.host_record(work)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/002.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/002.json')))
     config_path = work / 'work/execution.json'; config = e.configure(root, 2, 'tcad_execution:tcad', options, config_path)
     author = work / 'work/implementation.json'
     c.write(author, dict(solver_kind='sdevice', files=[dict(relative_path='main.cmd', content='Solve {}\n')],
@@ -149,18 +148,18 @@ def _reviewed_execution(chain, capsys, *, opaque=False):
     role, parents, instruction, back = review.request_route(root, job, c.read(record / 'result.json'), [3])
     review_job = c.build_job(root, 4, role, parents, instruction, back)
     review_record = c.host_record(c.workspace(root, 4))
-    c.write(review_record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/004.json')))
+    c.write(review_record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/004.json')))
     c.write(review_record / 'science-output.json', dict(verdict='pass', summary='Synthetic exact review',
         scientific_result='Synthetic transport/input contract only.', limitations=['No real platform/solver qualification.']))
     c.write(review_record / 'usage.json', dict(input_tokens=1, cached_input_tokens=0, output_tokens=1))
     c.write(review_record / 'native-outcome.json', dict(returncode=0, stop_reason=None,
-        usage=native.usage(root), raw_sha256=c.digest(review_record / 'science-output.json')))
+        usage=native.usage(root), raw_ref=c.file_ref(review_record / 'science-output.json')))
     c.seal_result(root, 4)
     _, parents, instruction, back = review.return_route(root, review_job, [2, 3, 4])
     c.build_job(root, 5, 'A', parents, instruction, back)
     finish(root, 5, 'A', parents, selection=['W002-I001'])
     job = c.build_job(root, 6, 'W', [5]); work = c.workspace(root, 6); record = c.host_record(work)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/006.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/006.json')))
     active = work / 'work/execution.json'; current = e.configure(root, 6, 'tcad_execution:tcad', options, active)
     secret = root / 'operator.key'; secret.write_bytes(b'x' * 32); secret.chmod(0o600)
     authority.bind_secret(root, b'x' * 32, source=secret)
@@ -180,7 +179,7 @@ def test_public_compile_exact_review_and_existing_run_keep_native_original(chain
     assert original == e.proof(original['path'])
     assert Path(original['path']).is_relative_to(root / 'host-runtime')
     assert accepted['tcad']['payload']['local_path'] == original['path'] != str(output)
-    assert all(accepted['tcad']['payload'][key] == original[key] for key in ('sha256', 'size_bytes'))
+    assert all(accepted['tcad']['payload'][key] == original[key] for key in ('size_bytes',))
     assert c.read(output) == dict(worker_implementation_version=1, implementation_ref='I001')
     assert accepted['execution_reservation'] is not None
     assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
@@ -197,8 +196,8 @@ def test_self_contained_v2_terminal_keeps_exact_inputs_and_next_subject_review(c
     job = c.read(root / 'jobs/006.json')
     accepted = e.Records(current).accepted(call)
     assert backend.submits == 1 and backend.prepared == [{}]
-    assert 'config_sha256' not in accepted  # Local metadata is not a generic accepted field.
-    assert accepted['interface']['config_sha256'] == current['execution_interface']['config_sha256']
+    assert 'config_record' not in accepted  # Local metadata is not a generic accepted field.
+    assert accepted['interface']['config_record'] == current['execution_interface']['config_record']
     assert inputs.managed_source_contributions(root, job, accepted)['complete']
     assert history.managed_input_coverage(root, job, history.managed_calls(root, job))[0]['complete'] is False
     backend.state = 'succeeded'
@@ -225,7 +224,7 @@ def test_self_contained_v2_terminal_keeps_exact_inputs_and_next_subject_review(c
         inputs.managed_source_contributions(root,job,changed)
     changed=deepcopy(accepted);changed['input_sources']['view']['sources']['complete']=False
     assert inputs.managed_source_contributions(root,job,changed)['complete'] is False
-    changed=deepcopy(accepted);changed['interface']['config_sha256']='0'*64
+    changed=deepcopy(accepted);changed['interface']['config_record']=dict(changed=True)
     with pytest.raises(q.IntegrityError,match='original native owner'):
         inputs.managed_source_contributions(root,job,changed)
     legacy={key:value for key,value in accepted.items() if key!='input_sources'}
@@ -242,10 +241,10 @@ def test_native_observation_new_subject_review_and_next_run_use_covered_inputs(c
     from scidiscovery.research_loop import history, qualification as q
     root, backend, output, active, current, _ = _reviewed_execution(chain, capsys)
     from scidiscovery.research_loop import atomic_files
-    log=b'synthetic input-chain terminal\n';log_sha=hashlib.sha256(log).hexdigest()
+    log=b'synthetic input-chain terminal\n'
     copies=[];copy=atomic_files.copy_original
     def counted_copy(source,target,**options):
-        if options['sha256']==log_sha:copies.append(options['size_bytes'])
+        if Path(source)==backend.output_root/'tcad_log':copies.append(options['size_bytes'])
         return copy(source,target,**options)
     monkeypatch.setattr(atomic_files,'copy_original',counted_copy)
     assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
@@ -259,7 +258,7 @@ def test_native_observation_new_subject_review_and_next_run_use_covered_inputs(c
     assert backend.submits == 1 and backend.prepared == [{'mesh': b'mesh'}]
     observed=c.read(e.Records(current).directory(call)/'execution-observation.json')
     retained=next(item for item in observed['outputs'] if item['name']=='tcad_log')
-    cas=root/'host-history/objects'/log_sha
+    cas=Path(retained['path'])
     inode=(cas.stat().st_dev,cas.stat().st_ino)
     assert all((path.stat().st_dev,path.stat().st_ino)==inode
         for path in (Path(retained['path']),Path(retained['source']['path'])))
@@ -287,7 +286,7 @@ def test_native_observation_new_subject_review_and_next_run_use_covered_inputs(c
     for mutation in ('changed', 'omitted'):
         altered = deepcopy(proof['managed_input_coverage'])
         if mutation == 'changed':
-            altered[0]['client_binding']['sha256'] = 'c' * 64
+            altered[0]['client_binding']['path'] = '/wrong/compiler-client.json'
         else:
             altered[0].pop('client_binding')
         with pytest.raises(q.IntegrityError, match='no longer names its exact payload'):
@@ -301,7 +300,7 @@ def test_native_observation_new_subject_review_and_next_run_use_covered_inputs(c
     assert expected_authors <= {tuple(row) for row in review.authors(root, 6)['participants']}
     # A changed ref cannot reuse the coverage fact; no extra backend action.
     changed = deepcopy(proof['managed_input_coverage'])
-    changed[0]['binding']['request']['sha256'] = 'b' * 64
+    changed[0]['binding']['request']['path'] = '/wrong/authorization-request.json'
     with pytest.raises(q.IntegrityError, match='binding changed'):
         q._output(root, c.read(root / 'jobs/006.json'), seal, managed_coverage=changed)
     original_job = c.read(root / 'jobs/006.json')
@@ -328,12 +327,12 @@ def test_native_observation_new_subject_review_and_next_run_use_covered_inputs(c
     assert q._read(root, back['request'])['subject']['material'] == material
     reviewed = c.build_job(root, 8, role, parents, instruction, back)
     review_record = c.host_record(c.workspace(root, 8))
-    c.write(review_record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/008.json')))
+    c.write(review_record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/008.json')))
     c.write(review_record / 'science-output.json', dict(verdict='pass', summary='Exact revised fixture',
         scientific_result='Declared input/author coverage only.', limitations=['Synthetic transport and native identities.']))
     c.write(review_record / 'usage.json', dict(input_tokens=1, cached_input_tokens=0, output_tokens=1))
     c.write(review_record / 'native-outcome.json', dict(returncode=0, stop_reason=None,
-        usage=native.usage(root), raw_sha256=c.digest(review_record / 'science-output.json')))
+        usage=native.usage(root), raw_ref=c.file_ref(review_record / 'science-output.json')))
     c.seal_result(root, 8)
     qualification = q._read(root, c.read(review_record / 'result-identity.json')['formal_review'])
     assert qualification['status'] == 'passed' and qualification['independence'] == 'independent'
@@ -343,7 +342,7 @@ def test_native_observation_new_subject_review_and_next_run_use_covered_inputs(c
     assert history.resolve_implementation(root, choices[0], returning['history']['nodes']) == material
     finish(root, 9, 'A', parents, selection=choices)
     c.build_job(root, 10, 'W', [9]); later = c.host_record(c.workspace(root, 10))
-    c.write(later / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/010.json')))
+    c.write(later / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/010.json')))
     config_path = c.workspace(root, 10) / 'work/execution.json'
     e.configure(root, 10, 'tcad_execution:tcad', chain[2], config_path)
     backend.state = 'queued'
@@ -438,7 +437,7 @@ def late_call(chain,capsys,monkeypatch):
             outcome=c.read(record/'native-outcome.json');outcome['cleanup']='observed_group_cleaned'
             c.write(record/'native-outcome.json',outcome)
             owner=dict(pid=999999999,start_ticks=1,pgid=999999999,sid=999999999,
-                boot_id='synthetic-original-boot',task_sha256=execution.identity(root,step))
+                boot_id='synthetic-original-boot',task_ref=execution.identity(root,step))
             for name in ('runner-process.json','native-process.json'):c.write(record/name,owner)
         return original_seal(root,step)
 
@@ -504,7 +503,7 @@ def test_late_decision_public_resume_preserves_call_pending_prefix_and_cancelled
                 started_at=None,completed_at='2026-10-17T00:00:00Z',terminal_state='cancelled',
                 exit_code=130,error='synthetic cancellation',outputs=[])).encode(),'application/json')]:
             path=directory/name;path.write_bytes(data)
-            rows.append(LocalFileDescriptor(name=name,local_path=str(path),sha256=hashlib.sha256(data).hexdigest(),size_bytes=len(data),media_type=media))
+            rows.append(LocalFileDescriptor(name=name,local_path=str(path),size_bytes=len(data),media_type=media))
         return tuple(rows)
 
     monkeypatch.setattr(backend,'collect_with_budget',collect,raising=False)
@@ -593,19 +592,8 @@ def test_reservation_gap_renews_authority_without_second_reservation_or_refund(l
     assert budget.execution_accounting(root)['remaining']==remaining
 
 
-def test_native_compile_publishes_same_package_once_before_acceptance(chain,capsys,monkeypatch):
-    from scidiscovery.research_loop import atomic_files
+def test_native_compile_retains_distinct_originals_for_equal_package_bytes(chain,capsys):
     root,backend,options,config,config_path,author,aliases=chain
-    publications=[];copies=[]
-    publish=atomic_files.publish_bytes;copy=atomic_files.copy_original
-    def counted_publish(path,payload,**options):
-        publications.append(hashlib.sha256(payload).hexdigest())
-        return publish(path,payload,**options)
-    def counted_copy(source,path,**options):
-        copies.append(options['sha256'])
-        return copy(source,path,**options)
-    monkeypatch.setattr(atomic_files,'publish_bytes',counted_publish)
-    monkeypatch.setattr(atomic_files,'copy_original',counted_copy)
     for name in ('first','second'):
         output=c.workspace(root,2)/f'artifacts/{name}.json'
         assert e.main(['--config',str(config_path),'compile','--implementation',str(author),
@@ -614,17 +602,13 @@ def test_native_compile_publishes_same_package_once_before_acceptance(chain,caps
     compiled=[c.read(path) for path in inputs._directory(root,2).glob('*/compiler.json')]
     assert len(compiled)==2
     outputs=[row['output'] for row in compiled]
-    sha=outputs[0]['sha256']
-    assert outputs[1]['sha256']==sha and outputs[0]['path']!=outputs[1]['path']
-    cas=root/'host-history/objects'/sha
-    original_inode=(cas.stat().st_dev,cas.stat().st_ino)
-    assert all((Path(row['path']).stat().st_dev,Path(row['path']).stat().st_ino)==original_inode for row in outputs)
-    descriptor=LocalFileDescriptor(name='storage-admission-only',local_path=outputs[0]['path'],
-        sha256=sha,size_bytes=outputs[0]['size_bytes'],media_type='application/json')
-    records=e.Records(config)
-    accepted=records.accept(descriptor,{},config['execution_interface'])
+    first,second=(Path(row['path']) for row in outputs)
+    assert first!=second and first.read_bytes()==second.read_bytes()
+    assert (first.stat().st_dev,first.stat().st_ino)!=(second.stat().st_dev,second.stat().st_ino)
+    descriptor=LocalFileDescriptor(name='storage-admission-only',local_path=str(first),
+        size_bytes=outputs[0]['size_bytes'],media_type='application/json')
+    accepted=e.Records(config).accept(descriptor,{},config['execution_interface'])
     retained=Path(accepted['script']['path'])
-    assert accepted['source_script']==outputs[0]['path']
-    assert (retained.stat().st_dev,retained.stat().st_ino)==original_inode
-    assert publications.count(sha)==1 and copies.count(sha)==0
+    assert accepted['source_script']==str(first)
+    assert retained.read_bytes()==first.read_bytes()
     assert backend.submits==0

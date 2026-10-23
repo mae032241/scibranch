@@ -20,7 +20,7 @@ import time
 from . import configuration_updates
 from . import budget as control_budget, execution, runtime, search, checkpoint, profiles, backends
 from .output_repair import OutputRepairRequired
-from .contracts import (ACTIONS, actions, ROLE_INSTRUCTIONS, digest, host_record, read,
+from .contracts import (ACTIONS, actions, ROLE_INSTRUCTIONS, record_ref, file_ref, host_record, read,
                         seal_result, workspace, write)
 
 
@@ -85,7 +85,7 @@ def execute_native(root: Path, step: int, *, final_report=None):
         raise ValueError('W dispatch violates its frozen search authorization')
     anchor = search.accept(root, job) if node_anchor is None else None
     with (record / "native-intent.json").open("x") as stream:
-        json.dump(dict(step=step, task_sha256=digest(job_path), prepared_at=time.time(), **profile_binding,
+        json.dump(dict(step=step, task_ref=record_ref(job_path), prepared_at=time.time(), **profile_binding,
                        **(dict(search_slice=anchor) if anchor is not None else {}),
                        **(dict(budget_slice=node_anchor) if node_anchor is not None else {})), stream)
         stream.flush()
@@ -174,7 +174,7 @@ def run_native(root: Path, step: int, attempt=0):
         from . import startup_recovery
         startup = startup_recovery.validate_intent(root,job,intent)
         startup_recovery.require_eligibility(root,step,startup)
-    if intent.get('task_sha256') != digest(job_path):
+    if intent.get('task_ref') != record_ref(job_path):
         raise ValueError('Native execution task changed')
     profile = profiles.validate_intent(settings, job, intent)
     from . import skill_supply
@@ -228,9 +228,7 @@ def run_native(root: Path, step: int, attempt=0):
             raise ValueError('Original native session binding changed')
         with regular(Path(session['path'])).open('rb') as stream:
             header = stream.readline()
-        import hashlib
-        if hashlib.sha256(header).hexdigest() != intent['session']['header_sha256']:
-            raise ValueError('Original native session header changed')
+        continuation.validate_session_header(header, session['thread_id'], work)
         args, resume_position = backend.resume(args, profile, work, pending, schema_path, session)
     (work / 'artifacts').mkdir(exist_ok=True)
     (work / 'work').mkdir(exist_ok=True)
@@ -256,7 +254,7 @@ def run_native(root: Path, step: int, attempt=0):
               'authoring scratch and experiments/<name>/artifacts for managed outputs, with an optional brief '
               'scientific conclusion.md. Those are directories, not extra role agents. '
               + completion + links_instruction + verification
-              + 'The controller collects deliverables, records paths and hashes, validates and seals your final response. '
+              + 'The controller collects deliverables, records original paths, validates and seals your final response. '
               'Do not build attachment indexes, manifests, provenance inventories, hash lists, packaging scripts, '
               'or schema validators. Do not duplicate final responses in files or copy every model for handoff. '
               'Read configured_delivery and any delivery_requirements in science-task.json. The effect scope is a configured '
@@ -376,7 +374,7 @@ def run_native(root: Path, step: int, attempt=0):
     if intent.get('continuation_kind') == 'fragment':
         prior = execution.record(root, step, attempt - 1)
         saved = intent['fragment_checkpoint']
-        if saved['path'] != (prior / 'checkpoint.json').relative_to(root).as_posix() or saved['sha256'] != digest(prior / 'checkpoint.json'):
+        if saved['path'] != (prior / 'checkpoint.json').relative_to(root).as_posix():
             raise ValueError('Native fragment checkpoint changed before launch')
         packet = checkpoint.brief(root, job, prior)
         write(work / 'work/science-resume.json', packet)
@@ -680,14 +678,14 @@ def run_native(root: Path, step: int, attempt=0):
             cleanup='cleanup_unknown';stop='cleanup_unknown'
         if process is not None:
             try:
-                if process_id is not None and runtime.process_matches(process_id, process_id['task_sha256']):
+                if process_id is not None and runtime.process_matches(process_id, process_id['task_ref']):
                     os.killpg(process_id['pgid'], signal.SIGTERM)
             except ProcessLookupError:
                 pass
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                if process_id is not None and runtime.process_matches(process_id, process_id['task_sha256']):
+                if process_id is not None and runtime.process_matches(process_id, process_id['task_ref']):
                     os.killpg(process_id['pgid'], signal.SIGKILL)
                 process.wait(timeout=5)
             if process_id is not None:
@@ -749,7 +747,7 @@ def run_native(root: Path, step: int, attempt=0):
     if attempt and intent.get('context_mode') != 'new_context' and thread_id != intent['session']['thread_id']:
         stop = outcome['stop_reason'] = 'native_thread_changed'
     if (settings.get('resume_policy') is not None or intent.get('continuation_kind') in {'author_closeout','startup_successor'}) and process is not None:
-        outcome['execution_processes'] = {name: digest(record / name) for name in ('runner-process.json', 'native-process.json')}
+        outcome['execution_processes'] = {name: record_ref(record / name) for name in ('runner-process.json', 'native-process.json')}
     if intent.get('budget_slice') is not None:
         try:
             outcome['budget_slice'] = control_budget.node_report(root, job, intent, meter)
@@ -780,6 +778,6 @@ def run_native(root: Path, step: int, attempt=0):
         write(record / 'native-outcome.json', outcome)
         raise OutputRepairRequired('missing_output', 'Return the required final scientific JSON; the completed work and checkpoints are already retained.')
     os.replace(pending, raw)
-    outcome['raw_sha256'] = digest(raw)
+    outcome['raw_ref'] = file_ref(raw)
     write(record / 'native-outcome.json', outcome)
     return outcome

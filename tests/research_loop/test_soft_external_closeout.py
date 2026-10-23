@@ -52,14 +52,14 @@ def external_scene(tmp_path, monkeypatch, *, mode='soft', action='deliver', acco
             work = c.workspace(root, step);record = execution.record(root, step)
             for name, content in kwargs.get('files', {}).items():
                 path = work/'artifacts'/name;path.parent.mkdir(parents=True, exist_ok=True);path.write_text(content)
-            c.write(record/'native-intent.json', dict(task_sha256=c.digest(root/'jobs'/f'{step:03d}.json')))
+            c.write(record/'native-intent.json', dict(task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json')))
             payload = dict(summary='Retained W conclusion', scientific_result='Known original transport facts only',
                 limitations=['Fixture originals; no scientific qualification'], implementation_selection=None,
                 mechanism_findings=None, stage_intent='review')
             c.write(record/'science-output.json', payload)
             c.write(record/'usage.json', dict(input_tokens=accounted_worker, cached_input_tokens=2, output_tokens=0))
             c.write(record/'native-outcome.json', dict(returncode=0, stop_reason=None, usage=native.usage(root),
-                raw_sha256=c.digest(record/'science-output.json')))
+                raw_ref=c.file_ref(record/'science-output.json')))
             c.seal_result(root, step)
         monkeypatch.setattr(protocol, 'finish', retained_original)
     original_prepare = controller.prepare
@@ -154,7 +154,7 @@ def test_final_a_cannot_decline_available_originals_with_a_casual_finish(tmp_pat
 def test_absent_completion_policy_does_not_grant_overbudget_author(tmp_path, monkeypatch):
     root = external_scene(tmp_path, monkeypatch, accounted_worker=100500)
     settings = c.read(root/'settings.json');settings.pop('final_a_completion_policy')
-    c.write(root/'settings.json', settings);c.write(root/'settings-identity.json', dict(sha256=c.digest(root/'settings.json')))
+    c.write(root/'settings.json', settings);c.write(root/'settings-identity.json', dict(path='settings.json'))
     assert controller.closeout(root)['status'] == 'closeout_budget_unavailable'
     assert not (root/'jobs/003.json').exists()
     assert budget.final_a_barrier(root) is None
@@ -335,7 +335,7 @@ def test_postpreflight_budget_race_preserves_unused_w_and_returns_final_report(t
 
 
 def retain_general_closeout(root):
-    nodes = [dict(step=number, seal_sha256=c.digest(execution.record(root, number)/'result-identity.json')) for number in range(1, 4)]
+    nodes = [dict(step=number, seal_ref=c.record_ref(execution.record(root, number)/'result-identity.json')) for number in range(1, 4)]
     budget.begin_closeout(root, 3, 4, 'retained_model_closeout', delivery_sources=delivery.catalogue_sources(root, nodes), authorization_step=3)
 
 

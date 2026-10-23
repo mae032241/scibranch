@@ -21,17 +21,17 @@ def completed_without_meter(tmp_path):
         resume_policy=dict(max_attempts=1,protocol='codex_exec_resume',usage_scope='turn',output_repair=True))
     job=c.build_job(root,1,'W',[]);record=execution.origin(root,1)
     anchor=budget.accept_node(root,job)
-    intent=dict(task_sha256=c.digest(root/'jobs/001.json'),budget_slice=anchor)
+    intent=dict(task_ref=c.record_ref(root/'jobs/001.json'),budget_slice=anchor)
     c.write(record/'native-intent.json',intent)
     binding=execution.identity(root,1)
     for name in ('runner-process.json','native-process.json'):
-        c.write(record/name,dict(task_sha256=binding,boot_id=budget.clock_stamp()['boot_id'],pid=1,start_ticks=1,pgid=1,sid=1,ppid=1))
+        c.write(record/name,dict(task_ref=binding,boot_id=budget.clock_stamp()['boot_id'],pid=1,start_ticks=1,pgid=1,sid=1,ppid=1))
     outcome=dict(returncode=0,stop_reason=None,cleanup='observed_group_cleaned',
         metering=dict(source='turn.completed',coverage='unknown',reason='terminal_usage_unreported'),
         usage=dict(unknown_steps=[1],blocking_unknown_steps=[]),
-        execution_processes={name:c.digest(record/name) for name in ('runner-process.json','native-process.json')},
+        execution_processes={name:c.record_ref(record/name) for name in ('runner-process.json','native-process.json')},
         budget_slice=dict(role='W',advance_seconds=1.,input_tokens=0,cached_input_tokens=0,output_tokens=0,
-            observed_tokens=0,dispatches=1,limits=anchor['limits'],usage_observed=False),output_status='missing',raw_sha256=None)
+            observed_tokens=0,dispatches=1,limits=anchor['limits'],usage_observed=False),output_status='missing',raw_ref=None)
     c.write(record/'native-outcome.json',outcome)
     return root,job,record
 
@@ -92,7 +92,7 @@ def test_managed_original_still_waits_or_retains_unknown_without_resubmission(tm
     root,job,config,cli,call=case(tmp_path,dict(collect=False,query_state=state))
     record=execution.origin(root,2);raw=record/'science-output.json';raw.write_text('{}')
     c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,cleanup='observed_group_cleaned',
-        usage=dict(unknown_steps=[1,2],blocking_unknown_steps=[]),raw_sha256=c.digest(raw),
+        usage=dict(unknown_steps=[1,2],blocking_unknown_steps=[]),raw_ref=c.file_ref(raw),
         metering=dict(source='turn.completed',coverage='unknown',reason='terminal_usage_unreported')))
     monkeypatch.setattr(worker_delivery,'writers_stopped',lambda *args:None)
     before=(experiments.Records(config).directory(call)/'accepted.json').read_bytes()

@@ -1,5 +1,4 @@
 """Typed TCAD output views from synthetic retained originals; no native execution."""
-import hashlib
 import json
 
 import pytest
@@ -19,7 +18,7 @@ def tcad_outputs(tmp_path):
     def descriptor(name, raw, media='application/json'):
         path = original_directory / name
         path.write_bytes(raw)
-        return LocalFileDescriptor(name=name, local_path=str(path), sha256=hashlib.sha256(raw).hexdigest(),
+        return LocalFileDescriptor(name=name, local_path=str(path),
                                    size_bytes=len(raw), media_type=media)
 
     digest = 'a' * 64
@@ -27,7 +26,7 @@ def tcad_outputs(tmp_path):
     scientific_json = descriptor('scientific-data.json', e.encoded(dict(sha256='a scientifically named variable', values=[1, 2])))
     control = descriptor('native-package.json', e.encoded(dict(capability_sha256=digest)))
     log = descriptor('tcad_log', b'Solver reported convergence.\n', 'text/plain')
-    rows = [dict(name=item.name, relative_path=relative, media_type=item.media_type, sha256=item.sha256,
+    rows = [dict(name=item.name, relative_path=relative, media_type=item.media_type,
         size_bytes=item.size_bytes, output_class=classification) for item, relative, classification in (
             (native, 'curve.csv', 'solver_native'), (scientific_json, 'data.json', 'parser_derived'),
             (control, 'native-package.json', 'transport_derived'))]
@@ -40,7 +39,7 @@ def tcad_outputs(tmp_path):
     wrapper.config = dict(record_dir=str(records), execution_interface=dict(executor='tcad_execution:tcad'))
     descriptors = (native, scientific_json, control, log, manifest)
     observation = dict(outputs=[dict(descriptor=item.model_dump(mode='json'), path=item.local_path,
-        sha256=item.sha256, size_bytes=item.size_bytes) for item in descriptors])
+        size_bytes=item.size_bytes) for item in descriptors])
     return wrapper, descriptors, observation
 
 
@@ -103,10 +102,10 @@ def test_registered_historical_projection_never_builds_backend_and_separates_man
     raw = e.encoded(value)
     source = Path(manifest.local_path).with_name('another-retained-manifest')
     source.write_bytes(raw)
-    replacement = manifest.model_copy(update=dict(local_path=str(source), sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw)))
+    replacement = manifest.model_copy(update=dict(local_path=str(source), size_bytes=len(raw)))
     outputs = (*originals[:-1], replacement)
     second_observation = dict(outputs=[dict(descriptor=item.model_dump(mode='json'), path=item.local_path,
-        sha256=item.sha256, size_bytes=item.size_bytes) for item in outputs])
+        size_bytes=item.size_bytes) for item in outputs])
     second = e.scientific_outputs(config, second_observation)
     first_facts = next(item for item in first if item.name == 'tcad_execution_facts.json')
     second_facts = next(item for item in second if item.name == 'tcad_execution_facts.json')
@@ -120,24 +119,24 @@ def test_scientific_paths_distinguish_cases_with_same_output_filename(tcad_outpu
     from pathlib import Path
     wrapper, originals, _ = tcad_outputs
     relative_a, relative_b = f'caseA/{identity_component}iv.plt', f'caseB/{identity_component}iv.plt'
-    native_a = originals[0].model_copy(update=dict(name='generated_' + hashlib.sha256(relative_a.encode()).hexdigest()))
+    native_a = originals[0].model_copy(update=dict(name='generated_caseA'))
     path_b = Path(native_a.local_path).with_name('retained-caseB-output')
     raw_b = b'Synthetic distinct case B observations.\n'
     path_b.write_bytes(raw_b)
-    native_b = LocalFileDescriptor(name='generated_' + hashlib.sha256(relative_b.encode()).hexdigest(),
-        local_path=str(path_b), sha256=hashlib.sha256(raw_b).hexdigest(), size_bytes=len(raw_b), media_type='text/plain')
+    native_b = LocalFileDescriptor(name='generated_caseB',
+        local_path=str(path_b),  size_bytes=len(raw_b), media_type='text/plain')
     value = json.loads(Path(originals[-1].local_path).read_bytes())
     value['outputs'][0].update(name=native_a.name, relative_path=relative_a)
     value['outputs'].append(dict(name=native_b.name, relative_path=relative_b, media_type=native_b.media_type,
-        sha256=native_b.sha256, size_bytes=native_b.size_bytes, output_class='solver_native'))
+        size_bytes=native_b.size_bytes, output_class='solver_native'))
     raw = e.encoded(value)
     manifest_path = Path(originals[-1].local_path).with_name('retained-dual-case-manifest')
     manifest_path.write_bytes(raw)
     manifest = originals[-1].model_copy(update=dict(local_path=str(manifest_path),
-        sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw)))
+        size_bytes=len(raw)))
     descriptors = (native_a, native_b, *originals[1:-1], manifest)
     observation = dict(outputs=[dict(descriptor=item.model_dump(mode='json'), path=item.local_path,
-        sha256=item.sha256, size_bytes=item.size_bytes) for item in descriptors])
+        size_bytes=item.size_bytes) for item in descriptors])
     calls = Path(wrapper.config['record_dir']) / 'calls'
     original_tree = tree_bytes(calls)
     selected = e.scientific_outputs(wrapper.config, observation, adapter=wrapper)
@@ -164,12 +163,12 @@ def test_projection_uses_exact_managed_configuration_namespace(tcad_outputs, tmp
     job = root / 'jobs/002.json'
     job.parent.mkdir(parents=True)
     job.write_text(json.dumps(dict(step=2, worker_view_version=1)))
-    task = c.digest(job)
-    record = root / 'host-runtime/experiment-control' / task / 'records'
+    task = c.record_ref(job)
+    record = root / 'host-runtime/experiment-control/002/records'
     (record / 'calls').mkdir(parents=True)
     (record / 'calls/retained-original').write_bytes(b'Immutable permit call closure.')
     before = tree_bytes(record / 'calls')
-    config = dict(record_dir=str(record), scope=dict(step=2, job_sha256=task))
+    config = dict(record_dir=str(record), scope=dict(step=2, job_ref=task))
     selected = e.scientific_outputs(config, observation, adapter=wrapper)
     facts = next(item for item in selected if item.name == 'tcad_execution_facts.json')
     assert Path(facts.local_path).is_relative_to(record.parent / 'scientific-output-views')

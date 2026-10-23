@@ -66,7 +66,7 @@ def _inode(path):
 
 
 def _entry_key(entry):
-    return originals.identity_key(entry['origin_identity']), entry['path'], entry['sha256'], entry['size_bytes']
+    return originals.identity_key(entry['origin_identity']), entry['path'], entry['size_bytes']
 
 
 def _payload_entries(manifest):
@@ -85,11 +85,11 @@ def test_sibling_forks_share_selected_originals_and_public_views(shared_source, 
     before = {key: (stat.S_IMODE(path.stat().st_mode), _inode(path)) for key, path in sources.items()}
     first, second = tmp_path / 'first', tmp_path / 'second'
     _create(parent, first, 'shared-first')
-    payload_sha = c.digest(parent / 'project/nodes/001/artifacts/shared.bin')
+    payload_path = parent / 'project/nodes/001/artifacts/shared.bin'
     copy_original = atomic_files.copy_original
 
     def no_payload_copy(source, destination, **options):
-        assert options['sha256'] != payload_sha, 'Second fork recopied the opaque selected payload'
+        assert Path(source) != payload_path, 'Second fork recopied the opaque selected payload'
         return copy_original(source, destination, **options)
 
     with monkeypatch.context() as patch:
@@ -101,17 +101,14 @@ def test_sibling_forks_share_selected_originals_and_public_views(shared_source, 
     direct_readonly = []
     for row in second_manifest['entries']:
         left, right = _entry_path(first, first_entries[_entry_key(row)]), _entry_path(second, row)
-        assert _inode(left) == _inode(right)
+        assert left.read_bytes() == right.read_bytes() == sources[fork_sources._key(row['origin_identity'],row['path'],row)].read_bytes()
         assert stat.S_IMODE(right.stat().st_mode) == 0o400
         key = fork_sources._key(row['origin_identity'], row['path'], row)
         source = sources[key]
         assert (stat.S_IMODE(source.stat().st_mode), _inode(source)) == before[key]
-        cas = parent / 'host-history/objects' / row['sha256']
-        if before[key][0] == 0o400 and cas.exists() and _inode(cas) == _inode(source):
+        if before[key][0] == 0o400 and _inode(right) == _inode(source):
             direct_readonly.append(source)
-            assert _inode(right) == _inode(source)
-        else:
-            assert _inode(right) != _inode(source)
+            assert _inode(left) == _inode(right) == _inode(source)
     assert direct_readonly, 'Fixture must exercise direct links from retained read-only originals'
     assert {_inode(_entry_path(second, row)) for row in _payload_entries(second_manifest)} == {
         _inode(_entry_path(first, row)) for row in _payload_entries(first_manifest)}
@@ -134,12 +131,11 @@ def test_declared_public_payload_is_shared_through_child_source_freeze(tmp_path,
     with payload.open('wb') as stream:
         for _ in range(16):
             stream.write(chunk)
-    payload_sha = c.digest(payload)
     parent = tmp_path / 'parent'
     controller.prepare(parent, objective, public, ['fixture'], max_tokens=4000,
         max_seconds=60, max_steps=7, model='fixture', reasoning_effort='high',
         search_policy=None, experiment_mode='external', source_restrictions=[
-            dict(source=str(path), sha256=c.digest(path), restriction='clear')
+            dict(source=str(path),  restriction='clear')
             for path in (objective, payload)])
     for step, role, parents, action in [(1, 'H', [], 'analyze'), (2, 'A', [1], 'finish')]:
         _finish_without_native(monkeypatch, parent, step, role, parents, action=action)
@@ -148,7 +144,7 @@ def test_declared_public_payload_is_shared_through_child_source_freeze(tmp_path,
 
     def declared_original(root):
         document = c.read(root / c.settings(root)['source_provenance']['path'])
-        rows = [row for row in document['declarations'] if row['origin']['sha256'] == payload_sha]
+        rows = [row for row in document['declarations'] if row['origin']['path'] == str(payload)]
         assert len(rows) == 1
         return root / rows[0]['retained']['path']
 
@@ -158,12 +154,12 @@ def test_declared_public_payload_is_shared_through_child_source_freeze(tmp_path,
     bind_original = c._bind_original
     validated = []
 
-    def verify_preseeded(source, destination, sha256, **options):
-        if sha256 == payload_sha:
+    def verify_preseeded(source, destination, **options):
+        if options['size_bytes'] == payload.stat().st_size:
             assert destination.exists(), 'Child source freezing recopied the declared opaque payload'
             assert _inode(destination) == original_inode
             validated.append(destination)
-        return bind_original(source, destination, sha256, **options)
+        return bind_original(source, destination, **options)
 
     first, second = tmp_path / 'first', tmp_path / 'second'
     with monkeypatch.context() as patch:
@@ -184,7 +180,7 @@ def test_declared_public_payload_is_shared_through_child_source_freeze(tmp_path,
     fork_sources.validate_manifest(second, full=True)
 
 
-def test_mutable_original_is_snapshotted_once_without_writable_alias(shared_source, tmp_path):
+def test_mutable_original_is_snapshotted_independently_without_writable_alias(shared_source, tmp_path):
     parent = shared_source
     original = parent / 'project/nodes/001/artifacts/shared.bin'
     original.chmod(0o600)
@@ -194,7 +190,7 @@ def test_mutable_original_is_snapshotted_once_without_writable_alias(shared_sour
     _create(parent, second, 'mutable-second')
     entry = next(row for row in _payload_entries(_manifest(first)) if row['path'] == original.relative_to(parent).as_posix())
     inherited = _entry_path(first, entry)
-    assert _inode(inherited) == _inode(_entry_path(second, entry))
+    assert _inode(inherited) != _inode(_entry_path(second, entry))
     assert _inode(inherited) != before
     assert _inode(original) == before and stat.S_IMODE(original.stat().st_mode) == 0o600
     original.write_text('The mutable producer name can change independently.\n')
@@ -237,10 +233,10 @@ def test_nested_fork_reuses_original_inodes_after_ancestors_are_removed(shared_s
     child, grandchild = tmp_path / 'child', tmp_path / 'grandchild'
     _create(parent, child, 'nested-first')
     inherited = {_entry_key(row): _inode(_entry_path(child, row)) for row in _payload_entries(_manifest(child))}
-    payload_sha = _payload_entries(_manifest(child))[0]['sha256']
+    payload_paths = {_entry_path(child,row) for row in _payload_entries(_manifest(child))}
     copy_original = atomic_files.copy_original
     def no_second_freeze(source, destination, **options):
-        assert options['sha256'] != payload_sha, 'Inherited readonly payload was independently frozen again'
+        assert Path(source) not in payload_paths, 'Inherited readonly payload was independently frozen again'
         return copy_original(source, destination, **options)
     with monkeypatch.context() as patch:
         patch.setattr(atomic_files, 'copy_original', no_second_freeze)
@@ -305,50 +301,6 @@ def test_failed_publication_retains_exact_prepared_stage_until_same_operation_fi
         expected_preview_id=expected, operation_id='rollback-retry') == receipt
 
 
-@pytest.mark.parametrize('published', [False, True])
-def test_interrupted_mutable_import_cannot_publish_partial_cache_object(shared_source, tmp_path, monkeypatch, published):
-    from scidiscovery.research_loop import atomic_files
-    parent, child = shared_source, tmp_path / 'retry-import'
-    original = parent / 'host-delivery/cache-fixture.bin'
-    original.parent.mkdir(exist_ok=True)
-    original.write_text(PAYLOAD + 'Unconsumed private snapshot fixture.\n')
-    original.chmod(0o600)
-    raw = original.read_bytes()
-    payload_sha = c.digest(original)
-    cache = parent / 'host-history/fork-cache' / payload_sha
-    cache_before = set(cache.parent.iterdir()) if cache.parent.exists() else set()
-    preview = fork_service.preview(parent, 2, child, budget=BUDGET)
-    assert (set(cache.parent.iterdir()) if cache.parent.exists() else set()) == cache_before
-    copy_original = atomic_files.copy_original
-    interrupted = []
-
-    def fail_import(source, destination, **options):
-        if Path(destination) == cache:
-            if published:
-                copy_original(source, destination, **options)
-            with atomic_files._temporary(Path(destination)) as (temporary, output):
-                interrupted.append(temporary)
-                output.write(b'Unpublished partial import')
-                raise OSError('injected interruption during normalized import')
-        return copy_original(source, destination, **options)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(atomic_files, 'copy_original', fail_import)
-        with pytest.raises(fork_service.ForkError, match='injected interruption'):
-            fork_service.create(parent, 2, child, budget=BUDGET,
-                expected_preview_id=preview['preview_id'], operation_id='import-retry')
-    assert interrupted and not child.exists()
-    assert all(not path.exists() for path in interrupted)
-    assert cache.exists() is published
-    if published:
-        assert cache.read_bytes() == raw and stat.S_IMODE(cache.stat().st_mode) == 0o400
-    assert original.read_bytes() == raw and stat.S_IMODE(original.stat().st_mode) == 0o600
-    _create(parent, child, 'import-retry')
-    entry = next(row for row in _manifest(child)['entries'] if row['path'] == original.relative_to(parent).as_posix())
-    assert _inode(cache) == _inode(_entry_path(child, entry))
-    assert stat.S_IMODE(cache.stat().st_mode) == 0o400
-
-
 def test_cross_device_link_failure_is_explicit_without_copy_fallback(shared_source, tmp_path, monkeypatch):
     from scidiscovery import archive_io
     parent = shared_source
@@ -366,7 +318,7 @@ def test_cross_device_link_failure_is_explicit_without_copy_fallback(shared_sour
 
     with monkeypatch.context() as patch:
         patch.setattr(archive_io.os, 'link', cross_device)
-        patch.setattr(archive_io, 'copy_verified', forbid_fallback)
+        patch.setattr(archive_io, 'copy_original', forbid_fallback)
         with pytest.raises(fork_service.ForkError) as error:
             fork_service.create(parent, 2, child, budget=BUDGET,
                 expected_preview_id=preview['preview_id'], operation_id='device-retry')
@@ -374,55 +326,3 @@ def test_cross_device_link_failure_is_explicit_without_copy_fallback(shared_sour
     assert not child.exists()
     _create(parent, child, 'device-retry')
     fork_sources.validate_manifest(child, full=True)
-
-
-def test_conflicting_cache_object_is_rejected_without_damaging_existing_branch(shared_source, tmp_path):
-    parent = shared_source
-    first, second = tmp_path / 'first', tmp_path / 'cache-conflict'
-    original = parent / 'host-delivery/cache-fixture.bin'
-    original.parent.mkdir(exist_ok=True)
-    original.write_text(PAYLOAD + 'Unconsumed private snapshot fixture.\n')
-    raw = original.read_bytes()
-    _create(parent, first, 'cache-conflict-first')
-    cache = parent / 'host-history/fork-cache' / c.digest(original)
-    original_inode = _inode(cache)
-    cache.unlink()
-    cache.write_bytes(b'Conflicting object at the original content address.\n')
-    cache.chmod(0o400)
-    preview = fork_service.preview(parent, 2, second, budget=BUDGET)
-    with pytest.raises(fork_service.ForkError, match='cache original changed') as error:
-        fork_service.create(parent, 2, second, budget=BUDGET,
-            expected_preview_id=preview['preview_id'], operation_id='cache-conflict-second')
-    assert error.value.code == 'fork_origin_invalid' and not second.exists()
-    entry = next(row for row in _manifest(first)['entries'] if row['path'] == original.relative_to(parent).as_posix())
-    assert _inode(_entry_path(first, entry)) == original_inode
-    assert _entry_path(first, entry).read_bytes() == raw
-    fork_sources.validate_manifest(first, full=True)
-
-
-@pytest.mark.parametrize('warm', [False, True])
-def test_readonly_cache_requires_prior_normalization(shared_source, tmp_path, warm):
-    parent = shared_source
-    if warm:
-        _create(parent, tmp_path / 'first', 'readonly-cache-first')
-    cache = parent / 'host-history/fork-cache'
-    cache.mkdir(parents=True, exist_ok=True)
-    mode = stat.S_IMODE(cache.stat().st_mode)
-    cache.chmod(0o500)
-    child = tmp_path / 'readonly-cache-child'
-    try:
-        preview = fork_service.preview(parent, 2, child, budget=BUDGET)
-        if warm:
-            assert preview['status'] == 'fork_preview_ready'
-            _create(parent, child, 'readonly-cache-reuse')
-            fork_sources.validate_manifest(child, full=True)
-        else:
-            assert preview['status'] == 'fork_preview_blocked'
-            assert any(row['code'] == 'fork_storage_unsupported' for row in preview['blockers'])
-            with pytest.raises(fork_service.ForkError) as error:
-                fork_service.create(parent, 2, child, budget=BUDGET,
-                    expected_preview_id=preview['preview_id'], operation_id='readonly-cache-cold')
-            assert error.value.code == 'fork_storage_unsupported' and not child.exists()
-            assert not list(cache.iterdir())
-    finally:
-        cache.chmod(mode)

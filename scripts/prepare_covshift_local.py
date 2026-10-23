@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 from itertools import islice
 import json
 import os
@@ -55,14 +54,12 @@ def prepare(root, task):
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=task, text=True).strip()
     if revision != REVISION:
         raise ValueError('exact_task_revision_required')
-    subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--', *PUBLIC], cwd=task, check=True)
-    blobs, original_hashes = {}, {}
+    blobs = {}
     for name in PUBLIC:
         path = task / name
         if path.resolve() != path.absolute():
             raise ValueError('public_input_symlink_rejected')
         raw = helpers().regular_bytes(path, INPUT_BOUND)
-        original_hashes[name] = hashlib.sha256(raw).hexdigest()
         blobs[name] = sanitize_meta(raw) if name.endswith('/meta.json') else raw
     root.mkdir(exist_ok=False)
     for name, raw in blobs.items():
@@ -74,8 +71,7 @@ def prepare(root, task):
     (root / 'workspace/train.py').write_text(TRAIN)
     (root / 'host-private/canary.txt').write_text('private synthetic canary\n')
     result = dict(kind='covshift_local_engineering_preparation', task_revision=REVISION,
-        original_public_files_sha256=original_hashes,
-        public_files_sha256={n:hashlib.sha256(raw).hexdigest() for n,raw in blobs.items()},
+        public_files=list(PUBLIC), public_file_sizes={name:len(raw) for name,raw in blobs.items()},
         removed_meta_keys=sorted(PRIVATE_META_KEYS), generator_not_exported=True,
         launch_ready=False, model='not_run', hidden_scoring='not_run')
     write(root / 'prepared.json', result)
@@ -83,7 +79,8 @@ def prepare(root, task):
 
 
 def verify_public(root, manifest):
-    if set(manifest['public_files_sha256']) != set(PUBLIC) or manifest['task_revision'] != REVISION:
+    if (not isinstance(manifest['public_files'],list) or len(manifest['public_files']) != len(PUBLIC)
+            or set(manifest['public_files']) != set(PUBLIC) or manifest['task_revision'] != REVISION):
         raise ValueError('exact_public_manifest_required')
     expected = {}
     for name in PUBLIC:
@@ -98,8 +95,7 @@ def verify_public(root, manifest):
             if {p.name for p in islice(entries, len(names) + 1)} != names:
                 raise ValueError('public_whitelist_changed')
     for name in PUBLIC:
-        raw = helpers().regular_bytes(root / 'public' / name, INPUT_BOUND)
-        if hashlib.sha256(raw).hexdigest() != manifest['public_files_sha256'][name]:
+        if helpers().regular_size(root / 'public' / name, INPUT_BOUND) != manifest['public_file_sizes'][name]:
             raise ValueError('public_input_changed:' + name)
     meta = json.loads(helpers().regular_bytes(root / 'public/environment/harness/meta.json', INPUT_BOUND))
     if PRIVATE_META_KEYS.intersection(meta):
@@ -145,7 +141,7 @@ def task_smoke(private, host_netns, expected_python, expected_prefix):
 def handoff(root):
     blobs = {name:helpers().regular_bytes(root / 'output' / name, SMOKE_ARTIFACT_BOUND)
         for name in ('submitted.json', 'submitted_model.pkl')}
-    result = {name:dict(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest()) for name,raw in blobs.items()}
+    result = {name:dict(path=str((root / 'submission' / name).absolute()), size_bytes=len(raw)) for name,raw in blobs.items()}
     for name, raw in blobs.items():
         with (root / 'submission' / name).open('xb') as stream:
             stream.write(raw)

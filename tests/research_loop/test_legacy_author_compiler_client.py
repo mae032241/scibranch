@@ -13,14 +13,14 @@ def legacy_compiler(tmp_path, monkeypatch):
     c.write(root / 'jobs/002.json', job)
     job_ref = inputs.q._ref(root, root / 'jobs/002.json')
     origin = root / 'native-evidence/002'
-    c.write(origin / 'native-intent.json', dict(task_sha256=job_ref['sha256']))
+    c.write(origin / 'native-intent.json', dict(task_ref=c.record_ref(root/job_ref['path'])))
     original_intent = inputs.q._ref(root, origin / 'native-intent.json')
     package = c.workspace(root, 2) / 'artifacts/old-package.json'
-    c.write(package, dict(schema_version=3, capability_sha256='a' * 64))
+    c.write(package, dict(schema_version=3, capability_ref='a' * 64))
     original_bytes = package.read_bytes()
     identity = inputs.q._identity(package)
     material = dict(source=str(package), path='inputs/parents/002/artifacts/old-package.json',
-                    sha256=identity['sha256'], size_bytes=identity['size_bytes'])
+                    size_bytes=identity['size_bytes'])
     compiler_path = inputs._directory(root, 2) / 'original-compiler/compiler.json'
     compiler = dict(job=job_ref, native_intent=original_intent, output=identity)
     compiler_ref = inputs.q._save(root, compiler_path, compiler)
@@ -46,7 +46,7 @@ def legacy_compiler(tmp_path, monkeypatch):
     monkeypatch.setattr(author_closeout, 'require_original_eligibility',
                         lambda root_arg, value: value if value == permit else pytest.fail('Different eligibility subject'))
     public = c.workspace(root, 2) / 'artifacts/scientific-implementations/I001.json'
-    c.write(origin / 'continuations/001/native-intent.json', dict(attempt=1, task_sha256=job_ref['sha256'],
+    c.write(origin / 'continuations/001/native-intent.json', dict(attempt=1, task_ref=c.record_ref(root/job_ref['path']),
         author_closeout=permit_ref, continuation_kind='author_closeout', context_mode='new_context', worker_view_version=1))
     return root, job, compiler_ref, material, permit_ref, public, original_bytes
 
@@ -78,12 +78,12 @@ def test_legacy_client_cannot_masquerade_at_old_package_path(legacy_compiler):
 def test_legacy_client_requires_original_authorization_and_accepted_intent(legacy_compiler):
     root, job, compiler, material, permit, public, _ = legacy_compiler
     with pytest.raises(inputs.q.IntegrityError, match='exact author authorization'):
-        inputs.create_legacy_author_client(root, job, compiler, material, dict(permit, sha256='0' * 64), 1, public)
+        inputs.create_legacy_author_client(root, job, compiler, material, dict(permit, path='host-recovery/unapproved.json'), 1, public)
     assert not public.exists()
     ref = create(legacy_compiler)
     intent_path = root / 'native-evidence/002/continuations/001/native-intent.json'
     intent = c.read(intent_path)
-    intent['author_closeout'] = dict(permit, sha256='0' * 64)
+    intent['author_closeout'] = dict(permit, path='host-recovery/unapproved.json')
     c.write(intent_path, intent)
     with pytest.raises(inputs.q.IntegrityError, match='accepted author context'):
         inputs.verify_legacy_author_client(root, job, ref)
@@ -96,7 +96,7 @@ def test_legacy_client_rejects_changed_private_binding_and_original_package(lega
     if changed == 'binding':
         path = root / ref['path']
         binding = c.read(path)
-        binding['package']['sha256'] = '0' * 64
+        binding['package']['path'] = str(root/'unapproved-package.json')
         path.chmod(0o600)
         c.write(path, binding)
     else:
@@ -111,6 +111,6 @@ def test_legacy_capture_rejects_unbound_self_authored_client(legacy_compiler):
     c.write(public, dict(worker_implementation_version=1, implementation_ref='I001'))
     identity = inputs.q._identity(public)
     material = dict(source=str(public), path='inputs/parents/002/artifacts/scientific-implementations/I001.json',
-                    sha256=identity['sha256'], size_bytes=identity['size_bytes'])
+                    size_bytes=identity['size_bytes'])
     with pytest.raises(inputs.q.IntegrityError, match='exact sealed compiler provenance'):
         inputs.capture(root, job, [material])

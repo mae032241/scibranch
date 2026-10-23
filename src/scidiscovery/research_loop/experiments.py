@@ -9,7 +9,6 @@ from collections.abc import Mapping
 from contextlib import contextmanager, ExitStack
 from dataclasses import asdict
 import fcntl
-import hashlib
 import importlib.metadata
 import inspect
 import json
@@ -39,7 +38,7 @@ MAX_ASSET = 32 * 1024 * 1024
 ID = re.compile(r'[A-Za-z0-9._-]{1,128}\Z')
 RETIREMENT_KEY = 'original_submission_retirement'
 RETIREMENT_SCHEMA = 'scidiscovery.permanent-submission-retirement.v1'
-RETIREMENT_CONTRACT = dict(version=1, identity='original_prepared_sha256',
+RETIREMENT_CONTRACT = dict(version=1, identity='original_call_and_prepared_path',
     absent='permanent_not_submitted', invocation='context_manager', refunds=False)
 INPUT_SOURCES_KEY = 'managed_input_sources'
 INPUT_SOURCES_SCHEMA = 'scidiscovery.managed-input-sources.v1'
@@ -73,12 +72,12 @@ def _configuration_effect(function):
     def guarded(*args, **kwargs):
         first = args[0] if args else kwargs['config']
         config = first.config if isinstance(first, Records) else first
-        from . import contracts as c, storage_policy as storage, experiment_client, shared_originals
+        from . import contracts as c, storage_policy as storage, experiment_client
         root = experiment_client.root_for_configuration(config, allow_standalone=True)
         if root is not None:
             from . import shared_input_views
             shared_input_views.dynamic_root(root,c.workspace(root,config['scope']['step']),'retained-experiments')
-        with instance_owner.lease_for_configuration(config), c.record_writer(Path(config['record_dir'])), storage.bind(root,config.get('storage_policy')), c.verified_digests(), shared_originals.verified():
+        with instance_owner.lease_for_configuration(config), c.record_writer(Path(config['record_dir'])), storage.bind(root,config.get('storage_policy')):
             return function(*args, **kwargs)
     return guarded
 
@@ -86,12 +85,12 @@ def _configuration_effect(function):
 def record_effect(function):
     @wraps(function)
     def guarded(self,*args,**kwargs):
-        from . import contracts as c, storage_policy as storage, experiment_client, shared_originals
+        from . import contracts as c, storage_policy as storage, experiment_client
         root = experiment_client.root_for_configuration(self.config, allow_standalone=True)
         if root is not None:
             from . import shared_input_views
             shared_input_views.dynamic_root(root,c.workspace(root,self.config['scope']['step']),'retained-experiments')
-        with instance_owner.lease_for_configuration(self.config), c.record_writer(self.records.root), storage.bind(root,self.config.get('storage_policy')), c.verified_digests(), shared_originals.verified():
+        with instance_owner.lease_for_configuration(self.config), c.record_writer(self.records.root), storage.bind(root,self.config.get('storage_policy')):
             return function(self,*args,**kwargs)
     return guarded
 
@@ -170,24 +169,11 @@ def read(path, limit=None):
 
 def proof(path, limit=None, *, context=None):
     from . import contracts as c
+    if context is not None:context.remaining_seconds()
     path=c.regular(Path(path),limit=limit)
-    if context is None:return dict(path=str(path),sha256=c.digest(path),size_bytes=path.stat().st_size)
-    from . import atomic_files
-    digest=hashlib.sha256();size=0
-    with atomic_files._regular_stream(path) as stream:
-        before=os.fstat(stream.fileno())
-        while True:
-            context.remaining_seconds()
-            block=stream.read(min(1024*1024,before.st_size-size+1))
-            if not block:break
-            size+=len(block)
-            if size>before.st_size:raise IntegrityError('Execution original grew during verification')
-            digest.update(block)
-        after=os.fstat(stream.fileno())
-        if (size,before.st_size,before.st_mtime_ns)!=(before.st_size,after.st_size,after.st_mtime_ns):
-            raise IntegrityError('Execution original changed during verification')
-    context.remaining_seconds()
-    return dict(path=str(path),sha256=digest.hexdigest(),size_bytes=size)
+    value=c.file_ref(path)
+    if context is not None:context.remaining_seconds()
+    return value
 
 
 def write(path, value, *, root=None, policy=None, context=None):
@@ -314,7 +300,7 @@ def _public_capabilities(adapter):
             raise IntegrityError('Registered public capability contract is malformed')
         result.append(dict(key=item.key,kind=item.kind,schema_id=item.schema_id,
             payload_schema_version=item.payload_schema_version,media_type=item.media_type,
-            public_summary=dict(item.public_summary),sha256=hashlib.sha256(item.content).hexdigest(),size_bytes=len(item.content)))
+            public_summary=dict(item.public_summary),size_bytes=len(item.content)))
     try:encoded(result)
     except (ValueError,TypeError) as exc:
         raise IntegrityError('Registered public capability metadata is not finite JSON') from exc
@@ -393,7 +379,7 @@ def _source_projection(config, accepted):
                     material=subject['material'],client_binding=compiled[0].get('client_binding'))
                 implementation=dict(compiler['author'],path=str(root/compiler['author']['path']))
     source=declared.scientific_source(accepted,implementation=implementation)
-    if source is not None and proof(source['path'])!={key:source[key] for key in ('path','sha256','size_bytes')}:
+    if source is not None and proof(source['path'])!={key:source[key] for key in ('path','size_bytes')}:
         raise IntegrityError('Scientific source differs from its retained original')
     return source
 
@@ -458,8 +444,8 @@ def _scientific_projection_directory(config):
         # stay beside calls/ so its CAS, lock, quotas and aliases share one root.
         projection_directory=record_directory/'scientific-output-views'
     else:
-        task=c.digest(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
-        if config['scope'].get('job_sha256')!=task:
+        task=c.record_ref(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
+        if config['scope'].get('job_ref')!=task:
             raise IntegrityError('Scientific projection differs from its exact original task')
         projection_directory=root/'host-runtime/experiment-control'/task/'scientific-output-views'
     if (projection_directory.resolve()!=projection_directory
@@ -481,7 +467,7 @@ def _validated_scientific_outputs(selected, *, operation_context=None):
             raise IntegrityError('Scientific output requires distinct canonical names')
         names.add(descriptor.name)
         item=proof(descriptor.local_path,context=operation_context)
-        if item['sha256']!=descriptor.sha256 or item['size_bytes']!=descriptor.size_bytes:
+        if item['size_bytes']!=descriptor.size_bytes:
             raise IntegrityError('Scientific output original changed')
     return selected
 
@@ -510,7 +496,7 @@ def scientific_outputs(config, observation, *, adapter=None, include_logs=False,
     elif config['execution_interface'].get('result_protocol')==LOCAL_RESULT_PROTOCOL:
         def original(reference):
             actual=proof(reference['path'],context=context)
-            if any(actual[key]!=reference[key] for key in ('sha256','size_bytes')):
+            if any(actual[key]!=reference[key] for key in ('size_bytes',)):
                 raise IntegrityError('Scientific output completion original changed')
             storage.check(context)
             value=json.loads(read(Path(reference['path'])))
@@ -521,11 +507,10 @@ def scientific_outputs(config, observation, *, adapter=None, include_logs=False,
             raise IntegrityError('Scientific outputs differ from their exact completed call')
         def collected(source):
             matches=[descriptor for item,descriptor in zip(observation['outputs'],descriptors)
-                if item['source']==source and descriptor.sha256==source['sha256']
-                and descriptor.size_bytes==source['size_bytes']]
+                if item['source']==source and descriptor.size_bytes==source['size_bytes']]
             if len(matches)!=1:raise IntegrityError('Scientific output has no exact collected original')
             return matches[0]
-        selected=[collected({key:output[key] for key in ('path','sha256','size_bytes')}).model_copy(
+        selected=[collected({key:output[key] for key in ('path','size_bytes')}).model_copy(
             update={'name':output['name']}) for output in completed.get('outputs',[])]
         if include_logs:
             from . import shared_originals, scientific_log_projection, experiment_client
@@ -560,17 +545,17 @@ def scientific_outputs(config, observation, *, adapter=None, include_logs=False,
                 if len(matches)!=1:raise IntegrityError('Scientific log has no exact retained transport original')
                 descriptor=collected(matches[0])
                 def blocks():
-                    return scientific_log_projection.project(descriptor.local_path,sha256=descriptor.sha256,
-                        size_bytes=descriptor.size_bytes,replacements=replacements,context=context)
+                    return scientific_log_projection.project(descriptor.local_path,size_bytes=descriptor.size_bytes,replacements=replacements,context=context)
                 inventory.entry()
-                identity=scientific_log_projection.measure(blocks(),context=context,inventory=inventory)
                 target=target_directory/(stream+'.txt')
                 if target.is_symlink():raise IntegrityError('Scientific log projection must be an original file')
-                original=shared_originals.publish_stream(root,blocks,**identity,policy=limits,context=context)
-                shared_originals.link(original,target,**identity,root=root,policy=limits,context=context)
+                if not target.exists():
+                    original=shared_originals.publish_stream(root,blocks,policy=limits,context=context)
+                    shared_originals.link(original,target,size_bytes=original.stat().st_size,
+                        root=root,policy=limits,context=context)
                 item=proof(target,context=context)
                 selected.append(LocalFileDescriptor(name=log_name+'/'+stream+'.txt',local_path=str(target),
-                    sha256=item['sha256'],size_bytes=item['size_bytes'],media_type='text/plain'))
+                    size_bytes=item['size_bytes'],media_type='text/plain'))
         selected=tuple(selected)
     else:selected=descriptors
     return _validated_scientific_outputs(selected,operation_context=context)
@@ -590,7 +575,7 @@ def _collected_view(config, call_id, observation, adapter, *, operation_context=
     for descriptor in scientific_outputs(config,observation,adapter=adapter,include_logs=True,operation_context=context):
         inventory.entry();inventory.file(descriptor.size_bytes)
         target = shared_input_views.dynamic_root(root,work,'retained-experiments') / call_id / 'outputs' / descriptor.name
-        c._bind_original(Path(descriptor.local_path), target, descriptor.sha256, context=context, policy=config.get('storage_policy'), root=root, size_bytes=descriptor.size_bytes, source_kind='mutable')
+        c._bind_original(Path(descriptor.local_path), target, context=context, policy=config.get('storage_policy'), root=root, size_bytes=descriptor.size_bytes, source_kind='managed_frozen')
         result.append(dict(name=descriptor.name, path=str(target), media_type=descriptor.media_type,
             size_bytes=descriptor.size_bytes, retention='retained_original'))
     return dict(status='collected', call_id=call_id, outputs=result)
@@ -607,10 +592,10 @@ def freeze(config, executor, *, path=None):
     breadth.validate(value.get('breadth'))
     value.setdefault('admission',dict(version=ADMISSION_VERSION,mode='unavailable'))
     scope=value.get('scope')
-    if (not isinstance(scope,dict) or set(scope)!={'step','role','job_sha256','execution_key','mechanism_ref','handoff_protocol'}
+    if (not isinstance(scope,dict) or set(scope)!={'step','role','job_ref','execution_key','mechanism_ref','handoff_protocol'}
             or type(scope.get('step')) is not int or scope['step']<=0 or scope['role'] not in {'H','W','A','E'}
-            or any(not isinstance(scope.get(key),str) or not re.fullmatch('[0-9a-f]{64}',scope[key])
-                   for key in ('job_sha256','execution_key'))):
+            or not isinstance(scope.get('job_ref'),dict) or set(scope['job_ref'])!={'path'}
+            or not isinstance(scope.get('execution_key'),dict) or set(scope['execution_key'])!={'path'}):
         raise IntegrityError('Exact host-bound scientific execution scope required')
     value.setdefault('max_seconds',65)
     if type(value['max_seconds']) not in (int,float) or not 0<value['max_seconds']<float('inf'):
@@ -628,7 +613,7 @@ def freeze(config, executor, *, path=None):
         **(dict(projection_contract=declared.projection_contract) if declared.projection_contract is not None else {}),
         terminal_evidence=getattr(adapter,'terminal_evidence_kind','adapter_result'),
         result_protocol=result_protocol,
-        config_sha256=hashlib.sha256(encoded(body)).hexdigest(),
+        config_record=body,
         capabilities=asdict(lifecycle_capabilities(adapter)))
     if 'registered_implementation' in value or adapter.capabilities():
         value['execution_interface']['public_capabilities']=_public_capabilities(adapter)
@@ -652,7 +637,7 @@ def configure(root,step,executor,config,output):
         raise UnsupportedExecution('Preserved scientific admission is read-only; prepare a new instance')
     c._validate_inputs(root,c.workspace(root,step),job)
     record=execution.record(root,step)
-    if c.read(c.regular(record/'native-intent.json')).get('task_sha256')!=c.digest(root/'jobs'/f'{step:03d}.json'):
+    if c.read(c.regular(record/'native-intent.json')).get('task_ref')!=c.record_ref(root/'jobs'/f'{step:03d}.json'):
         raise IntegrityError('Host configuration has no exact accepted scientific task')
     native_attempt=dict(number=len(execution.records(root,step))-1,execution_key=execution.identity(root,step))
     selected=configuration_updates.for_job(root, job).get('execution_config')
@@ -700,7 +685,7 @@ def configure(root,step,executor,config,output):
     value=freeze(value,executor,path=output)
     updates=[]
     # Complete originals remain in the existing host-control namespace.
-    projection=root/'host-runtime/experiment-control'/value['scope']['job_sha256']/'interfaces'/f'{native_attempt["number"]:03d}.json'
+    projection=root/'host-runtime/experiment-control'/f'{value["scope"]["step"]:03d}'/'interfaces'/f'{native_attempt["number"]:03d}.json'
     for path in ((record/'experiment-config.json',projection) if client is not None else (Path(output),record/'experiment-config.json',projection)):
         if path.exists():
             old=c.read(c.regular(path))
@@ -760,7 +745,7 @@ def original_configuration(config,call_id):
         raise IntegrityError('Original execution native attempt is unavailable')
     from . import experiment_client
     root=experiment_client.root_for_configuration(config)
-    path=root/'host-runtime/experiment-control'/config['scope']['job_sha256']/'interfaces'/f'{attempt["number"]:03d}.json'
+    path=root/'host-runtime/experiment-control'/f'{config["scope"]["step"]:03d}'/'interfaces'/f'{attempt["number"]:03d}.json'
     original=json.loads(read(path))
     if (original.get('scope')!=config['scope'] or original.get('record_dir')!=config['record_dir']
             or original.get('native_attempt')!=attempt or original.get('execution_interface')!=accepted.get('interface')):
@@ -854,14 +839,14 @@ class Records:
             if unresolved:raise ConcurrentExecution('Original host preparation is unresolved; preserve its exact call without replay')
         inventory = storage.Inventory(self.config.get('storage_policy'),context=operation_context)
         original=proof(descriptor.local_path,context=operation_context)
-        if original['sha256']!=descriptor.sha256 or original['size_bytes']!=descriptor.size_bytes:
+        if original['size_bytes']!=descriptor.size_bytes:
             raise IntegrityError('Prepared execution input changed')
         import shutil,tempfile
         self.root.mkdir(parents=True,exist_ok=True)
         directory=Path(tempfile.mkdtemp(prefix='.prepared-',dir=self.root))
         source = directory / 'source.py'
         destination=self.root/'calls'/descriptor.name
-        source_proof=dict(path=str(destination/'source.py'),sha256=descriptor.sha256,size_bytes=descriptor.size_bytes)
+        source_proof=dict(path=str(destination/'source.py'),size_bytes=descriptor.size_bytes)
         accepted = dict(metadata, call_id=descriptor.name, scope=self.config['scope'],
             source_script=descriptor.local_path, script=source_proof,native_attempt=self.config.get('native_attempt'),
             prepared=descriptor.model_dump(mode='json'), interface=interface)
@@ -874,7 +859,7 @@ class Records:
             if not files:inventory.file(descriptor.size_bytes)
             for item in files:
                 inventory.entry();inventory.file(item['size_bytes'])
-            c._bind_original(Path(descriptor.local_path), source, descriptor.sha256, context=operation_context, root=self.storage_root(), policy=self.config.get('storage_policy'), size_bytes=descriptor.size_bytes, source_kind='mutable')
+            c._bind_original(Path(descriptor.local_path), source, context=operation_context, root=self.storage_root(), policy=self.config.get('storage_policy'), size_bytes=descriptor.size_bytes, source_kind='mutable')
             seen = set()
             for item in files:
                 name = item['name']; relative = Path(name)
@@ -883,10 +868,10 @@ class Records:
                     raise ValueError('Managed input path is not canonical')
                 seen.add(name)
                 original=proof(item['path'],context=operation_context)
-                if any(original[key]!=item[key] for key in ('sha256','size_bytes')):
+                if any(original[key]!=item[key] for key in ('size_bytes',)):
                     raise IntegrityError('Managed input changed before acceptance')
                 target=directory/'inputs'/relative
-                c._bind_original(Path(item['path']), target, item['sha256'], context=operation_context, root=self.storage_root(), policy=self.config.get('storage_policy'), size_bytes=item['size_bytes'], source_kind='mutable')
+                c._bind_original(Path(item['path']), target, context=operation_context, root=self.storage_root(), policy=self.config.get('storage_policy'), size_bytes=item['size_bytes'], source_kind='mutable')
             with self.lease():
                 if expected_calls is not None and [path.name for path in self.calls()]!=expected_calls:
                     raise ConcurrentExecution('Another original execution was accepted; query its identity')
@@ -997,8 +982,7 @@ def dispatch(config, script, *, parent=None, new=False, change=None, mechanism=N
     """Convenience input path; neutral callers may provide a descriptor directly."""
     from . import experiment_client
     source=experiment_client.payload_path(config,Path(script).absolute());item=proof(source)
-    payload=LocalFileDescriptor(name='input',local_path=str(source),sha256=item['sha256'],
-        size_bytes=item['size_bytes'],media_type='application/octet-stream')
+    payload=LocalFileDescriptor(name='input',local_path=str(source),size_bytes=item['size_bytes'],media_type='application/octet-stream')
     return dispatch_descriptor(config,payload,parent=parent,new=new,change=change,mechanism=mechanism,command_options=command_options)
 
 
@@ -1019,8 +1003,8 @@ def verify_observation(value, original, *, interface=None, context=None):
         data=original(item)
         if isinstance(data,Path):
             valid=proof(data,context=context)
-            changed=any(valid[key]!=item[key] for key in ('sha256','size_bytes'))
-        else:changed=hashlib.sha256(data).hexdigest()!=item['sha256'] or len(data)!=item['size_bytes']
+            changed=any(valid[key]!=item[key] for key in ('size_bytes',))
+        else:changed=len(data)!=item['size_bytes']
         if changed:raise IntegrityError('Execution observation original changed')
         return data
     def decoded(item):
@@ -1051,19 +1035,19 @@ def verify_observation(value, original, *, interface=None, context=None):
             raise IntegrityError('Execution observation escaped its accepted owner')
     for item in [*value['proofs'],*value['outputs']]:
         bound(item)
-        if any(item['source'][key]!=item[key] for key in ('sha256','size_bytes')):
+        if any(item['source'][key]!=item[key] for key in ('size_bytes',)):
             raise IntegrityError('Collected observation differs from its declared descriptor')
     if [item['source'] for item in value['proofs']]!=completed.get('proofs'):
         raise IntegrityError('Retained backend proofs differ from the original completion descriptors')
     for item in value['outputs']:
         descriptor=LocalFileDescriptor.model_validate(item['descriptor'])
         if (descriptor.name!=item['name'] or descriptor.local_path!=item['source']['path']
-                or descriptor.sha256!=item['sha256'] or descriptor.size_bytes!=item['size_bytes']):
+                or descriptor.size_bytes!=item['size_bytes']):
             raise IntegrityError('Retained collection differs from its original descriptor')
     source=value.get('scientific_source')
     if source is not None:
         bound(source)
-        if any(source[key]!=source['source'][key] for key in ('sha256','size_bytes')):
+        if any(source[key]!=source['source'][key] for key in ('size_bytes',)):
             raise IntegrityError('Scientific source lost its retained original')
     if 'public_result' in value:
         public=_run_view(value['public_result'])
@@ -1078,7 +1062,7 @@ def verify_observation(value, original, *, interface=None, context=None):
                 or name.as_posix()!=descriptor.name or '\\' in descriptor.name
                 or descriptor.name!=item['name'] or descriptor.local_path!=item['source']['path']
                 or any(item[key]!=descriptor.model_dump(mode='json')[key] or item['source'][key]!=item[key]
-                    for key in ('sha256','size_bytes'))):
+                    for key in ('size_bytes',))):
             raise IntegrityError('Frozen scientific output lost its exact descriptor')
         names.add(descriptor.name)
     if value['interface'].get('terminal_evidence')=='local_process':
@@ -1105,7 +1089,7 @@ def _retirement_contract(contract,capability):
             or not isinstance(contract.get('backend_protocol'),dict) or not contract['backend_protocol']):
         raise IntegrityError('Permanent retirement capability contract changed')
     raw=encoded(contract)
-    if capability.get('sha256')!=hashlib.sha256(raw).hexdigest() or capability.get('size_bytes')!=len(raw):
+    if capability.get('size_bytes')!=len(raw):
         raise IntegrityError('Permanent retirement capability bytes differ from the frozen interface')
     return contract
 
@@ -1117,10 +1101,10 @@ def verify_retirement(value, original, *, interface=None, context=None):
         if isinstance(data,Path):
             if data.resolve()!=data:raise IntegrityError('Retirement original path changed')
             actual=proof(data,context=context)
-            if any(actual[key]!=item[key] for key in ('sha256','size_bytes')):
+            if any(actual[key]!=item[key] for key in ('size_bytes',)):
                 raise IntegrityError('Retirement original changed')
             data=data.read_bytes()
-        if hashlib.sha256(data).hexdigest()!=item['sha256'] or len(data)!=item['size_bytes']:
+        if len(data)!=item['size_bytes']:
             raise IntegrityError('Retirement original changed')
         return data
     def decoded(item):return json.loads(bound(item))
@@ -1139,10 +1123,10 @@ def verify_retirement(value, original, *, interface=None, context=None):
     prepared=value['prepared']
     if (accepted['script'].get('path')!=str(Path(value['accepted']['path']).parent/'source.py')
             or prepared.get('name')!=value['call_id']
-            or (accepted['script'].get('sha256'),accepted['script'].get('size_bytes'))!=(prepared['sha256'],prepared['size_bytes'])):
+            or accepted['script'].get('size_bytes')!=prepared['size_bytes']):
         raise IntegrityError('Retirement prepared copy differs from its original descriptor')
     bound(accepted['script'])
-    bound(dict(path=prepared['local_path'],sha256=prepared['sha256'],size_bytes=prepared['size_bytes']))
+    bound(dict(path=prepared['local_path'],size_bytes=prepared['size_bytes']))
     decoded(value['authority'])
     if value['version']==1:
         declared,_=registration(selected['executor'])
@@ -1171,7 +1155,7 @@ def retirement_originals(value,accepted):
     prepared=value['prepared']
     result=([value[key] for key in ('accepted','authority','request','response','protocol')]
         if value['version']==1 else [value['accepted'],value['authority'],value['assertion'],*value['native_originals']])
-    result.extend([accepted['script'],dict(path=prepared['local_path'],sha256=prepared['sha256'],size_bytes=prepared['size_bytes'])])
+    result.extend([accepted['script'],dict(path=prepared['local_path'],size_bytes=prepared['size_bytes'])])
     if value.get('dispatch_intent') is not None:result.append(value['dispatch_intent'])
     return result
 
@@ -1278,26 +1262,24 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
     def retain(item):
         from . import contracts as c
         source=c.regular(Path(item['path']));info=source.stat()
-        key=(str(source),info.st_dev,info.st_ino,info.st_mtime_ns,info.st_ctime_ns,
-            item['sha256'],item['size_bytes'])
+        key=(str(source),info.st_dev,info.st_ino,info.st_mtime_ns,item['size_bytes'])
         if key in retained:return dict(retained[key],source=item)
         original=proof(source,context=operation_context)
-        if any(original[field]!=item[field] for field in ('sha256','size_bytes')):
+        if original['size_bytes']!=item['size_bytes']:
             raise IntegrityError('Execution observation original changed during collection')
-        target=directory/'observed-originals'/item['sha256']
-        # Host record publishers close and fsync these exact immutable slots.
-        # Arbitrary adapter/Worker outputs remain mutable until their first freeze.
-        managed = source in {directory/name for name in
-            ('accepted.json','source.py','submission.json')}
-        frozen=shared_originals.retain(storage_root,source,sha256=item['sha256'],size_bytes=item['size_bytes'],
-            source_kind='managed_frozen' if managed else 'mutable',
-            context=operation_context,policy=config.get('storage_policy'))
-        shared_originals.link(frozen,target,sha256=item['sha256'],size_bytes=item['size_bytes'],context=operation_context,
-            root=storage_root,policy=config.get('storage_policy'))
-        result=dict(path=str(target),sha256=item['sha256'],size_bytes=item['size_bytes'])
-        info=source.stat()
-        key=(str(source),info.st_dev,info.st_ino,info.st_mtime_ns,info.st_ctime_ns,
-            item['sha256'],item['size_bytes'])
+        target=directory/'observed-originals'/f'{len(retained):06d}'
+        # Read-only originals already published inside this private call share
+        # their inode; external adapter outputs freeze independently once.
+        managed = source.is_relative_to(directory) and source.stat().st_mode & 0o777 == 0o400
+        if not target.exists():
+            frozen=shared_originals.retain(storage_root,source,size_bytes=item['size_bytes'],
+                source_kind='managed_frozen' if managed else 'mutable',
+                context=operation_context,policy=config.get('storage_policy'))
+            shared_originals.link(frozen,target,size_bytes=item['size_bytes'],context=operation_context,
+                root=storage_root,policy=config.get('storage_policy'))
+        result=proof(target,context=operation_context)
+        if result['size_bytes']!=item['size_bytes']:
+            raise IntegrityError('Retained observation original exceeds its declared bound')
         retained[key]=result
         return dict(result,source=item)
     proofs=[retain(item) for item in proofs]
@@ -1312,7 +1294,7 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
                 raise IntegrityError('Collected observation requires distinct canonical names')
             names.add(descriptor.name)
             item=proof(descriptor.local_path,context=operation_context)
-            if item['sha256']!=descriptor.sha256 or item['size_bytes']!=descriptor.size_bytes:
+            if item['size_bytes']!=descriptor.size_bytes:
                 raise IntegrityError('Collected observation original changed')
             outputs.append(dict(retain(item),name=descriptor.name,descriptor=descriptor.model_dump(mode='json')))
     value=dict(version=OBSERVATION_VERSION,call_id=call_id,scope=accepted['scope'],
@@ -1332,7 +1314,7 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
     value['scientific_source']=retain(source) if source is not None else None
     value['public_result']=_run_view(adapter.public_result(result))
     selected=scientific_outputs(config,value,adapter=adapter,operation_context=operation_context)
-    value['scientific_outputs']=[dict(retain(dict(path=item.local_path,sha256=item.sha256,size_bytes=item.size_bytes)),
+    value['scientific_outputs']=[dict(retain(dict(path=item.local_path,size_bytes=item.size_bytes)),
         name=item.name,descriptor=item.model_dump(mode='json')) for item in selected]
     verify_observation(value,lambda item:Path(item['path']),context=operation_context)
     with records.lease('observation-'+call_id+'.lock'):
@@ -1426,7 +1408,7 @@ def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None
             method=getattr(adapter,'input_sources',None)
             metadata['input_sources']=dict(contract=dict(key=item.key,kind=item.kind,schema_id=item.schema_id,
                 payload_schema_version=item.payload_schema_version,media_type=item.media_type,
-                content=item.content.decode('utf-8'),sha256=hashlib.sha256(item.content).hexdigest(),size_bytes=len(item.content)),
+                content=item.content.decode('utf-8'),size_bytes=len(item.content)),
                 view=method(prepared,metadata) if callable(method) else None)
     from . import replay_check
     metadata['engineering_check'] = replay_check.acceptance(config, adapter)

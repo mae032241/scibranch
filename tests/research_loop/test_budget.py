@@ -33,7 +33,7 @@ def original_intent(root):
     contracts.build_job(root, 1, 'H', [])
     record = contracts.host_record(contracts.workspace(root, 1))
     contracts.write(record / 'native-intent.json', dict(step=1,
-        task_sha256=contracts.digest(root / 'jobs/001.json')))
+        task_ref=contracts.record_ref(root / 'jobs/001.json')))
     return record
 
 
@@ -100,7 +100,7 @@ def test_closed_closeout_funds_use_recorded_limits_only_for_queries(clocked, mon
     settings['node_budget_policy'] = budget.node_policy({
         role: dict(max_observed_tokens=10, max_seconds=2) for role in 'HWAE'})
     contracts.write(root / 'settings.json', settings)
-    contracts.write(root / 'settings-identity.json', dict(sha256=contracts.digest(root / 'settings.json')))
+    contracts.write(root / 'settings-identity.json', dict(path='settings.json'))
     transition(root, 'advance')
     budget.begin_closeout(root, 0, 1, 'A retained pending closeout', final_only=final_only)
     now[0] = 105.
@@ -130,7 +130,7 @@ def test_status_keeps_unclosed_and_legacy_clock_reads_strict(clocked, monkeypatc
     settings = contracts.settings(root)
     settings['time_budget_basis'] = basis
     contracts.write(root / 'settings.json', settings)
-    contracts.write(root / 'settings-identity.json', dict(sha256=contracts.digest(root / 'settings.json')))
+    contracts.write(root / 'settings-identity.json', dict(path='settings.json'))
     transition(root, phase)
     stamp = budget.clock_stamp(); stamp.update(boot_id='next-boot', at_boottime=1.)
     monkeypatch.setattr(budget, 'clock_stamp', lambda: dict(stamp))
@@ -227,7 +227,7 @@ def test_budget_amend_is_audited_and_preserves_consumption_and_settings(clocked,
     assert [item['seq'] for item in events] == [1, 2, 3]
     assert amendment['amendment_seq'] == events[2]['seq']
     assert events[2]['operation_id'] == result['operation_id']
-    assert events[2]['parent_sha256'] == contracts.digest(root / 'control-ledger/000002.json')
+    assert events[2]['parent_ref'] == contracts.record_ref(root / 'control-ledger/000002.json')
     assert events[2]['before'] == dict(max_tokens=100, max_seconds=20)
     assert events[2]['after'] == dict(max_tokens=200, max_seconds=30)
     assert events[2]['at_unix'] == 150
@@ -450,7 +450,7 @@ def test_case02_clock_slew_uses_boot_consumption_without_false_stop(clocked, mon
     settings = contracts.settings(root)
     settings['max_seconds'] = 3600
     contracts.write(root / 'settings.json', settings)
-    contracts.write(root / 'settings-identity.json', dict(sha256=contracts.digest(root / 'settings.json')))
+    contracts.write(root / 'settings-identity.json', dict(path='settings.json'))
     # Replay the observed same-boot case02 anchors, without touching that instance.
     now[0] = 1791694089.621297
     ticks = [2899.955554225]
@@ -490,7 +490,7 @@ def test_legacy_elapsed_instance_retains_its_original_deadline(clocked):
     settings = contracts.settings(root)
     settings.pop('time_budget_basis')
     contracts.write(root / 'settings.json', settings)
-    contracts.write(root / 'settings-identity.json', dict(sha256=contracts.digest(root / 'settings.json')))
+    contracts.write(root / 'settings-identity.json', dict(path='settings.json'))
     now[0] = 105.
     transition(root, 'paused')
     now[0] = 130.
@@ -512,7 +512,7 @@ def test_legacy_elapsed_ledger_rejects_open_utc_rollback_without_refund(clocked,
     settings = contracts.settings(root)
     settings.pop('time_budget_basis')
     contracts.write(root / 'settings.json', settings)
-    contracts.write(root / 'settings-identity.json', dict(sha256=contracts.digest(root / 'settings.json')))
+    contracts.write(root / 'settings-identity.json', dict(path='settings.json'))
     ticks = [100.]
     monkeypatch.setattr(budget.time, 'clock_gettime', lambda _: ticks[0])
     transition(root, 'advance')

@@ -44,7 +44,7 @@ def test_ordinary_improve_below_old_reserve_can_accept_first_managed_call(tmp_pa
         assert not job.get('final_only') and budget.node_admission(root,job) is None
         anchor=budget.accept_node(root,job)
         record=execution.origin(root,step)
-        intent=dict(step=step,task_sha256=c.digest(root/'jobs/002.json'),budget_slice=anchor,
+        intent=dict(step=step,task_ref=c.record_ref(root/'jobs/002.json'),budget_slice=anchor,
             search_slice=search.accept(root,job))
         c.write(record/'native-intent.json',intent)
         budget.write_node_hint(root,job,intent,budget.snapshot(root),dict(input_tokens=0,output_tokens=0),observed=False)
@@ -67,7 +67,7 @@ def test_ordinary_improve_below_old_reserve_can_accept_first_managed_call(tmp_pa
         c.write(record/'science-output.json',payload)
         c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
         c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,
-            usage=native.usage(root),raw_sha256=c.digest(record/'science-output.json')))
+            usage=native.usage(root),raw_ref=c.file_ref(record/'science-output.json')))
         c.seal_result(root,step)
         (root/'pause.request').write_text('Pause after the accepted original')
     monkeypatch.setattr(native,'execute_native',execute)

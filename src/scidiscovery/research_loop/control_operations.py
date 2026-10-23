@@ -68,7 +68,7 @@ def start_background(root, *, continue_run=False, ack_correction=None, authoriza
             if type(resume_step) is not int or not 0 < resume_step <= budget.historical_step_limit(root):
                 raise ValueError('An exact prepared node is required')
             path = contracts.regular(root / 'jobs' / f'{resume_step:03d}.json')
-            action = dict(kind='worker_resume', step=resume_step, job_sha256=contracts.digest(path))
+            action = dict(kind='worker_resume', step=resume_step, job_ref=contracts.record_ref(path))
         descriptor = os.open(root / 'host-run.lock', os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
         try:
             try:
@@ -183,7 +183,7 @@ def _child(root, operation_id, descriptor):
             action = value.get('action', dict(kind='run'))
             if action['kind'] == 'worker_resume':
                 path = contracts.regular(root / 'jobs' / f'{action["step"]:03d}.json')
-                if contracts.digest(path) != action['job_sha256']:
+                if contracts.record_ref(path) != action['job_ref']:
                     raise ValueError('Detached resume lost its exact original scientific task')
                 result = controller._worker_resume_locked(root, action['step'])
             else:

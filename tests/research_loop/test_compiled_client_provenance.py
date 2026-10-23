@@ -31,7 +31,6 @@ def test_compiled_scientific_client_seals_separate_exact_private_package(compile
     expected = Path(config['record_dir']).parent / 'implementations/I001/package.json'
     assert value['output'] == e.proof(expected)
     assert value['output']['path'] != row['material']['source']
-    assert value['output']['sha256'] != row['material']['sha256']
     assert c.read(expected)['schema_version'] == 3
     finish(root, 2, 'W', [1])
     seal = c.read(c.host_record(c.workspace(root, 2)) / 'result-identity.json')
@@ -55,7 +54,7 @@ def test_compiler_rejects_changed_client_package_or_private_binding(compiled_cli
     else:
         binding = c.read(binding_path)
         if subject == 'binding_package':
-            binding['package']['sha256'] = '0' * 64
+            binding['package']['path'] = str(public.with_name('unapproved-package.json'))
         elif subject == 'binding_public_path':
             binding['public_path'] = str(public.with_name('unrelated.json'))
         else:
@@ -83,7 +82,7 @@ def test_generic_payload_fallback_still_checks_exact_material_bytes(tmp_path):
     path = tmp_path / 'ordinary-package.json'
     path.write_bytes(b'{"schema_version":2,"scientific_payload":true}')
     identity = e.proof(path)
-    material = dict(source=str(path), sha256=identity['sha256'], size_bytes=identity['size_bytes'])
+    material = dict(source=str(path), size_bytes=identity['size_bytes'])
     assert inputs.compiled_payload(tmp_path, material) == identity
     path.write_bytes(path.read_bytes() + b' ')
     with pytest.raises(inputs.q.IntegrityError, match='exact source'):

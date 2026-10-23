@@ -81,7 +81,7 @@ class FakeReader:
 
 def sealed(step, role, payload, *, observation=None, materials=0, **job):
     return dict(job=dict(step=step, role=role, **job), payload=payload,
-                seal=dict(materials=[{}] * materials, raw_sha256='x'), observation=observation)
+                seal=dict(materials=[{}] * materials, raw_ref='x'), observation=observation)
 
 
 def calls(count):
@@ -374,7 +374,7 @@ def test_retained_real_sample_projection_matches_acceptance_facts():
     assert card['chosen']['label'] == 'convex_strong' and card['delivery_label'] == '已确认交付'
     assert card['criteria_change']['status'] == 'revised' and len(card['unmet']) == 3
     member = ui_view.candidate_file(reader, card['chosen'], projection)
-    assert member['sha256'] == view['closeout']['last_confirmed']['artifact_sha256']
+    assert member['reference'] == view['closeout']['last_confirmed']['artifact_ref']
     assert before == {path: path.stat().st_mtime_ns for path in root.rglob('*') if path.is_file()}
 
 

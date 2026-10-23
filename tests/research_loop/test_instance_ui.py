@@ -108,8 +108,8 @@ def test_progress_distinguishes_unconfirmed_runner_from_active_empty_log(tmp_pat
     root, key = prepare(tmp_path, enabled=False)
     c.build_job(root, 1, 'H', [])
     record = execution.origin(root, 1); record.mkdir(parents=True, exist_ok=True)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/001.json'), prepared_at=1.0))
-    runner = runtime.process_identity(os.getpid(), c.digest(root / 'jobs/001.json'))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json'), prepared_at=1.0))
+    runner = runtime.process_identity(os.getpid(), c.record_ref(root / 'jobs/001.json'))
     if not active:
         runner['pid'] = 0  # No Linux /proc/0 identity can match this stopped runner.
     c.write(record / 'runner-process.json', runner)
@@ -144,8 +144,8 @@ def test_progress_unavailable_observation_never_claims_prepared_or_running(tmp_p
     root, key = prepare(tmp_path, enabled=False)
     c.build_job(root, 1, 'H', [])
     record = execution.origin(root, 1)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/001.json'), prepared_at=1.0))
-    c.write(record / 'runner-process.json', runtime.process_identity(os.getpid(), c.digest(root / 'jobs/001.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json'), prepared_at=1.0))
+    c.write(record / 'runner-process.json', runtime.process_identity(os.getpid(), c.record_ref(root / 'jobs/001.json')))
     ui, cookie = session(root, key)
     (record / malformed).write_bytes(b'{')
     value = json.loads(ui.get('/nodes/1/events?attempt=0', host=ui.host, cookie=cookie)[1])
@@ -182,7 +182,7 @@ def test_unsealed_controller_receipt_preserves_unknown_task_in_overview_and_live
     root, key = prepare(tmp_path, enabled=False)
     c.build_job(root, 1, 'H', [])
     record = execution.origin(root, 1)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/001.json'), prepared_at=1.0))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json'), prepared_at=1.0))
     operation_id = 'd' * 32
     c.write(root / 'host-control/operations' / (operation_id + '.json'), dict(
         operation_id=operation_id, kind='controller', sequence=1, status='applied',
@@ -347,7 +347,8 @@ def test_read_cookie_opens_only_sealed_science_and_attachment_members(tmp_path,m
     assert read(body)==(root/'native-evidence/001/science-output.json').read_bytes()
     page=ui.get('/nodes/1/materials',host=ui.host,cookie=cookie)[1]
     assert b'/nodes/1/materials/1' in page and b'untrusted authored file' not in page
-    assert element_texts(page, 'script') == [render.translation_client.SCRIPT]
+    assert not any(element_texts(page, 'script'))
+    assert b'/assets/translation.js' in page
     _,body,headers=ui.get('/nodes/1/materials/1',host=ui.host,cookie=cookie)
     assert headers['Content-Disposition'].startswith('attachment;')
     assert read(body)==b'<script>untrusted authored file</script>'
@@ -360,8 +361,6 @@ def test_read_cookie_opens_only_sealed_science_and_attachment_members(tmp_path,m
 
 @pytest.mark.process_e2e
 def test_loopback_science_download_uses_existing_browser_scope_and_safe_headers(tmp_path,monkeypatch):
-    import base64
-    import hashlib
     import http.client
     from scidiscovery.research_loop import instance_ui
     root,key=prepare(tmp_path,enabled=False)
@@ -394,19 +393,22 @@ def test_loopback_science_download_uses_existing_browser_scope_and_safe_headers(
         connection.request('GET','/results/1',headers={'Cookie':cookie})
         response=connection.getresponse()
         from scidiscovery.research_loop import instance_render
-        assert response.status==200 and instance_render.STYLE_SOURCE in response.getheader('Content-Security-Policy')
+        assert response.status==200 and "style-src 'self'" in response.getheader('Content-Security-Policy')
         result_page=response.read()
         assert b'/nodes/1/science' in result_page and b'<details>' in result_page
         assert untrusted.encode() not in result_page and html.escape(untrusted).encode() in result_page
         assert b'<svg' not in result_page
         csp=response.getheader('Content-Security-Policy')
         assert "'unsafe-inline'" not in csp and "'unsafe-eval'" not in csp
-        script_sources=csp.split('script-src ',1)[1].split(';',1)[0].split()
-        scripts=re.findall(rb'<script\b[^>]*>(.*?)</script>',result_page,re.S)
+        assert "script-src 'self'" in csp
+        scripts=re.findall(rb'<script\b[^>]*src="([^"]+)"[^>]*></script>',result_page)
         assert scripts
         for script in scripts:
-            digest=base64.b64encode(hashlib.sha256(script).digest()).decode()
-            assert "'sha256-"+digest+"'" in script_sources
+            assert script.startswith(b'/assets/')
+            connection.request('GET',script.decode(),headers={'Cookie':cookie})
+            asset=connection.getresponse()
+            assert asset.status==200 and 'javascript' in asset.getheader('Content-Type')
+            assert asset.read()
         connection.request('GET','/nodes/1/materials/1',headers={'Cookie':cookie})
         response=connection.getresponse()
         assert response.status==200 and response.getheader('Content-Disposition').startswith('attachment;')
@@ -970,9 +972,9 @@ network = false
             if stage not in advanced:
                 advanced.add(stage)
                 if stage == 'metered':
-                    task_sha256 = c.digest(root / 'jobs/001.json')
-                    c.write(record / 'native-intent.json', dict(task_sha256=task_sha256, prepared_at=1.0))
-                    c.write(record / 'runner-process.json', runtime.process_identity(os.getpid(), task_sha256))
+                    task_ref = c.record_ref(root / 'jobs/001.json')
+                    c.write(record / 'native-intent.json', dict(task_ref=task_ref, prepared_at=1.0))
+                    c.write(record / 'runner-process.json', runtime.process_identity(os.getpid(), task_ref))
                 elif stage == '2':
                     finish(root, 1, 'H', [], action='analyze', summary='First browser phase finding')
                     _, _, output = finish(root, 2, 'A', [1], summary='Second browser phase conclusion')
@@ -983,8 +985,8 @@ network = false
                 elif stage == '4':
                     c.build_job(root, 4, 'W', [3])
                     output = execution.origin(root, 4)
-                    c.write(output / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/004.json'), prepared_at=1.0))
-                    c.write(output / 'runner-process.json', runtime.process_identity(os.getpid(), c.digest(root / 'jobs/004.json')))
+                    c.write(output / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/004.json'), prepared_at=1.0))
+                    c.write(output / 'runner-process.json', runtime.process_identity(os.getpid(), c.record_ref(root / 'jobs/004.json')))
                 elif stage == 'stopped':
                     output = execution.origin(root, 4)
                     runner = c.read(output / 'runner-process.json'); runner['pid'] = 0
@@ -1704,9 +1706,12 @@ def test_headless_browser_sse_preserves_draft_and_form_credentials(tmp_path):
             if self.path == '/fixture-ready':
                 ready.set(); body = b'{}'
             elif self.path == '/': body = page
+            elif self.path == '/assets/progress.js': body = render.PROGRESS_SCRIPT.encode()
+            elif self.path == '/assets/translation.js': body = render.translation_client.SCRIPT.encode()
+            elif self.path == '/assets/style.css': body = render.CSS.encode()
             else: body = b'{}'
             self.send_response(200); self.send_header('Content-Length', str(len(body)))
-            self.send_header('Content-Type', 'text/html; charset=utf-8' if self.path == '/' else 'application/json')
+            self.send_header('Content-Type', 'text/html; charset=utf-8' if self.path == '/' else 'text/javascript' if self.path.endswith('.js') else 'text/css' if self.path.endswith('.css') else 'application/json')
             self.send_header('Content-Security-Policy', render.CSP.replace('script-src ', 'script-src ' + driver_csp + ' ', 1))
             self.end_headers(); self.wfile.write(body)
     with tempfile.TemporaryDirectory(prefix='scid-ui-browser-', dir='/tmp') as browser_directory, ThreadingHTTPServer(('127.0.0.1', 0), Handler) as server:
@@ -1740,7 +1745,7 @@ def test_saved_native_wait_and_stops_never_dispatch_from_get_or_sse(tmp_path, mo
     root, key = prepare(tmp_path, enabled=False)
     c.build_job(root, 1, 'H', [])
     record = root / 'native-evidence/001'; record.mkdir(exist_ok=True)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/001.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json')))
     c.write(record / 'native-outcome.json', dict(native_started=kind != 'unsubmitted', returncode=0))
     if kind == 'external':
         c.write(record / 'execution-wait.json', dict(status='waiting'))

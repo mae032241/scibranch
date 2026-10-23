@@ -67,7 +67,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         (work / 'work/release').touch()
     if (record / 'runner-process.json').exists():
         owner = contracts.read(record / 'runner-process.json')
-        until(lambda: not runtime.process_matches(owner, owner['task_sha256']))
+        until(lambda: not runtime.process_matches(owner, owner['task_ref']))
 
 
 @pytest.mark.process_e2e
@@ -79,7 +79,7 @@ def test_controller_kill_rejoins_same_native_execution(local):
     assert status(root)['nodes'][0]['state'] == 'running'
     first.kill()
     first.communicate(timeout=3)
-    assert runtime.process_matches(owner, owner['task_sha256'])
+    assert runtime.process_matches(owner, owner['task_ref'])
     before_wait = budget.snapshot(root)['advance_seconds']
     assert budget.snapshot(root)['clock_phase'] == 'advance'
     second = launch()
@@ -105,10 +105,10 @@ def test_runner_loss_cleans_observed_group_and_never_replays(local):
     until(lambda: (work / 'work/ready').exists())
     runner = contracts.read(record / 'runner-process.json')
     child_pid = contracts.read(work / 'work/child.json')['pid']
-    child = runtime.process_identity(child_pid, runner['task_sha256'])
+    child = runtime.process_identity(child_pid, runner['task_ref'])
     os.kill(runner['pid'], signal.SIGKILL)
     until(lambda: (record / 'runner-cleanup.json').exists())
-    until(lambda: not runtime.process_matches(child, child['task_sha256']))
+    until(lambda: not runtime.process_matches(child, child['task_ref']))
     assert contracts.read(record / 'runner-cleanup.json')['status'] == 'observed_group_signalled'
     assert runtime.node_state(root, 1) == 'unknown'
     assert not (record / 'native-outcome.json').exists()
@@ -126,7 +126,7 @@ def test_identity_mismatch_is_unknown_without_killing_original(local):
     original = contracts.read(record / 'runner-process.json')
     contracts.write(record / 'runner-process.json', dict(original, start_ticks=original['start_ticks'] + 1))
     assert runtime.node_state(root, 1) == 'unknown'
-    assert runtime.process_matches(original, original['task_sha256'])
+    assert runtime.process_matches(original, original['task_ref'])
     until(lambda: front.poll() is not None)
     assert controller.run(root)['status'] == 'native_outcome_unsealed'
     (work / 'work/release').touch()
@@ -134,7 +134,7 @@ def test_identity_mismatch_is_unknown_without_killing_original(local):
     front.communicate(timeout=5)
     # Terminal output precedes the detached runner's final clock append under
     # the host writer lock. Wait for its real identity, not the tampered file.
-    until(lambda: not runtime.process_matches(original, original['task_sha256']))
+    until(lambda: not runtime.process_matches(original, original['task_ref']))
     assert controller.run(root)['status'] == 'wait'
     assert (work / 'work/launches.txt').read_text() == 'launch\n'
 
@@ -144,7 +144,7 @@ def test_intent_before_runner_start_is_unknown_and_never_replayed(local):
     contracts.build_job(root, 1, 'H', [])
     assert runtime.node_state(root, 1) == 'unstarted'
     contracts.write(record / 'native-intent.json', dict(step=1,
-        task_sha256=contracts.digest(root / 'jobs/001.json')))
+        task_ref=contracts.record_ref(root / 'jobs/001.json')))
     assert runtime.node_state(root, 1) == 'unknown'
     assert controller.run(root)['status'] == 'native_outcome_unsealed'
     assert not (work / 'work/launches.txt').exists()
@@ -154,7 +154,7 @@ def test_intent_before_runner_start_is_unknown_and_never_replayed(local):
 def test_stale_identity_never_signals_an_unrelated_process(local):
     root, work, record, launch, until = local
     contracts.build_job(root, 1, 'H', [])
-    binding = contracts.digest(root / 'jobs/001.json')
+    binding = contracts.record_ref(root / 'jobs/001.json')
     outsider = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(20)'], start_new_session=True)
     try:
         identity = runtime.process_identity(outsider.pid, binding)
@@ -201,7 +201,7 @@ def test_direct_runner_entry_rejects_duplicate_and_retained_execution(local):
     (work / 'work/release').touch()
     front.communicate(timeout=8)
     owner = contracts.read(record / 'runner-process.json')
-    until(lambda: not runtime.process_matches(owner, owner['task_sha256']))
+    until(lambda: not runtime.process_matches(owner, owner['task_ref']))
     with pytest.raises(RuntimeError, match='refusing duplicate'):
         runtime._run(root, 1)
     assert (work / 'work/launches.txt').read_text() == 'launch\n'
@@ -214,9 +214,9 @@ def test_actual_native_boundary_rechecks_budget_without_submitting(local, monkey
     settings = contracts.settings(root)
     settings.pop('time_budget_basis')  # This fixture checks the legacy absolute deadline.
     contracts.write(root / 'settings.json', settings)
-    contracts.write(root / 'settings-identity.json', dict(sha256=contracts.digest(root / 'settings.json')))
+    contracts.write(root / 'settings-identity.json', dict(path='settings.json'))
     contracts.build_job(root, 1, 'H', [])
-    contracts.write(record / 'native-intent.json', dict(step=1, task_sha256=contracts.digest(root / 'jobs/001.json')))
+    contracts.write(record / 'native-intent.json', dict(step=1, task_ref=contracts.record_ref(root / 'jobs/001.json')))
     contracts.write(root / 'host-started.json', dict(at_unix=0 if budget == 'wall' else time.time()))
     if budget != 'wall':
         value = dict(input_tokens=1000 if budget == 'tokens' else 0, cached_input_tokens=0,
@@ -261,7 +261,7 @@ def test_successful_leader_exit_cleans_surviving_standard_child(local):
     assert front.returncode == 0, out + err
     assert json.loads(out)['status'] == 'wait'
     assert contracts.read(record / 'native-outcome.json')['cleanup'] == 'observed_group_cleaned'
-    _assert_child_dead(work, contracts.digest(root / 'jobs/001.json'))
+    _assert_child_dead(work, contracts.record_ref(root / 'jobs/001.json'))
 
 
 @pytest.mark.process_e2e
@@ -275,10 +275,10 @@ def test_budget_term_leader_exit_cleans_stubborn_standard_child(local):
         role: dict(max_observed_tokens=1000, max_seconds=1 if role == 'A' else 60)
         for role in ('H', 'W', 'A', 'E')}
     contracts.write(root / 'settings.json', settings)
-    contracts.write(root / 'settings-identity.json', dict(sha256=contracts.digest(root / 'settings.json')))
+    contracts.write(root / 'settings-identity.json', dict(path='settings.json'))
     front = launch('closeout')
     until(lambda: (work / 'work/ready').exists())
-    binding = contracts.digest(root / 'jobs/001.json')
+    binding = contracts.record_ref(root / 'jobs/001.json')
     child = runtime.process_identity(contracts.read(work / 'work/child.json')['pid'], binding)
     leader = contracts.read(record / 'native-process.json')
     assert (child['pgid'], child['sid']) == (leader['pgid'], leader['sid'])

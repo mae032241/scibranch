@@ -23,24 +23,24 @@ solver kind 或发行证据漂移均在启动前拒绝。宿主及同权限 Work
 
 ## 2. 外部 transport
 
-任务载荷为 `TCADJobSpec` v4，外层请求/响应为 transport v1。
+任务载荷为 `TCADJobSpec` v5，含不透明的 32 位小写十六进制 `request_id`；外层请求/响应为 transport v2。
 任务必须包含 `collect_generated_outputs` 和 `max_storage_bytes`。
 控制端、适配器和远端 runner 必须使用匹配的 wire/config；不在线迁移旧任务。
 
 `CommandTCADExecutorAdapter` 每次调用一个管理员配置的短命令。请求和响应为有界规范 JSON：
 
 ```json
-{"schema_version":1,"operation":"capabilities|execution_policy|submission_protocol|prepare|lookup_submission|submit_retirable|retire_submission|status|cancel|collect","payload":{}}
+{"schema_version":2,"operation":"capabilities|execution_policy|submission_protocol|prepare|lookup_submission|submit_retirable|retire_submission|status|cancel|collect","payload":{}}
 ```
 
 | 操作 | 责任 |
 | --- | --- |
 | `capabilities` | 读取管理员冻结的 solver capability |
 | `execution_policy` | 读取管理员策略与 runner/debug 配置 |
-| `submission_protocol` | 只读确认远端支持版本 1 的提交/原子撤销协议 |
+| `submission_protocol` | 只读确认远端支持版本 2 的提交/原子撤销协议 |
 | `prepare` | 物化精确 package 与 JobSpec |
-| `lookup_submission` | 按已准备描述符的稳定摘要权威查回既有外部任务 |
-| `submit_retirable` | 幂等提交，服从精确摘要的永久撤销标记 |
+| `lookup_submission` | 按原不透明 `submission_id` 权威查回既有外部任务 |
+| `submit_retirable` | 按原 `request_id` 幂等提交，服从原 `submission_id` 的永久撤销标记 |
 | `retire_submission` | 在提交锁内返回现有任务，或持久撤销尚不存在的精确请求 |
 | `status` | 一次短查询 |
 | `cancel` | 请求取消并短时返回 |
@@ -49,7 +49,9 @@ solver kind 或发行证据漂移均在启动前拒绝。宿主及同权限 Work
 transport 不等待 solver、不循环轮询、不生成或修改 deck、不批准请求、不写科研控制状态。
 提交成功、领域终态和结果收集是三个事实，不能压成一个 `succeeded`。
 
-`submit_retirable` 必须对同一已准备描述符幂等。首次新提交先验证远端协议，再权威
+`lookup_submission` 与 `retire_submission` 消费原 `submission_id`，它对应已冻结
+JobSpec 的 `request_id`，不从科学载荷、归档或描述符内容计算。`submit_retirable` 必须
+对同一已准备请求幂等。首次新提交先验证远端协议，再权威
 `lookup_submission`。结果未知后只能核对原请求；`found:false` 不能证明在途提交已经
 停止，也不能作为重发或释放预算的依据。`retire_submission` 的否定结果必须持久阻止
 该精确请求今后被接受；反复查询为空、超时或端点不可用不构成撤销证明。
@@ -74,8 +76,9 @@ Job 的存储、内存、输出和时间限额分别约束；多 case 共用原 
 策略直接授权不伪造人工决定，状态须显示授权来源。资源高水位和超调是采样观测，
 不能作为硬磁盘或内存配额证明。
 
-科学文件使用流式上传、带明确大小上限的 `get_to`、逐文件哈希和流式原件登记，
-不经 JSON/base64。传输配置必须覆盖获准总存储额度；小 JSON/预览仍独立有界。
+科学文件使用流式上传、带明确大小上限的 `get_to` 与路径/大小原件登记，
+不经 JSON/base64，也不逐文件计算内容哈希。capability 与 policy 的审批绑定摘要保留，
+具体白名单及同 UID 软边界见[架构](ARCHITECTURE.zh-CN.md)。传输配置必须覆盖获准总存储额度；小 JSON/预览仍独立有界。
 预览上限不能代替科学文件存储上限。
 
 ## 4. 注入式开发调试与后端

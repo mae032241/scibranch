@@ -29,8 +29,8 @@ copies current source, deployment tools, supported plugin trees, functional test
 and fixtures, current reference documents and selected developer tools. The plugin
 trees include the optional `cov_execution` distribution; the core wheel carries no
 Cov execution entry point. It normalizes
-text and modes, scans the result, then writes `MANIFEST.sha256` and a deterministic
-`.tar.gz` archive. An existing output requires an explicit `--force`; use a fresh
+text and modes, scans the result, then writes `MANIFEST.json` with per-file paths
+and byte sizes and a deterministic `.tar.gz` archive. An existing output requires an explicit `--force`; use a fresh
 output directory when preserving a candidate.
 
 Plans, audits, stage results, handoffs, superseded specifications and trial outputs
@@ -39,7 +39,8 @@ fixtures live under `tests/fixtures/` or `scripts/acceptance/fixtures/` and are
 published with their consumers. Research databases, credentials, private datasets,
 generated platform profiles and local agent instructions are excluded. Bundled
 reference manuals have separate distribution restrictions; see [NOTICE](../NOTICE.md).
-The release scan and checksum manifest do not establish redistribution rights.
+The release scan and path/size manifest do not establish redistribution rights or
+content-tamper detection; the [architecture](ARCHITECTURE.md) owns the hash allowlist.
 
 ## Checks and preservation
 

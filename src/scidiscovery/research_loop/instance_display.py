@@ -123,7 +123,7 @@ def observation(root, step, node=None):
     if not receipt:
         return None
     relative = f'host-history/observations/{step:03d}.json'
-    if receipt.get('path') != relative:
+    if receipt.get('path',) != relative:
         raise ValueError('Saved observation escaped its node')
     source = _inherited(root, step)
     if source is not None:
@@ -138,7 +138,7 @@ def science(root, step):
 
 def _label(material, step):
     prefix = f'inputs/parents/{step:03d}/artifacts/'
-    logical = material.get('path')
+    logical = material.get('path',)
     if (not isinstance(logical, str) or not logical.startswith(prefix) or '\\' in logical
             or '..' in PurePosixPath(logical).parts or PurePosixPath(logical).as_posix() != logical
             or not logical.removeprefix(prefix)):
@@ -163,8 +163,10 @@ def _object(root, relative):
     if not isinstance(relative, str):
         raise ValueError('Saved deliverable escaped its output owner')
     path = PurePosixPath(relative)
-    if (path.parent != PurePosixPath('host-history/objects') or len(path.name) != 64
-            or any(character not in '0123456789abcdef' for character in path.name)):
+    if (path.is_absolute() or '..' in path.parts or path.as_posix()!=relative
+            or not ((path.parent==PurePosixPath('host-history/objects') and path.name)
+                or (path.parts[:2]==('project','nodes') and 'artifacts' in path.parts)
+                or (path.parts[:2]==('host-runtime','experiment-control') and 'outputs' in path.parts))):
         raise ValueError('Saved deliverable escaped its output owner')
     return _path(root, relative)
 
@@ -204,6 +206,6 @@ def artifact(root, step, index):
         for output in call.get('outputs', []):
             if (name == f'experiments/{call["call_id"]}/artifacts/{output["name"]}'
                     and call['scope']['step'] == step and output.get('retention') == 'archived'
-                    and output.get('path') == relative):
+                    and output.get('path',) == relative):
                 return Original(_object(root, output['snapshot'])), name
     raise ValueError('Saved deliverable escaped its output owner')

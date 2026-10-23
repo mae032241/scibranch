@@ -1,6 +1,4 @@
 """Guidance composition UI; submission and immutable binding stay in user_guidance."""
-import base64
-import hashlib
 import html
 
 
@@ -79,4 +77,3 @@ SCRIPT = """(() => {
     update(false);
   }
 })();"""
-SCRIPT_CSP = "'sha256-" + base64.b64encode(hashlib.sha256(SCRIPT.encode()).digest()).decode() + "'"

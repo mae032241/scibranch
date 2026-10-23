@@ -18,7 +18,7 @@ def test_twenty_five_real_calls_keep_large_snapshot_contexts_and_restart_binding
     outer=tmp_path/('long-real-instance-owner-'+'q'*100);outer.mkdir()
     root,config,digest=cov_scene(outer)
     script=c.workspace(root,2)/'work/train.py';script.write_text('success')
-    results=[cov.run(config,digest,script,new=True) for _ in range(25)]
+    results=[cov.run(config,script,new=True) for _ in range(25)]
     assert all(row['status']=='known_success' for row in results)
     finish(root,2,'W',[1],text='A complete authored record. '+('科学 evidence \\"' * 12000))
     seal_path=execution.origin(root,2)/'result-identity.json';sealed=seal_path.read_bytes()
@@ -80,7 +80,7 @@ def test_archive_streams_complete_large_file_and_never_relaxes_path_checks(fragm
         proof=history._proof(root,source.relative_to(root).as_posix())
         history._validate_proof(root,proof)
     assert proof['retention']=='archived' and proof['size_bytes']==source_size
-    assert c.digest(root/proof['snapshot'])==c.digest(source)
+    assert (root/proof['snapshot']).read_bytes()==source.read_bytes()
     alias=root/'alias';alias.symlink_to(source)
     for name in [str(source),'../large-original.bin','alias']:
         with pytest.raises(history.ObserverIntegrityError):history._proof(root,name)

@@ -78,8 +78,8 @@ def _managed_refs(root,source,seal,state):
         current=state['mechanisms'].get(ref)
         if current is None or row['status'] not in {'known_success','known_failed'} or binding['source_h']!=current['source_h']:continue
         step=current['source_h']
-        if step not in hashes:hashes[step]=c.digest(originals.source_record(originals.node(root,step),'result-identity.json'))
-        if binding['source_h_sha256']==hashes[step]:refs.add(ref)
+        if step not in hashes:hashes[step]=history.source_seal_ref(originals.node(root,step))
+        if binding['source_h_ref']==hashes[step]:refs.add(ref)
     return refs
 
 
@@ -96,8 +96,8 @@ def _screen_refs(root,source,seal,state):
         fact_path=originals.source_record(owner,worker_delivery.FACT_NAME)
         facts=c.read(fact_path)
         intent=c.read(originals.source_record(owner,'native-intent.json'))
-        if facts.get('version')!=1 or facts.get('binding')!=dict(job_sha256=seal['job_sha256'],
-                raw_sha256=seal['raw_sha256'],source_attempt=intent.get('attempt',0)):
+        if facts.get('version')!=1 or facts.get('binding')!=dict(job_ref=seal['job_ref'],
+                raw_ref=seal['raw_ref'],source_attempt=intent.get('attempt',0)):
             raise history.ObserverIntegrityError('Inherited W evidence changed its exact attempt')
         from . import execution_recovery
         recovered=execution_recovery.resolved(root,originals.recovery_refs(owner,source))
@@ -125,7 +125,7 @@ def _screen_refs(root,source,seal,state):
         facts=worker_delivery.validate(root,source,record)
         fact_path=c.regular(record/worker_delivery.FACT_NAME)
     receipt=seal['control_outcome'].get('worker_delivery') or {}
-    if receipt.get('facts_sha256')!=c.digest(fact_path):
+    if receipt.get('facts_ref')!=history.source_control_ref(owner,(owner.native_record or f'native-evidence/{owner.step:03d}')+'/'+worker_delivery.FACT_NAME):
         raise history.ObserverIntegrityError('Final W scientific evidence differs from its seal')
     science=c.science_payload(originals.source_raw(owner),'W',source['handoff_protocol'])
     declared={};mechanisms=source['search']['breadth']['mechanisms']
@@ -138,8 +138,8 @@ def _screen_refs(root,source,seal,state):
         ref=row['mechanism_ref'];findings=declared.get(ref,[]);current=state['mechanisms'].get(ref)
         if current is None or len(findings)!=1 or findings[0]['basis']!='observed' or not findings[0]['finding'].strip():continue
         binding=worker_delivery.accepted_original(root,row['accepted'],source=owner)['mechanism_binding'];step=current['source_h']
-        if step not in hashes:hashes[step]=c.digest(originals.source_record(originals.node(root,step),'result-identity.json'))
-        if binding['source_h']==step and binding['source_h_sha256']==hashes[step]:refs.add(ref)
+        if step not in hashes:hashes[step]=history.source_seal_ref(originals.node(root,step))
+        if binding['source_h']==step and binding['source_h_ref']==hashes[step]:refs.add(ref)
     return refs
 
 
@@ -187,7 +187,7 @@ def _repair_subject(root,job,ref,*,payload=None):
             prefix=f'inputs/parents/{step:03d}/artifacts/'
             explicit=any(material['source']==str(originals.node(root,step).logical_workspace/'artifacts'/material['path'][len(prefix):])
                 and material['source']==original['path']
-                and all(material[key]==original[key] for key in ('sha256','size_bytes'))
+                and all(material[key]==original[key] for key in ('size_bytes',))
                 for material in inputs.get(step,[]) for original in input_originals)
             candidate=(source,seal,row)
             if step in direct:candidates.append(candidate)
@@ -200,11 +200,11 @@ def _repair_subject(root,job,ref,*,payload=None):
     source,seal,row=known[0];binding=row['mechanism_binding'];old_h=binding['source_h']
     # Validate the old observation under its OWN H seal, even after a revision.
     original_h,_,_,sha=history._source(root,old_h)
-    if original_h['role']!='H' or binding['source_h_sha256']!=sha:
+    if original_h['role']!='H' or binding['source_h_ref']!=sha:
         return dict(status='version_mismatch',root=None,source=None)
     identity=originals.source_record(originals.node(root,source['step']),'result-identity.json')
-    subject=dict(step=source['step'],job_sha256=seal['job_sha256'],raw_sha256=seal['raw_sha256'],
-        seal_sha256=c.digest(identity),call=copy.deepcopy(row))
+    subject=dict(step=source['step'],job_ref=seal['job_ref'],raw_ref=seal['raw_ref'],
+        seal_ref=c.record_ref(identity),call=copy.deepcopy(row))
     return dict(status='available',root=source['search'].get('repair_root') or source['step'],source=subject)
 
 
@@ -235,7 +235,7 @@ def _assessed(root,job,state):
     focus=(source.get('search') or {}).get('focus')
     if focus is None:return None
     seal=originals.source_record(originals.node(root,source['step']),'result-identity.json')
-    return dict(identity=(source['step'],c.digest(seal)),mechanism_ref=focus['mechanism_ref'],allocation=source['search']['allocation'],
+    return dict(identity=(source['step'],c.record_path(seal)),mechanism_ref=focus['mechanism_ref'],allocation=source['search']['allocation'],
         breadth=bool(source['search'].get('breadth')),mechanism_refs=sorted(_managed_refs(root,source,source_seal,state)))
 
 
@@ -370,7 +370,7 @@ def fold(root,sources,*,recovery_refs=()):
         intent=originals.source_record(source,'native-intent.json')
         if job['role']=='W' and job.get('search') and intent.exists():
             value=c.read(c.regular(intent))
-            if value['task_sha256']!=c.digest(originals.resolve_ref(source,dict(path=f'jobs/{step:03d}.json'))):raise ValueError('W dispatch identity changed')
+            if value['task_ref']!=history.source_control_ref(source,f'jobs/{step:03d}.json'):raise ValueError('W dispatch identity changed')
             outcome=c.read(originals.source_record(source,'native-outcome.json'))
             observation=history.read_observation(root,job,seal) if seal.get('observations') else None
             state['accepted_slices'].append(dict(step=step,focus=job['search']['focus'],meter=outcome.get('search_slice'),
@@ -401,7 +401,7 @@ def _execution_opportunities(root,state,original_rows,refs,cache):
         state['opportunity_counts'][ref]=state['opportunity_counts'].get(ref,0)+1
         grant=binding['grant']
         if grant:
-            key=(grant['source_a'],grant['source_a_sha256'])
+            key=(grant['source_a'],grant['source_a_ref']['path'])
             state['opportunity_grants'][key]=state['opportunity_grants'].get(key,0)+1
         if row['status']=='unknown':state['opportunity_unknown']=True
 
@@ -425,12 +425,12 @@ def _breadth(root,state,limits,focus):
     for ref in refs:
         item=state['mechanisms'][ref];step=item['source_h']
         mechanisms.append(dict(mechanism_ref=ref,label=item['label'],source_h=step,
-            source_h_sha256=c.digest(originals.source_record(originals.node(root,step),'result-identity.json')),
+            source_h_ref=history.source_seal_ref(originals.node(root,step)),
             minimal_test=item['minimal_test'],status=item['status']))
     declared=state.get('extra_grant');grant=None
     if declared and declared['mechanism_ref'] in refs:
-        step=declared['source_a'];sha=c.digest(originals.source_record(originals.node(root,step),'result-identity.json'))
-        grant=dict(declared,source_a_sha256=sha,extra_calls=1,used_calls=min(1,state['opportunity_grants'].get((step,sha),0)))
+        step=declared['source_a'];sha=history.source_seal_ref(originals.node(root,step))
+        grant=dict(declared,source_a_ref=sha,extra_calls=1,used_calls=min(1,state['opportunity_grants'].get((step,sha['path']),0)))
     return breadth.validate(dict(version=1,initial_calls=limits.get('initial_calls',1),mechanisms=mechanisms,
         baseline=[dict(mechanism_ref=ref,accepted_count=state['opportunity_counts'].get(ref,0)) for ref in refs],
         grant=grant,prior_unknown=state['opportunity_unknown']))
@@ -448,10 +448,10 @@ def bind(root,step,role,protocol=None,*,write_pages=True,state=None,unified=True
         choice=_repair_choice(root,chooser,focus['mechanism_ref'],payload=payload)
         repair_binding,repair_root,repair_source=choice['status'],choice['root'],choice['source']
         seal=originals.source_record(chooser_source,'result-identity.json')
-        repair_authorization=dict(step=chooser_step,job_sha256=c.digest(originals.resolve_ref(chooser_source,dict(path=f'jobs/{chooser_step:03d}.json'))),seal_sha256=c.digest(seal))
+        repair_authorization=dict(step=chooser_step,job_ref=history.source_control_ref(chooser_source,f'jobs/{chooser_step:03d}.json'),seal_ref=c.record_ref(seal))
     obligation=[]
     if role=='W' and focus and focus['action']=='screen':
-        obligation=[dict(mechanism_ref=ref,source_h=item['source_h'],source_h_sha256=c.digest(originals.source_record(originals.node(root,item['source_h']),'result-identity.json')))
+        obligation=[dict(mechanism_ref=ref,source_h=item['source_h'],source_h_ref=history.source_seal_ref(originals.node(root,item['source_h'])))
             for ref,item in state['mechanisms'].items() if ref in state['authorized'] and item['status']=='pending']
     return dict(coverage_obligation=obligation,focus=focus,allocation=copy.deepcopy(state['order']['allocation']),unfinished_plan=copy.deepcopy(state['order']['remaining']),
         breadth=_breadth(root,state,limits,focus) if role=='W' else None,intent_diagnostics=state['order']['diagnostics'],repair_root=repair_root,repair_binding=repair_binding,repair_source=repair_source,repair_authorization=repair_authorization,limits=policy(limits),files=[])
@@ -483,7 +483,7 @@ def accept(root, job):
     if job.get('search') is None or job['role'] != 'W':
         return None
     stamp = budget.clock_stamp()
-    return dict(task_sha256=c.digest(root / 'jobs' / f'{job["step"]:03d}.json'),
+    return dict(task_ref=c.record_ref(root / 'jobs' / f'{job["step"]:03d}.json'),
                 boot_id=stamp['boot_id'], advance_seconds=budget.snapshot(root)['advance_seconds'])
 
 
@@ -493,7 +493,7 @@ def stop_reason(root, job, intent, limits, meter):
         if job['role'] == 'W' and job.get('search') is not None:
             raise ValueError('Accepted W slice has no immutable meter anchor')
         return None
-    if (anchor['task_sha256'] != c.digest(root / 'jobs' / f'{job["step"]:03d}.json')
+    if (anchor['task_ref'] != c.record_ref(root / 'jobs' / f'{job["step"]:03d}.json')
             or anchor['boot_id'] != budget.clock_stamp()['boot_id']):
         raise ValueError('Accepted W slice meter identity changed')
     duration = limits['advance_seconds'] - anchor['advance_seconds']
@@ -549,10 +549,10 @@ def _portfolio_update(root, job, payload, seal, state, seal_sha=None):
     if job['role'] == 'W':
         focus = (job.get('search') or {}).get('focus')
         if focus and focus['mechanism_ref'] in mechanisms:
-            identity=(job['step'],seal_sha)
+            identity=(job['step'],seal_sha['path'])
             if focus['action']=='repair':
                 original=job['search']['repair_root']
-                identity=(original,c.digest(originals.source_record(originals.node(root,original),'result-identity.json')))
+                identity=(original,c.record_path(originals.source_record(originals.node(root,original),'result-identity.json')))
             branches=[focus['mechanism_ref']]
             if (job.get('search') or {}).get('breadth'):
                 observation=history.read_observation(root,job,seal) if seal.get('observations') else {}

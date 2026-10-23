@@ -70,7 +70,6 @@ def _safe_public_profile_id(value: str) -> str:
 class FileDescriptor(StrictModel):
     name: str = Field(min_length=1, max_length=256)
     local_path: str = Field(min_length=1, max_length=4096)
-    sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
     size_bytes: int = Field(ge=0, le=2**50)
     media_type: str = Field(min_length=3, max_length=255)
 
@@ -85,7 +84,6 @@ class ResourceLimits(StrictModel):
 
 class ArchiveEntry(StrictModel):
     relative_path: str = Field(min_length=1, max_length=1024)
-    sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
     size_bytes: int = Field(ge=0, le=2**50)
 
     _safe_path = field_validator("relative_path")(_validate_relative_path)
@@ -119,7 +117,8 @@ class ExpectedOutput(StrictModel):
 
 
 class TCADJobSpec(StrictModel):
-    schema_version: Literal[4] = 4
+    schema_version: Literal[5] = 5
+    request_id: str = Field(default_factory=lambda: uuid.uuid4().hex, min_length=32, max_length=32, pattern=r"^[0-9a-f]{32}$")
     execution_purpose: ExecutionPurpose
     tool_profile: str = Field(min_length=1, max_length=256)
     solver_kind: SolverKind
@@ -332,8 +331,8 @@ class CollectInput(RunIdInput):
     collection: CollectionBudgetInput | None = None
 
 
-class SubmissionDigestInput(ExecutionToolInput):
-    submission_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+class SubmissionIdentityInput(ExecutionToolInput):
+    submission_id: str = Field(min_length=32,max_length=32,pattern=r"^[0-9a-f]{32}$")
 
 
 @dataclass(frozen=True)
@@ -360,12 +359,12 @@ EXECUTION_TOOLS = (
     ExecutionTool(
         "tcad_lookup_submission",
         "Authoritatively look up one exact prepared TCAD submission.",
-        SubmissionDigestInput,
+        SubmissionIdentityInput,
     ),
     ExecutionTool("tcad_submit", "Submit one prepared TCAD job and return immediately.", SubmitInput),
     ExecutionTool("tcad_submission_protocol", "Discover submission and retirement protocol support.", EmptyInput),
     ExecutionTool("tcad_submit_retirable", "Submit with permanent exact-submission retirement support.", SubmitInput),
-    ExecutionTool("tcad_retire_submission", "Permanently fence an absent exact submission or return its existing job.", SubmissionDigestInput),
+    ExecutionTool("tcad_retire_submission", "Permanently fence an absent exact submission or return its existing job.", SubmissionIdentityInput),
     ExecutionTool("tcad_status", "Read one durable TCAD job status and optional bounded, redacted log tails with observed job timing.", RunIdInput),
     ExecutionTool("tcad_cancel", "Request cancellation of one TCAD job.", RunIdInput),
     ExecutionTool("tcad_inspect_outputs", "Read bounded terminal files without execution or mutation.", InspectOutputsInput),
@@ -398,7 +397,7 @@ class TCADExecutionFacade:
         }
 
     def tcad_submission_protocol(self) -> dict[str, Any]:
-        return {"version": 1, "submit": "tcad_submit_retirable", "retire": "tcad_retire_submission"}
+        return {"version": 2, "submit": "tcad_submit_retirable", "retire": "tcad_retire_submission"}
 
     def tcad_execution_policy(self) -> dict[str, Any]:
         return self.policy.snapshot().model_dump(mode="json")
@@ -446,21 +445,24 @@ class TCADExecutionFacade:
         archive = Path(job.input_archive.local_path).absolute()
         if not any(_within(archive, Path(root)) for root in self.policy.allowed_input_roots):
             raise ExecutionToolError("TCAD archive is outside allowed roots")
-        if _file_identity(archive, self.policy.runner.transfer_chunk_bytes) != (job.input_archive.sha256, job.input_archive.size_bytes):
+        if _file_size(archive, self.policy.runner.transfer_chunk_bytes) != job.input_archive.size_bytes:
             raise ExecutionToolError("archive differs from its descriptor")
-        digest = hashlib.sha256(job_raw).hexdigest()
+        request_id = job.request_id
         self._reconcile_active()
         submitted_at = _timestamp()
         run_id = f"run_{uuid.uuid4().hex}"
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            if connection.execute("SELECT 1 FROM retired_submissions WHERE job_sha256=?", (digest,)).fetchone():
+            if connection.execute("SELECT 1 FROM retired_submissions WHERE request_id=?", (request_id,)).fetchone():
                 raise ExecutionToolError("this exact submission was permanently retired")
             previous = connection.execute(
-                "SELECT run_id FROM submissions WHERE job_sha256 = ?", (digest,)
+                "SELECT run_id FROM submissions WHERE request_id = ?", (request_id,)
             ).fetchone()
             if previous is not None:
                 connection.execute("ROLLBACK")
+                original=json.loads((self.runs_root/previous["run_id"]/"submission.json").read_bytes())
+                if original!=job.model_dump(mode="json"):
+                    raise ExecutionToolError("request identity differs from original submission")
                 return self.tcad_status(run_id=previous["run_id"])
             active = connection.execute(
                 """
@@ -474,10 +476,10 @@ class TCADExecutionFacade:
             connection.execute(
                 """
                 INSERT INTO submissions (
-                    job_sha256, run_id, submitted_at, lifecycle_state
+                    request_id, run_id, submitted_at, lifecycle_state
                 ) VALUES (?, ?, ?, 'preparing')
                 """,
-                (digest, run_id, submitted_at),
+                (request_id, run_id, submitted_at),
             )
             connection.execute("COMMIT")
 
@@ -486,6 +488,7 @@ class TCADExecutionFacade:
         process: subprocess.Popen[bytes] | None = None
         try:
             run_dir.mkdir(mode=0o770)
+            _write_new(run_dir/"submission.json",job_raw,mode=0o440)
             work_dir = run_dir / "work"
             _extract_archive(archive, job.archive_entries, work_dir, self.policy.runner.transfer_chunk_bytes)
             runtime = {
@@ -568,12 +571,12 @@ class TCADExecutionFacade:
         return {"run_id": run_id, "state": "accepted", "accepted_at": submitted_at}
 
     def tcad_lookup_submission(
-        self, *, submission_sha256: str
+        self, *, submission_id: str
     ) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT run_id FROM submissions WHERE job_sha256 = ?",
-                (submission_sha256,),
+                "SELECT run_id FROM submissions WHERE request_id = ?",
+                (submission_id,),
             ).fetchone()
         if row is None:
             return {"found": False}
@@ -586,17 +589,17 @@ class TCADExecutionFacade:
         value["progress"] = _job_progress(str(self.runs_root / run_id))
         return value
 
-    def tcad_retire_submission(self, *, submission_sha256: str) -> dict[str, Any]:
-        SubmissionDigestInput(submission_sha256=submission_sha256)
+    def tcad_retire_submission(self, *, submission_id: str) -> dict[str, Any]:
+        SubmissionIdentityInput(submission_id=submission_id)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute("SELECT run_id FROM submissions WHERE job_sha256=?", (submission_sha256,)).fetchone()
+            row = connection.execute("SELECT run_id FROM submissions WHERE request_id=?", (submission_id,)).fetchone()
             if row is None:
-                connection.execute("INSERT OR IGNORE INTO retired_submissions VALUES (?)", (submission_sha256,))
+                connection.execute("INSERT OR IGNORE INTO retired_submissions VALUES (?)", (submission_id,))
             connection.commit()
         if row is not None:
             return {"found": True, **self.tcad_status(run_id=row["run_id"])}
-        return {"found": False, "retired": True, "submission_sha256": submission_sha256}
+        return {"found": False, "retired": True, "submission_id": submission_id}
 
     def _tcad_status_value(self, *, run_id: str) -> dict[str, Any]:
         row = self._submission_row(run_id)
@@ -836,11 +839,11 @@ class TCADExecutionFacade:
     def _initialize(self) -> None:
         self.state_root.mkdir(parents=True, exist_ok=True, mode=0o770)
         with self._connect() as connection:
-            connection.execute("CREATE TABLE IF NOT EXISTS retired_submissions (job_sha256 TEXT PRIMARY KEY)")
+            connection.execute("CREATE TABLE IF NOT EXISTS retired_submissions (request_id TEXT PRIMARY KEY)")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS submissions (
-                    job_sha256 TEXT PRIMARY KEY,
+                    request_id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL UNIQUE,
                     submitted_at TEXT NOT NULL,
                     lifecycle_state TEXT NOT NULL DEFAULT 'running'
@@ -886,16 +889,12 @@ class TCADExecutionRouter:
         return getattr(self.facade, name)(**values)
 
 
-def _file_identity(path, chunk_bytes):
-    descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    with os.fdopen(descriptor, "rb") as stream:
-        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-            raise ValueError("scientific file is not regular")
-        digest, size = hashlib.sha256(), 0
-        for chunk in iter(lambda: stream.read(chunk_bytes), b""):
-            digest.update(chunk)
-            size += len(chunk)
-    return digest.hexdigest(), size
+def _file_size(path, chunk_bytes):
+    descriptor=os.open(str(path),os.O_RDONLY|getattr(os,"O_NOFOLLOW",0))
+    with os.fdopen(descriptor,"rb") as source:
+        info=os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode):raise ValueError("scientific file is not regular")
+        return info.st_size
 
 
 def _extract_archive(archive_path, entries, destination, chunk_bytes):
@@ -914,17 +913,16 @@ def _extract_archive(archive_path, entries, destination, chunk_bytes):
             source = archive.extractfile(member)
             target = os.path.join(str(destination), *name.split("/"))
             os.makedirs(os.path.dirname(target), exist_ok=True)
-            digest, size = hashlib.sha256(), 0
+            size = 0
             with source, open(target, "xb") as output:
                 for chunk in iter(lambda: source.read(chunk_bytes), b""):
                     size += len(chunk)
                     if size > item["size_bytes"]:
                         raise ValueError("archive member exceeds manifest")
-                    digest.update(chunk)
                     output.write(chunk)
                 output.flush()
                 os.fsync(output.fileno())
-            if size != item["size_bytes"] or digest.hexdigest() != item["sha256"]:
+            if size != item["size_bytes"]:
                 raise ValueError("archive member differs from manifest")
             os.chmod(target, 0o440)
             seen.add(name)
@@ -938,23 +936,17 @@ def _read_descriptor(descriptor: FileDescriptor) -> bytes:
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         raise ExecutionToolError("TCAD input must be a regular non-symlink file")
     content = path.read_bytes()
-    if len(content) != descriptor.size_bytes or hashlib.sha256(content).hexdigest() != descriptor.sha256:
+    if len(content) != descriptor.size_bytes:
         raise ExecutionToolError("TCAD input differs from its descriptor")
     return content
 
 
 def _descriptor(*, name: str, path: Path, media_type: str, context=None) -> dict[str, Any]:
-    digest = hashlib.sha256()
-    size = 0
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            if context: context.remaining_seconds()
-            digest.update(chunk)
-            size += len(chunk)
+    if context:context.remaining_seconds()
+    size=_file_size(path,1024*1024)
     return FileDescriptor(
         name=name,
         local_path=str(path),
-        sha256=digest.hexdigest(),
         size_bytes=size,
         media_type=media_type,
     ).model_dump(mode="json")

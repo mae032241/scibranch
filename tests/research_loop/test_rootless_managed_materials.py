@@ -32,7 +32,7 @@ def test_frozen_managed_outputs_mount_with_exact_descriptor_and_no_backend_reloa
     assert len(calls)==2 and len({call['call_id'] for call in calls})==2
     expected=[dict(source=str(root/output['snapshot']),
         path=f'inputs/parents/002/artifacts/experiments/{call["call_id"]}/artifacts/{output["name"]}',
-        sha256=output['sha256'],size_bytes=output['size_bytes'])
+        size_bytes=output['size_bytes'])
         for call in calls for output in call['outputs']]
     assert len(expected)==2 and sorted(job['direct_materials'],key=lambda row:row['path'])==sorted(expected,key=lambda row:row['path'])
     assert all(row in seal['materials'] for row in expected)
@@ -45,11 +45,11 @@ def test_frozen_managed_outputs_mount_with_exact_descriptor_and_no_backend_reloa
     assert len({row['path'] for row in expected})==2
     for row in expected:
         source=Path(row['source']);target=work/row['path']
-        assert source==root/'host-history/objects'/row['sha256']
+        assert source.is_relative_to(root/'host-history/objects')
         assert target.is_file() and not target.is_symlink() and target.resolve()==target
         assert target.read_bytes()==source.read_bytes()==b'opaque remote package; never interpreted as local Python'
-        assert target.stat().st_size==row['size_bytes'] and c.digest(target)==row['sha256']
-        assert 'host-history' not in row['path'] and row['sha256'] not in row['path']
+        assert target.stat().st_size==row['size_bytes']
+        assert 'host-history' not in row['path']
     assert before=={path:path.read_bytes() for path in root.rglob('*') if path.is_file()}
 
 
@@ -77,7 +77,7 @@ def test_identical_material_reference_is_an_idempotent_read_without_new_mounts(t
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('fault',['call','name','source','proof','digest','size','symlink','conflicting_duplicate'])
+@pytest.mark.parametrize('fault',['call','name','source','proof','size','symlink','conflicting_duplicate'])
 def test_managed_exports_reject_unbound_or_changed_originals(tmp_path,monkeypatch,remote_registry,fault):
     launcher,root,job=prepared(tmp_path,monkeypatch)
     job=copy.deepcopy(job);item=job['direct_materials'][0];source=Path(item['source'])
@@ -93,7 +93,6 @@ def test_managed_exports_reject_unbound_or_changed_originals(tmp_path,monkeypatc
     elif fault=='proof':
         seal=c.read(execution.record(root,2)/'result-identity.json');path=root/seal['observations']['path']
         value=c.read(path);value['managed_calls'][0]['outputs'][0]['name']='other-descriptor';c.write(path,value)
-    elif fault=='digest':item['sha256']='f'*64
     elif fault=='size':item['size_bytes']+=1
     elif fault=='symlink':
         source.chmod(0o600);data=source.read_bytes();source.unlink();other=tmp_path/'same-bytes';other.write_bytes(data);source.symlink_to(other)
@@ -106,21 +105,12 @@ def test_managed_exports_reject_unbound_or_changed_originals(tmp_path,monkeypatc
         launcher.direct_materials(dict(scene_root=str(root)),c.workspace(root,3),root/'jobs/003.json')
 
 
-def test_launcher_reads_full_control_job_and_streams_large_material_digest(tmp_path,monkeypatch):
+def test_launcher_reads_full_control_job(tmp_path,monkeypatch):
     import json
     from cov_execution import launcher
     job=tmp_path/'job.json';value=dict(direct_materials=[],full_control_metadata='x'*(5*1024*1024))
     with job.open('w') as stream:json.dump(value,stream)
     assert json.loads(launcher.regular(job))==value
-    asset=tmp_path/'asset.bin'
-    with asset.open('wb') as stream:stream.truncate(33*1024*1024)
-    digest=c.digest(asset)
-    original=Path.read_bytes
-    def no_large_read(path):
-        if path==asset:raise AssertionError('Material digest must stream')
-        return original(path)
-    monkeypatch.setattr(Path,'read_bytes',no_large_read)
-    assert launcher.file_digest(asset)==digest
 
 
 def test_selected_skill_mounts_and_grants_use_frozen_objects_without_private_manifest(tmp_path, monkeypatch):
@@ -170,7 +160,6 @@ def test_selected_skill_mounts_and_grants_use_frozen_objects_without_private_man
 
 @pytest.mark.process_e2e
 def test_cov_outer_reads_selected_skill_in_real_namespace_without_copy_or_private_store(tmp_path, monkeypatch):
-    import hashlib
     import json
     import shutil
     import subprocess
@@ -205,7 +194,7 @@ def test_cov_outer_reads_selected_skill_in_real_namespace_without_copy_or_privat
     selected = _object(root, 'alpha'); unselected = _object(root, 'beta')
     original = selected / 'SKILL.md'
     before = original.stat()
-    expected = dict(sha256=hashlib.sha256(original.read_bytes()).hexdigest(),
+    expected = dict(text=original.read_text(),
                     device=before.st_dev, inode=before.st_ino)
     bindings = dict(projection=str(work / '.agents/skills'), selected=str(selected),
                     unselected=str(unselected), manifest=str(root / skill_supply.MANIFEST),
@@ -285,7 +274,7 @@ else:
     readonly(projection); readonly(selected); readonly(manual)
     info = manual.stat()
     assert manual.resolve() == selected / 'SKILL.md'
-    assert hashlib.sha256(manual.read_bytes()).hexdigest() == value['expected']['sha256']
+    assert manual.read_text() == value['expected']['text']
     assert (info.st_dev, info.st_ino) == (value['expected']['device'], value['expected']['inode'])
     assert {path.name for path in selected.parent.iterdir()} == {selected.name}
     probe = selected / '.write-probe'
@@ -315,7 +304,7 @@ else:
                             dict(selected_readable=True, original_inode=True, readonly=True,
                                  unselected_visible=False, private_manifest_visible=False))
     assert original.stat().st_ino == before.st_ino
-    assert hashlib.sha256(original.read_bytes()).hexdigest() == expected['sha256']
+    assert original.read_text() == expected['text']
     assert objective.read_bytes() == objective_bytes
     assert objective.stat().st_mode == objective_before.st_mode
     assert alias.stat().st_ino == objective.stat().st_ino == objective_before.st_ino

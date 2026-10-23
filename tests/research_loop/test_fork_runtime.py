@@ -59,7 +59,7 @@ def test_high_logical_labels_do_not_consume_child_action_allowance(tmp_path, mon
     c.write(root / 'jobs/200.json', {'step': 200, 'role': 'H'})
     record = root / 'native-evidence/200'
     c.write(record / 'native-intent.json', {'step': 200,
-        'task_sha256': c.digest(root / 'jobs/200.json')})
+        'task_ref': c.record_ref(root / 'jobs/200.json')})
     c.write(record / 'usage.json', {'input_tokens': 7, 'cached_input_tokens': 2, 'output_tokens': 3})
     assert budget.used_steps(root) == 1
     assert budget.task_step_available(root, 201)
@@ -77,7 +77,7 @@ def test_usage_keeps_high_original_after_ceiling_reduction_and_unknown_meter(tmp
     root = prepared(tmp_path)
     c.write(root / 'jobs/200.json', {'step': 200, 'role': 'H'})
     c.write(root / 'native-evidence/200/native-intent.json', {'step': 200,
-        'task_sha256': c.digest(root / 'jobs/200.json')})
+        'task_ref': c.record_ref(root / 'jobs/200.json')})
     meter = native.usage(root)
     assert meter['unknown_steps'] == [200]
     assert meter['observed_tokens'] == 0
@@ -88,10 +88,10 @@ def test_usage_keeps_high_original_after_ceiling_reduction_and_unknown_meter(tmp
 
 
 def test_bootstrap_return_binds_plain_proofs_and_retains_nested_origin():
-    origin = dict(goal_id='parent', settings_sha256='a' * 64)
-    earlier = dict(goal_id='ancestor', settings_sha256='b' * 64)
-    original = dict(kind='formal_review', request=dict(path='request.json', sha256='c' * 64),
-        review=dict(path='review.json', sha256='d' * 64, origin_identity=earlier))
+    origin = dict(goal_id='parent', settings_ref=dict(path='/parent/settings.json'))
+    earlier = dict(goal_id='ancestor', settings_ref=dict(path='/ancestor/settings.json'))
+    original = dict(kind='formal_review', request=dict(path='request.json', size_bytes=0),
+        review=dict(path='review.json', size_bytes=0, origin_identity=earlier))
     bound = fork_runtime._bound_return(original, origin)
     assert bound['request']['origin_identity'] == origin
     assert bound['review']['origin_identity'] == earlier
@@ -116,7 +116,7 @@ def test_frozen_terminal_recovery_uses_original_pending_authority_and_query(late
     # that a recovery snapshot itself admits a new research instance.
     closure = fork_sources._Closure()
     closure.snapshot(root)
-    closure.sealed(source, values[-1]['seal_sha256'])
+    closure.sealed(source, values[-1]['seal_ref'])
     for ref in refs:
         closure.add(source, ref['path'], proof=ref)
     store = tmp_path / 'frozen-recovery'

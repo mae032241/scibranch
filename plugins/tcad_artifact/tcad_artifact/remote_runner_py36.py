@@ -192,19 +192,19 @@ def _validate_authorization(config, job, authorization):
         outcome = "require_human_approval"
     if (not isinstance(authorization, dict) or outcome == "deny"
             or authorization.get("outcome") != outcome
-            or authorization.get("policy_digest") != _sha(_canonical(snapshot))
+            or authorization.get("policy_digest") != _control_digest(_canonical(snapshot))
             or authorization.get("policy") != snapshot or authorization.get("budget") != budget
             or authorization.get("allowance") != {"max_storage_bytes": policy["max_storage_bytes"], "wall_time_seconds": policy["max_total_wall_time_seconds"]}
             or authorization.get("per_execution_allowance") != {"max_storage_bytes": policy["max_storage_bytes"], "wall_time_seconds": policy["max_wall_time_seconds"]}
             or authorization.get("outside_allowance") != policy["outside_limits"]
-            or not _valid_sha(authorization.get("budget_key"))):
+            or not _valid_control_digest(authorization.get("budget_key"))):
         raise ValueError("execution policy changed or control authorization is missing; reauthorize exact request")
     if config["runner"]["max_transfer_bytes"] < limits["max_storage_bytes"]:
         raise ValueError("runner transfer capability is smaller than requested storage budget")
 
 
 def _handle(config, request, input_stream, output_stream):
-    if not isinstance(request, dict) or request.get("schema_version") != 1:
+    if not isinstance(request, dict) or request.get("schema_version") != 2:
         raise ValueError("invalid remote runner envelope")
     operation = request.get("operation")
     payload = request.get("payload")
@@ -213,7 +213,8 @@ def _handle(config, request, input_stream, output_stream):
     if operation == "put":
         _put(config, payload, input_stream)
         _write_response(output_stream, operation, {"stored": True})
-    elif operation == "get" and "max_bytes" in payload:
+    elif operation == "get":
+        payload.setdefault("max_bytes",config["max_transfer_bytes"])
         _stream_get(config, payload, output_stream)
     elif operation == "get_archive":
         _stream_get_archive(config, payload, output_stream)
@@ -227,8 +228,7 @@ def _handle(config, request, input_stream, output_stream):
 def _put(config, payload, stream):
     relative = _safe_relative(payload.get("relative_path"))
     size = int(payload.get("size_bytes", -1))
-    digest = payload.get("sha256")
-    if size < 0 or size > config["max_transfer_bytes"] or not _valid_sha(digest):
+    if size < 0 or size > config["max_transfer_bytes"]:
         raise ValueError("invalid upload descriptor")
     destination = os.path.join(config["exchange_root"], *relative.split("/"))
     _require_within(destination, config["exchange_root"])
@@ -236,20 +236,19 @@ def _put(config, payload, stream):
     descriptor, temporary = tempfile.mkstemp(prefix=".upload.", dir=os.path.dirname(destination))
     try:
         with os.fdopen(descriptor, "wb") as target:
-            observed, count = hashlib.sha256(), 0
+            count = 0
             while count < size:
                 block = stream.read(min(config["runner"]["transfer_chunk_bytes"], size - count))
                 if not block:
                     raise ValueError("incomplete upload")
                 target.write(block)
-                observed.update(block)
                 count += len(block)
-            if stream.read(1) or observed.hexdigest() != digest:
+            if stream.read(1):
                 raise ValueError("uploaded bytes differ from descriptor")
             target.flush()
             os.fsync(target.fileno())
         if os.path.exists(destination):
-            if _file_identity(destination, config["runner"]["transfer_chunk_bytes"]) != (digest, size):
+            if _file_size(destination, config["runner"]["transfer_chunk_bytes"]) != size:
                 raise ValueError("immutable upload already exists with different bytes")
         else:
             os.chmod(temporary, 0o440)
@@ -265,22 +264,21 @@ def _stream_get(config, payload, output_stream):
     metadata = os.lstat(path)
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > limit:
         raise ValueError("inspection download exceeds file bounds")
-    digest = hashlib.sha256()
-    size = 0
-    with open(path, "rb") as stream:
-        for chunk in iter(lambda: stream.read(config["runner"]["transfer_chunk_bytes"]), b""):
-            size += len(chunk)
-            if size > limit:
-                raise ValueError("inspection download exceeds file bounds")
-            digest.update(chunk)
-        _write_response(output_stream, "get", {"sha256": digest.hexdigest(), "size_bytes": size})
-        stream.seek(0)
+    size=metadata.st_size
+    with open(path,"rb") as stream:
+        before=os.fstat(stream.fileno())
+        if (before.st_dev,before.st_ino,before.st_size)!=(metadata.st_dev,metadata.st_ino,size):
+            raise ValueError("inspection source changed")
+        _write_response(output_stream,"get",{"size_bytes":size})
         sent = 0
         for chunk in iter(lambda: stream.read(config["runner"]["transfer_chunk_bytes"]), b""):
             sent += len(chunk)
             if sent > limit:
                 raise ValueError("inspection download changed")
             output_stream.write(chunk)
+        after=os.fstat(stream.fileno())
+        if sent!=size or (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns):
+            raise ValueError("inspection source changed during transfer")
     output_stream.flush()
 
 
@@ -290,12 +288,7 @@ def _stream_get_archive(config, payload, output_stream):
     if not isinstance(files, list) or not files:
         raise ValueError("archive download requires file descriptors")
     _write_response(output_stream, "get_archive", {"files": len(files)})
-    digest = hashlib.sha256()
-    class HashedStream:
-        def write(self, data):
-            digest.update(data)
-            return output_stream.write(data)
-    with tarfile.open(fileobj=HashedStream(), mode="w|", format=tarfile.GNU_FORMAT) as archive:
+    with tarfile.open(fileobj=output_stream, mode="w|", format=tarfile.GNU_FORMAT) as archive:
         manifest = _canonical(files)
         info = tarfile.TarInfo("manifest.json")
         info.size = len(manifest)
@@ -304,8 +297,8 @@ def _stream_get_archive(config, payload, output_stream):
             path = os.path.abspath(item["local_path"])
             _require_within(path, config["result_root"])
             _require_within(os.path.realpath(path), os.path.realpath(config["result_root"]))
-            size, expected = item["size_bytes"], item["sha256"]
-            if type(size) is not int or not 0 <= size <= config["max_transfer_bytes"] or not _valid_sha(expected):
+            size = item["size_bytes"]
+            if type(size) is not int or not 0 <= size <= config["max_transfer_bytes"]:
                 raise ValueError("invalid archive download descriptor")
             descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK)
             with os.fdopen(descriptor, "rb") as stream:
@@ -317,8 +310,6 @@ def _stream_get_archive(config, payload, output_stream):
                 archive.addfile(info, stream)
                 if stream.read(1):
                     raise ValueError("archive source changed since inspection")
-    # Fixed-size transport checksum trailer, removed before local tar decoding.
-    output_stream.write(b"sha256:" + digest.hexdigest().encode("ascii") + b"\n")
     output_stream.flush()
 
 
@@ -335,7 +326,7 @@ def _rpc(config, payload):
         if name == "tcad_submission_protocol":
             if arguments:
                 raise ValueError("protocol discovery accepts no arguments")
-            result = {"version": 1, "submit": "tcad_submit_retirable", "retire": "tcad_retire_submission"}
+            result = {"version": 2, "submit": "tcad_submit_retirable", "retire": "tcad_retire_submission"}
         elif name == "tcad_execution_policy":
             if arguments:
                 raise ValueError("policy discovery accepts no arguments")
@@ -346,10 +337,10 @@ def _rpc(config, payload):
             result = _capabilities(config)
         elif name == "tcad_lookup_submission":
             result = _lookup_submission(
-                config, arguments.get("submission_sha256")
+                config, arguments.get("submission_id")
             )
         elif name == "tcad_retire_submission":
-            result = _retire_submission(config, arguments.get("submission_sha256"))
+            result = _retire_submission(config, arguments.get("submission_id"))
         elif name in {"tcad_submit", "tcad_submit_retirable"}:
             result = _submit(config, arguments.get("submission"), arguments.get("authorization"))
         elif name == "tcad_status":
@@ -384,11 +375,11 @@ def _capabilities(config):
                 "capability_sha256": _capability_sha256(tool),
                 "launch_name": os.path.basename(tool["executable"]),
                 "private_fixed_argument_count": len(tool["arguments"]),
-                "private_fixed_arguments_sha256": _sha(
+                "private_fixed_arguments_sha256": _control_digest(
                     _canonical(tool["arguments"])
                 ),
                 "private_release_evidence_bytes": len(release_raw),
-                "private_release_evidence_sha256": _sha(release_raw),
+                "private_release_evidence_sha256": _control_digest(release_raw),
                 "profile_id": tool["profile_id"],
                 "public_arguments": tool.get("public_arguments", []),
                 "public_release_label": _public_release_label(tool),
@@ -433,10 +424,10 @@ def _submit(config, descriptor, authorization=None):
         raise ValueError("job capability differs from configured tool capability")
     archive = os.path.abspath(job["input_archive"]["local_path"])
     _require_within(archive, config["exchange_root"])
-    if _file_identity(archive, config["runner"]["transfer_chunk_bytes"]) != (job["input_archive"]["sha256"], job["input_archive"]["size_bytes"]):
+    if _file_size(archive, config["runner"]["transfer_chunk_bytes"]) != job["input_archive"]["size_bytes"]:
         raise ValueError("archive differs from its descriptor")
-    digest = _sha(job_raw)
-    run_id = "run_" + digest[:32]
+    request_id = job["request_id"]
+    run_id = "run_" + request_id
     runs_root = config["result_root"]
     _mkdir(runs_root)
     lock_path = os.path.join(config["state_root"], "submission.lock")
@@ -445,8 +436,10 @@ def _submit(config, descriptor, authorization=None):
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         run_dir = os.path.join(runs_root, run_id)
         if os.path.isdir(run_dir):
+            original=json.loads(_read_regular(os.path.join(run_dir,"submission.json")).decode("utf-8"))
+            if original!=job:raise ValueError("request identity differs from original submission")
             return _status(config, run_id)
-        if os.path.exists(os.path.join(config["state_root"], "retired_submissions", digest)):
+        if os.path.exists(os.path.join(config["state_root"], "retired_submissions", request_id)):
             raise RuntimeError("this exact submission was permanently retired")
         active = 0
         for name in os.listdir(runs_root):
@@ -458,6 +451,7 @@ def _submit(config, descriptor, authorization=None):
         if active >= config["max_concurrent_runs"]:
             raise RuntimeError("remote runner concurrent limit is reached")
         os.mkdir(run_dir, 0o770)
+        _write_new(os.path.join(run_dir,"submission.json"),job_raw,0o440)
         work_dir = os.path.join(run_dir, "work")
         os.mkdir(work_dir, 0o750)
         _extract_archive(archive, job["archive_entries"], work_dir, config["runner"]["transfer_chunk_bytes"])
@@ -488,21 +482,21 @@ def _submit(config, descriptor, authorization=None):
     return {"run_id": run_id, "state": "accepted", "accepted_at": _timestamp()}
 
 
-def _lookup_submission(config, submission_sha256):
+def _lookup_submission(config, submission_id):
     if (
-        not isinstance(submission_sha256, str)
-        or len(submission_sha256) != 64
-        or any(character not in "0123456789abcdef" for character in submission_sha256)
+        not isinstance(submission_id, str)
+        or len(submission_id) != 32
+        or any(character not in "0123456789abcdef" for character in submission_id)
     ):
-        raise ValueError("submission digest is invalid")
-    run_id = "run_" + submission_sha256[:32]
+        raise ValueError("submission identity is invalid")
+    run_id = "run_" + submission_id
     run_dir = os.path.join(config["result_root"], run_id)
     if not os.path.isdir(run_dir):
         return {"found": False}
     return dict({"found": True}, **_status(config, run_id))
 
 
-def _retire_submission(config, submission_sha256):
+def _retire_submission(config, submission_id):
     """Fence future submits under the same lock used to create the job."""
     _mkdir(config["state_root"])
     with open(os.path.join(config["state_root"], "submission.lock"), "a+") as lock:
@@ -512,14 +506,14 @@ def _retire_submission(config, submission_sha256):
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError("Submission is still in progress; retry abandon/cancel later. No retirement was confirmed; budget remains reserved.")
-        value = _lookup_submission(config, submission_sha256)
+        value = _lookup_submission(config, submission_id)
         if value["found"]:
             return value
         root = os.path.join(config["state_root"], "retired_submissions")
         _mkdir(root)
-        marker = os.path.join(root, submission_sha256)
+        marker = os.path.join(root, submission_id)
         if not os.path.exists(marker):
-            _write_new(marker, (submission_sha256 + "\n").encode("ascii"), 0o440)
+            _write_new(marker, (submission_id + "\n").encode("ascii"), 0o440)
         # The caller may release budget once this acknowledgment arrives.
         # Persist both the marker entry and its directory before acknowledging.
         for directory in (root, config["state_root"]):
@@ -528,7 +522,7 @@ def _retire_submission(config, submission_sha256):
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
-        return {"found": False, "retired": True, "submission_sha256": submission_sha256}
+        return {"found": False, "retired": True, "submission_id": submission_id}
 
 
 def _status(config, run_id):
@@ -585,8 +579,7 @@ def _collect(config, run_id):
             item["media_type"],
         )
         if (
-            descriptor["sha256"] != item["sha256"]
-            or descriptor["size_bytes"] != item["size_bytes"]
+            descriptor["size_bytes"] != item["size_bytes"]
         ):
             raise RuntimeError("completed output differs from its manifest")
         outputs.append(descriptor)
@@ -628,6 +621,7 @@ def _run_worker(config, run_dir):
     process = None
     collection_deadline = [None]
     collection_stopped = False
+    input_generations = {}
 
     def check_collection():
         if os.path.isfile(os.path.join(run_dir, "cancel_requested")):
@@ -643,6 +637,7 @@ def _run_worker(config, run_dir):
     try:
         environment = _runtime_environment(run_dir)
         environment.update(runtime["environment"])
+        input_generations = _input_generations(os.path.join(run_dir,"work"),runtime["archive_entries"])
         with open(os.path.join(run_dir, "worker.log"), "wb") as log:
             if os.path.isfile(os.path.join(run_dir, "cancel_requested")):
                 raise _Cancelled("cancelled_before_launch")
@@ -665,6 +660,7 @@ def _run_worker(config, run_dir):
             dict(runtime["limits"], transfer_chunk_bytes=runtime["runner_policy"]["transfer_chunk_bytes"]),
             outputs, collection_errors,
             archive_entries=runtime.get("archive_entries", ()),
+            input_generations=input_generations,
             collect_generated_outputs=runtime.get("collect_generated_outputs", False),
             check=check_collection,
         )
@@ -701,6 +697,7 @@ def _run_worker(config, run_dir):
             _collect_expected(os.path.join(run_dir, "work"), runtime["expected_outputs"],
                 dict(runtime["limits"], transfer_chunk_bytes=runtime["runner_policy"]["transfer_chunk_bytes"]),
                 outputs, collection_errors, archive_entries=runtime["archive_entries"],
+                input_generations=input_generations,
                 collect_generated_outputs=runtime.get("collect_generated_outputs", False),
                 check=check_collection)
         except _Cancelled as failure:
@@ -773,9 +770,12 @@ def _runtime_environment(run_dir):
 
 
 def _validate_job(job):
-    expected = {"schema_version", "execution_purpose", "tool_profile", "solver_kind", "capability_sha256", "input_archive", "archive_entries", "arguments", "expected_outputs", "limits", "collect_generated_outputs"}
-    if not isinstance(job, dict) or set(job) != expected or job["schema_version"] != 4:
+    expected = {"schema_version", "request_id", "execution_purpose", "tool_profile", "solver_kind", "capability_sha256", "input_archive", "archive_entries", "arguments", "expected_outputs", "limits", "collect_generated_outputs"}
+    if not isinstance(job, dict) or set(job) != expected or job["schema_version"] != 5:
         raise ValueError("job specification has unexpected fields")
+    if (not isinstance(job["request_id"],str) or len(job["request_id"])!=32
+            or any(ch not in "0123456789abcdef" for ch in job["request_id"])):
+        raise ValueError("job request identity is invalid")
     if not isinstance(job["collect_generated_outputs"], bool):
         raise ValueError("job generated-output collection flag is invalid")
     if job["execution_purpose"] not in {"production", "development_debug"}:
@@ -803,7 +803,7 @@ def _validate_job(job):
         raise ValueError("job can declare at most one process-log output")
     if job["solver_kind"] not in {"sprocess", "sdevice", "shell_runner", "deterministic_tool"}:
         raise ValueError("job solver_kind is invalid")
-    if not _valid_sha(job["capability_sha256"]):
+    if not _valid_control_digest(job["capability_sha256"]):
         raise ValueError("job capability_sha256 is invalid")
     limits = job["limits"]
     required_limits = {"wall_time_seconds", "cpu_time_seconds", "max_memory_bytes", "max_output_bytes", "max_storage_bytes"}
@@ -814,7 +814,7 @@ def _validate_job(job):
             raise ValueError("job limits must be positive integers")
 
 
-def _publish_log_mirror(source_path, target_path, digest, size, chunk_bytes, check=None):
+def _publish_log_mirror(source_path, target_path, size, chunk_bytes, check=None):
     import tempfile
     descriptor, temporary = tempfile.mkstemp(prefix=".stdout.", dir=os.path.dirname(str(target_path)))
     try:
@@ -832,35 +832,25 @@ def _publish_log_mirror(source_path, target_path, digest, size, chunk_bytes, che
                     target.write(chunk)
             target.flush()
             os.fsync(target.fileno())
-        if _file_identity(temporary, chunk_bytes, check=check) != (digest, size):
+        if _file_size(temporary, chunk_bytes, check=check) != size:
             raise RuntimeError("stdout changed during mirror publication")
         os.chmod(temporary, 0o440)
         try:
             os.link(temporary, str(target_path))
         except FileExistsError:
-            if _file_identity(target_path, chunk_bytes, check=check) != (digest, size):
+            if _file_size(target_path, chunk_bytes, check=check) != size:
                 raise RuntimeError("reserved stdout mirror conflicts with an existing file; originals retained")
     finally:
         os.unlink(temporary)
 
 
-def _file_identity(path, chunk_bytes, check=None):
-    if check is not None:
-        check()
-    descriptor = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
-    with os.fdopen(descriptor, "rb") as stream:
-        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-            raise ValueError("scientific file is not regular")
-        digest, size = hashlib.sha256(), 0
-        while True:
-            if check is not None:
-                check()
-            chunk = stream.read(chunk_bytes)
-            if not chunk:
-                break
-            digest.update(chunk)
-            size += len(chunk)
-    return digest.hexdigest(), size
+def _file_size(path, chunk_bytes, check=None):
+    if check is not None:check()
+    descriptor=os.open(str(path),os.O_RDONLY|os.O_NONBLOCK|getattr(os,"O_NOFOLLOW",0))
+    with os.fdopen(descriptor,"rb") as source:
+        info=os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode):raise ValueError("scientific file is not regular")
+        return info.st_size
 
 
 def _extract_archive(archive_path, entries, destination, chunk_bytes):
@@ -879,17 +869,16 @@ def _extract_archive(archive_path, entries, destination, chunk_bytes):
             source = archive.extractfile(member)
             target = os.path.join(str(destination), *name.split("/"))
             os.makedirs(os.path.dirname(target), exist_ok=True)
-            digest, size = hashlib.sha256(), 0
+            size = 0
             with source, open(target, "xb") as output:
                 for chunk in iter(lambda: source.read(chunk_bytes), b""):
                     size += len(chunk)
                     if size > item["size_bytes"]:
                         raise ValueError("archive member exceeds manifest")
-                    digest.update(chunk)
                     output.write(chunk)
                 output.flush()
                 os.fsync(output.fileno())
-            if size != item["size_bytes"] or digest.hexdigest() != item["sha256"]:
+            if size != item["size_bytes"]:
                 raise ValueError("archive member differs from manifest")
             os.chmod(target, 0o440)
             seen.add(name)
@@ -897,7 +886,7 @@ def _extract_archive(archive_path, entries, destination, chunk_bytes):
         raise ValueError("archive is missing declared members")
 
 
-def _collect_expected(root, expected, limits, records=None, errors=None, *, archive_entries=(), collect_generated_outputs=False, check=None):
+def _collect_expected(root, expected, limits, records=None, errors=None, *, archive_entries=(), input_generations=None, collect_generated_outputs=False, check=None):
     records = [] if records is None else records
     total = sum(int(item["size_bytes"]) for item in records)
     failures = [] if errors is None else errors
@@ -921,7 +910,7 @@ def _collect_expected(root, expected, limits, records=None, errors=None, *, arch
                 continue
             if os.lstat(path).st_size > item["max_bytes"]:
                 raise RuntimeError("output exceeds declared bound")
-            digest, size = _file_identity(path, limits["transfer_chunk_bytes"], check=check)
+            size = _file_size(path, limits["transfer_chunk_bytes"], check=check)
             if size > item["max_bytes"]:
                 raise RuntimeError("output exceeds declared bound")
             total += size
@@ -930,10 +919,10 @@ def _collect_expected(root, expected, limits, records=None, errors=None, *, arch
             if capture == "process_log":
                 target = os.path.join(root, *relative.split("/"))
                 os.makedirs(os.path.dirname(target), exist_ok=True)
-                _publish_log_mirror(path, target, digest, size, limits["transfer_chunk_bytes"], check=check)
+                _publish_log_mirror(path, target, size, limits["transfer_chunk_bytes"], check=check)
             os.chmod(path, 0o440)
             records.append({"name": item["name"], "relative_path": relative,
-                "media_type": item["media_type"], "sha256": digest, "size_bytes": size})
+                "media_type": item["media_type"], "size_bytes": size})
         except _CollectionStopped:
             raise
         except (OSError, RuntimeError, ValueError) as failure:
@@ -943,7 +932,7 @@ def _collect_expected(root, expected, limits, records=None, errors=None, *, arch
                 break
     if collect_generated_outputs:
         try:
-            _collect_generated(root, archive_entries, expected, limits, records, check=check)
+            _collect_generated(root, archive_entries, expected, limits, records, input_generations=input_generations, check=check)
         except _CollectionStopped:
             raise
         except (OSError, RuntimeError, ValueError) as failure:
@@ -955,7 +944,32 @@ def _collect_expected(root, expected, limits, records=None, errors=None, *, arch
     return records
 
 
-def _collect_generated(root, archive_entries, expected, limits, records, check=None):
+def _input_generation(value):
+    return (value.st_dev,value.st_ino,value.st_mode,value.st_size,
+            value.st_mtime_ns,value.st_ctime_ns)
+
+
+def _input_generations(root, archive_entries):
+    """Capture only this run's pre-launch input metadata, without reading bytes."""
+    result={}
+    for item in archive_entries:
+        relative=_safe_relative(item["relative_path"])
+        path=os.path.join(root,*relative.split("/"))
+        current=root
+        for part in relative.split("/"):
+            current=os.path.join(current,part)
+            if stat.S_ISLNK(os.lstat(current).st_mode):
+                raise ValueError("original input path contains a symlink")
+        descriptor=os.open(path,os.O_RDONLY|os.O_NONBLOCK|getattr(os,"O_NOFOLLOW",0))
+        with os.fdopen(descriptor,"rb") as source:
+            value=os.fstat(source.fileno())
+            if not stat.S_ISREG(value.st_mode) or value.st_size!=item["size_bytes"]:
+                raise ValueError("original input differs from its staged descriptor")
+            result[relative]=_input_generation(value)
+    return result
+
+
+def _collect_generated(root, archive_entries, expected, limits, records, input_generations=None, check=None):
     originals = dict((item["relative_path"], item) for item in archive_entries)
     reserved = set(item["relative_path"] for item in expected)
     total = sum(int(item["size_bytes"]) for item in records)
@@ -990,26 +1004,18 @@ def _collect_generated(root, archive_entries, expected, limits, records, check=N
                 metadata = os.fstat(descriptor)
                 if not stat.S_ISREG(metadata.st_mode):
                     raise RuntimeError("generated output is not a regular file: " + relative)
+                if relative in originals:
+                    before=(input_generations or {}).get(relative)
+                    if before is None:
+                        raise RuntimeError("generated collection lacks original input generation")
+                    if _input_generation(metadata)==tuple(before):
+                        continue
                 if total + metadata.st_size > limits["max_output_bytes"]:
                     raise RuntimeError("total output exceeds job limit")
-                digest = hashlib.sha256()
-                size = 0
-                with os.fdopen(descriptor, "rb", closefd=False) as stream:
-                    while True:
-                        if check is not None:
-                            check()
-                        chunk = stream.read(limits["transfer_chunk_bytes"])
-                        if not chunk:
-                            break
-                        size += len(chunk)
-                        if total + size > limits["max_output_bytes"]:
-                            raise RuntimeError("total output exceeds job limit")
-                        digest.update(chunk)
+                size=metadata.st_size
             finally:
                 os.close(descriptor)
-            original = originals.get(relative)
-            if original is not None and size == original["size_bytes"] and digest.hexdigest() == original["sha256"]:
-                continue
+            # Changed original paths remain outputs; unchanged inputs cost no output quota.
             generated += 1
             if len(records) >= 4092:
                 raise RuntimeError("collected solver output count exceeds 4092")
@@ -1018,9 +1024,9 @@ def _collect_generated(root, archive_entries, expected, limits, records, check=N
             media_type = {".plx": "application/x-synopsys-plx", ".json": "application/json",
                           ".csv": "text/csv", ".txt": "text/plain", ".log": "text/plain",
                           ".png": "image/png"}.get(suffix, "application/octet-stream")
-            records.append({"name": "generated_" + hashlib.sha256(relative.encode("utf-8")).hexdigest(),
+            records.append({"name": "generated_" + str(len(records)),
                             "relative_path": relative, "media_type": media_type,
-                            "sha256": digest.hexdigest(), "size_bytes": size})
+                            "size_bytes": size})
     if not generated:
         raise RuntimeError("solver produced no generated output files")
     if check is not None:
@@ -1169,20 +1175,20 @@ def _terminate(process, grace_seconds):
 
 
 def _read_bound_descriptor(value, root):
-    required = {"name", "local_path", "sha256", "size_bytes", "media_type"}
-    if not isinstance(value, dict) or set(value) != required or not _valid_sha(value.get("sha256")):
+    required = {"name", "local_path", "size_bytes", "media_type"}
+    if not isinstance(value, dict) or set(value) != required:
         raise ValueError("file descriptor is invalid")
     path = os.path.abspath(value["local_path"])
     _require_within(path, root)
     raw = _read_regular(path)
-    if len(raw) != value["size_bytes"] or _sha(raw) != value["sha256"]:
+    if len(raw) != value["size_bytes"]:
         raise ValueError("file differs from descriptor")
     return raw
 
 
 def _descriptor(name, path, media_type):
-    digest, size = _file_identity(path, 1024 * 1024)
-    return {"name": name, "local_path": path, "sha256": digest, "size_bytes": size, "media_type": media_type}
+    size = _file_size(path, 1024 * 1024)
+    return {"name": name, "local_path": path, "size_bytes": size, "media_type": media_type}
 
 
 def _tool(config, profile_id):
@@ -1202,7 +1208,7 @@ def _capability_sha256(tool):
         "schema_version": 1,
         "solver_kind": tool["solver_kind"],
     }
-    return _sha(_canonical(capability))
+    return _control_digest(_canonical(capability))
 
 
 def _run_dir(config, run_id):
@@ -1313,11 +1319,12 @@ def _unlink(path):
         pass
 
 
-def _valid_sha(value):
+def _valid_control_digest(value):
     return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
 
-def _sha(raw):
+def _control_digest(raw):
+    """Installed capability and approval records only; never scientific files."""
     return hashlib.sha256(raw).hexdigest()
 
 
@@ -1425,7 +1432,7 @@ def _job_progress(run_dir):
             text = raw.decode("utf-8", errors="replace")
             stream_identity = "%s:%s:%s:%s" % (directory, name, metadata.st_dev, metadata.st_ino)
             result["log_tails"].append({
-                "stream_id": hashlib.sha256(stream_identity.encode("utf-8")).hexdigest(),
+                "stream_id": "%s:%s:%s" % (name,metadata.st_dev,metadata.st_ino),
                 "start_byte": start_byte,
                 "source": "stdout" if directory == run_dir else "solver_log",
                 "tail": _redact_log(text), "size_bytes": metadata.st_size,
@@ -1438,7 +1445,7 @@ def _job_progress(run_dir):
 
 
 def _write_response(stream, operation, payload):
-    stream.write(_canonical({"schema_version": 1, "operation": operation, "ok": True, "payload": payload}) + b"\n")
+    stream.write(_canonical({"schema_version": 2, "operation": operation, "ok": True, "payload": payload}) + b"\n")
     stream.flush()
 
 
@@ -1501,25 +1508,9 @@ def _inspect_directory(run_dir, relative_path=None, max_bytes=32 * 1024 * 1024, 
         return {"status": "unavailable", "reason": "not_regular_file"}
     if metadata.st_size > max_bytes:
         return {"status": "limit_exceeded", "reason": "file_bytes"}
-    digest = hashlib.sha256()
-    size = 0
-    with open(path, "rb") as stream:
-        before = os.fstat(stream.fileno())
-        while True:
-            check_deadline()
-            chunk = stream.read(1024 * 1024)
-            check_deadline()
-            if not chunk:
-                break
-            size += len(chunk)
-            if size > max_bytes:
-                return {"status": "limit_exceeded", "reason": "file_bytes"}
-            digest.update(chunk)
-        after = os.fstat(stream.fileno())
     check_deadline()
-    if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns) or before.st_ino != metadata.st_ino:
-        return {"status": "changed_since_inspection", "reason": "file_changed"}
-    return {"status": "available", "relative_path": relative, "file": {"name": "candidate", "local_path": path, "media_type": "application/octet-stream", "sha256": digest.hexdigest(), "size_bytes": size}}
+    return {"status":"available","relative_path":relative,"file":{"name":"candidate",
+        "local_path":path,"media_type":"application/octet-stream","size_bytes":metadata.st_size}}
 
 
 

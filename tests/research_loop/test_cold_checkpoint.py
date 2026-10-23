@@ -219,7 +219,7 @@ def test_restore_shares_immutable_payloads_keeps_mutable_files_independent_and_c
     source.write_bytes(raw)
     other = root / 'project/global/ordinary-b'
     other.write_bytes(raw)
-    proof = {key: archive.files.hash_file(source)[key] for key in ('sha256', 'size_bytes')}
+    proof = {key: archive.files.stat_file(source)[key] for key in ('size_bytes',)}
     frozen = shared_originals.retain(root, source, source_kind='mutable', **proof)
     aliases = [root / f'project/nodes/001/inputs/alias-{number}' for number in range(20)]
     for alias in aliases:
@@ -249,7 +249,7 @@ def test_restore_shares_immutable_payloads_keeps_mutable_files_independent_and_c
     assert result['generation'] == 2 and result['paused'] is True
     assert storage.usage(root) <= limit
     rows = [json.loads(line) for line in (package / 'payload/manifest.jsonl').read_bytes().splitlines()]
-    blob = package / 'payload' / next(row['blob'] for row in rows if row.get('sha256') == proof['sha256'])
+    blob = package / 'payload' / next(row['blob'] for row in rows if row.get('path') == frozen.relative_to(root).as_posix())
     assert all(os.path.samefile(alias, frozen) for alias in aliases)
     assert os.path.samefile(frozen, blob)
     assert os.path.samefile(frozen, previous / frozen.relative_to(root))
@@ -268,7 +268,7 @@ def test_cli_independent_checkpoint_copies_unique_immutable_targets_and_isolates
     raw = b'Identical bytes with distinct mutable ownership.\n' * 40
     source = root / 'project/global/mutable-a'; source.write_bytes(raw)
     other = root / 'project/global/mutable-b'; other.write_bytes(raw)
-    proof = {key: archive.files.hash_file(source)[key] for key in ('sha256', 'size_bytes')}
+    proof = {key: archive.files.stat_file(source)[key] for key in ('size_bytes',)}
     frozen = shared_originals.retain(root, source, source_kind='mutable', **proof)
     aliases = [root / f'project/nodes/001/inputs/immutable-{number}' for number in range(6)]
     for alias in aliases:
@@ -309,7 +309,7 @@ def test_cli_independent_checkpoint_copies_unique_immutable_targets_and_isolates
     restored_frozen = root / frozen.relative_to(root)
     assert all(os.path.samefile(alias, restored_frozen) for alias in aliases)
     assert not os.path.samefile(source, other) and not os.path.samefile(source, restored_frozen)
-    blob = package / 'payload' / next(row['blob'] for row in files if row['sha256'] == proof['sha256'])
+    blob = package / 'payload' / next(row['blob'] for row in files if row['path'] == frozen.relative_to(root).as_posix())
     source.write_bytes(b'New mutable bytes')
     assert other.read_bytes() == restored_frozen.read_bytes() == blob.read_bytes() == raw
     blob.chmod(0o600); blob.write_bytes(b'Changed independent package bytes'); blob.chmod(0o400)
@@ -390,7 +390,7 @@ def test_independent_pending_restore_validates_all_inode_ownership(cold, tmp_pat
     root, anchor = cold
     source = root / 'project/global/mutable-a'; source.write_bytes(b'Shared content, distinct frozen ownership.\n')
     other = root / 'project/global/mutable-b'; other.write_bytes(source.read_bytes())
-    proof = {key: archive.files.hash_file(source)[key] for key in ('sha256', 'size_bytes')}
+    proof = {key: archive.files.stat_file(source)[key] for key in ('size_bytes',)}
     frozen = shared_originals.retain(root, source, source_kind='mutable', **proof)
     alias = root / 'project/nodes/001/inputs/immutable-alias'
     shared_originals.link(frozen, alias, root=root, **proof)
@@ -403,7 +403,7 @@ def test_independent_pending_restore_validates_all_inode_ownership(cold, tmp_pat
         archive.checkpoint_restore(root, package)
     monkeypatch.setattr(archive, '_restore_dependencies', dependencies)
     rows = [json.loads(line) for line in (package / 'payload/manifest.jsonl').read_bytes().splitlines()]
-    row = next(row for row in rows if row.get('sha256') == proof['sha256'])
+    row = next(row for row in rows if row.get('path') == frozen.relative_to(root).as_posix())
     if damage == 'package_alias':
         alias.unlink(); os.link(package / 'payload' / row['blob'], alias)
     elif damage == 'split_immutable':

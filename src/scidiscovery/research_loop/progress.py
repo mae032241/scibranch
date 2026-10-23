@@ -7,7 +7,6 @@ A reader failure cannot change execution, receipts, originals or usage coverage.
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,10 +15,6 @@ import stat
 from . import backends, contracts, execution, native_usage, public_output, runtime
 
 MAX_BYTES = 262144
-
-
-def _digest(data):
-    return hashlib.sha256(data).hexdigest()
 
 
 def _encode(value):
@@ -31,13 +26,11 @@ def _decode(cursor, binding):
         if not isinstance(cursor, str) or len(cursor) > 2048:
             raise ValueError
         value = json.loads(base64.urlsafe_b64decode(cursor + '=' * (-len(cursor) % 4)))
-        if (set(value) != {'v', 'binding', 'stream', 'offset', 'prefix_size', 'prefix', 'edge', 'skip'}
-                or value['v'] != 1 or value['binding'] != binding
+        if (set(value) != {'v', 'binding', 'stream', 'offset', 'skip'}
+                or value['v'] != 2 or value['binding'] != binding
                 or not isinstance(value['stream'], list) or len(value['stream']) != 2
                 or any(type(item) is not int or item < 0 for item in value['stream'])
                 or type(value['offset']) is not int or value['offset'] < 0
-                or type(value['prefix_size']) is not int or not 0 <= value['prefix_size'] <= 64
-                or any(not isinstance(value[key], str) or len(value[key]) != 64 for key in ('prefix', 'edge'))
                 or type(value['skip']) is not bool):
             raise ValueError
         return value
@@ -68,7 +61,7 @@ def read(root, step, *, attempt=0, cursor=None, limit_bytes=65536, tail=False):
     job = json.loads(job_bytes)
     if job.get('step') != step:
         raise ValueError('Exact progress node identity changed')
-    binding = _digest(json.dumps([settings['goal_id'], step, attempt]).encode())
+    binding = [settings['goal_id'], step, attempt]
     previous = _decode(cursor, binding) if cursor is not None else None
     record = execution.origin(root, step)
     if attempt:
@@ -87,7 +80,7 @@ def read(root, step, *, attempt=0, cursor=None, limit_bytes=65536, tail=False):
             runner_path = record / 'runner-process.json'
             if runner_path.exists():
                 runner = contracts.read(contracts.regular(runner_path, limit=4096))
-                runtime_binding = _digest(intent_bytes if attempt else job_bytes)
+                runtime_binding = contracts.record_ref(intent_path if attempt else job_path)
                 result['state'] = 'running' if runtime.process_matches(runner, runtime_binding) else 'unknown'
             if type(intent.get('prepared_at')) in (int, float):
                 result['prepared_at'] = intent['prepared_at']
@@ -137,11 +130,8 @@ def read(root, step, *, attempt=0, cursor=None, limit_bytes=65536, tail=False):
             if previous:
                 if identity != previous['stream']:
                     return dict(result, stream_state='replaced', restart_required=True)
-                if info.st_size < offset or info.st_size < previous['prefix_size']:
+                if info.st_size < offset:
                     return dict(result, stream_state='truncated', restart_required=True)
-                if (_digest(_bytes(stream, 0, previous['prefix_size'])) != previous['prefix']
-                        or _digest(_bytes(stream, max(0, offset - 64), min(offset, 64))) != previous['edge']):
-                    return dict(result, stream_state='replaced', restart_required=True)
             data = _bytes(stream, offset, limit_bytes)
             result['bytes_read'] = len(data)
             skipping = previous['skip'] if previous else tail_skipping
@@ -180,10 +170,7 @@ def read(root, step, *, attempt=0, cursor=None, limit_bytes=65536, tail=False):
                     if safe is not None:
                         result['events'].append(safe)
             offset += consumed
-            prefix_size = previous['prefix_size'] if previous else min(64, info.st_size)
-            current = dict(v=1, binding=binding, stream=identity, offset=offset,
-                           prefix_size=prefix_size, prefix=_digest(_bytes(stream, 0, prefix_size)),
-                           edge=_digest(_bytes(stream, max(0, offset - 64), min(offset, 64))), skip=skipping)
+            current = dict(v=2, binding=binding, stream=identity, offset=offset, skip=skipping)
             # Detect changes during this single bounded read before returning it.
             after = os.fstat(stream.fileno())
             if after.st_size < info.st_size:

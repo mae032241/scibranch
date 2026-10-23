@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from . import execution
 
-import hashlib
 import json
 import math
 import os
@@ -89,7 +88,7 @@ def observer_input_sources(root, job, observation, *, source=None):
             or original['contract'] != contract
             or original['job'] != q._ref(root, logical_root / 'jobs' / f'{job["step"]:03d}.json', source=source)
             or q._read(root, original['job'], source=source) != job or original['raw'] != q._ref(root, raw, source=source)
-            or original['raw']['sha256'] != observation['binding']['source_sha256']):
+            or dict(path=str(raw),size_bytes=original['raw']['size_bytes']) != observation['binding']['source_ref']):
         raise q.IntegrityError('Observer source view differs from its original task')
     return execution_inputs.validate_source_view(root, job, original['view'], source=source)
 
@@ -115,7 +114,7 @@ def resolve(root, target, receipts, *, current=None):
             raise ValueError('Historical implementation is outside the frozen history')
         from . import originals
         path = originals.source_record(originals.node(root, step), 'result-identity.json')
-        if c.digest(c.regular(path)) != receipt['seal_sha256']:
+        if source_seal_ref(originals.node(root, step)) != receipt['seal_ref']:
             raise ValueError('Historical node seal changed')
         rows = c.read(path)['materials']
     row = next((row for row in rows if handle(row) == target), None)
@@ -124,7 +123,7 @@ def resolve(root, target, receipts, *, current=None):
     return row
 
 
-def _proof(root, source, *, context=None):
+def _proof(root, source, *, context=None, source_kind='mutable'):
     from .protocol import require_current
     require_current(root)
     if not isinstance(source, str):
@@ -135,19 +134,50 @@ def _proof(root, source, *, context=None):
     c.regular(path)
     size = path.stat().st_size
     from . import experiments
-    sha = c.digest(path) if context is None else experiments.proof(path,context=context)['sha256']
     from . import shared_originals, storage_policy as storage
     limits=storage.for_path(root,path)
-    snapshot=shared_originals.retain(root,path,sha256=sha,size_bytes=size,source_kind='mutable',context=context,policy=limits)
-    return dict(path=source, sha256=sha, size_bytes=size, retention='archived',
+    snapshot=shared_originals.retain(root,path,size_bytes=size,source_kind=source_kind,context=context,policy=limits)
+    return dict(path=source, size_bytes=size, retention='archived',
                 snapshot=snapshot.relative_to(root).as_posix())
+
+
+def source_control_ref(source, relative):
+    from . import originals
+    originals.original_ref(source,relative)
+    return dict(path=str(Path(source.original_root)/relative))
+
+
+def source_seal_ref(source):
+    return source_control_ref(source,f'native-evidence/{source.step:03d}/result-identity.json')
+
+
+def _same_original(root, original, retained):
+    return (Path(root) / original['path'] == Path(root) / retained['path']
+        and original.get('size_bytes') == retained.get('size_bytes'))
+
+
+def _retained_original(root, row, proof):
+    candidates=[row[key] for key in ('accepted','completed','terminal','observation','retirement') if row.get(key) is not None]
+    candidates.extend(row.get('originals', [])); candidates.extend(row.get('outputs', []))
+    matches={item['snapshot']: item for item in candidates if _same_original(root, proof, item)}
+    if len(matches)!=1:
+        raise ObserverIntegrityError('Original has no exact retained path binding')
+    return next(iter(matches.values()))
+
+
+def _snapshot(proof):
+    path=Path(proof.get('snapshot', ''))
+    if (proof.get('retention')!='archived' or path.is_absolute() or '..' in path.parts
+            or path.as_posix()!=proof['snapshot'] or not path.parts):
+        raise ObserverIntegrityError('Archived original has no exact snapshot path')
+    return path.as_posix()
 
 
 def _job_storage(function):
     @wraps(function)
     def bound(root,job,*args,**kwargs):
         from . import storage_policy as storage, shared_originals
-        with storage.bind(root,c.settings(root,job).get('storage_policy')), shared_originals.verified():
+        with storage.bind(root,c.settings(root,job).get('storage_policy')):
             return function(root,job,*args,**kwargs)
     return bound
 
@@ -174,12 +204,12 @@ def _managed_config(job,root=None):
     configured = ((job.get('search') or {}).get('breadth') or 'experiment_mode' in job and
         (job['experiment_mode']=='local' and job['role']=='W'
          or root is not None and (execution.record(root,job['step'])/'experiment-config.json').exists()))
-    return dict(adapter_sha256='registered-originals-v1') if configured else None
+    return dict(adapter_ref='registered-originals-v1') if configured else None
 
 
 def _managed_proof(root,path,original,*,context=None):
-    proof=_proof(root,Path(path).relative_to(root).as_posix(),context=context)
-    if any(proof[key]!=original[key] for key in ('sha256','size_bytes')):
+    proof=_proof(root,Path(path).relative_to(root).as_posix(),context=context,source_kind='managed_frozen')
+    if any(proof[key]!=original[key] for key in ('size_bytes',)):
         raise ObserverIntegrityError('Managed file differs from completed original')
     return proof
 
@@ -218,10 +248,10 @@ def managed_status(root, row, *, context=None):
             raise ObserverIntegrityError('Non-submission cannot contain executed terminal evidence')
         accepted=c.read(root/row['accepted']['snapshot'])
         value=c.read(root/row['retirement']['snapshot'])
-        if value.get('accepted',{}).get('sha256')!=row['accepted']['sha256']:
+        if not _same_original(root, value.get('accepted', {}), row['accepted']):
             raise ObserverIntegrityError('Retirement differs from the archived accepted call')
         try:
-            experiments.verify_retirement(value,lambda item:root/'host-history/objects'/item['sha256'],
+            experiments.verify_retirement(value,lambda item:root/_retained_original(root,row,item)['snapshot'],
                 interface=_execution_interface(root,accepted),context=context)
         except (ValueError,OSError,KeyError,TypeError) as error:
             raise ObserverIntegrityError('Archived permanent retirement proof changed') from error
@@ -232,12 +262,12 @@ def managed_status(root, row, *, context=None):
     observation=row.get('observation')
     if observation is not None:
         value=c.read(root/observation['snapshot'])
-        if (value['accepted']['sha256']!=row['accepted']['sha256']
-                or value['completed']['sha256']!=row['completed']['sha256']):
+        if (not _same_original(root, value['accepted'], row['accepted'])
+                or not _same_original(root, value['completed'], row['completed'])):
             raise ObserverIntegrityError('Managed observation differs from archived call originals')
         try:
             return experiments.verify_observation(value,lambda proof:
-                root/'host-history/objects'/proof['sha256'],interface=interface,context=context)
+                root/_retained_original(root,row,proof)['snapshot'],interface=interface,context=context)
         except (ValueError,OSError,KeyError,TypeError) as error:
             raise ObserverIntegrityError('Managed execution observation original changed') from error
     if interface.get('observation_version') is not None:return 'unknown'
@@ -273,14 +303,14 @@ def scientific_outputs(root, job, call):
         config = c.read(originals.resolve_ref(source, dict(path=record + '/experiment-config.json')))
         observed = c.read(archived_ref(call['observation']))
         archived = dict(observed, completed=dict(observed['completed'], path=str(archived_ref(call['completed']))),
-            outputs=[dict(item, path=str(originals.resolve_ref(source, dict(item, path='host-history/objects/' + item['sha256']))))
+            outputs=[dict(item, path=str(originals.resolve_ref(source, dict(item, path=_retained_original(source.original_root,call,item)['snapshot']))))
                 for item in observed['outputs']],
-            **(dict(scientific_outputs=[dict(item,path=str(originals.resolve_ref(source,dict(item,path='host-history/objects/'+item['sha256']))))
+            **(dict(scientific_outputs=[dict(item,path=str(originals.resolve_ref(source,dict(item,path=_retained_original(source.original_root,call,item)['snapshot']))))
                 for item in observed['scientific_outputs']]) if 'scientific_outputs' in observed else {}))
         result = []
         for descriptor in experiments.scientific_outputs(config, archived):
             matches = [row for row in call['outputs'] if row['name'] == descriptor.name
-                and row['sha256'] == descriptor.sha256 and row['size_bytes'] == descriptor.size_bytes
+                and row['size_bytes'] == descriptor.size_bytes
                 and archived_ref(row) == Path(descriptor.local_path)]
             if len(matches) != 1:
                 raise ObserverIntegrityError('Inherited scientific output lost its exact archived descriptor')
@@ -297,14 +327,14 @@ def scientific_outputs(root, job, call):
         raise ObserverIntegrityError('Scientific output interface changed')
     observed=c.read(c.regular(root/call['observation']['snapshot']))
     archived=dict(observed,completed=dict(observed['completed'],path=str(root/call['completed']['snapshot'])),
-        outputs=[dict(item,path=str(root/'host-history/objects'/item['sha256']))
+        outputs=[dict(item,path=str(root/_retained_original(root,call,item)['snapshot']))
         for item in observed['outputs']],
-        **(dict(scientific_outputs=[dict(item,path=str(root/'host-history/objects'/item['sha256']))
+        **(dict(scientific_outputs=[dict(item,path=str(root/_retained_original(root,call,item)['snapshot']))
             for item in observed['scientific_outputs']]) if 'scientific_outputs' in observed else {}))
     result=[]
     for descriptor in experiments.scientific_outputs(config,archived):
-        proof=_proof(root,Path(descriptor.local_path).relative_to(root).as_posix())
-        if proof['sha256']!=descriptor.sha256 or proof['size_bytes']!=descriptor.size_bytes:
+        proof=_proof(root,Path(descriptor.local_path).relative_to(root).as_posix(),source_kind='managed_frozen')
+        if proof['size_bytes']!=descriptor.size_bytes:
             raise ObserverIntegrityError('Selected scientific output original changed')
         result.append(dict(proof,path=proof['snapshot'],name=descriptor.name))
     return result
@@ -331,7 +361,7 @@ def managed_calls(root, job, *, context=None):
                 raise ObserverIntegrityError('Managed completion changed accepted mechanism')
             terminal_path=directory/'terminal.json'
             if terminal_path.exists():
-                terminal=_proof(root,terminal_path.relative_to(root).as_posix(),context=context)
+                terminal=_proof(root,terminal_path.relative_to(root).as_posix(),context=context,source_kind='managed_frozen')
         observed_path=directory/'execution-observation.json';observed=None;extra=[]
         if observed_path.exists():
             observed=c.read(c.regular(observed_path))
@@ -345,17 +375,17 @@ def managed_calls(root, job, *, context=None):
             value=experiments.retirement(dict(record_dir=str(records.root),scope=scope,execution_interface=interface,breadth=(job.get('search') or {}).get('breadth')),directory.name)
             originals=experiments.retirement_originals(value,accepted)
             row=dict(call_id=directory.name,scope=scope,mechanism_binding=binding,status='not_submitted',
-                result_protocol=generic_results.protocol(interface),accepted=_proof(root,accepted_path.relative_to(root).as_posix(),context=context),
-                completed=None,terminal=None,retirement=_proof(root,retired_path.relative_to(root).as_posix(),context=context),
+                result_protocol=generic_results.protocol(interface),accepted=_proof(root,accepted_path.relative_to(root).as_posix(),context=context,source_kind='managed_frozen'),
+                completed=None,terminal=None,retirement=_proof(root,retired_path.relative_to(root).as_posix(),context=context,source_kind='managed_frozen'),
                 originals=[_managed_proof(root,item['path'],item,context=context) for item in originals])
             row['status']=managed_status(root,row,context=context);result.append(row)
             continue
         outputs=_managed_outputs(interface,value,observed)
         row=dict(call_id=directory.name,scope=scope,mechanism_binding=binding,status=state,
             result_protocol=generic_results.protocol(interface),
-            accepted=_proof(root,accepted_path.relative_to(root).as_posix(),context=context),
-            completed=_proof(root,completion.relative_to(root).as_posix(),context=context) if completion.exists() else None,terminal=terminal,
-            **(dict(observation=_proof(root,observed_path.relative_to(root).as_posix(),context=context)) if observed is not None else {}),
+            accepted=_proof(root,accepted_path.relative_to(root).as_posix(),context=context,source_kind='managed_frozen'),
+            completed=_proof(root,completion.relative_to(root).as_posix(),context=context,source_kind='managed_frozen') if completion.exists() else None,terminal=terminal,
+            **(dict(observation=_proof(root,observed_path.relative_to(root).as_posix(),context=context,source_kind='managed_frozen')) if observed is not None else {}),
             **(dict(originals=[_managed_proof(root,directory/'inputs'/item['name'],item,context=context) for item in accepted.get('snapshot_files',[])]
                     +[_managed_proof(root,item['path'],item,context=context) for item in (extra if observed is not None else value.get('proofs',[]))],
                 outputs=[dict(name=item['name'],**_managed_proof(root,item['path'],item,context=context)) for item in outputs],
@@ -365,7 +395,7 @@ def managed_calls(root, job, *, context=None):
                if 'result' in value or observed is not None else {}))
         if observed is not None:
             # Retain every collected descriptor even when local result outputs use scientific names.
-            for item in observed['outputs']:_managed_proof(root,item['path'],item,context=context)
+            row['originals'].extend(_managed_proof(root,item['path'],item,context=context) for item in observed['outputs'])
         row['status']=managed_status(root,row,context=context)
         result.append(row)
     return result
@@ -412,22 +442,23 @@ def validate_managed(root, job, rows, *, context=None):
                 if 'native_terminal' in observed:originals.append(observed['native_terminal'])
                 originals.extend(observed.get('scientific_outputs',[]))
                 if observed.get('scientific_source') is not None:originals.append(observed['scientific_source'])
+                originals.extend(observed['outputs'])
             else:originals.extend(completed.get('proofs',[]))
-            if (len(row['originals'])!=len(originals) or any(any(proof[key]!=original[key] for key in ('sha256','size_bytes'))
+            if (len(row['originals'])!=len(originals) or any(any(proof[key]!=original[key] for key in ('size_bytes',))
                     for proof,original in zip(row['originals'],originals))):
                 raise ObserverIntegrityError('Managed input or log original changed')
             outputs=_managed_outputs(_execution_interface(root,accepted),completed,observed)
             if len(row['outputs'])!=len(outputs):
                 raise ObserverIntegrityError('Managed outputs differ from completed original')
             for proof,original in zip(row['outputs'],outputs):
-                if any(proof[key]!=original[key] for key in ('name','sha256','size_bytes')):
+                if any(proof[key]!=original[key] for key in ('name','size_bytes')):
                     raise ObserverIntegrityError('Managed output changed')
         if row.get('retirement') is not None:
             value=c.read(root/row['retirement']['snapshot'])
             from . import experiments
             originals=experiments.retirement_originals(value,accepted)
             if (len(row['originals'])!=len(originals) or any(any(item[key]!=original[key]
-                    for key in ('sha256','size_bytes')) for item,original in zip(row['originals'],originals))):
+                    for key in ('size_bytes',)) for item,original in zip(row['originals'],originals))):
                 raise ObserverIntegrityError('Retirement native originals differ from the frozen receipt')
         if row['status'] not in {'known_success','known_failed','not_submitted','unknown'}:raise ObserverIntegrityError('Managed state differs')
         if row['status']!=managed_status(root,row,context=context):
@@ -451,16 +482,15 @@ def validate_managed_original(source, job, rows):
     from . import originals, experiments, breadth, generic_results
     job_ref = originals.original_ref(source, f'jobs/{job["step"]:03d}.json')
     scope = dict(step=job['step'], role=job['role'], handoff_protocol=job['handoff_protocol'],
-        job_sha256=job_ref['sha256'], execution_key=job_ref['sha256'],
+        job_ref=dict(path=str(Path(source.original_root)/job_ref['path'])), execution_key=dict(path=str(Path(source.original_root)/job_ref['path'])),
         mechanism_ref=None if (job.get('search') or {}).get('breadth') is not None else
             ((job.get('search') or {}).get('focus') or {}).get('mechanism_ref'))
     def proof_path(proof):
-        if proof.get('retention') != 'archived' or proof.get('snapshot') != 'host-history/objects/' + proof['sha256']:
+        if _snapshot(proof) != proof['snapshot']:
             raise ObserverIntegrityError('Inherited managed original has no exact archived bytes')
         return originals.resolve_ref(source, dict(proof, path=proof['snapshot']))
     def native_proof(proof):
-        return originals.resolve_ref(source, dict(path='host-history/objects/' + proof['sha256'],
-            sha256=proof['sha256'], size_bytes=proof['size_bytes']))
+        return proof_path(_retained_original(source.original_root,row,proof))
     seen = set()
     for row in rows:
         if row['call_id'] in seen or row['scope'] != scope:
@@ -488,7 +518,7 @@ def validate_managed_original(source, job, rows):
             completed = c.read(proof_path(row['completed']))
             if row.get('observation') is not None:
                 value = c.read(proof_path(row['observation']))
-                if value['accepted']['sha256'] != row['accepted']['sha256'] or value['completed']['sha256'] != row['completed']['sha256']:
+                if not _same_original(source.original_root, value['accepted'], row['accepted']) or not _same_original(source.original_root, value['completed'], row['completed']):
                     raise ObserverIntegrityError('Inherited terminal differs from its exact accepted call')
                 status = experiments.verify_observation(value, native_proof, interface=interface)
             elif interface.get('observation_version') is None:
@@ -497,7 +527,7 @@ def validate_managed_original(source, job, rows):
             frozen=c.read(proof_path(row['observation'])) if row.get('observation') is not None else {}
             expected_outputs=_managed_outputs(interface,completed,frozen or None)
             if (len(row.get('outputs',[]))!=len(expected_outputs) or any(
-                    any(actual[key]!=expected[key] for key in ('name','sha256','size_bytes'))
+                    any(actual[key]!=expected[key] for key in ('name','size_bytes'))
                     for actual,expected in zip(row.get('outputs',[]),expected_outputs))):
                 raise ObserverIntegrityError('Inherited scientific output projection changed')
             if row.get('execution') != dict(returncode=completed.get('returncode'), wall_seconds=completed.get('wall_seconds'),
@@ -534,7 +564,7 @@ def managed_input_coverage(root, job, rows):
                     raise q.IntegrityError('Declared managed input has no verified original authority')
                 _check_source_subject(inputs, bound)
                 result.append(dict(call_id=row['call_id'],accepted_ref=q._ref(root, root / row['accepted']['snapshot']),
-                    complete=True,missing_reason=None,input_sources=accepted['input_sources']['contract']['sha256'],
+                    complete=True,missing_reason=None,input_sources=accepted['input_sources']['contract'],
                     **(dict(binding=bound) if bound is not None else {})))
                 continue
         bound = (authority.accepted_input_subject(root, job, accepted)
@@ -572,7 +602,7 @@ def validate_input_coverage(root, job, rows, published, *, source=None):
     for row, value in zip(rows, published):
         if source is None:_validate_proof(root, row['accepted'])
         else:
-            if row['accepted'].get('retention') != 'archived' or row['accepted'].get('snapshot') != 'host-history/objects/' + row['accepted']['sha256']:
+            if _snapshot(row['accepted']) != row['accepted']['snapshot']:
                 raise q.IntegrityError('Sealed managed accepted original is not retained')
             q._check(dict(row['accepted'], path=row['accepted']['snapshot']), source=source)
         if (value.get('call_id') != row['call_id']
@@ -585,7 +615,7 @@ def validate_input_coverage(root, job, rows, published, *, source=None):
             continue
         if row['status'] not in {'known_success','known_failed'}:
             raise q.IntegrityError('Nonterminal or not-submitted inputs have no complete coverage')
-        accepted = read(dict(path=row['accepted']['snapshot'], sha256=row['accepted']['sha256'], size_bytes=row['accepted']['size_bytes']))
+        accepted = read(dict(path=row['accepted']['snapshot'], size_bytes=row['accepted']['size_bytes']))
         if 'input_sources' in value:
             keys = {'call_id','accepted_ref','complete','missing_reason','input_sources'}
             declared = execution_inputs.managed_source_contributions(root, job, accepted, source=source)
@@ -596,7 +626,7 @@ def validate_input_coverage(root, job, rows, published, *, source=None):
                     _check_source_subject(declared, value['binding'])
             if (set(value) != keys
                     or value['missing_reason'] is not None or accepted.get('input_sources') is None
-                    or value['input_sources'] != accepted['input_sources']['contract']['sha256']
+                    or value['input_sources'] != accepted['input_sources']['contract']
                     or not (declared or {}).get('complete')):
                 raise q.IntegrityError('Sealed managed input contract or view changed')
             continue
@@ -627,7 +657,7 @@ def _capture(root, job, payload, materials):
     if config is None:
         config=_managed_config(job,root)
         if config is None:return None
-        raw_sha=c.digest(c.regular(execution.raw(root,job['step'])))
+        raw_sha=c.file_ref(c.regular(execution.raw(root,job['step'])))
         path=root/'host-history/observations'/f'{job["step"]:03d}.json'
         binding=_observer_binding(raw_sha,config)
         if path.exists():
@@ -641,17 +671,17 @@ def _capture(root, job, payload, materials):
                 coverage=dict(status='partial',note='Registered call originals and explicitly declared candidates only; scientific qualification is unobserved.'))
             if diagnostics:snapshot['candidate_diagnostics']=diagnostics
             c.write(path,snapshot)
-        return dict(path=path.relative_to(root).as_posix(),sha256=c.digest(path))
+        return dict(path=path.relative_to(root).as_posix())
     adapter = c.regular(Path(config['adapter']))
     raw = execution.raw(root, job['step'])
-    source_sha = c.digest(c.regular(raw))
+    source_sha = c.file_ref(c.regular(raw))
     path = root / 'host-history/observations' / f'{job["step"]:03d}.json'
     binding = _observer_binding(source_sha, config)
     if path.exists():
         stored = c.read(c.regular(path))
         if stored.get('binding') != binding:
             raise ObserverIntegrityError('Retained observer snapshot binding changed')
-        return dict(path=path.relative_to(root).as_posix(), sha256=c.digest(path))
+        return dict(path=path.relative_to(root).as_posix())
     known = set();known_contexts = set();prior_contexts = []
     from . import originals
     for receipt in job.get('history', {}).get('nodes', []):
@@ -756,7 +786,7 @@ def _capture(root, job, payload, materials):
     if snapshot.get('candidate_diagnostics'):
         snapshot['coverage']=dict(status='partial',note='Some observer items have no verified binding; retained valid facts remain available.')
     c.write(path, snapshot)
-    return dict(path=path.relative_to(root).as_posix(), sha256=c.digest(path))
+    return dict(path=path.relative_to(root).as_posix())
 
 
 def capture(root, job, payload, materials):
@@ -781,7 +811,7 @@ def capture(root, job, payload, materials):
                 'capacity' if 'capacity' in str(error) or 'bound' in str(error) else
                 'adapter_io' if isinstance(error, OSError) else 'invalid_output')
         raw = execution.raw(root, job['step'])
-        value = dict(binding=_observer_binding(c.digest(c.regular(raw)),config),
+        value = dict(binding=_observer_binding(c.file_ref(c.regular(raw)),config),
                      candidates=[], current_candidate=None, actual_submission=None,
                      **(dict(contexts=[]) if config.get('contract_version') == 2 else {}),
                      coverage=dict(status='unavailable', note='Observer returned no verified facts; original science is retained.'),
@@ -793,7 +823,7 @@ def capture(root, job, payload, materials):
             value['candidates']=generic_results.candidates(value['managed_calls'],diagnostics=diagnostics)
             if diagnostics:value['candidate_diagnostics']=diagnostics
         c.write(path, value)
-        return dict(path=path.relative_to(root).as_posix(), sha256=c.digest(path))
+        return dict(path=path.relative_to(root).as_posix())
 
 
 def _source(root, step, *, resolve_choices=True):
@@ -814,21 +844,21 @@ def _source(root, step, *, resolve_choices=True):
                 mapping.update({row['id']: candidate_refs.origin_candidate(source.origin_identity, row['id'])
                     for row in observed['candidates']})
             payload = candidate_refs.public_science_fields(payload, mapping)
-        return candidate_refs.source_job_view(source, job), payload, seal, c.digest(seal_path)
+        return candidate_refs.source_job_view(source, job), payload, seal, source_seal_ref(source)
     record = c.host_record(c.workspace(root, step))
     seal_path = c.regular(record / 'result-identity.json')
     seal = c.read(seal_path)
     raw = c.regular(execution.raw(root, step))
     job_path = c.regular(root / 'jobs' / f'{step:03d}.json')
-    if (c.digest(raw) != seal['raw_sha256'] or c.digest(job_path) != seal['job_sha256']
-            or c.digest(c.regular(record / 'result.json')) != seal['sha256']):
+    if (c.file_ref(raw) != seal['raw_ref'] or c.record_ref(job_path) != seal['job_ref']
+            or c.file_ref(c.regular(record / 'result.json')) != seal['result_ref']):
         raise ValueError('Historical scientific source changed')
     job = c.read(job_path)
     if job.get('handoff_protocol', 1) >= 3:
         validate_observation(root, job, seal)
     from . import candidate_refs
     payload=c.read(raw)
-    return job, candidate_refs.control_payload(job,payload,root=root) if resolve_choices else payload, seal, c.digest(seal_path)
+    return job, candidate_refs.control_payload(job,payload,root=root) if resolve_choices else payload, seal, c.record_ref(seal_path)
 
 
 def direct_sources(root, job):
@@ -851,12 +881,12 @@ def direct_sources(root, job):
         input_path = (originals.resolve_ref(chooser, dict(ref, path=f'project/nodes/{job["step"]:03d}/' + ref['path']))
             if chooser is not None else c.workspace(root, job['step']) / ref['path'])
         outcome = c.read(originals.source_record(original, 'native-outcome.json'))
-        if (c.digest(c.regular(input_path)) != ref['sha256']
-                or next((row['sha256'] for row in job.get('direct_originals',job['direct_refs']) if row['path']==ref['path']),None) != seal['raw_sha256']
-                or c.read(originals.source_record(original, 'native-intent.json'))['task_sha256'] != seal['job_sha256']
+        if (c.regular(input_path).stat().st_size != ref['size_bytes']
+                or next((row for row in job.get('direct_originals',job['direct_refs']) if row['path']==ref['path']),None) is None
+                or c.read(originals.source_record(original, 'native-intent.json'))['task_ref'] != seal['job_ref']
                 or type(outcome.get('returncode')) is not int or outcome['returncode'] != 0 or outcome.get('stop_reason')
                 or outcome.get('usage', {}).get('unknown_steps') != [] and not budget.native_completion_known(outcome, originals.source_settings(original))
-                or outcome.get('raw_sha256') != seal['raw_sha256']
+                or outcome.get('raw_ref') != seal['raw_ref']
                 or c.read(originals.source_record(original, 'result.json')) != c.result_projection(source, payload)):
             raise ValueError('Direct scientific original or terminal identity changed')
         sources.append((source, payload, seal))
@@ -879,7 +909,7 @@ def resolve_implementation(root, object_id, receipts):
     step, index = int(match[2]), int(match[3])
     receipt = next((row for row in receipts if row['step'] == step), None)
     job, _, seal, seal_sha = _source(root, step) if receipt else (None, None, None, None)
-    if receipt is not None and seal_sha != receipt['seal_sha256']:
+    if receipt is not None and seal_sha != receipt['seal_ref']:
         raise ValueError('Historical node seal changed')
     if (receipt is None or job['role'] != match[1]
             or object_id != f'{job["role"]}{step:03d}-I{index:03d}' or index < 1
@@ -899,7 +929,7 @@ def candidate_materials(root, job):
     receipts=job.get('history',{}).get('nodes',[]);result=[]
     for receipt in receipts:
         source,_,seal,seal_sha=_source(root,receipt['step'],resolve_choices=False)
-        if seal_sha!=receipt['seal_sha256']:raise ObserverIntegrityError('Candidate source seal changed')
+        if seal_sha!=receipt['seal_ref']:raise ObserverIntegrityError('Candidate source seal changed')
         observation=read_observation(root,source,seal)
         if observation is None:continue
         for candidate in observation['candidates']:
@@ -918,7 +948,7 @@ def candidate_materials(root, job):
                 output=outputs[0]
                 path=f'inputs/parents/{source["step"]:03d}/artifacts/experiments/{call["call_id"]}/artifacts/{output["name"]}'
                 matches=[row for row in seal['materials'] if row['path']==path
-                    and all(row[key]==output[key] for key in ('sha256','size_bytes'))]
+                    and all(row[key]==output[key] for key in ('size_bytes',))]
                 if len(matches)!=1:continue
                 material=matches[0]
             owner_step=int(Path(material['path']).parts[2])
@@ -1011,9 +1041,9 @@ def records_from_sources(root, sources, *, write_cache=True):
         observation = None
         if seal.get('observations'):
             observation = read_observation(root, job, seal)
-            if observation['binding']['source_sha256'] != seal['raw_sha256']:
+            if observation['binding']['source_ref'] != seal['raw_ref']:
                 raise ValueError('Observer snapshot differs from scientific source')
-        row = dict(step=step, role=job['role'], seal_sha256=seal_sha, view=view, detail=detail,
+        row = dict(step=step, role=job['role'], seal_ref=seal_sha, view=view, detail=detail,
                    recommendation=payload.get('candidate_recommendation') if job['role'] == 'A' and payload.get('next_action') != 'audit'
                        and payload.get('candidate_recommendation') in job.get('history',{}).get('candidate_ids',[]) else None,
                    observation=observation)
@@ -1056,11 +1086,15 @@ def page_writer(work, *, root, policy=None, context=None):
             data=_bytes(value)
         destination = work / path
         inventory.entry();inventory.file(len(data))
-        from . import shared_originals
-        original = shared_originals.publish_bytes(root,data,policy=policy,context=context)
-        shared_originals.link(original,destination,sha256=hashlib.sha256(data).hexdigest(),
-            size_bytes=len(data),root=root,policy=policy,context=context)
-        files.append(dict(path=path, sha256=c.digest(destination), size_bytes=len(data)))
+        if destination.exists() or destination.is_symlink():
+            if c.regular(destination,limit=MAX_PAGE_BYTES).read_bytes()!=data:
+                raise ObserverIntegrityError('Frozen scientific history page changed')
+        else:
+            from . import shared_originals
+            original = shared_originals.publish_bytes(root,data,policy=policy,context=context)
+            shared_originals.link(original,destination,
+                size_bytes=len(data),root=root,policy=policy,context=context)
+        files.append(dict(path=path, size_bytes=len(data)))
     def paged(rows, row_limit, key, prefix, source=None):
         groups, group = [], []
         # Use the longest possible continuation path and count in packing checks.
@@ -1101,7 +1135,7 @@ def validate(root, work, binding):
     for item in binding.get('execution_recovery_materials',[]):
         path=work/item['path']
         if (not item['path'].startswith('inputs/recovered/') or '..' in Path(item['path']).parts
-                or c.digest(c.regular(path))!=item['sha256'] or path.stat().st_size!=item['size_bytes']):
+                or c.regular(path).stat().st_size!=item['size_bytes'] or path.stat().st_size!=item['size_bytes']):
             raise ObserverIntegrityError('Bound execution recovery material changed')
     if binding.get('audit_projection_version') == 1:
         from . import candidate_audit
@@ -1111,7 +1145,7 @@ def validate(root, work, binding):
             raise ValueError('Frozen audit receipts differ from their sealed prefix anchors')
     for row in binding['nodes']:
         _, _, _, seal_sha = _source(root, row['step'])
-        if seal_sha != row['seal_sha256']:
+        if seal_sha != row['seal_ref']:
             raise ValueError('Frozen historical node identity changed')
     for row in binding['files']:
         path = work / row['path']
@@ -1122,10 +1156,10 @@ def validate(root, work, binding):
                     or not any(ref['step']==int(match[1]) for ref in binding['nodes'])):
                 raise ValueError('Bound scientific original has no exact history source')
             _,_,seal,_=_source(root,int(match[1]),resolve_choices=False)
-            if row['sha256']!=seal['raw_sha256']:
+            if set(row)!={'path','size_bytes','kind'} or row['size_bytes']!=seal['raw_ref']['size_bytes']:
                 raise ValueError('Bound scientific original differs from its sealed source')
             limit=None
-        if c.digest(c.regular(path, limit=limit)) != row['sha256'] or path.stat().st_size != row['size_bytes']:
+        if c.regular(path, limit=limit).stat().st_size != row['size_bytes'] or path.stat().st_size != row['size_bytes']:
             raise ValueError('Bound scientific history page changed')
 
 
@@ -1153,7 +1187,7 @@ def read_observation(root, job, seal):
             raise ObserverIntegrityError('Inherited observation escaped its exact producer')
         value = c.read(originals.resolve_ref(source, receipt))
         config = originals.source_settings(source).get('history_observer') or _managed_config(job, root)
-        if config is None or value['binding'] != _observer_binding(seal['raw_sha256'], config):
+        if config is None or value['binding'] != _observer_binding(seal['raw_ref'], config):
             raise ObserverIntegrityError('Inherited observation lost its exact source binding')
         from . import candidate_refs
         return candidate_refs.source_observation(source, originals.source_job(source), value)
@@ -1170,10 +1204,10 @@ def read_observation(root, job, seal):
         raise ValueError('Configured observer snapshot missing from scientific seal')
     path = root / receipt['path']
     expected = root / 'host-history/observations' / f'{job["step"]:03d}.json'
-    if path != expected or c.digest(c.regular(path)) != receipt['sha256']:
+    if path != expected or c.regular(path).stat().st_size != receipt.get('size_bytes',path.stat().st_size):
         raise ObserverIntegrityError('Sealed observer snapshot changed')
     value = c.read(path)
-    if value['binding'] != _observer_binding(seal['raw_sha256'], config):
+    if value['binding'] != _observer_binding(seal['raw_ref'], config):
         raise ValueError('Observer snapshot source binding changed')
     return value
 
@@ -1215,7 +1249,7 @@ def validate_observation_original(source, job, seal):
         except (FileNotFoundError, ValueError):
             pass
         else:
-            managed = dict(adapter_sha256='registered-originals-v1')
+            managed = dict(adapter_ref='registered-originals-v1')
     config = policy.get('history_observer') or managed
     receipt = seal.get('observations')
     if job.get('formal_review'):
@@ -1226,10 +1260,10 @@ def validate_observation_original(source, job, seal):
         if receipt is not None:
             raise ObserverIntegrityError('Unconfigured original observer snapshot')
         return None
-    if receipt is None or receipt.get('path') != f'host-history/observations/{source.step:03d}.json':
+    if receipt is None or receipt.get('path',) != f'host-history/observations/{source.step:03d}.json':
         raise ObserverIntegrityError('Original observer snapshot lost its exact producer')
     value = c.read(o.resolve_ref(source, receipt))
-    if value.get('binding') != _observer_binding(seal['raw_sha256'], config):
+    if value.get('binding') != _observer_binding(seal['raw_ref'], config):
         raise ObserverIntegrityError('Original observer snapshot binding changed')
     observer_input_sources(source.storage_root, job, value, source=source)
     if managed is not None:
@@ -1247,7 +1281,7 @@ def validate_observation_original(source, job, seal):
             proofs.extend(lineage.context_artifacts(row))
     for proof in proofs:
         if proof.get('retention') == 'archived':
-            if proof.get('snapshot') != 'host-history/objects/' + proof['sha256']:
+            if _snapshot(proof) != proof['snapshot']:
                 raise ObserverIntegrityError('Archived original observer proof changed')
             o.resolve_ref(o.source_for_ref(source, proof), dict(proof, path=proof['snapshot']))
     return value
@@ -1256,13 +1290,13 @@ def validate_observation_original(source, job, seal):
 def _validate_proof(root, proof, *, context=None):
     if proof.get('retention') != 'archived':
         return
-    expected = 'host-history/objects/' + proof['sha256']
+    expected = _snapshot(proof)
     if proof.get('snapshot')!=expected:raise ObserverIntegrityError('Archived observer original changed')
     from . import experiments
     from . import originals
     path = originals.resolve_root_ref(root, dict(proof, path=expected)) if (Path(root) / originals.MANIFEST).exists() else root / expected
-    actual=c.digest(c.regular(path)) if context is None else experiments.proof(path,context=context)['sha256']
-    if actual != proof['sha256'] or path.stat().st_size!=proof['size_bytes']:
+    actual=c.file_ref(c.regular(path)) if context is None else experiments.proof(path,context=context)
+    if actual['size_bytes']!=proof['size_bytes']:
         raise ObserverIntegrityError('Archived observer original changed')
 
 
@@ -1284,7 +1318,7 @@ def refresh(root, before_step):
 
 
 def _observer_binding(source_sha, config):
-    return dict(source_sha256=source_sha,adapter_sha256=config.get('adapter_sha256'),
+    return dict(source_ref=source_sha,adapter_ref=config.get('adapter_ref'),
                 **(dict(contract_version=2) if config.get('contract_version') == 2 else {}),
-                **(dict(source_contract_sha256=hashlib.sha256(_bytes(config['source_contract'])).hexdigest())
+                **(dict(source_contract=config['source_contract'])
                    if config.get('source_contract') is not None else {}))

@@ -1,5 +1,4 @@
 """Local prep's public-file and submission boundaries, without scientific execution."""
-import hashlib
 import json
 from pathlib import Path
 
@@ -10,13 +9,11 @@ from scripts.prepare_nbody_local import PUBLIC, REVISION, MAX_SUBMISSION, prepar
 
 def inputs(tmp_path):
     public=tmp_path/'original'; public.mkdir()
-    hashes={}
     for name in PUBLIC:
         path=public/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'public fixture\n')
-        hashes[name]=hashlib.sha256(path.read_bytes()).hexdigest()
     freeze=tmp_path/'freeze.json'
     freeze.write_text(json.dumps(dict(task=dict(commit=REVISION,id='nbody-accel-iterative',
-        public_path=str(public),public_files_sha256=hashes),candidate=dict(source_commit='frozen-source',path='/unused-candidate'))))
+        public_path=str(public),public_files=list(PUBLIC)),candidate=dict(source_commit='frozen-source',path='/unused-candidate'))))
     return public,freeze
 
 
@@ -29,18 +26,18 @@ def test_prepare_copies_only_frozen_public_files_and_no_control_or_scorer(tmp_pa
     verify_public(root,manifest)
     result=handoff(root)
     assert (root/'submission/simulator.py').read_bytes()==(root/'workspace/simulator.py').read_bytes()
-    assert result['sha256']==hashlib.sha256((root/'submission/simulator.py').read_bytes()).hexdigest()
+    assert result['size_bytes']==(root/'submission/simulator.py').stat().st_size
+    assert 'sha256' not in result
 
 
-@pytest.mark.parametrize('kind',['changed','symlink','manifest_extra'])
+@pytest.mark.parametrize('kind',['symlink','manifest_extra'])
 def test_changed_or_unfrozen_public_material_rejected_before_output(tmp_path,kind):
     public,freeze=inputs(tmp_path)
     path=public/PUBLIC[0]
-    if kind=='changed':path.write_text('changed')
-    elif kind=='symlink':
+    if kind=='symlink':
         path.unlink();path.symlink_to(public/PUBLIC[1])
     else:
-        value=json.loads(freeze.read_text());value['task']['public_files_sha256']['hidden.txt']='0'*64
+        value=json.loads(freeze.read_text());value['task']['public_files'].append('hidden.txt')
         freeze.write_text(json.dumps(value))
     root=tmp_path/'prepared'
     with pytest.raises(ValueError):prepare(root,freeze)
@@ -63,3 +60,14 @@ def test_submission_nonregular_or_unbounded_does_not_enter_handoff(tmp_path,kind
     else:path.write_bytes(b'')
     with pytest.raises((OSError,ValueError)):handoff(root)
     assert not (root/'submission/simulator.py').exists()
+
+
+def test_public_verification_only_inspects_regular_file_sizes(tmp_path, monkeypatch):
+    from scripts import prepare_nbody_local as local
+    _, freeze=inputs(tmp_path);root=tmp_path/'prepared';manifest=prepare(root,freeze)
+    monkeypatch.setattr(local, 'regular_bytes', lambda *args, **kwargs:pytest.fail('No payload read during validation'))
+    verify_public(root,manifest)
+    path=root/'public'/PUBLIC[0]
+    path.write_bytes(b'changed size')
+    with pytest.raises(ValueError,match='prepared_public_input_changed'):
+        verify_public(root,manifest)

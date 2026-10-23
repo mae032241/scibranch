@@ -4,7 +4,6 @@ The hard link publishes an independent temporary inode, never a writable source.
 Callers retain ownership of path, identity and operation-context policy.
 """
 from contextlib import contextmanager
-import hashlib
 import os
 from pathlib import Path
 import stat
@@ -84,73 +83,53 @@ def replace_bytes(path, payload, *, mode=0o600):
         _sync_directory(path.parent)
 
 
-def _verify_copy(path, sha256, size_bytes, context):
-    digest, size = hashlib.sha256(), 0
-    _check(context)
-    with _regular_stream(path) as original:
-        limit = os.fstat(original.fileno()).st_size if size_bytes is None else size_bytes
-        if os.fstat(original.fileno()).st_size != limit:
-            raise ValueError('Atomic original size changed')
-        while True:
-            _check(context)
-            block = original.read(min(1024 * 1024, limit - size + 1))
-            if not block:
-                break
-            size += len(block)
-            if size > limit:
-                raise ValueError('Atomic original exceeds its declared identity')
-            digest.update(block)
-    _check(context)
-    if (digest.hexdigest(), size) != (sha256, limit):
-        raise ValueError('Atomic original identity changed')
+def _generation(info):
+    # Hardlinks legitimately change ctime; byte-generation checks do not use it.
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns)
 
 
-def copy_original(source, path, *, sha256, size_bytes=None, mode=0o400, context=None):
-    """Copy at most the declared size, verify identity, then publish exclusively.
+def copy_original(source, path, *, size_bytes, mode=0o400, context=None):
+    """Freeze bounded bytes to a fresh inode, with no content fingerprint.
 
-    When the caller only declares SHA, the source's initial size bounds this copy.
-    Existing originals are verified and retained; they are never repaired in place.
+    An existing destination is never adopted merely because its size matches.
+    The caller owns logical provenance and reuse of an already published slot.
     """
     source, path = Path(source), Path(path)
-    if size_bytes is not None and (type(size_bytes) is not int or size_bytes < 0):
+    if type(size_bytes) is not int or size_bytes < 0:
         raise ValueError('Atomic original size must be a nonnegative integer')
     _check(context)
     if path.exists() or path.is_symlink():
-        _verify_copy(path, sha256, size_bytes, context)
-        return
+        raise FileExistsError(path)
     with _temporary(path) as (temporary, output), _regular_stream(source) as original:
-        limit = os.fstat(original.fileno()).st_size if size_bytes is None else size_bytes
-        if os.fstat(original.fileno()).st_size != limit:
-            raise ValueError('Atomic original size changed before retention')
-        digest, size = hashlib.sha256(), 0
+        before = _generation(os.fstat(original.fileno()))
+        if before[3] != size_bytes or _generation(source.lstat()) != before:
+            raise ValueError('Atomic original changed before retention')
+        size = 0
         while True:
             _check(context)
-            # One extra byte detects a growing source without writing past its bound.
-            block = original.read(min(1024 * 1024, limit - size + 1))
+            block = original.read(min(1024 * 1024, size_bytes - size + 1))
             if not block:
                 break
-            _check(context)
             size += len(block)
-            if size > limit:
-                raise ValueError('Atomic original exceeds its declared identity')
-            digest.update(block)
+            if size > size_bytes:
+                raise ValueError('Atomic original exceeds its declared size')
             output.write(block)
-        if (digest.hexdigest(), size) != (sha256, limit):
-            raise ValueError('Atomic original identity changed during retention')
+        if (size != size_bytes or _generation(os.fstat(original.fileno())) != before
+                or _generation(source.lstat()) != before):
+            raise ValueError('Atomic original changed during retention')
         _finish(output, mode)
         _check(context)
-        try:
-            os.link(temporary, path, follow_symlinks=False)
-        except FileExistsError:
-            _verify_copy(path, sha256, limit, context)
+        os.link(temporary, path, follow_symlinks=False)
         temporary.unlink()
         _sync_directory(path.parent)
 
 
-def publish_stream(path, blocks, *, sha256, size_bytes, context=None):
-    """Verify bounded generated blocks before publishing one frozen inode."""
+def publish_stream(path, blocks, *, size_bytes=None, context=None, inventory=None):
+    """Publish one bounded generated stream without a measurement/hash pass."""
     path = Path(path)
-    digest, size = hashlib.sha256(), 0
+    if size_bytes is not None and (type(size_bytes) is not int or size_bytes < 0):
+        raise ValueError('Atomic stream size must be a nonnegative integer')
+    size = 0
     _check(context)
     with _temporary(path) as (temporary, output):
         for block in blocks:
@@ -158,19 +137,20 @@ def publish_stream(path, blocks, *, sha256, size_bytes, context=None):
             if type(block) is not bytes:
                 raise ValueError('Atomic stream requires bytes blocks')
             size += len(block)
-            if size > size_bytes:
-                raise ValueError('Atomic stream exceeds its declared identity')
-            digest.update(block)
+            if size_bytes is not None and size > size_bytes:
+                raise ValueError('Atomic stream exceeds its declared size')
+            if inventory is not None:
+                inventory.limit('max_file_bytes', size)
+                inventory.limit('max_total_bytes', inventory.total + size)
             output.write(block)
-        if (digest.hexdigest(), size) != (sha256, size_bytes):
-            raise ValueError('Atomic stream identity changed during publication')
-        _check(context)
+        if size_bytes is not None and size != size_bytes:
+            raise ValueError('Atomic stream size changed during publication')
+        if inventory is not None:
+            inventory.file(size)
         _finish(output, 0o400)
         _check(context)
-        try:
-            os.link(temporary, path, follow_symlinks=False)
-        except FileExistsError:
-            _verify_copy(path, sha256, size_bytes, context)
+        os.link(temporary, path, follow_symlinks=False)
         temporary.unlink()
         _sync_directory(path.parent)
         _check(context)
+    return size

@@ -339,7 +339,7 @@ def inspect(*, config=None, root=None, view='frozen'):
                 if grant is not None:
                     active['execution_resource_policy']['allowance'] = dict(grant['allowance'])
             return dict(status='config_inspected', source='current_instance', instance=str(root),
-                base_identity=dict(goal_id=settings['goal_id'], settings_sha256=contracts.digest(root / 'settings.json')),
+                base_identity=dict(goal_id=settings['goal_id'], settings_ref=contracts.record_ref(root / 'settings.json')),
                 active_revision=state['active_revision'],
                 pending_revision=state['revision'] if state['pending'] else None,
                 effective_from=state['effective_from'],

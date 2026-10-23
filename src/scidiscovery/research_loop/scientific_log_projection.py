@@ -1,5 +1,4 @@
 """Complete local log projections without retaining a whole log in memory."""
-import hashlib
 import os
 from pathlib import Path
 
@@ -85,10 +84,10 @@ def _generation(info):
             info.st_mtime_ns, info.st_ctime_ns)
 
 
-def _raw_blocks(path, sha256, size_bytes, context, block_size):
+def _raw_blocks(path, size_bytes, context, block_size):
     from .experiments import IntegrityError
     path = Path(path)
-    digest, size = hashlib.sha256(), 0
+    size = 0
     storage.check(context)
     with atomic_files._regular_stream(path) as stream:
         before = _generation(os.fstat(stream.fileno()))
@@ -102,32 +101,16 @@ def _raw_blocks(path, sha256, size_bytes, context, block_size):
             size += len(block)
             if size > size_bytes:
                 raise IntegrityError('Scientific log original grew during projection')
-            digest.update(block)
             yield block
         storage.check(context)
-        if (size, digest.hexdigest()) != (size_bytes, sha256):
+        if size != size_bytes:
             raise IntegrityError('Scientific log original differs from its exact binding')
         if (_generation(os.fstat(stream.fileno())) != before
                 or _generation(path.lstat()) != before):
             raise IntegrityError('Scientific log original changed during projection')
 
 
-def project(path, *, sha256, size_bytes, replacements, context, block_size=BLOCK_BYTES):
+def project(path, *, size_bytes, replacements, context, block_size=BLOCK_BYTES):
     """A fresh iteration verifies the exact raw original before completing EOF."""
-    return replace_blocks(_raw_blocks(path, sha256, size_bytes, context, block_size),
+    return replace_blocks(_raw_blocks(path, size_bytes, context, block_size),
                           replacements, context=context, block_size=block_size)
-
-
-def measure(blocks, *, context, inventory):
-    """Hash a projection without writing; charge its logical file only once."""
-    digest, size = hashlib.sha256(), 0
-    inventory.limit('max_files', inventory.files + 1)
-    for block in blocks:
-        storage.check(context)
-        size += len(block)
-        inventory.limit('max_file_bytes', size)
-        inventory.limit('max_total_bytes', inventory.total + size)
-        digest.update(block)
-    inventory.file(size)
-    storage.check(context)
-    return dict(sha256=digest.hexdigest(), size_bytes=size)

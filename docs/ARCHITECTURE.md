@@ -2,6 +2,21 @@
 
 [简体中文](ARCHITECTURE.zh-CN.md) | English
 
+Control does not hash scientific content by default. Hashing is restricted to
+approval bindings and small control requests that require durable idempotency;
+these helpers must not traverse scientific files, code, logs, observations, inputs,
+results, Skills or archives. Explicit scientific tools may use their own algorithms
+on selected evidence; that is separate from control identity. Protocol 26 uses
+`record_ref = {"path": "/absolute/original"}` and
+`file_ref = {"path": "/absolute/original", "size_bytes": N}`. Control bindings use
+`*_ref` fields; paths, producers and lifecycle identities replace content digests.
+Managed object paths use UUIDs, without content deduplication or hash caches.
+Archive v4, checkpoint v3 and fork manifest v2 follow this contract. Earlier
+protocols and packages are incompatible with current advancement/restoration;
+originals are preserved without migration. Read-only Linux mounts protect selected
+inputs in the scientific namespace; trusted same-UID code remains a soft boundary,
+without protection against deliberate same-UID rewrites or content-tamper detection.
+
 `scid-research` owns explicit research instances; `scid-experiment` records managed experiments.
 There is no LLM Root, MCP scheduling service or background Root daemon.
 The core exposes the thin CLI and instance UI; the old CLI/MCP/UI, Root host,
@@ -38,8 +53,8 @@ and observations; A owns contribution, evidence gaps, direction and delivery sel
 E owns requested evidence work. Control owns immutable bindings, budgets, qualification,
 authorization and mechanical publication. It does not manufacture science or ask models
 to perform extra hash calculation, comparison, verification or prepare hash inventories.
-Workers write ordinary scientific files; control computes and verifies their exact
-bindings automatically and retains the mechanical records privately on the host.
+Workers write ordinary scientific files; control records their exact paths, producers
+and declared sizes privately on the host under the reference contract above.
 
 Local result metrics retain distinct nonempty names and explicit finite numeric
 values. `unit`, `evaluation_key`, `direction` and labels are optional scientific
@@ -129,7 +144,7 @@ H revises only changed commitments; omitted commitments and their adopted A
 reasons remain. Repair binds the stable mechanism to one exact direct W observation,
 or to an exact original accepted input selected through `implementation_selection`.
 Multiple possible observations require an explicit exact selection; equal output
-bytes, labels and recency cannot select the source. Deduplicated archive paths
+bytes, labels and recency cannot select the source. Shared archive paths
 cannot prove logical input identity; such outputs cannot disambiguate a repair.
 The old W, call, accepted and
 terminal originals keep their own H seal; the current H/A authorization is frozen
@@ -167,8 +182,10 @@ outputs before temporary work disappears. A compares those results and the actua
 adapter scope with the task requirements, reports gaps, and may deliver the best
 existing partial result, including in FINAL. Coverage adds no completion gate.
 
-`exp` is a thin submission and wait helper using one ordinary
-`submit.json`/response slot. For local-mode W scientific views, the existing native
+Managed call records use `host-runtime/experiment-control/<step>/records`, keyed
+by the exact task step rather than a job-content hash. `exp` is a thin submission
+and wait helper using one ordinary `submit.json`/response slot. For local-mode W
+scientific views, the existing native
 host services that slot for the native attempt's lifetime and writes responses
 automatically. External mode leaves service ownership with its declared launcher.
 Neither path adds an agent, daemon, UDS or FIFO.
@@ -195,9 +212,10 @@ no operator setting. These file views do not establish hostile same-user process
 isolation or a blanket guarantee for generic native execution.
 
 Managed execution outputs, observation originals and history retention reuse the
-instance's existing `host-history/objects/<sha256>` archive. Host-only immutable
-aliases may share an inode across calls; equal bytes do not merge original calls,
-origins or scientific paths. Mutable external bytes are frozen independently once;
+instance's `host-history/objects/<uuid>` archive. Each independent freeze gets a
+new object path; equal bytes are not deduplicated. Host-only aliases of a managed
+frozen original may share its inode across calls without merging original calls,
+origins or scientific paths. Mutable external bytes are first copied independently;
 accepted input snapshots, Worker inputs, collection and wake views then share
 read-only originals through owning hardlinks. Editing requires an explicit,
 file-scoped working copy under `work/`, never a pre-copied input tree. Sharing
@@ -205,7 +223,7 @@ requires the same filesystem and fails explicitly without a copy fallback.
 Source ownership is supplied by its lifecycle, not inferred from mode or link
 count. Mode 0400 alone is not hostile same-user write isolation.
 
-Protocol 25 protects shared inputs at the final native launch boundary with Linux
+Protocol 26 protects shared inputs at the final native launch boundary with Linux
 read-only mounts, including custom protocol argv. An exactly registered module
 launcher retains host preparation and submission service ownership, then applies
 the same protection at its final scientific namespace. Its provider/module identity
@@ -252,18 +270,18 @@ process logs still incur usage scans; no usage cache survives an unlocked interv
 
 Local scientific log projections stream complete content through the original ordered
 path replacements, including matches across block boundaries. One finite operation
-deadline covers both logs, input verification, transformation and publication. A first
-streaming pass determines the output identity without writing; only a missing CAS
-object requires a second pass into one atomic output inode. Existing content is reused
-without another full write. Memory depends on bounded blocks and replacement metadata,
+deadline covers both logs, input-reference checks, transformation and publication.
+Each projection streams into a new atomic output inode with an opaque object
+identity; it does not scan existing content for deduplication. Memory depends on
+bounded blocks and replacement metadata,
 not the full log length; raw originals remain unchanged and are never truncated.
 
 Control retains exact binding indexes, full receipts and per-file omission inventories;
 default scientific views expose human references, observations and limitations. New
 views are labelled projections, while source, user originals and scientific prose
 retain their exact content. The standalone operator exporter
-`scripts/acceptance/worker_evidence_view.py` verifies an explicitly pinned original
-index and all indexed bytes, then creates separate `control/` and `science/` trees.
+`scripts/acceptance/worker_evidence_view.py` reads an explicitly selected original
+index and its materials, then creates separate `control/` and `science/` trees.
 Only `science/index.json` is the reader entry point; omitted materials appear as a
 small category summary with `details_ref` and `when_to_open`. When a candidate or
 experiment's material coverage matters, the reader can follow those references to
@@ -334,7 +352,7 @@ Deterministic curve and figure algorithms are self-contained Skill scripts;
   scientific explanation; its rows, `keep`, rationale and evidence-step formatting
   do not grant or gate delivery. Actual audit and delivery actions still require
   an exact available candidate, qualification and execution permission. Null
-  does not authorize delivery. Protocol 25 rejects earlier frozen protocols without
+  does not authorize delivery. Protocol 26 rejects earlier frozen protocols without
   migrating their original bytes.
 - One advancing writer per instance; read views neither call models nor own scientific/budget state.
 - Exact immutable originals, configuration and calls; revisions inherit no prior qualification or approval.
@@ -426,7 +444,7 @@ exact identity checks and independent execution authorization still apply.
 Shared budget checks for new nodes remain unchanged. Author
 closeout token permits are also soft targets; their finite time limits remain
 enforced. Actual usage remains accounted without creating a new shared allowance.
-Protocol 25 accepts only soft node settings. Older protocols remain read-only;
+Protocol 26 accepts only soft node settings. Older protocols remain read-only;
 frozen hard settings are never silently changed to soft. A denied start
 advances the existing control journal to durable `FINAL` (`closeout_begin` mode
 `final`); it never reclassifies an ordinary A as final from the remaining balance.
@@ -523,12 +541,13 @@ quiescent source storage as a private snapshot using verified hardlinks. This is
 current-directory superset, not a reconstruction of a complete historical directory
 at task N. The selected job and its exact original input cut separately determine
 scientific visibility. `visibility=private_snapshot` entries are omitted from ordinary
-node views; internal exact-hash references can still resolve them without making
+node views; internal exact-path references can still resolve them without making
 them scientific inputs or qualifications. Fork/cache implementation storage is
 excluded; existing original object storage is retained. No domain filenames or
 plugin JSON traversal define this inventory. `originals.py` resolves originals by
-original identity and digest. Existing 0400 originals are shared directly.
-Writable or differently permissioned originals are first frozen once into the
+original identity, path and declared size. Lifecycle-proven managed frozen originals
+are shared directly; mode 0400 alone does not prove ownership. Mutable originals
+are first independently frozen into the
 source's private `host-history/fork-cache` store, then shared. Source bytes
 and permissions are not changed. Public views link only their selected retained
 originals, never private control metadata. Nested branches share these same
@@ -544,14 +563,12 @@ storage is removed; data is reclaimed when its last link disappears. There is no
 separate mutable reference-count database. All shared sources and the target must
 be on the same filesystem; unsupported links fail explicitly without copying as
 a fallback. A source requiring new snapshots must permit private-store writes.
-Existing copied manifests remain readable. Later task execution still prepares
+Current fork manifest v2 records exact paths and sizes. Later task execution prepares
 read-only node-local aliases to the selected originals. Writable scratch remains
 independent and is created only when needed.
-Pure readers tolerate link-induced metadata changes with at most three attempts
-per reader: only ctime may differ on a 0400 regular file, while its path, inode,
-mode, size and mtime remain fixed. Each attempt must finish with a stable generation
-and exact original binding; aborted hashes are not cached. Persistent changes fail
-closed. This does not retry creation, control actions or external execution.
+Readers resolve the retained identity, path and declared size; they do not cache
+or recompute content fingerprints. Publication and recovery keep their original
+transaction and inode checks without retrying external execution.
 
 Native homes, credentials, model sessions, tools, solvers, licenses and the
 execution environment are not copied. Frozen model, permission and launcher declarations remain declarations;
@@ -621,14 +638,15 @@ Changing TMPDIR or an XDG runtime directory does not establish that shared mount
 Read-only originals and the host's cooperative source lease protect the declared
 sharing boundary among cooperating current-version writers. They remain a same-user
 soft boundary: a same-user process that deliberately changes permissions and writes
-a shared inode can damage all its references; digest validation detects corruption. Do not combine forking with active pre-upgrade writers: the lease
+a shared inode can damage all its references. Content changes are not detected by
+reference checks. Do not combine forking with active pre-upgrade writers: the lease
 does not retroactively fence older processes. These controls do not establish
 real-model, solver or scientific qualification.
 
 ## Explicit instance deletion
 
 `instance_delete.py` removes only an explicitly named current-protocol instance,
-bound to its goal ID, frozen settings digest and operation ID. Unused prepared,
+bound to its goal ID, frozen settings reference and operation ID. Unused prepared,
 paused and completed roots must pass the existing archive quiescence checks.
 Active owner/source-reader locks, unknown execution or delivery effects, and
 unknown cleanup block deletion without canceling or replaying work. Canonical
@@ -680,8 +698,12 @@ Restored immutable aliases share the first restored target, while mutable files
 remain separate. Existing targets that still share a package inode conflict under
 either effective independent mode. Checkpoint export and restore freeze the mode
 in the original transaction; retries cannot switch it. New packages use archive
-format 3 and checkpoint format 2; older packages remain inspect-only. Derived
-workspace mount identities are excluded and rebuilt before a new native launch.
+format 4 and checkpoint format 3; older packages are incompatible with current
+restore and are not migrated. Package inventories record paths, sizes, blobs and
+inode aliases, without content checksums or equality-based deduplication. A restore
+retry must match its original publication transaction and target inode; equal size
+or bytes at another target cannot establish idempotency. Derived workspace mount
+identities are excluded and rebuilt before a new native launch.
 Unpublished preparation snapshots retain one exact host binding before input
 materialization. Explicit maintenance can finish publication of an already durable,
 admitted accepted record, or discard only a partial snapshot with the original
@@ -709,13 +731,12 @@ Adapter audit, smoke and scratch recovery requests contain staged candidate orig
 
 ## Selected framework Skill assets
 
-`skill_supply.py` independently freezes selected bundle contents once in a private
-shared store and gives each instance its own hardlinks. `SCID_SHARED_STORE` selects
-an explicit store; otherwise the host user cache is used. The store and instance
-must support same-filesystem hardlinks; there is no per-instance copy fallback.
-One store writer lock covers first publication across different bundle trees.
+`skill_supply.py` independently copies selected bundle contents into the instance's
+private `host-control/skills/objects` directory. There is no global shared store or
+`SCID_SHARED_STORE` setting. Role/node projections share those managed frozen
+originals by hardlink; unsupported sharing fails without a copy fallback.
 Role/Worker selections remain bound to jobs and native intents. Instance-owned
-references survive installation, shared-store or sibling-instance removal;
+references survive installation or sibling-instance removal;
 `.agents/skills` is a validated, rebuildable discovery projection. Source
 installation updates do not refresh frozen bytes. Revisions
 select existing frozen sets only; new IDs/versions require a new instance.

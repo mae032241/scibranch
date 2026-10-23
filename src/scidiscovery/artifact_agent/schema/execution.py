@@ -23,6 +23,5 @@ class ExecutionAdmission(SchemaModel):
 class LocalFileDescriptor(SchemaModel):
     name: Identifier
     local_path: Annotated[str, Field(min_length=1, max_length=4096)]
-    sha256: Sha256
     size_bytes: Annotated[int, Field(ge=0, le=2**50)]
     media_type: MediaType

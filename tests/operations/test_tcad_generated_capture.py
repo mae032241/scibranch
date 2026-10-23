@@ -1,6 +1,5 @@
 """Adaptive solver frames are collected from actual files, not guessed names."""
 
-import hashlib
 
 import pytest
 
@@ -16,21 +15,20 @@ def test_collects_all_adaptive_frames_and_skips_unchanged_inputs(tmp_path):
     collector = remote_runner_py36._collect_expected
     source = tmp_path / "main.cmd"
     source.write_bytes(b"solver input")
-    original = {"relative_path": "main.cmd", "size_bytes": source.stat().st_size,
-                "sha256": hashlib.sha256(source.read_bytes()).hexdigest()}
+    original = {"relative_path": "main.cmd", "size_bytes": source.stat().st_size}
+    generations=remote_runner_py36._input_generations(str(tmp_path),[original])
     frames = tmp_path / "frames"
     frames.mkdir()
     for index in range(79):
         (frames / f"movie_{index:04d}.tdr").write_bytes(f"frame {index}".encode())
     records = collector(str(tmp_path), [],
                         {"max_output_bytes": 4096, "transfer_chunk_bytes": 1024}, archive_entries=[original],
-                        collect_generated_outputs=True)
+                        input_generations=generations, collect_generated_outputs=True)
     assert len(records) == 79
     assert [item["relative_path"] for item in records] == [
         f"frames/movie_{index:04d}.tdr" for index in range(79)
     ]
-    assert all(item["name"] == "generated_" + hashlib.sha256(
-        item["relative_path"].encode()).hexdigest() for item in records)
+    assert [item["name"] for item in records]==["generated_"+str(index) for index in range(79)]
 
 
 def test_generated_capture_fails_closed_on_budget_and_symlink(tmp_path):
@@ -58,12 +56,12 @@ def test_changed_staged_input_is_not_silently_excluded(tmp_path):
     collector = remote_runner_py36._collect_expected
     source = tmp_path / "main.cmd"
     source.write_bytes(b"before")
-    original = {"relative_path": "main.cmd", "size_bytes": 6,
-                "sha256": hashlib.sha256(b"before").hexdigest()}
+    original = {"relative_path": "main.cmd", "size_bytes": 6}
+    generations=remote_runner_py36._input_generations(str(tmp_path),[original])
     source.write_bytes(b"after")
     root = str(tmp_path)
     records = collector(root, [], {"max_output_bytes": 4096, "transfer_chunk_bytes": 1024},
-                        archive_entries=[original], collect_generated_outputs=True)
+                        archive_entries=[original], input_generations=generations, collect_generated_outputs=True)
     assert [item["relative_path"] for item in records] == ["main.cmd"]
 
 
@@ -87,10 +85,10 @@ def test_runtime_attestation_accepts_only_manifest_named_generated_files():
     package = package.model_copy(update={"project": project})
     raw = b"adaptive frame"
     path = "frames/movie_0079.tdr"
-    name = "generated_" + hashlib.sha256(path.encode()).hexdigest()
+    name = "generated_0"
     record = RuntimeOutputRecord(name=name, relative_path=path,
                                  media_type="application/octet-stream",
-                                 sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw))
+                                 size_bytes=len(raw))
     manifest = TCADRuntimeManifest(started_at=None, completed_at="2026-09-24T00:00:00Z",
                                    terminal_state="succeeded", exit_code=0,
                                    error="", outputs=(record,))

@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from deploy.install_transaction import _directory_digest
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 SKILL = REPOSITORY / "skills/sentaurus-tcad-code"
@@ -24,7 +23,15 @@ def test_all_manual_topics_have_real_anchors_and_helpers_preserve_skill(tmp_path
     scratch.mkdir()
     env = {**os.environ, "TMPDIR": str(scratch), "XDG_CACHE_HOME": str(scratch),
            "PYTHONDONTWRITEBYTECODE": "1"}
-    before = _directory_digest(SKILL)
+    catalog=SKILL/'references/manuals/catalog.json'
+    declared=json.loads(catalog.read_text())['manuals']
+    originals=[catalog,SKILL/'references/manuals/topics.json',
+        *(SKILL/'references/manuals'/item['relative_path'] for item in declared),
+        *(SKILL/'scripts'/name for name in ('manual_extract.py','manual_search.py','validate_deck_project.py'))]
+    def pins():
+        return {str(path):(path.stat().st_dev,path.stat().st_ino,path.stat().st_mode,
+            path.stat().st_size,path.stat().st_mtime_ns) for path in originals}
+    before=pins()
 
     def helper(script, *args, expected=0):
         result = subprocess.run([sys.executable, str(SKILL / "scripts" / script), *args],
@@ -49,7 +56,7 @@ def test_all_manual_topics_have_real_anchors_and_helpers_preserve_skill(tmp_path
         found = helper("manual_search.py", *common, "--topic", topic["topic"])
         extract = helper("manual_extract.py", *common, "--start-page", str(found["start_page"]),
                          "--end-page", str(found["end_page"]))
-        assert extract["manual_sha256"] == found["manual_sha256"]
+        assert extract["manual_ref"] == found["manual_ref"]
         for anchor in anchors[topic["topic"]]:
             assert anchor in extract["text"], (topic["topic"], anchor)
     common = ("--release", "R-2020.09", "--solver-kind", "sprocess")
@@ -61,6 +68,6 @@ def test_all_manual_topics_have_real_anchors_and_helpers_preserve_skill(tmp_path
                                "--end-page", "9999", expected=1)
     assert "positive ordered" in helper("manual_extract.py", *common, "--start-page", "0",
                                        "--end-page", "1", expected=1)
-    assert _directory_digest(SKILL) == before
-    assert list(scratch.rglob("*.layout.txt"))
+    assert pins() == before
+    assert list(scratch.iterdir()) == []
     assert {path.name for path in tmp_path.iterdir()} == {"scratch"}

@@ -3,20 +3,12 @@
 Select this file directly in the installed lane when the release builder changes.
 It never runs the packaged functional suite or creates an installation environment.
 """
-import hashlib
+import json
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
-
-
-def _sha256_file(path):
-    digest = hashlib.sha256()
-    with path.open('rb') as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b''):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def test_git_release_builder_emits_clean_manifested_source(tmp_path: Path) -> None:
@@ -79,23 +71,10 @@ def test_git_release_builder_emits_clean_manifested_source(tmp_path: Path) -> No
         assert (output / "skills" / skill / "scripts" / entry).is_file()
         assert (output / "skills" / skill / "requirements.txt").is_file()
     manual_root = output / "skills/sentaurus-tcad-code/references/manuals"
-    for relative, digest in (
-        (
-            "R-2020.09/sprocess_ug.pdf",
-            "bcaf5cfe87bd276a2068fa6681a0b62b2526512b65a710a660d892c45ceaf5d9",
-        ),
-        (
-            "R-2020.09/sdevice_ug.pdf",
-            "dae2c94b29c92705d3b8d6124c2f0ab595541ed48e4b220a425f72fac42794ce",
-        ),
-        (
-            "R-2020.09/sentaurus_relnote.pdf",
-            "0e6679154406b2d12356be28ab901a3786f48ca9b91b14f6769ada508bdbfbf9",
-        ),
-    ):
+    for relative in ("R-2020.09/sprocess_ug.pdf", "R-2020.09/sdevice_ug.pdf", "R-2020.09/sentaurus_relnote.pdf"):
         manual = manual_root / relative
-        assert manual.is_file()
-        assert _sha256_file(manual) == digest
+        original = project_root / "skills/sentaurus-tcad-code/references/manuals" / relative
+        assert manual.read_bytes() == original.read_bytes()
     for name in ("manual_search.py", "manual_extract.py"):
         helper = output / "skills/sentaurus-tcad-code/scripts" / name
         assert helper.is_file()
@@ -109,13 +88,11 @@ def test_git_release_builder_emits_clean_manifested_source(tmp_path: Path) -> No
     assert not any(output.rglob("r5_g_*.py"))
     assert not any(output.rglob("test_r5_g_*_runner.py"))
     assert not any(output.rglob("__pycache__"))
-    manifest = output / "MANIFEST.sha256"
-    entries = {}
-    for line in manifest.read_text(encoding="utf-8").splitlines():
-        digest, relative = line.split("  ", 1)
-        entries[relative] = digest
-    readme = output / "README.md"
-    assert entries["README.md"] == hashlib.sha256(readme.read_bytes()).hexdigest()
+    manifest = output / "MANIFEST.json"
+    body = json.loads(manifest.read_text())
+    assert body['version'] == 1
+    entries = {row['path']: row['size_bytes'] for row in body['files']}
+    assert all((output / relative).stat().st_size == size for relative, size in entries.items())
     assert set(entries) == {
         path.relative_to(output).as_posix()
         for path in output.rglob("*")

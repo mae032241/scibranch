@@ -28,6 +28,11 @@ def canonical(value):
                       allow_nan=False).encode('utf-8')
 
 
+def request_digest(value):
+    """Bind an exact approval or side-effect retry request; never read payload files."""
+    return hashlib.sha256(canonical(value)).hexdigest()
+
+
 def receipt_hmac(secret: bytes, payload: bytes) -> str:
     if type(secret) is not bytes or len(secret) < 32:
         raise ValueError('Execution receipt requires the configured host secret')

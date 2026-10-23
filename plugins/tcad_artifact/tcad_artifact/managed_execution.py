@@ -1,7 +1,7 @@
 """Opaque TCAD transport binding; trusted P3 authority is required for effects."""
 from __future__ import annotations
 
-import hashlib
+import uuid
 import json
 import os
 import re
@@ -23,7 +23,7 @@ from scidiscovery.research_loop import contracts as c
 from .project_packager import (ExecutionPackage, NativeExecutionPackage, NativeResolvedProjectInput,
     TCADRuntimeManifest, validate_execution_package_json)
 from .native_implementation import TCADCompilationConfig, TCADImplementation, compile_native_implementation
-from .execution_control import SolverCapabilitySnapshot
+from .execution_control import SolverCapabilitySnapshot, TCADJobSpec
 from .runtime_plugin import TCADRuntimeConfig, build_adapter
 
 
@@ -44,29 +44,14 @@ def _package_profile(raw):
 
 
 def _proof(path, context=None):
-    path = Path(path)
-    if path.resolve() != path or not path.is_file():
-        raise e.IntegrityError('Exact TCAD regular original required')
-    digest, size = hashlib.sha256(), 0
-    with path.open('rb') as source:
-        while True:
-            if context is not None:
-                context.remaining_seconds()
-            block = source.read(1024 * 1024)
-            if not block:
-                break
-            digest.update(block)
-            size += len(block)
-    if context is not None:
-        context.remaining_seconds()
-    return dict(path=str(path), sha256=digest.hexdigest(), size_bytes=size)
+    return e.proof(path,context=context)
 
 
 def _verify_descriptor(descriptor, context=None):
     if Path(descriptor.local_path).stat().st_size != descriptor.size_bytes:
         raise e.IntegrityError('TCAD descriptor original size changed')
     original = _proof(descriptor.local_path, context)
-    if (original['sha256'], original['size_bytes']) != (descriptor.sha256, descriptor.size_bytes):
+    if original['size_bytes'] != descriptor.size_bytes:
         raise e.IntegrityError('TCAD descriptor original changed')
     return original
 
@@ -88,7 +73,7 @@ def _retain_original(descriptor, target, context, *, root, policy):
     """Freeze untrusted native bytes once, then hold a read-only shared alias."""
     from scidiscovery.research_loop import storage_policy as storage
     try:
-        c._bind_original(Path(descriptor.local_path),target,descriptor.sha256,root=root,
+        c._bind_original(Path(descriptor.local_path),target,root=root,
             size_bytes=descriptor.size_bytes,source_kind='mutable',policy=policy,context=context)
     except storage.StorageQuotaExceeded:
         raise
@@ -151,7 +136,7 @@ class TCADManagedExecution:
                 dict(input='Exact sealed host-compiled native package; formal review and trusted gate required')),
             AdapterCapability(e.RETIREMENT_KEY, 'execution_recovery', e.RETIREMENT_SCHEMA, 1,
                 'application/json', e.encoded(dict(e.RETIREMENT_CONTRACT, backend_protocol={
-                    'version': 1, 'submit': 'tcad_submit_retirable', 'retire': 'tcad_retire_submission'})),
+                    'version': 2, 'submit': 'tcad_submit_retirable', 'retire': 'tcad_retire_submission'})),
                 dict(action='Retire the exact original submission; no refund or new execution grant')),
             AdapterCapability('execution_resource_usage', 'resource_usage', 'scidiscovery.execution-resource-usage.v1', 1,
                 'application/json', e.encoded(dict(version=1, dimensions=['wall_time_seconds', 'max_storage_bytes'],
@@ -224,6 +209,14 @@ class TCADManagedExecution:
         if preparation_profile != 'research_loop.v1' or Path(exchange_directory) != self.records.root:
             raise ValueError('Exact managed TCAD preparation context required')
         _verify_descriptor(payload,self.operation_context)
+        binding_path=self._stage(payload.name)/'binding.json'
+        if binding_path.exists():
+            binding=json.loads(e.read(binding_path))
+            if binding.get('payload')!=payload.model_dump(mode='json') or binding.get('target')!=self.target:
+                raise e.IntegrityError('Original TCAD preparation binding changed')
+            prepared=LocalFileDescriptor.model_validate(binding['prepared'])
+            self._preparation(prepared)
+            return prepared
         raw = Path(payload.local_path).read_bytes(); profile = _package_profile(raw)
         reviewed = validate_execution_package_json(raw, preparation_profile=profile)
         metadata, opener = self.input_metadata, self.open_input
@@ -237,7 +230,7 @@ class TCADManagedExecution:
         permit = self._check('prepare', payload.name, payload)
         stage = _directory(self._stage(payload.name))
         source = stage / 'package.json'
-        c._bind_original(Path(payload.local_path), source, payload.sha256, context=self.operation_context, policy=self.config.get('storage_policy'), root=self.records.storage_root(), size_bytes=payload.size_bytes, source_kind='mutable')
+        c._bind_original(Path(payload.local_path), source, context=self.operation_context, policy=self.config.get('storage_policy'), root=self.records.storage_root(), size_bytes=payload.size_bytes, source_kind='mutable')
         original = payload.model_copy(update={'local_path': str(source)})
         prepared = self.adapter.prepare(original, preparation_profile=profile,
             exchange_directory=stage, input_metadata=metadata, open_input=opener)
@@ -288,8 +281,8 @@ class TCADManagedExecution:
             return None  # Native V3 retains its compiler; nonempty V2 has no native mapping.
         spec = TCADJobSpec.model_validate_json(Path(payload.local_path).read_bytes(), strict=True)
         expected = {item.relative_path:item.content.encode('utf-8') for item in package.project.files}
-        inventory = {item.relative_path:(item.sha256,item.size_bytes) for item in spec.archive_entries}
-        if (inventory != {name:(hashlib.sha256(raw).hexdigest(),len(raw)) for name,raw in expected.items()}
+        inventory = {item.relative_path:item.size_bytes for item in spec.archive_entries}
+        if (inventory != {name:len(raw) for name,raw in expected.items()}
                 or spec.arguments != (package.project.entrypoint, *package.project.arguments)
                 or spec.tool_profile != package.project.tool_profile or spec.solver_kind != package.project.solver_kind
                 or spec.capability_sha256 != package.capability.capability_sha256):
@@ -301,12 +294,12 @@ class TCADManagedExecution:
                 if not member.isfile() or member.name not in expected or member.name in seen:
                     raise e.IntegrityError('TCAD prepared archive contains undeclared scientific inputs')
                 stream = archive.extractfile(member)
-                digest = hashlib.sha256(); size = 0
+                size = 0
                 for block in iter(lambda:stream.read(1024*1024), b''):
                     if self.operation_context is not None:
                         self.operation_context.remaining_seconds()
-                    digest.update(block); size += len(block)
-                if (digest.hexdigest(),size) != inventory[member.name]:
+                    size += len(block)
+                if size != inventory[member.name]:
                     raise e.IntegrityError('TCAD embedded source differs from prepared archive')
                 seen.add(member.name)
         if seen != set(expected):
@@ -320,7 +313,7 @@ class TCADManagedExecution:
         if original['producer_step'] != subject['producer_step'] or original['producer_seal'] != subject['producer_seal']:
             raise e.IntegrityError('TCAD input does not name its original reviewed producer')
         attempt = self.config['native_attempt']['number']
-        projection = root / 'host-runtime/experiment-control' / self.config['scope']['job_sha256'] / 'interfaces' / f'{attempt:03d}.json'
+        projection = root / 'host-runtime/experiment-control' / f'{self.config["scope"]["step"]:03d}' / 'interfaces' / f'{attempt:03d}.json'
         return dict(job=q._ref(root,root/'jobs'/f'{job["step"]:03d}.json'),
             configuration=q._ref(root,projection), native_intent=intent, prepared=payload.model_dump(mode='json'),
             evidence=[dict(item,path=Path(item['path']).relative_to(root).as_posix()) for item in (package_proof,archive_proof)],
@@ -333,8 +326,7 @@ class TCADManagedExecution:
                 or accepted.get('interface') != self._original_interface()
                 or descriptor.name != call
                 or accepted['script'].get('path') != str(self.records.directory(call) / 'source.py')
-                or (accepted['script'].get('sha256'), accepted['script'].get('size_bytes'))
-                    != (descriptor.sha256, descriptor.size_bytes)
+                or accepted['script'].get('size_bytes') != descriptor.size_bytes
                 or accepted.get('execution_authority') != accepted.get('tcad', {}).get('authority')
                 or accepted.get('execution_reservation') != accepted.get('tcad', {}).get('reservation')
                 or accepted.get('execution_target') != self.target
@@ -346,7 +338,7 @@ class TCADManagedExecution:
     def _original_interface(self):
         selected = self.config.get('execution_interface')
         required = {'version', 'executor', 'observation_version', 'terminal_evidence',
-            'result_protocol', 'config_sha256', 'capabilities'}
+            'result_protocol', 'config_record', 'capabilities'}
         if (not isinstance(selected, dict) or type(selected.get('version')) is not int
                 or selected['version'] != e.VERSION or not required.issubset(selected)
                 or selected.get('executor') != 'tcad_execution:tcad'
@@ -354,8 +346,7 @@ class TCADManagedExecution:
                 or selected['observation_version'] != e.OBSERVATION_VERSION
                 or selected.get('terminal_evidence') != self.terminal_evidence_kind
                 or selected.get('result_protocol') != self.result_protocol
-                or not isinstance(selected.get('config_sha256'), str)
-                or not re.fullmatch('[0-9a-f]{64}', selected['config_sha256'])
+                or not isinstance(selected.get('config_record'), dict)
                 or not isinstance(selected.get('capabilities'), dict)
                 or any(type(value) is not bool for value in selected['capabilities'].values())
                 or selected['capabilities'] != vars(self.lifecycle_capabilities())):
@@ -378,7 +369,7 @@ class TCADManagedExecution:
         known = self.records.external(call)
         if known is not None and external != known:
             raise e.IntegrityError('TCAD backend changed the original external identity')
-        value = dict(call_id=call, scope=self.config['scope'], prepared_sha256=descriptor.sha256,
+        value = dict(call_id=call, scope=self.config['scope'], prepared_ref=dict(path=descriptor.local_path,size_bytes=descriptor.size_bytes),
                      external_run_id=external, target=self.target)
         path = self.records.directory(call) / 'tcad-backend-binding.json'
         with self.records.lease('tcad-binding-' + call + '.lock'):
@@ -436,7 +427,7 @@ class TCADManagedExecution:
     def _retirement_packet(self, call, kind, value):
         raw = e.encoded(value)
         directory = _directory(self.records.directory(call) / 'retirement-native')
-        path = directory / (kind + '-' + hashlib.sha256(raw).hexdigest() + '.json')
+        path = directory / (kind + '-' + uuid.uuid4().hex + '.json')
         _write_original(path, value)
         return e.proof(path)
 
@@ -473,7 +464,7 @@ class TCADManagedExecution:
                     note='Original job found; use its native terminal evidence, not a non-submission proof')
                 return
             if (response.get('found') is not False or response.get('retired') is not True
-                    or response.get('submission_sha256') != prepared.sha256):
+                    or response.get('submission_id') != _prepared_submission_id(prepared.model_dump(mode='json'))):
                 raise e.IntegrityError('TCAD retirement did not permanently fence the original submission')
             if self.records.external(call) is not None or any((directory / name).exists()
                     for name in ('completed.json', 'terminal.json', 'execution-observation.json')):
@@ -496,7 +487,7 @@ class TCADManagedExecution:
         if (directory / 'collected.json').exists():
             receipt = json.loads(e.read(directory / 'tcad-terminal-binding.json'))
             if (receipt.get('call_id') != call or receipt.get('scope') != self.config['scope']
-                    or receipt.get('prepared_sha256') != descriptor.sha256
+                    or receipt.get('prepared_ref') != dict(path=descriptor.local_path,size_bytes=descriptor.size_bytes)
                     or receipt.get('external_run_id') != external
                     or execution_status(receipt.get('status', {}).get('state')) not in {'known_success', 'known_failed'}):
                 raise e.IntegrityError('TCAD retained terminal binding changed')
@@ -551,19 +542,19 @@ class TCADManagedExecution:
                 or collected.get('mechanism_binding') != accepted.get('mechanism_binding')
                 or collected.get('native_state') != native
                 or receipt.get('call_id') != call or receipt.get('scope') != accepted['scope']
-                or receipt.get('prepared_sha256') != prepared.sha256
+                or receipt.get('prepared_ref') != dict(path=prepared.local_path,size_bytes=prepared.size_bytes)
                 or receipt.get('external_run_id') != self.records.external(call)
                 or receipt.get('outputs') != collected.get('outputs')
                 or receipt.get('status', {}).get('state') != native):
             raise e.IntegrityError('TCAD collection differs from the original terminal state')
-        if backend != dict(call_id=call, scope=accepted['scope'], prepared_sha256=prepared.sha256,
+        if backend != dict(call_id=call, scope=accepted['scope'], prepared_ref=dict(path=prepared.local_path,size_bytes=prepared.size_bytes),
                            external_run_id=self.records.external(call), target=self.target):
             raise e.IntegrityError('TCAD retained backend binding changed')
         outputs = tuple(LocalFileDescriptor.model_validate(item) for item in collected['outputs'])
         for item in outputs:
             if context is not None:
                 context.remaining_seconds()
-            if Path(item.local_path) != directory / 'tcad-originals' / item.sha256:
+            if Path(item.local_path) != directory / 'tcad-originals' / item.name:
                 raise e.IntegrityError('TCAD retained output escaped its original call')
         self._inventory(outputs, native, context=context)
         return collected
@@ -607,7 +598,7 @@ class TCADManagedExecution:
             if context is not None:
                 context.remaining_seconds()
             descriptor = names[item.name]
-            if (descriptor.sha256, descriptor.size_bytes, descriptor.media_type) != (item.sha256, item.size_bytes, item.media_type):
+            if (descriptor.size_bytes, descriptor.media_type) != (item.size_bytes, item.media_type):
                 raise e.IntegrityError('TCAD native output differs from its manifest')
         return manifest
 
@@ -621,13 +612,13 @@ class TCADManagedExecution:
         originals = _directory(directory / 'tcad-originals')
         retained = []
         for item in outputs:
-            target = originals / item.sha256
+            target = originals / item.name
             _retain_original(item,target,context,root=self.records.storage_root(),policy=self.config.get('storage_policy'))
             retained.append(item.model_copy(update={'local_path': str(target)}))
         receipt = directory / 'tcad-terminal-binding.json'
         context.remaining_seconds()
         _write_original(receipt, dict(call_id=call, scope=self.config['scope'],
-            external_run_id=self.records.external(call), prepared_sha256=self.records.accepted(call)['prepared']['sha256'],
+            external_run_id=self.records.external(call), prepared_ref=dict(path=self.records.accepted(call)['prepared']['local_path'],size_bytes=self.records.accepted(call)['prepared']['size_bytes']),
             status=details, outputs=[item.model_dump(mode='json') for item in retained]))
         self.records.publish(call, 'collected.json', dict(native_state=manifest.terminal_state,
             outputs=[item.model_dump(mode='json') for item in retained]))
@@ -671,7 +662,7 @@ class TCADManagedExecution:
             try:
                 proofs = [_proof(directory / name, context) for name in (
                     'tcad-backend-binding.json', 'tcad-terminal-binding.json', 'collected.json')]
-                proofs += [dict(path=item['local_path'], sha256=item['sha256'], size_bytes=item['size_bytes'])
+                proofs += [dict(path=item['local_path'], size_bytes=item['size_bytes'])
                            for item in collected['outputs']]
                 context.remaining_seconds()
             except OSError:
@@ -754,17 +745,19 @@ class TCADManagedExecution:
         if (not projection_directory.is_absolute() or projection_directory.resolve() != projection_directory
                 or not projection_directory.is_dir()):
             raise e.IntegrityError('Scientific TCAD projection requires its explicit canonical host directory')
-        directory = _directory(projection_directory / 'tcad/v2' / manifests[0].sha256)
+        manifest_path=Path(manifests[0].local_path)
+        call=next((parent.name for parent in manifest_path.parents if parent.parent.name=='calls'),None)
+        directory = _directory(projection_directory / 'tcad/v3' / (call or uuid.uuid4().hex))
         path = directory / 'tcad_execution_facts.json'
         if path.resolve() != path or path.is_symlink():
             raise e.IntegrityError('Scientific TCAD facts changed their host namespace')
         _write_original(path, facts)
         _write_original(directory / 'private-scientific-path-bindings.json',
-            dict(manifest_sha256=manifests[0].sha256, outputs=path_bindings))
+            dict(manifest_ref=dict(path=manifests[0].local_path,size_bytes=manifests[0].size_bytes), outputs=path_bindings))
         path.chmod(0o440)
         original = _proof(path)
         result.append(LocalFileDescriptor(name='tcad_execution_facts.json', local_path=str(path),
-            sha256=original['sha256'], size_bytes=original['size_bytes'], media_type='application/json'))
+            size_bytes=original['size_bytes'], media_type='application/json'))
         return tuple(result)
 
     def collect(self, external):
@@ -926,22 +919,14 @@ def build_managed_runtime(context):
         operation_context=getattr(services, 'operation_context', None))})
 
 
-def legacy_retirement(value, decoded, contract):
-    """Pure reader for published v1 TCAD receipts; never constructs a backend."""
-    accepted=decoded(value['accepted'])
-    request=decoded(value['request']);response=decoded(value['response']);protocol=decoded(value['protocol'])
-    if e.encoded(protocol)!=e.encoded(contract['backend_protocol']):
-        raise e.IntegrityError('Legacy TCAD retirement protocol differs from its frozen contract')
-    if (request.get('call_id')!=value['call_id'] or request.get('scope')!=value['scope']
-            or request.get('accepted')!=value['accepted'] or request.get('prepared')!=value['prepared']
-            or request.get('authority')!=value['authority'] or request.get('target')!=accepted.get('execution_target')
-            or response.get('found') is not False or response.get('retired') is not True
-            or response.get('submission_sha256')!=value['prepared']['sha256']):
-        raise e.IntegrityError('Legacy TCAD retirement does not fence the exact original call')
-
 
 REGISTRATION = ExecutionInterfaceRegistration('tcad_execution', '1', RuntimePluginFactory(build_managed_runtime,
     configure=configure_managed_execution, requires_config_file=True),
     scientific_outputs=TCADManagedExecution.scientific_outputs,
-    scientific_source=TCADManagedExecution.scientific_source,legacy_retirement=legacy_retirement,
+    scientific_source=TCADManagedExecution.scientific_source,
     projection_contract='tcad.public-projections.v2')
+
+
+def _prepared_submission_id(descriptor):
+    value=json.loads(Path(descriptor['local_path']).read_bytes())
+    return value.get('request_id',value.get('submission_id'))

@@ -6,7 +6,7 @@ may produce a new candidate; A must judge and authorize those new bytes.
 from __future__ import annotations
 
 from . import configuration_updates
-from . import contracts as c, execution
+from . import contracts as c, execution, history, originals
 
 
 class RepairUnavailable(ValueError):
@@ -68,7 +68,7 @@ def _request(root,decision_step,failure):
     sources = []
     nodes=list(job['history']['nodes'])
     own=c.host_record(c.workspace(root,decision_step))/'result-identity.json'
-    if own.exists():nodes.append(dict(step=decision_step,seal_sha256=c.digest(own)))
+    if own.exists():nodes.append(dict(step=decision_step,seal_ref=c.record_ref(own)))
     for node in nodes:
         producer = originals.node(root, node['step'])
         seal = c.read(originals.source_record(producer, 'result-identity.json'))
@@ -82,14 +82,14 @@ def _request(root,decision_step,failure):
     if owner['role']!='W':return None
     original = (owner.get('engineering_repair') or {}).get('original_candidate',cid)
     return dict(decision_step=decision_step, candidate_id=cid, original_candidate=original,
-        source=source, reason=result['note'], failure=dict(path=path.relative_to(root).as_posix(),sha256=c.digest(path)),
+        source=source, reason=result['note'], failure=dict(path=path.relative_to(root).as_posix()),
         objects=binding['source']['objects'],diagnostic=result.get('diagnostic',result['note']))
 
 
 def _blocked_path(root,repair):
-    import hashlib
+    from scidiscovery import execution_security as security
     from . import delivery
-    key=hashlib.sha256(delivery._bytes(dict(settings_sha256=c.digest(root/'settings.json'),repair=repair))).hexdigest()
+    key=security.request_digest(dict(settings_ref=c.record_ref(root/'settings.json'),repair=repair))
     return root/'host-delivery/engineering-blocked'/(key+'.json')
 
 
@@ -107,7 +107,7 @@ def _lineage_key(root, repair):
         if previous is None:
             return (*key, repair['original_candidate'])
         source = originals.dependency(source, previous['source']['step'],
-            seal_sha256=previous['source']['seal_sha256'])
+            seal_ref=previous['source']['seal_ref'])
 
 
 def admit(root, repair, before_step):
@@ -117,7 +117,7 @@ def admit(root, repair, before_step):
     blocked=_blocked_path(root,repair)
     if blocked.exists():
         value=c.read(c.regular(blocked,limit=4096))
-        if value!={'repair_sha256':blocked.stem,'reason':'engineering_repair_input_capacity'}:
+        if value!={'repair_ref':blocked.stem,'reason':'engineering_repair_input_capacity'}:
             raise ValueError('Engineering repair preparation receipt changed')
         raise RepairUnavailable(value['reason'])
     from . import originals, fork_runtime
@@ -148,7 +148,7 @@ def validate_job(root, job):
             continue
         original=_repair_original(root, repair, proof)
         local=c.workspace(root,job['step'])/'inputs/repair'/name
-        if c.digest(c.regular(local))!=c.digest(original):raise ValueError('Repair input copy changed')
+        if c.regular(local).stat().st_size!=c.regular(original).stat().st_size:raise ValueError('Repair input copy changed')
 
 
 def bind_inputs(root, job):
@@ -162,13 +162,13 @@ def bind_inputs(root, job):
     if c.output_quota_exceeded(policy,(proof['size_bytes'] for proof in [*proofs,*job['direct_materials']])):
         from .candidate_audit import _save
         path=_blocked_path(root,repair)
-        if not path.exists():_save(path,dict(repair_sha256=path.stem,reason='engineering_repair_input_capacity'))
+        if not path.exists():_save(path,dict(repair_ref=path.stem,reason='engineering_repair_input_capacity'))
         raise RepairUnavailable('engineering_repair_input_capacity')
     for name in ('source.py','artifact'):
         proof=job['engineering_repair']['objects'].get(name)
         if proof is None:continue
         inventory.entry();inventory.file(proof['size_bytes'])
-        c._bind_original(_repair_original(root,job['engineering_repair'],proof), c.workspace(root,job['step'])/'inputs/repair'/name, proof['sha256'], root=root, policy=policy.get('storage_policy'), context=context, size_bytes=proof['size_bytes'], source_kind='mutable')
+        c._bind_original(_repair_original(root,job['engineering_repair'],proof), c.workspace(root,job['step'])/'inputs/repair'/name, root=root, policy=policy.get('storage_policy'), context=context, size_bytes=proof['size_bytes'], source_kind='mutable')
 
 
 def _repair_original(root, repair, proof):
@@ -212,7 +212,7 @@ def sources(root, before_step):
     repaired=[step for step in steps(root,before_step) if step>begin['source_cutoff']]
     if not repaired:return begin['delivery_sources']
     nodes=[*begin['delivery_sources']['source_nodes'],*[dict(step=step,
-        seal_sha256=c.digest(fork_runtime.source_record(root,step,'result-identity.json'))) for step in repaired]]
+        seal_ref=history.source_seal_ref(originals.node(root,step))) for step in repaired]]
     path=root/'jobs'/f'{before_step:03d}.json'
     job=c.read(c.regular(path)) if path.exists() else configuration_updates._reservation(root,before_step)
     return delivery.catalogue_sources(root,nodes,job=job)

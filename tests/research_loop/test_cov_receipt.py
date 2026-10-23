@@ -40,6 +40,7 @@ if __name__=='__main__':main()
 '''
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('failed',[False,True])
 def test_confirmed_runner_output_takes_actual_record_object_and_keeps_candidate_logs(tmp_path,execution_registry,monkeypatch,failed):
     cli=tmp_path/'exp_cli.py';cli.write_text(CLI)
@@ -48,16 +49,22 @@ def test_confirmed_runner_output_takes_actual_record_object_and_keeps_candidate_
     value=dict(contract_version=2,feedback_version=1,record_dir=str(tmp_path/'lineage'),runs_root=str(runs),
         run_argv=[sys.executable,'-I',str(cli)],receipt_channel='public_runner_main',
         admission=dict(version=1,mode='hard'),scope=dict(handoff_protocol=CURRENT,step=2,role='W',
-            job_sha256='a'*64,execution_key='b'*64,mechanism_ref='h001.m1'),parents=[],evaluation_key='fixture')
+            job_ref=dict(path=str(tmp_path/'jobs/002.json')),execution_key=dict(path=str(tmp_path/'jobs/002.json')),mechanism_ref='h001.m1'),parents=[],evaluation_key='fixture')
     config=experiments.freeze(value,'cov_execution:experiment',path=tmp_path/'config.json')
     source=tmp_path/'candidate.py'
     source.write_text('print("ordinary multiline training log")\nprint(\'{"ok":true,"run_id":9001}\')\nfailed='+str(failed)+'\n'+('# legal source padding\n'*13000))
     assert source.stat().st_size>cov_receipt.MAX_BYTES
-    result=experiments.dispatch(config,source,new=True)
+    from scidiscovery.research_loop import worker_execution_bridge as bridge
+    # Synthetic trusted host seam; no namespace-isolation claim.
+    token=bridge._LOCAL_LAUNCH.set(lambda config,accepted,command,cwd:(command,cwd,None))
+    try:
+        result=experiments.dispatch(config,source,new=True)
+    finally:
+        bridge._LOCAL_LAUNCH.reset(token)
     assert result['status']==('known_failed' if failed else 'known_success')
     directory=Path(config['record_dir'])/'calls'/result['call_id']
     receipt=json.loads((directory/'receipt.json').read_text())
-    assert set(receipt)=={'version','call_id','accepted_sha256','source_sha256','row'}
+    assert set(receipt)=={'version','call_id','scope','source_ref','row'}
     assert receipt['row']['run_id']==1 and receipt['row']['ok'] is not failed
     assert '9001' in (directory/'stdout.raw').read_text()
     assert cov_lineage._completed(directory)['run_id']==1
@@ -65,9 +72,7 @@ def test_confirmed_runner_output_takes_actual_record_object_and_keeps_candidate_
         records = experiments.Records(config)
         public_model = runs / 'model_run1.pkl'
         frozen_model = directory / 'model.pkl'
-        blob = records.storage_root() / 'host-history/objects' / result['model']['sha256']
         assert public_model.stat().st_ino != frozen_model.stat().st_ino
-        assert frozen_model.stat().st_ino == blob.stat().st_ino
         observation = json.loads((directory / 'execution-observation.json').read_text())
         observed = next(item for item in observation['proofs'] if item['source']['path'] == str(frozen_model))
         retained = Path(observed['path'])
@@ -120,7 +125,7 @@ def test_host_receipt_child_imports_writable_inputs_without_bytecode(tmp_path,ex
     value=dict(contract_version=2,feedback_version=1,record_dir=str(tmp_path/'lineage'),runs_root=str(runs),
         run_argv=[sys.executable,'-B','-I',str(cli)],receipt_channel='public_runner_main',
         admission=dict(version=1,mode='hard'),scope=dict(handoff_protocol=CURRENT,step=2,role='W',
-            job_sha256='a'*64,execution_key='b'*64,mechanism_ref='h001.m1'),parents=[],evaluation_key='fixture',
+            job_ref=dict(path=str(tmp_path/'jobs/002.json')),execution_key=dict(path=str(tmp_path/'jobs/002.json')),mechanism_ref='h001.m1'),parents=[],evaluation_key='fixture',
         engineering_check_reserve_seconds=0)
     config=experiments.freeze(value,'cov_execution:experiment',path=tmp_path/'config.json')
     result=experiments.dispatch(config,source,new=True)
@@ -150,7 +155,7 @@ def test_known_cov_original_tamper_is_integrity_error_without_reexecution(wrappe
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('mode',['wrong_run_id','wrong_call_id','wrong_accepted_digest','wrong_source_digest','duplicate_receipt'])
+@pytest.mark.parametrize('mode',['wrong_run_id','wrong_call_id','wrong_scope','wrong_source_ref','duplicate_receipt'])
 def test_malformed_independent_receipt_never_borrows_success_logs_or_replays(wrapper,mode):
     text=wrapper.backend.read_text()
     if mode=='duplicate_receipt':
@@ -159,8 +164,8 @@ def test_malformed_independent_receipt_never_borrows_success_logs_or_replays(wra
         replacement={
             'wrong_run_id':"envelope['row']=dict(returned,run_id=999)",
             'wrong_call_id':"envelope['call_id']='unrelated-call'",
-            'wrong_accepted_digest':"envelope['accepted_sha256']='0'*64",
-            'wrong_source_digest':"envelope['source_sha256']='0'*64",
+            'wrong_scope':"envelope['scope']={}",
+            'wrong_source_ref':"envelope['source_ref']={}",
         }[mode]
         text=text.replace(" with open(receipt,'x')",' '+replacement+"\n with open(receipt,'x')")
     wrapper.backend.write_text(text)

@@ -5,7 +5,6 @@ from contextlib import ExitStack
 import ctypes
 import errno
 import fcntl
-import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -17,9 +16,7 @@ import tempfile
 from scidiscovery import archive_io as files
 from .instance_owner import effect as owner_effect
 
-LEGACY_FORMAT = 'scidiscovery.instance-readonly-archive.v1'
-SHARED_FORMAT = 'scidiscovery.instance-readonly-archive.v2'
-FORMAT = 'scidiscovery.instance-readonly-archive.v3'
+FORMAT = 'scidiscovery.instance-readonly-archive.v4'
 ROOT_FILES = {'settings.json', 'settings-identity.json', 'host-started.json', 'pause.request', 'instance-owner.json'}
 ROOT_DIRS = {'jobs', 'project', 'control-ledger', 'correction-ledger', 'native-evidence',
              'host-runtime', 'host-history', 'host-delivery', 'source-provenance',
@@ -58,8 +55,6 @@ def _excluded(root, parts):
         from . import skill_supply
         skill_supply.archive_projection(root, int(parts[2]))
         return 'verified_derived_skill_projection'
-    if parts[:2] == ('host-history', 'fork-cache'):
-        return 'immutable_fork_snapshot_cache'
     if parts[0] == 'native-homes':
         return 'native_environment_sessions_caches_and_credentials'
     if len(parts) == 1 and parts[0] in {'host-run.lock', 'control-ledger.lock', 'configuration.lock'}:
@@ -75,12 +70,12 @@ def _excluded(root, parts):
                  and parts[1].isdecimal() and parts[2] == 'continuations' and parts[3].isdecimal())):
         return 'native_runner_lease'
     if (len(parts) == 4 and parts[:2] == ('host-runtime', 'experiment-control')
-            and re.fullmatch('[0-9a-f]{64}', parts[2]) and parts[3] == 'accept.lock'):
+            and parts[2].isdecimal() and parts[3] == 'accept.lock'):
         return 'managed_admission_lease'
     legacy_records = (len(parts) == 6 and parts[0:2] == ('project', 'nodes')
         and parts[2].isdecimal() and parts[3:5] == ('work', 'lineage'))
     host_records = (len(parts) == 5 and parts[:2] == ('host-runtime', 'experiment-control')
-        and re.fullmatch('[0-9a-f]{64}', parts[2]) and parts[3] == 'records')
+        and parts[2].isdecimal() and parts[3] == 'records')
     if legacy_records or host_records:
         name = parts[-1]
         if name.endswith('.lock'):
@@ -89,31 +84,20 @@ def _excluded(root, parts):
 
 
 def _private_originals(root):
-    """Exclude only credentials explicitly located by the framework host binding."""
+    """Exclude credentials from the exact current host source declaration."""
     locator = root / 'execution-authority/host-key-source.json'
     if not locator.exists():
         return frozenset()
     value = _read(locator)
-    # Historical archives can retain an opaque locator marker without a source.
-    if 'source' not in value:
+    source = value.get('source')
+    if source is None:
         return frozenset()
-    source = value['source']
-    if (not isinstance(source, dict) or not isinstance(source.get('path'), str)
-            or not isinstance(source.get('sha256'), str)
-            or not re.fullmatch('[0-9a-f]{64}', source['sha256'])
-            or type(source.get('size_bytes')) is not int or source['size_bytes'] < 0):
+    if not isinstance(source, dict) or not isinstance(source.get('path'), str):
         raise files.ArchiveError('Private credential locator is malformed')
     path = Path(source['path'])
     if not path.is_absolute() or path.resolve() != path:
         raise files.ArchiveError('Private credential locator is not canonical')
-    binding = root / 'execution-authority/host-key.json'
-    key = value.get('key')
-    if (not isinstance(key, dict) or key.get('path') != 'execution-authority/host-key.json'
-            or any(key.get(field) != files.hash_file(binding)[field] for field in ('sha256', 'size_bytes'))
-            or _read(binding).get('key_sha256') != source['sha256']):
-        raise files.ArchiveError('Private credential locator lost its host binding')
     return frozenset({path.relative_to(root).as_posix()}) if path.is_relative_to(root) else frozenset()
-
 
 def _inventory(root, *, context=None, inventory=None):
     """Walk only explicit owning namespaces; unknown roots are gaps, not trees."""
@@ -148,7 +132,7 @@ def _inventory(root, *, context=None, inventory=None):
         if stat.S_ISREG(info.st_mode):
             if inventory is not None:
                 inventory.file(info.st_size)
-            yield dict(path=name, kind='file', **files.hash_file(path, context=context))
+            yield dict(path=name, kind='file', **files.stat_file(path, context=context))
         else:
             yield dict(path=name, kind='directory', **identity)
             for child in sorted(path.iterdir(), key=lambda item: item.name):
@@ -244,8 +228,8 @@ def _owner_locks(stack, root, *, disposing=False, context=None):
 
 def _dead(identity, binding):
     from . import runtime
-    if (not isinstance(binding, str) or not re.fullmatch('[0-9a-f]{64}', binding)
-            or not isinstance(identity, dict) or identity.get('task_sha256') != binding
+    if (not isinstance(binding, dict) or set(binding) != {'path'} or not Path(binding['path']).is_absolute()
+            or not isinstance(identity, dict) or identity.get('task_ref') != binding
             or any(type(identity.get(key)) is not int or identity[key] <= 0
                    for key in ('pid', 'start_ticks', 'pgid', 'sid')) or not identity.get('boot_id')):
         raise files.ArchiveError('Original process identity is incomplete')
@@ -267,7 +251,7 @@ def _quiescent(root):
             raise files.ArchiveError('Unrecognized native attempt owner')
         job = root / 'jobs' / (relative.parts[0] + '.json')
         intent = _read(path)
-        if intent.get('task_sha256') != c.digest(c.regular(job)):
+        if intent.get('task_ref') != c.record_ref(c.regular(job)):
             raise files.ArchiveError('Native intent lost its exact task')
         outcome_path = record / 'native-outcome.json'
         if not outcome_path.exists():
@@ -276,7 +260,7 @@ def _quiescent(root):
         if (outcome.get('native_started') is not False
                 and (type(outcome.get('returncode')) is not int or outcome.get('cleanup') != 'observed_group_cleaned')):
             raise files.ArchiveError('Native cleanup is unconfirmed')
-        binding = c.digest(job) if len(relative.parts) == 1 else c.digest(path)
+        binding = c.record_ref(job) if len(relative.parts) == 1 else c.record_ref(path)
         for name in ('runner-process.json', 'native-process.json', 'watchdog-process.json'):
             process = record / name
             if process.exists():
@@ -304,11 +288,11 @@ def _quiescent(root):
                     or verified.get('accepted') != e.proof(call / 'accepted.json')):
                 raise files.ArchiveError('Terminal original belongs to another managed call')
             if interface.get('terminal_evidence') == 'local_process' and (call / 'process.json').exists():
-                _dead(_read(call / 'process.json'), hashlib.sha256(e.encoded(accepted)).hexdigest())
+                _dead(_read(call / 'process.json'), c.record_ref(call / 'accepted.json'))
             replay = call / 'engineering-check.intent.json'
             if replay.exists():
                 result = _read(call / 'engineering-check.outcome.json')
-                if result.get('intent_sha256') != c.digest(replay) or result.get('result', {}).get('cleanup_confirmed') is not True:
+                if result.get('intent_ref') != c.record_ref(replay) or result.get('result', {}).get('cleanup_confirmed') is not True:
                     raise files.ArchiveError('Engineering replay has unconfirmed cleanup')
     for path in (root / 'execution-authority/calls').glob('*/prepare-intent.json'):
         allocation = _read(path.with_name('allocation.json'))
@@ -331,7 +315,7 @@ def _quiescent(root):
         if not outcome.exists():
             raise files.ArchiveError('Accepted delivery/audit intent has no outcome')
         value = _read(outcome)
-        if value.get('intent_sha256', c.digest(intent)) != c.digest(intent) or value.get('result', value).get('cleanup_confirmed') is not True:
+        if value.get('intent_ref', c.record_ref(intent)) != c.record_ref(intent) or value.get('result', value).get('cleanup_confirmed') is not True:
             raise files.ArchiveError('Delivery/audit cleanup is unconfirmed')
     for path in (root / 'host-delivery/preparation').glob('*.json'):
         if _read(path).get('cleanup_confirmed') is not True:
@@ -343,7 +327,7 @@ def _quiescent(root):
         process_paths += list((records / 'calls').glob('*/engineering-check.process.json'))
     for path in process_paths:
         identity = _read(path)['identity']
-        _dead(identity, identity.get('task_sha256'))
+        _dead(identity, identity.get('task_ref'))
 
 
 def _dependencies(settings):
@@ -407,7 +391,7 @@ def archive_export(root, output, *, independent=False):
 def _same_inventory_entry(expected, current):
     if (expected.get('kind') == current.get('kind') == 'file'
             and expected.get('mode') == current.get('mode') == 0o400):
-        # Both inventories freshly hash the file. Link/unlink changes ctime on
+        # Link/unlink changes ctime on
         # shared readonly inodes; every other property and field stays binding.
         expected = dict(expected, source_stat=expected['source_stat'][:3])
         current = dict(current, source_stat=current['source_stat'][:3])
@@ -415,7 +399,7 @@ def _same_inventory_entry(expected, current):
 
 
 def _immutable_bindings(root):
-    """Exact files published by the fork and Skill lifecycle owners."""
+    """Only lifecycle-owned paths identify frozen originals."""
     from . import contracts as c, originals, skill_supply
     bindings = {}
     manifest = originals._manifest(root)
@@ -427,62 +411,36 @@ def _immutable_bindings(root):
     settings = c.settings(root)
     manifest = skill_supply.validate(root, settings)
     if manifest is not None:
-        for tree in manifest['objects'].values():
+        for item, tree in manifest['objects'].items():
             for row in tree['files']:
-                bindings[root / skill_supply.DIRECTORY / 'objects' / tree['tree_sha256'] / _path(row['path'])] = row
-        manifest_path = root / skill_supply.MANIFEST
-        bindings[manifest_path] = dict(settings['skills']['manifest'], size_bytes=manifest_path.stat().st_size)
+                bindings[root / skill_supply.DIRECTORY / 'objects' / item / _path(row['path'])] = row
+        path = root / skill_supply.MANIFEST
+        bindings[path] = dict(size_bytes=path.stat().st_size)
     return bindings
 
+def _managed_inodes(root, bindings, *, context=None):
+    """Resolve lifecycle-owned originals once; their readonly aliases share ownership."""
+    inodes = set()
+    for source, expected in bindings.items():
+        actual = files.stat_file(source, context=context)
+        if actual['mode'] != 0o400 or actual['size_bytes'] != expected['size_bytes']:
+            raise files.ArchiveError('Managed original differs from its owner binding')
+        inodes.add(tuple(actual['source_stat'][:2]))
+    objects = files.check_path(root / 'host-history/objects')
+    if objects.exists():
+        with os.scandir(objects) as entries:
+            for entry in entries:
+                actual = files.stat_file(Path(entry.path), context=context)
+                if actual['mode'] != 0o400:
+                    raise files.ArchiveError('Managed object is not frozen')
+                inodes.add(tuple(actual['source_stat'][:2]))
+    return inodes
 
-def _managed_original(root, source, entry, bindings):
-    """Mode alone never proves ownership; CAS names and owner bindings do."""
-    if stat.S_IMODE(source.stat().st_mode) != 0o400:
-        return False
-    proof = bindings.get(source)
-    if proof is not None and all(proof.get(key) == entry[key] for key in ('sha256', 'size_bytes')):
-        return True
-    candidate = files.check_path(root / 'host-history/objects' / entry['sha256'])
-    if not candidate.exists():
-        return False
-    left, right = source.stat(), candidate.stat()
-    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
 
-
-def _snapshot_original(root, source, entry, *, context, policy, managed=False):
-    """Freeze once in the inventory-excluded owner cache, preserving live mode."""
-    from . import atomic_files, storage_policy as storage
-    source = files.check_path(source)
-    storage.Inventory(policy, context=context).file(entry['size_bytes'])
-    with storage.writer_lock(root, context=context):
-        before = files.hash_file(source, context=context)
-        if any(before[key] != entry[key] for key in ('sha256', 'size_bytes')):
-            raise files.ArchiveError('Snapshot source differs from its exact binding')
-        if managed:
-            if before['mode'] != 0o400:
-                raise files.ArchiveError('Managed snapshot original is not frozen')
-            return source
-        for candidate in (root / 'host-history/objects' / entry['sha256'],
-                          root / 'host-history/fork-cache' / entry['sha256']):
-            candidate = files.check_path(candidate)
-            if candidate.exists():
-                actual = files.hash_file(candidate, context=context)
-                if (actual['mode'] != 0o400 or any(actual[key] != entry[key] for key in ('sha256', 'size_bytes'))):
-                    raise files.ArchiveError('Snapshot cache original changed')
-                return candidate
-        target = files.check_path(root / 'host-history/fork-cache' / entry['sha256'])
-        with storage.mutation(root, entry['size_bytes'], policy=policy, context=context, target=target):
-            try:
-                atomic_files.copy_original(source, target, sha256=entry['sha256'],
-                    size_bytes=entry['size_bytes'], context=context)
-            except OSError as error:
-                if error.errno in {errno.EXDEV, errno.EOPNOTSUPP, errno.ENOSYS, errno.EPERM, errno.EMLINK}:
-                    raise files.SharingUnsupported('Snapshot publication requires supported same-filesystem hardlinks') from error
-                raise
-        after = files.hash_file(source, context=context)
-        if not _same_inventory_entry(dict(kind='file', **before), dict(kind='file', **after)):
-            raise files.ArchiveError('Snapshot source changed during first freeze')
-        return target
+def _managed_original(root, source, entry, inodes):
+    actual = files.stat_file(source)
+    return (actual['mode'] == 0o400 and actual['size_bytes'] == entry['size_bytes']
+        and tuple(actual['source_stat'][:2]) in inodes)
 
 
 def _reference_growth(root, source, *, policy, context):
@@ -509,14 +467,10 @@ def _export(root, output, *, independent=False, on_locked=None, context=None):
     from . import contracts as c, storage_policy as storage
     root = files.check_path(Path(root).expanduser().absolute())
     output = files.check_path(Path(output).expanduser().absolute())
-    if root.resolve() != root or output.resolve() != output:
-        raise files.ArchiveError('Archive source and destination must be canonical paths')
-    if root == output or output.is_relative_to(root) or root.is_relative_to(output):
-        raise files.ArchiveError('Archive destination must be separate from the original instance')
-    if output.exists():
-        raise files.ArchiveError('Archive destination already exists')
-    if not output.parent.is_dir():
-        raise files.ArchiveError('Explicit archive destination parent must exist')
+    if root.resolve() != root or output.resolve() != output or root == output or output.is_relative_to(root) or root.is_relative_to(output):
+        raise files.ArchiveError('Archive destination must be a separate canonical path')
+    if output.exists() or not output.parent.is_dir():
+        raise files.ArchiveError('Archive requires an absent destination and existing explicit parent')
     if not independent and root.stat().st_dev != output.parent.stat().st_dev:
         raise files.SharingUnsupported('Archive export requires a supported same-filesystem destination')
     settings = c.settings(root)
@@ -525,186 +479,201 @@ def _export(root, output, *, independent=False, on_locked=None, context=None):
     with ExitStack() as locks:
         _owner_locks(locks, root, context=context)
         _quiescent(root)
-        # Both namespaces must exist before the freeze callback and first walk:
-        # adding their parent entries later would change the snapshot itself.
-        files.check_path(root / 'host-history/fork-cache').mkdir(parents=True, exist_ok=True, mode=0o700)
-        bindings = _immutable_bindings(root)
+        managed_inodes = _managed_inodes(root, _immutable_bindings(root), context=context)
         if on_locked is not None:
             on_locked(settings)
         stage = Path(tempfile.mkdtemp(prefix='.' + output.name + '-archive-', dir=output.parent))
         try:
             (stage / 'blobs').mkdir()
             counts = dict(files=0, directories=0, gaps=0, excluded=0, bytes=0, unique_blobs=0, blob_bytes=0)
-            blobs = set()
+            blobs, generations = {}, {}
             def originals():
-                for entry in _inventory(root, context=context, inventory=storage.Inventory(policy, context=context)):
+                for current in _inventory(root, context=context, inventory=storage.Inventory(policy, context=context)):
+                    entry = dict(current)
+                    generations[entry['path']] = current
+                    entry.pop('source_stat', None)
                     if entry['kind'] == 'file':
                         source = root / entry['path']
-                        managed = _managed_original(root, source, entry, bindings)
+                        managed = _managed_original(root, source, current, managed_inodes)
                         entry['storage'] = 'immutable' if managed else 'independent'
-                        entry['blob'] = f'blobs/{entry["sha256"]}-{entry["size_bytes"]}'
-                        if entry['blob'] not in blobs:
-                            frozen = _snapshot_original(root, source, entry, context=context, policy=policy, managed=managed)
-                            publish = files.copy_independent_verified if independent else files.link_verified
-                            publish(frozen, stage / entry['blob'], dict(entry, mode=0o400), context=context)
-                            blobs.add(entry['blob'])
+                        identity = tuple(current['source_stat'][:2])
+                        blob = blobs.get(identity)
+                        if blob is None:
+                            blob = f'blobs/{len(blobs) + 1:012d}'
+                            frozen_entry = dict(entry, mode=0o400)
+                            if managed and not independent:
+                                files.link_original(source, stage / blob, frozen_entry, context=context)
+                            else:
+                                files.copy_original(source, stage / blob, frozen_entry, context=context)
+                            blobs[identity] = blob
                             counts['unique_blobs'] += 1; counts['blob_bytes'] += entry['size_bytes']
+                        entry['blob'] = blob
                         counts['files'] += 1; counts['bytes'] += entry['size_bytes']
                     else:
                         counts[{'directory': 'directories', 'gap': 'gaps', 'excluded': 'excluded'}[entry['kind']]] += 1
                     yield entry
             entries = _stream(stage / 'manifest.jsonl', originals(), context=context)
             dependencies = _stream(stage / 'dependencies.jsonl', _configuration_dependencies(root, settings), context=context)
-            metadata = dict(format=FORMAT, blob_ownership='independent' if independent else 'shared', instance_id=settings['goal_id'], settings_sha256=c.digest(root / 'settings.json'),
+            metadata = dict(format=FORMAT, blob_ownership='independent' if independent else 'shared',
+                instance_id=settings['goal_id'], settings_ref=c.record_ref(root / 'settings.json'),
                 restorable=False, limitations=LIMITATIONS, entries=entries, dependencies=dependencies, **counts,
-                manifest={key: value for key, value in files.hash_file(stage / 'manifest.jsonl', context=context).items() if key in {'sha256', 'size_bytes'}},
-                dependency_manifest={key: value for key, value in files.hash_file(stage / 'dependencies.jsonl', context=context).items() if key in {'sha256', 'size_bytes'}})
+                manifest=dict(path='manifest.jsonl', size_bytes=(stage / 'manifest.jsonl').stat().st_size),
+                dependency_manifest=dict(path='dependencies.jsonl', size_bytes=(stage / 'dependencies.jsonl').stat().st_size))
             files.durable_json(stage / 'archive.json', metadata)
-            with (stage / 'manifest.jsonl').open('rb') as stream:
-                for index, current in enumerate(_inventory(root, context=context), 1):
-                    line = stream.readline()
-                    if not line:
-                        raise files.ArchiveError('Original archive scope gained entries before publication')
-                    expected = json.loads(line)
-                    expected.pop('blob', None)
-                    expected.pop('storage', None)
-                    if not _same_inventory_entry(expected, dict(index=index, **current)):
-                        raise files.ArchiveError('Original archive scope changed before publication')
-                if stream.read(1):
-                    raise files.ArchiveError('Original archive scope lost entries before publication')
+            checked = set()
+            for current in _inventory(root, context=context):
+                expected = generations.get(current['path'])
+                if expected is None or not _same_inventory_entry(expected, current):
+                    raise files.ArchiveError('Original archive scope changed before publication')
+                checked.add(current['path'])
+            if checked != set(generations):
+                raise files.ArchiveError('Original archive scope lost entries before publication')
             files.fsync_directory(stage / 'blobs'); files.fsync_directory(stage)
             _publish(stage, output)
             return dict(status='archive_exported', package=str(output), instance_id=settings['goal_id'],
-                        blob_ownership=metadata['blob_ownership'],
-                        restorable=False, **counts, external_dependencies=dependencies, limitations=LIMITATIONS)
+                blob_ownership=metadata['blob_ownership'], restorable=False, **counts,
+                external_dependencies=dependencies, limitations=LIMITATIONS)
         finally:
             if stage.exists():
                 shutil.rmtree(stage)
 
-
 def archive_inspect(package, *, after=0, limit=20, section='manifest', _context=None):
-    """Verify every blob/line without importing framework plugins or writing files."""
+    """Inspect package structure and original references without reading payloads."""
     package = files.check_path(Path(package).expanduser().absolute())
     from . import storage_policy as storage
     context = _context or storage.Deadline(65)
-    if package.resolve() != package:
-        raise files.ArchiveError('Read-only archive path must be canonical')
-    if (type(after) is not int or after < 0 or type(limit) is not int or limit <= 0
-            or section not in {'manifest', 'dependencies'}):
-        raise files.ArchiveError('Exact positive archive page and continuation required')
+    if package.resolve() != package or type(after) is not int or after < 0 or type(limit) is not int or limit <= 0 or section not in {'manifest', 'dependencies'}:
+        raise files.ArchiveError('Exact canonical archive and positive page required')
     if {path.name for path in package.iterdir()} != {'archive.json', 'manifest.jsonl', 'dependencies.jsonl', 'blobs'}:
         raise files.ArchiveError('Read-only package layout changed')
     metadata = _read(package / 'archive.json')
-    if not isinstance(metadata, dict):
-        raise files.ArchiveError('Unsupported read-only archive format')
-    legacy = metadata.get('format') == LEGACY_FORMAT
-    counters = {'entries', 'dependencies', 'files', 'directories', 'gaps', 'excluded', 'bytes'}
-    if not legacy:
-        counters |= {'unique_blobs', 'blob_bytes'}
-    fields = counters | {'format', 'instance_id', 'settings_sha256', 'restorable', 'limitations', 'manifest', 'dependency_manifest'}
-    if metadata.get('format') == FORMAT:
-        fields.add('blob_ownership')
-    if (set(metadata) != fields or metadata.get('format') not in {FORMAT, SHARED_FORMAT, LEGACY_FORMAT}
-            or metadata.get('format') == FORMAT and metadata.get('blob_ownership') not in ('shared', 'independent')
-            or metadata.get('restorable') is not False
-            or any(type(metadata[key]) is not int or metadata[key] < 0 for key in counters)
-            or not isinstance(metadata['instance_id'], str) or not metadata['instance_id']
-            or not isinstance(metadata['settings_sha256'], str) or not re.fullmatch('[0-9a-f]{64}', metadata['settings_sha256'])):
+    counters = {'entries', 'dependencies', 'files', 'directories', 'gaps', 'excluded', 'bytes', 'unique_blobs', 'blob_bytes'}
+    if (not isinstance(metadata, dict) or metadata.get('format') != FORMAT
+            or metadata.get('blob_ownership') not in {'shared', 'independent'} or metadata.get('restorable') is not False
+            or any(type(metadata.get(k)) is not int or metadata[k] < 0 for k in counters)
+            or not isinstance(metadata.get('settings_ref'), dict) or not metadata.get('instance_id')):
         raise files.ArchiveError('Unsupported read-only archive format')
     counts = dict(files=0, directories=0, gaps=0, excluded=0, bytes=0)
-    blobs = {}
-    selected, last, total = [], None, 0
-    settings_blob = identity_blob = None
-    files.check_path(package / 'blobs')
+    blobs = {}; selected = []; last = None; total = 0; settings_blob = None
     for name, proof in (('manifest', metadata['manifest']), ('dependencies', metadata['dependency_manifest'])):
-        if (not isinstance(proof, dict) or set(proof) != {'sha256', 'size_bytes'}
-                or not isinstance(proof['sha256'], str) or not re.fullmatch('[0-9a-f]{64}', proof['sha256'])
-                or type(proof['size_bytes']) is not int or proof['size_bytes'] < 0):
-            raise files.ArchiveError('Malformed archive manifest identity')
-        source = package / (name + '.jsonl')
-        before = files.hash_file(source, context=context)
-        if any(before[key] != proof[key] for key in ('sha256', 'size_bytes')):
-            raise files.ArchiveError('Archive manifest changed')
+        if not isinstance(proof, dict) or proof.get('path') != name + '.jsonl' or type(proof.get('size_bytes')) is not int:
+            raise files.ArchiveError('Malformed archive manifest reference')
+        source = package / proof['path']; before = files.stat_file(source, context=context)
+        if before['size_bytes'] != proof['size_bytes']:
+            raise files.ArchiveError('Archive manifest size changed')
         number = 0; previous = None
         with source.open('rb') as stream:
             for number, line in enumerate(stream, 1):
-                storage.check(context)
-                entry = json.loads(line)
-                if not isinstance(entry, dict) or type(entry.get('index')) is not int or entry['index'] != number:
+                storage.check(context); entry = json.loads(line)
+                if not isinstance(entry, dict) or entry.get('index') != number:
                     raise files.ArchiveError('Archive entry sequence changed')
                 if name == 'manifest':
-                    kind = entry.get('kind')
-                    fields = {'index', 'path', 'kind'}
-                    fields |= ({'blob', 'size_bytes', 'sha256', 'mode', 'source_stat'} if kind == 'file' else
-                        {'mode', 'source_stat'} if kind == 'directory' else
-                        {'reason', 'mode', 'source_stat'} if kind == 'gap' else {'reason'} if kind == 'excluded' else set())
-                    if kind == 'file' and not legacy:
-                        fields.add('storage')
-                    if not isinstance(kind, str) or set(entry) != fields or kind not in {'file', 'directory', 'gap', 'excluded'}:
-                        raise files.ArchiveError('Malformed archive entry')
-                    logical = _path(entry['path'])
+                    kind = entry.get('kind'); logical = _path(entry['path'])
                     if previous is not None and logical.parts <= previous:
                         raise files.ArchiveError('Duplicate or unordered archive logical path')
                     previous = logical.parts
                     if kind == 'file':
-                        if (not isinstance(entry['sha256'], str) or not re.fullmatch('[0-9a-f]{64}', entry['sha256'])
+                        if (set(entry) != {'index','path','kind','blob','size_bytes','mode','storage'}
                                 or type(entry['size_bytes']) is not int or entry['size_bytes'] < 0
-                                or type(entry['mode']) is not int or not 0 <= entry['mode'] <= 0o7777):
+                                or type(entry['mode']) is not int or not 0 <= entry['mode'] <= 0o7777
+                                or entry['storage'] not in {'immutable','independent'}
+                                or entry['storage'] == 'immutable' and entry['mode'] != 0o400
+                                or re.fullmatch(r'blobs/[0-9]{12}', entry['blob']) is None):
                             raise files.ArchiveError('Malformed archive file binding')
-                        expected_blob = (f'blobs/{number:012d}' if legacy else
-                            f'blobs/{entry["sha256"]}-{entry["size_bytes"]}')
-                        if entry.get('blob') != expected_blob:
-                            raise files.ArchiveError('Archive blob path changed')
-                        if not legacy and (not isinstance(entry['storage'], str) or entry['storage'] not in {'immutable', 'independent'}
-                                or entry['storage'] == 'immutable' and entry['mode'] != 0o400):
-                            raise files.ArchiveError('Malformed archive storage semantics')
                         actual = blobs.get(entry['blob'])
                         if actual is None:
-                            actual = files.hash_file(package / entry['blob'], context=context)
-                            blobs[entry['blob']] = actual
-                        if (any(actual[key] != entry[key] for key in ('sha256', 'size_bytes'))
-                                or actual['mode'] != (entry['mode'] if legacy else 0o400)):
-                            raise files.ArchiveError('Archive blob changed')
-                        if entry['path'] == 'settings.json':
-                            if entry['sha256'] != metadata['settings_sha256']:
-                                raise files.ArchiveError('Archive instance settings identity changed')
-                            settings_blob = package / entry['blob']
-                        elif entry['path'] == 'settings-identity.json':
-                            identity_blob = package / entry['blob']
+                            actual = files.stat_file(package / entry['blob'], context=context); blobs[entry['blob']] = actual
+                        if actual['size_bytes'] != entry['size_bytes'] or actual['mode'] != 0o400:
+                            raise files.ArchiveError('Archive blob metadata changed')
+                        if entry['path'] == 'settings.json': settings_blob = package / entry['blob']
                         counts['files'] += 1; counts['bytes'] += entry['size_bytes']
-                    elif kind in {'directory', 'gap', 'excluded'}:
-                        counts[{'directory': 'directories', 'gap': 'gaps', 'excluded': 'excluded'}[kind]] += 1
-                    else:
-                        raise files.ArchiveError('Unknown archive entry kind')
-                elif set(entry) != {'index', 'owner', 'reference', 'coverage'}:
-                    raise files.ArchiveError('Malformed archive dependency reference')
+                    elif kind in {'directory','gap','excluded'}:
+                        expected = {'index','path','kind'} | ({'mode'} if kind == 'directory' else {'mode','reason'} if kind == 'gap' else {'reason'})
+                        if set(entry) != expected: raise files.ArchiveError('Malformed archive entry')
+                        counts[{'directory':'directories','gap':'gaps','excluded':'excluded'}[kind]] += 1
+                    else: raise files.ArchiveError('Unknown archive entry kind')
+                elif set(entry) != {'index','owner','reference','coverage'}:
+                    raise files.ArchiveError('Malformed archive dependency')
                 if name == section and number > after and len(selected) < limit:
                     selected.append(entry); last = number
-        if files.hash_file(source, context=context) != before:
+        if files.stat_file(source, context=context) != before:
             raise files.ArchiveError('Archive manifest changed during inspection')
-        expected = metadata['entries'] if name == 'manifest' else metadata['dependencies']
-        if number != expected:
+        if number != metadata['entries' if name == 'manifest' else 'dependencies']:
             raise files.ArchiveError('Archive manifest count changed')
-        if name == section:
-            total = number
-    if any(counts[key] != metadata[key] for key in counts):
-        raise files.ArchiveError('Archive summary changed')
-    if not legacy:
-        counts.update(unique_blobs=len(blobs), blob_bytes=sum(row['size_bytes'] for row in blobs.values()))
-        if any(counts[key] != metadata[key] for key in ('unique_blobs', 'blob_bytes')):
-            raise files.ArchiveError('Archive unique content summary changed')
+        if name == section: total = number
+    counts.update(unique_blobs=len(blobs), blob_bytes=sum(row['size_bytes'] for row in blobs.values()))
+    if any(counts[k] != metadata[k] for k in counts): raise files.ArchiveError('Archive summary changed')
     if {path.name for path in (package / 'blobs').iterdir()} != {Path(name).name for name in blobs}:
         raise files.ArchiveError('Archive has unlisted blob entries')
-    settings = _read(settings_blob) if settings_blob is not None else None
-    identity = _read(identity_blob) if identity_blob is not None else None
-    if (not isinstance(settings, dict) or not isinstance(identity, dict)
-            or settings.get('goal_id') != metadata['instance_id']
-            or identity.get('sha256') != metadata['settings_sha256']):
-        raise files.ArchiveError('Read-only package lost its original instance identity')
+    if settings_blob is None or _read(settings_blob).get('goal_id') != metadata['instance_id']:
+        raise files.ArchiveError('Archive lost its instance identity')
     return dict(status='archive_inspected', instance_id=metadata['instance_id'], restorable=False,
-        blob_ownership=metadata.get('blob_ownership', 'shared'),
-        section=section, entries=selected, next_after=last if last is not None and last < total else None,
-        total_entries=total, **counts, external_dependencies=metadata['dependencies'], limitations=LIMITATIONS)
+        blob_ownership=metadata['blob_ownership'], section=section, entries=selected,
+        next_after=last if last is not None and last < total else None, total_entries=total,
+        **counts, external_dependencies=metadata['dependencies'], limitations=LIMITATIONS)
+
+def _restore_material_original(root, source, blob, entry, request, *, context, policy=None):
+    """Resume only this exact no-replacement file publication, never same-size adoption."""
+    from . import instance_owner as owner, storage_policy as storage
+    directory = files.check_path(root / 'host-runtime/restore')
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    receipt = directory / f'material-{request["step"]:03d}-{request["index"]:06d}.json'
+    value = _read(receipt) if receipt.exists() else None
+    if value is not None and (value.get('version') != 1 or value.get('request') != request
+            or value.get('phase') not in {'allocated', 'prepared', 'published'}):
+        raise files.ArchiveError('Material restore belongs to another exact operation')
+    if source.exists() or source.is_symlink():
+        actual = files.stat_file(source, context=context)
+        if value is None and request['ownership'] == 'shared' and actual['source_stat'][:2] == files.stat_file(blob)['source_stat'][:2]:
+            return False
+        if (value is None or value['phase'] == 'allocated'
+                or actual['source_stat'][:2] != value.get('target_identity')
+                or actual['size_bytes'] != entry['size_bytes'] or actual['mode'] != 0o400):
+            raise files.ArchiveError('Existing material is not this restore publication; never overwritten')
+        value['phase'] = 'published'; files.durable_json(receipt, value)
+        stage = Path(value['stage'])
+        if stage.exists():
+            if owner._identity(stage) != value['stage_identity']:
+                raise files.ArchiveError('Material restore stage was replaced')
+            original = stage / 'original'
+            if original.exists():
+                if files.stat_file(original)['source_stat'][:2] != value['target_identity']:
+                    raise files.ArchiveError('Material restore stage original changed')
+                original.unlink(); files.fsync_directory(stage)
+            stage.rmdir(); files.fsync_directory(directory)
+        return False
+    if value is None:
+        stage = Path(tempfile.mkdtemp(prefix='.material-', dir=directory))
+        value = dict(version=1, request=request, phase='allocated', stage=str(stage),
+            stage_identity=owner._identity(stage), target_identity=None)
+        files.durable_json(receipt, value)
+    elif value['phase'] == 'published':
+        raise files.ArchiveError('Published material is now missing; its original publication cannot be replayed')
+    stage = files.check_path(Path(value['stage']))
+    if stage.parent != directory or owner._identity(stage) != value['stage_identity']:
+        raise files.ArchiveError('Material restore lost its exact private stage')
+    original = stage / 'original'
+    if any(path.name != 'original' for path in stage.iterdir()):
+        raise files.ArchiveError('Material restore stage gained unrecognized entries')
+    if value['phase'] == 'allocated':
+        # No target was published in this phase. Only our bound private stage
+        # may contain an incomplete first copy; it is not an accepted original.
+        if original.exists() or original.is_symlink():
+            files.stat_file(original, context=context); original.unlink()
+        growth = entry['size_bytes'] if request['ownership'] == 'independent' else _reference_growth(root, blob, policy=storage.configuration(policy), context=context)
+        with storage.mutation(root, growth, policy=policy, context=context):
+            if request['ownership'] == 'independent':
+                files.copy_independent(blob, original, dict(entry, mode=0o400), context=context)
+            else:
+                files.link_original(blob, original, dict(entry, mode=0o400), context=context)
+        value.update(phase='prepared', target_identity=files.stat_file(original)['source_stat'][:2])
+        files.durable_json(receipt, value)
+    if files.stat_file(original)['source_stat'][:2] != value['target_identity']:
+        raise files.ArchiveError('Material restore prepared original was replaced')
+    files.link_original(original, source, dict(entry, mode=0o400), context=context)
+    value['phase'] = 'published'; files.durable_json(receipt, value)
+    original.unlink(); stage.rmdir(); files.fsync_directory(directory)
+    return True
 
 
 @owner_effect
@@ -737,24 +706,27 @@ def archive_restore_material(root, package, *, step, index, independent=False):
             raise files.ArchiveError('Sealed material source must be its absolute original path')
         files.check_path(source)
         work = c.workspace(root, step)
+        declared = Path(material.get('original_source', material['source']))
         nested = re.fullmatch(r'(?:experiments/[^/]+/)+(?:artifacts/.+|conclusion\.(?:json|md))', name)
+        ordinary = declared == work / 'artifacts' / name or nested and declared == work / name
+        owned = source == declared or source.parent == root / 'host-history/objects'
         if (not source.is_absolute() or source.resolve() != source or not source.is_relative_to(root)
-                or not (source == work / 'artifacts' / name or nested and source == work / name)):
+                or not ordinary or not owned):
             raise files.ArchiveError('Only ordinary sealed artifacts or nested experiment files can be restored; call and control originals are excluded')
         metadata_path = package / 'archive.json'
-        metadata_before = files.hash_file(metadata_path)
+        metadata_before = files.stat_file(metadata_path)
         archive_inspect(package, limit=1, _context=context)
         metadata = _read(package / 'archive.json')
         if metadata['format'] != FORMAT:
             raise files.ArchiveError('Legacy archives support read-only inspection only')
-        if files.hash_file(metadata_path) != metadata_before:
+        if files.stat_file(metadata_path) != metadata_before:
             raise files.ArchiveError('Archive metadata changed during inspection')
         ownership = 'independent' if independent or metadata['blob_ownership'] == 'independent' else 'shared'
-        if metadata['instance_id'] != settings['goal_id'] or metadata['settings_sha256'] != c.digest(root / 'settings.json'):
+        if metadata['instance_id'] != settings['goal_id'] or metadata['settings_ref'] != c.record_ref(root / 'settings.json'):
             raise files.ArchiveError('Archive belongs to another original instance')
         manifest = package / 'manifest.jsonl'
-        before = files.hash_file(manifest)
-        if any(before[key] != metadata['manifest'][key] for key in ('sha256', 'size_bytes')):
+        before = files.stat_file(manifest)
+        if any(before[key] != metadata['manifest'][key] for key in ('size_bytes',)):
             raise files.ArchiveError('Archive manifest changed after inspection')
         wanted = source.relative_to(root).as_posix()
         seal_path = c.host_record(work) / 'result-identity.json'
@@ -767,48 +739,25 @@ def archive_restore_material(root, package, *, step, index, independent=False):
                     selected = row
                 if row['path'] == sealed:
                     producer = row
-        if files.hash_file(manifest) != before:
+        if files.stat_file(manifest) != before:
             raise files.ArchiveError('Archive manifest changed during material selection')
         if (producer is None or producer['kind'] != 'file'
-                or producer['sha256'] != c.digest(seal_path) or producer['size_bytes'] != seal_path.stat().st_size):
+                or producer['size_bytes'] != seal_path.stat().st_size or _read(package / producer['blob']) != _read(seal_path)):
             raise files.ArchiveError('Archive does not contain this exact current producer seal')
         if (selected is None or selected['kind'] != 'file'
-                or any(selected[key] != material[key] for key in ('sha256', 'size_bytes'))):
+                or any(selected[key] != material[key] for key in ('size_bytes',))):
             raise files.ArchiveError('Archive does not contain this exact sealed material')
-
-        def existing():
-            if not source.exists() and not source.is_symlink():
-                return False
-            actual = files.hash_file(source, context=context)
-            if ownership == 'independent':
-                for candidate in (package / 'blobs').iterdir():
-                    context.remaining_seconds()
-                    info = candidate.stat(follow_symlinks=False)
-                    if actual['source_stat'][:2] == [info.st_dev, info.st_ino]:
-                        raise files.ArchiveError('Existing material shares a package inode; independent restore never overwrites it')
-            if any(actual[key] != material[key] for key in ('sha256', 'size_bytes')):
-                raise files.ArchiveError('Existing original differs from the sealed material; never overwritten')
-            return True
 
         result = dict(step=step, index=index, name=name, blob_ownership=ownership,
             permission='File bytes only; no scientific qualification, execution permission or automatic continuation')
-        if existing():
-            return dict(status='material_already_present', **result)
         blob = package / selected['blob']
+        request = dict(root=str(root), step=step, index=index, package=str(package), blob=selected['blob'],
+            source=str(source), producer=c.record_ref(seal_path), ownership=ownership)
         policy = storage.for_path(root, source)
         storage.Inventory(policy, context=context).file(selected['size_bytes'])
-        growth = (selected['size_bytes'] if ownership == 'independent' else
-            _reference_growth(root, blob, policy=policy, context=context))
-        with storage.mutation(root, growth, policy=policy, context=context):
-            try:
-                publish = files.copy_independent_verified if ownership == 'independent' else files.link_verified
-                publish(blob, source, dict(selected, mode=0o400), context=context)
-            except files.ArchiveError:
-                if existing():
-                    return dict(status='material_already_present', **result)
-                raise
-        existing()
-        return dict(status='material_restored', **result)
+        with storage.writer_lock(root, context=context):
+            created = _restore_material_original(root, source, blob, selected, request, context=context, policy=policy)
+        return dict(status='material_restored' if created else 'material_already_present', **result)
 
 
 def checkpoint_enroll(root, anchor_directory):
@@ -836,7 +785,8 @@ def _json_identity(path):
         if ((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)
                 != (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)):
             raise files.ArchiveError('Checkpoint metadata changed while reading')
-        return json.loads(raw), dict(sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw), mode=stat.S_IMODE(before.st_mode))
+        return json.loads(raw), dict(path=str(Path(path).absolute()), size_bytes=len(raw), mode=stat.S_IMODE(before.st_mode),
+            source_stat=[before.st_dev,before.st_ino,before.st_mtime_ns,before.st_ctime_ns])
     finally:
         os.close(fd)
 
@@ -844,53 +794,47 @@ def _json_identity(path):
 def _checkpoint(package, *, with_proof=False, context=None):
     package = files.check_path(Path(package).absolute())
     value, proof = _json_identity(package / 'checkpoint.json')
-    if (value.get('version') != 2 or value.get('kind') != 'cold_checkpoint'
+    if (value.get('version') != 3 or value.get('kind') != 'cold_checkpoint'
             or value.get('blob_ownership') not in ('shared', 'independent')):
         raise files.ArchiveError('Only an explicitly enrolled cold checkpoint can restore an instance')
     metadata, actual = _json_identity(package / 'payload/archive.json')
     if (value['payload_ref']['path'] != 'payload/archive.json'
-            or any(value['payload_ref'][key] != actual[key] for key in ('sha256','size_bytes'))):
+            or any(value['payload_ref'][key] != actual[key] for key in ('size_bytes',))):
         raise files.ArchiveError('Cold checkpoint payload identity changed')
     archive_inspect(package / 'payload', limit=1, _context=context)
     if metadata['format'] != FORMAT:
         raise files.ArchiveError('Legacy archives support read-only inspection only')
     if metadata['blob_ownership'] != value['blob_ownership']:
         raise files.ArchiveError('Cold checkpoint payload ownership changed')
-    after = files.hash_file(package / 'payload/archive.json')
-    if any(after[key] != actual[key] for key in ('sha256','size_bytes','mode')):
+    after = files.stat_file(package / 'payload/archive.json')
+    if any(after[key] != actual[key] for key in ('size_bytes','mode','source_stat')):
         raise files.ArchiveError('Checkpoint payload metadata changed during inspection')
     if (metadata['gaps'] or value['instance_id'] != metadata['instance_id']
-            or value['settings_ref']['sha256'] != metadata['settings_sha256']):
+            or value['settings_ref'] != metadata['settings_ref']):
         raise files.ArchiveError('Cold checkpoint lost its complete exact instance payload')
     return (value,proof,metadata) if with_proof else value
 
 
 def _checkpoint_entries(package, metadata, *, context=None):
-    """Bind the actual copy/activation iteration to the verified manifest bytes."""
+    """Consume one stable manifest descriptor; no scientific payload is hashed."""
     path = package / 'payload/manifest.jsonl'; files.check_path(path)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
         before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode):
-            raise files.ArchiveError('Checkpoint manifest is not regular')
-        digest = hashlib.sha256(); size = 0
+        if not stat.S_ISREG(before.st_mode) or before.st_size != metadata['manifest']['size_bytes']:
+            raise files.ArchiveError('Checkpoint manifest metadata changed')
         with os.fdopen(fd, 'rb', closefd=False) as stream:
             for line in stream:
-                if context is not None:
-                    context.remaining_seconds()
-                digest.update(line); size += len(line)
+                if context is not None: context.remaining_seconds()
                 entry = json.loads(line); _path(entry['path'])
-                if entry['kind'] == 'file' and entry['blob'] != f'blobs/{entry["sha256"]}-{entry["size_bytes"]}':
-                    raise files.ArchiveError('Checkpoint copy blob identity changed')
+                if entry['kind'] == 'file' and re.fullmatch(r'blobs/[0-9]{12}', entry['blob']) is None:
+                    raise files.ArchiveError('Checkpoint blob locator changed')
                 yield entry
         after = os.fstat(fd)
-        if (digest.hexdigest() != metadata['manifest']['sha256'] or size != metadata['manifest']['size_bytes']
-                or (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)
-                != (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)):
+        if (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns) != (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns):
             raise files.ArchiveError('Checkpoint manifest changed during consumption')
     finally:
         os.close(fd)
-
 
 def checkpoint_export(root, output, *, independent=False):
     from . import budget, instance_owner as owner, qualification as q, storage_policy as storage
@@ -906,9 +850,9 @@ def checkpoint_export(root, output, *, independent=False):
             if output.exists():
                 value, checkpoint_proof, _ = _checkpoint(output, with_proof=True, context=context)
                 if (value['transaction'] != anchor['transaction'] or value['blob_ownership'] != ownership
-                        or anchor.get('checkpoint_sha256') != checkpoint_proof['sha256']):
+                        or anchor.get('checkpoint_ref') != dict(path=str(output / 'checkpoint.json'))):
                     raise files.ArchiveError('Published checkpoint belongs to another transaction')
-                anchor['checkpoint_sha256'] = checkpoint_proof['sha256']
+                anchor['checkpoint_ref'] = dict(path=str(output / 'checkpoint.json'))
                 files.durable_json(directory / 'owner.json', anchor)
                 return dict(status='checkpoint_exported', package=str(output), generation=binding['generation'], frozen=True, blob_ownership=ownership)
         elif anchor['state'] != 'active' or anchor['generation'] != binding['generation']:
@@ -929,16 +873,16 @@ def checkpoint_export(root, output, *, independent=False):
                 anchor.update(state='frozen', transaction=transaction, output=str(output), export_blob_ownership=ownership)
                 files.durable_json(directory / 'owner.json', anchor)
             _export(root, stage / 'payload', independent=independent, on_locked=freeze, context=context)
-            payload = files.hash_file(stage / 'payload/archive.json')
-            value = dict(version=2, kind='cold_checkpoint', transaction=transaction, blob_ownership=ownership,
-                instance_id=binding['instance_id'], settings_ref=q._ref(root, root / 'settings.json'),
+            payload = files.stat_file(stage / 'payload/archive.json')
+            value = dict(version=3, kind='cold_checkpoint', transaction=transaction, blob_ownership=ownership,
+                instance_id=binding['instance_id'], settings_ref=dict(path=str(root / 'settings.json')),
                 original_root=str(root), host=binding['host'], anchor_id=binding['anchor_id'],
                 source_generation=binding['generation'], binding=binding,
-                payload_ref=dict(path='payload/archive.json', **{key:payload[key] for key in ('sha256','size_bytes')}),
+                payload_ref=dict(path='payload/archive.json', **{key:payload[key] for key in ('size_bytes',)}),
                 budget=captured)
             files.durable_json(stage / 'checkpoint.json', value)
             _checkpoint(stage, context=context)
-            anchor['checkpoint_sha256'] = files.hash_file(stage / 'checkpoint.json')['sha256']
+            anchor['checkpoint_ref'] = dict(path=str(output / 'checkpoint.json'))
             files.durable_json(directory / 'owner.json', anchor)
             _publish(stage, output)
             return dict(status='checkpoint_exported', package=str(output), generation=binding['generation'], frozen=True, blob_ownership=ownership)
@@ -967,7 +911,7 @@ def _validate_restored_payload(root, package, checkpoint, restored, metadata, *,
     for entry in _checkpoint_entries(package, metadata, context=context):
         name = entry['path']; expected.add(name)
         if entry['kind'] == 'file':
-            actual = files.hash_file(root / name, context=context)
+            actual = files.stat_file(root / name, context=context)
             blob = (package / 'payload' / entry['blob']).stat()
             identity = tuple(actual['source_stat'][:2])
             if entry['storage'] == 'immutable':
@@ -991,7 +935,7 @@ def _validate_restored_payload(root, package, checkpoint, restored, metadata, *,
                 continue
             if name == 'pause.request' and _read(root / name) == dict(reason='cold_checkpoint_restored'):
                 continue
-            if any(actual[key] != entry[key] for key in ('sha256','size_bytes','mode')):
+            if any(actual[key] != entry[key] for key in ('size_bytes','mode')):
                 raise files.ArchiveError('Pending restore original changed: ' + name)
         elif entry['kind'] == 'directory':
             if not (root/name).is_dir() or stat.S_IMODE((root/name).stat().st_mode) != entry['mode']:
@@ -1002,8 +946,8 @@ def _validate_restored_payload(root, package, checkpoint, restored, metadata, *,
     for name, proof in (('archive.json', checkpoint['payload_ref']), ('manifest.jsonl', metadata['manifest'])):
         retained = root / prefix / name
         if retained.exists():
-            actual = files.hash_file(retained, context=context)
-            if any(actual[key] != proof[key] for key in ('sha256','size_bytes')):
+            actual = files.stat_file(retained, context=context)
+            if any(actual[key] != proof[key] for key in ('size_bytes',)):
                 raise files.ArchiveError('Pending restore retained manifest changed')
     for entry in _inventory(root, context=context):
         name = entry['path']
@@ -1029,11 +973,11 @@ def checkpoint_restore(root, package, *, independent=False):
     if (str(root) != checkpoint['original_root'] or root.resolve() != root or owner._host() != checkpoint['host']
             or root == package or root.is_relative_to(package) or package.is_relative_to(root)):
         raise files.ArchiveError('Cold restore supports only the same host and exact original absolute root')
-    digest = checkpoint_proof['sha256']
+    checkpoint_ref = dict(path=str(package / 'checkpoint.json'))
     if ownership == 'shared' and package.stat().st_dev != root.parent.stat().st_dev:
         raise files.SharingUnsupported('Checkpoint restore requires supported same-filesystem hardlinks')
     with owner.exclusive(root, binding=binding) as (directory, anchor, _):
-        if (anchor.get('transaction') != checkpoint['transaction'] or anchor.get('checkpoint_sha256') != digest
+        if (anchor.get('transaction') != checkpoint['transaction'] or anchor.get('checkpoint_ref') != checkpoint_ref
                 or anchor.get('export_blob_ownership') != checkpoint['blob_ownership']
                 or anchor['generation'] not in {binding['generation'], binding['generation']+1}):
             raise files.ArchiveError('Cold checkpoint is stale or unregistered at its original anchor')
@@ -1067,14 +1011,14 @@ def checkpoint_restore(root, package, *, independent=False):
                             blob = package / 'payload' / entry['blob']
                             if entry['storage'] == 'immutable':
                                 if ownership == 'shared':
-                                    files.link_verified(blob, target, entry, context=context)
+                                    files.link_original(blob, target, entry, context=context)
                                 elif entry['blob'] in immutable:
-                                    files.link_verified(immutable[entry['blob']], target, entry, context=context)
+                                    files.link_original(immutable[entry['blob']], target, entry, context=context)
                                 else:
-                                    files.copy_independent_verified(blob, target, entry, context=context)
+                                    files.copy_independent(blob, target, entry, context=context)
                                     immutable[entry['blob']] = target
                             else:
-                                files.copy_independent_verified(blob, target, entry, context=context)
+                                files.copy_independent(blob, target, entry, context=context)
                         elif entry['kind'] == 'directory':
                             target.mkdir(parents=True, exist_ok=True); directories.append((target,entry['mode']))
                         elif entry['kind'] == 'gap':
@@ -1101,18 +1045,22 @@ def checkpoint_restore(root, package, *, independent=False):
             receipt = root / 'host-runtime/restore' / checkpoint['transaction']
             receipt.mkdir(parents=True, exist_ok=True)
             source = package / 'checkpoint.json'
-            files.copy_verified(source, receipt / 'checkpoint.json', dict(kind='file', **checkpoint_proof), context=context)
+            if not (receipt / 'checkpoint.json').exists():
+                files.copy_original(source, receipt / 'checkpoint.json', dict(kind='file', **checkpoint_proof), context=context)
+            elif _read(receipt / 'checkpoint.json') != checkpoint:
+                raise files.ArchiveError('Retained checkpoint control record changed')
             checkpoint_ref = q._ref(root, receipt / 'checkpoint.json')
             # Retain the two original control manifests so historical snapshot
             # bindings can verify their cold inheritance without the package.
             # Payload bytes remain solely in their original restored locations.
             for name in ('archive.json', 'manifest.jsonl'):
                 source = package / 'payload' / name
-                original = files.hash_file(source, context=context)
+                original = files.stat_file(source, context=context)
                 expected = checkpoint['payload_ref'] if name == 'archive.json' else metadata['manifest']
-                if any(original[key] != expected[key] for key in ('sha256','size_bytes')):
+                if any(original[key] != expected[key] for key in ('size_bytes',)):
                     raise files.ArchiveError('Cold restore control manifest source changed')
-                files.copy_verified(source, receipt / name, dict(kind='file', **original), context=context)
+                if not (receipt / name).exists():
+                    files.copy_original(source, receipt / name, dict(kind='file', **original), context=context)
             transfer = dict(version=1, kind='owner_restore', transaction=checkpoint['transaction'],
                 checkpoint_ref=checkpoint_ref, instance_id=binding['instance_id'], original_root=str(root),
                 anchor_id=binding['anchor_id'], host=binding['host'], from_generation=binding['generation'],

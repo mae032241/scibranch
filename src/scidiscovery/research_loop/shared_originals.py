@@ -1,47 +1,18 @@
-"""Reuse the instance's existing content archive; preserve logical identities.
-
-Mutable sources freeze once; all managed read-only views hold strict hardlinks.
-Scientific identity remains with each original call and path.
-"""
+"""Publish immutable original slots; logical provenance belongs to each caller."""
 import errno
-import hashlib
-from contextlib import contextmanager
-from contextvars import ContextVar
 import os
 from pathlib import Path
-import re
 import stat
+import uuid
 
 from . import atomic_files, storage_policy as storage
 
 _SHARING_UNSUPPORTED = {errno.EXDEV, errno.EOPNOTSUPP, errno.ENOTTY, errno.EINVAL,
                         errno.ENOSYS, errno.EPERM, errno.EMLINK}
-_proofs = ContextVar('shared_original_proofs', default=None)
-
-
-@contextmanager
-def verified():
-    """Only one synchronous operation may reuse verified inode generations."""
-    if _proofs.get() is not None:
-        yield
-        return
-    token=_proofs.set({})
-    try:
-        yield
-    finally:
-        _proofs.reset(token)
 
 
 def _generation(path):
-    info=path.stat()
-    return (info.st_dev,info.st_ino,info.st_mode,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
-
-
-def _remember(generation, sha256):
-    cache=_proofs.get()
-    if cache is not None:
-        if len(cache)>=4096:cache.clear()
-        cache[generation]=sha256
+    return atomic_files._generation(path.lstat())
 
 
 def _path(path):
@@ -51,42 +22,15 @@ def _path(path):
     return path
 
 
-def _verify(path, sha256, size_bytes, context):
-    from . import contracts as c
-    for attempt in range(3):
-        storage.check(context)
-        before=_generation(path)
-        if not stat.S_ISREG(before[2]) or before[3] != size_bytes:
-            raise ValueError('Shared original differs from its exact binding')
-        cache=_proofs.get()
-        actual=cache.get(before) if cache is not None else None
-        if actual is None:actual=c.digest(path) if context is None else _digest(path,context)
-        after=_generation(path)
-        if after!=before:
-            if attempt<2 and after[:-1]==before[:-1] and stat.S_IMODE(before[2])==0o400:continue
-            raise ValueError('Shared original changed during verification')
-        if actual!=sha256:raise ValueError('Shared original differs from its exact binding')
-        _remember(after,sha256)
-        return after
-
-
-def _digest(path, context):
-    from . import experiments as e
-    return e.proof(path, context=context)['sha256']
-
-
-def _identity(sha256, size_bytes):
-    if not isinstance(sha256, str) or re.fullmatch('[0-9a-f]{64}', sha256) is None:
-        raise ValueError('Exact content identity required')
+def _file(path, size_bytes, *, frozen=False):
     if type(size_bytes) is not int or size_bytes < 0:
         raise ValueError('Managed file size must be a nonnegative integer')
-
-
-def _frozen(path, sha256, size_bytes, context):
-    generation = _verify(path, sha256, size_bytes, context)
-    if stat.S_IMODE(generation[2]) != 0o400:
+    value = _generation(path)
+    if not stat.S_ISREG(value[2]) or value[3] != size_bytes:
+        raise ValueError('Managed original differs from its declared file')
+    if frozen and stat.S_IMODE(value[2]) != 0o400:
         raise ValueError('Only a frozen host original may share its inode')
-    return generation
+    return value
 
 
 def _hardlink(source, target):
@@ -99,94 +43,82 @@ def _hardlink(source, target):
         raise
 
 
-def retain(root, source, *, sha256, size_bytes, source_kind, context=None, policy=None):
+def retain(root, source, *, size_bytes, source_kind, context=None, policy=None):
     root, source = _path(root), _path(source)
-    _identity(sha256, size_bytes)
     if source_kind not in {'mutable', 'managed_frozen'}:
         raise ValueError('Explicit mutable or managed_frozen source kind required')
-    if source_kind == 'managed_frozen' and not source.is_relative_to(root):
-        raise ValueError('Managed frozen source escaped its explicit instance root')
     context = context or storage.Deadline(65)
-    target = _path(root / 'host-history/objects' / sha256)
+    storage.check(context)
+    if source_kind == 'managed_frozen':
+        if not source.is_relative_to(root):
+            raise ValueError('Managed frozen source escaped its instance root')
+        _file(source, size_bytes, frozen=True)
+        return source
     limits = storage.for_root(root) if policy is None else storage.configuration(policy)
     storage.Inventory(limits, context=context).file(size_bytes)
+    target = _path(root / 'host-history/objects' / uuid.uuid4().hex)
     with storage.writer_lock(root, context=context):
-        before = (_frozen if source_kind == 'managed_frozen' else _verify)(source, sha256, size_bytes, context)
-        if target.exists():
-            _frozen(target, sha256, size_bytes, context)
-        elif source_kind == 'managed_frozen':
-            link(source, target, sha256=sha256, size_bytes=size_bytes, root=root, context=context, policy=limits)
-        else:
-            with storage.mutation(root,size_bytes,policy=limits,context=context,target=target):
-                atomic_files.copy_original(source, target, sha256=sha256, size_bytes=size_bytes, context=context)
-                if _generation(source) != before:
-                    # The published independent bytes remain a valid CAS object,
-                    # but this changing source cannot establish an exact binding.
-                    raise ValueError('Shared source changed during first freeze')
-                _frozen(target,sha256,size_bytes,context)
+        _file(source, size_bytes)
+        with storage.mutation(root,size_bytes,policy=limits,context=context,target=target):
+            atomic_files.copy_original(source,target,size_bytes=size_bytes,context=context)
     return target
 
 
 def publish_bytes(root, payload, *, context=None, policy=None):
-    """Publish new bytes in CAS first, so repeated projections never copy again."""
     root = _path(root)
     if type(payload) is not bytes:
         raise ValueError('Managed publication requires bytes')
     context = context or storage.Deadline(65)
-    sha256 = hashlib.sha256(payload).hexdigest()
-    target = _path(root / 'host-history/objects' / sha256)
+    target = _path(root / 'host-history/objects' / uuid.uuid4().hex)
     limits = storage.for_root(root) if policy is None else storage.configuration(policy)
     storage.Inventory(limits,context=context).file(len(payload))
     with storage.writer_lock(root,context=context):
-        if target.exists():
-            _frozen(target,sha256,len(payload),context)
-        else:
-            with storage.mutation(root,len(payload),policy=limits,context=context,target=target):
-                storage.check(context)
-                atomic_files.publish_bytes(target,payload)
-                _frozen(target,sha256,len(payload),context)
+        with storage.mutation(root,len(payload),policy=limits,context=context,target=target):
+            storage.check(context)
+            atomic_files.publish_bytes(target,payload)
     return target
 
 
-def publish_stream(root, blocks_factory, *, sha256, size_bytes, context=None, policy=None):
-    """Replay a measured projection only when its CAS object is absent."""
+def publish_stream(root, blocks_factory, *, size_bytes=None, context=None, policy=None):
     root = _path(root)
-    _identity(sha256, size_bytes)
     context = context or storage.Deadline(65)
-    target = _path(root / 'host-history/objects' / sha256)
+    target = _path(root / 'host-history/objects' / uuid.uuid4().hex)
     limits = storage.for_root(root) if policy is None else storage.configuration(policy)
-    storage.Inventory(limits, context=context).file(size_bytes)
-    with storage.writer_lock(root, context=context):
-        if target.exists():
-            _frozen(target, sha256, size_bytes, context)
-        else:
-            with storage.mutation(root, size_bytes, policy=limits, context=context, target=target):
-                atomic_files.publish_stream(target, blocks_factory(), sha256=sha256,
-                                            size_bytes=size_bytes, context=context)
-                _frozen(target, sha256, size_bytes, context)
+    inventory = storage.Inventory(limits,context=context)
+    inventory.limit('max_files',1)
+    # Only an explicitly enabled instance byte quota needs advance measurement.
+    # Default publication transforms and writes the stream in one pass.
+    if size_bytes is None and limits['enabled'] and limits['max_instance_bytes'] is not None:
+        size_bytes=0
+        for block in blocks_factory():
+            storage.check(context)
+            if type(block) is not bytes:raise ValueError('Atomic stream requires bytes blocks')
+            size_bytes+=len(block)
+            inventory.limit('max_file_bytes',size_bytes)
+            inventory.limit('max_total_bytes',size_bytes)
+    with storage.writer_lock(root,context=context):
+        with storage.mutation(root,size_bytes or 0,policy=limits,context=context,target=target):
+            atomic_files.publish_stream(target,blocks_factory(),size_bytes=size_bytes,
+                context=context,inventory=inventory)
     return target
 
 
-def link(original, destination, *, sha256, size_bytes, root, context=None, policy=None):
+def link(original, destination, *, size_bytes, root, context=None, policy=None):
     root, original, destination = _path(root), _path(original), _path(destination)
-    _identity(sha256, size_bytes)
     if not original.is_relative_to(root) or not destination.is_relative_to(root):
         raise ValueError('Managed alias escaped its explicit instance root')
     context = context or storage.Deadline(65)
     limits = storage.for_root(root) if policy is None else storage.configuration(policy)
     storage.Inventory(limits,context=context).file(size_bytes)
-    # A verified inode already inside root adds no regular-file bytes, even
-    # when existing independent content has put the instance over its limit.
     with storage.writer_lock(root,context=context):
-        before = _frozen(original,sha256,size_bytes,context)
+        before = _file(original,size_bytes,frozen=True)
         def existing():
-            generation = _frozen(destination,sha256,size_bytes,context)
-            if generation[:2] != before[:2]:
+            if _file(destination,size_bytes,frozen=True)[:2] != before[:2]:
                 raise ValueError('Managed alias collision: expected the exact shared inode')
-        if destination.exists():
+        if destination.exists() or destination.is_symlink():
             existing()
             return
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.parent.mkdir(parents=True,exist_ok=True)
         storage.check(context)
         created = False
         try:
@@ -195,16 +127,9 @@ def link(original, destination, *, sha256, size_bytes, root, context=None, polic
                 created = True
             except FileExistsError:
                 existing()
-            if created:
-                after = _generation(destination)
-                if after[:-1]!=before[:-1] or _generation(original)[:-1]!=after[:-1]:
-                    raise ValueError('Shared source changed during alias publication')
-                _remember(after,sha256)
-            atomic_files._sync_directory(destination.parent)
-            final = _frozen(original,sha256,size_bytes,context)
-            if final[:-1] != before[:-1] or _generation(destination)[:-1] != final[:-1]:
+            if _generation(original)!=before or _generation(destination)!=before:
                 raise ValueError('Shared source changed during alias publication')
-            _remember(final,sha256)
+            atomic_files._sync_directory(destination.parent)
         except BaseException:
             if created:
                 destination.unlink(missing_ok=True)

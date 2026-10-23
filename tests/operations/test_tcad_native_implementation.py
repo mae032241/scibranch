@@ -1,5 +1,4 @@
 """Small local contracts; no runtime/Root/installation or solver fixture."""
-import hashlib
 import json
 from pathlib import Path
 
@@ -8,29 +7,27 @@ from pydantic import ValidationError
 
 from scidiscovery.artifact_agent.schema.common import canonical_json
 from tcad_artifact.execution_control import SolverCapabilitySnapshot
+from tests.operations.test_runtime_plugin_configuration import _execution_package
 from tcad_artifact.native_implementation import compile_native_implementation
 from tcad_artifact.project_packager import (
-    DeckProjectDraft, ExecutionPackage, NativeExecutionPackage, NativeResolvedProjectInput,
+    DeckProjectDraft, NativeExecutionPackage, NativeResolvedProjectInput,
     ProjectInitializationAttestation,
-    ScientificDeckImplementation, validate_execution_package_json,
+    ScientificDeckImplementation,
 )
 
 
-def _old_document():
-    return json.loads((Path(__file__).parents[1] / 'fixtures/tcad_analysis_package.json').read_bytes())
+def _document():
+    return json.loads(_execution_package())
 
 
 def _initialization_report():
-    # Fixed source vector: main.cmd + NUL + "Solve {}\n" + NUL. This digest
-    # predates these tests in the legacy package fixture, not a production helper.
     return dict(schema_version=1,profile='tcad.project-initialization.v1',
-        source_tree_sha256='60d208f572fb4e121c3aba93250a1bd6017ea8999e97ac17ddadb2a43b499b0d',
         mode='initialization',terminal_state='succeeded',exit_code=0,
         diagnostic_layer='complete',qualified=True,summary='Exact source-bound initialization fixture')
 
 
 def test_initialization_attestation_accepts_exact_project_source():
-    project=_old_document()['project']
+    project=_document()['project']
     assert project['files']==[dict(relative_path='main.cmd',content='Solve {}\n')]
     report=ProjectInitializationAttestation.model_validate_json(canonical_json(_initialization_report()),strict=True)
     project['initialization_attestation']=report.model_dump(mode='json')
@@ -45,40 +42,20 @@ def test_initialization_attestation_rejects_preflight_report():
         ProjectInitializationAttestation.model_validate_json(canonical_json(preflight),strict=True)
 
 
-def test_initialization_attestation_rejects_stale_project_source():
-    project=_old_document()['project']
-    project['initialization_attestation']=dict(_initialization_report(),source_tree_sha256='b'*64)
-    with pytest.raises(ValidationError,match='debug attestation source digest differs'):
-        DeckProjectDraft.model_validate_json(canonical_json(project),strict=True)
-
-
-def test_v2_keeps_fixed_legacy_package_bytes():
-    # Fixed legacy fixture + the old v2 envelope. Expected bytes do not come
-    # from the new model/serializer; the digest pins this 2,902-byte vector.
-    old = _old_document()
-    raw = json.dumps(dict(schema_version=2, project=old['project'], capability=old['capability'],
-        review=old['review'], resolved_inputs=[]), ensure_ascii=False, allow_nan=False,
-        sort_keys=True, separators=(',', ':')).encode()
-    assert hashlib.sha256(raw).hexdigest() == '3a91a6302f39e63626a9ed1982d4f4a432803d5b51785a129b47b8874ad074c3'
-    package = validate_execution_package_json(raw)
-    assert type(package) is ExecutionPackage
-    assert canonical_json(package.model_dump(mode='json')) == raw
-
-
 def test_native_compiler_preserves_exact_origin_and_control_capture():
     # Ref objects here are declarations only; producer membership and source
     # authorization are tested at the host loader, not asserted by this test.
-    old = _old_document()
-    capability = SolverCapabilitySnapshot.model_validate_json(canonical_json(old['capability']), strict=True)
+    document = _document()
+    capability = SolverCapabilitySnapshot.model_validate_json(canonical_json(document['capability']), strict=True)
     slot = dict(semantic_name='mesh', target_relative_path='inputs/mesh.tdr',
                 media_type='application/octet-stream')
     authored = ScientificDeckImplementation.model_validate_json(canonical_json(dict(
         solver_kind='sdevice', files=[dict(relative_path='main.cmd', content='Solve {}\n')],
-        input_slots=[slot], entrypoint='main.cmd', resource_limits=old['project']['resource_limits'])), strict=True)
+        input_slots=[slot], entrypoint='main.cmd', resource_limits=document['project']['resource_limits'])), strict=True)
     original = dict(instance_id='scid-hwa-native-test', producer_step=1,
-        producer_seal=dict(path='native-evidence/001/result-identity.json', sha256='a'*64, size_bytes=100),
+        producer_seal=dict(path='native-evidence/001/result-identity.json', size_bytes=100),
         material_path='inputs/parents/001/artifacts/mesh.tdr',
-        sha256=hashlib.sha256(b'mesh').hexdigest(), size_bytes=4)
+        size_bytes=4)
     resolved = NativeResolvedProjectInput.model_validate_json(canonical_json(
         dict(slot, original=original, size_bytes=4)), strict=True)
     raw = compile_native_implementation(authored, capability=capability, resolved_inputs=(resolved,))
@@ -90,7 +67,7 @@ def test_native_compiler_preserves_exact_origin_and_control_capture():
     assert package.project.tool_profile == capability.profile_id
     assert package.project.expected_outputs[0].model_dump(mode='json') == dict(
         name='process_log', capture='process_log', relative_path='.scid-capture/solver_stdout.log',
-        media_type='text/plain', max_bytes=old['project']['resource_limits']['max_output_bytes'],
+        media_type='text/plain', max_bytes=document['project']['resource_limits']['max_output_bytes'],
         required=True, experiment_key=None, case_key=None)
     assert package.resolved_inputs[0].original.model_dump(mode='json') == original
     assert 'artifact_ref' not in json.loads(raw)['resolved_inputs'][0]

@@ -49,7 +49,6 @@ def test_missing_policy_and_unsupported_transfer_are_rejected():
 
 
 def test_solver_log_is_counted_and_stdout_collision_preserves_original(tmp_path):
-    import hashlib
     from tcad_artifact import remote_runner_py36 as runner
     work = tmp_path / "work"
     work.mkdir()
@@ -60,6 +59,6 @@ def test_solver_log_is_counted_and_stdout_collision_preserves_original(tmp_path)
     expected = ({"relative_path": "main.log", "capture": "process_log"},)
     assert runner._logical_storage_bytes(tmp_path, (), expected) >= genuine.stat().st_size + stdout.stat().st_size
     with pytest.raises(RuntimeError, match="conflicts"):
-        runner._publish_log_mirror(stdout, genuine, hashlib.sha256(b"stdout").hexdigest(), 6, 1024)
+        runner._publish_log_mirror(stdout, genuine, 6, 1024)
     assert genuine.read_bytes() == b"real solver log"
     assert stdout.read_bytes() == b"stdout"

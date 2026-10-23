@@ -3,7 +3,6 @@
 This adapter confirms local directory delivery only. It makes no external service,
 scientific audit, smoke, or goal completion claim.
 """
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -43,20 +42,17 @@ def descriptor(directory, *, python=sys.executable):
         inputs=[dict(label='runtime-python', path=python)], source_roots=[str(directory)])
 
 
-def _sha(path):
+def _file_size(path):
     path = Path(path)
-    if path.resolve() != path or not path.is_file() :
+    if path.resolve() != path or path.is_symlink() or not path.is_file():
         raise ValueError('Exact bounded delivery file required')
-    digest=hashlib.sha256()
-    with path.open('rb') as stream:
-        for block in iter(lambda:stream.read(1024*1024),b''):digest.update(block)
-    return digest.hexdigest()
+    return path.stat().st_size
 
 
 def _guard(request):
     source = Path('/inputs/scid-current-protocol')
     proof = next(item for item in request['inputs'] if item['label'] == 'scid-current-protocol')
-    if _sha(source) != proof['sha256'] or source.stat().st_size != proof['size_bytes']:
+    if _file_size(source) != proof['size_bytes']:
         raise ValueError('Frozen delivery protocol changed')
     runpy.run_path(str(source))['require_scope'](request['scope'])
 
@@ -65,15 +61,15 @@ def _manifest(request):
     if (not re.fullmatch('[0-9a-f]{64}', request['operation_id'])
             or request['context'].get('kind') != 'managed_local_result'):
         raise ValueError('Exact managed local delivery required')
-    objects = {name: digest for name, digest in request['object_digests'].items()
+    objects = {name: digest for name, digest in request['object_refs'].items()
         if name == 'artifact' or name.startswith(('inputs/', 'outputs/'))}
-    if objects.get('artifact') != request['artifact_sha256']:raise ValueError('Declared artifact identity changed')
+    if objects.get('artifact') != request['artifact_ref']:raise ValueError('Declared artifact identity changed')
     for name, digest in objects.items():
         if (Path(name).is_absolute() or '..' in Path(name).parts or '\\' in name
-                or Path(name).as_posix() != name or _sha(Path('/inputs') / name) != digest):
+                or Path(name).as_posix() != name or _file_size(Path('/inputs') / name) != digest['size_bytes']):
             raise ValueError('Managed delivery object changed')
     return dict(version=1, operation_id=request['operation_id'], candidate_id=request['candidate_id'],
-        artifact_sha256=request['artifact_sha256'], objects=objects, result=request['context'],
+        artifact_ref=request['artifact_ref'], objects=objects, result=request['context'],
         qualification='Exact local directory delivery only; no scientific or external submission qualification.')
 
 
@@ -87,7 +83,7 @@ def leaf(request):
     manifest = _manifest(request)
     destination = Path('/target') / request['operation_id']
     reply = dict(operation_id=request['operation_id'], candidate_id=request['candidate_id'],
-        artifact_sha256=request['artifact_sha256'])
+        artifact_ref=request['artifact_ref'])
     if request['phase'] == 'promote':
         if destination.exists() or destination.is_symlink():
             raise ValueError('Existing delivery requires confirmation, never another promotion')
@@ -98,7 +94,7 @@ def leaf(request):
             path.parent.mkdir(parents=True, exist_ok=True)
             with (Path('/inputs')/name).open('rb') as source,path.open('xb') as sink:
                 shutil.copyfileobj(source,sink,1024*1024);sink.flush();os.fsync(sink.fileno())
-            if _sha(path) != manifest['objects'][name]:raise ValueError('Delivered object changed')
+            if _file_size(path) != manifest['objects'][name]['size_bytes']:raise ValueError('Delivered object changed')
         with (pending/'manifest.json').open('x',encoding='utf-8') as stream:
             json.dump(manifest,stream,sort_keys=True,allow_nan=False);stream.write('\n');stream.flush();os.fsync(stream.fileno())
         os.rename(pending, destination)
@@ -111,7 +107,7 @@ def leaf(request):
         original = destination / 'manifest.json'
         if original.resolve()!=original:raise ValueError('Exact bounded delivery manifest required')
         actual = json.loads(original.read_text())
-        if actual == manifest and all(_sha(destination / name) == digest for name, digest in manifest['objects'].items()):
+        if actual == manifest and all(_file_size(destination / name) == digest['size_bytes'] for name, digest in manifest['objects'].items()):
             return dict(reply, status='confirmed', note='exact_local_directory_delivery_confirmed')
     except (OSError, ValueError):
         pass

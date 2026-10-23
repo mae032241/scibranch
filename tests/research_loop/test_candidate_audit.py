@@ -71,7 +71,7 @@ def test_audit_only_returns_to_a_and_never_promotes_or_replays(tmp_path, monkeyp
         assert receipt['status'] == 'audited' and receipt['candidate_id'] == 'run-1'
         assert receipt['scope'] == candidate_audit.SCOPE
         assert 'sha256' not in json.dumps(receipt) and 'leakage_flag' not in receipt
-        assert correction._proofs(root,job,{'verdict':'progress'}) == {c.digest(c.host_record(c.workspace(root,2))/'science-output.json')}
+        assert correction._proofs(root,job,{'verdict':'progress'}) == {str(c.host_record(c.workspace(root,2))/'science-output.json')}
         assert not (root / 'runs/submitted.json').exists()
         assert not list((root / 'submission').iterdir())
         parents = [int(Path(row['path']).parts[2]) for row in job['direct_refs']]
@@ -174,7 +174,6 @@ def test_audit_outcome_single_field_tamper_is_hard_rejection(tmp_path,field,valu
         candidate_audit.receipt_ref(root,3)
 
 
-
 @pytest.mark.process_e2e
 def test_published_correction_pause_blocks_new_audit_acceptance(tmp_path):
     root=audit_fixture(tmp_path,correction_enabled=True)
@@ -218,20 +217,20 @@ def _seal_existing(root,step,payload):
     if c.read(root/'jobs'/f'{step:03d}.json')['role']=='A':
         payload={'decision_request':None,'portfolio_review':None,**payload}
     record=c.host_record(c.workspace(root,step))
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs'/f'{step:03d}.json')))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json')))
     from test_history_handoff import selection_explanation
     if isinstance(payload.get('candidate_recommendation'),str):payload['selection_explanation']=selection_explanation()
     c.write(record/'science-output.json',payload)
     c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
     c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),
-        raw_sha256=c.digest(record/'science-output.json')))
+        raw_ref=c.file_ref(record/'science-output.json')))
     return c.seal_result(root,step)
 
 
 @pytest.mark.process_e2e
 def test_closeout_audit_keeps_exact_prefix_returns_a_without_promotion(tmp_path,monkeypatch):
     root=audit_fixture(tmp_path)
-    nodes=[dict(step=i,seal_sha256=c.digest(c.host_record(c.workspace(root,i))/'result-identity.json')) for i in (1,2)]
+    nodes=[dict(step=i,seal_ref=c.record_ref(c.host_record(c.workspace(root,i))/'result-identity.json')) for i in (1,2)]
     refs=delivery.freeze_sources(root,nodes)
     budget.begin_closeout(root,2,3,'Original explicit closeout',delivery_sources=refs)
     c.build_job(root,3,'A',[1,2],purpose='closeout',source_cutoff=2,delivery_sources=refs)
@@ -279,7 +278,7 @@ def test_unchanged_unavailable_candidate_stops_repeated_audit_route(tmp_path,mon
     job=c.read(root/'jobs/004.json');payload=c.validate(c.workspace(root,4))
     assert candidate_audit.execute(root,job,payload)=='candidate_audit_originals_unavailable'
     second=candidate_audit._outcome(root,4)
-    assert second['unavailable_input_sha256']==first['unavailable_input_sha256']
+    assert second['unavailable_input_ref']==first['unavailable_input_ref']
     assert second['result']['note']=='candidate_audit_unchanged_originals_unavailable'
     before=len(calls)
     assert candidate_audit.execute(root,job,payload)=='candidate_audit_originals_unavailable'
@@ -306,5 +305,5 @@ def test_unavailable_audit_does_not_block_a_different_exact_candidate(tmp_path,m
     job=c.read(root/'jobs/004.json');payload=c.validate(c.workspace(root,4))
     assert candidate_audit.execute(root,job,payload) is None
     first,second=candidate_audit._outcome(root,3),candidate_audit._outcome(root,4)
-    assert first['unavailable_input_sha256']!=second['unavailable_input_sha256']
+    assert first['unavailable_input_ref']!=second['unavailable_input_ref']
     assert second['result']['note']=='candidate_originals_unavailable'

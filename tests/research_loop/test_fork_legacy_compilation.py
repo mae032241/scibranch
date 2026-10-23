@@ -18,10 +18,10 @@ def retained_legacy(tmp_path, *, attempt=1, changed=None, retain=True):
 
     settings = write('settings.json', dict(goal_id='legacy-compiler-fixture'))
     job = write('jobs/002.json', dict(step=2, role='W', direct_materials=[], selected_inputs=[]))
-    intent = write('native-evidence/002/native-intent.json', dict(task_sha256=job['sha256']))
+    intent = write('native-evidence/002/native-intent.json', dict(task_ref=dict(path=str(root/job['path']))))
     interface = dict(public_capabilities=[dict(key='implementation_authoring', version=1)])
-    configuration = write(f'host-runtime/experiment-control/{job["sha256"]}/interfaces/000.json',
-        dict(native_attempt=dict(number=0), scope=dict(step=2, job_sha256=job['sha256']),
+    configuration = write('host-runtime/experiment-control/002/interfaces/000.json',
+        dict(native_attempt=dict(number=0), scope=dict(step=2, job_ref=dict(path=str(root/job['path']))),
              execution_interface=interface))
     experiment = write('native-evidence/002/experiment-config.json', dict(execution_interface=interface))
     outcome = write('native-evidence/002/native-outcome.json', dict(stop_reason='token_limit'))
@@ -40,14 +40,14 @@ def retained_legacy(tmp_path, *, attempt=1, changed=None, retain=True):
     first_compiler = write('native-evidence/002/compiled-implementations/a-original/compiler.json', compiler_value)
     compiler = write('native-evidence/002/compiled-implementations/z-original/compiler.json', compiler_value)
     original_material = dict(source=output['path'], path='inputs/parents/002/artifacts/old-package.json',
-                             sha256=output['sha256'], size_bytes=output['size_bytes'])
+                             size_bytes=output['size_bytes'])
     permit = write('host-recovery/author-closeout/002.json', dict(version=1, scope='author_closeout_only',
         context='new_context', step=2, source_attempt=0, job=job, settings=settings,
         original_intent=intent, original_outcome=outcome, original_usage=usage,
         original_experiment_config=experiment, calls=[]))
     first_intent = write('native-evidence/002/continuations/001/native-intent.json', dict(attempt=1,
-        task_sha256=job['sha256'], author_closeout=permit, continuation_kind='author_closeout',
-        context_mode='new_context', worker_view_version=1, root_intent_sha256=intent['sha256']))
+        task_ref=dict(path=str(root/job['path'])), author_closeout=permit, continuation_kind='author_closeout',
+        context_mode='new_context', worker_view_version=1, root_intent_ref=dict(path=str(root/intent['path']))))
     successor = upgrade = None
     if attempt == 2:
         source_originals = {'native-intent.json': first_intent}
@@ -63,12 +63,12 @@ def retained_legacy(tmp_path, *, attempt=1, changed=None, retain=True):
             authorization_note='fixture output grant', authorization_statement='fixture exact output'))
         permit = successor
         write('native-evidence/002/continuations/002/native-intent.json', dict(attempt=2,
-            task_sha256=job['sha256'], author_closeout=permit, continuation_kind='author_closeout',
+            task_ref=dict(path=str(root/job['path'])), author_closeout=permit, continuation_kind='author_closeout',
             context_mode='new_context', worker_view_version=1))
     client = dict(worker_implementation_version=1, implementation_ref='I002')
     public = write('project/nodes/002/artifacts/scientific-implementations/I002.json', client)
     material = dict(source=str(root / public['path']), path='inputs/parents/002/artifacts/scientific-implementations/I002.json',
-                    sha256=public['sha256'], size_bytes=public['size_bytes'])
+                    size_bytes=public['size_bytes'])
     binding_value = dict(client=client, public_path=material['source'], package=output,
         legacy_authorization=dict(permit=permit, compiler=compiler, material=original_material, attempt=attempt))
     if changed == 'compiler':
@@ -76,12 +76,12 @@ def retained_legacy(tmp_path, *, attempt=1, changed=None, retain=True):
     elif changed == 'public_path':
         binding_value['public_path'] = str(root / 'project/nodes/002/artifacts/copied.json')
     elif changed == 'package':
-        binding_value['package'] = dict(output, sha256='0' * 64)
+        binding_value['package'] = dict(output, path=str(root/'unapproved-package.json'))
     elif changed == 'intent':
         path = root / f'native-evidence/002/continuations/{attempt:03d}/native-intent.json'
         c.write(path, dict(c.read(path), context_mode='resume'))
     binding = write(f'native-evidence/002/compiled-implementations/z-original/author-client-{attempt:03d}.json', binding_value)
-    identity = dict(goal_id='legacy-compiler-fixture', settings_sha256=settings['sha256'])
+    identity = dict(goal_id='legacy-compiler-fixture', settings_ref=dict(path=str(root/settings['path'])))
     if not retain:
         return originals.NodeSource(identity, 2, str(root), root), compiler, binding, material
     key = originals.identity_key(identity)
@@ -181,7 +181,6 @@ def test_legacy_owner_inventory_and_copy_preserve_author_chain(tmp_path, attempt
         entries=list(closure.entries.values()), origins=closure.origins,
         legacy_compilations=closure.legacy_compilations, bootstrap={},
         source_paths=closure.paths, source_root=str(source.storage_root), blocked_reasons=closure.blocked)
-    plan['source_fingerprint'] = fork_sources.fingerprint(plan)
     child = tmp_path / 'copied-child'
     manifest = fork_sources.copy_source(plan, child / originals.FORK_DIRECTORY)
     shutil.rmtree(source.storage_root)

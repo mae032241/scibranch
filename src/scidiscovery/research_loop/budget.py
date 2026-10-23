@@ -1,17 +1,17 @@
 """Append-only time facts and operator ceilings; no scientific scheduling."""
 from __future__ import annotations
 
+from scidiscovery import execution_security as security
 from contextlib import contextmanager
 import errno
 import fcntl
-import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import time
 
-from . import contracts
+from . import contracts, history, originals
 
 
 def clock_stamp():
@@ -75,14 +75,14 @@ def _events(root, settings, *, resources=False):
 def _read_events(root, settings, *, resources=False):
     # The caller owns this immutable original-settings observation.
     events, parent, origins = [], None, {}
-    identity = contracts.digest(root / 'settings.json')
+    identity = contracts.record_ref(root / 'settings.json')
     for seq, path in enumerate(sorted((root / 'control-ledger').glob('*.json')), 1):
         data = contracts.regular(path).read_bytes()
         event = json.loads(data)
         if not isinstance(event, dict):
             raise ValueError('Invalid control ledger event')
         if (type(event.get('seq')) is not int or path.name != f'{seq:06d}.json' or event.get('seq') != seq
-                or event.get('parent_sha256') != parent or event.get('settings_sha256') != identity
+                or event.get('parent_ref') != parent or event.get('settings_ref') != identity
                 or type(event.get('at_unix')) not in (int, float) or not math.isfinite(event['at_unix'])
                 or type(event.get('at_boottime')) not in (int, float)
                 or not math.isfinite(event['at_boottime']) or event['at_boottime'] < 0
@@ -144,8 +144,8 @@ def _read_events(root, settings, *, resources=False):
                 or not isinstance(event.get('result'), dict) or event['result'].get('status') not in {'confirmed', 'failed', 'unknown', 'rejected', 'engineering_error', 'unclassified'}):
             raise ValueError('Invalid delivery action outcome')
         events.append(event)
-        parent = hashlib.sha256(data).hexdigest()
-        origins[seq] = dict(path=path.relative_to(root).as_posix(), sha256=parent, size_bytes=len(data))
+        parent = contracts.record_ref(path)
+        origins[seq] = dict(path=path.relative_to(root).as_posix(), size_bytes=len(data))
     state = _resource_state(root, settings, events, origins)
     return (events, parent, state) if resources else (events, parent)
 
@@ -199,7 +199,7 @@ def _resource_owner(settings):
     if policy is None or selected is None or settings.get('execution_authority_policy') is None:
         raise ValueError('Explicit frozen execution resource owner is unavailable')
     value = dict(instance=settings['goal_id'], executor=selected['executor'])
-    key = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    key = json.dumps(value, sort_keys=True, separators=(',', ':'))
     return dict(key=key, **value)
 
 
@@ -233,8 +233,7 @@ def _resource_state(root, settings, events, origins):
             binding = event.get('binding')
             if (grant is None or event.get('grant_revision') != grant['ref'] or identity in reservations
                     or not isinstance(binding, dict)
-                    or identity != hashlib.sha256(json.dumps(dict(owner=owner, binding=binding),
-                        sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+                    or identity != security.request_digest(dict(owner=owner, binding=binding))
                     or any(ceiling[key] > grant['allowance'][key] for key in ceiling)):
                 raise ValueError('Execution reservation changed its grant or original binding')
             remaining = dict(ceiling)
@@ -256,7 +255,7 @@ def _resource_state(root, settings, events, origins):
                     or not isinstance(binding,dict) or set(binding)!=set(original['binding'])
                     or any(binding.get(key)!=original['binding'].get(key) for key in ('call_id','scope','native_attempt','interface'))
                     or not isinstance(proof,dict) or set(proof)!={'seal','allocation','pending_set'}
-                    or any(not isinstance(ref,dict) or set(ref)!={'path','sha256','size_bytes'} for ref in proof.values())):
+                    or any(not isinstance(ref,dict) or set(ref)!={'path','size_bytes'} for ref in proof.values())):
                 raise ValueError('Only the exact never-prepared reservation can change authority')
             original['binding']=binding
         elif kind == 'resource_bind':
@@ -344,7 +343,7 @@ def reserve_execution(root, *, binding, request_ref, decision_ref, budget, grant
     root = Path(root).resolve(); settings = _resource_settings(root); owner = _resource_owner(settings)
     budget = _resource_dimensions(budget); effective_allowance = _resource_dimensions(effective_allowance)
     binding = dict(binding, request=request_ref, decision=decision_ref)
-    identity = hashlib.sha256(json.dumps(dict(owner=owner, binding=binding), sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    identity = security.request_digest(dict(owner=owner, binding=binding))
     q._read(root, request_ref); q._read(root, decision_ref)
     verified_rebind=None
     if unprepared_recovery is not None:
@@ -425,7 +424,7 @@ def bind_execution(root, *, reservation, accepted, prepared, operation_context=N
             if row['bound'] != original:
                 raise ValueError('Original reservation already bound another preparation')
             return row['ref']
-        q._check(dict(path=prepared['local_path'], sha256=prepared['sha256'], size_bytes=prepared['size_bytes']))
+        q._check(dict(path=prepared['local_path'], size_bytes=prepared['size_bytes']))
         q._check(value['script'])
         _append(root, settings, events, parent, kind='resource_bind', owner=row['owner'],
             reservation_id=identity, reservation=reservation, accepted_binding=original)
@@ -545,8 +544,8 @@ def _append(root, settings, events, parent, **fields):
     from .protocol import require_current
     require_current(root)
     stamp = clock_stamp()
-    event = dict(seq=len(events) + 1, parent_sha256=parent,
-                 settings_sha256=contracts.digest(root / 'settings.json'), **stamp, **fields)
+    event = dict(seq=len(events) + 1, parent_ref=parent,
+                 settings_ref=contracts.record_ref(root / 'settings.json'), **stamp, **fields)
     if 'reanchor' in event:
         _verify_reanchor(root, settings, event, events)
     elif events:
@@ -764,7 +763,7 @@ def execution_blocked(root, *, ignore_operation=None, include_managed=True, igno
                 if (record.get('action_id') != action['intent']['action_id'] or record.get('operation_id') != action['intent']['operation_id']
                         or record.get('phase') not in {'audit', 'promote', 'confirm'}
                         or path.name != action['intent']['action_id'] + '-' + record['phase'] + '.json'
-                        or identity.get('task_sha256') != action['intent']['operation_id']
+                        or identity.get('task_ref') != action['intent']['operation_id']
                         or identity.get('boot_id') != clock_stamp()['boot_id']
                         or any(type(identity.get(key)) is not int or identity[key] <= 0 for key in ('pid', 'start_ticks', 'pgid', 'sid'))
                         or runtime.process_matches(identity, action['intent']['operation_id'])
@@ -778,8 +777,8 @@ def execution_blocked(root, *, ignore_operation=None, include_managed=True, igno
             record = execution.record(root, step)
             if not (record / 'native-intent.json').exists():
                 continue
-            binding = contracts.digest(root / 'jobs' / f'{step:03d}.json')
-            if contracts.read(record / 'native-intent.json')['task_sha256'] != binding:
+            binding = contracts.record_ref(root / 'jobs' / f'{step:03d}.json')
+            if contracts.read(record / 'native-intent.json')['task_ref'] != binding:
                 return True
             outcome = contracts.read(record / 'native-outcome.json')
             if outcome.get('stop_reason') in {'native_error_unknown', 'cleanup_unknown'}:
@@ -803,7 +802,7 @@ def _delivery_group_live(identity):
     from . import runtime
     for path in Path('/proc').glob('[0-9]*'):
         try:
-            member = runtime.process_identity(int(path.name), identity['task_sha256'])
+            member = runtime.process_identity(int(path.name), identity['task_ref'])
         except OSError as error:
             if error.errno in {errno.ENOENT, errno.ESRCH}:
                 continue
@@ -870,7 +869,7 @@ def usage_accounting(root, meter, *, events=None):
         if not permit.stem.isdigit():continue
         value = startup_recovery.reconciled_original(root,int(permit.stem))
         reconciled.append(dict(step=value['step'],attempt=0,record=str(Path(value['originals']['intent']['path']).parent.relative_to(root)),
-            provider_model_tokens=0,reconciliation_sha256=value['reconciliation']['sha256']))
+            provider_model_tokens=0,reconciliation_ref=value['reconciliation']))
     # Missing billing coverage neither invents usage nor grants replay;
     # unresolved execution is checked through its own retained facts.
     return dict(reserved_tokens=0, accounted_tokens=meter['observed_tokens'],
@@ -1020,14 +1019,14 @@ def stopped_report_original(root, step):
     names = ['native-intent.json', 'native-outcome.json', 'usage-observation.json'] if (record / 'native-intent.json').exists() else []
     if (record / 'usage.json').exists():
         names.append('usage.json')
-    value = dict(step=step, job_sha256=contracts.digest(contracts.regular(job_path)),
-                 records={name: contracts.digest(contracts.regular(record / name)) for name in names})
+    value = dict(step=step, job_ref=contracts.record_ref(contracts.regular(job_path)),
+                 records={name: contracts.record_ref(contracts.regular(record / name)) for name in names})
     _validate_stopped_report(root, value)
     return value
 
 
 def _validate_stopped_report(root, value):
-    if (not isinstance(value, dict) or set(value) != {'step', 'job_sha256', 'records'}
+    if (not isinstance(value, dict) or set(value) != {'step', 'job_ref', 'records'}
             or type(value['step']) is not int or value['step'] <= 0 or not isinstance(value['records'], dict)
             or set(value['records']) not in (set(), {'native-intent.json', 'native-outcome.json', 'usage-observation.json'},
                     {'native-intent.json', 'native-outcome.json', 'usage-observation.json', 'usage.json'})):
@@ -1035,9 +1034,9 @@ def _validate_stopped_report(root, value):
     path = Path(root) / 'jobs' / f'{value["step"]:03d}.json'
     job = contracts.read(contracts.regular(path))
     record = contracts.host_record(contracts.workspace(root, value['step']))
-    if (contracts.digest(path) != value['job_sha256']
+    if (contracts.record_ref(path) != value['job_ref']
             or (record / 'result-identity.json').exists() or (record / 'continuations').exists()
-            or any(contracts.digest(contracts.regular(record / name)) != proof for name, proof in value['records'].items())):
+            or any(contracts.record_ref(contracts.regular(record / name)) != proof for name, proof in value['records'].items())):
         raise ValueError('Stopped report original identity changed')
     if not value['records']:
         from . import experiment_client, qualification
@@ -1049,7 +1048,7 @@ def _validate_stopped_report(root, value):
         return value
     intent = contracts.read(record / 'native-intent.json')
     outcome = contracts.read(record / 'native-outcome.json')
-    if (intent.get('task_sha256') != value['job_sha256'] or 'attempt' in intent
+    if (intent.get('task_ref') != value['job_ref'] or 'attempt' in intent
             or type(outcome.get('returncode')) is not int or outcome.get('cleanup') != 'observed_group_cleaned'
             or outcome.get('stop_reason') not in {'closeout_protected_token_limit', 'closeout_protected_time_limit',
                 'token_limit', 'wall_limit', 'node_slice_token_limit', 'node_slice_time_limit'}):
@@ -1128,7 +1127,7 @@ def normal_resume(root, before_step=None, *, events=None):
 
 
 def _event_ref(root, event):
-    return dict(seq=event['seq'], sha256=contracts.digest(Path(root)/'control-ledger'/f'{event["seq"]:06d}.json'))
+    return dict(seq=event['seq'], record=contracts.record_ref(Path(root)/'control-ledger'/f'{event["seq"]:06d}.json'))
 
 
 def _validate_cursor(root, cursor, before_step, events):
@@ -1141,9 +1140,8 @@ def _validate_cursor(root, cursor, before_step, events):
     steps = []
     for ref in cursor['source_refs']:
         number = ref.get('step')
-        if (set(ref) != {'step','seal_sha256'} or type(number) is not int or number <= 0
-                or not isinstance(ref['seal_sha256'],str) or len(ref['seal_sha256']) != 64
-                or any(char not in '0123456789abcdef' for char in ref['seal_sha256'])
+        if (set(ref) != {'step','seal_ref'} or type(number) is not int or number <= 0
+                or not isinstance(ref['seal_ref'], dict) or set(ref['seal_ref']) != {'path'}
                 or fork_runtime.source_job(root, number).get('final_only')):
             raise ValueError('Final resume source differs from declared normal science')
         steps.append(number)
@@ -1174,7 +1172,7 @@ def require_cursor_eligibility(root, cursor, before_step, events):
             contracts.validate(contracts.workspace(root,ref['step']))
         elif not fork_runtime.is_fork(root):
             raise ValueError('Final resume scientific original is missing')
-        elif contracts.digest(fork_runtime.source_record(root, ref['step'], 'result-identity.json')) != ref['seal_sha256']:
+        elif history.source_seal_ref(originals.node(root,ref['step'])) != ref['seal_ref']:
             raise ValueError('Final resume inherited scientific original changed')
 
 
@@ -1222,7 +1220,7 @@ def resume_cursor(root, resume, *, events=None):
 def _normal_source_refs(root, before_step, events):
     from . import fork_runtime
     if fork_runtime.is_fork(root):
-        return [dict(step=number, seal_sha256=contracts.digest(fork_runtime.source_record(root, number, 'result-identity.json')))
+        return [dict(step=number, seal_ref=history.source_seal_ref(originals.node(root,number)))
             for number in fork_runtime.science_steps(root, before_step)]
     resumed = normal_resume(root,before_step,events=events)
     if resumed is None:
@@ -1235,7 +1233,7 @@ def _normal_source_refs(root, before_step, events):
         path = Path(root)/'jobs'/f'{number:03d}.json'
         seal = contracts.host_record(contracts.workspace(root,number))/'result-identity.json'
         if path.exists() and seal.exists() and not contracts.read(path).get('final_only'):
-            refs.append(dict(step=number,seal_sha256=contracts.digest(contracts.regular(seal))))
+            refs.append(dict(step=number,seal_ref=contracts.record_ref(contracts.regular(seal))))
     return refs
 
 
@@ -1268,7 +1266,7 @@ def final_a_admission(root, job, *, final_report=None, events=None):
 
 def _validate_final_a_event(root, settings, event, previous):
     """Replay only the original admission facts; never sample live budget here."""
-    fields = {'seq', 'parent_sha256', 'settings_sha256', 'at_unix', 'at_boottime', 'boot_id',
+    fields = {'seq', 'parent_ref', 'settings_ref', 'at_unix', 'at_boottime', 'boot_id',
               'kind', 'version', 'step', 'attempt', 'basis', 'anchor', 'selection', 'reserve'}
     if (_final_a_policy(settings) is None or set(event) != fields
             or type(event['version']) is not int or event['version'] != 2
@@ -1281,8 +1279,8 @@ def _validate_final_a_event(root, settings, event, previous):
     settings = contracts.settings(root, job)
     anchor, selection, reserve = event['anchor'], event['selection'], event['reserve']
     ceilings, max_steps, _ = _ceiling_limits(contracts.settings(root), previous)
-    if (not isinstance(anchor, dict) or set(anchor) != {'task_sha256', 'role', 'boot_id', 'advance_seconds', 'limits', 'shared_limits'}
-            or anchor['task_sha256'] != contracts.digest(job_path) or anchor['role'] != 'A'
+    if (not isinstance(anchor, dict) or set(anchor) != {'task_ref', 'role', 'boot_id', 'advance_seconds', 'limits', 'shared_limits'}
+            or anchor['task_ref'] != contracts.record_ref(job_path) or anchor['role'] != 'A'
             or anchor['boot_id'] != event['boot_id']
             or type(anchor['advance_seconds']) not in (int, float) or not math.isfinite(anchor['advance_seconds'])
             or anchor['advance_seconds'] < 0 or not isinstance(anchor['limits'], dict) or anchor['limits'] != node_limits(root, job)
@@ -1336,7 +1334,7 @@ def final_a_return(root, job, intent, *, events=None):
         from . import continuation, execution
         first=execution.origin(root,job['step'])
         prior=first if number==1 else first/'continuations'/f'{number-1:03d}'
-        if (intent.get('root_intent_sha256')!=contracts.digest(contracts.regular(first/'native-intent.json'))
+        if (intent.get('root_intent_ref')!=contracts.record_ref(contracts.regular(first/'native-intent.json'))
                 or intent.get('previous')!=execution.proof(prior)):
             raise ValueError('Final A return output repair changed its exact source')
         continuation.validate_repair(root,job['step'],intent,prior_record=prior,verify_task=False)
@@ -1347,11 +1345,11 @@ def final_a_return(root, job, intent, *, events=None):
     if (accepted is None or _final_a_policy(settings) is None or ('attempt' in intent and not (startup or repair))
             or intent.get('continuation_kind') is not None and not (startup or repair) or intent.get('step') != job['step']
             or job['role'] != 'A' or job.get('formal_review') is not None
-            or intent.get('task_sha256') != accepted['anchor']['task_sha256']
+            or intent.get('task_ref') != accepted['anchor']['task_ref']
             or accepted['step'] != job['step']
-            or not isinstance(marker, dict) or set(marker) != {'seq', 'sha256'}
+            or not isinstance(marker, dict) or set(marker) != {'seq', 'record'}
             or type(marker['seq']) is not int or marker['seq'] != accepted['seq']
-            or marker['sha256'] != contracts.digest(Path(root) / 'control-ledger' / f'{accepted["seq"]:06d}.json')
+            or marker['record'] != contracts.record_ref(Path(root) / 'control-ledger' / f'{accepted["seq"]:06d}.json')
             or intent['budget_slice'] != expected_anchor):
         raise ValueError('Final A return reference or original attempt changed')
     return accepted
@@ -1377,7 +1375,7 @@ def _accept_final_a(root, job, anchor, limits, *, final_report=None):
         accepted = next((row for row in events if row['kind'] == 'final_a_return'
             and (active is not None and row['step'] == active['first_step'])), None)
         if accepted is not None:
-            if accepted['step'] != job['step'] or accepted['anchor']['task_sha256'] != anchor['task_sha256']:
+            if accepted['step'] != job['step'] or accepted['anchor']['task_ref'] != anchor['task_ref']:
                 raise NodeBudgetUnavailable('final_a_return_consumed')
         else:
             # Never carry a pre-lock admission sample into durable acceptance.
@@ -1402,7 +1400,7 @@ def _accept_final_a(root, job, anchor, limits, *, final_report=None):
             # Publish once before the intent. A crash before intent publication
             # can only reuse this same exact acceptance, never select a new A.
             accepted = _append(root, settings, events, parent, **fields)
-        marker = dict(seq=accepted['seq'], sha256=contracts.digest(Path(root) / 'control-ledger' / f'{accepted["seq"]:06d}.json'))
+        marker = dict(seq=accepted['seq'], record=contracts.record_ref(Path(root)/'control-ledger'/f'{accepted["seq"]:06d}.json'))
         return dict(accepted['anchor'], final_return=marker)
 
 
@@ -1468,9 +1466,9 @@ def _validate_final_a_action(root, event, previous):
         raise ValueError('Final delivery requires its exact decision job')
     from . import configuration_updates
     policy = configuration_updates.for_step(root, decision_step).get('delivery_policy')
-    if (accepted is None or not isinstance(marker, dict) or set(marker) != {'seq', 'sha256'}
+    if (accepted is None or not isinstance(marker, dict) or set(marker) != {'seq', 'record'}
             or type(marker['seq']) is not int or marker['seq'] != accepted['seq']
-            or marker['sha256'] != contracts.digest(Path(root) / 'control-ledger' / f'{accepted["seq"]:06d}.json')
+            or marker['record'] != contracts.record_ref(Path(root) / 'control-ledger' / f'{accepted["seq"]:06d}.json')
             or _active_final(previous) is None or _active_final(previous)['first_step'] != accepted['step']
             or policy is None
             or event['max_seconds'] != policy['submit_seconds' if event['action_kind'] == 'submit' else 'confirm_seconds']
@@ -1482,11 +1480,10 @@ def _validate_final_a_action(root, event, previous):
     # Authorization replay checks the immutable declared object references,
     # never execution results, scientific qualification or current admission.
     decision = event['decision']
-    if (set(decision) != {'step','job_sha256','raw_sha256','seal_sha256'}
-            or decision['job_sha256'] != accepted['anchor']['task_sha256']
-            or any(not isinstance(decision[key],str) or len(decision[key]) != 64
-                or any(char not in '0123456789abcdef' for char in decision[key])
-                for key in ('job_sha256','raw_sha256','seal_sha256'))
+    if (set(decision) != {'step','job_ref','raw_ref','seal_ref'}
+            or decision['job_ref'] != accepted['anchor']['task_ref']
+            or any(not isinstance(decision[key], dict) or 'path' not in decision[key]
+                for key in ('job_ref','raw_ref','seal_ref'))
             or actions and any(event[key] != actions[0][key] for key in ('operation_id','decision','binding'))):
         raise ValueError('Final delivery changed its authorized object references')
 
@@ -1500,7 +1497,7 @@ def final_a_delivery(root, decision, binding):
     job = contracts.read(contracts.regular(Path(root)/'jobs'/f'{step:03d}.json'))
     intent = contracts.read(contracts.regular(contracts.host_record(contracts.workspace(root,step))/'native-intent.json'))
     final_a_return(root,job,intent)
-    if (decision.get('job_sha256') != accepted['anchor']['task_sha256'] or binding.get('decision') != decision):
+    if (decision.get('job_ref') != accepted['anchor']['task_ref'] or binding.get('decision') != decision):
         raise ValueError('Final delivery changed its declared object scope')
     return intent['budget_slice']['final_return']
 
@@ -1547,7 +1544,7 @@ def _attempt_consumption(root, job, paths):
             startup_recovery.validate_intent(root,job,intent)
         report = original.get('budget_slice', {})
         if (meter is not None and native._usage_event(dict(type='turn.completed', usage=meter)) != meter
-                or intent.get('task_sha256') != contracts.digest(root / 'jobs' / f'{job["step"]:03d}.json')
+                or intent.get('task_ref') != contracts.record_ref(root / 'jobs' / f'{job["step"]:03d}.json')
                 or anchor.get('limits') != policy or anchor.get('role') != job['role']
                 or not startup and (anchor.get('previous_tokens', 0) != tokens or anchor.get('previous_seconds', 0.) != seconds)
                 or bool(report.get('usage_observed')) != (meter is not None) or report.get('limits') != policy
@@ -1565,7 +1562,7 @@ def _attempt_consumption(root, job, paths):
 def _node_duration(root, job, intent, limits):
     anchor = intent.get('budget_slice')
     final = final_a_return(root, job, intent) if (anchor or {}).get('final_return') is not None else None
-    if (not isinstance(anchor, dict) or anchor.get('task_sha256') != contracts.digest(root / 'jobs' / f'{job["step"]:03d}.json')
+    if (not isinstance(anchor, dict) or anchor.get('task_ref') != contracts.record_ref(root / 'jobs' / f'{job["step"]:03d}.json')
             or anchor.get('role') != job['role'] or anchor.get('limits') != node_limits(root, job)
             or final is None and anchor.get('shared_limits') != {key: limits[key] for key in ('max_tokens', 'max_seconds')}
             or anchor.get('boot_id') != clock_stamp()['boot_id']
@@ -1676,9 +1673,9 @@ def accept_node(root, job, *, final_report=None):
         return None
     accepted = final_a_barrier(root)
     if accepted is not None and accepted['step'] == job['step']:
-        if accepted['anchor']['task_sha256'] != contracts.digest(Path(root) / 'jobs' / f'{job["step"]:03d}.json'):
+        if accepted['anchor']['task_ref'] != contracts.record_ref(Path(root) / 'jobs' / f'{job["step"]:03d}.json'):
             raise ValueError('Final A return cannot bind a replacement task')
-        marker = dict(seq=accepted['seq'], sha256=contracts.digest(Path(root) / 'control-ledger' / f'{accepted["seq"]:06d}.json'))
+        marker = dict(seq=accepted['seq'], record=contracts.record_ref(Path(root)/'control-ledger'/f'{accepted["seq"]:06d}.json'))
         return dict(accepted['anchor'], final_return=marker)
     if job.get('final_report') is not None and final_report is None and final_a_admission(root, job) is None:
         raise NodeBudgetUnavailable('final_a_report_requires_control_admission')
@@ -1686,7 +1683,7 @@ def accept_node(root, job, *, final_report=None):
     if reason:
         raise NodeBudgetUnavailable(reason)
     limits, stamp = snapshot(root), clock_stamp()
-    anchor = dict(task_sha256=contracts.digest(root / 'jobs' / f'{job["step"]:03d}.json'), role=job['role'],
+    anchor = dict(task_ref=contracts.record_ref(root / 'jobs' / f'{job["step"]:03d}.json'), role=job['role'],
                 boot_id=stamp['boot_id'], advance_seconds=limits['advance_seconds'], limits=policy,
                 shared_limits={key: limits[key] for key in ('max_tokens', 'max_seconds')})
     return _accept_final_a(root, job, anchor, limits, final_report=final_report)
@@ -1748,7 +1745,7 @@ def accept_continuation(root, job, paths, *, output_repair=None):
             or limits['seconds_remaining'] <= reserve['seconds']
             or step_limit(root) - used_steps(root) < 1 + reserve['steps']):
         raise NodeBudgetUnavailable('worker_resume_budget_unavailable')
-    return dict(task_sha256=contracts.digest(root / 'jobs' / f'{job["step"]:03d}.json'), role=job['role'],
+    return dict(task_ref=contracts.record_ref(root / 'jobs' / f'{job["step"]:03d}.json'), role=job['role'],
                 boot_id=clock_stamp()['boot_id'], advance_seconds=limits['advance_seconds'], limits=policy,
                 shared_limits={key: limits[key] for key in ('max_tokens', 'max_seconds')},
                 previous_tokens=tokens, previous_seconds=seconds)
@@ -1961,7 +1958,7 @@ def exploration_stop(root, job, limits):
 
 def _validate_action_result(intent, result):
     binding = intent['binding']
-    if (set(result) - {'failure_phase','diagnostic'} != {'status', 'operation_id', 'candidate_id', 'artifact_sha256', 'note', 'cleanup_confirmed'}
+    if (set(result) - {'failure_phase','diagnostic'} != {'status', 'operation_id', 'candidate_id', 'artifact_ref', 'note', 'cleanup_confirmed'}
             or 'failure_phase' in result and (result['status'] not in {'failed', 'rejected', 'engineering_error', 'unclassified', 'unknown'} or result['failure_phase'] not in {'audit', 'promote', 'confirm'})
             or 'diagnostic' in result and (not isinstance(result['diagnostic'],str) or len(result['diagnostic'].encode())>4096)
             or result['status'] not in {'confirmed', 'failed', 'unknown', 'rejected', 'engineering_error', 'unclassified'}
@@ -1970,15 +1967,15 @@ def _validate_action_result(intent, result):
             or result['operation_id'] != intent['operation_id']
             or result['candidate_id'] != binding['candidate_id']
             or not isinstance(result['note'], str) or len(result['note'].encode()) > 4096
-            or result['artifact_sha256'] not in {None, binding['source']['objects']['artifact']['sha256']}
-            or result['status'] == 'confirmed' and result['artifact_sha256'] != binding['source']['objects']['artifact']['sha256']):
+            or result['artifact_ref'] is not None and result['artifact_ref'] != binding['source']['objects']['artifact']
+            or result['status'] == 'confirmed' and result['artifact_ref'] != binding['source']['objects']['artifact']):
         raise ValueError('Delivery result differs from its exact accepted candidate and artifact')
 
 
 def action_process(root, intent, phase, identity):
     from .protocol import require_current
     require_current(root)
-    if phase not in {'audit', 'promote', 'confirm'} or identity['task_sha256'] != intent['operation_id']:
+    if phase not in {'audit', 'promote', 'confirm'} or identity['task_ref'] != intent['operation_id']:
         raise ValueError('Delivery process differs from its exact action phase')
     path = root / 'host-delivery/action-processes' / (intent['action_id'] + '-' + phase + '.json')
     if path.exists() or path.is_symlink():
@@ -2084,7 +2081,7 @@ def write_node_hint(root, job, intent, limits, meter, *, observed, author_limits
 
 
 def _review_directory(root,job):
-    return Path(root)/'host-runtime/experiment-control'/contracts.digest(Path(root)/'jobs'/f'{job["step"]:03d}.json')
+    return Path(root)/'host-runtime/experiment-control'/f'{job["step"]:03d}'
 
 
 def review_configuration(root,job):
@@ -2104,7 +2101,7 @@ def review_configuration(root,job):
     meter=contracts.read(record/'usage.json') if (record/'usage.json').exists() else dict(input_tokens=0,cached_input_tokens=0,output_tokens=0)
     publish_review(root,job,intent,snapshot(Path(root)),meter,observed=(record/'usage.json').exists())
     return dict(version=experiments.ADMISSION_VERSION,mode='soft',directory=str(directory),
-        stage_anchor=contracts.digest(Path(root)/'jobs'/f'{job["step"]:03d}.json'))
+        stage_anchor=contracts.record_ref(Path(root)/'jobs'/f'{job["step"]:03d}.json'))
 
 
 def publish_review(root,job,intent,limits,meter,*,observed):
@@ -2128,8 +2125,8 @@ def publish_review(root,job,intent,limits,meter,*,observed):
         intent=contracts.read(contracts.regular(record/'native-intent.json'))
         observed=(record/'usage.json').exists()
         meter=contracts.read(contracts.regular(record/'usage.json')) if observed else dict(input_tokens=0,output_tokens=0)
-        task=contracts.digest(root/'jobs'/f'{job["step"]:03d}.json')
-        if intent.get('task_sha256')!=task:raise ValueError('Review publication has no exact native task')
+        task=contracts.record_ref(root/'jobs'/f'{job["step"]:03d}.json')
+        if intent.get('task_ref')!=task:raise ValueError('Review publication has no exact native task')
         targets=node_limits(root,job);duration=None
         if targets is not None:duration=_node_duration(root,job,intent,limits)
         elif job['role']=='W' and job.get('search'):

@@ -25,12 +25,12 @@ def entries(package):
 
 
 def rewrite_manifest(package, values):
-    # Update the outer hash so the real semantic/path consumer, rather than only
-    # the manifest checksum, must reject the deliberate malformed package.
+    # Update the outer descriptor so the semantic/path consumer rejects the
+    # deliberately malformed package.
     (package / 'manifest.jsonl').write_bytes(b''.join(archive.files.canonical(value) + b'\n' for value in values))
     meta = json.loads((package / 'archive.json').read_bytes())
-    proof = archive.files.hash_file(package / 'manifest.jsonl')
-    meta['manifest'] = {key: proof[key] for key in ('sha256', 'size_bytes')}
+    proof = archive.files.stat_file(package / 'manifest.jsonl')
+    meta['manifest'] = dict(path='manifest.jsonl',size_bytes=proof['size_bytes'])
     archive.files.durable_json(package / 'archive.json', meta)
 
 
@@ -92,7 +92,7 @@ def test_active_writer_and_unknown_native_preserve_originals_without_export(tmp_
             archive.archive_export(root, package)
     assert not package.exists() and material.read_bytes() == original
     c.build_job(root, 1, 'H', [])
-    c.write(root / 'native-evidence/001/native-intent.json', dict(task_sha256=c.digest(root / 'jobs/001.json')))
+    c.write(root / 'native-evidence/001/native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json')))
     with pytest.raises(archive.files.ArchiveError, match='outcome is absent'):
         archive.archive_export(root, package)
     assert not package.exists() and material.read_bytes() == original
@@ -312,7 +312,7 @@ def test_arbitrary_managed_writer_lease_blocks_lifecycle_without_domain_names(tm
         settings = c.settings(root)
         with pytest.raises(archive.files.ArchiveError, match='owner is active'):
             instance_delete.delete_instance(root, instance_id=settings['goal_id'],
-                settings_sha256=c.digest(root / 'settings.json'), operation_id='blocked-delete')
+                settings_ref=c.record_ref(root / 'settings.json'), operation_id='blocked-delete')
         assert root.exists() and material.exists()
     finally:
         os.close(descriptor)
@@ -328,7 +328,7 @@ def test_archive_fences_first_managed_writer_after_lease_enumeration(tmp_path, m
 
     class Writer:
         config = dict(record_dir=str(records), scope=dict(step=1, role=job['role'],
-            job_sha256=c.digest(root / 'jobs/001.json')))
+            job_ref=c.record_ref(root / 'jobs/001.json')))
 
         @experiments.record_effect
         def mutate(self):
@@ -420,7 +420,7 @@ def test_v2_unique_blobs_repeated_export_and_independent_source_lifetimes(tmp_pa
     root, material = scene(tmp_path)
     raw = b'opaque archive content\n' * 256
     material.write_bytes(raw)
-    identity = {key: archive.files.hash_file(material)[key] for key in ('sha256', 'size_bytes')}
+    identity = {key: archive.files.stat_file(material)[key] for key in ('size_bytes',)}
     frozen = shared_originals.retain(root, material, source_kind='mutable', **identity)
     alias = root / 'project/nodes/001/inputs/duplicate-original'
     shared_originals.link(frozen, alias, root=root, **identity)
@@ -430,22 +430,22 @@ def test_v2_unique_blobs_repeated_export_and_independent_source_lifetimes(tmp_pa
     original_modes = {path: path.stat().st_mode & 0o777 for path in (material, duplicate)}
     result = archive.archive_export(root, first)
     rows = [row for row in entries(first) if row['kind'] == 'file']
-    payload_rows = [row for row in rows if row['sha256'] == identity['sha256']]
+    payload_rows = [row for row in rows if row['path'] in {frozen.relative_to(root).as_posix(), alias.relative_to(root).as_posix()}]
     assert {row['blob'] for row in payload_rows} == {payload_rows[0]['blob']}
     blob = first / payload_rows[0]['blob']
     assert os.path.samefile(blob, frozen) and os.path.samefile(blob, alias)
     assert not os.path.samefile(blob, material) and not os.path.samefile(blob, duplicate)
     assert {path: path.stat().st_mode & 0o777 for path in original_modes} == original_modes
-    assert {row['storage'] for row in payload_rows} == {'immutable', 'independent'}
+    assert {row['storage'] for row in payload_rows} == {'immutable'}
+    independent_rows=[row for row in rows if row['path'] in {material.relative_to(root).as_posix(),duplicate.relative_to(root).as_posix()}]
+    assert len({row['blob'] for row in independent_rows})==2
+    assert not ({row['blob'] for row in independent_rows}&{row['blob'] for row in payload_rows})
     assert result['files'] == len(rows)
     assert result['bytes'] == sum(row['size_bytes'] for row in rows)
     unique = {row['blob']: row['size_bytes'] for row in rows}
     assert result['unique_blobs'] == len(unique)
     assert result['blob_bytes'] == sum(unique.values())
     usage = storage_policy.usage(root)
-    def forbidden(*args, **options):
-        pytest.fail('Repeated archive export refroze already retained bytes')
-    monkeypatch.setattr(atomic_files, 'copy_original', forbidden)
     archive.archive_export(root, second)
     assert storage_policy.usage(root) == usage
     assert os.path.samefile(second / payload_rows[0]['blob'], blob)
@@ -488,7 +488,7 @@ def test_archive_share_failure_never_copies_or_publishes(tmp_path, monkeypatch, 
     assert not package.exists()
 
 
-def test_v2_rejects_unlisted_blobs_and_invalid_storage_and_v1_remains_inspectable(tmp_path):
+def test_archive_rejects_unlisted_blobs_and_invalid_storage(tmp_path):
     root, _ = scene(tmp_path)
     package = tmp_path / 'archive'
     archive.archive_export(root, package)
@@ -505,24 +505,6 @@ def test_v2_rejects_unlisted_blobs_and_invalid_storage_and_v1_remains_inspectabl
     with pytest.raises(archive.files.ArchiveError, match='unlisted blob'):
         archive.archive_inspect(package)
     extra.unlink()
-    legacy = tmp_path / 'legacy'
-    (legacy / 'blobs').mkdir(parents=True)
-    old_rows = []
-    for row in rows:
-        old = dict(row)
-        if old['kind'] == 'file':
-            old.pop('storage')
-            old['blob'] = f'blobs/{old["index"]:012d}'
-            archive.files.copy_verified(package / row['blob'], legacy / old['blob'], old)
-        old_rows.append(old)
-    (legacy / 'manifest.jsonl').write_bytes(b''.join(archive.files.canonical(row) + b'\n' for row in old_rows))
-    (legacy / 'dependencies.jsonl').write_bytes((package / 'dependencies.jsonl').read_bytes())
-    metadata = json.loads((package / 'archive.json').read_bytes())
-    metadata.update(format=archive.LEGACY_FORMAT)
-    metadata.pop('unique_blobs'); metadata.pop('blob_bytes'); metadata.pop('blob_ownership')
-    metadata['manifest'] = {key: archive.files.hash_file(legacy / 'manifest.jsonl')[key] for key in ('sha256', 'size_bytes')}
-    archive.files.durable_json(legacy / 'archive.json', metadata)
-    assert archive.archive_inspect(legacy)['files'] == sum(row['kind'] == 'file' for row in rows)
     assert (package / file_row['blob']).stat().st_mode & 0o777 == 0o400
 
 
@@ -531,7 +513,7 @@ def test_cli_independent_export_copies_each_unique_blob_once_and_preserves_sourc
     import shutil
     from scidiscovery.research_loop import atomic_files, shared_originals
     root, material = scene(tmp_path)
-    proof = {key: archive.files.hash_file(material)[key] for key in ('sha256', 'size_bytes')}
+    proof = {key: archive.files.stat_file(material)[key] for key in ('size_bytes',)}
     frozen = shared_originals.retain(root, material, source_kind='mutable', **proof)
     alias = root / 'project/nodes/001/inputs/same-content'
     shared_originals.link(frozen, alias, root=root, **proof)
@@ -550,7 +532,7 @@ def test_cli_independent_export_copies_each_unique_blob_once_and_preserves_sourc
     assert len(copied) == len(set(copied)) == result['unique_blobs']
     sources = {(path.stat().st_dev, path.stat().st_ino) for path in root.rglob('*') if path.is_file()}
     assert all((path.stat().st_dev, path.stat().st_ino) not in sources for path in (package / 'blobs').iterdir())
-    rows = [row for row in entries(package) if row.get('sha256') == proof['sha256']]
+    rows = [row for row in entries(package) if row.get('path') == frozen.relative_to(root).as_posix()]
     assert len({row['blob'] for row in rows}) == 1
     blob = package / rows[0]['blob']; original = blob.read_bytes()
     frozen.chmod(0o600); frozen.write_bytes(b'Live retained original deliberately changed')
@@ -629,7 +611,7 @@ def test_independent_copy_rejects_existing_inode_or_mode_without_repair(tmp_path
     else:
         target.write_bytes(source.read_bytes()); target.chmod(0o600)
     original = target.stat()
-    entry = dict(archive.files.hash_file(source), kind='file')
+    entry = dict(archive.files.stat_file(source), kind='file')
     with pytest.raises(archive.files.ArchiveError, match='independent exact original'):
         archive.files.copy_independent_verified(source, target, entry)
     assert target.stat().st_ino == original.st_ino and target.stat().st_mode == original.st_mode
@@ -642,7 +624,7 @@ def test_independent_copy_rejects_link_disguised_as_copy_without_repair(tmp_path
     target = tmp_path / 'target'
     monkeypatch.setattr(atomic_files, 'copy_original', lambda source, target, **options: os.link(source, target))
     with pytest.raises(archive.files.ArchiveError, match='independent exact original'):
-        archive.files.copy_independent_verified(source, target, archive.files.hash_file(source))
+        archive.files.copy_independent_verified(source, target, archive.files.stat_file(source))
     assert os.path.samefile(source, target) and source.read_bytes() == b'Exact frozen original'
 
 

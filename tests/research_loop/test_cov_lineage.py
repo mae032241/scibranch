@@ -1,6 +1,5 @@
 """Small real-CLI wrapper checks; no scientific-role launcher or model calls."""
 from scidiscovery.research_loop.protocol import CURRENT
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -34,8 +33,8 @@ if mode=='wrong_script':returned['script']=str(root/'unrelated.py')
 if mode=='wrong_metric':returned['val_score']=.9
 receipt=os.environ.get('SCID_COV_RECEIPT_PATH')
 if receipt and mode!='missing_receipt':
- envelope=dict(version=1,call_id=os.environ['SCID_COV_CALL_ID'],accepted_sha256=os.environ['SCID_COV_ACCEPTED_SHA256'],
-  source_sha256=os.environ['SCID_COV_SOURCE_SHA256'],row=returned)
+ envelope=dict(version=2,call_id=os.environ['SCID_COV_CALL_ID'],scope=json.loads(os.environ['SCID_COV_SCOPE']),
+  source_ref=json.loads(os.environ['SCID_COV_SOURCE_REF']),row=returned)
  with open(receipt,'x') as stream:json.dump(envelope,stream)
 encoded=(json.dumps(returned)+'\n').encode()
 if mode=='noise':
@@ -61,14 +60,19 @@ def wrapper(tmp_path,execution_registry):
     config = tmp_path / 'config.json'
     value=dict(receipt_channel='backend_file',admission=dict(version=1,mode='hard'),contract_version=2, feedback_version=1, record_dir=str(records), runs_root=str(runs),
         run_argv=[sys.executable, str(backend), '--runs-root', str(runs)],
-        scope=dict(handoff_protocol=CURRENT,step=2, role='W', job_sha256='a'*64, execution_key='b'*64, mechanism_ref='h001.m1'),
+        scope=dict(handoff_protocol=CURRENT,step=2, role='W', job_ref=dict(path=str(tmp_path/'jobs/002.json')), execution_key=dict(path=str(tmp_path/'jobs/002.json')), mechanism_ref='h001.m1'),
         parents=[], evaluation_key='fixture-public-v1')
     config.write_text(json.dumps(experiments.freeze(value,'cov_execution:experiment',path=config)))
     env = dict(os.environ, PYTHONPATH=str(Path(cov_lineage.__file__).parents[1])+os.pathsep+os.environ.get('PYTHONPATH',''), EXP_WALL_CAP_S='1')
 
     class Wrapper:
         def cli(self, *args, expected=0):
-            reply = subprocess.run([sys.executable, '-m', 'cov_execution.lineage',
+            # Synthetic host seam: exercise real child receipts, not namespace isolation.
+            launch = ('import runpy,sys; from scidiscovery.research_loop import worker_execution_bridge as bridge; '
+                      'bridge._LOCAL_LAUNCH.set(lambda config,accepted,command,cwd:(command,cwd,None)); '
+                      'sys.argv=["cov_execution.lineage",*sys.argv[1:]]; '
+                      'runpy.run_module("cov_execution.lineage",run_name="__main__")')
+            reply = subprocess.run([sys.executable, '-c', launch,
                                     '--config', str(config), *map(str, args)],
                                    cwd=tmp_path, env=env, capture_output=True, text=True, timeout=20)
             assert reply.returncode == expected, (reply.stdout, reply.stderr)
@@ -99,9 +103,8 @@ def wrapper(tmp_path,execution_registry):
 
 def test_current_frozen_wrapper_configuration_roundtrips_and_rejects_undeclared_fields(wrapper):
     frozen = json.loads(wrapper.config.read_text())
-    parsed, digest = cov_lineage._config(wrapper.config)
+    parsed = cov_lineage._config(wrapper.config)
     assert parsed == frozen
-    assert digest == hashlib.sha256(wrapper.config.read_bytes()).hexdigest()
     invalid = [dict(frozen, undeclared_host_binding='not part of the wrapper contract'),
         {key: value for key, value in frozen.items() if key != 'storage_policy'},
         dict(frozen, storage_policy=dict(frozen['storage_policy'], undeclared_dimension=1)),
@@ -217,10 +220,10 @@ def test_incomplete_transport_rejects_even_exact_successful_receipt(wrapper):
     original = {path: path.read_bytes() for path in directory.iterdir() if path.is_file()}
     receipt=json.loads((directory/'receipt.json').read_text())
     assert receipt['row']==rows[0]
-    assert set(receipt)=={'version','call_id','accepted_sha256','source_sha256','row'}
+    assert set(receipt)=={'version','call_id','scope','source_ref','row'}
     assert receipt['version']==1 and receipt['call_id']==accepted['call_id']
-    assert receipt['accepted_sha256']==hashlib.sha256(experiments.encoded(accepted)).hexdigest()
-    assert receipt['source_sha256']==accepted['script']['sha256']
+    assert receipt['scope']==accepted['scope']
+    assert receipt['source_ref']==accepted['script']
     config = json.loads(wrapper.config.read_text())
     from scidiscovery.research_loop import storage_policy as storage
     arguments = dict(storage_root=experiments.Records(config).storage_root(),

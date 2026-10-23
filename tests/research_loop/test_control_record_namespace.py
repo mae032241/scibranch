@@ -15,7 +15,7 @@ def task(root, step=2, version=1):
     path=root/'jobs'/f'{step:03d}.json'
     c.write(path,job)
     directory=experiment_client.record_directory(root,step)
-    config=dict(record_dir=str(directory),scope=dict(step=step,role='W',job_sha256=c.digest(path)))
+    config=dict(record_dir=str(directory),scope=dict(step=step,role='W',job_ref=c.record_ref(path)))
     return path,config
 
 
@@ -23,13 +23,13 @@ def task(root, step=2, version=1):
 def test_record_namespace_preserves_exact_job_and_owner(tmp_path,version):
     path,config=task(tmp_path,version=version)
     original=path.read_bytes()
-    expected=(tmp_path/'host-runtime/experiment-control'/c.digest(path)/'records'
+    expected=(tmp_path/'host-runtime/experiment-control/002/records'
         if version==1 else tmp_path/'project/nodes/002/work/lineage')
     assert Path(config['record_dir'])==expected
     assert experiment_client.root_for_configuration(config)==tmp_path
     assert instance_owner.configuration_root(config)==tmp_path
     assert path.read_bytes()==original
-    changed=dict(config,scope=dict(config['scope'],job_sha256='0'*64))
+    changed=dict(config,scope=dict(config['scope'],job_ref=dict(path=str(tmp_path/'jobs/999.json'))))
     with pytest.raises(instance_owner.files.ArchiveError,match='original job'):
         instance_owner.configuration_root(changed)
 

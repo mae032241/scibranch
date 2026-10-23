@@ -6,9 +6,9 @@ Scientific prose, metric names, source files and arbitrary user JSON are untouch
 import copy
 import re
 
-_MACHINE_CANDIDATE=re.compile(r'local-[0-9a-f]{64}\Z')
+_MACHINE_CANDIDATE=re.compile(r'local-[0-9]+-[A-Za-z0-9._-]+-[0-9]+\Z')
 _REFERENCE=re.compile(r'[HWAE]\d{3,}-C\d{3,}(?:/artifacts/.+)?\Z')
-_ORIGIN_CANDIDATE=re.compile(r'source:([0-9a-f]{64}):(.+)\Z', re.DOTALL)
+_ORIGIN_CANDIDATE=re.compile(r'source:([^:]+):(.+)\Z', re.DOTALL)
 _SLOTS={'id','candidate_id','candidate_ids','parent_candidate','original_candidate',
     'recommendation','candidate_recommendation','subject'}
 
@@ -57,7 +57,7 @@ def source_input_mapping(source, job, *, _active=None):
     result = {item: item for item in known if _MACHINE_CANDIDATE.fullmatch(item) or _ORIGIN_CANDIDATE.fullmatch(item)}
     owners = {}
     for row in job.get('history', {}).get('nodes', []):
-        producer = originals.dependency(source, row['step'], seal_sha256=row['seal_sha256'])
+        producer = originals.dependency(source, row['step'], seal_ref=row['seal_ref'])
         seal = c.read(originals.source_record(producer, 'result-identity.json'))
         receipt = seal.get('observations')
         if receipt is None:
@@ -193,6 +193,7 @@ def public_fields(value, mapping):
     if not isinstance(value,dict):return value
     result={}
     for key,item in value.items():
+        if key in {'original_source','job_ref','task_ref','raw_ref','result_ref','seal_ref','source_ref','source_h_ref','source_a_ref','execution_key','root_intent_ref','compiler_ref','client_binding','origin_identity'}:continue
         if key in _SLOTS and isinstance(item,str):result[key]=mapping.get(item,item)
         elif key=='candidate_ids' and isinstance(item,list):result[key]=[mapping.get(identity,identity) if isinstance(identity,str) else identity for identity in item]
         elif key in {'metrics','scientific_result','text','reported','result'}:result[key]=item

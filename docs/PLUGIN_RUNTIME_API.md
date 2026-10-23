@@ -45,8 +45,9 @@ lookup, status, cancellation, collection and retained result projections.
 resume, lookup and atomic-admission support. Missing declarations grant no operation.
 Unsupported lifecycle operations must fail before transport work.
 
-`LocalFileDescriptor` binds name, exact local original, digest, byte count and media
-type. Adapters verify those originals and retain complete native terminal evidence.
+`LocalFileDescriptor` binds name, exact local original path, byte count and media
+type. It has no content digest. Adapters retain those references and complete native
+terminal evidence under the [architecture's hash allowlist](ARCHITECTURE.md).
 Known process success is an engineering fact. A cancelled native state remains a
 known engineering failure; neither state establishes scientific qualification.
 Pending native states remain pending; uncertain submission is unknown.
@@ -73,7 +74,7 @@ Python module implementing selective native Skill loading and the final scientif
 read-only namespace. The generic loader
 resolves a unique declaration through the existing execution entry points and
 freezes provider/interface/module identity in `native_capabilities.native_launcher_contract`,
-including when no Skills are selected. Protocol 25 keeps this registered launcher
+including when no Skills are selected. Protocol 26 keeps this registered launcher
 on the host for preparation and its original submission service; its final scientific
 launch must apply the shared-input read-only mounts after all writable mappings.
 Other launcher argv retain the generic final-process protection. This declares native loading capability;
@@ -101,7 +102,8 @@ The persistent source bundles are
 operate on explicit input files without Operation, Artifact or Run hosting.
 Dependencies and CLI preflight belong to each bundle; core does not require Pillow.
 Curve unit/operator/support/numeric checks and figure identity/calibration/ambiguity
-checks remain executable algorithms. Their computed output is evidence for Workers;
+checks remain executable algorithms. Explicit tool-internal evidence processing is
+separate from control's hash allowlist. Their computed output is evidence for Workers;
 control does not manufacture a scientific verdict from it.
 
 ## Delivery input ownership

@@ -20,7 +20,7 @@ def unknown_original(tmp_path, monkeypatch):
     record = execution.origin(root, 1)
     record.mkdir(parents=True, exist_ok=True)
     contracts.write(record / 'native-intent.json', dict(step=1,
-        task_sha256=contracts.digest(root / 'jobs/001.json')))
+        task_ref=contracts.record_ref(root / 'jobs/001.json')))
     meter = dict(input_tokens=100, cached_input_tokens=50, output_tokens=20)
     observation = dict(coverage='unknown', reason='terminal_usage_unreported',
         thread_id='fixture-thread', tokens=meter)

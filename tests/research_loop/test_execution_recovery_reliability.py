@@ -27,13 +27,13 @@ def test_sealed_accepted_unknown_remains_a_global_blocker(tmp_path, monkeypatch)
     from scidiscovery.research_loop import originals,budget
     root=tmp_path.resolve();seal_path=root/'native-evidence/002/result-identity.json'
     seal_path.parent.mkdir(parents=True)
-    job_sha='a'*64
-    c.write(seal_path,dict(job_sha256=job_sha,pending_executions=dict(path='pending.json'),observations=dict(path='observed.json')))
-    c.write(root/'pending.json',dict(job=dict(path='jobs/002.json',sha256=job_sha),allocations=[dict(
+    job_ref=dict(path=str(root/'jobs/002.json'))
+    c.write(seal_path,dict(job_ref=job_ref,pending_executions=dict(path='pending.json'),observations=dict(path='observed.json')))
+    c.write(root/'pending.json',dict(job=dict(path='jobs/002.json'),allocations=[dict(
         call_id='original',disposition='possibly_prepared',accepted=dict(path='accepted.json'),allocation=dict(path='allocation.json'))]))
-    c.write(root/'allocation.json',dict(call_id='original',binding=dict(scope=dict(job_sha256=job_sha))))
+    c.write(root/'allocation.json',dict(call_id='original',binding=dict(scope=dict(job_ref=job_ref))))
     c.write(root/'observed.json',dict(managed_calls=[dict(call_id='original',status='unknown')]))
-    monkeypatch.setattr(originals,'node',lambda *_:object())
+    monkeypatch.setattr(originals,'node',lambda *_:type('Source', (), {'original_root':str(root)})())
     monkeypatch.setattr(originals,'source_for_ref',lambda source,_:source)
     monkeypatch.setattr(originals,'resolve_ref',lambda _,ref:root/ref['path'])
     monkeypatch.setattr(execution_recovery,'prefix',lambda *_:[])
@@ -126,7 +126,7 @@ def test_tcad_retire_found_binds_original_without_cancel(tmp_path,monkeypatch):
     directory=tmp_path/'records/calls/original';directory.mkdir(parents=True)
     c.write(directory/'accepted.json',dict(original=True))
     payload=LocalFileDescriptor(name='original',local_path=str(directory/'accepted.json'),
-        **{key:e.proof(directory/'accepted.json')[key] for key in ('sha256','size_bytes')},media_type='application/json')
+        **{key:e.proof(directory/'accepted.json')[key] for key in ('size_bytes',)},media_type='application/json')
     wrapper=TCADManagedExecution.__new__(TCADManagedExecution)
     wrapper.config=dict(record_dir=str(tmp_path/'records'));wrapper.target=dict(original=True)
     bindings=[]

@@ -1,5 +1,4 @@
 """Plugin v2 exact original relations; no models and no default-view rewrite."""
-import hashlib
 import json
 from pathlib import Path
 import sys
@@ -23,11 +22,24 @@ if ok:
 else:row.update(error='Declared fixture failure',wall_seconds=.01)
 with ledger.open('a') as f:f.write(json.dumps(row)+'\\n')
 if os.environ.get('SCID_COV_RECEIPT_PATH'):
- envelope=dict(version=1,call_id=os.environ['SCID_COV_CALL_ID'],accepted_sha256=os.environ['SCID_COV_ACCEPTED_SHA256'],
-  source_sha256=os.environ['SCID_COV_SOURCE_SHA256'],row=row)
+ envelope=dict(version=2,call_id=os.environ['SCID_COV_CALL_ID'],scope=json.loads(os.environ['SCID_COV_SCOPE']),
+  source_ref=json.loads(os.environ['SCID_COV_SOURCE_REF']),row=row)
  with open(os.environ['SCID_COV_RECEIPT_PATH'],'x') as f:json.dump(envelope,f)
 print(json.dumps(row,indent=2));sys.exit(0 if ok else 1)
 '''
+
+
+@pytest.fixture(autouse=True)
+def synthetic_host_launch(tmp_path,monkeypatch):
+    monkeypatch.setenv('EXP_RUN_DIR',str(tmp_path/'instance/runs'))
+    monkeypatch.setenv('EXP_RUNNER',str(tmp_path/'runner.py'))
+    from scidiscovery.research_loop import worker_execution_bridge as bridge
+    # Exercise real call/observer processes with a synthetic trusted host seam.
+    token=bridge._LOCAL_LAUNCH.set(lambda config,accepted,command,cwd:(command,cwd,None))
+    try:
+        yield
+    finally:
+        bridge._LOCAL_LAUNCH.reset(token)
 
 
 def scene(tmp_path):
@@ -39,22 +51,24 @@ def scene(tmp_path):
             config=dict(runs='runs',calls='project/nodes',evaluation_key='covshift-public-val-v1')))
     finish(root,1,'H',[],action='experiment')
     c.build_job(root,2,'W',[1]);record=c.host_record(c.workspace(root,2))
-    intent=dict(task_sha256=c.digest(root/'jobs/002.json'))
+    intent=dict(task_ref=c.record_ref(root/'jobs/002.json'))
     if c.settings(root).get('node_budget_policy') is not None:intent['budget_slice']=budget.accept_node(root,c.read(root/'jobs/002.json'))
     c.write(record/'native-intent.json',intent)
-    backend=tmp_path/'exp.py';backend.write_text(BACKEND)
+    from test_cov_receipt import CLI, RUNNER
+    backend=tmp_path/'exp.py';backend.write_text(CLI)
+    (tmp_path/'runner.py').write_text(RUNNER)
     output=tmp_path/'config.json'
-    cov.configure(root,2,[sys.executable,str(backend),str(root/'runs')],root/'runs',output,receipt_channel='backend_file')
-    config,digest=cov._config(output)
-    return root,config,digest
+    cov.configure(root,2,[sys.executable,str(backend)],root/'runs',output,receipt_channel='public_runner_main')
+    config=cov._config(output);config_ref=dict(path=str(output))
+    return root,config,config_ref
 
 
 @pytest.mark.process_e2e
 def test_real_calls_same_node_branch_return_and_readonly_projection(tmp_path):
-    root,config,digest=scene(tmp_path);script=c.workspace(root,2)/'work/train.py';script.write_text('success')
-    p=cov.run(config,digest,script,new=True)
-    q=cov.run(config,digest,script,parent=p['candidate_id'])
-    r=cov.run(config,digest,script,parent=p['candidate_id'])
+    root,config,config_ref=scene(tmp_path);script=c.workspace(root,2)/'work/train.py';script.write_text('failed=False')
+    p=cov.run(config,script,new=True)
+    q=cov.run(config,script,parent=p['candidate_id'])
+    r=cov.run(config,script,parent=p['candidate_id'])
     assert all(row['status']=='known_success' for row in (p,q,r))
     assert q['parent']['source']=='same_node_completed_call'
     before={path:path.read_bytes() for path in Path(config['record_dir']).rglob('*') if path.is_file()}
@@ -63,7 +77,7 @@ def test_real_calls_same_node_branch_return_and_readonly_projection(tmp_path):
     finish(root,2,'W',[1])
     record=execution.origin(root,2);seal=c.read(record/'result-identity.json')
     observed=c.read(root/seal['observations']['path'])
-    assert observed['binding']['contract_version']==2 and len(observed['contexts'])==3
+    assert observed['binding']['contract_version']==2 and len(observed['contexts'])==3, observed['coverage']
     view=lineage.build(root,3)
     edges={(edge['subject'],edge['target']) for edge in view['relations'] if edge['kind']=='derivation'}
     assert edges=={(q['candidate_id'],p['candidate_id']),(r['candidate_id'],p['candidate_id'])}
@@ -76,13 +90,13 @@ def test_real_calls_same_node_branch_return_and_readonly_projection(tmp_path):
 
 
 @pytest.mark.process_e2e
-def test_context_scope_and_asset_tamper_are_hard_not_optional(tmp_path):
-    root,config,digest=scene(tmp_path);script=c.workspace(root,2)/'work/train.py';script.write_text('success')
-    result=cov.run(config,digest,script,new=True)
+def test_context_scope_and_asset_size_change_are_hard_not_optional(tmp_path):
+    root,config,config_ref=scene(tmp_path);script=c.workspace(root,2)/'work/train.py';script.write_text('failed=False')
+    result=cov.run(config,script,new=True)
     request=dict(root=str(root),step=2,config=c.settings(root)['history_observer']['config'],known_candidates=[],known_contexts=[])
     observed=cov.observe(request)
     job=c.read(root/'jobs/002.json');wrong=json.loads(json.dumps(observed['contexts']))
-    wrong[0]['scope']['execution_key']='0'*64
+    wrong[0]['scope']['execution_key']=dict(path=str(root/'native-evidence/003'))
     with pytest.raises(history.ObserverIntegrityError):lineage.contexts(root,job,wrong,lambda path:history._proof(root,path))
     path=Path(result['model']['path']);path.chmod(0o600);path.write_bytes(b'tampered')
     with pytest.raises(cov.IntegrityError):cov.observe(request)
@@ -104,19 +118,19 @@ def test_v1_existing_contract_bytes_and_relations_remain_unknown(tmp_path):
 
 @pytest.mark.process_e2e
 def test_sealed_parent_exact_completion_is_distinct_from_implementation_reuse(tmp_path):
-    root,config,digest=scene(tmp_path)
-    script=c.workspace(root,2)/'work/train.py';script.write_text('success')
-    parent=cov.run(config,digest,script,new=True)
+    root,config,config_ref=scene(tmp_path)
+    script=c.workspace(root,2)/'work/train.py';script.write_text('failed=False')
+    parent=cov.run(config,script,new=True)
     finish(root,2,'W',[1],files={'retained.py':'Scientific implementation S'})
     # A's implementation handoff remains separate from the declared experiment parent.
     finish(root,3,'A',[2],selection=['W002-I001'],action='continue_w')
     c.build_job(root,4,'W',[3])
-    c.write(execution.origin(root,4)/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/004.json')))
+    c.write(execution.origin(root,4)/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/004.json')))
     output=tmp_path/'next.json'
-    cov.configure(root,4,config['run_argv'],root/'runs',output,receipt_channel='backend_file')
-    next_config,next_sha=cov._config(output)
-    script=c.workspace(root,4)/'work/train.py';script.write_text('success')
-    child=cov.run(next_config,next_sha,script,parent=parent['candidate_id'])
+    cov.configure(root,4,config['run_argv'],root/'runs',output,receipt_channel='public_runner_main')
+    next_config=cov._config(output);next_ref=dict(path=str(output))
+    script=c.workspace(root,4)/'work/train.py';script.write_text('failed=False')
+    child=cov.run(next_config,script,parent=parent['candidate_id'])
     assert child['parent']['source']=='sealed'
     finish(root,4,'W',[3])
     view=lineage.build(root,5)
@@ -128,24 +142,19 @@ def test_sealed_parent_exact_completion_is_distinct_from_implementation_reuse(tm
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('wrong', ['model', 'future'])
 def test_declared_parent_binding_cannot_borrow_another_or_future_original(tmp_path,wrong):
-    root,config,digest=scene(tmp_path)
-    script=c.workspace(root,2)/'work/train.py';script.write_text('success')
-    parent=cov.run(config,digest,script,new=True)
-    child=cov.run(config,digest,script,parent=parent['candidate_id'])
+    root,config,config_ref=scene(tmp_path)
+    script=c.workspace(root,2)/'work/train.py';script.write_text('failed=False')
+    parent=cov.run(config,script,new=True)
+    child=cov.run(config,script,parent=parent['candidate_id'])
     directory=Path(config['record_dir'])/'calls'/child['call_id']
     accepted=json.loads((directory/'accepted.json').read_text())
     if wrong=='model':
-        accepted['parent_binding']['model_sha256']='0'*64
+        accepted['parent_binding']['model_ref']['path']=str(root/'runs/unbound-model.pkl')
         (directory/'accepted.json').write_bytes(cov._bytes(accepted))
-        # Construct a transport-consistent fixture with an intentionally wrong
-        # scientific parent binding; independent receipt rejection is tested
-        # separately in test_cov_lineage's receipt.json tamper control.
-        receipt_path=directory/'receipt.json'
-        receipt=json.loads(receipt_path.read_text())
-        receipt['accepted_sha256']=hashlib.sha256(experiments.encoded(accepted)).hexdigest()
-        receipt_path.write_bytes(cov._bytes(receipt))
+        # Refresh only the changed declaration's size descriptor. The receipt
+        # still binds this call, scope and exact source path.
         completed=json.loads((directory/'completed.json').read_text())
-        completed['proofs']=[cov._proof(Path(proof['path'])) if Path(proof['path']).name in {'accepted.json','receipt.json'} else proof
+        completed['proofs']=[cov._proof(Path(proof['path'])) if Path(proof['path']).name=='accepted.json' else proof
             for proof in completed['proofs']]
         (directory/'completed.json').write_bytes(cov._bytes(completed))
     request=dict(root=str(root),step=2,config=c.settings(root)['history_observer']['config'],known_candidates=[],known_contexts=[])
@@ -153,24 +162,24 @@ def test_declared_parent_binding_cannot_borrow_another_or_future_original(tmp_pa
     items=observed['contexts']
     assert all(item['status']=='known_success' for item in items)
     if wrong=='future':items.reverse()
-    expected='Declared parent completion/artifact/source differs' if wrong=='model' else 'Declared parent has no earlier completed original'
-    with pytest.raises(history.ObserverIntegrityError,match=expected):
+    expected='Cov parent model differs from the accepted original' if wrong=='model' else 'Declared parent has no earlier completed original'
+    with pytest.raises((history.ObserverIntegrityError,experiments.IntegrityError),match=expected):
         lineage.contexts(root,c.read(root/'jobs/002.json'),items,lambda path:history._proof(root,path))
 
 
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('field,value', [('candidate_id','run-999'),('run_id',999),('status','known_failed')])
 def test_completed_cannot_change_identity_or_outcome_while_preserving_proofs(tmp_path,field,value):
-    root,config,digest=scene(tmp_path)
-    script=c.workspace(root,2)/'work/train.py';script.write_text('success')
-    result=cov.run(config,digest,script,new=True)
+    root,config,config_ref=scene(tmp_path)
+    script=c.workspace(root,2)/'work/train.py';script.write_text('failed=False')
+    result=cov.run(config,script,new=True)
     path=Path(config['record_dir'])/'calls'/result['call_id']/'completed.json'
     completed=json.loads(path.read_text());completed[field]=value
     path.write_bytes(cov._bytes(completed))
     originals={item:item.read_bytes() for item in (Path(config['record_dir'])/'calls').rglob('*') if item.is_file()}
     with pytest.raises(cov.IntegrityError):cov.status(config)
-    # The already-existing observation receipt rejects changed completed bytes
-    # before the optional domain/history observer is reached.
+    # The already-existing observation records the completed file's size;
+    # this metadata edit changes that size before the optional observer runs.
     with pytest.raises(experiments.IntegrityError,match='^Execution observation original changed$'):
         finish(root,2,'W',[1])
     assert all(item.read_bytes()==data for item,data in originals.items())
@@ -180,18 +189,18 @@ def test_completed_cannot_change_identity_or_outcome_while_preserving_proofs(tmp
 
 @pytest.mark.process_e2e
 def test_completed_model_cannot_be_rebound_to_another_successful_call(tmp_path):
-    root,config,digest=scene(tmp_path)
-    script=c.workspace(root,2)/'work/train.py';script.write_text('success')
-    first=cov.run(config,digest,script,new=True)
-    second=cov.run(config,digest,script,new=True)
+    root,config,config_ref=scene(tmp_path)
+    script=c.workspace(root,2)/'work/train.py';script.write_text('failed=False')
+    first=cov.run(config,script,new=True)
+    second=cov.run(config,script,new=True)
     path=Path(config['record_dir'])/'calls'/first['call_id']/'completed.json'
     completed=json.loads(path.read_text());completed['model']=second['model']
     # Even adding the other valid proof cannot turn it into this call's artifact.
     completed['proofs'].append(second['model']);path.write_bytes(cov._bytes(completed))
     originals={item:item.read_bytes() for item in (Path(config['record_dir'])/'calls').rglob('*') if item.is_file()}
     with pytest.raises(cov.IntegrityError):cov.status(config)
-    # The already-existing observation receipt rejects changed completed bytes
-    # before the optional domain/history observer is reached.
+    # The already-existing observation records the completed file's size;
+    # this metadata edit changes that size before the optional observer runs.
     with pytest.raises(experiments.IntegrityError,match='^Execution observation original changed$'):
         finish(root,2,'W',[1])
     assert all(item.read_bytes()==data for item,data in originals.items())

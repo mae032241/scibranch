@@ -153,7 +153,7 @@ def test_default_standard_cli_repairs_same_a_in_original_native_home(tmp_path,fi
     assert 'selection_explanation' not in c.read(origin/'science-output.json')
     assert c.validate(c.workspace(root,step))['selection_explanation']['criteria_change']['status']=='unchanged'
     intent=c.read(current/'native-intent.json')
-    assert intent['task_sha256']==c.read(origin/'native-intent.json')['task_sha256']
+    assert intent['task_ref']==c.read(origin/'native-intent.json')['task_ref']
     assert intent.get('native_profile')==c.read(origin/'native-intent.json').get('native_profile')
     assert intent['session']['home']==str(home) and intent['session']['workspace']==str(c.workspace(root,step))
     assert intent['output_repair']['code']=='selection_explanation_incomplete'
@@ -221,7 +221,7 @@ def test_default_cli_incomplete_w_retains_partial_exit_and_reaches_a(tmp_path):
     assert worker_delivery.assessment(root,job,science,record)['status']=='incomplete'
     exit=c.read(record/'stage-end.json')['work_exit']
     assert exit['kind']=='resume_policy' and exit['reason']=='worker_resume_output_only'
-    assert exit['settings_sha256']==c.digest(root/'settings.json')
+    assert exit['settings_ref']==c.record_ref(root/'settings.json')
     assert worker_delivery.validate_exit(root,job,record,exit)=='worker_resume_output_only'
     assert worker_delivery.require_delivery(root,job,science,record)['status']=='partial'
     assert c.read(root/'jobs/003.json')['role']=='A' and c.validate(c.workspace(root,3))['next_action']=='finish'
@@ -241,7 +241,7 @@ def test_w_nomination_structure_repairs_in_same_output_only_task_without_repeati
     chain=execution.records(root,2);assert len(chain)==2
     origin,current=chain;intent=c.read(current/'native-intent.json')
     assert intent['output_repair']['code']=='candidate_nominations_incomplete' and 'work_repair' not in intent
-    assert intent['task_sha256']==c.read(origin/'native-intent.json')['task_sha256']
+    assert intent['task_ref']==c.read(origin/'native-intent.json')['task_ref']
     assert intent['session']['home']==str(home) and intent['output_repair']['source_attempt']==0
     assert (c.workspace(root,2)/'work/launches').read_text()=='exec\nresume\n'
     original=c.read(origin/'science-output.json')

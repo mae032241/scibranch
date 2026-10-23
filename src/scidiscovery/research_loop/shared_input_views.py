@@ -3,7 +3,6 @@
 Same-user host processes and pre-existing writable descriptors remain trusted.
 Only the assigned workspace and explicit framework mappings are inventoried.
 """
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -43,8 +42,10 @@ def _identity(path):
 
 
 def _binding(root, work):
-    key = hashlib.sha256(str(work).encode()).hexdigest()
-    return Path(root) / 'host-runtime/shared-input-views' / (key + '.json')
+    root, work = Path(root).absolute(), Path(work).absolute()
+    if not work.is_relative_to(root):
+        raise _unsupported('workspace is outside its exact instance')
+    return root / 'host-runtime/shared-input-views' / work.relative_to(root) / 'binding.json'
 
 
 def dynamic_root(root, work, name):
@@ -165,7 +166,7 @@ def _host_aliases(root, work, inventory):
                 existing(root/'host-recovery/author-context'/f'{step:03d}'/number/'author-science-context')
             if declared.get('role')!='W':continue
             record_directory=experiment_client.record_directory(root,step)
-            private=root/'host-runtime/experiment-control'/c.digest(path)
+            private=root/'host-runtime/experiment-control'/f'{step:03d}'
             for holder in (record_directory,private/'scientific-output-views',
                     private/'implementations',origin/'compiled-implementations'):
                 inventory.check();_exact(holder).mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -241,22 +242,6 @@ def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=Fal
             path = root / name
             if path.exists():
                 mappings[str(path)] = _exact(path)
-        # Exact selected cache objects only. Never enumerate or expose the cache.
-        if skill_mounts:
-            from . import configuration_updates, skill_supply
-            settings = configuration_updates.for_job(root, job)
-            manifest = skill_supply.validate(root, settings)
-            selected = {str(Path(source)) for source, _ in skill_mounts}
-            store = skill_supply._shared_store()
-            for tree in manifest['objects'].values():
-                base = root / skill_supply.DIRECTORY / 'objects' / tree['tree_sha256']
-                if str(base) in selected:
-                    for row in tree['files']:
-                        path = store / 'skills/objects' / row['sha256']
-                        if path.exists():
-                            source_info=(base/row['path']).stat();cache_info=path.stat()
-                            if (source_info.st_dev,source_info.st_ino)==(cache_info.st_dev,cache_info.st_ino):
-                                mappings[str(path)] = _exact(path)
     dynamic_root(root, work, DYNAMIC_ROOTS[0])
     arguments = []
     for destination, source in mappings.items():

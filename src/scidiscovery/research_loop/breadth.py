@@ -18,10 +18,10 @@ def validate(value):
         raise ValueError('Scientific opportunity combination requires mechanisms')
     refs = set()
     for row in rows:
-        if (not isinstance(row,dict) or set(row) != {'mechanism_ref','label','source_h','source_h_sha256','minimal_test','status'}
+        if (not isinstance(row,dict) or set(row) != {'mechanism_ref','label','source_h','source_h_ref','minimal_test','status'}
                 or row['mechanism_ref'] in refs or any(not isinstance(row[key],str) or not row[key] for key in ('mechanism_ref','label','minimal_test'))
                 or type(row['source_h']) is not int or row['source_h'] < 1
-                or not isinstance(row['source_h_sha256'],str) or len(row['source_h_sha256']) != 64
+                or not isinstance(row['source_h_ref'], dict) or set(row['source_h_ref']) != {'path'}
                 or row['status'] not in {'pending','screened','deferred','waived'}):
             raise ValueError('Scientific opportunity mechanism binding differs')
         refs.add(row['mechanism_ref'])
@@ -31,9 +31,9 @@ def validate(value):
             or any(set(row) != {'mechanism_ref','accepted_count'} or type(row['accepted_count']) is not int or row['accepted_count'] < 0 for row in baseline)):
         raise ValueError('Frozen accepted-call baseline differs')
     grant = value['grant']
-    if grant is not None and (not isinstance(grant,dict) or set(grant) != {'mechanism_ref','source_a','source_a_sha256','extra_calls','used_calls'}
+    if grant is not None and (not isinstance(grant,dict) or set(grant) != {'mechanism_ref','source_a','source_a_ref','extra_calls','used_calls'}
             or grant['mechanism_ref'] not in refs or type(grant['source_a']) is not int or grant['source_a'] < 1
-            or not isinstance(grant['source_a_sha256'],str) or len(grant['source_a_sha256']) != 64
+            or not isinstance(grant['source_a_ref'], dict) or set(grant['source_a_ref']) != {'path'}
             or grant['extra_calls'] != 1 or type(grant['used_calls']) is not int or grant['used_calls'] not in (0,1)):
         raise ValueError('Frozen A opportunity authorization differs')
     return value
@@ -44,16 +44,16 @@ def check_binding(value, binding, scope):
     if value is None:
         if binding is not None:raise ValueError('Unexpected scientific call binding')
         return None
-    if not isinstance(binding,dict) or set(binding) != {'mechanism_ref','source_h','source_h_sha256','job_sha256','grant'}:
+    if not isinstance(binding,dict) or set(binding) != {'mechanism_ref','source_h','source_h_ref','job_ref','grant'}:
         raise ValueError('Accepted scientific call binding missing')
     row = next((row for row in value['mechanisms'] if row['mechanism_ref'] == binding['mechanism_ref']),None)
-    if (row is None or any(binding[key] != row[key] for key in ('source_h','source_h_sha256'))
-            or binding['job_sha256'] != scope['job_sha256']):
+    if (row is None or any(binding[key] != row[key] for key in ('source_h','source_h_ref'))
+            or binding['job_ref'] != scope['job_ref']):
         raise ValueError('Accepted scientific call escaped frozen combination')
     grant = binding['grant']
     if grant is not None:
         allowed = value['grant']
-        if allowed is None or grant != {key:allowed[key] for key in ('source_a','source_a_sha256')} or allowed['mechanism_ref'] != binding['mechanism_ref']:
+        if allowed is None or grant != {key:allowed[key] for key in ('source_a','source_a_ref')} or allowed['mechanism_ref'] != binding['mechanism_ref']:
             raise ValueError('Accepted extra opportunity escaped exact A authorization')
     return binding
 
@@ -82,5 +82,5 @@ def admit(value, choice, scope, accepted):
     if awaiting and counts[ref] >= value['initial_calls']:
         if grant is None or grant['mechanism_ref'] != ref or used >= grant['extra_calls']:
             raise OpportunityRequired('Other H mechanisms retain initial call opportunities; report the scientific question to A for justified extra allocation')
-        extra = {key:grant[key] for key in ('source_a','source_a_sha256')}
-    return dict(mechanism_ref=ref,source_h=selected['source_h'],source_h_sha256=selected['source_h_sha256'],job_sha256=scope['job_sha256'],grant=extra)
+        extra = {key:grant[key] for key in ('source_a','source_a_ref')}
+    return dict(mechanism_ref=ref,source_h=selected['source_h'],source_h_ref=selected['source_h_ref'],job_ref=scope['job_ref'],grant=extra)

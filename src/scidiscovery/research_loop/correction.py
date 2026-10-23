@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from . import budget, execution
 
-import hashlib
 import json
 import re
 
@@ -44,7 +43,7 @@ def _proofs(root, job, assessment):
     if source['role'] == 'A' and payload.get('next_action') == 'audit':
         return _proofs(root, source, assessment)
     if source['role'] == 'W' or (source['role'] == 'H' and payload.get('next_action') == 'analyze' and not source.get('author_correction')):
-        return {seal['raw_sha256']}
+        return {seal['raw_ref']['path']}
     if source['role'] == 'E':
         target = source.get('evidence_return') or {}
         requester = next((row for row in sources if row[0]['step'] == target.get('step')), None)
@@ -52,7 +51,7 @@ def _proofs(root, job, assessment):
         if (target.get('role') == 'A' and requester is not None and requester[0]['role'] == 'A'
                 and requester[1].get('next_action') == 'extract'
                 and any(row[0]['step'] == target['step'] for row in e_sources)):
-            return {seal['raw_sha256']}
+            return {seal['raw_ref']['path']}
     return set()
 
 
@@ -64,34 +63,34 @@ def validate_payload(root, job, payload):
 
 
 def _records(root):
-    identity = c.digest(root / 'settings.json')
+    identity = c.record_ref(root / 'settings.json')
     events, parent, seen = [], None, set()
     for seq, path in enumerate(sorted((root / 'correction-ledger').glob('*.json')), 1):
         raw = c.regular(path, limit=MAX_RECORD_BYTES).read_bytes()
         event = json.loads(raw)
         if (not isinstance(event, dict) or type(event.get('seq')) is not int or event.get('seq') != seq or path.name != f'{seq:06d}.json'
-                or event.get('parent_sha256') != parent or event.get('settings_sha256') != identity
+                or event.get('parent_ref') != parent or event.get('settings_ref') != identity
                 or event.get('kind') not in {'trigger', 'ack'}):
             raise ValueError('Correction fact identity or sequence changed')
-        common = {'seq', 'parent_sha256', 'settings_sha256', 'kind'}
+        common = {'seq', 'parent_ref', 'settings_ref', 'kind'}
         fields = {'trigger'} if event['kind'] == 'trigger' else {
-            'trigger_id', 'cutoff', 'cutoff_seal_sha256', 'authorization_note'}
+            'trigger_id', 'cutoff', 'cutoff_seal_ref', 'authorization_note'}
         if set(event) != common | fields:
             raise ValueError('Correction fact fields changed')
         if event['kind'] == 'trigger':
             trigger = event['trigger']
             if (not isinstance(trigger, dict) or set(trigger) != {
-                    'step', 'seal_sha256', 'raw_sha256', 'reason', 'level', 'trigger_id'}
+                    'step', 'seal_ref', 'raw_ref', 'reason', 'level', 'trigger_id'}
                     or type(trigger['step']) is not int or trigger['step'] <= 0
                     or trigger['reason'] not in REASONS.values() or trigger['level'] not in {'review', 'pause'}
-                    or any(not isinstance(trigger[key], str) or re.fullmatch(r'[0-9a-f]{64}', trigger[key]) is None
-                           for key in ('seal_sha256', 'raw_sha256', 'trigger_id'))):
+                    or any(not isinstance(trigger[key], dict) or 'path' not in trigger[key] for key in ('seal_ref', 'raw_ref'))
+                    or not isinstance(trigger['trigger_id'], str)):
                 raise ValueError('Correction trigger fields changed')
             if trigger['trigger_id'] in seen:
                 raise ValueError('Correction trigger is duplicated')
             seen.add(trigger['trigger_id'])
         events.append(event)
-        parent = hashlib.sha256(raw).hexdigest()
+        parent = c.record_ref(path)
     return events, parent
 
 
@@ -100,8 +99,8 @@ def _append(root, events, parent, **fields):
     # no independent correction writer or mutable episode state.
     from .protocol import require_current
     require_current(root)
-    event = dict(seq=len(events) + 1, parent_sha256=parent,
-                 settings_sha256=c.digest(root / 'settings.json'), **fields)
+    event = dict(seq=len(events) + 1, parent_ref=parent,
+                 settings_ref=c.record_ref(root / 'settings.json'), **fields)
     serialized = json.dumps(event, ensure_ascii=False, indent=2, allow_nan=False) + '\n'
     if len(serialized.encode('utf-8')) > MAX_RECORD_BYTES:
         raise ValueError('Correction fact exceeds its serialized UTF-8 byte bound')
@@ -125,11 +124,11 @@ def _inherited_events(root):
             raise ValueError('Inherited correction fact sequence changed')
         actual = originals.resolve_root_ref(root, ref)
         event = c.read(actual)
-        if (event.get('seq') != sequence + 1 or event.get('parent_sha256') != previous
-                or event.get('settings_sha256') != identity['settings_sha256']
+        if (event.get('seq') != sequence + 1 or event.get('parent_ref') != previous
+                or event.get('settings_ref') != identity['settings_ref']
                 or event.get('kind') not in {'trigger', 'ack'}):
             raise ValueError('Inherited correction fact identity changed')
-        chains[key] = (c.digest(actual), sequence + 1)
+        chains[key] = (c.record_ref(actual), sequence + 1)
         values.append(event)
     return values
 
@@ -142,7 +141,6 @@ def freeze_prefix(root):
     _inherited_events(root)
     events, _ = _records(root)
     return inherited + [dict(path=f'correction-ledger/{event["seq"]:06d}.json',
-        sha256=c.digest(root / 'correction-ledger' / f'{event["seq"]:06d}.json'),
         size_bytes=(root / 'correction-ledger' / f'{event["seq"]:06d}.json').stat().st_size) for event in events]
 
 
@@ -153,10 +151,10 @@ def _view_events(root):
 def _trigger(root, step, seal, reason, level):
     from . import originals
     source = originals.node(root, step)
-    value = dict(step=step, seal_sha256=c.digest(originals.source_record(source, 'result-identity.json')),
-                 raw_sha256=seal['raw_sha256'], reason=reason, level=level)
-    identity = dict(settings_sha256=source.origin_identity['settings_sha256'], **value)
-    value['trigger_id'] = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    value = dict(step=step, seal_ref=history.source_seal_ref(source),
+                 raw_ref=seal['raw_ref'], reason=reason, level=level)
+    identity = dict(settings_ref=source.origin_identity['settings_ref'], **value)
+    value['trigger_id'] = json.dumps(identity, sort_keys=True, separators=(',', ':'))
     return value
 
 
@@ -195,10 +193,10 @@ def project(root, before_step=None):
         job, payload, seal, _ = history._source(root, step)
         outcome = c.read(originals.source_record(source, 'native-outcome.json'))
         intent = c.read(originals.source_record(source, 'native-intent.json'))
-        if (intent.get('task_sha256') != c.digest(originals.resolve_ref(source, dict(path=f'jobs/{step:03d}.json')))
+        if (intent.get('task_ref') != c.record_ref(originals.resolve_ref(source, dict(path=f'jobs/{step:03d}.json')))
                 or type(outcome.get('returncode')) is not int or outcome['returncode'] != 0
                 or outcome.get('stop_reason') or outcome.get('usage', {}).get('blocking_unknown_steps', outcome.get('usage', {}).get('unknown_steps')) != []
-                or outcome.get('raw_sha256') != seal['raw_sha256']):
+                or outcome.get('raw_ref') != seal['raw_ref']):
             raise ValueError('Correction replay requires verified original terminal nodes')
         if c.read(record / 'result.json') != c.result_projection(job, payload):
             raise ValueError('Correction result differs from original scientific fields')
@@ -215,8 +213,8 @@ def project(root, before_step=None):
                 or seal.get('control_outcome', {}).get('portfolio_status') == 'unresolved'
                 or payload['next_action'] in {'extract', 'wait', 'audit','formal_review'}):
             continue
-        seal_digest = c.digest(record / 'result-identity.json')
-        eligible.append(dict(step=step, seal_sha256=seal_digest))
+        seal_digest = c.record_ref(record / 'result-identity.json')
+        eligible.append(dict(step=step, seal_ref=seal_digest))
         sticky, consumed_pause = False, None
         if pause is not None:
             ack = acks.get(pause['trigger_id'])
@@ -278,10 +276,10 @@ def project(root, before_step=None):
     for key, value in published.items():
         if value['step'] < before_step and expected.get(key) != value:
             raise ValueError('Published correction trigger differs from sealed facts')
-    known_eligible = {item['step']: item['seal_sha256'] for item in eligible}
+    known_eligible = {item['step']: item['seal_ref'] for item in eligible}
     for ack in acks.values():
         if ack['cutoff'] < before_step and (
-                known_eligible.get(ack['cutoff']) != ack.get('cutoff_seal_sha256')
+                known_eligible.get(ack['cutoff']) != ack.get('cutoff_seal_ref')
                 or ack['cutoff'] < published[ack['trigger_id']]['step']
                 or published[ack['trigger_id']]['level'] != 'pause'):
             raise ValueError('Correction acknowledgment cutoff changed')
@@ -314,7 +312,7 @@ def publish(root, cutoff):
             return state
         event = _append(root, events, parent, kind='trigger', trigger=trigger)
         events.append(event)
-        parent = c.digest(root / 'correction-ledger' / f'{event["seq"]:06d}.json')
+        parent = c.record_ref(root / 'correction-ledger' / f'{event["seq"]:06d}.json')
         known.add(trigger['trigger_id'])
         # Publish in original cutoff order and replay after each fact: the
         # first pause becomes sticky before any late accepted A is processed.
@@ -392,5 +390,5 @@ def acknowledge(root, trigger_id, authorization_note):
         return state['permit']  # Retry cannot extend the original cutoff.
     cutoff = state['eligible'][-1]
     return _append(root, events, parent, kind='ack', trigger_id=trigger_id,
-                   cutoff=cutoff['step'], cutoff_seal_sha256=cutoff['seal_sha256'],
+                   cutoff=cutoff['step'], cutoff_seal_ref=cutoff['seal_ref'],
                    authorization_note=authorization_note)

@@ -40,7 +40,7 @@ def consumer(tmp_path, monkeypatch, execution_registry):
             config=dict(runs='runs', calls='project/nodes', evaluation_key='fixture-public')))
     job = c.build_job(root, 1, 'H', [])
     record = execution.record(root, 1)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/001.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json')))
     experiments.configure(root, 1, 'local_execution:command', dict(run_argv=[sys.executable]), tmp_path / 'config.json')
 
     def observe(value, *, registered=True):
@@ -136,7 +136,7 @@ def test_legacy_observer_cannot_borrow_registered_row_extensions(consumer, extra
 
 def test_registered_scope_mismatch_remains_typed_integrity_failure(consumer, monkeypatch):
     path = consumer.record / 'experiment-config.json'
-    value = c.read(path);value['scope']['job_sha256'] = '0' * 64
+    value = c.read(path);value['scope']['job_ref'] = '0' * 64
     c.write(path, value)
     def forbidden(config):
         pytest.fail('A changed bound scope cannot reach the producer')

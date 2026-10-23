@@ -23,7 +23,7 @@ def prepare(tmp_path, *, max_steps=2, legacy=False):
         settings = c.settings(root)
         settings.pop('final_a_completion_policy')
         c.write(root / 'settings.json', settings)
-        c.write(root / 'settings-identity.json', dict(sha256=c.digest(root / 'settings.json')))
+        c.write(root / 'settings-identity.json', dict(path='settings.json'))
     finish(root, 1, 'H', [], action='analyze')
     return root
 
@@ -37,7 +37,7 @@ def final_job(root):
 
 def accept(root, role='A', *, final=True):
     job = final_job(root) if final else c.build_job(root, 2, role, [1])
-    intent = dict(step=2, task_sha256=c.digest(root / 'jobs/002.json'),
+    intent = dict(step=2, task_ref=c.record_ref(root / 'jobs/002.json'),
                   budget_slice=budget.accept_node(root, job))
     c.write(execution.origin(root, 2) / 'native-intent.json', intent)
     return job, intent
@@ -68,7 +68,7 @@ def complete(root, job, intent, *, unknown=False):
     usage = native.usage(root)
     outcome = dict(returncode=-15 if unknown else 0,
         stop_reason='token_limit' if unknown else None, cleanup='observed_group_cleaned',
-        metering=observation, usage=usage, raw_sha256=c.digest(record / 'science-output.json'),
+        metering=observation, usage=usage, raw_ref=c.file_ref(record / 'science-output.json'),
         final_a_completion=budget.final_a_receipt(accepted, intent, meter, usage))
     c.write(record / 'native-outcome.json', outcome)
     return meter, outcome
@@ -85,9 +85,8 @@ def test_new_prepare_freezes_one_original_final_a_grant(original_final):
     assert accepted['basis'] == 'final_state'
     assert budget.closeout_state(root)['begin']['mode'] == 'final'
     assert job['final_only']
-    assert marker == dict(seq=accepted['seq'], sha256=c.digest(
-        root / 'control-ledger' / f'{accepted["seq"]:06d}.json'))
-    assert accepted['anchor']['task_sha256'] == intent['task_sha256']
+    assert marker == dict(seq=accepted['seq'], record=c.record_ref(root/'control-ledger'/f'{accepted["seq"]:06d}.json'))
+    assert accepted['anchor']['task_ref'] == intent['task_ref']
     assert accepted['anchor']['shared_limits'] == dict(max_tokens=1000, max_seconds=200)
     assert budget.final_a_barrier(root) == accepted
     assert budget.final_a_barrier(root, before_step=2) is None
@@ -104,9 +103,9 @@ def test_final_grant_cannot_be_moved_or_reused_by_a_continuation(original_final,
     elif change == 'seq':
         changed_intent['budget_slice']['final_return']['seq'] += 1
     elif change == 'digest':
-        changed_intent['budget_slice']['final_return']['sha256'] = '0' * 64
+        changed_intent['budget_slice']['final_return']['record'] = dict(path='/unapproved/control-ledger/000001.json')
     elif change == 'task':
-        changed_intent['task_sha256'] = '0' * 64
+        changed_intent['task_ref'] = '0' * 64
     elif change == 'role':
         changed_job['role'] = 'W'
     elif change == 'step':
@@ -245,7 +244,7 @@ def test_crash_before_intent_reuses_only_the_original_grant(tmp_path):
     grants = [c.read(path) for path in (root / 'control-ledger').glob('*.json')
               if c.read(path)['kind'] == 'final_a_return']
     assert len(grants) == 1
-    assert grants[0]['anchor']['task_sha256'] == c.digest(root / 'jobs/002.json')
+    assert grants[0]['anchor']['task_ref'] == c.record_ref(root / 'jobs/002.json')
 
 
 def test_budget_amendment_preserves_the_original_final_claim_and_consumption(original_final):

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import errno
-import hashlib
 import json
 import os
 import re
@@ -36,40 +35,20 @@ def check_path(path):
     return path
 
 
-def hash_file(path, *, context=None):
-    binding = None
-    for attempt in range(3):
-        if context is not None:
-            context.remaining_seconds()
-        check_path(path)
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode):
-                raise ArchiveError("archive source is not a regular file")
-            generation = (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-            if binding is not None and generation[:-1] != binding:
-                raise ArchiveError("archive file changed while hashing")
-            binding = generation[:-1]
-            sha = hashlib.sha256()
-            with os.fdopen(fd, "rb", closefd=False) as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    if context is not None:
-                        context.remaining_seconds()
-                    sha.update(chunk)
-            after = os.fstat(fd)
-            checked = (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
-            if checked != generation:
-                # Linking an immutable original changes ctime. Retry the read,
-                # preserving every other generation field and the retry bound.
-                if attempt < 2 and stat.S_IMODE(info.st_mode) == 0o400 and checked[:-1] == binding:
-                    continue
-                raise ArchiveError("archive file changed while hashing")
-            return {"size_bytes": info.st_size, "sha256": sha.hexdigest(), "mode": stat.S_IMODE(info.st_mode),
-                    "source_stat": [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns]}
-        finally:
-            os.close(fd)
-
+def stat_file(path, *, context=None):
+    """Read file metadata without reading or fingerprinting its contents."""
+    if context is not None:
+        context.remaining_seconds()
+    path = check_path(path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ArchiveError("archive source is not a regular file")
+        return dict(size_bytes=info.st_size, mode=stat.S_IMODE(info.st_mode),
+            source_stat=[info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns])
+    finally:
+        os.close(fd)
 
 def fsync_directory(path):
     descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -95,14 +74,12 @@ def durable_json(path, value):
     fsync_directory(path.parent)
 
 
-def link_verified(source, destination, entry, *, context=None):
-    """Retain one immutable inode without changing its bytes or permissions."""
+def link_original(source, destination, entry, *, context=None):
+    """Publish the exact immutable inode, rejecting every foreign collision."""
     source, destination = check_path(source), check_path(destination)
-    if entry['mode'] != 0o400:
-        raise ArchiveError('Shared originals must have mode 0400')
-    original = hash_file(source, context=context)
-    if any(original[key] != entry[key] for key in ('sha256', 'size_bytes', 'mode')):
-        raise ArchiveError('Shared source differs from its immutable binding')
+    original = stat_file(source, context=context)
+    if original['mode'] != 0o400 or entry['mode'] != 0o400 or original['size_bytes'] != entry['size_bytes']:
+        raise ArchiveError('Shared original is not a frozen exact source')
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     created = False
     try:
@@ -115,11 +92,13 @@ def link_verified(source, destination, entry, *, context=None):
             if error.errno in {errno.EXDEV, errno.EOPNOTSUPP, errno.ENOSYS, errno.EPERM, errno.EMLINK}:
                 raise SharingUnsupported('Managed originals require supported same-filesystem hardlinks') from error
             raise
-        actual = hash_file(destination, context=context)
-        if any(actual[key] != entry[key] for key in ('sha256', 'size_bytes', 'mode')):
-            raise ArchiveError('Shared destination differs from its immutable binding')
-        if actual['source_stat'][:2] != original['source_stat'][:2]:
-            raise ArchiveError('Shared source inode changed during publication')
+        actual = stat_file(destination, context=context)
+        if (actual['source_stat'][:2] != original['source_stat'][:2]
+                or actual['size_bytes'] != original['size_bytes'] or actual['mode'] != 0o400):
+            raise ArchiveError('Shared destination is not its exact source inode')
+        after = stat_file(source, context=context)
+        if any(after[k] != original[k] for k in ('size_bytes', 'mode')) or after['source_stat'][:3] != original['source_stat'][:3]:
+            raise ArchiveError('Shared original changed during publication')
         fsync_directory(destination.parent)
     except BaseException:
         if created:
@@ -128,73 +107,28 @@ def link_verified(source, destination, entry, *, context=None):
         raise
 
 
-def copy_verified(source, destination, entry, *, context=None):
-    """Copy before unlink, including on the same filesystem, to preserve drafts."""
-    check_path(source)
-    check_path(destination)
-    if entry["kind"] == "directory":
-        destination.mkdir(parents=True, exist_ok=True, mode=0o700)
-        return
-    if destination.exists():
-        actual = hash_file(destination, context=context)
-        if any(actual[key] != entry[key] for key in ("sha256", "size_bytes", "mode")):
-            raise ArchiveError("destination file collision")
-        return
-    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = destination.with_name(destination.name + ".archive-copy")
-    parent_mode = stat.S_IMODE(destination.parent.stat().st_mode)
-    descriptor = None
-    try:
-        os.chmod(destination.parent, parent_mode | 0o700)
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(descriptor, "wb", closefd=False) as output, open(source, "rb") as input_file:
-            for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
-                if context is not None:
-                    context.remaining_seconds()
-                output.write(chunk)
-            output.flush()
-            os.fchmod(descriptor, entry["mode"])
-            os.fsync(descriptor)
-        actual = hash_file(temporary, context=context)
-        if any(actual[key] != entry[key] for key in ("sha256", "size_bytes")):
-            raise ArchiveError("copy verification failed")
-        # CAS may acquire a new owner while this instance is restoring. Publish
-        # without replacement, matching the CAS store's own immutable protocol.
-        try:
-            os.link(temporary, destination, follow_symlinks=False)
-        except FileExistsError:
-            actual = hash_file(destination, context=context)
-            if any(actual[key] != entry[key] for key in ("sha256", "size_bytes", "mode")):
-                raise ArchiveError("destination appeared with different content or permissions")
-        fsync_directory(destination.parent)
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        try:
-            temporary.unlink(missing_ok=True)
-        finally:
-            os.chmod(destination.parent, parent_mode)
-
-
-def copy_independent_verified(source, destination, entry, *, context=None):
-    """Publish one bounded independent inode, retaining exact existing originals."""
+def copy_original(source, destination, entry, *, context=None):
+    """Copy one exact source once; a same-size destination is never a receipt."""
     from .research_loop import atomic_files
     source, destination = check_path(source), check_path(destination)
-    original = hash_file(source, context=context)
-    if original['mode'] != 0o400 or any(original[key] != entry[key] for key in ('sha256', 'size_bytes')):
-        raise ArchiveError('Independent copy source differs from its frozen binding')
+    if entry['kind'] == 'directory':
+        destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return
+    original = stat_file(source, context=context)
+    if original['size_bytes'] != entry['size_bytes']:
+        raise ArchiveError('Copy source size changed')
     try:
-        atomic_files.copy_original(source, destination, sha256=entry['sha256'],
-            size_bytes=entry['size_bytes'], mode=entry['mode'], context=context)
+        atomic_files.copy_original(source, destination, size_bytes=entry['size_bytes'],
+            mode=entry['mode'], context=context)
     except ValueError as error:
-        raise ArchiveError('Independent copy identity changed') from error
-    except OSError as error:
-        if error.errno in {errno.EXDEV, errno.EOPNOTSUPP, errno.ENOSYS, errno.EPERM, errno.EMLINK}:
-            raise SharingUnsupported('Independent copy publication requires supported destination hardlinks') from error
-        raise
-    actual = hash_file(destination, context=context)
-    if (any(actual[key] != entry[key] for key in ('sha256', 'size_bytes', 'mode'))
-            or actual['source_stat'][:2] == original['source_stat'][:2]):
-        # A competing no-replacement destination remains its owner's original.
-        # The archive/checkpoint caller owns cleanup only of its exact stage.
-        raise ArchiveError('Independent copy destination is not an independent exact original')
+        raise ArchiveError('Copy source changed or destination collides') from error
+    actual = stat_file(destination, context=context)
+    if (actual['source_stat'][:2] == original['source_stat'][:2]
+            or actual['size_bytes'] != entry['size_bytes'] or actual['mode'] != entry['mode']):
+        raise ArchiveError('Copy destination is not an independent original')
+
+
+def copy_independent(source, destination, entry, *, context=None):
+    if stat_file(source, context=context)['mode'] != 0o400:
+        raise ArchiveError('Independent archive copy source must be frozen')
+    copy_original(source, destination, dict(entry, kind='file'), context=context)

@@ -21,7 +21,7 @@ def intents(root):
     for path in sorted((root / 'host-delivery/audit-recovery').glob('*/intent.json')):
         intent = c.read(c.regular(path))
         settings = configuration_updates.for_job(root, intent)
-        if (intent.get('settings_sha256') != c.digest(root / 'settings.json')
+        if (intent.get('settings_ref') != c.record_ref(root / 'settings.json')
                 or intent.get('operation_id') != path.parent.name
                 or type(intent.get('attempt')) is not int or intent['attempt'] != 1
                 or intent.get('reason') not in CONTROL_CODES
@@ -40,17 +40,17 @@ def facts(root):
         outcome = path.with_name('outcome.json')
         value = c.read(c.regular(outcome)) if outcome.exists() else None
         if value is not None:
-            if (value['intent_sha256'] != c.digest(path) or value.get('recovery','none') not in {'none','author_repair','control_retry'}
+            if (value['intent_ref'] != c.record_ref(path) or value.get('recovery','none') not in {'none','author_repair','control_retry'}
                 or value.get('status') not in AUDIT_STATUSES
                     or type(value.get('cleanup_confirmed')) is not bool
                     or not value['cleanup_confirmed'] and value['status']!='unknown'):
                 raise ValueError('Audit engineering recovery outcome changed')
             process=path.with_name('process.json')
-            if value.get('process_sha256') is not None:
-                if c.digest(c.regular(process))!=value['process_sha256']:
+            if value.get('process_ref') is not None:
+                if c.record_ref(c.regular(process))!=value['process_ref']:
                     raise ValueError('Audit engineering recovery process changed')
                 record=c.read(process)
-                if record.get('phase')!='audit' or record.get('identity',{}).get('task_sha256')!=intent['operation_id']:
+                if record.get('phase')!='audit' or record.get('identity',{}).get('task_ref')!=intent['operation_id']:
                     raise ValueError('Audit engineering recovery process identity changed')
             elif value['status']=='audited':raise ValueError('A completed engineering retry needs its process original')
         yield intent, value
@@ -82,7 +82,7 @@ def recover_preflight(root, operation):
                 or intent['initial_result'].get('cleanup_confirmed') is not True):
             return None
         result=dict(status='engineering_error',note='audit_recovery_preflight_not_dispatched',cleanup_confirmed=True)
-        _save(outcome,dict(intent_sha256=c.digest(path),process_sha256=None,**result))
+        _save(outcome,dict(intent_ref=c.record_ref(path),process_ref=None,**result))
         return result
 
 
@@ -98,7 +98,7 @@ def run(root, spec, source, request, seconds, *, on_process=None, author_require
             return dict(status='engineering_error',note='audit_transport_timeout',cleanup_confirmed=True)
         try:
             if retry:
-                _save(directory/'dispatch.json',dict(intent_sha256=c.digest(intent_path),operation_id=request['operation_id']))
+                _save(directory/'dispatch.json',dict(intent_ref=c.record_ref(intent_path),operation_id=request['operation_id']))
             else:
                 from . import candidate_audit
                 candidate_audit.mark_dispatch(root,job,request['operation_id'])
@@ -113,8 +113,8 @@ def run(root, spec, source, request, seconds, *, on_process=None, author_require
                     'delivery_audit_process_failed':'audit_process_failed','delivery_audit_process_unavailable':'audit_process_unavailable'}.get(error.code)
             if code is None:raise
             return dict(status='engineering_error', note=code, cleanup_confirmed=True)
-        if (not isinstance(value, dict) or set(value)-{'diagnostic','recovery'} != {'status','operation_id','candidate_id','artifact_sha256','note'}
-                or any(value.get(k) != request[k] for k in ('operation_id','candidate_id','artifact_sha256'))
+        if (not isinstance(value, dict) or set(value)-{'diagnostic','recovery'} != {'status','operation_id','candidate_id','artifact_ref','note'}
+                or any(value.get(k) != request[k] for k in ('operation_id','candidate_id','artifact_ref'))
                 or value.get('recovery','none') not in {'none','author_repair','control_retry'}
                 or value.get('status') not in AUDIT_STATUSES or not isinstance(value.get('note'), str)
                 or len(value['note'].encode()) > 1024 or 'diagnostic' in value and (not isinstance(value['diagnostic'],str) or len(value['diagnostic'].encode())>4096)):
@@ -146,9 +146,9 @@ def run(root, spec, source, request, seconds, *, on_process=None, author_require
     if (remaining <= 0 or meter.get('blocking_unknown_steps', meter['unknown_steps']) or meter.get('accounted_tokens', meter['observed_tokens']) >= limits['max_tokens']
             or budget.used_steps(root)+1+reserved_steps > budget.effective_max_steps(root)):
         return result, request, deadline
-    intent = dict(settings_sha256=c.digest(root/'settings.json'), operation_id=request['operation_id'], attempt=1,
-        candidate_id=request['candidate_id'], artifact_sha256=request['artifact_sha256'],
-        object_digests=request['object_digests'], reason=result['note'], max_seconds=min(remaining,limits['seconds_remaining']),
+    intent = dict(settings_ref=c.record_ref(root/'settings.json'), operation_id=request['operation_id'], attempt=1,
+        candidate_id=request['candidate_id'], artifact_ref=request['artifact_ref'],
+        object_refs=request['object_refs'], reason=result['note'], max_seconds=min(remaining,limits['seconds_remaining']),
         fence_protocol=1,owner=runtime.process_identity(os.getpid(),request['operation_id']),
         initial_result=result,leaf_output=delivery.leaf_refs(root,request['operation_id']),
         advance_seconds=limits['advance_seconds'])
@@ -168,5 +168,5 @@ def run(root, spec, source, request, seconds, *, on_process=None, author_require
         preflight=not (directory/'dispatch.json').exists()
         result=dict(status='engineering_error' if preflight else 'unknown',
             note='audit_recovery_preflight_failed' if preflight else 'audit_recovery_dispatch_unknown',cleanup_confirmed=preflight)
-    _save(outcome_path, dict(intent_sha256=c.digest(intent_path),process_sha256=c.digest(directory/'process.json') if (directory/'process.json').exists() else None, **result))
+    _save(outcome_path, dict(intent_ref=c.record_ref(intent_path),process_ref=c.record_ref(directory/'process.json') if (directory/'process.json').exists() else None, **result))
     return result, fresh, deadline

@@ -19,7 +19,7 @@ from execution_fixtures import execution_registry,remote_registry
 def managed(tmp_path,execution_registry):
     records=tmp_path/'work/lineage'
     config=tmp_path/'config.json'
-    scope=dict(handoff_protocol=CURRENT,step=2,role='W',job_sha256='a'*64,execution_key='b'*64,mechanism_ref=None)
+    scope=dict(handoff_protocol=CURRENT,step=2,role='W',job_ref=dict(path=str(tmp_path/'jobs/002.json')),execution_key=dict(path=str(tmp_path/'jobs/002.json')),mechanism_ref=None)
     value=dict(admission=dict(version=1,mode='hard'),record_dir=str(records),scope=scope,run_argv=[sys.executable],max_seconds=10)
     executor='local_execution:command'
     config.write_text(json.dumps(experiments.freeze(value,executor,path=config)))
@@ -61,7 +61,7 @@ def test_registered_cli_lifecycle_query_collect_and_byte_identity(managed):
     collected=managed.cli('collect','--call-id',call)
     assert collected['status']=='collected' and collected['outputs']
     for item in collected['outputs']:
-        assert experiments.proof(item['local_path'])['sha256']==item['sha256']
+        assert experiments.proof(item['local_path'])==dict(path=item['local_path'],size_bytes=item['size_bytes'])
     assert first['calls'][0]['metric'] is first['calls'][0]['candidate_id'] is None
     managed.cli('cancel','--call-id',call,expected=2)
 
@@ -178,8 +178,8 @@ def test_unregistered_key_and_preserved_config_never_launch(tmp_path,execution_r
 @pytest.mark.process_e2e
 def test_nonlocal_contract_retains_different_external_identity_without_core_process_assumptions(tmp_path,remote_registry):
     config=tmp_path/'remote.json'
-    value=dict(admission=dict(version=1,mode='hard'),record_dir=str(tmp_path/'records'),scope=dict(handoff_protocol=CURRENT,step=2,role='W',job_sha256='a'*64,
-        execution_key='b'*64,mechanism_ref=None))
+    value=dict(admission=dict(version=1,mode='hard'),record_dir=str(tmp_path/'records'),scope=dict(handoff_protocol=CURRENT,step=2,role='W',job_ref=dict(path=str(tmp_path/'jobs/002.json')),
+        execution_key=dict(path=str(tmp_path/'jobs/002.json')),mechanism_ref=None))
     config.write_text(json.dumps(experiments.freeze(value,'remote_execution:fixture',path=config)))
     source=tmp_path/'opaque-package';source.write_bytes(b'not a local script')
     env=dict(os.environ,PYTHONPATH=str(Path(experiments.__file__).parents[2])+os.pathsep+os.environ.get('PYTHONPATH',''))
@@ -194,7 +194,7 @@ def test_nonlocal_contract_retains_different_external_identity_without_core_proc
     assert binding['external_run_id']=='remote-'+result['call_id']
     assert not (directory/'process.json').exists() and not (directory/'terminal.json').exists()
     assert invoke('query','--call-id',result['call_id'])['state']=='succeeded'
-    assert invoke('collect','--call-id',result['call_id'])['outputs'][0]['sha256']==experiments.proof(source)['sha256']
+    assert Path(invoke('collect','--call-id',result['call_id'])['outputs'][0]['local_path']).read_bytes()==source.read_bytes()
     (directory/'submission.json').unlink()
     assert invoke('lookup','--call-id',result['call_id'])['state']=='succeeded'
     assert json.loads((directory/'submission.json').read_text())==binding

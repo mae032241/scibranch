@@ -114,7 +114,7 @@ def repair_scene(tmp_path,*,ordinary=False,reason='dependency',always_fail=False
                     assert not list((root/'control-ledger').glob('*.json')) and not list((root/'jobs').glob('*.json'))
                     value.pop('final_a_completion_policy')
                     c.write(root/'settings.json',value)
-                    c.write(root/'settings-identity.json',dict(sha256=c.digest(root/'settings.json')))
+                    c.write(root/'settings-identity.json',dict(path='settings.json'))
                 return value
             patch.setattr(controller,'prepare',frozen_prepare)
         root,*rest=managed_scene(tmp_path,launcher=[sys.executable,str(native)],harness=harness,audit=ordinary or audit_after_repair,max_tokens=max_tokens,output_capacity=output_capacity,resume_policy=dict(max_attempts=1,protocol='codex_exec_resume',usage_scope='turn',output_repair=False) if crash else None)
@@ -237,7 +237,7 @@ def test_default_search_routes_exact_repair_with_no_active_scientific_focus(tmp_
 @pytest.mark.parametrize('code',sorted(cov_delivery.AUTHOR_REPAIR_CODES))
 def test_worker_audit_fault_is_preserved_without_unchanged_retry(tmp_path,monkeypatch,code):
     calls=[]
-    request=dict(operation_id='a'*64,candidate_id='run-1',artifact_sha256='b'*64)
+    request=dict(operation_id='a'*64,candidate_id='run-1',artifact_ref='b'*64)
     def fault(spec,item,seconds,**kwargs):
         calls.append(item)
         return dict(cov_delivery._reply(dict(request,phase='audit'),'engineering_error',code),diagnostic='Original bounded diagnostic')
@@ -309,7 +309,7 @@ def test_insufficient_original_budget_stops_before_new_worker(tmp_path,monkeypat
         assert not list((root/'control-ledger').glob('*.json'))
         value.pop('final_a_completion_policy')
         c.write(root/'settings.json',value)
-        c.write(root/'settings-identity.json',dict(sha256=c.digest(root/'settings.json')))
+        c.write(root/'settings-identity.json',dict(path='settings.json'))
         return value
     with monkeypatch.context() as patch:
         patch.setattr(controller,'prepare',legacy_prepare)
@@ -498,13 +498,13 @@ def test_original_managed_output_capacity_blocks_initial_seal_before_repair(tmp_
     outputs=[item for observation in observations for item in observation['outputs']]
     artifact=work/'artifacts/comparison.csv'
     assert artifact.read_text()==scientific_output and artifact.stat().st_size>64
-    assert all(Path(item['path']).stat().st_size==item['size_bytes'] and c.digest(Path(item['path']))==item['sha256'] for item in outputs)
-    originals={p:c.digest(p) for p in calls.rglob('*') if p.is_file()}
-    artifact_digest=c.digest(artifact)
+    assert all(Path(item['path']).stat().st_size==item['size_bytes'] for item in outputs)
+    originals={p:(p).read_bytes() for p in calls.rglob('*') if p.is_file()}
+    artifact_digest=(artifact).read_bytes()
     with pytest.raises(ValueError,match='exceeds item byte budget'):
         c.collect_materials(root,2)
-    assert originals=={p:c.digest(p) for p in calls.rglob('*') if p.is_file()}
-    assert c.digest(artifact)==artifact_digest
+    assert originals=={p:(p).read_bytes() for p in calls.rglob('*') if p.is_file()}
+    assert (artifact).read_bytes()==artifact_digest
     assert not (root/'native-evidence/004/native-intent.json').exists()
     assert not (root/'submission/model.pkl').exists()
 
@@ -582,7 +582,7 @@ def test_legacy_preflight_settles_without_replaying_old_audit_or_rewriting_scien
     before=budget.used_steps(root)
     if partial_result:
         candidate_audit._save(directory/'adapter-result.json',dict(status='unavailable',note='candidate_audit_legacy_preflight_not_dispatched',cleanup_confirmed=True,
-            operation_id=intent['operation_id'],candidate_id='run-3',artifact_sha256=binding['source']['objects']['artifact']['sha256']))
+            operation_id=intent['operation_id'],candidate_id='run-3',artifact_ref=binding['source']['objects']['artifact']))
         originals[directory/'adapter-result.json']=(directory/'adapter-result.json').read_bytes()
     snapshot={p.name:p.read_bytes() for p in directory.iterdir()}
     assert cli(root,'status')['closeout']['status']=='candidate_audit_unknown'
@@ -592,7 +592,7 @@ def test_legacy_preflight_settles_without_replaying_old_audit_or_rewriting_scien
     assert result['status']==expected,result
     assert all(path.read_bytes()==data for path,data in originals.items())
     old=candidate_audit._outcome(root,5)
-    assert old['result']['status']=='unavailable' and old['process_sha256'] is None and old['leaf_output']==[]
+    assert old['result']['status']=='unavailable' and old['process_ref'] is None and old['leaf_output']==[]
     assert candidate_audit.public_receipt(root,candidate_audit.receipt_ref(root,5))['qualification']=='not_completed'
     assert not (directory/'dispatch.json').exists() and not list(delivery.leaf_output(root).glob(intent['operation_id']+'-*'))
     assert c.read(root/'native-evidence/006/science-output.json')['next_action']=='deliver'
@@ -619,7 +619,7 @@ def test_legacy_shaped_audit_with_execution_evidence_remains_unknown_without_rep
         candidate_audit._save(delivery.leaf_output(root)/(intent['operation_id']+'-audit-1.json'),dict(preserved_execution_evidence=True))
     else:
         candidate_audit._save(root/'host-delivery/audit-recovery'/intent['operation_id']/'intent.json',dict(
-            settings_sha256=c.digest(root/'settings.json'),operation_id=intent['operation_id'],attempt=1,
+            settings_ref=c.record_ref(root/'settings.json'),operation_id=intent['operation_id'],attempt=1,
             reason='audit_source_missing',max_seconds=intent['max_seconds'],advance_seconds=intent['advance_seconds']))
     original={p:p.read_bytes() for p in directory.iterdir()}
     before=budget.used_steps(root)

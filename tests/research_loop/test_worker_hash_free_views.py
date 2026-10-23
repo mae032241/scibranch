@@ -16,8 +16,8 @@ from test_native_execution_inputs import chain, _reviewed_execution
 
 def assert_no_control_identity(value):
     if isinstance(value,dict):
-        assert not any(key in {'sha256','source_sha256','model_sha256','job_sha256',
-            'execution_key','source_h_sha256','native_originals','native_originals_index',
+        assert not any(key in {'sha256','source_ref','model_sha256','job_ref',
+            'execution_key','source_h_ref','native_originals','native_originals_index',
             'retirement_proof','originals'} for key in value)
         for item in value.values():assert_no_control_identity(item)
     elif isinstance(value,list):
@@ -29,7 +29,7 @@ def assert_no_control_identity(value):
 def local_candidate(tmp_path):
     root=scene(tmp_path);finish(root,1,'H',[],action='experiment')
     c.build_job(root,2,'W',[1]);record=execution.origin(root,2)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json')))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json')))
     config=experiments.configure(root,2,'local_execution:command',dict(run_argv=[sys.executable]),
         c.workspace(root,2)/'work/experiment-config.json')
     directory=c.workspace(root,2)/'experiments/measurement';directory.mkdir(parents=True)
@@ -86,8 +86,8 @@ def test_retained_route_checks_exact_original_parent_and_validates_public_projec
     monkeypatch.setattr(c,'write',compact_native)
     finish(root,1,'H',[],action='experiment')
     job=c.build_job(root,2,'W',[1]);work=c.workspace(root,2)
-    assert job['direct_refs'][0]['sha256']!=job['direct_originals'][0]['sha256']
-    assert job['direct_originals'][0]['sha256']==c.digest(execution.raw(root,1))
+    assert job['direct_refs'][0]['size_bytes']!=job['direct_originals'][0]['size_bytes']
+    assert job['direct_originals'][0]['size_bytes']==execution.raw(root,1).stat().st_size
     assert controller._check_job(root,c.settings(root),2,'W',[1],'',None)==job
     c._validate_inputs(root,work,job)
     with pytest.raises(ValueError,match='sealed scientific route'):
@@ -118,7 +118,7 @@ def test_normal_controller_loop_routes_independently_serialized_parent_views(tmp
     assert launched==['H','W','A']
     for step in (2,3):
         job=c.read(root/'jobs'/f'{step:03d}.json')
-        assert job['direct_refs'][0]['sha256']!=job['direct_originals'][0]['sha256']
+        assert job['direct_refs'][0]['size_bytes']!=job['direct_originals'][0]['size_bytes']
         c._validate_inputs(root,c.workspace(root,step),job)
 
 
@@ -273,7 +273,7 @@ def test_real_candidate_reference_roundtrip_keeps_private_canonical_and_public_p
     successor=c.build_job(root,4,'H',[3])
     public=c.read(c.workspace(root,4)/successor['direct_refs'][0]['path'])
     assert public['candidate_recommendation']==reference
-    assert successor['direct_originals'][0]['sha256']==c.digest(raw)
+    assert successor['direct_originals'][0]['size_bytes']==raw.stat().st_size
     assert canonical not in json.dumps(public)
     with pytest.raises(ValueError,match='outside this frozen'):
         candidate_refs.resolve_reference(root,author,'W002-C999')
@@ -337,9 +337,9 @@ def test_public_replay_diagnostic_keeps_private_originals_out_of_science(tmp_pat
     from scidiscovery.research_loop import replay_check
     directory=tmp_path/'call';directory.mkdir()
     c.write(directory/'accepted.json',{});c.write(directory/'completed.json',{})
-    c.write(directory/replay_check.INTENT,dict(accepted_sha256=c.digest(directory/'accepted.json'),
-        completed_sha256=c.digest(directory/'completed.json')))
-    c.write(directory/replay_check.OUTCOME,dict(intent_sha256=c.digest(directory/replay_check.INTENT),result=dict(
+    c.write(directory/replay_check.INTENT,dict(accepted_ref=c.record_ref(directory/'accepted.json'),
+        completed_ref=c.record_ref(directory/'completed.json')))
+    c.write(directory/replay_check.OUTCOME,dict(intent_ref=c.record_ref(directory/replay_check.INTENT),result=dict(
         status='dependency_error',note='dependency_unavailable_in_declared_sample_scope',stage='source_import',
         cleanup_confirmed=True,diagnostic='/private/host-runtime/'+'a'*64+'/source.py: missing dependency')))
     original=(directory/replay_check.OUTCOME).read_bytes()

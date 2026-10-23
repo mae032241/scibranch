@@ -58,7 +58,7 @@ def test_fresh_home_loads_actual_native_overrides_and_rejects_retired_mcp_overri
         max_seconds=60, max_steps=2, model='no-provider-fixture', reasoning_effort='high',
         search_policy=None, node_budget_mode='soft')
     job = contracts.build_job(root, 1, 'H', [])
-    intent = dict(task_sha256=contracts.digest(root / 'jobs/001.json'),
+    intent = dict(task_ref=contracts.record_ref(root / 'jobs/001.json'),
         **native.profiles.binding(contracts.settings(root), job))
     anchor = native.control_budget.accept_node(root, job)
     if anchor is not None:

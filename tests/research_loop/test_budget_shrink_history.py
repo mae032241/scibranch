@@ -28,7 +28,7 @@ def prepare(tmp_path, *, fragments=False):
 def finish(root, step, role, parents, *, action='wait', instruction='', artifact=False, seal=True, job=None, anchor=None):
     if job is None:job = c.build_job(root, step, role, parents, instruction=instruction)
     record = execution.origin(root, step)
-    intent = dict(step=step, task_sha256=c.digest(root / 'jobs' / f'{step:03d}.json'))
+    intent = dict(step=step, task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json'))
     if anchor is not None:intent['budget_slice'] = anchor
     c.write(record / 'native-intent.json', intent)
     payload = dict(summary='Fixture contribution', scientific_result='Retain this original contribution with its limits.',
@@ -43,7 +43,7 @@ def finish(root, step, role, parents, *, action='wait', instruction='', artifact
     meter = dict(input_tokens=7, cached_input_tokens=2, output_tokens=3)
     c.write(record / 'usage.json', meter)
     outcome = dict(returncode=0, stop_reason=None, cleanup='observed_group_cleaned',
-        usage=native.usage(root), raw_sha256=c.digest(record / 'science-output.json'))
+        usage=native.usage(root), raw_ref=c.file_ref(record / 'science-output.json'))
     if (anchor or {}).get('final_return') is not None:
         # Simulated terminal transport still needs the exact real FINAL receipt;
         # it grants no scientific qualification to this fixture contribution.
@@ -167,13 +167,13 @@ def test_previously_accepted_fragment_chain_survives_shrink_but_next_turn_does_n
         anchor = budget.accept_node(root, job) if number == 0 else budget.accept_continuation(root, job, paths)
         record = first if number == 0 else first / 'continuations' / f'{number:03d}'
         record.mkdir(parents=True, exist_ok=True)
-        intent = dict(step=1, task_sha256=c.digest(root / 'jobs/001.json'), budget_slice=anchor)
+        intent = dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json'), budget_slice=anchor)
         if number:
             prior = paths[-1];proof = prior / 'checkpoint.json'
             intent.update(attempt=number, continuation_kind='fragment', context_mode='new_context',
                 native_home=str(root / 'native-homes/001' / f'context-{number:03d}'),
-                root_intent_sha256=c.digest(first / 'native-intent.json'), previous=execution.proof(prior),
-                fragment_checkpoint=dict(path=proof.relative_to(root).as_posix(), sha256=c.digest(proof)))
+                root_intent_ref=c.record_ref(first / 'native-intent.json'), previous=execution.proof(prior),
+                fragment_checkpoint=dict(path=proof.relative_to(root).as_posix(), ))
         c.write(record / 'native-intent.json', intent)
         meter = dict(input_tokens=7, cached_input_tokens=2, output_tokens=3)
         c.write(record / 'usage.json', meter)
@@ -183,7 +183,7 @@ def test_previously_accepted_fragment_chain_survives_shrink_but_next_turn_does_n
         report = dict(budget.node_report(root, job, intent, meter), usage_observed=True)
         c.write(record / 'native-outcome.json', dict(returncode=7 if number == 2 else 0, stop_reason=None,
             cleanup='observed_group_cleaned', usage=native.usage(root), budget_slice=report,
-            raw_sha256=c.digest(record / 'science-output.json')))
+            raw_ref=c.file_ref(record / 'science-output.json')))
         checkpoint.capture(root, job, record)
         paths.append(record)
     shrink(root)
@@ -206,7 +206,7 @@ def test_later_original_successor_above_initial_ceiling_blocks_resume_after_amen
     # An unreconciled successor intent is sufficient to prohibit another native
     # turn for this old stage; it does not assert a scientific result or verdict.
     later = execution.origin(root, 6);later.mkdir(parents=True)
-    c.write(later / 'native-intent.json', dict(step=6, task_sha256='0' * 64))
+    c.write(later / 'native-intent.json', dict(step=6, task_ref=dict(path='/fixture/jobs/002.json')))
     retained = originals(root)
     def forbidden(*args, **kwargs):pytest.fail('A retained successor must prevent a new native submission')
     from scidiscovery.research_loop import runtime
@@ -259,7 +259,7 @@ def test_reconciled_waiting_wake_retains_successor_guard_above_initial_step_ceil
     # An unreconciled higher successor remains a blocker; no scientific result
     # or fresh execution permission is inferred from this retained intent.
     later = execution.origin(root, 8);later.mkdir(parents=True)
-    c.write(later / 'native-intent.json', dict(step=8, task_sha256='0' * 64))
+    c.write(later / 'native-intent.json', dict(step=8, task_ref=dict(path='/fixture/jobs/002.json')))
     retained = originals(root)
     ledger = {path: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')}
     def forbidden(*args, **kwargs):pytest.fail('A retained successor must prevent a fresh execution-wake native turn')

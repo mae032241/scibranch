@@ -40,7 +40,7 @@ def indexed_rows(root, job, name):
     while page:
         path=c.workspace(root,job['step'])/page
         original=next(row for row in job['history']['files'] if row['path']==page)
-        assert c.digest(path)==original['sha256']
+        assert path.stat().st_size==original['size_bytes']
         value=c.read(path)
         rows.extend(value[name]);page=value['next_page']
     return rows
@@ -146,7 +146,7 @@ def test_w_combination_view_uses_frozen_authorized_rows_not_single_focus(tmp_pat
     # Pure projection contract input: acceptance and grants remain another owner.
     plan=c.read(c.workspace(root,1)/'conclusion.json')['search_plan']
     mechanisms=[dict(mechanism_ref=f'h001.m{index}',label=item['label'],source_h=1,
-        source_h_sha256=c.digest(c.host_record(c.workspace(root,1))/'result-identity.json'),
+        source_h_ref=c.record_ref(c.host_record(c.workspace(root,1))/'result-identity.json'),
         minimal_test=item['minimal_test'],status='pending') for index,item in enumerate(plan['commitments'],1)]
     job['search']['breadth']=dict(version=1,initial_calls=1,mechanisms=mechanisms,
         baseline=[dict(mechanism_ref=row['mechanism_ref'],accepted_count=1) for row in mechanisms],grant=None,prior_unknown=False)
@@ -167,6 +167,6 @@ def test_w_combination_view_uses_frozen_authorized_rows_not_single_focus(tmp_pat
     for row in rows:
         assert (c.workspace(root,5)/row['original']).is_file()
     public=json.dumps(view)
-    assert 'source_h_sha256' not in public and 'baseline' not in public and 'accepted_count' not in public
+    assert 'source_h_ref' not in public and 'baseline' not in public and 'accepted_count' not in public
     assert len((json.dumps(view['lineage'],ensure_ascii=False,indent=2)+'\n').encode())<=4096
     assert job==before

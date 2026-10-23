@@ -169,7 +169,7 @@ def _selected_base(root, selected, *, bind_inputs=False):
         if begin is None or begin['first_step'] != job['step']:
             raise ValueError('Fork closeout task lacks its new child boundary')
         job['closeout_begin'] = dict(seq=begin['seq'],
-            sha256=c.digest(Path(root) / 'control-ledger' / f'{begin["seq"]:06d}.json'))
+            **c.record_ref(Path(root) / 'control-ledger' / f'{begin["seq"]:06d}.json'))
     job.pop('execution_authority', None)
     job.pop('execution_qualifications', None)
     job['source_provenance'] = (qualification.bind_inputs(root, job) if bind_inputs else
@@ -213,7 +213,7 @@ def _selected_files(root, selected):
             relative = originals.relative(entry['path'][len(prefix):])
             if not relative.startswith('inputs/'):
                 raise ValueError('Fork scientific input is outside its exact input namespace')
-            yield relative, originals.resolve_ref(source, entry), entry['sha256']
+            yield relative, originals.resolve_ref(source, entry), entry['size_bytes']
 
 
 def build_selected_job(root, step):
@@ -243,9 +243,9 @@ def build_selected_job(root, step):
     frozen=configuration_updates.for_new_job(root,step)
     context=storage.Deadline(frozen['max_seconds'])
     inventory=storage.Inventory(frozen.get('storage_policy'),context=context)
-    for relative, source, digest in _selected_files(root, selected):
+    for relative, source, size_bytes in _selected_files(root, selected):
         inventory.entry();inventory.file(source.stat().st_size)
-        c._bind_original(source, work/relative, digest, root=root, policy=frozen.get('storage_policy'), context=context, size_bytes=(source).stat().st_size, source_kind='managed_frozen')
+        c._bind_original(source, work/relative, root=root, policy=frozen.get('storage_policy'), context=context, size_bytes=(source).stat().st_size, source_kind='managed_frozen')
     # Review inputs remain neutral; general advice waits for the next legal task.
     if job.get('formal_review'):
         statements = selected['job'].get('user_guidance', [])
@@ -297,7 +297,7 @@ def validate_selected_job(root, work, job):
             raise ValueError('Fork advice differs from its exact applied user original')
     if c.read(c.regular(Path(work) / 'science-task.json')) != selected_science_view(root, job):
         raise ValueError('Fork scientific task projection changed')
-    for relative, _, digest in _selected_files(root, selected):
-        if c.digest(c.regular(Path(work) / relative)) != digest:
+    for relative, original, size_bytes in _selected_files(root, selected):
+        if c.regular(Path(work) / relative).stat().st_ino != original.stat().st_ino or (Path(work) / relative).stat().st_dev != original.stat().st_dev:
             raise ValueError('Fork scientific input bytes changed')
     execution_authority.validate_job(root, job)

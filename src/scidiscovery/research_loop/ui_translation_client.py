@@ -1,6 +1,4 @@
 """Browser cache reader. Provider work starts only in the explicit click handler."""
-import base64
-import hashlib
 
 SCRIPT = r'''
 (() => {
@@ -130,7 +128,6 @@ SCRIPT = r'''
   refreshState();
 })();
 '''
-CSP = "'sha256-" + base64.b64encode(hashlib.sha256(SCRIPT.encode()).digest()).decode() + "'"
 
 TOOLBAR = ('<aside class="translation-tools" data-translation-url="/translation" aria-label="阅读与翻译">'
     '<a href="/reading">阅读与翻译</a> '

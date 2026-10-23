@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import ipaddress
 import json
 import os
@@ -99,7 +98,6 @@ class SSHRemoteClient:
             "put",
             {
                 "relative_path": relative_path,
-                "sha256": hashlib.sha256(raw).hexdigest(),
                 "size_bytes": len(raw),
             },
             raw,
@@ -112,7 +110,7 @@ class SSHRemoteClient:
         if descriptor.size_bytes > self.config.max_transfer_bytes:
             raise ValueError("upload exceeds configured transfer bound")
         response, trailing = self._call("put", {"relative_path": relative_path,
-            "sha256": descriptor.sha256, "size_bytes": descriptor.size_bytes}, b"",
+            "size_bytes": descriptor.size_bytes}, b"",
             upload_path=Path(descriptor.local_path))
         if trailing:
             raise RuntimeError("VM upload returned unexpected bytes")
@@ -133,7 +131,6 @@ class SSHRemoteClient:
         payload = _require_ok(response, "get")
         if (
             payload.get("size_bytes") != len(raw)
-            or payload.get("sha256") != hashlib.sha256(raw).hexdigest()
         ):
             raise RuntimeError("VM download differs from response descriptor")
         return raw
@@ -142,27 +139,19 @@ class SSHRemoteClient:
         response, _ = self._call("get", {"local_path": local_path, "max_bytes": max_bytes}, b"",
                                  download_to=destination, download_limit=max_bytes)
         payload = _require_ok(response, "get")
-        digest = hashlib.sha256()
-        size = 0
-        with destination.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                if self.context:
-                    self.context.remaining_seconds()
-                size += len(chunk)
-                digest.update(chunk)
-        if payload.get("size_bytes") != size or payload.get("sha256") != digest.hexdigest():
+        if self.context:self.context.remaining_seconds()
+        if payload.get("size_bytes") != destination.stat().st_size:
             raise RuntimeError("VM download differs from response descriptor")
 
     def get_many_to(self, items, *, on_complete, on_progress):
         """One standard tar transfer per bounded request; no per-file SSH calls."""
         batch, records = [], []
-        size = len(_canonical({"schema_version": 1, "operation": "get_archive", "payload": {"files": []}})) + 1
+        size = len(_canonical({"schema_version": 2, "operation": "get_archive", "payload": {"files": []}})) + 1
         base_size = size
         for descriptor, path in items:
             if descriptor.size_bytes > self.config.max_transfer_bytes:
                 raise ValueError("download exceeds configured transfer bound")
-            record = {"local_path": descriptor.local_path, "size_bytes": descriptor.size_bytes,
-                      "sha256": descriptor.sha256}
+            record = {"local_path": descriptor.local_path, "size_bytes": descriptor.size_bytes}
             extra = len(_canonical(record)) + bool(records)
             if size + extra > HEADER_LIMIT and batch:
                 self._get_many_batch(batch, records, on_complete, on_progress)
@@ -209,7 +198,7 @@ class SSHRemoteClient:
     ) -> tuple[dict[str, Any], bytes]:
         started = time.monotonic()
         request = _canonical(
-            {"schema_version": 1, "operation": operation, "payload": payload}
+            {"schema_version": 2, "operation": operation, "payload": payload}
         ) + b"\n" + body
         command = [
             self.config.ssh_executable,
@@ -238,8 +227,6 @@ class SSHRemoteClient:
         )
         if download_to is not None:
             header = bytearray()
-            archive_tail = bytearray()
-            archive_digest = hashlib.sha256() if operation == "get_archive" else None
             received = 0
             parsed = None
             last_report = 0.0
@@ -253,12 +240,6 @@ class SSHRemoteClient:
                             return
                         parsed = json.loads(header)
                         raw = body
-                    if archive_digest is not None:
-                        # Only the 72-byte checksum trailer is retained in memory.
-                        archive_tail.extend(raw)
-                        raw = bytes(archive_tail[:-72])
-                        del archive_tail[:-72]
-                        archive_digest.update(raw)
                     received += len(raw)
                     if received > download_limit:
                         raise RuntimeError("VM download exceeds inspection bound")
@@ -288,8 +269,6 @@ class SSHRemoteClient:
                 raise subprocess.CalledProcessError(completed.returncode, command, stderr=completed.stderr)
             if parsed is None:
                 raise RuntimeError("VM download returned no header")
-            if archive_digest is not None and archive_tail != b"sha256:" + archive_digest.hexdigest().encode("ascii") + b"\n":
-                raise RuntimeError("result archive transport checksum differs")
             self.download_progress(received)
             return parsed, b""
         from contextlib import nullcontext
@@ -405,14 +384,14 @@ class SSHTCADTransport:
             value = self._rpc(
                 "tcad_" + operation,
                 {
-                    "submission_sha256": marker["remote_submission"]["sha256"]
+                    "submission_id": marker["submission_id"]
                 },
             )
             if value.get("found") is False:
                 if operation == "retire_submission":
-                    if value.get("retired") is not True or value.get("submission_sha256") != marker["remote_submission"]["sha256"]:
+                    if value.get("retired") is not True or value.get("submission_id") != marker["submission_id"]:
                         raise RuntimeError("runner did not confirm retirement of the exact submission")
-                    return {"found": False, "retired": True, "submission_sha256": payload["submission"]["sha256"]}
+                    return {"found": False, "retired": True, "submission_id": marker["submission_id"]}
                 return {"found": False}
             return {
                 "found": True,
@@ -442,8 +421,8 @@ class SSHTCADTransport:
         job = TCADJobSpec.model_validate_json(job_raw, strict=True)
         if job.input_archive != archive_descriptor:
             raise ValueError("job archive binding differs from prepare archive")
-        digest = hashlib.sha256(job_raw).hexdigest()
-        prefix = f"transport/{digest}"
+        request_id = job.request_id
+        prefix = f"transport/{request_id}"
         remote_archive_path = str(self.remote_exchange_root / prefix / "project.tar")
         self.remote.put_file(f"{prefix}/project.tar", archive_descriptor)
         remote_archive = job.input_archive.model_copy(
@@ -455,17 +434,17 @@ class SSHTCADTransport:
         remote_submission = FileDescriptor(
             name="execution_payload",
             local_path=str(self.remote_exchange_root / prefix / "job.json"),
-            sha256=hashlib.sha256(remote_job_raw).hexdigest(),
             size_bytes=len(remote_job_raw),
             media_type="application/json",
         )
         marker_raw = _canonical(
             {
-                "schema_version": 1,
+                "schema_version": 2,
+                "submission_id":request_id,
                 "remote_submission": remote_submission.model_dump(mode="json"),
             }
         )
-        marker_path = self.local_result_root / "submissions" / f"{digest}.json"
+        marker_path = self.local_result_root / "submissions" / f"{request_id}.json"
         _write_immutable(marker_path, marker_raw)
         return {
             "submission": _local_descriptor(
@@ -480,9 +459,13 @@ class SSHTCADTransport:
             raise ValueError("transport submission marker is outside result root")
         raw = _read_local_descriptor(descriptor)
         marker = json.loads(raw)
-        if marker.get("schema_version") != 1:
+        if (marker.get("schema_version") != 2
+                or not isinstance(marker.get("submission_id"),str)
+                or re.fullmatch(r"[0-9a-f]{32}",marker["submission_id"]) is None):
             raise ValueError("transport submission marker is invalid")
-        FileDescriptor.model_validate(marker.get("remote_submission"), strict=True)
+        remote=FileDescriptor.model_validate(marker.get("remote_submission"), strict=True)
+        expected=self.remote_exchange_root/"transport"/marker["submission_id"]/"job.json"
+        if remote.local_path!=str(expected):raise ValueError("submission marker changed its exact request owner")
         return marker
 
     def _inspect_outputs(self, run_id: str, relative_path: str | None, max_bytes: int) -> dict[str, Any]:
@@ -494,18 +477,18 @@ class SSHTCADTransport:
         descriptor = FileDescriptor.model_validate(value["file"], strict=True)
         if descriptor.size_bytes > min(max_bytes, 32 * 1024 * 1024):
             raise ValueError("inspection file exceeds limit")
-        path = self.local_result_root / "inspection" / run_id / descriptor.sha256
+        path = self.local_result_root / "inspection" / run_id / uuid.uuid4().hex
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=path.parent) as directory:
             temporary = Path(directory) / "download"
             self.remote.get_to(descriptor.local_path, temporary, min(max_bytes, 32 * 1024 * 1024))
             observed = _local_descriptor("candidate", temporary, descriptor.media_type)
-            if observed.size_bytes != descriptor.size_bytes or observed.sha256 != descriptor.sha256:
+            if observed.size_bytes != descriptor.size_bytes:
                 return {"status": "changed_since_inspection", "reason": "download_changed"}
             os.chmod(temporary, 0o400)
             if path.exists():
                 existing = _local_descriptor("candidate", path, descriptor.media_type)
-                if existing.sha256 != descriptor.sha256:
+                if existing.size_bytes != descriptor.size_bytes:
                     raise RuntimeError("immutable inspection copy changed")
             else:
                 os.link(temporary, path)
@@ -546,12 +529,7 @@ class SSHTCADTransport:
         def matches(candidate, descriptor):
             if not candidate.is_file() or candidate.stat().st_size != descriptor.size_bytes:
                 return False
-            digest = hashlib.sha256()
-            with candidate.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    if context: context.remaining_seconds()
-                    digest.update(chunk)
-            return digest.hexdigest() == descriptor.sha256
+            return True
 
         for item in value["outputs"]:
             if context is not None:
@@ -561,7 +539,7 @@ class SSHTCADTransport:
                 raise RuntimeError("remote result names are not unique")
             seen.add(remote_descriptor.name)
             name = (remote_descriptor.name if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", remote_descriptor.name)
-                else "output_" + hashlib.sha256(remote_descriptor.name.encode()).hexdigest())
+                else "output_" + str(len(seen)))
             if name in local_names:
                 raise RuntimeError("remote result names map to the same cache file")
             local_names.add(name)
@@ -630,7 +608,7 @@ def _read_descriptor(descriptor: FileDescriptor) -> bytes:
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         raise ValueError("transport input is not a regular file")
     raw = path.read_bytes()
-    if len(raw) != descriptor.size_bytes or hashlib.sha256(raw).hexdigest() != descriptor.sha256:
+    if len(raw) != descriptor.size_bytes:
         raise ValueError("transport input differs from descriptor")
     return raw
 
@@ -641,7 +619,7 @@ def _read_local_descriptor(descriptor: LocalFileDescriptor) -> bytes:
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         raise ValueError("local descriptor is not a regular file")
     raw = path.read_bytes()
-    if len(raw) != descriptor.size_bytes or hashlib.sha256(raw).hexdigest() != descriptor.sha256:
+    if len(raw) != descriptor.size_bytes:
         raise ValueError("local file differs from descriptor")
     return raw
 
@@ -666,23 +644,19 @@ def _write_immutable(path: Path, raw: bytes) -> None:
 
 
 def _local_descriptor(name: str, path: Path, media_type: str) -> LocalFileDescriptor:
-    digest = hashlib.sha256()
-    size = 0
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            size += len(chunk)
-            digest.update(chunk)
+    metadata=path.lstat()
+    if not stat.S_ISREG(metadata.st_mode):raise ValueError("local file is not regular")
+    size=metadata.st_size
     return LocalFileDescriptor(
         name=name,
         local_path=str(path),
-        sha256=digest.hexdigest(),
         size_bytes=size,
         media_type=media_type,
     )
 
 
 def _require_ok(response: dict[str, Any], operation: str) -> dict[str, Any]:
-    if response.get("schema_version") != 1 or response.get("operation") != operation:
+    if response.get("schema_version") != 2 or response.get("operation") != operation:
         raise RuntimeError("VM transport response envelope differs")
     if response.get("ok") is not True or not isinstance(response.get("payload"), dict):
         raise RuntimeError("VM transport rejected operation")
@@ -762,7 +736,7 @@ def main(argv: list[str] | None = None) -> int:
         if not raw:
             raise ValueError("transport request is missing")
         request = json.loads(raw)
-        if request.get("schema_version") != 1 or not isinstance(request.get("payload"), dict):
+        if request.get("schema_version") != 2 or not isinstance(request.get("payload"), dict):
             raise ValueError("transport request envelope is invalid")
         operation = str(request.get("operation"))
         config = read_transport_config(args.config)
@@ -776,10 +750,10 @@ def main(argv: list[str] | None = None) -> int:
             remote_exchange_root=config.remote_exchange_root,
         )
         payload = transport.handle(operation, request["payload"])
-        response = {"schema_version": 1, "operation": operation, "ok": True, "payload": payload}
+        response = {"schema_version": 2, "operation": operation, "ok": True, "payload": payload}
     except Exception as error:
         response = {
-            "schema_version": 1,
+            "schema_version": 2,
             "operation": operation,
             "ok": False,
             "error": str(error),

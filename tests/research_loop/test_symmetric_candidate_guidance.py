@@ -116,8 +116,8 @@ def test_a_breadth_judgment_reaches_actual_native_prompt_with_custom_guidance(tm
             'Temporary relative underperformance', 'deferral rather than scientific rejection'):
         assert concept in judgment
     record = execution.origin(root, 1)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/001.json'),
-        budget_slice=dict(task_sha256=c.digest(root / 'jobs/001.json'), role='A',
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json'),
+        budget_slice=dict(task_ref=c.record_ref(root / 'jobs/001.json'), role='A',
             boot_id=budget.clock_stamp()['boot_id'], advance_seconds=0., limits=nodes['A'],
             shared_limits=dict(max_tokens=100000, max_seconds=600), previous_tokens=0, previous_seconds=0.)))
     c.write(record / 'runner-process.json', dict(fixture='prompt capture only'))
@@ -150,7 +150,7 @@ def test_a_breadth_judgment_reaches_actual_native_prompt_with_custom_guidance(tm
             return self.returncode
 
     monkeypatch.setattr(native.subprocess, 'Popen', CaptureProcess)
-    monkeypatch.setattr(runtime, 'process_identity', lambda pid, binding: dict(task_sha256=binding))
+    monkeypatch.setattr(runtime, 'process_identity', lambda pid, binding: dict(task_ref=binding))
     monkeypatch.setattr(runtime, 'process_matches', lambda *args: False)
     monkeypatch.setattr(runtime, 'cleanup_owned_group', lambda *args: 'observed_group_cleaned')
     outcome = native.run_native(root, 1)

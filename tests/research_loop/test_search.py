@@ -47,7 +47,7 @@ def worker(root, step, parents, *, observed=None):
         job = c.read(path)
         assert job['role'] == 'W' and [int(row['path'].split('/')[2]) for row in job['direct_refs']] == parents
         c.write(execution.record(root, step) / 'native-intent.json',
-            dict(task_sha256=c.digest(path), search_slice=search.accept(root, job)))
+            dict(task_ref=c.record_ref(path), search_slice=search.accept(root, job)))
         output = root.parent / f'config-{step}.json'
         experiments.configure(root, step, 'local_execution:command', dict(run_argv=[sys.executable]), output)
         config = c.read(output)
@@ -84,11 +84,11 @@ def assess(root, step, parents, *, action='continue_w', search_choice=None):
         decision_request=dict(decision='mechanism', question=f'Which declared mechanism should receive contribution {step}?',
             change_criterion='A new trustworthy discriminating observation would change the mechanism choice')
             if action in {'continue_w', 'revise_h'} else None)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs' / f'{step:03d}.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json')))
     c.write(record / 'science-output.json', payload)
     c.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
     c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, usage=native.usage(root),
-        raw_sha256=c.digest(record / 'science-output.json')))
+        raw_ref=c.file_ref(record / 'science-output.json')))
     c.seal_result(root, step)
     return job, c.workspace(root, step), record
 

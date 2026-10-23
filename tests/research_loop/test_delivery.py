@@ -1,7 +1,6 @@
 """Exact pre-A snapshots and isolated delivery, deterministic zero-model processes."""
 from test_history_handoff import selection_explanation
 import copy
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -145,7 +144,7 @@ def prepare_fixture(tmp_path, mode='ok', *, real_harness=None, python=sys.execut
     finish(root, 2, 'W', [1], files={'train.py': code})
     c.write(root / 'host-started.json', budget.clock_stamp())
     budget.transition(root, 'advance', 'bounded input preparation')
-    nodes = [dict(step=step, seal_sha256=c.digest(c.host_record(c.workspace(root, step)) / 'result-identity.json'))
+    nodes = [dict(step=step, seal_ref=c.record_ref(c.host_record(c.workspace(root, step)) / 'result-identity.json'))
              for step in (1, 2)]
     return root, public, nodes
 
@@ -159,12 +158,12 @@ def closeout_decision(root, refs, recommendation='run-1'):
                    candidate_recommendation=recommendation, progress_assessment=None,
                    search_review=None, decision_request=None, portfolio_review=None,
                    next_action='deliver', route_reason='An explicit bounded delivery decision')
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/003.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/003.json')))
     if isinstance(payload.get('candidate_recommendation'),str):payload['selection_explanation']=selection_explanation()
     c.write(record / 'science-output.json', payload)
     c.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
     c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, usage=native.usage(root),
-                                              raw_sha256=c.digest(record / 'science-output.json')))
+                                              raw_ref=c.file_ref(record / 'science-output.json')))
     result = c.seal_result(root, 3)
     return job, result, delivery.binding(root, job, result)
 
@@ -193,7 +192,6 @@ def test_delivery_tool_upgrade_preserves_scientific_input_checks(tmp_path,monkey
         inputs=[dict(label='runtime-python',path=str(python)),dict(label='harness/data.csv',path=str(scientific))])))['adapter']
     runtime=next(item for item in spec['inputs'] if item['label']=='runtime-python')
     assert 'sha256' not in runtime
-    runtime.update(sha256=c.digest(python),size_bytes=python.stat().st_size)  # An existing instance's old tool metadata.
     monkeypatch.setattr(c,'settings',lambda root:dict(delivery_policy=dict(adapter=spec)))
     python.write_text('upgraded interpreter')
     adapter.write_text('print("upgraded tool")')
@@ -204,13 +202,13 @@ def test_delivery_tool_upgrade_preserves_scientific_input_checks(tmp_path,monkey
 
 
 @pytest.mark.parametrize('kind,phase',[('generic','confirm'),('cov','confirm'),('cov','audit'),('cov','smoke')])
-def test_delivery_namespace_accepts_old_interpreter_metadata(tmp_path,monkeypatch,kind,phase):
+def test_delivery_namespace_uses_exact_interpreter_reference(tmp_path,monkeypatch,kind,phase):
     from scidiscovery.research_loop import generic_delivery
     from scidiscovery.research_loop.protocol import CURRENT
     stage=tmp_path/'stage';(stage/'inputs').mkdir(parents=True);(stage/'scratch').mkdir()
     target=tmp_path/'target';target.mkdir()
     python=Path(sys.executable)
-    proof=dict(label='runtime-python',invoked_path=str(python.absolute()),path=str(python.resolve()),sha256='0'*64)
+    proof=dict(label='runtime-python',invoked_path=str(python.absolute()),path=str(python.resolve()))
     request=dict(scope=dict(handoff_protocol=CURRENT),stage=str(stage),phase=phase,inputs=[proof],
         source_roots=[],config=dict(python=str(python)),target={})
     if kind=='generic':
@@ -257,7 +255,7 @@ def test_pre_a_sources_are_snapshot_pending_not_proxy_qualified(tmp_path):
     root, _, nodes = prepare_fixture(tmp_path)
     refs = delivery.freeze_sources(root, nodes)
     assert refs['items'][0]['status'] == 'audit_pending'
-    assert refs['items'][0]['objects']['artifact']['size_bytes'] > delivery.MAX_BYTES
+    assert refs['items'][0]['objects']['artifact']['size_bytes'] > 256_000
     assert not (root / 'runs/submitted.json').exists()
     saved = copy.deepcopy(refs)
     (root / 'runs/exact-model.bin').write_bytes(b'Overwritten mutable public model')
@@ -284,9 +282,12 @@ def test_real_namespace_audit_promotes_only_complete_nonleaking_result(tmp_path,
     assert (root / 'settings.json').read_bytes() == old_settings
     if mode == 'ok':
         assert result['status'] == 'confirmed', result
-        expected = bound['source']['objects']['artifact']['sha256']
-        assert c.digest(root / 'submission/model.pkl') == expected
-        assert c.digest(root / 'runs/submitted_model.pkl') == expected
+        expected = bound['source']['objects']['artifact']
+        assert (root / 'submission/model.pkl').stat().st_size == expected['size_bytes']
+        assert (root / 'runs/submitted_model.pkl').stat().st_size == expected['size_bytes']
+        marker=c.read(root/'runs/rootless-delivery-operation.json')
+        assert marker['artifact_ref']==expected
+        assert marker['artifact_origin']==bound['source']['artifact_origin']
         budget.action_outcome(root, intent, result)
         before = (root / 'runs/submitted.json').read_bytes()
         assert delivery.invoke(root, intent, 20) == result  # Stored outcome is a read, not resubmission.
@@ -313,10 +314,10 @@ def test_source_archive_tamper_and_changed_argv_symlink_are_hard_errors(tmp_path
     link = tmp_path / 'launcher-link';link.symlink_to(first)
     value = c.settings(root)
     descriptor_ = dict(value['delivery_policy']['adapter'])
-    descriptor_['launcher_files'].append(dict(path=str(first), invoked_path=str(link), sha256=c.digest(first)))
+    descriptor_['launcher_files'].append(dict(path=str(first), invoked_path=str(link)))
     value['delivery_policy']['adapter'] = descriptor_
     c.write(root / 'settings.json', value)
-    c.write(root / 'settings-identity.json', dict(sha256=c.digest(root / 'settings.json')))
+    c.write(root / 'settings-identity.json', dict(path='settings.json'))
     link.unlink();link.symlink_to(second)
     with pytest.raises(ValueError, match='names another original'):delivery._adapter(root)
 
@@ -332,13 +333,13 @@ def test_seventeenth_source_remains_selectable_and_shared_objects_are_deduplicat
     read_original = delivery._proof
     reads = []
     def observe_read(root_, proof):
-        reads.append((proof['path'], proof['sha256'], proof['size_bytes']))
+        reads.append((proof['path'],proof['size_bytes']))
         return read_original(root_, proof)
     monkeypatch.setattr(delivery, '_proof', observe_read)
     delivery.validate_sources(root, refs)
-    assert len(reads) == len(set(reads))  # Shared large objects are hashed once per validation.
+    assert len(reads) == len(set(reads))  # Each exact retained original is checked once per validation.
     conflict = copy.deepcopy(refs)
-    conflict['items'][1]['objects']['artifact'] = dict(conflict['items'][1]['objects']['artifact'], sha256='0' * 64)
+    conflict['items'][1]['objects']['artifact'] = dict(conflict['items'][1]['objects']['artifact'], size_bytes=0)
     with pytest.raises(ValueError, match='Conflicting delivery aliases'):
         delivery.validate_sources(root, conflict)
     _, _, bound = closeout_decision(root, refs, recommendation='run-17')
@@ -389,10 +390,10 @@ print('{}',flush=True)
     assert len(ids) == 1 and ids[0][0] == 'audit'
     pid = int((tmp_path / 'child.pid').read_text())
     try:
-        child = runtime.process_identity(pid, ids[0][1]['task_sha256'])
+        child = runtime.process_identity(pid, ids[0][1]['task_ref'])
     except (OSError, ValueError):
         child = None
-    if child is not None:assert not runtime.process_matches(child, child['task_sha256'])
+    if child is not None:assert not runtime.process_matches(child, child['task_ref'])
     # Reap only the fixture child that the real subreaper now owns.
     import os
     try:os.waitpid(pid, os.WNOHANG)
@@ -415,7 +416,7 @@ def test_actual_public_harness_audit_completion_controls_promotion(tmp_path, mod
     result = delivery.invoke(root, intent, 20)
     if mode == 'real_ok':
         assert result['status'] == 'confirmed', result
-        assert c.digest(root / 'submission/model.pkl') == bound['source']['objects']['artifact']['sha256']
+        assert (root / 'submission/model.pkl').stat().st_size == bound['source']['objects']['artifact']['size_bytes']
         receipt = c.read(root / 'runs/submitted.json')
         assert receipt['leakage_flag'] is False
         assert receipt['audit_score'] is not None and receipt['audit_note'].startswith('audit took ')
@@ -432,7 +433,7 @@ def test_complete_delivery_sources_exceed_old_byte_and_candidate_caps(tmp_path):
     assert len(catalogue['items'])==140 and catalogue['omitted_count']==0
     refs=delivery.freeze_sources(root,nodes)
     assert len(refs['items'])==140 and refs['omitted_count']==0
-    assert len(delivery._bytes(refs))>delivery.MAX_BYTES
+    assert len(delivery._bytes(refs))>256_000
     path=root/'full-delivery-sources.json';c.write(path,refs)
     assert delivery.validate_sources(root,c.read(c.regular(path)))==refs
     view=delivery.public_sources(refs)
@@ -448,15 +449,15 @@ def test_complete_internal_adapter_reply_is_spooled_without_byte_truncation(tmp_
     rows=[dict(label='item-'+str(i),data='x'*2048) for i in range(160)]
     result=delivery._call(dict(launcher_argv=[sys.executable,str(script)],adapter=str(script)),
         dict(phase='resolve',operation_id='f'*64,items=rows),10)
-    assert result==dict(items=rows) and len(delivery._bytes(result))>delivery.MAX_BYTES
+    assert result==dict(items=rows) and len(delivery._bytes(result))>256_000
 
 
 def test_staged_audit_and_recovery_inputs_omit_delivery_destination(tmp_path,monkeypatch):
     original=tmp_path/'artifact';original.write_bytes(b'Exact retained scientific object')
     original.chmod(0o400)
-    proof=dict(sha256=c.digest(original),size_bytes=original.stat().st_size)
+    proof=dict(path='artifact',size_bytes=original.stat().st_size)
     spec=dict(inputs=[],config={'scientific_contract':'bounded audit'},target={'credential':'private-destination'})
-    source=dict(candidate_id='exact-candidate',objects={'artifact':proof},context={'kind':'scientific-result'})
+    source=dict(candidate_id='exact-candidate',objects={'artifact':proof},artifact_origin=c.file_ref(original),context={'kind':'scientific-result'})
     monkeypatch.setattr(delivery,'_proof',lambda root,value,**kwargs:original)
     monkeypatch.setattr(delivery,'_settings',lambda *args:dict(handoff_protocol=c.HANDOFF_PROTOCOL))
     stage=tmp_path/'stage'
@@ -465,7 +466,8 @@ def test_staged_audit_and_recovery_inputs_omit_delivery_destination(tmp_path,mon
     assert 'target' not in request and 'target' not in recovery
     assert 'private-destination' not in json.dumps([request,recovery])
     assert request['candidate_id']==recovery['candidate_id']=='exact-candidate'
-    assert request['object_digests']==recovery['object_digests']=={'artifact':proof['sha256']}
+    assert request['object_refs']==recovery['object_refs']=={'artifact':proof}
+    assert request['artifact_origin']==recovery['artifact_origin']==c.file_ref(original)
     assert (stage/'inputs/artifact').stat().st_ino == (stage/'recovery-1/inputs/artifact').stat().st_ino == original.stat().st_ino
     assert stat.S_IMODE((stage/'inputs/artifact').stat().st_mode) == 0o400
     (stage/'scratch/owned').write_text('writable independent audit work')
@@ -485,8 +487,8 @@ def test_delivery_stage_uses_owned_namespace_and_never_falls_back_to_copy(tmp_pa
     from scidiscovery.archive_io import SharingUnsupported
     from scidiscovery.research_loop import atomic_files
     original = tmp_path / 'artifact'; original.write_bytes(b'controlled immutable original'); original.chmod(0o400)
-    proof = dict(path='artifact', sha256=c.digest(original), size_bytes=original.stat().st_size)
-    source = dict(candidate_id='exact', objects={'artifact': proof}, context={})
+    proof = dict(path='artifact',size_bytes=original.stat().st_size)
+    source = dict(candidate_id='exact', objects={'artifact': proof}, artifact_origin=c.file_ref(original),context={})
     monkeypatch.setattr(delivery, '_settings', lambda *args: dict(handoff_protocol=c.HANDOFF_PROTOCOL))
     elsewhere = tmp_path / 'other-tmp'; elsewhere.mkdir()
     monkeypatch.setenv('TMPDIR', str(elsewhere))
@@ -508,12 +510,12 @@ def test_delivery_stage_uses_owned_namespace_and_never_falls_back_to_copy(tmp_pa
 
 def test_staging_deadline_expires_before_any_leaf_dispatch(tmp_path, monkeypatch):
     original = tmp_path / 'artifact'; original.write_bytes(b'frozen'); original.chmod(0o400)
-    proof = dict(path='artifact', sha256=c.digest(original), size_bytes=original.stat().st_size)
+    proof = dict(path='artifact',size_bytes=original.stat().st_size)
     monkeypatch.setattr(delivery, '_settings', lambda *args: dict(handoff_protocol=c.HANDOFF_PROTOCOL))
     class Expired:
         def remaining_seconds(self):
             raise TimeoutError('original attempt exhausted')
     with pytest.raises(TimeoutError, match='original attempt exhausted'):
         delivery._staged(tmp_path, dict(inputs=[], config={}),
-            dict(candidate_id='exact', objects={'artifact': proof}, context={}), 'same-call', tmp_path / 'stage',
+            dict(candidate_id='exact', objects={'artifact': proof},artifact_origin=c.file_ref(original),context={}), 'same-call', tmp_path / 'stage',
             context=Expired())

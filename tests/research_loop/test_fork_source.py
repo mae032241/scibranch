@@ -59,14 +59,14 @@ def test_selected_cut_excludes_selected_output_and_keeps_exact_inputs(tmp_path):
     assert 'project/nodes/002/conclusion.json' not in paths
     assert plan['bootstrap']['next_step'] == 2
     assert [row['step'] for row in plan['prefix_entries']] == [1]
-    assert plan['source']['job_ref']['sha256'] == c.digest(root / 'jobs/002.json')
+    assert dict(path=str(root/plan['source']['job_ref']['path'])) == c.record_ref(root / 'jobs/002.json')
 
 
 def test_missing_input_and_changed_exact_selector_fail_closed(tmp_path):
     root = completed_source(tmp_path)
     ref = originals.original_ref(originals.node(root, 2), 'jobs/002.json')
     with pytest.raises(ValueError, match='identity changed'):
-        fork_sources.inspect_source(root, dict(ref, sha256='0' * 64))
+        fork_sources.inspect_source(root, dict(ref, path='jobs/unapproved.json'))
     (root / 'project/nodes/002/inputs/parents/001/conclusion.json').unlink()
     with pytest.raises((ValueError, OSError)):
         fork_sources.inspect_source(root, ref)

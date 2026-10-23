@@ -36,7 +36,7 @@ def instance(tmp_path):
 
 def _request(root, operation='explicit-delete'):
     return dict(instance_id=c.settings(root)['goal_id'],
-        settings_sha256=c.digest(root / 'settings.json'), operation_id=operation)
+        settings_ref=c.record_ref(root / 'settings.json'), operation_id=operation)
 
 
 def _retained(root):
@@ -464,7 +464,7 @@ def test_explicit_delete_accepts_quiescent_lifecycle_states(instance, monkeypatc
     assert deletion.delete_instance(root, **request) == result
 
 
-@pytest.mark.parametrize('wrong', ['instance_id', 'settings_sha256'])
+@pytest.mark.parametrize('wrong', ['instance_id', 'settings_ref'])
 def test_wrong_confirmation_preserves_exact_originals(instance, wrong):
     request = _request(instance)
     request[wrong] = 'wrong-instance' if wrong == 'instance_id' else '0' * 64
@@ -478,7 +478,7 @@ def test_wrong_confirmation_preserves_exact_originals(instance, wrong):
 def test_legacy_protocol_is_rejected_without_migration(instance):
     settings = c.settings(instance)
     c.write(instance / 'settings.json', dict(settings, handoff_protocol=protocol.CURRENT - 1))
-    c.write(instance / 'settings-identity.json', dict(sha256=c.digest(instance / 'settings.json')))
+    c.write(instance / 'settings-identity.json', dict(path='settings.json'))
     request = _request(instance)
     before = _retained(instance)
     with pytest.raises(protocol.UnsupportedProtocol):
@@ -527,8 +527,8 @@ def test_unknown_or_live_originals_never_cancel_or_reset_budget(instance, monkey
     budget.transition(root, 'paused', 'Retain original consumption and unknown work')
     c.build_job(root, 1, 'H', [])
     record = c.host_record(c.workspace(root, 1))
-    binding = c.digest(root / 'jobs/001.json')
-    c.write(record / 'native-intent.json', dict(task_sha256=binding))
+    binding = c.record_ref(root / 'jobs/001.json')
+    c.write(record / 'native-intent.json', dict(task_ref=binding))
     if fault != 'pending_native':
         c.write(record / 'native-outcome.json', dict(returncode=0,
             cleanup='cleanup_unknown' if fault == 'cleanup_unknown' else 'observed_group_cleaned',
@@ -580,7 +580,7 @@ def test_shipped_cli_requires_confirmation_and_retries_absent_original_root(inst
     environment = dict(os.environ, PYTHONPATH=str(Path(deletion.__file__).resolve().parents[2]))
     command = [sys.executable, '-m', 'scidiscovery.research_loop.cli', 'instance-delete']
     options = ['--root', str(instance), '--instance-id', request['instance_id'],
-        '--settings-sha256', request['settings_sha256'], '--operation-id', request['operation_id']]
+        '--settings-ref', json.dumps(request['settings_ref']), '--operation-id', request['operation_id']]
     before = _retained(instance)
     for omitted in range(0, len(options), 2):
         missing = subprocess.run(command + options[:omitted] + options[omitted + 2:],
@@ -656,7 +656,7 @@ def test_readonly_directory_cleanup_never_changes_shared_regular_inode(instance,
     monkeypatch.setattr(os, 'fchmod', directory_fchmod)
     request = _request(instance)
     with pytest.raises(deletion.DeleteError):
-        deletion.delete_instance(instance, **dict(request, settings_sha256='0' * 64))
+        deletion.delete_instance(instance, **dict(request, settings_ref=dict(path='/fixture/settings.json')))
     assert stat.S_IMODE(directory.stat().st_mode) == directory_mode
     assert stat.S_IMODE(directory.parent.stat().st_mode) == directory_mode
     assert survivor.stat().st_nlink == before.st_nlink
@@ -745,7 +745,7 @@ def test_prepared_retry_rechecks_unknown_work_and_preserves_consumption(instance
         with pytest.raises(RuntimeError):
             deletion.delete_instance(root, **request)
     c.write(root / 'native-evidence/001/native-intent.json',
-        dict(task_sha256=c.digest(root / 'jobs/001.json')))
+        dict(task_ref=c.record_ref(root / 'jobs/001.json')))
     before = _retained(root)
     with pytest.raises(archive.files.ArchiveError, match='outcome is absent'):
         deletion.delete_instance(root, **request)
@@ -967,12 +967,12 @@ def test_deleting_source_sibling_and_child_preserves_exact_shared_forks(instance
     def payload_paths(root):
         manifest = c.read(root / originals.FORK_DIRECTORY / 'manifest.json')
         return {(originals.identity_key(row['origin_identity']), row['path'],
-            row['sha256'], row['size_bytes']): root / originals.FORK_DIRECTORY / row['storage_path']
+            row['size_bytes']): root / originals.FORK_DIRECTORY / row['storage_path']
             for row in manifest['entries'] if row['path'].endswith('/shared.bin')}
 
     original = instance / 'project/nodes/001/artifacts/shared.bin'
     key = (originals.identity_key(originals.local_identity(instance)),
-        original.relative_to(instance).as_posix(), c.digest(original), original.stat().st_size)
+        original.relative_to(instance).as_posix(), original.stat().st_size)
     first_paths, second_paths, grandchild_paths = (payload_paths(root)
         for root in (first, second, grandchild))
     assert key in first_paths and key in second_paths and key in grandchild_paths

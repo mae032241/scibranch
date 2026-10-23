@@ -28,7 +28,7 @@ def test_sealed_current_h_configures_registered_cov_and_final_a(tmp_path,executi
     job=c.build_job(root,2,'W',[1]);record=execution.record(root,2)
     node_anchor=budget.accept_node(root,job)
     anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,job))
-    c.write(record/'native-intent.json',dict(step=2,task_sha256=c.digest(root/'jobs/002.json'),**anchor))
+    c.write(record/'native-intent.json',dict(step=2,task_ref=c.record_ref(root/'jobs/002.json'),**anchor))
     c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
     original_intent=(record/'native-intent.json').read_bytes()
     assert job['search']['focus']['mechanism_ref']=='h001.m1'
@@ -73,12 +73,12 @@ def test_context_requires_current_stable_stage_scope(tmp_path,execution_registry
     from test_lineage import scene
     root,config,digest=scene(tmp_path)
     script=c.workspace(root,2)/'work/train.py';script.write_text('success')
-    cov_lineage.run(config,digest,script,new=True)
+    cov_lineage.run(config,script,new=True)
     request=dict(root=str(root),step=2,config=c.settings(root)['history_observer']['config'],known_candidates=[],known_contexts=[])
     contexts=cov_lineage.observe(request)['contexts']
     wrong=json.loads(json.dumps(contexts))
     if damage=='missing_protocol':wrong[0]['scope'].pop('handoff_protocol')
-    else:wrong[0]['scope']['execution_key']=c.digest(root/'jobs/001.json')
+    else:wrong[0]['scope']['execution_key']=c.record_ref(root/'jobs/001.json')
     def forbidden_archive(*args,**kwargs):raise AssertionError('Scope must be checked before asset archive')
     before={p:p.read_bytes() for p in root.rglob('*') if p.is_file()}
     with pytest.raises(history.ObserverIntegrityError,match='Execution context differs'):

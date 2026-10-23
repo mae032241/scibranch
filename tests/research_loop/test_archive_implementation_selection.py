@@ -59,7 +59,7 @@ def test_public_archive_ids_seal_validate_and_forward_exact_mixed_materials(tmp_
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('damage', ['bytes', 'size', 'symlink', 'seal'])
+@pytest.mark.parametrize('damage', ['size', 'symlink', 'seal'])
 def test_archive_selection_rejects_changed_exact_originals(tmp_path, execution_registry, damage):
     root, archived, _ = archived_source(tmp_path)
     object_id, row = archived[0]
@@ -78,8 +78,7 @@ def test_archive_selection_rejects_changed_exact_originals(tmp_path, execution_r
     else:
         original = source.read_bytes()
         source.chmod(0o600)
-        source.write_bytes(bytes([original[0] ^ 1]) + original[1:]
-            if damage == 'bytes' else original + b' ')
+        source.write_bytes(original + b' ')
     with pytest.raises(ValueError):
         c.selected_inputs(c.workspace(root, 3), dict(implementation_selection=[object_id]), job)
     assert not (execution.origin(root, 3) / 'result-identity.json').exists()
@@ -93,7 +92,7 @@ def test_archive_bound_copy_is_checked_after_selection_seals(tmp_path, execution
     copied = work / row['path']
     original = copied.read_bytes()
     copied.chmod(0o600)
-    copied.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+    copied.write_bytes(original + b' ')
     with pytest.raises(ValueError, match='direct material actually read'):
         c.validate(work)
 
@@ -106,7 +105,7 @@ def test_inherited_archive_requires_exact_same_instance_seal_membership(tmp_path
     job = c.build_job(root, 3, 'A', [2])
     row = dict(material)
     if damage == 'foreign':
-        source = tmp_path / 'foreign/host-history/objects' / row['sha256']
+        source = tmp_path / 'foreign/host-history/objects/foreign-original'
         source.parent.mkdir(parents=True)
         source.write_bytes(Path(row['source']).read_bytes())
         row['source'] = str(source)

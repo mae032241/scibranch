@@ -1,6 +1,5 @@
 """Exact host snapshot recovery; never an adapter or execution admission."""
 from contextlib import ExitStack
-import hashlib
 import hmac
 import json
 import math
@@ -65,19 +64,19 @@ def _json(path, context=None):
 
 
 def _verify_ref(root, ref, context=None):
-    if not isinstance(ref, dict) or set(ref) != {'path', 'sha256', 'size_bytes'}:
+    if not isinstance(ref, dict) or set(ref) != {'path', 'size_bytes'}:
         _fail('Host preparation original reference changed')
     path = Path(ref['path'])
     path = path if path.is_absolute() else root / path
     actual = e.proof(path, context=context)
-    if any(actual[key] != ref[key] for key in ('sha256', 'size_bytes')):
+    if any(actual[key] != ref[key] for key in ('size_bytes',)):
         _fail('Host preparation original bytes changed')
     return path
 
 
-def _base_digest(accepted):
-    return hashlib.sha256(e.encoded({key: value for key, value in accepted.items()
-        if key not in {'host_preparation', 'mechanism_binding'}})).hexdigest()
+def _acceptance_base(accepted):
+    return {key: value for key, value in accepted.items()
+        if key not in {'host_preparation', 'mechanism_binding'}}
 
 
 def _inventory(items):
@@ -94,9 +93,8 @@ def _inventory(items):
         if (relative.is_absolute() or '..' in relative.parts or relative.as_posix() != name
                 or not relative.parts or name == '.' or name in seen):
             _fail('Host snapshot input path is not canonical')
-        if (not isinstance(item.get('path'), str) or not Path(item['path']).is_absolute()
-                or not re.fullmatch('[0-9a-f]{64}', item.get('sha256', ''))
-                or type(item.get('size_bytes')) is not int or item['size_bytes'] < 0):
+        if (not isinstance(item.get('path',), str) or not Path(item['path']).is_absolute()
+                or type(item.get('size_bytes',)) is not int or item['size_bytes'] < 0):
             _fail('Host snapshot input original changed')
         seen.add(name)
     return items
@@ -109,10 +107,10 @@ def _configuration(root, config, context=None):
     job = root / 'jobs' / f'{scope["step"]:03d}.json'
     native = execution.record(root, scope['step'], attempt['number'])
     original = native / 'experiment-config.json'
-    projection = root / 'host-runtime/experiment-control' / scope['job_sha256'] / 'interfaces' / f'{attempt["number"]:03d}.json'
+    projection = root / 'host-runtime/experiment-control' / f'{scope["step"]:03d}' / 'interfaces' / f'{attempt["number"]:03d}.json'
     if (_json(original, context) != config or _json(projection, context) != config
-            or e.proof(job, context=context)['sha256'] != scope['job_sha256']
-            or _json(native / 'native-intent.json', context).get('task_sha256') != scope['job_sha256']):
+            or c.record_ref(job) != scope['job_ref']
+            or _json(native / 'native-intent.json', context).get('task_ref') != scope['job_ref']):
         _fail('Host preparation lost its original configuration or task')
     return dict(job=e.proof(job, context=context), configuration=e.proof(original, context=context),
         projection=e.proof(projection, context=context), native_intent=e.proof(native / 'native-intent.json', context=context))
@@ -147,7 +145,7 @@ def bind_snapshot(config, directory, descriptor, accepted_base, *, context):
             settings=e.proof(root / 'settings.json', context=context), owner=owner._binding(root)),
         scope=config['scope'], native_attempt=config['native_attempt'], interface=config['execution_interface'],
         prepared=descriptor.model_dump(mode='json'), input_inventory=inventory,
-        acceptance_base_sha256=_base_digest(accepted_base), **original)
+        acceptance_base=_acceptance_base(accepted_base), **original)
     authority = accepted_base.get('execution_authority')
     refs = {}
     if authority is not None:
@@ -229,7 +227,7 @@ def _tree(directory, value, *, complete, context=None):
                     observed.add(relative)
                     if complete:
                         actual = e.proof(path, context=context)
-                        if any(actual[key] != expected[relative][key] for key in ('sha256', 'size_bytes')):
+                        if any(actual[key] != expected[relative][key] for key in ('size_bytes',)):
                             _fail('Accepted host snapshot original changed')
                 elif complete or not re.fullmatch(r'\.scid-[A-Za-z0-9_-]+\.partial', name):
                     _fail('Host preparation contains an unknown file')
@@ -244,13 +242,12 @@ def _accepted(directory, value, config, ref, context=None, *, historical=False):
     accepted = _json(directory / 'accepted.json', context)
     destination = Path(value['records']) / 'calls' / value['call_id']
     prepared = value['prepared']
-    if (accepted.get('host_preparation') != ref or _base_digest(accepted) != value['acceptance_base_sha256']
+    if (accepted.get('host_preparation') != ref or _acceptance_base(accepted) != value['acceptance_base']
             or accepted.get('scope') != value['scope'] or accepted.get('call_id') != value['call_id']
             or accepted.get('native_attempt') != value['native_attempt'] or accepted.get('interface') != value['interface']
             or accepted.get('prepared') != prepared
             or accepted.get('source_script') != prepared['local_path']
-            or accepted.get('script') != dict(path=str(destination / 'source.py'),
-                sha256=prepared['sha256'], size_bytes=prepared['size_bytes'])
+            or accepted.get('script') != dict(path=str(destination / 'source.py'), size_bytes=prepared['size_bytes'])
             or accepted.get('snapshot_files', []) != value['input_inventory']):
         _fail('Durable accepted original differs from its host snapshot binding')
     from . import breadth
@@ -262,7 +259,7 @@ def _accepted(directory, value, config, ref, context=None, *, historical=False):
         originals = [('source.py', prepared), *(('inputs/' + item['name'], item) for item in value['input_inventory'])]
         for name, original in originals:
             actual = e.proof(directory / name, context=context)
-            if any(actual[key] != original[key] for key in ('sha256', 'size_bytes')):
+            if any(actual[key] != original[key] for key in ('size_bytes',)):
                 _fail('Historical accepted snapshot original changed')
     else:
         _tree(directory, value, complete=True, context=context)
@@ -296,7 +293,7 @@ def _historical_owner(root, value, originals, context=None):
         transition = owner.read_transition(root, checkpoint_ref, transfer_ref)
         checkpoint = transition['checkpoint']
         if (checkpoint['anchor_id'] != current['anchor_id'] or checkpoint['host'] != instance['host']
-                or checkpoint['settings_ref']['sha256'] != instance['settings']['sha256']):
+                or checkpoint['settings_ref'] != dict(path=instance['settings']['path']) or instance['settings']['path'] != str(root / 'settings.json')):
             _fail('Retained snapshot cold transition lost its original instance')
         transitions[transfer['from_generation']] = (path.parent, transition)
     while generation < current['generation']:
@@ -308,11 +305,11 @@ def _historical_owner(root, value, originals, context=None):
         metadata_path = receipt / 'archive.json'
         metadata = _json(metadata_path, context)
         if any(e.proof(metadata_path, context=context)[key] != checkpoint['payload_ref'][key]
-                for key in ('sha256', 'size_bytes')):
+                for key in ('size_bytes',)):
             _fail('Retained checkpoint payload identity changed')
         manifest = receipt / 'manifest.jsonl'
         actual = e.proof(manifest, context=context)
-        if any(actual[key] != metadata['manifest'][key] for key in ('sha256', 'size_bytes')):
+        if any(actual[key] != metadata['manifest'][key] for key in ('size_bytes',)):
             _fail('Retained checkpoint manifest identity changed')
         found = set()
         with manifest.open('rb') as stream:
@@ -320,7 +317,7 @@ def _historical_owner(root, value, originals, context=None):
                 _check(context); row = json.loads(line)
                 name = row['path']
                 if name in originals:
-                    if row.get('kind') != 'file' or any(row[key] != originals[name][key] for key in ('sha256', 'size_bytes')):
+                    if row.get('kind') != 'file' or any(row[key] != originals[name][key] for key in ('size_bytes',)):
                         _fail('Snapshot original was not inherited by its exact checkpoint')
                     found.add(name)
         if found != set(originals):
@@ -418,7 +415,7 @@ def _authority(root, value, config, accepted, context, *, directory=None):
             or any(binding.get(key) != expected[key] for key in ('scope', 'native_attempt', 'interface'))
             or allocation.get('native_intent') != request.get('native_intent')
             or request.get('native_intent') != native_intent
-            or request.get('call_id') != value['call_id'] or request.get('job', {}).get('sha256') != value['scope']['job_sha256']
+            or request.get('call_id') != value['call_id'] or c.record_ref(root / request.get('job', {})['path']) != value['scope']['job_ref']
             or decision.get('request') != refs['request'] or permit.get('decision') != refs['decision']
             or decision.get('nonce_hash') != request.get('nonce_hash')
             or not security.decision_authorizes(request['kind'],decision['selected_option'],request['options'])

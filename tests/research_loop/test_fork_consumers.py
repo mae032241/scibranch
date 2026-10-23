@@ -55,7 +55,7 @@ def inherited_candidates(tmp_path):
 def test_catalogue_and_shortlist_keep_cutoff_and_origin_after_parent_removal(inherited_candidates,monkeypatch):
     root,_,identity=inherited_candidates
     sources=history.source_sequence(root,4)
-    receipts=[dict(step=job['step'],seal_sha256=sha) for job,_,_,sha in sources]
+    receipts=[dict(step=job['step'],seal_ref=sha) for job,_,_,sha in sources]
     # This test reads a directory; it cannot invoke or qualify an adapter.
     monkeypatch.setattr(delivery,'_adapter',lambda *args: {})
     catalogue=delivery.catalogue_sources(root,receipts)
@@ -78,7 +78,7 @@ def test_inherited_delivery_proof_rejects_changed_copied_original(inherited_cand
     job,_,seal,_=history._source(root,2)
     fact=history.read_observation(root,job,seal)
     evidence=fact['candidates'][0]['evidence'][0]
-    proof=dict(path=evidence['snapshot'],sha256=evidence['sha256'],size_bytes=evidence['size_bytes'])
+    proof=dict(path=evidence['snapshot'],size_bytes=evidence['size_bytes'])
     path=delivery._proof(root,proof,source=owner)
     assert path.read_text()=='Retained original candidate bytes.\n'
     path.chmod(0o600);path.write_text('Changed copied evidence.\n')
@@ -134,7 +134,7 @@ def test_managed_candidate_resolution_uses_retained_inputs_after_parent_removal(
 def test_adapter_resolution_uses_original_id_and_rejects_foreign_reply(inherited_candidates,monkeypatch,foreign_id):
     root,_,identity=inherited_candidates
     sources=history.source_sequence(root,4)
-    receipts=[dict(step=job['step'],seal_sha256=sha) for job,_,_,sha in sources]
+    receipts=[dict(step=job['step'],seal_ref=sha) for job,_,_,sha in sources]
     settings=c.settings(root)
     monkeypatch.setattr(delivery,'_settings',lambda *args: dict(settings,
         delivery_policy=dict(cleanup_seconds=5)))
@@ -227,9 +227,9 @@ def test_parent_id_bounds_keep_raw_contract_and_exact_origin_shape(value,valid):
 def test_delivery_repair_refusal_binds_old_origin_not_new_same_label(inherited_candidates,monkeypatch):
     from scidiscovery.research_loop import engineering
     root,producer,old_candidate=inherited_candidates
-    producer_sha=c.digest(originals.source_record(producer,'result-identity.json'))
+    producer_sha=c.record_ref(originals.source_record(producer,'result-identity.json'))
     c.write(root/'jobs/004.json',dict(step=4,role='W',engineering_repair=dict(candidate_id='original',
-        source=dict(step=2,seal_sha256=producer_sha))))
+        source=dict(step=2,seal_ref=producer_sha))))
     job=dict(step=5,role='A',purpose='closeout')
     c.write(root/'jobs/005.json',job)
     record=root/'native-evidence/005'
@@ -241,7 +241,7 @@ def test_delivery_repair_refusal_binds_old_origin_not_new_same_label(inherited_c
     monkeypatch.setattr(delivery,'_choice',lambda *args: current['candidate_recommendation'])
     monkeypatch.setattr(delivery,'selected_sources',lambda *args,**kwargs: dict(items=[
         dict(candidate_id=current['candidate_recommendation'],status='audit_pending',
-            objects=dict(artifact=dict(sha256='a'*64)))]))
+            objects=dict(artifact=dict(path='unavailable-original',size_bytes=0)))]))
     monkeypatch.setattr(delivery,'_settings',lambda *args: dict(delivery_policy=dict(adapter=dict(target={}))))
     monkeypatch.setattr(budget,'closeout_state',lambda *args: dict(begin=dict(delivery_sources={}),actions=[]))
     monkeypatch.setattr(engineering,'steps',lambda *args: [4])
@@ -254,5 +254,5 @@ def test_delivery_repair_refusal_binds_old_origin_not_new_same_label(inherited_c
         else:
             bound=delivery.binding(root,job,current)
             assert bound['candidate_id']=='original'
-            assert bound['decision']['job_sha256']==c.digest(root/'jobs/005.json')
+            assert bound['decision']['job_ref']==c.record_ref(root/'jobs/005.json')
     assert not (root/'host-delivery').exists()

@@ -3,10 +3,8 @@
 This is an operator closeout, not a retroactive resume policy or experiment retry.
 The old outcome, incomplete meter and every accepted experiment remain original.
 """
-from functools import lru_cache
 import json
 from pathlib import Path
-import stat
 
 from . import configuration_updates
 from . import contracts as c
@@ -61,10 +59,6 @@ def science_context(root, job, record, *, permit=None, attempt=None):
     compiled={}
     from . import execution_inputs,qualification
     for material in job['direct_materials']:
-        if Path(material['source'])==root/'host-history/objects'/material['sha256']:
-            # _validate_inputs already checked the exact parent seal and this
-            # archived scientific asset; it is not a compiled source subject.
-            continue
         producer=execution_inputs._producer(root,material)
         seal=qualification._read(root,producer['producer_seal'])
         matches=[item for item in seal.get('compiled_implementations',[]) if item['material']==material]
@@ -80,7 +74,7 @@ def science_context(root, job, record, *, permit=None, attempt=None):
             original=execution_inputs.resolve_native_original(root,item['original'],compiler_job=owner)
             destination=public/item['alias']
             source=Path(original['source'])
-            c._bind_original(source, destination, original['sha256'], policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=original['size_bytes'], source_kind='mutable')
+            c._bind_original(source, destination, policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=original['size_bytes'], source_kind='managed_frozen')
             entries.append(dict(kind='source',source=_ref(root,source),display=_ref(root,destination)))
     paths.update((item['path'],'framework') for item in job['direct_refs'])
     paths.update((item['path'],'source' if item.get('kind')=='scientific_original' else 'framework')
@@ -101,14 +95,14 @@ def science_context(root, job, record, *, permit=None, attempt=None):
         target=public/name
         if kind=='compiler_author':
             item=compiled[name];author=item['compiler']['author'];source=_check(root,author)
-            c._bind_original(source, target, author['sha256'], policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=(source).stat().st_size, source_kind='managed_frozen')
+            c._bind_original(source, target, policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=(source).stat().st_size, source_kind='managed_frozen')
             entries.append(dict(kind=kind,source=_ref(root,source),display=_ref(root,target),
                 material=item['material'],compiler=item['binding']['compiler'],client_binding=item['binding'].get('client_binding')))
             continue
         source=c.regular(work/name);original=_ref(root,source)
         if kind=='framework':
             c.write(target,_context_projection(name,c.read(source),references,texts));target.chmod(0o400)
-        else:c._bind_original(source, target, original['sha256'], policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=(source).stat().st_size, source_kind='managed_frozen')
+        else:c._bind_original(source, target, policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=(source).stat().st_size, source_kind='managed_frozen')
         entries.append(dict(kind=kind,source=original,display=_ref(root,target)))
     own=[];masks=[];implementations=[]
     if job.get('worker_view_version')!=1 and permit is not None:
@@ -117,21 +111,20 @@ def science_context(root, job, record, *, permit=None, attempt=None):
             output=compiler['output'];source=Path(output['path'])
             if not source.is_relative_to(work/'artifacts'):raise ValueError('Legacy compiler output is not an original task artifact')
             relative=source.relative_to(work/'artifacts')
-            material=dict(source=str(source),path=f'inputs/parents/{job["step"]:03d}/artifacts/{relative.as_posix()}',
-                sha256=output['sha256'],size_bytes=output['size_bytes'])
+            material=dict(source=str(source),path=f'inputs/parents/{job["step"]:03d}/artifacts/{relative.as_posix()}',size_bytes=output['size_bytes'])
             client=work/'artifacts/scientific-implementations'/f'I{number:03d}.json'
             binding_ref=execution_inputs.create_legacy_author_client(root,job,compiler_ref,material,permit,attempt,client)
             binding,compiler=execution_inputs.verify_legacy_author_client(root,job,binding_ref,require_intent=False)
             own.append(binding_ref)
             source_name=f'work/retained-implementations/I{number:03d}/implementation.json'
             scientific=public/source_name;author=_check(root,compiler['author'])
-            c._bind_original(author, scientific, compiler['author']['sha256'], policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=(author).stat().st_size, source_kind='managed_frozen')
+            c._bind_original(author, scientific, policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=(author).stat().st_size, source_kind='managed_frozen')
             entries.append(dict(kind='source',source=_ref(root,author),display=_ref(root,scientific)))
             owner=qualification._read(root,compiler['job']);aliases=[]
             for item in compiler['inputs']:
                 original=execution_inputs.resolve_native_original(root,item['original'],compiler_job=owner)
                 input_source=Path(original['source']);display=public/item['alias']
-                c._bind_original(input_source, display, original['sha256'], policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=original['size_bytes'], source_kind='mutable');aliases.append(item['alias'])
+                c._bind_original(input_source, display, policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=original['size_bytes'], source_kind='managed_frozen');aliases.append(item['alias'])
                 entries.append(dict(kind='source',source=_ref(root,input_source),display=_ref(root,display)))
             note=public/'artifact-notes'/f'I{number:03d}.txt'
             note.parent.mkdir(parents=True,exist_ok=True)
@@ -177,10 +170,12 @@ def validate_science_context(root, job, proof):
             if item['material'] not in job['direct_materials']:raise ValueError('Author compiler source is not a frozen input')
             compiler=execution_inputs.verify_compilation(root,item['compiler'],material=item['material'],
                 client_binding=item['client_binding'])
-            if _check(root,compiler['author'])!=source or item['source']['sha256']!=item['display']['sha256']:
+            if (_check(root,compiler['author'])!=source or not source.samefile(display)
+                    or item['source']['size_bytes']!=item['display']['size_bytes']):
                 raise ValueError('Author compiler scientific display changed')
         elif item['kind']=='source':
-            if item['source']['sha256']!=item['display']['sha256']:raise ValueError('Author scientific original changed')
+            if not source.samefile(display) or item['source']['size_bytes']!=item['display']['size_bytes']:
+                raise ValueError('Author scientific original changed')
         else:
             name=display.relative_to(directory).as_posix()
             expected=(candidate_refs.public_fields(c.read(source),references) if item['kind']=='task' else
@@ -191,40 +186,23 @@ def validate_science_context(root, job, proof):
     return directory
 
 
-def _generation(path):
-    value=path.stat(follow_symlinks=False)
-    if not stat.S_ISREG(value.st_mode):raise ValueError('Author closeout requires original regular files')
-    return (value.st_dev,value.st_ino,value.st_mode,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
-
-
-@lru_cache(maxsize=4096)
-def _generation_digest(path, generation):
-    # Trusted same-user soft boundary: process-local deduplication, never a
-    # persisted qualification. ctime is part
-    # of the key so restoring mtime after a same-size edit cannot reuse a digest.
-    path=Path(path)
-    if _generation(path)!=generation:raise ValueError('Author closeout original changed while hashing')
-    value=c.digest(path)
-    if _generation(path)!=generation:raise ValueError('Author closeout original changed while hashing')
-    return value
-
-
-def _verified_digest(path):
+def _original_reference(path):
     path=c.regular(Path(path))
     if path.resolve()!=path:raise ValueError('Author closeout requires exact original files')
-    generation=_generation(path)
-    value=_generation_digest(str(path),generation)
-    if _generation(path)!=generation:raise ValueError('Author closeout original changed during validation')
-    return value,generation[3]
+    return c.record_ref(path), path.stat().st_size
+
+
+def _control(root, reference):
+    return dict(path=str(Path(root)/reference['path']))
 
 
 def _ref(root, path, *, source=None):
     if source is not None:
         from . import originals
         proof=originals.original_ref(source,Path(path).relative_to(root).as_posix())
-        return {key:proof[key] for key in ('path','sha256','size_bytes')}
-    path=Path(path);digest,size=_verified_digest(path)
-    return dict(path=path.relative_to(root).as_posix(),sha256=digest,size_bytes=size)
+        return {key:proof[key] for key in ('path','size_bytes')}
+    path=Path(path);digest,size=_original_reference(path)
+    return dict(path=path.relative_to(root).as_posix(),size_bytes=size)
 
 
 def _check(root, ref, *, source=None):
@@ -252,7 +230,7 @@ def _optional_original(root, path, source):
         return False
     if proof.get('origin_identity',source.origin_identity)!=source.origin_identity:
         raise ValueError('Author closeout optional original changed its origin')
-    proof={key:proof[key] for key in ('path','sha256','size_bytes')}
+    proof={key:proof[key] for key in ('path','size_bytes')}
     _declared_ref(root,proof,path)
     _check(root,proof,source=source)
     return True
@@ -268,11 +246,10 @@ def _calls(root, step):
 
 def _declared_ref(root, ref, expected=None):
     """Check a declared object address/hash without opening its result bytes."""
-    if (not isinstance(ref,dict) or set(ref) != {'path','sha256','size_bytes'}
+    if (not isinstance(ref,dict) or set(ref) != {'path','size_bytes'}
             or not isinstance(ref['path'],str) or Path(ref['path']).is_absolute() or '..' in Path(ref['path']).parts
             or type(ref['size_bytes']) is not int or ref['size_bytes'] < 0
-            or not isinstance(ref['sha256'],str) or len(ref['sha256']) != 64
-            or any(char not in '0123456789abcdef' for char in ref['sha256'])):
+):
         raise ValueError('Author closeout declared original identity changed')
     path = Path(root)/ref['path']
     if expected is not None and path != expected:
@@ -372,7 +349,7 @@ def _validate_verified_intent(root, job, intent, verified):
         context=intent.get('author_closeout_science_context')
         if not isinstance(context,dict):raise ValueError('Author scientific context is missing')
         _declared_ref(root,context)
-    if value['step']!=job['step'] or intent.get('task_sha256')!=original['job']['sha256']:
+    if value['step']!=job['step'] or intent.get('task_ref')!=_control(root,original['job']):
         raise ValueError('Author closeout accepted a different scientific task')
     return value
 
@@ -461,7 +438,7 @@ def science_facts(root, step):
             original=accepted['script']
         if original is not None:
             source=work/'work/retained-experiments'/row['call_id']/Path(original.get('source',original)['path']).name
-            c._bind_original(Path(original['path']), source, original['sha256'], policy=config.get('storage_policy'), root=root, size_bytes=(Path(original['path'])).stat().st_size, source_kind='mutable')
+            c._bind_original(Path(original['path']), source, policy=config.get('storage_policy'), root=root, size_bytes=(Path(original['path'])).stat().st_size, source_kind='mutable')
         value=dict(call_id=row['call_id'],candidate_id=row['candidate_id'],status=row['status'],
             mechanism={key:mechanism[key] for key in ('mechanism_ref',) if key in mechanism},
             source=source.relative_to(work).as_posix() if source is not None else None,
@@ -471,14 +448,14 @@ def science_facts(root, step):
         scientific=e.scientific_outputs(config,observation)
         for output in scientific:
             path=work/'work/retained-experiments'/row['call_id']/'outputs'/output.name
-            c._bind_original(Path(output.local_path), path, output.sha256, policy=config.get('storage_policy'), root=root, size_bytes=(Path(output.local_path)).stat().st_size, source_kind='mutable')
+            c._bind_original(Path(output.local_path), path, policy=config.get('storage_policy'), root=root, size_bytes=(Path(output.local_path)).stat().st_size, source_kind='mutable')
             value['outputs'].append(dict(name=output.name,path=path.relative_to(work).as_posix()))
         if config['execution_interface'].get('result_protocol')==e.LOCAL_RESULT_PROTOCOL:
             names={item.name for item in scientific};logs=[]
             for output in e.scientific_outputs(config,observation,include_logs=True):
                 if output.name in names:continue
                 path=work/'work/retained-experiments'/row['call_id']/'outputs'/output.name
-                c._bind_original(Path(output.local_path), path, output.sha256, policy=config.get('storage_policy'), root=root, size_bytes=(Path(output.local_path)).stat().st_size, source_kind='mutable')
+                c._bind_original(Path(output.local_path), path, policy=config.get('storage_policy'), root=root, size_bytes=(Path(output.local_path)).stat().st_size, source_kind='mutable')
                 logs.append(dict(stream=Path(output.name).stem,path=path.relative_to(work).as_posix()))
             if logs:
                 value['logs_ref']=dict(note='Read stdout/stderr only as scientifically needed; known execution snapshot paths use scientific source names.',
@@ -508,10 +485,10 @@ def start(root, step, *, max_tokens, max_seconds, authorization_note):
     old=c.read(c.regular(origin/'native-outcome.json'))
     if old.get('stop_reason')!='token_limit' or old.get('cleanup')!='observed_group_cleaned':
         raise ValueError('Only an original cleaned token-limit W is eligible')
-    binding=c.digest(root/'jobs'/f'{step:03d}.json')
+    binding=c.record_ref(root/'jobs'/f'{step:03d}.json')
     for name in ('runner-process.json','native-process.json'):
         process=c.read(c.regular(origin/name))
-        if process.get('task_sha256')!=binding or process.get('boot_id')!=budget.clock_stamp()['boot_id'] or runtime.process_matches(process,binding):
+        if process.get('task_ref')!=binding or process.get('boot_id')!=budget.clock_stamp()['boot_id'] or runtime.process_matches(process,binding):
             raise ValueError('Original author writer is live or its identity is unavailable')
     meter=native.usage(root);limits=budget.snapshot(root)
     reserve=budget.delivery_reserve(settings) or dict(tokens=0,seconds=0,steps=0)
@@ -538,7 +515,7 @@ def start(root, step, *, max_tokens, max_seconds, authorization_note):
     tokens,seconds=budget._attempt_consumption(root,job,[origin])
     budget.transition(root,'advance','explicit_author_closeout')
     limits=budget.snapshot(root)
-    anchor=dict(task_sha256=binding,role='W',boot_id=budget.clock_stamp()['boot_id'],advance_seconds=limits['advance_seconds'],
+    anchor=dict(task_ref=binding,role='W',boot_id=budget.clock_stamp()['boot_id'],advance_seconds=limits['advance_seconds'],
         limits=budget.node_limits(root,job),shared_limits={key:limits[key] for key in ('max_tokens','max_seconds')},
         previous_tokens=tokens,previous_seconds=seconds)
     context_record=root/'host-recovery/author-context'/f'{step:03d}/001'
@@ -549,7 +526,7 @@ def start(root, step, *, max_tokens, max_seconds, authorization_note):
     projection.write_bytes(_check(root,permit['original_experiment_config']).read_bytes())
     projection.chmod(0o400)
     intent=dict(step=step,attempt=1,continuation_kind='author_closeout',context_mode='new_context',
-        task_sha256=binding,root_intent_sha256=c.digest(origin/'native-intent.json'),previous=execution.proof(origin),
+        task_ref=binding,root_intent_ref=c.record_ref(origin/'native-intent.json'),previous=execution.proof(origin),
         budget_slice=anchor,author_closeout=_ref(root,path),
         worker_view_version=1,author_closeout_science_facts=_ref(root,science_path),
         author_context_version=1,author_closeout_science_context=context,
@@ -594,9 +571,9 @@ def validate_successor(root, value, *, original=None, source=None):
     intent=c.read(_check(root,value['source_originals']['native-intent.json'],source=source))
     if (intent.get('attempt')!=1 or intent.get('continuation_kind')!='author_closeout'
             or intent.get('context_mode')!='new_context'
-            or intent.get('root_intent_sha256')!=old['original_intent']['sha256']
+            or intent.get('root_intent_ref')!=_control(root,old['original_intent'])
             or intent.get('author_closeout')!=value['original_permit']
-            or intent.get('task_sha256')!=old['job']['sha256']):
+            or intent.get('task_ref')!=_control(root,old['job'])):
         raise ValueError('Author successor source intent identity changed')
     return value
 
@@ -615,8 +592,8 @@ def require_successor_eligibility(root, value):
         raise ValueError('Author successor requires the exact cleaned first author finite time stop')
     for name in ('runner-process.json','native-process.json'):
         process=c.read(prior/name)
-        if (value['source_originals'][name]['sha256']!=outcome.get('execution_processes',{}).get(name)
-                or process.get('task_sha256')!=value['source_originals']['native-intent.json']['sha256']
+        if (_control(root,value['source_originals'][name])!=outcome.get('execution_processes',{}).get(name)
+                or process.get('task_ref')!=_control(root,value['source_originals']['native-intent.json'])
                 or process.get('boot_id') is None or process.get('boot_id')!=intent.get('budget_slice',{}).get('boot_id')):
             raise ValueError('Author successor source process identity changed')
     job=c.read(root/old['job']['path'])
@@ -634,8 +611,8 @@ def _successor_facts(root, step):
         directory=work/row['originals'];accepted=c.read(directory/'accepted.json');completed=c.read(directory/'completed.json')
         calls.append(dict(call_id=row['call_id'],status=row['status'],candidate_id=row['candidate_id'],
             originals=row['originals'],backend_run_id=c.read(directory/'submission.json').get('external_run_id'),
-            source_sha256=(accepted.get('script') or {}).get('sha256'),
-            artifacts=[{key:item[key] for key in ('sha256','size_bytes')} for item in completed.get('outputs',[])]))
+            source_ref=accepted.get('script'),
+            artifacts=[{key:item[key] for key in ('size_bytes',)} for item in completed.get('outputs',[])]))
     return dict(version=1,scope=facts['scope'],call_count=len(calls),omitted_calls=0,calls=calls,
         ordering='Rows are listed by call directory, not scientific chronology. backend_run_id is copied from the retained submission binding; null means unavailable. Infer no last-eight ordering from this list.',
         detailed_facts=(str(Path(root)/'native-evidence'/f'{step:03d}'/'author-closeout-original-facts.json')
@@ -681,11 +658,11 @@ def start_successor(root, step, *, max_tokens, max_seconds, authorization_note,
             or budget.closeout_state(root)['begin'] is not None
             or any(p.name>f'{step:03d}.json' for p in (root/'jobs').glob('*.json'))):
         raise ValueError('Author successor cannot replace a seal, pause, closeout or scientific successor')
-    binding=c.digest(root/'jobs'/f'{step:03d}.json');prior=paths[-1]
-    previous_binding=c.digest(prior/'native-intent.json')
+    binding=c.record_ref(root/'jobs'/f'{step:03d}.json');prior=paths[-1]
+    previous_binding=c.record_ref(prior/'native-intent.json')
     for name in ('runner-process.json','native-process.json'):
         process=c.read(c.regular(prior/name))
-        if (process.get('task_sha256')!=previous_binding or process.get('boot_id')!=budget.clock_stamp()['boot_id']
+        if (process.get('task_ref')!=previous_binding or process.get('boot_id')!=budget.clock_stamp()['boot_id']
                 or runtime.process_matches(process,previous_binding)):
             raise ValueError('Original author writer is live or its identity is unavailable')
     if budget.execution_blocked(root):raise ValueError('Author successor requires stopped original execution')
@@ -700,7 +677,7 @@ def start_successor(root, step, *, max_tokens, max_seconds, authorization_note,
     tokens,seconds=budget._attempt_consumption(root,job,paths)
     budget.transition(root,'advance','explicit_author_closeout_successor')
     limits=budget.snapshot(root)
-    anchor=dict(task_sha256=binding,role='W',boot_id=budget.clock_stamp()['boot_id'],advance_seconds=limits['advance_seconds'],
+    anchor=dict(task_ref=binding,role='W',boot_id=budget.clock_stamp()['boot_id'],advance_seconds=limits['advance_seconds'],
         limits=budget.node_limits(root,job),shared_limits={key:limits[key] for key in ('max_tokens','max_seconds')},
         previous_tokens=tokens,previous_seconds=seconds)
     context_record=root/'host-recovery/author-context'/f'{step:03d}/002'
@@ -714,7 +691,7 @@ def start_successor(root, step, *, max_tokens, max_seconds, authorization_note,
     science_path=record/'author-closeout-science.json'
     c.write(science_path,science_facts(root,step));science_path.chmod(0o400)
     intent=dict(step=step,attempt=2,continuation_kind='author_closeout',context_mode='new_context',
-        task_sha256=binding,root_intent_sha256=c.digest(origin/'native-intent.json'),previous=execution.proof(prior),
+        task_ref=binding,root_intent_ref=c.record_ref(origin/'native-intent.json'),previous=execution.proof(prior),
         budget_slice=anchor,author_closeout=_ref(root,path),author_closeout_facts=_ref(root,record/'author-closeout-facts.json'),
         worker_view_version=1,author_closeout_science_facts=_ref(root,science_path),
         author_context_version=1,author_closeout_science_context=context,
@@ -756,20 +733,20 @@ def _completed_output_facts(root, step, record, session):
     usage=c.read(c.regular(record/'usage.json')) if (record/'usage.json').exists() else None
     observation=c.read(c.regular(record/'usage-observation.json'))
     if (intent.get('attempt')!=2 or intent.get('continuation_kind')!='author_closeout' or intent.get('context_mode')!='new_context'
-            or intent.get('task_sha256')!=c.digest(c.regular(root/'jobs'/f'{step:03d}.json'))
+            or intent.get('task_ref')!=c.record_ref(c.regular(root/'jobs'/f'{step:03d}.json'))
             or intent.get('author_closeout')!=_ref(root,successor_path(root,step))
             or type(outcome.get('returncode')) is not int or outcome['returncode']!=0
             or outcome.get('stop_reason')!='author_closeout_token_limit' or outcome.get('cleanup')!='observed_group_cleaned'
-            or outcome.get('raw_sha256') is not None or outcome.get('output_status') is not None):
+            or outcome.get('raw_ref') is not None or outcome.get('output_status') is not None):
         raise ValueError('Only an exact completely returned cleaned author token stop is eligible')
     if (usage is not None and (native._usage_event(dict(type='turn.completed',usage=usage))!=usage
             or observation.get('tokens')!=usage) or observation!=outcome.get('metering')
             or observation.get('source')!='turn.completed'):
         raise ValueError('Completed output usage observation changed its original completion')
-    binding=c.digest(record/'native-intent.json')
+    binding=c.record_ref(record/'native-intent.json')
     for name in ('runner-process.json','native-process.json'):
         path=c.regular(record/name);process=c.read(path)
-        if (c.digest(path)!=outcome.get('execution_processes',{}).get(name) or process.get('task_sha256')!=binding
+        if (c.record_ref(path)!=outcome.get('execution_processes',{}).get(name) or process.get('task_ref')!=binding
                 or process.get('boot_id')!=intent.get('budget_slice',{}).get('boot_id')
                 or process.get('boot_id') is None
                 or any(type(process.get(key)) is not int or process[key]<=0 for key in ('pid','start_ticks','pgid','sid','ppid'))):
@@ -941,13 +918,14 @@ def accepted_output(root, step, record, intent, outcome):
             or outcome!=c.read(root/value['originals']['native-outcome.json']['path'])):
         raise ValueError('Completed-output acceptance belongs to another native attempt')
     raw=Path(record)/'science-output.json'
-    if raw.exists() or raw.is_symlink():
-        if _verified_digest(raw)[0]!=value['originals']['result.pending.json']['sha256']:
-            raise ValueError('Accepted completed output bytes changed')
-    return dict(receipt=_ref(root,path),raw_sha256=value['originals']['result.pending.json']['sha256'],facts=value['facts'])
+    pending=_check(root,value['originals']['result.pending.json'])
+    if (c.regular(raw).resolve()!=raw or not raw.samefile(pending)
+            or raw.stat().st_size!=value['originals']['result.pending.json']['size_bytes']):
+        raise ValueError('Accepted completed output alias changed')
+    return dict(receipt=_ref(root,path),raw_ref=c.file_ref(raw),facts=value['facts'])
 
 
-def accept_completed_output(root, step, *, attempt, pending_sha256, session, authorization_note, authorization_statement):
+def accept_completed_output(root, step, *, attempt, pending_ref, session, authorization_note, authorization_statement):
     """Publish already returned author bytes; never launch native or executor work."""
     from . import budget,execution,native,runtime
     root=Path(root)
@@ -956,7 +934,7 @@ def accept_completed_output(root, step, *, attempt, pending_sha256, session, aut
         raise ValueError('Exact author attempt 2 and explicit output acceptance are required')
     record=root/'native-evidence'/f'{step:03d}'/'continuations/002'
     pending=_ref(root,record/'result.pending.json')
-    if pending['sha256']!=pending_sha256:raise ValueError('Explicit pending output digest changed')
+    if pending!=pending_ref:raise ValueError('Explicit pending output digest changed')
     upgrade_path=_output_record(root,step,'upgrade')
     if upgrade_path.exists():
         upgrade=_validate_output_upgrade(root,c.read(c.regular(upgrade_path)))
@@ -974,7 +952,7 @@ def accept_completed_output(root, step, *, attempt, pending_sha256, session, aut
         value=require_output_eligibility(root,c.read(c.regular(acceptance_path)))
         if (value['originals']['result.pending.json']!=pending or _check(root,value['session'])!=Path(session).absolute()):
             raise ValueError('Original completed-output acceptance cannot be replaced')
-        c._bind_original(record/'result.pending.json', record/'science-output.json', pending_sha256, policy=c.settings(root).get('storage_policy'), root=root, size_bytes=(record/'result.pending.json').stat().st_size, source_kind='mutable')
+        c._bind_original(record/'result.pending.json', record/'science-output.json', policy=c.settings(root).get('storage_policy'), root=root, size_bytes=(record/'result.pending.json').stat().st_size, source_kind='managed_frozen')
         return c.seal_result(root,step)
     paths=execution.records(root,step);job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
     if (len(paths)!=3 or paths[-1]!=record or job['role']!='W'
@@ -985,7 +963,7 @@ def accept_completed_output(root, step, *, attempt, pending_sha256, session, aut
     facts=_completed_output_facts(root,step,record,Path(session).absolute())
     science=c.science_payload(record/'result.pending.json','W',job['handoff_protocol'],'selection' in job,**c.response_options(job))
     if science.get('stage_intent') not in {'review','decision'}:raise ValueError('Completed output cannot reopen exploration')
-    binding=c.digest(record/'native-intent.json')
+    binding=c.record_ref(record/'native-intent.json')
     for name in ('runner-process.json','native-process.json'):
         process=c.read(record/name)
         if process['boot_id']!=budget.clock_stamp()['boot_id'] or runtime.process_matches(process,binding):
@@ -1008,5 +986,5 @@ def accept_completed_output(root, step, *, attempt, pending_sha256, session, aut
         session=_ref(root,Path(session).absolute()),facts=facts,admission=admission,usage_originals=_admission_usage_refs(root,step))
     require_output_eligibility(root,value)
     c.write(acceptance_path,value);acceptance_path.chmod(0o400)
-    c._bind_original(record/'result.pending.json', record/'science-output.json', pending_sha256, policy=c.settings(root).get('storage_policy'), root=root, size_bytes=(record/'result.pending.json').stat().st_size, source_kind='mutable')
+    c._bind_original(record/'result.pending.json', record/'science-output.json', policy=c.settings(root).get('storage_policy'), root=root, size_bytes=(record/'result.pending.json').stat().st_size, source_kind='managed_frozen')
     return c.seal_result(root,step)

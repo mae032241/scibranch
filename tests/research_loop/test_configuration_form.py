@@ -88,7 +88,7 @@ def test_blank_page_has_no_implicit_inputs_or_budgets(tmp_path):
 def test_complex_cov_declaration_roundtrips_all_typed_controls_and_export(tmp_path):
     draft = complete(tmp_path)
     document = draft['document']
-    document['research']['source_restrictions'] = [dict(source='public/dataset.bin', sha256='a'*64, restriction='restricted')]
+    document['research']['source_restrictions'] = [dict(source='public/dataset.bin', restriction='restricted')]
     document['research']['user_updates'] = []
     document['agent'].update(backend='codex', model='global', reasoning_effort='high', service_tier='default',
         roles={role:dict(model='model-'+role, reasoning_effort='high', service_tier='priority') for role in 'HWAE'},

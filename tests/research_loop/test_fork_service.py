@@ -24,7 +24,7 @@ def transaction(tmp_path, monkeypatch):
         if _on_created is not None:
             _on_created(root)
         c.write(root / 'settings.json', dict(goal_id='child-' + service.uuid.uuid4().hex))
-        c.write(root / 'settings-identity.json', dict(sha256=c.digest(root / 'settings.json')))
+        c.write(root / 'settings-identity.json', dict(path='settings.json'))
         c.write(root / 'pause.request', dict(reason='fork_created_paused'))
         c.write(root / 'host-runtime/fork/manifest.json', dict(kind='test-transaction-only'))
         return root, c.settings(root)
@@ -241,7 +241,7 @@ def test_file_objective_over_inline_limit_survives_fork(tmp_path, monkeypatch):
     assert not (tmp_path / 'inline').exists()
     parent = tmp_path / 'parent'
     controller.prepare(parent, objective, public, ['fixture-no-execution'], **options,
-        source_restrictions=[dict(source=str(objective), sha256=c.digest(objective), restriction='clear')])
+        source_restrictions=[dict(source=str(objective),  restriction='clear')])
     write = c.write
 
     def write_synthetic_result(path, value):
@@ -267,7 +267,7 @@ def test_file_objective_over_inline_limit_survives_fork(tmp_path, monkeypatch):
     assert (child / 'project/global/objective.md').read_bytes() == original
     sources = qualification._sources(child)
     assert sources['globals'][0]['origin']['path'] == str(child / 'project/global/objective.md')
-    assert sources['globals'][0]['origin']['sha256'] == c.digest(child / 'project/global/objective.md')
+    assert Path(sources['globals'][0]['origin']['path']).read_bytes() == (child / 'project/global/objective.md').read_bytes()
     assert any(row['origin']['path'] == str(child / 'project/global/objective.md')
                and row['restriction'] == 'clear' for row in sources['declarations'])
     assert b'.scid-fork-' not in (child / settings['source_provenance']['path']).read_bytes()
@@ -313,7 +313,7 @@ def test_selected_global_updates_and_restrictions_survive_child_birth(tmp_path):
     controller.prepare(parent, objective, public, ['fixture-no-execution'],
         max_tokens=1000, max_seconds=60, max_steps=3, model='fixture', reasoning_effort='high',
         experiment_mode='external', search_policy=None, user_updates=[update],
-        source_restrictions=[dict(source=str(path), sha256=c.digest(path), restriction=restriction)
+        source_restrictions=[dict(source=str(path),  restriction=restriction)
             for path, restriction in ((objective, 'clear'), (update, 'restricted'))])
     for step, role, parents, action in ((1, 'H', [], 'analyze'), (2, 'A', [1], 'finish')):
         _, _, record = finish(parent, step, role, parents, action=action)
@@ -333,7 +333,7 @@ def test_selected_global_updates_and_restrictions_survive_child_birth(tmp_path):
     assert b'.scid-fork-' not in (child / settings['source_provenance']['path']).read_bytes()
     shutil.rmtree(parent)
     for material in settings['global_materials']:
-        assert c.digest(child / material['source']) == material['sha256']
+        assert (child / material['source']).stat().st_size == material['size_bytes']
 
 
 @pytest.mark.parametrize('mutation,code', [('invalid_sealed_input', 'fork_origin_invalid'), ('unsupported', 'fork_source_unsupported')])
@@ -349,7 +349,7 @@ def test_shared_source_validation_rejections_have_stable_codes(tmp_path, mutatio
         settings = c.settings(parent)
         settings['handoff_protocol'] = 22
         c.write(parent / 'settings.json', settings)
-        c.write(parent / 'settings-identity.json', dict(sha256=c.digest(parent / 'settings.json')))
+        c.write(parent / 'settings-identity.json', dict(path='settings.json'))
     with pytest.raises(service.ForkError) as error:
         service.preview(parent, 2, tmp_path / 'branch', budget=BUDGET)
     assert error.value.code == code
@@ -357,7 +357,7 @@ def test_shared_source_validation_rejections_have_stable_codes(tmp_path, mutatio
 
 def test_typed_source_file_absence_retains_missing_input_code(tmp_path):
     with pytest.raises(service.ForkError) as error:
-        service._source_call(service.files.hash_file, tmp_path / 'missing-original')
+        service._source_call(service.files.stat_file, tmp_path / 'missing-original')
     assert error.value.code == 'fork_input_missing'
     assert isinstance(error.value.__cause__, FileNotFoundError)
 
@@ -506,7 +506,7 @@ def test_published_record_preserves_existing_child_integrity_checks(transaction)
     parent, child, _ = transaction
     create(parent, child)
     c.write(child / 'settings.json', dict(goal_id='a-different-child'))
-    c.write(child / 'settings-identity.json', dict(sha256=c.digest(child / 'settings.json')))
+    c.write(child / 'settings-identity.json', dict(path='settings.json'))
     with pytest.raises(service.ForkError, match='receipt identity'):
         create(parent, child)
     assert c.read(child / 'settings.json')['goal_id'] == 'a-different-child'
@@ -597,7 +597,7 @@ def test_real_published_delete_never_recreates_child(tmp_path, monkeypatch):
     receipt = service.create(parent, 2, child, budget=BUDGET,
         expected_preview_id=expected, operation_id='published-deleted')
     instance_delete.delete_instance(child, instance_id=receipt['child_identity'],
-        settings_sha256=c.digest(child / 'settings.json'), operation_id='delete-child')
+        settings_ref=c.record_ref(child / 'settings.json'), operation_id='delete-child')
     monkeypatch.setattr(service, '_prepare', lambda *_: pytest.fail('Deleted child was recreated'))
     assert service.create(parent, 2, child, budget=BUDGET,
         expected_preview_id=expected, operation_id='published-deleted') == receipt

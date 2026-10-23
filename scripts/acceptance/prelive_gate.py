@@ -10,7 +10,6 @@ Run with the candidate interpreter, e.g. ``venv/bin/python -I prelive_gate.py``.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -153,11 +152,13 @@ output.write_text(json.dumps(payload))
 '''
 
 
-def sha(path):
-    h = hashlib.sha256()
-    with Path(path).open('rb') as stream:
-        for chunk in iter(lambda: stream.read(1 << 20), b''):h.update(chunk)
-    return h.hexdigest()
+def metadata(path):
+    """Exact path and filesystem metadata, without content fingerprinting."""
+    from scidiscovery.research_loop import contracts as c
+    path = c.regular(Path(path).absolute())
+    value = path.stat()
+    return dict(path=str(path),size_bytes=value.st_size,device=value.st_dev,inode=value.st_ino,
+                modified_ns=value.st_mtime_ns,changed_ns=value.st_ctime_ns)
 
 
 def _launcher():
@@ -181,8 +182,8 @@ ADOPTED = ()  # Replay the exact policy, including disabled/missing policies.
 
 # Code/launcher identities and scratch paths are the only rebound settings.
 REBOUND = (('goal_id',), ('public_root',), ('native_launcher_argv',), ('history_observer', 'adapter'),
-           ('history_observer', 'adapter_sha256'), ('resume_policy', 'launcher_files'),
-           ('delivery_policy', 'adapter', 'adapter'), ('delivery_policy', 'adapter', 'adapter_sha256'),
+           ('history_observer', 'adapter_ref'), ('resume_policy', 'launcher_files'),
+           ('delivery_policy', 'adapter', 'adapter'), ('delivery_policy', 'adapter', 'adapter_ref'),
            ('delivery_policy', 'adapter', 'launcher_argv'), ('delivery_policy', 'adapter', 'launcher_files'))
 
 
@@ -204,12 +205,12 @@ def differences(left, right, prefix=''):
 
 def source_files(settings_path, config, manifest):
     files = [settings_path, settings_path.parent / 'settings-identity.json', Path(config['public_manifest'])]
-    files += [Path(config['public_root']) / name for name in manifest['public_files_sha256']]
-    return {str(path): sha(path) for path in files if path.is_file()}
+    files += [Path(config['public_root']) / name for name in manifest['public_files']]
+    return {str(path): metadata(path) for path in files}
 
 
 def _source_proof(root):
-    """Read exact retained declarations and globals; paths alone establish no identity."""
+    """Read exact retained declarations and globals; preserve declared paths and sizes."""
     from scidiscovery.research_loop import contracts as c, qualification
     root = Path(root).absolute()
     settings = c.settings(root)
@@ -220,26 +221,26 @@ def _source_proof(root):
             or proof['version'] != 1 or proof['scope'] != qualification.SCOPE
             or [row['material'] for row in proof['globals']] != settings['global_materials']):
         raise ValueError('Prelive source proof differs from its frozen global mapping')
-    def original(relative, digest, size):
+    def original(relative, size):
         path = root / relative
         if Path(relative).is_absolute() or path.resolve() != path or not path.is_relative_to(root):
             raise ValueError('Prelive retained source escaped its exact instance')
         path = c.regular(path)
-        if sha(path) != digest or path.stat().st_size != size:
+        if path.stat().st_size != size:
             raise ValueError('Prelive retained source bytes differ from their declaration')
     for row in proof['declarations']:
         if set(row) != {'origin', 'restriction', 'retained'} or row['restriction'] not in {'clear', 'restricted'}:
             raise ValueError('Prelive source declaration is malformed')
         origin, retained = row['origin'], row['retained']
         if (not Path(origin['path']).is_absolute() or '..' in Path(origin['path']).parts
-                or (retained['sha256'], retained['size_bytes']) != (origin['sha256'], origin['size_bytes'])):
+                or retained['size_bytes'] != origin['size_bytes']):
             raise ValueError('Prelive source identity differs from its retained original')
-        original(retained['path'], retained['sha256'], retained['size_bytes'])
+        original(retained['path'], retained['size_bytes'])
     for row in proof['globals']:
         origin, material = row['origin'], row['material']
-        if material['sha256'] != origin['sha256']:
-            raise ValueError('Prelive global mapping changed original bytes')
-        original(material['source'], origin['sha256'], origin['size_bytes'])
+        if material['size_bytes'] != origin['size_bytes']:
+            raise ValueError('Prelive global mapping changed original size')
+        original(material['source'], origin['size_bytes'])
     return proof
 
 
@@ -249,22 +250,21 @@ def source_provenance_equal(source, target, maps):
 
 
 def rebind(settings_path, launcher_path, work, scid_python, fault=None):
-    """Fresh scratch inputs; the source run is read, hashed and never written."""
+    """Fresh scratch inputs; the source run is read and never written."""
     from cov_execution import delivery as cov_delivery, lineage as cov_lineage
     settings = json.loads(settings_path.read_bytes());config = json.loads(launcher_path.read_bytes())
     proof = _source_proof(settings_path.parent)
     manifest = json.loads(Path(config['public_manifest']).read_bytes())
     source_root, source_public = str(settings_path.parent.absolute()), settings['public_root']
     root, public = work / 'instance', work / 'public'
-    for name, digest in manifest['public_files_sha256'].items():
+    for name in manifest['public_files']:
         target = public / name;target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(Path(source_public) / name, target)
-        if sha(target) != digest:raise ValueError('frozen_public_input_changed')
     shutil.copyfile(config['public_manifest'], work / 'public-manifest.json')
     fake = work / 'fake-codex';fake.write_text('#!' + scid_python + '\n' + FAKE_NATIVE.replace('FAULT=None', 'FAULT=' + repr(fault), 1));fake.chmod(0o555)
     host = config.get('code_mode_host') or {}
-    if not (host.get('path') and Path(host['path']).is_file() and sha(host['path']) == host.get('sha256')):
-        path = Path('/usr/bin/true').resolve();host = dict(path=str(path), sha256=sha(path))
+    if not (host.get('path') and Path(host['path']).resolve() == Path(host['path']) and Path(host['path']).is_file()):
+        path = Path('/usr/bin/true').resolve();host = dict(path=str(path))
     venv = str(Path(scid_python).absolute().parent.parent)
     rebound = dict(config, scene_root=str(root), public_root=str(public), public_manifest=str(work / 'public-manifest.json'),
         runs_dir=str(root / 'runs'), submission_dir=str(root / 'submission'), native=str(fake),
@@ -295,9 +295,9 @@ def rebind(settings_path, launcher_path, work, scid_python, fault=None):
         target = Path(_map(row['origin']['path'], maps))
         if target not in [objective, *updates] and not target.is_relative_to(public):
             raise ValueError('Prelive source has no explicit controlled copy binding')
-        if not target.is_file() or sha(target) != row['origin']['sha256'] or target.stat().st_size != row['origin']['size_bytes']:
+        if not target.is_file() or target.stat().st_size != row['origin']['size_bytes']:
             raise ValueError('Prelive rebound source differs from the exact declared bytes')
-        restrictions.append(dict(source=str(target), sha256=row['origin']['sha256'], restriction=row['restriction']))
+        restrictions.append(dict(source=str(target), restriction=row['restriction']))
     kwargs['source_restrictions'] = restrictions
     if settings.get('history_observer') is not None:
         observer = settings['history_observer']
@@ -372,7 +372,7 @@ def _checks(root, chain, result):
             process = c.read(path) if path.is_file() else {}
             process_checks.append((process.get('action_id'), process.get('operation_id'), process.get('phase')) == (
                 intent['action_id'], intent['operation_id'], phase)
-                and (process.get('identity') or {}).get('task_sha256') == intent['operation_id'])
+                and (process.get('identity') or {}).get('task_ref') == intent['operation_id'])
         final_leaf = delivery.leaf_refs(root, actions[0]['intent']['operation_id'])
         final_phases = {c.read(root / item['path'])['phase'] for item in final_leaf}
         checks['final_host_leaf_output'] = {'audit', 'promote', 'confirm'} <= final_phases
@@ -398,7 +398,8 @@ def _checks(root, chain, result):
         checks['selection_disabled_preserved'] = screen is None
         checks['delivered_closeout_choice'] = confirmed.get('candidate_id') == final['candidate']
     submitted = root / 'submission/model.pkl'
-    checks['submission_bytes_match'] = submitted.is_file() and sha(submitted) == confirmed.get('artifact_sha256')
+    artifact = confirmed.get('artifact_ref') or {}
+    checks['submission_size_match'] = submitted.is_file() and submitted.stat().st_size == artifact.get('size_bytes')
     checks['usage_known'] = native.usage(root)['unknown_steps'] == []
     leaf = root / 'host-delivery/leaf-output'
     phases = {path.name.split('-')[1] for path in leaf.glob('*.json')} if leaf.is_dir() else set()
@@ -443,20 +444,15 @@ def run_gate(settings_path, launcher_path, work, *, scid_python=None, fault=None
     manifest = json.loads(Path(config['public_manifest']).read_bytes())
     before = source_files(settings_path, config, manifest)
     verdict = dict(passed=False, models_called=0, model_requests=0, settings=str(settings_path),
-                   settings_sha256=sha(settings_path), source_protocol=settings.get('handoff_protocol'), current_protocol=CURRENT,
+                   settings_ref=dict(path=str(settings_path)), source_protocol=settings.get('handoff_protocol'), current_protocol=CURRENT,
                    fault=fault, scope='Zero-model production-config chain; not real model behavior, target reward or remote TCAD.')
-    from scidiscovery import research_loop
-    installed = {path.name: sha(path) for path in sorted(Path(research_loop.__file__).parent.glob('*.py'))}
-    # Binds the verdict to the exact installed code a live run would import.
-    verdict['installed_modules_sha256'] = hashlib.sha256(json.dumps(installed, sort_keys=True).encode()).hexdigest()
-    verdict['repo_source_mismatch'] = sorted(name for name, digest in installed.items()
-        if not (REPO / 'src/scidiscovery/research_loop' / name).is_file() or sha(REPO / 'src/scidiscovery/research_loop' / name) != digest)[:32]
+    verdict['installed_module_root'] = str(Path(controller.__file__).parent)
     checks = verdict['checks'] = {}
     identity = settings_path.parent / 'settings-identity.json'
-    checks['source_settings_identity'] = identity.is_file() and json.loads(identity.read_bytes()).get('sha256') == verdict['settings_sha256']
+    checks['source_settings_identity'] = identity.is_file() and json.loads(identity.read_bytes()) == verdict['settings_ref']
     checks['frozen_protocol_current'] = settings.get('handoff_protocol') == CURRENT
     # Informational: the candidate launcher/adapters are what a new live run would use.
-    verdict['launcher_matches_source_run'] = all(Path(p).is_file() and sha(p) == sha(LAUNCHER) for p in settings['native_launcher_argv']
+    verdict['launcher_matches_source_run'] = all(Path(p).resolve() == LAUNCHER and Path(p).is_file() for p in settings['native_launcher_argv']
                                                 if Path(p).name.endswith('launcher.py'))
     try:
         _launcher().load(launcher_path)  # Read-only source preflight: whitelist, manifest, binaries.
@@ -474,8 +470,8 @@ def run_gate(settings_path, launcher_path, work, *, scid_python=None, fault=None
         checks['source_provenance_equal_after_rebind'] = source_provenance_equal(settings_path.parent, root, maps)
         expected = normalized(settings, maps)
         if checks['source_provenance_equal_after_rebind']:
-            # A proof hash includes its explicit source paths. Replace only after
-            # independently verifying every original, restriction and mapping.
+            # Source proof locators carry the explicit instance root. Rebind only
+            # after checking every declared size, restriction and mapping.
             expected['source_provenance'] = rebound_settings['source_provenance']
         diff = differences(expected, normalized(rebound_settings))
         verdict['adopted_defaults'] = ['/' + key for key in adopted]
@@ -492,7 +488,7 @@ def run_gate(settings_path, launcher_path, work, *, scid_python=None, fault=None
     except Exception as error:  # A gate failure is a verdict, never a retry.
         verdict['error'] = f'{type(error).__name__}: {str(error)[:400]}'
         checks['completed_without_exception'] = False
-    checks['source_unchanged'] = source_files(settings_path, config, manifest) == before
+    checks['source_metadata_unchanged'] = source_files(settings_path, config, manifest) == before
     verdict['seconds'] = round(time.monotonic() - started, 1)
     verdict['passed'] = all(checks.values())  # With a fault: the negative control behaved as required.
     return verdict

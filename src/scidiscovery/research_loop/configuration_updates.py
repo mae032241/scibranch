@@ -38,7 +38,7 @@ def revisions(root, *, through=None):
     if not paths or through == 0:
         return []
     original = c.settings(root)
-    parent = dict(path='settings.json', sha256=c.digest(c.regular(root / 'settings.json')))
+    parent = dict(path='settings.json')
     rows = []
     for index, path in enumerate(paths, 1):
         if through is not None and index > through:
@@ -46,7 +46,7 @@ def revisions(root, *, through=None):
         if path.name != f'{index:06d}.json':
             raise ValueError('Configuration revision sequence changed')
         identity = c.read(c.regular(_directory(root) / 'identities' / path.name))
-        if identity != dict(sha256=c.digest(c.regular(path))):
+        if identity != c.record_ref(c.regular(path)):
             raise ValueError('Configuration revision original changed')
         value = c.read(c.regular(path))
         if (value.get('version') != 1 or type(value.get('revision')) is not int
@@ -58,24 +58,22 @@ def revisions(root, *, through=None):
             if value['settings'].get(key) != original.get(key):
                 raise ValueError('Configuration revision changed immutable research identity')
         rows.append(value)
-        parent = dict(path=path.relative_to(root).as_posix(), sha256=c.digest(path))
+        parent = dict(path=path.relative_to(root).as_posix())
     return rows
 
 
 def _reference(root, row):
     path = _directory(root) / 'revisions' / f'{row["revision"]:06d}.json'
-    return dict(revision=row['revision'], path=path.relative_to(Path(root)).as_posix(), sha256=c.digest(c.regular(path)))
+    return dict(revision=row['revision'], path=path.relative_to(Path(root)).as_posix())
 
 
 def _read_reference(root, ref):
-    if not isinstance(ref, dict) or set(ref) != {'revision', 'path', 'sha256'} or type(ref.get('revision')) is not int or ref['revision'] < 1:
+    if not isinstance(ref, dict) or set(ref) != {'revision', 'path'} or type(ref.get('revision')) is not int or ref['revision'] < 1:
         raise ValueError('Exact configuration revision reference required')
     expected = f'host-control/configuration/revisions/{ref["revision"]:06d}.json'
     if ref['path'] != expected:
         raise ValueError('Configuration revision location changed')
     path = c.regular(Path(root) / expected)
-    if c.digest(path) != ref['sha256']:
-        raise ValueError('Configuration revision original changed')
     values = revisions(root, through=ref['revision'])
     if ref['revision'] > len(values):
         raise ValueError('Configuration revision is missing')
@@ -241,7 +239,7 @@ def submit(root, configuration, *, base=None, expected_revision=None,
                 resource_baseline = values[-1].get('resource_baseline')
         path = _directory(root) / 'revisions' / f'{revision:06d}.json'
         predecessor = (_reference(root, values[-1]) if values else
-                       dict(path='settings.json', sha256=c.digest(c.regular(root / 'settings.json'))))
+                       dict(path='settings.json'))
         predecessor.pop('revision', None)
         row = dict(version=1, revision=revision, predecessor=predecessor, settings=settings,
                    configuration=document, budget_changes=changed, resource_change=resource_changed,
@@ -250,7 +248,7 @@ def submit(root, configuration, *, base=None, expected_revision=None,
         staged = path.with_suffix('.pending')
         c.write(staged, row)
         identity = _directory(root) / 'identities' / path.name
-        c.write(identity, dict(sha256=c.digest(staged)))
+        c.write(identity, dict(path=str(path)))
         identity.chmod(0o400)
         staged.chmod(0o400)
         os.replace(staged, path)

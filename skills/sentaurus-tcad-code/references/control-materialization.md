@@ -4,7 +4,7 @@
 
 The author writes the complete solver-language project. The control plane owns
 safe file handling, capability identity, arguments, resource policy, reviewed
-case values and units, source hashes, and raw process-log capture. It does not
+case values and units, exact source references, and raw process-log capture. It does not
 generate, parse, or interpret TCAD source.
 
 ## Authoritative Task Contract
@@ -46,7 +46,7 @@ parser exists in control.
 Raw-output declarations are mechanical collection contracts, not proof that a
 solver command produces the file. The independent reviewer checks source/output
 consistency. Control validates only names, safe paths, uniqueness, size policy,
-and later collection integrity.
+and later collection path/size bindings.
 
 ## Initialization Boundary
 
@@ -59,8 +59,11 @@ cannot qualify scientific results.
 ## Failure Boundary
 
 Materialization may reject only unsafe/missing files, incomplete or duplicate
-case declarations, non-unique locators, plan/declaration case mismatch, stale
-hashes, invalid capability identity, or resource/output contract violations.
+case declarations, non-unique locators, plan/declaration case mismatch, missing
+source references, invalid capability identity, or resource/output contract violations.
+Control does not hash scientific source or outputs; approval-binding hashes follow
+its architecture allowlist. Read-only views do not establish hostile same-UID
+isolation or content-tamper detection.
 Material names, equations, units inside TCAD commands, and boundary semantics
 belong to authoring and independent review.
 

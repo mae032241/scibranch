@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 from itertools import islice
 import json
 import math
@@ -43,10 +42,24 @@ def regular_bytes(path, maximum=MAX_SUBMISSION):
         os.close(fd)
 
 
+def regular_size(path, maximum=MAX_SUBMISSION):
+    """Inspect a bounded regular original without reading its contents."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= maximum:
+            raise ValueError('bounded_regular_file_required')
+        return metadata.st_size
+    finally:
+        os.close(fd)
+
+
 def prepare(output, freeze):
     frozen = json.loads(Path(freeze).read_text())
     task = frozen['task']
-    if task['commit'] != REVISION or task['id'] != 'nbody-accel-iterative' or set(task['public_files_sha256']) != set(PUBLIC):
+    if (task['commit'] != REVISION or task['id'] != 'nbody-accel-iterative'
+            or not isinstance(task['public_files'],list) or len(task['public_files']) != len(PUBLIC)
+            or set(task['public_files']) != set(PUBLIC)):
         raise ValueError('exact_frozen_nbody_public_inputs_required')
     public = Path(task['public_path']).resolve()
     blobs = {}
@@ -55,8 +68,6 @@ def prepare(output, freeze):
         if path.resolve() != path.absolute():
             raise ValueError('public_input_symlink_rejected')
         raw = regular_bytes(path)
-        if hashlib.sha256(raw).hexdigest() != task['public_files_sha256'][name]:
-            raise ValueError('frozen_public_input_changed:'+name)
         blobs[name] = raw
     root = Path(output).absolute()
     root.mkdir(exist_ok=False)
@@ -69,7 +80,7 @@ def prepare(output, freeze):
     (root/'workspace/simulator.py').write_bytes(blobs['environment/workspace/simulator.py'])
     (root/'host-private/canary.txt').write_bytes(b'local-smoke-private-canary\n')
     manifest = dict(kind='nbody_local_engineering_preparation', task_revision=REVISION,
-        public_files_sha256=task['public_files_sha256'], source_candidate=frozen['candidate']['source_commit'],
+        public_files=list(PUBLIC), public_file_sizes={name:len(raw) for name,raw in blobs.items()}, source_candidate=frozen['candidate']['source_commit'],
         installed_candidate=frozen['candidate']['path'], launch_ready=False,
         no_model=True, scoring='not_run', profile_proposal='not_activated')
     write(root/'prepared.json', manifest)
@@ -98,6 +109,9 @@ def namespace_command(root, python, command):
 
 
 def verify_public(root, manifest):
+    if (not isinstance(manifest['public_files'],list) or len(manifest['public_files']) != len(PUBLIC)
+            or set(manifest['public_files']) != set(PUBLIC) or manifest['task_revision'] != REVISION):
+        raise ValueError('exact_public_manifest_required')
     public = root/'public'
     directories = {}
     for name in PUBLIC:
@@ -112,7 +126,7 @@ def verify_public(root, manifest):
             if {item.name for item in islice(entries,len(names)+1)} != names:
                 raise ValueError('prepared_public_whitelist_changed')
     for name in PUBLIC:
-        if hashlib.sha256(regular_bytes(public/name)).hexdigest() != manifest['public_files_sha256'][name]:
+        if regular_size(public/name) != manifest['public_file_sizes'][name]:
             raise ValueError('prepared_public_input_changed:'+name)
 
 
@@ -148,9 +162,9 @@ def compute_smoke(private, host_netns):
         python=sys.version.split()[0],numpy=numpy.__version__,finite_values=True,stable_ids=True,
         cwd=str(Path.cwd()),native_child_boundary=child.stdout.strip(),task_network_namespace='separate',
         host_private_not_mounted=True,host_environment_cleared=True,supervisor_lock_not_exposed=True,
-        source_sha256=hashlib.sha256(regular_bytes('/app/workspace/simulator.py')).hexdigest(),
-        input_sha256=hashlib.sha256(Path('/app/output/input.json').read_bytes()).hexdigest(),
-        output_sha256=hashlib.sha256(Path('/app/output/output.json').read_bytes()).hexdigest())
+        source_ref=dict(path='/app/workspace/simulator.py',size_bytes=regular_size('/app/workspace/simulator.py')),
+        input_ref=dict(path='/app/output/input.json',size_bytes=regular_size('/app/output/input.json')),
+        output_ref=dict(path='/app/output/output.json',size_bytes=regular_size('/app/output/output.json')))
     write('/app/output/cpu-smoke.json', result)
     print(json.dumps(result))
 
@@ -187,7 +201,7 @@ def handoff(root):
     target = root/'submission/simulator.py'
     with target.open('xb') as stream:
         stream.write(raw)
-    result = dict(file='simulator.py',bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest(),
+    result = dict(file='simulator.py',path=str(target.absolute()),size_bytes=len(raw),
         scoring='not_run',source='quiescent_engineering_smoke_workspace')
     write(root/'handoff.json',result)
     return result

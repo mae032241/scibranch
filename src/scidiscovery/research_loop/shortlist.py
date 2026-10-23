@@ -41,7 +41,7 @@ def _directory(root, before_step=None, *, repair_step=None, normal_step=None):
 
 
 def _boundary(root, begin):
-    return dict(seq=begin['seq'], sha256=c.digest(root / 'control-ledger' / f'{begin["seq"]:06d}.json'))
+    return dict(seq=begin['seq'],record=c.record_ref(root/'control-ledger'/f'{begin["seq"]:06d}.json'))
 
 
 def _members(root, begin, before_step=None):
@@ -73,7 +73,7 @@ def screen(root, begin, before_step=None):
     rows = [dict(member, smoke=dict(status='not_run', note='explicit_candidate_required'),
                  audit=dict(status='not_run', note='read_exact_candidate_audit_receipts'))
             for member in computed['members']]
-    _save(final, dict(version=2, public_view_version=3, shortlist_sha256=c.digest(path),
+    _save(final, dict(version=2, public_view_version=3, shortlist_ref=c.record_ref(path),
         closeout_begin=computed['closeout_begin'], rows=rows))
     return None
 
@@ -89,13 +89,13 @@ def bind_normal(root, job):
         if c.read(c.regular(path))!=computed:raise ValueError('Ordinary A comparison input changed')
     else:_save(path,computed)
     final=directory/'screen.json'
-    frozen=dict(version=2,public_view_version=3,shortlist_sha256=c.digest(path),source_nodes=computed['source_nodes'],
+    frozen=dict(version=2,public_view_version=3,shortlist_ref=c.record_ref(path),source_nodes=computed['source_nodes'],
         rows=[dict(member,smoke=dict(status='not_run',note='explicit_candidate_required'),
             audit=dict(status='not_run',note='read_exact_candidate_audit_receipts')) for member in computed['members']])
     if final.exists():
         if c.read(c.regular(final))!=frozen:raise ValueError('Ordinary A comparison catalogue changed')
     else:_save(final,frozen)
-    return dict(version=2,sha256=c.digest(final),normal_step=job['step'])
+    return dict(version=2,record=c.record_ref(final),normal_step=job['step'])
 
 
 def marker(root,before_step=None):
@@ -106,7 +106,7 @@ def marker(root,before_step=None):
     if value.get('version') != 2 or value.get('public_view_version') != 3:
         raise ValueError('Unsupported frozen candidate catalogue')
     if not value['rows']:return None
-    return dict(version=2, sha256=c.digest(path),**(dict(repair_step=int(directory.name)) if directory.parent.name=='repairs' else {}))
+    return dict(version=2,record=c.record_ref(path),**(dict(repair_step=int(directory.name)) if directory.parent.name=='repairs' else {}))
 
 
 def _screen(root, mark, *, job=None):
@@ -130,8 +130,8 @@ def _screen(root, mark, *, job=None):
             ref=original['fork_source']['job']
             source=originals.source_for_ref(source,ref)
             originals.resolve_ref(source,ref)
-        path=originals.resolve_ref(source,dict(path=path.relative_to(root).as_posix(),sha256=mark['sha256']))
-    if c.digest(c.regular(path)) != mark['sha256']:
+        path=originals.resolve_ref(source,dict(path=path.relative_to(root).as_posix()))
+    if (history.source_control_ref(source,(directory/'screen.json').relative_to(root).as_posix()) if source is not None else c.record_ref(c.regular(path))) != mark['record']:
         raise ValueError('Control candidate catalogue changed')
     value = c.read(path)
     if value.get('version') != 2 or value.get('public_view_version') != 3:
@@ -142,8 +142,8 @@ def _screen(root, mark, *, job=None):
             raise ValueError('Ordinary A catalogue differs from its exact scientific input')
     original=directory/'shortlist.json'
     if source is not None:
-        original=originals.resolve_ref(source,dict(path=original.relative_to(root).as_posix(),sha256=value['shortlist_sha256']))
-    if value['shortlist_sha256'] != c.digest(c.regular(original)):
+        original=originals.resolve_ref(source,dict(path=original.relative_to(root).as_posix()))
+    if value['shortlist_ref'] != (history.source_control_ref(source,(directory/'shortlist.json').relative_to(root).as_posix()) if source is not None else c.record_ref(c.regular(original))):
         raise ValueError('Control candidate catalogue source changed')
     if source is not None:
         from . import candidate_refs

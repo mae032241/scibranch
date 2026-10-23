@@ -56,15 +56,15 @@ def finish(root, step, role, parents, text='A bounded scientific finding', actio
         path = work / 'artifacts' / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(contents)
-    task_sha256=contracts.digest(root / 'jobs' / f'{step:03d}.json')
+    task_ref=contracts.record_ref(root / 'jobs' / f'{step:03d}.json')
     if preserve_native_intent:
-        assert contracts.read(contracts.regular(record/'native-intent.json'))['task_sha256']==task_sha256
+        assert contracts.read(contracts.regular(record/'native-intent.json'))['task_ref']==task_ref
     else:
-        contracts.write(record / 'native-intent.json', dict(task_sha256=task_sha256))
+        contracts.write(record / 'native-intent.json', dict(task_ref=task_ref))
     contracts.write(record / 'science-output.json', payload)
     contracts.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
     contracts.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None,
-        usage=native.usage(root), raw_sha256=contracts.digest(record / 'science-output.json')))
+        usage=native.usage(root), raw_ref=contracts.file_ref(record / 'science-output.json')))
     contracts.seal_result(root, step)
     return job, work, record
 
@@ -96,9 +96,16 @@ def test_real_scientific_route_reuses_only_selected_file_without_ancestry(scene,
         # build_job is idempotent for an identical request; use the actual route.
         parents = [int(Path(ref['path']).parts[2]) for ref in job['direct_refs']]
         finish(root, step, role, parents, text, action, files, selection=['W002-I001'] if step == 4 else [] if step == 5 else None)
-    monkeypatch.setattr(native, 'execute_native', execute)
+    errors = []
+    def observed_execute(root, step):
+        try:
+            return execute(root, step)
+        except Exception as error:
+            errors.append(repr(error))
+            raise
+    monkeypatch.setattr(native, 'execute_native', observed_execute)
     result = controller.run(scene)
-    assert result['status'] == 'finish' and result['completed_steps'] == 6, result
+    assert result['status'] == 'finish' and result['completed_steps'] == 6, (result, errors)
     final = contracts.workspace(scene, 6)
     assert not (final / REUSED).exists()  # Retained H4 must not re-send to A6.
     assert contracts.read(contracts.host_record(final) / 'result-identity.json').get('selected_inputs', []) == []

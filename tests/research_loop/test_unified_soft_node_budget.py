@@ -99,7 +99,7 @@ def test_old_hard_or_missing_mode_is_preserved_without_execution(tmp_path, mode)
     else:
         settings['node_budget_mode'] = mode
     c.write(root / 'settings.json', settings)
-    c.write(root / 'settings-identity.json', dict(sha256=c.digest(root / 'settings.json')))
+    c.write(root / 'settings-identity.json', dict(path='settings.json'))
     originals = {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
     with pytest.raises(UnsupportedProtocol, match='preserved without migration'):
         controller.run(root)
@@ -114,7 +114,7 @@ def test_w_token_crossing_requests_review_without_stopping_original_node(tmp_pat
     job = c.build_job(root, 2, 'W', [1])
     start_clock(root, 'Original W reaches soft token target')
     record = execution.record(root, 2)
-    intent = dict(task_sha256=c.digest(root / 'jobs/002.json'), budget_slice=budget.accept_node(root, job))
+    intent = dict(task_ref=c.record_ref(root / 'jobs/002.json'), budget_slice=budget.accept_node(root, job))
     c.write(record / 'native-intent.json', intent)
     meter = dict(input_tokens=12, cached_input_tokens=5, output_tokens=3)
     c.write(record / 'usage.json', meter)
@@ -131,7 +131,7 @@ def test_author_token_hint_is_soft_while_finite_author_time_stays_bounded(tmp_pa
     root = scene(tmp_path, tokens=1000, seconds=20, search_policy=None)
     job = c.build_job(root, 1, 'H', [])
     start_clock(root, 'Verified author allowance advisory projection')
-    intent = dict(task_sha256=c.digest(root / 'jobs/001.json'), budget_slice=budget.accept_node(root, job),
+    intent = dict(task_ref=c.record_ref(root / 'jobs/001.json'), budget_slice=budget.accept_node(root, job),
                   continuation_kind='author_closeout')
     intent['budget_slice'].update(previous_tokens=50, previous_seconds=2.)
     c.write(execution.record(root, 1) / 'native-intent.json', intent)

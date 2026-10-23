@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import ast
 import builtins
-import hashlib
 import importlib.util
 import json
 import os
@@ -18,7 +17,7 @@ import sys
 
 MAX_BYTES = 256_000
 MAX_SOURCE_BYTES = 32 * 1024 * 1024  # Existing managed payload allowance.
-ENV_KEYS = ('SCID_COV_RECEIPT_PATH','SCID_COV_CALL_ID','SCID_COV_ACCEPTED_SHA256','SCID_COV_SOURCE_SHA256')
+ENV_KEYS = ('SCID_COV_RECEIPT_PATH','SCID_COV_CALL_ID','SCID_COV_SCOPE','SCID_COV_SOURCE_REF')
 
 
 def encoded(value):
@@ -31,14 +30,7 @@ def original(path,limit=None):
         raise ValueError('Cov receipt requires an exact original executable source')
     size=path.stat().st_size
     if limit is not None and size>limit:raise ValueError('Cov receipt original exceeds its existing read bound')
-    digest=hashlib.sha256();observed=0
-    with path.open('rb') as stream:
-        for chunk in iter(lambda:stream.read(1024*1024),b''):
-            observed+=len(chunk)
-            if limit is not None and observed>limit:raise ValueError('Cov receipt original exceeds its existing read bound')
-            digest.update(chunk)
-    if observed!=size:raise ValueError('Cov receipt original changed while being read')
-    return dict(path=str(path),sha256=digest.hexdigest(),size_bytes=size)
+    return dict(path=str(path),size_bytes=size)
 
 
 def _shape(nodes):
@@ -74,13 +66,14 @@ def profile(argv,channel):
 
 
 def envelope(accepted,row):
-    return dict(version=1,call_id=accepted['call_id'],accepted_sha256=hashlib.sha256(encoded(accepted)).hexdigest(),
-        source_sha256=accepted['script']['sha256'],row=row)
+    return dict(version=2,call_id=accepted['call_id'],scope=accepted['scope'],
+        source_ref=accepted['script'],row=row)
 
 
 def environment(accepted,directory):
     value=envelope(accepted,None)
-    return dict(zip(ENV_KEYS,(str(directory/'receipt.json'),accepted['call_id'],value['accepted_sha256'],value['source_sha256'])))
+    return dict(zip(ENV_KEYS,(str(directory/'receipt.json'),accepted['call_id'],
+        encoded(value['scope']).decode(),encoded(value['source_ref']).decode())))
 
 
 def _runner(accepted,directory):
@@ -153,13 +146,11 @@ def main():
     if len(sys.argv)==3 and sys.argv[1]=='--science-runner':return science_runner(sys.argv[2])
     if len(sys.argv)!=2:raise ValueError('One exact accepted call original is required')
     path=Path(sys.argv[1]);directory=path.parent
-    proof=original(path);accepted=json.loads(path.read_bytes())
+    original(path);accepted=json.loads(path.read_bytes())
     if path.name!='accepted.json' or directory.name!=accepted['call_id']:
         raise ValueError('Receipt transport changed its accepted call')
-    if proof['sha256']!=hashlib.sha256(encoded(accepted)).hexdigest():
-        raise ValueError('Receipt transport acceptance is not canonical')
     source=original(accepted['source_script'])
-    if (source['sha256']!=accepted['prepared']['sha256'] or source['sha256']!=accepted['script']['sha256']
+    if (source['path']!=accepted['prepared']['local_path']
             or source['size_bytes']!=accepted['prepared']['size_bytes'] or source['size_bytes']!=accepted['script']['size_bytes']):
         raise ValueError('Receipt transport source changed before execution')
     transport=accepted['receipt_transport']

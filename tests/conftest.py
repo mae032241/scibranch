@@ -8,12 +8,6 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _private_shared_skill_store(monkeypatch, tmp_path):
-    """Tests must never populate or corrupt the operator's frozen Skill cache."""
-    monkeypatch.setenv("SCID_SHARED_STORE", str(tmp_path / "shared-skill-store"))
-
-
-@pytest.fixture(autouse=True)
 def _source_subprocess_paths(monkeypatch, request):
     """Preserve independent package imports in source-launched child interpreters."""
     if Path(request.node.path).is_relative_to(Path(__file__).parent / "installation"):

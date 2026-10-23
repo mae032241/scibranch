@@ -1,5 +1,6 @@
 """Repair retains the exact old observation and binds current H authority."""
 import json
+from pathlib import Path
 
 import pytest
 
@@ -54,8 +55,8 @@ def test_cov_revised_h_repairs_exact_old_combination_without_inheriting_screenin
     assert subject['step']==2 and subject['call']['call_id']==observed['call_id']
     assert subject['call']['status']=='known_failed'
     assert subject['call']['mechanism_binding']['source_h']==1
-    assert subject['call']['mechanism_binding']['source_h_sha256']==c.digest(execution.record(root,1)/'result-identity.json')
-    assert authorization['step']==4 and authorization['seal_sha256']==c.digest(execution.record(root,4)/'result-identity.json')
+    assert subject['call']['mechanism_binding']['source_h_ref']==c.record_ref(execution.record(root,1)/'result-identity.json')
+    assert authorization['step']==4 and authorization['seal_ref']==c.record_ref(execution.record(root,4)/'result-identity.json')
     assert job['search']['repair_root']==2 and search.launch_reason(root,job) is None
     assert repair['breadth']['baseline']==[dict(mechanism_ref='h001.m1',accepted_count=1)]
     assert repair['breadth']['mechanisms'][0]['source_h']==4
@@ -188,7 +189,7 @@ def test_archive_alias_of_new_output_cannot_select_its_original_input_call(tmp_p
     # The physical path and content match, but this selected logical object is
     # another call's OUTPUT, not this call's accepted input material lineage.
     assert material['source']==accepted['source_script']==str(archive)
-    assert material['sha256']==accepted['script']['sha256']
+    assert Path(material['source']).read_bytes()==Path(accepted['script']['path']).read_bytes()
     assert '/'+generated['call_id']+'/' in material['path']
     a(root,3,[1,2],action='revise_h')
     selected=next(row['id'] for row in history.implementation_options(root,2) if row['label']=='original.py')

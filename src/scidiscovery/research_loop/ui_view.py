@@ -959,9 +959,9 @@ def audit_facts(root, projection, *, subject=None):
         chosen, status = value.get('candidate_id'), value['result']['status']
         if chosen is None:
             continue
-        binding = c.read(directory / 'binding.json') if value.get('binding_sha256') is not None else None
+        binding = c.read(directory / 'binding.json') if value.get('binding_ref') is not None else None
         artifact = binding['source']['objects']['artifact'] if binding is not None else None
-        matched = artifact is not None and models.get(chosen) == {(artifact['sha256'], artifact['size_bytes'])}
+        matched = artifact is not None and models.get(chosen) == {(artifact['path'], artifact['size_bytes'])}
         result[chosen] = ('公开审计通过' if status == 'audited' and matched else
             '公开审计已完成；候选文件归属未知' if status == 'audited' else
             '公开审计失败' if status == 'rejected' else '公开审计未完成')
@@ -1039,7 +1039,7 @@ def candidate_file(reader, candidate, projection):
             if owner in {row['step'] for row in projection.get('records', [])}:
                 for index, member in enumerate(reader.node(owner)['seal'].get('materials') or [], 1):
                     if member['path'] == 'inputs/parents/' + f'{owner:03d}/artifacts/' + match[2]:
-                        return dict(step=owner, index=index, name=display._label(member, owner), sha256=member['sha256'])
+                        return dict(step=owner, index=index, name=display._label(member, owner), reference=dict(path=member['source'],size_bytes=member['size_bytes']))
     match = re.fullmatch(r'[HWAE](\d{3,})-C(\d{3,})/(.+)', candidate['reference'])
     if not match or int(match[1]) != candidate['step']:
         return None
@@ -1055,7 +1055,7 @@ def candidate_file(reader, candidate, projection):
         except ValueError:
             continue
         if label == name:
-            return dict(step=step, index=index, name=name, sha256=material.get('sha256'))
+            return dict(step=step, index=index, name=name, reference=dict(path=material['source'],size_bytes=material['size_bytes']))
     return None
 
 

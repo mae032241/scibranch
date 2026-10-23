@@ -83,7 +83,7 @@ def closeout_author(monkeypatch, *attempts, authorize_final=True,cleanup='observ
         calls.append((step, task))
         record = c.host_record(c.workspace(root, step))
         job=c.read(root/'jobs'/f'{step:03d}.json')
-        intent=dict(step=step,task_sha256=c.digest(root/'jobs'/f'{step:03d}.json'))
+        intent=dict(step=step,task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'))
         if job.get('final_only') and authorize_final:intent['budget_slice']=budget.accept_node(root,job)
         c.write(record/'native-intent.json',intent)
         c.write(record / 'science-output.json', payload)
@@ -92,7 +92,7 @@ def closeout_author(monkeypatch, *attempts, authorize_final=True,cleanup='observ
         observation=dict(coverage='terminal',source='turn.completed',tokens=meter)
         c.write(record/'usage-observation.json',observation)
         usage=native.usage(root)
-        outcome=dict(returncode=0,stop_reason=None,cleanup=cleanup,usage=usage,raw_sha256=c.digest(record/'science-output.json'))
+        outcome=dict(returncode=0,stop_reason=None,cleanup=cleanup,usage=usage,raw_ref=c.file_ref(record/'science-output.json'))
         accepted=budget.final_a_return(root,job,intent)
         if accepted is not None:
             outcome.update(metering=observation,final_a_completion=budget.final_a_receipt(accepted,intent,meter,usage))
@@ -252,7 +252,7 @@ def test_protocol_18_is_read_only_and_cannot_be_migrated_to_current_selection(tm
     from scidiscovery.research_loop.protocol import UnsupportedProtocol
     root=scene(tmp_path)
     settings=c.read(root/'settings.json');settings['handoff_protocol']=18
-    c.write(root/'settings.json',settings);c.write(root/'settings-identity.json',dict(sha256=c.digest(root/'settings.json')))
+    c.write(root/'settings.json',settings);c.write(root/'settings-identity.json',dict(path='settings.json'))
     before={p.relative_to(root):p.read_bytes() for p in root.rglob('*') if p.is_file()}
     monkeypatch.setattr(native,'execute_native',lambda *a,**kw:pytest.fail('Retired protocol cannot run A'))
     with pytest.raises(UnsupportedProtocol):controller.closeout(root)

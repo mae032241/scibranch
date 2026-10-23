@@ -1,5 +1,4 @@
 """Generic task execution/result/artifact handoff, using real CLIs and no models."""
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -134,7 +133,7 @@ def test_generic_inverse_default_local_cli_handoff_and_export(tmp_path, executio
         assert (Path(accepted['experiment_directory']) / 'dataset.json').read_text().startswith('source deliberately changed')
         evidence.append(dict(call_id=call['call_id'], status=call['status'], accepted=call['accepted'],
                              result=call['execution']['result'], originals=call['originals'], outputs=call['outputs']))
-    before = {str(p): c.digest(p) for p in calls_directory.rglob('*') if p.is_file()}
+    before = {str(p): (p).read_bytes() for p in calls_directory.rglob('*') if p.is_file()}
     repeated = cli('run', '--root', root)
     assert repeated['status'] == finished['status']
     if deliver:assert repeated['last_confirmed'] == finished['last_confirmed']
@@ -173,10 +172,10 @@ def test_generic_inverse_default_local_cli_handoff_and_export(tmp_path, executio
         assert comparison_choice == c.read(c.host_record(c.workspace(root, 4)) / 'science-output.json')['candidate_comparison']
         assert c.settings(root)['max_steps'] == budget.effective_max_steps(root) == budget.used_steps(root) == 6
         assert (bundle / 'artifact').read_bytes() == (root / chosen['evidence'][1]['snapshot']).read_bytes()
-        previous = {str(p): c.digest(p) for p in target.rglob('*') if p.is_file()}
+        previous = {str(p): (p).read_bytes() for p in target.rglob('*') if p.is_file()}
         assert cli('closeout', '--root', root)['status'] == 'delivery_confirmed'
         assert budget.closeout_state(root)['actions'] == actions
-        assert previous == {str(p): c.digest(p) for p in target.rglob('*') if p.is_file()}
+        assert previous == {str(p): (p).read_bytes() for p in target.rglob('*') if p.is_file()}
         # Reproduce the delivered product using only the delivered inputs and replay instruction.
         replay = tmp_path / 'delivery-reproduction'
         shutil.copytree(bundle / 'inputs', replay)
@@ -189,7 +188,7 @@ def test_generic_inverse_default_local_cli_handoff_and_export(tmp_path, executio
                 assert (replay / 'artifacts' / name.removeprefix('outputs/')).read_bytes() == (bundle / name).read_bytes()
     else:
         assert not list((root / 'host-delivery').glob('**/*.intent.json'))
-    assert before == {str(p): c.digest(p) for p in calls_directory.rglob('*') if p.is_file()}
+    assert before == {str(p): (p).read_bytes() for p in calls_directory.rglob('*') if p.is_file()}
     # Rebuild only from archived originals after export, not the changed Worker inputs.
     reproduced = []
     for call in calls:
@@ -202,7 +201,7 @@ def test_generic_inverse_default_local_cli_handoff_and_export(tmp_path, executio
             if '/inputs/' not in item['path']:
                 continue
             original = root / item['snapshot']
-            assert hashlib.sha256(original.read_bytes()).hexdigest() == item['sha256']
+            assert original.stat().st_size == item['size_bytes']
             destination = replay / item['path'].split('/inputs/', 1)[1]
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(original.read_bytes())
@@ -221,7 +220,7 @@ def test_generic_inverse_default_local_cli_handoff_and_export(tmp_path, executio
                   archive_reproduction_byte_identical=reproduced, core_module=str(c.__file__),
                   candidate_ids=[row['id'] for row in observation['candidates']],
                   directory_delivery=(dict(status=exported['status'], candidate_id=manifest['candidate_id'],
-                      operation_id=operation, manifest_sha256=c.digest(bundle / 'manifest.json'),
+                      operation_id=operation, manifest_ref=c.record_ref(bundle / 'manifest.json'),
                       submit_count=sum(row['intent']['action_kind']=='submit' for row in actions),
                       exact_bundle_reproduction=True) if deliver else None),
                   limitations=['Public target stress only; no hidden reward.',
@@ -274,9 +273,9 @@ def test_generic_directory_delivery_preserves_final_author_without_optional_comp
     bundle = target / operation
     manifest = c.read(bundle / 'manifest.json')
     assert manifest['operation_id'] == operation and manifest['candidate_id'] == chosen['id']
-    assert c.digest(bundle / 'artifact') == manifest['artifact_sha256'] == chosen['evidence'][1]['sha256']
+    assert manifest['artifact_ref'] == actions[0]['intent']['binding']['source']['objects']['artifact']
     assert (bundle / 'artifact').read_bytes() == (root / chosen['evidence'][1]['snapshot']).read_bytes()
-    assert all(c.digest(bundle / name) == digest for name, digest in manifest['objects'].items())
+    assert all((bundle / name).stat().st_size == reference['size_bytes'] for name, reference in manifest['objects'].items())
     delivered = {path: path.read_bytes() for path in target.rglob('*') if path.is_file()}
     from scidiscovery.research_loop import native
     observed_tokens = native.usage(root)['observed_tokens']
@@ -436,7 +435,7 @@ print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=10,cached_in
     assert (bundle/'artifact').read_bytes()==b'second original'
     manifest=c.read(bundle/'manifest.json')
     assert manifest['result']['candidate']['artifact']=='artifacts/a-second.bin'
-    assert manifest['artifact_sha256']==selected['evidence'][1]['sha256']
+    assert manifest['artifact_ref']['size_bytes']==selected['evidence'][1]['size_bytes']
     from scidiscovery.research_loop import candidate_refs,generic_results,history
     for step in (3,4):
         job=c.read(root/'jobs'/f'{step:03d}.json')
@@ -506,26 +505,26 @@ def test_generic_isolated_delivery_keeps_large_manifest_and_all_objects(tmp_path
         '\nimport ssl\nfrom pathlib import Path\n' +
         'assert all(not Path(path).exists() for path in ' + repr([str(path) for path in private]) + ')\n')
     artifact=inputs/'artifact';artifact.write_bytes(b'exact managed artifact')
-    objects={'artifact':c.digest(artifact)}
+    objects={'artifact':c.file_ref(artifact)}
     for index in range(150):
         name='outputs/'+str(index)+'x'*170
         item=inputs/name;item.parent.mkdir(exist_ok=True);item.write_text('exact output '+str(index))
-        objects[name]=c.digest(item)
+        objects[name]=c.file_ref(item)
     spec=generic_delivery.descriptor(target, python=str(python))
     assert set(spec['config']['runtime_roots']) == {sys.base_prefix,
         sys.prefix if runtime == 'shared' else str(environment)}
     request=dict(phase='promote',scope=dict(handoff_protocol=protocol.CURRENT),stage=str(stage),
-        operation_id='e'*64,candidate_id='local-explicit',artifact_sha256=objects['artifact'],
-        config=spec['config'],target=spec['target'],object_digests=objects,
+        operation_id='e'*64,candidate_id='local-explicit',artifact_ref=objects['artifact'],
+        config=spec['config'],target=spec['target'],object_refs=objects,
         context=dict(kind='managed_local_result',retained_metadata='x'*280000),
-        inputs=[dict(label='scid-current-protocol',sha256=c.digest(source),size_bytes=source.stat().st_size),
-            dict(label='runtime-python',invoked_path=str(python.absolute()),path=str(python.resolve()),sha256=c.digest(python.resolve()))])
+        inputs=[dict(label='scid-current-protocol',size_bytes=source.stat().st_size),
+            dict(label='runtime-python',invoked_path=str(python.absolute()),path=str(python.resolve()))])
     promoted=delivery._call(spec,request,10)
     assert promoted['status']=='confirmed'
     saved=target/request['operation_id'];manifest=saved/'manifest.json'
     assert manifest.stat().st_size>256000
     assert c.read(manifest)['objects']==objects
-    assert all(c.digest(saved/name)==digest for name,digest in objects.items())
+    assert all((saved/name).read_bytes()==Path(reference['path']).read_bytes() for name,reference in objects.items())
     repeated=delivery._call(spec,dict(request,phase='confirm'),10)
     assert repeated['status']=='confirmed'
     (saved/next(name for name in objects if name.startswith('outputs/'))).write_text('tampered')

@@ -15,11 +15,11 @@ from test_composed_execution_results import composed_registry
 def complete(root,job,payload):
     """Represent a stopped native transport; no native/model process is invoked."""
     step=job['step'];record=execution.origin(root,step)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs'/f'{step:03d}.json')))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json')))
     c.write(record/'science-output.json',payload)
     c.write(record/'usage.json',dict(input_tokens=1,cached_input_tokens=0,output_tokens=1))
     c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,native_started=False,
-        usage=native.usage(root),raw_sha256=c.digest(record/'science-output.json')))
+        usage=native.usage(root),raw_ref=c.file_ref(record/'science-output.json')))
     c.seal_result(root,step)
     return record
 
@@ -57,11 +57,11 @@ def test_new_fork_screen_can_seal_using_its_retained_prefix(tmp_path):
         candidate_nominations=dict(representatives=[], extras=[], gaps=[
             dict(mechanism_ref='h001.m1', reason='No usable model exists.')]))
     c.write(record / 'native-intent.json',
-        dict(task_sha256=c.digest(child / 'jobs/004.json')))
+        dict(task_ref=c.record_ref(child / 'jobs/004.json')))
     c.write(record / 'science-output.json', payload)
     c.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
     c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None,
-        usage=native.usage(child), raw_sha256=c.digest(record / 'science-output.json')))
+        usage=native.usage(child), raw_ref=c.file_ref(record / 'science-output.json')))
     c.seal_result(child, 4)
     assert (record / 'result-identity.json').is_file()
     c.validate(c.workspace(child,4))
@@ -102,12 +102,12 @@ def test_fork_formal_reviewer_can_bind_inherited_compiler_originals(
     reviewer = c.build_job(root, 4, role, parents, instruction, back)
     assert reviewer['purpose'] == 'formal_review'
     record = execution.origin(root, 4)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/004.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/004.json')))
     c.write(record / 'science-output.json', dict(verdict='pass', summary='Fixture review',
         scientific_result='Exact compiler originals are retained.', limitations=['Synthetic identities only.']))
     c.write(record / 'usage.json', dict(input_tokens=1, cached_input_tokens=0, output_tokens=1))
     c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None,
-        usage=native.usage(root), raw_sha256=c.digest(record / 'science-output.json')))
+        usage=native.usage(root), raw_ref=c.file_ref(record / 'science-output.json')))
     c.seal_result(root, 4)
     _, parents, instruction, back = review.return_route(root, reviewer, [2, 3, 4])
     c.build_job(root, 5, 'A', parents, instruction, back)
@@ -134,7 +134,7 @@ def test_fork_formal_reviewer_can_bind_inherited_compiler_originals(
         # A new request must construct neutral inputs, rather than reusing the
         # historical reviewer's already frozen scientific-input copies.
         record = execution.origin(child, 3)
-        c.write(record / 'native-intent.json', dict(task_sha256=c.digest(child / 'jobs/003.json')))
+        c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(child / 'jobs/003.json')))
         c.write(record / 'science-output.json', dict(summary='Request exact review',
             scientific_result='Assess the inherited exact compiled implementation.',
             limitations=['Synthetic native identities only.'], implementation_selection=['W002-I001'],
@@ -142,7 +142,7 @@ def test_fork_formal_reviewer_can_bind_inherited_compiler_originals(
             route_reason='Assess the exact retained scientific subject.'))
         c.write(record / 'usage.json', dict(input_tokens=1, cached_input_tokens=0, output_tokens=1))
         c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None,
-            usage=native.usage(child), raw_sha256=c.digest(record / 'science-output.json')))
+            usage=native.usage(child), raw_ref=c.file_ref(record / 'science-output.json')))
         c.seal_result(child, 3)
         role, parents, instruction, back = review.request_route(child, selected,
             c.validate(c.workspace(child, 3)), [1, 2, 3])
@@ -160,7 +160,7 @@ def test_fork_formal_reviewer_can_bind_inherited_compiler_originals(
     assert proof['subject']['producer_seal']['origin_identity']==producer.origin_identity
     binding=review.input_binding(child,selected['formal_review'])
     scientific=binding['compiler_scientific_materials'][0]
-    assert c.digest(c.workspace(child,4)/scientific['path'])==scientific['sha256']
+    assert (c.workspace(child,4)/scientific['path']).stat().st_size==scientific['size_bytes']
     assert not backend.prepared and backend.submits==0
 
     compiler=execution_inputs.verify_original_compilation(producer,row['compiler'],
@@ -172,7 +172,7 @@ def test_fork_formal_reviewer_can_bind_inherited_compiler_originals(
     author_ref=compiler['author']
     retained=originals.resolve_ref(producer,author_ref)
     retained.chmod(0o600);retained.write_bytes(b'changed compiler author original')
-    with pytest.raises(ValueError,match='Original bytes changed'):
+    with pytest.raises(ValueError,match='Original size changed'):
         review.input_binding(child,selected['formal_review'])
 
 

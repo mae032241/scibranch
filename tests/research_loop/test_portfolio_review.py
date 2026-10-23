@@ -52,7 +52,7 @@ def worker(root, step, parents, *, observed=P):
     assert job['role'] == 'W' and [int(Path(row['path']).parts[2]) for row in job['direct_refs']] == parents
     record = execution.record(root, step)
     anchor = budget.accept_node(root, job)
-    intent = dict(step=step, task_sha256=c.digest(path), **(
+    intent = dict(step=step, task_ref=c.record_ref(path), **(
         dict(budget_slice=anchor) if anchor is not None else dict(search_slice=search.accept(root, job))))
     c.write(record / 'native-intent.json', intent)
     original_intent = (record / 'native-intent.json').read_bytes()
@@ -74,7 +74,7 @@ def worker(root, step, parents, *, observed=P):
     meter = dict(input_tokens=7, cached_input_tokens=2, output_tokens=3)
     c.write(record / 'usage.json', meter)
     c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, usage=native.usage(root),
-        raw_sha256=c.digest(record / 'science-output.json'), search_slice=search.report(root, job, intent, meter)))
+        raw_ref=c.file_ref(record / 'science-output.json'), search_slice=search.report(root, job, intent, meter)))
     c.seal_result(root, step)
     assert (record / 'native-intent.json').read_bytes() == original_intent
 
@@ -91,11 +91,11 @@ def author(root, step, parents, *, branch=None, portfolio=None, action='continue
         progress_assessment=dict(verdict='no_progress'), candidate_recommendation=None,
         next_action=action, route_reason='Exact scientific question', decision_request=request,
         portfolio_review=portfolio)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(path)))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(path)))
     c.write(record / 'science-output.json', payload)
     c.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
     c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, usage=native.usage(root),
-                                             raw_sha256=c.digest(record / 'science-output.json')))
+                                             raw_ref=c.file_ref(record / 'science-output.json')))
     c.seal_result(root, step)
     return job, payload
 

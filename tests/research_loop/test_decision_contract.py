@@ -45,11 +45,11 @@ def author(root, step, parents, request, *, action='continue_w', review=None):
                    search_review=review, progress_assessment=dict(verdict='no_progress'),
                    candidate_recommendation=None, next_action=action, route_reason='Exact scientific question',
                    decision_request=request, portfolio_review=None)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs' / f'{step:03d}.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json')))
     c.write(record / 'science-output.json', payload)
     c.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
     c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, usage=native.usage(root),
-                                             raw_sha256=c.digest(record / 'science-output.json')))
+                                             raw_ref=c.file_ref(record / 'science-output.json')))
     c.seal_result(root, step)
     return job, payload
 
@@ -180,7 +180,7 @@ def test_retired_schemas_and_task_writes_reject_without_changing_originals(tmp_p
     # Preserved archive bytes are fixtures, not an invocation of a retired writer.
     root = tmp_path / 'archive'
     c.write(root / 'settings.json', dict(handoff_protocol=retired))
-    c.write(root / 'settings-identity.json', dict(sha256=c.digest(root / 'settings.json')))
+    c.write(root / 'settings-identity.json', dict(path='settings.json'))
     job = dict(step=3, role='A', handoff_protocol=retired)
     c.write(root / 'jobs/003.json', job)
     c.write(c.workspace(root, 3) / 'science-task.json', dict(preserved_task='Original scientific limitations'))

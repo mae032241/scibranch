@@ -6,10 +6,8 @@ budget, recovery, or native-session continuation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import hashlib
 import json
 from pathlib import Path, PurePosixPath
-import re
 
 from scidiscovery import archive_io as files
 
@@ -26,12 +24,11 @@ def relative(value):
 
 
 def identity_key(identity):
-    if (not isinstance(identity, dict) or set(identity) != {'goal_id', 'settings_sha256'}
-            or not isinstance(identity['goal_id'], str) or not identity['goal_id']
-            or not re.fullmatch('[0-9a-f]{64}', identity['settings_sha256'])):
+    if (not isinstance(identity, dict) or set(identity) != {'goal_id', 'settings_ref'}
+            or not isinstance(identity['settings_ref'], dict) or set(identity['settings_ref']) != {'path'}
+            or not Path(identity['settings_ref']['path']).is_absolute()):
         raise ValueError('Exact original instance identity required')
-    return hashlib.sha256(files.canonical(identity)).hexdigest()
-
+    return files.safe_id(identity['goal_id'])
 
 def _json(path):
     path = files.check_path(path)
@@ -44,7 +41,7 @@ def local_identity(root):
     from . import contracts as c
     root = files.check_path(Path(root).absolute())
     settings = c.settings(root)
-    return dict(goal_id=settings['goal_id'], settings_sha256=files.hash_file(root / 'settings.json')['sha256'])
+    return dict(goal_id=settings['goal_id'], settings_ref=c.record_ref(root / 'settings.json'))
 
 
 def _manifest(root):
@@ -53,7 +50,7 @@ def _manifest(root):
     if not path.exists():
         return None
     value = _json(path)
-    if value.get('version') != 1 or value.get('kind') != 'scientific_fork':
+    if value.get('version') != 2 or value.get('kind') != 'scientific_fork':
         raise ValueError('Unsupported fork source manifest')
     return value
 
@@ -80,7 +77,7 @@ def _entry_index(entries):
     for row in entries:
         key = (identity_key(row['origin_identity']), relative(row['path']))
         versions = index.setdefault(key, [])
-        exact = (*key, row['sha256'], row['size_bytes'])
+        exact = key
         if exact in seen:
             raise ValueError('Repeated original identity in source binding')
         seen.add(exact)
@@ -168,12 +165,13 @@ def inherited(root, step):
         and not (Path(root) / 'jobs' / f'{step:03d}.json').exists())
 
 
-def dependency(source, step, *, seal_sha256=None):
+def dependency(source, step, *, seal_ref=None):
     if source.entries is None:
         return node(source.storage_root, step)
     path = f'native-evidence/{step:03d}/result-identity.json'
     matches = [row for row in source.entries if row['path'] == path
-        and (seal_sha256 is None or row['sha256'] == seal_sha256)]
+        and (seal_ref is None or seal_ref.get('path') in {path,
+            str(Path(row['origin_identity']['settings_ref']['path']).parent / path)})]
     same = [row for row in matches if row['origin_identity'] == source.origin_identity]
     if same:
         matches = same
@@ -228,11 +226,17 @@ def resolve_root_ref(root, ref, *, context=None):
     if context is not None:context.remaining_seconds()
     if 'origin_identity' in ref:
         return resolve_ref(for_origin(root, ref['origin_identity']), ref, context=context)
-    path = relative(ref['path'])
+    reference_path = Path(ref['path'])
+    if reference_path.is_absolute():
+        if not reference_path.is_relative_to(Path(root).absolute()):
+            raise ValueError('Root original reference escaped its exact instance')
+        path = relative(reference_path.relative_to(Path(root).absolute()).as_posix())
+    else:
+        path = relative(ref['path'])
     actual = Path(root) / path
     if actual.exists() or _manifest(root) is None:
-        proof = files.hash_file(actual, context=context)
-        if any(field in ref and proof[field] != ref[field] for field in ('sha256', 'size_bytes')):
+        proof = files.stat_file(actual, context=context)
+        if any(field in ref and proof[field] != ref[field] for field in ('size_bytes',)):
             raise ValueError('Original bytes changed: ' + path)
         return actual
     parts = PurePosixPath(path).parts
@@ -247,7 +251,7 @@ def resolve_root_ref(root, ref, *, context=None):
         return resolve_ref(node(root, step), ref, context=context)
     manifest = _manifest(root)
     matches = [row for row in manifest['entries'] if row['path'] == path
-        and all(field not in ref or row[field] == ref[field] for field in ('sha256', 'size_bytes'))]
+        and all(field not in ref or row[field] == ref[field] for field in ('size_bytes',))]
     if len(matches) != 1:
         raise ValueError('Original reference requires an explicit origin identity')
     return resolve_ref(for_origin(root, matches[0]['origin_identity']), matches[0], context=context)
@@ -258,11 +262,11 @@ def material_path(root, material):
     source = Path(material['source'])
     if not source.is_absolute():
         return resolve_root_ref(root, dict(path=relative(material['source']),
-            **{field: material[field] for field in ('sha256', 'size_bytes') if field in material}))
+            **{field: material[field] for field in ('size_bytes',) if field in material}))
     root = Path(root).absolute()
     if source.is_relative_to(root):
         return resolve_root_ref(root, dict(path=source.relative_to(root).as_posix(),
-            **{field: material[field] for field in ('sha256', 'size_bytes') if field in material}))
+            **{field: material[field] for field in ('size_bytes',) if field in material}))
     manifest = _manifest(root)
     if manifest is None:
         return source
@@ -272,7 +276,7 @@ def material_path(root, material):
         if source.is_relative_to(logical):
             relative_path = source.relative_to(logical).as_posix()
             entries = [row for row in manifest['entries'] if row['origin_identity'] == origin['identity']
-                and row['path'] == relative_path and row['sha256'] == material['sha256']]
+                and row['path'] == relative_path and row['size_bytes'] == material['size_bytes']]
             matches.extend(entries)
     if len(matches) != 1:
         raise ValueError('Scientific material has no unique exact inherited origin')
@@ -296,7 +300,7 @@ def material_owner(source, material):
         if logical.is_relative_to(logical_root):
             path = logical.relative_to(logical_root).as_posix()
             matches.extend(row for row in manifest['entries'] if row['origin_identity'] == origin['identity']
-                and row['path'] == path and row['sha256'] == material['sha256'])
+                and row['path'] == path and row['size_bytes'] == material['size_bytes'])
     if len(matches) != 1:
         raise ValueError('Material has no unique exact original origin')
     return for_origin(root, matches[0]['origin_identity'], step=source.step), matches[0]['path']
@@ -319,72 +323,46 @@ def has_original(source, path):
 
 
 def resolve_ref(source, ref, *, context=None):
-    if context is not None:context.remaining_seconds()
+    if context is not None: context.remaining_seconds()
     if not isinstance(source, NodeSource) or not isinstance(ref, dict):
         raise ValueError('Exact original handle and reference required')
     origin = ref.get('origin_identity', source.origin_identity)
     key = identity_key(origin)
-    path = relative(ref['path'])
+    raw_path = ref['path']
+    if Path(raw_path).is_absolute():
+        original = Path(raw_path)
+        if not original.is_relative_to(Path(source.original_root)):
+            raise ValueError('Original reference escaped its declared origin')
+        path = relative(original.relative_to(source.original_root).as_posix())
+    else:
+        path = relative(raw_path)
     if origin != source.origin_identity:
         raise ValueError('Cross-origin reference requires its own original handle')
-    expected = dict(ref)
+    expected = ref
     if source.entries is None:
         actual = files.check_path(source.storage_root / path)
     else:
-        versions = source._index.get((key, path), ())
-        matches = [row for row in versions if all(field not in ref or ref[field] == row[field]
-            for field in ('sha256', 'size_bytes'))]
-        if (not matches and isinstance(ref.get('sha256'), str)
-                and re.fullmatch('[0-9a-f]{64}', ref['sha256'])
-                and type(ref.get('size_bytes')) is int and ref['size_bytes'] >= 0):
-            # Old frozen receipts can bind a cleaned/reused locator while the
-            # exact bytes remain in the original owner's content archive. This
-            # resolves that explicit identity; it never discovers a new source,
-            # changes the logical receipt, or bypasses a damaged matching inode.
-            archived = 'host-history/objects/' + ref['sha256']
-            matches = [row for row in source._index.get((key, archived), ())
-                if row['sha256'] == ref['sha256'] and row['size_bytes'] == ref['size_bytes']]
-        if not matches and not versions:
-            raise ValueError('Original is outside the frozen fork closure: ' + key + ':' + path)
+        matches = source._index.get((key, path), ())
         if len(matches) != 1:
-            raise ValueError('Original reference has no unique exact frozen binding: ' + key + ':' + path)
+            raise ValueError('Original has no unique frozen path binding: ' + key + ':' + path)
         entry = matches[0]
-        stored_path = relative(entry['path'])
-        if entry['storage_path'] not in {f'inherited/{key}/{stored_path}',
-                f'inherited/{key}/versions/{entry["sha256"]}/{entry["size_bytes"]}/{stored_path}'}:
+        if entry['storage_path'] != f'inherited/{key}/{path}':
             raise ValueError('Original storage binding changed')
-        for field in ('sha256', 'size_bytes'):
-            if field in ref and ref[field] != entry[field]:
-                raise ValueError('Original reference differs from its frozen binding')
+        if 'size_bytes' in ref and ref['size_bytes'] != entry['size_bytes']:
+            raise ValueError('Original reference differs from its frozen binding')
         expected = entry
         actual = files.check_path(source.storage_root / entry['storage_path'])
-    from . import contracts as c
-    files.check_path(actual)
-    binding = None
-    for attempt in range(3):
-        generation = c._digest_generation(actual)
-        if generation is None or binding is not None and generation[:-1] != binding:
-            raise ValueError('Original changed while reading its binding')
-        binding = generation[:-1]
-        checked = (dict(sha256=c.digest(c.regular(actual)), size_bytes=actual.stat().st_size)
-            if context is None else files.hash_file(c.regular(actual), context=context))
-        after = c._digest_generation(actual)
-        if after != generation:
-            if attempt < 2 and c._readonly_metadata_change(generation, after):
-                continue
-            raise ValueError('Original changed while reading its binding')
-        for field in ('sha256', 'size_bytes'):
-            if field in expected and checked[field] != expected[field]:
-                raise ValueError('Original bytes changed: ' + key + ':' + path)
-        return actual
-
+    checked = files.stat_file(actual, context=context)
+    if 'size_bytes' in expected and checked['size_bytes'] != expected['size_bytes']:
+        raise ValueError('Original size changed: ' + key + ':' + path)
+    return actual
 
 def original_ref(source, path):
     path = relative(path)
     actual = resolve_ref(source, dict(path=path))
-    proof = files.hash_file(actual)
+    proof = files.stat_file(actual)
     return dict(origin_identity=source.origin_identity, path=path,
-        sha256=proof['sha256'], size_bytes=proof['size_bytes'])
+        size_bytes=proof['size_bytes'])
 
 
 def source_job(source):
@@ -399,30 +377,26 @@ def source_settings(source):
     job = source_job(source)
     if source.entries is None:
         return c.settings(source.storage_root, job)
-    path = resolve_ref(source, dict(path='settings.json', sha256=source.origin_identity['settings_sha256']))
-    initial = _json(path)
+    initial = _json(resolve_ref(source, dict(path='settings.json')))
     if initial.get('goal_id') != source.origin_identity['goal_id']:
         raise ValueError('Original settings lost its instance identity')
     revision = job.get('configuration_revision')
-    if revision is None:
-        return initial
+    if revision is None: return initial
     number = revision['revision']
-    predecessor = dict(path='settings.json', sha256=source.origin_identity['settings_sha256'])
+    predecessor = dict(path='settings.json')
     selected = None
     for index in range(1, number + 1):
         relative_path = f'host-control/configuration/revisions/{index:06d}.json'
-        proof = original_ref(source, relative_path)
-        current = _json(resolve_ref(source, proof))
+        current = _json(resolve_ref(source, dict(path=relative_path)))
         identity = _json(resolve_ref(source, dict(path=f'host-control/configuration/identities/{index:06d}.json')))
-        if (identity != dict(sha256=proof['sha256']) or current.get('revision') != index
-                or current.get('predecessor') != predecessor):
+        expected = dict(path=str(Path(source.original_root) / relative_path))
+        if identity != expected or current.get('revision') != index or current.get('predecessor') != predecessor:
             raise ValueError('Original configuration predecessor changed')
-        predecessor = dict(path=relative_path, sha256=proof['sha256'])
+        predecessor = dict(path=relative_path)
         selected = current['settings']
     if revision != dict(revision=number, **predecessor):
         raise ValueError('Original job configuration binding changed')
     return selected
-
 
 def source_record(source, name):
     name = relative(name)
@@ -487,7 +461,7 @@ def history_source(source, job):
     while owner.get('fork_source') is not None:
         ref=owner['fork_source']['job']
         source=source_for_ref(source,ref)
-        key=(identity_key(source.origin_identity),ref['sha256'])
+        key=(identity_key(source.origin_identity),ref['path'])
         if key in seen:raise ValueError('Frozen history has a cyclic task origin')
         seen.add(key)
         owner=_json(resolve_ref(source,ref))

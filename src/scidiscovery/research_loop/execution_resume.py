@@ -4,7 +4,7 @@ The seal records positive namespace/cleanup evidence before any late dispatch.
 No current missing file or PID is interpreted as proof of non-submission.
 """
 from pathlib import Path
-import hashlib
+import uuid
 import math
 import re
 import time
@@ -68,7 +68,7 @@ def _capture_pending(root, job):
             original=directory/'allocation.json'
             if not original.exists():complete=False;continue
             allocation=c.read(c.regular(original))
-            if allocation['binding']['scope']['job_sha256']==job_ref['sha256']:
+            if allocation['binding']['scope']['job_ref']==dict(path=str(root/job_ref['path'])):
                 calls.append((directory,allocation))
         # No pending authority allocation means no new attempt/request history IO.
         if not calls and not namespace and not pending:return None
@@ -98,7 +98,7 @@ def _capture_pending(root, job):
             for name in ('runner-process.json','native-process.json'):
                 if name in proofs:
                     process=q._read(root,proofs[name])
-                    if (process.get('task_sha256')!=binding or not process.get('boot_id')
+                    if (process.get('task_ref')!=binding or not process.get('boot_id')
                             or any(type(process.get(key)) is not int or process[key]<=0 for key in ('pid','start_ticks','pgid','sid'))):
                         complete=False
             attempts.append(proofs)
@@ -170,7 +170,7 @@ def verify_pending_set(root, seal, allocation_ref=None, *, unprepared=False, req
         if source is None:return q._ref(root, path)
         relative = Path(path).relative_to(source.original_root).as_posix()
         actual = _source_path(source, dict(expected, path=relative))
-        return dict(path=relative, sha256=c.digest(actual), size_bytes=actual.stat().st_size)
+        return dict(path=relative, size_bytes=actual.stat().st_size)
     ref = seal.get('pending_executions')
     if ref is None:
         raise ValueError('Original seal has no positive pending execution evidence')
@@ -200,14 +200,14 @@ def verify_pending_set(root, seal, allocation_ref=None, *, unprepared=False, req
                     or not records.is_relative_to(logical_root)
                     or original_path!=expected or binding.get('records')!=str(records)
                     or binding.get('scope')!=config.get('scope')
-                    or binding['scope'].get('job_sha256')!=seal['job_sha256']
-                    or binding.get('job',{}).get('sha256')!=value['job']['sha256']):
+                    or binding['scope'].get('job_ref')!=seal['job_ref']
+                    or q.control_reference(logical_root,binding['job'])!=q.control_reference(logical_root,value['job'])):
                 raise q.IntegrityError('Pending host preparation escaped its original job')
         return refs
     if not job.get('execution_authority'):
         if (value.get('version')!=1 or value.get('contract') is not None or value.get('complete') is not False
                 or value.get('attempts')!=[] or value.get('allocations')!=[]
-                or value['job']['sha256']!=seal['job_sha256']
+                or dict(path=str(logical_root/value['job']['path']))!=seal['job_ref']
                 or ref['path']!=(execution.origin(logical_root,job['step'])/'pending-execution-set.json').relative_to(logical_root).as_posix()
                 or not isinstance(value.get('unavailable_reason'),str)):
             raise q.IntegrityError('Binding-only pending evidence is not conservative original evidence')
@@ -228,7 +228,7 @@ def verify_pending_set(root, seal, allocation_ref=None, *, unprepared=False, req
                 version=1, options=list(authority.OPTIONS), scope=authority.SCOPE, stage='decision_originals_resource_gate_separate'):
             raise q.IntegrityError('Original pending authority contract changed')
         logical_root = Path(source.original_root)
-    if (value.get('version') != 1 or value['job']['sha256'] != seal['job_sha256']
+    if (value.get('version') != 1 or dict(path=str(logical_root/value['job']['path'])) != seal['job_ref']
             or type(value.get('complete')) is not bool
             or ref['path'] != (execution.origin(logical_root, job['step']) / 'pending-execution-set.json').relative_to(logical_root).as_posix()
             or value['contract'] != expected_contract):
@@ -240,7 +240,7 @@ def verify_pending_set(root, seal, allocation_ref=None, *, unprepared=False, req
     for row in value['allocations']:
         if context is not None:context.remaining_seconds()
         allocation = read(row['allocation'])
-        if allocation['call_id'] != row['call_id'] or allocation['binding']['scope']['job_sha256'] != seal['job_sha256']:
+        if allocation['call_id'] != row['call_id'] or allocation['binding']['scope']['job_ref'] != seal['job_ref']:
             raise q.IntegrityError('Pending allocation escaped its original job')
         for proof in row['requests']:
             request = read(proof)
@@ -249,7 +249,7 @@ def verify_pending_set(root, seal, allocation_ref=None, *, unprepared=False, req
         # New inventory refs and legacy top-level proof-shaped values share
         # the same hash/size/origin checks; legacy missing data is never empty.
         for key,item in row.items():
-            if isinstance(item,dict) and {'path','sha256','size_bytes'} <= set(item):verify_bytes(item)
+            if isinstance(item,dict) and {'path','size_bytes'} <= set(item):verify_bytes(item)
         if 'records' in row:
             if not isinstance(row['records'],list):raise q.IntegrityError('Pending call inventory changed')
             for proof in row['records']:verify_bytes(proof)
@@ -277,8 +277,8 @@ def verify_pending_set(root, seal, allocation_ref=None, *, unprepared=False, req
         for name in ('runner-process.json','native-process.json'):
             process=read(proofs[name])
             binding = (execution.identity(root,job['step'],number) if source is None else
-                (value['job']['sha256'] if number == 0 else proof_at(record / 'native-intent.json', proofs['native-intent.json'])['sha256']))
-            if (process.get('task_sha256')!=binding or not process.get('boot_id')
+                (dict(path=str(logical_root/value['job']['path'])) if number == 0 else dict(path=str(record / 'native-intent.json'))))
+            if (process.get('task_ref')!=binding or not process.get('boot_id')
                     or any(type(process.get(key)) is not int or process[key]<=0 for key in ('pid','start_ticks','pgid','sid'))):
                 raise q.IntegrityError('Original cleanup has no exact process owner')
     row = matches[0]
@@ -442,7 +442,7 @@ class _RecoveryAdmission:
             return
         self.opportunity()
         verify_pending_set(self.root,self.seal,self.allocation_ref,unprepared=True)
-        self.base=dict(source_step=self.job['step'],call_id=self.call,scope=self.config['scope'],seal_sha256=self.seal_sha,
+        self.base=dict(source_step=self.job['step'],call_id=self.call,scope=self.config['scope'],seal_ref=self.seal_sha,
             pending_set=self.seal['pending_executions'],allocation=self.allocation_ref,request=request,decision=decision,admission=self.operation,
             origin='sealed_unprepared')
         execution_recovery.append(self.root,self.base,'resume_intent',context=self.context)
@@ -634,7 +634,7 @@ def resume(root,step,call_id,*,max_seconds,authorization_note,request_valid_seco
             permit=authority._permit(root,accepted['execution_authority'],config,accepted['execution_target'],call_id,None,operation.secret)
             if permit['allocation']!=allocation or permit['payload_alias']!=original['binding']['payload_alias']:
                 raise q.IntegrityError('Original accepted authority escaped its sealed allocation')
-            operation.base=dict(source_step=step,call_id=call_id,scope=config['scope'],seal_sha256=sha,
+            operation.base=dict(source_step=step,call_id=call_id,scope=config['scope'],seal_ref=sha,
                 pending_set=seal['pending_executions'],allocation=allocation,request=permit['request'],decision=permit['decision'],
                 admission=operation.operation,origin='sealed_preparation_unknown')
     else:
@@ -645,7 +645,7 @@ def resume(root,step,call_id,*,max_seconds,authorization_note,request_valid_seco
         operation.check();operation.opportunity()
         adapter=e.load(config,host_services=operation.services())
         identity=original['binding']['payload_alias'];q._check(identity)
-        descriptor=e.LocalFileDescriptor(name=call_id,local_path=identity['path'],sha256=identity['sha256'],size_bytes=identity['size_bytes'],media_type='application/json')
+        descriptor=e.LocalFileDescriptor(name=call_id,local_path=identity['path'],size_bytes=identity['size_bytes'],media_type='application/json')
         try:
             prepared=adapter.prepare(descriptor,preparation_profile='research_loop.v1',exchange_directory=records.root)
         except authority.AuthorityRequired as error:
@@ -672,7 +672,7 @@ def resume(root,step,call_id,*,max_seconds,authorization_note,request_valid_seco
         if execution_status(details.get('state')) in {'known_success','known_failed'}:
             e.record_observation(config,adapter,call_id,operation_context=operation.context)
     if (prior is not None and prior.get('version')==2) or operation.base is not None:
-        _publish(root,job,operation.base or {key:prior[key] for key in ('source_step','call_id','scope','seal_sha256','pending_set','allocation','request','decision','admission','origin')},adapter,context=operation.context)
+        _publish(root,job,operation.base or {key:prior[key] for key in ('source_step','call_id','scope','seal_ref','pending_set','allocation','request','decision','admission','origin')},adapter,context=operation.context)
     else:
         return recovery.create(root,step)
     return dict(status='execution_resume_recorded',call_id=call_id,note='Original execution facts appended; the sealed scientific conclusion is unchanged.')
@@ -692,7 +692,7 @@ def _publish(root,job,base,adapter,*,query=True,context=None):
             dict(phase=phase,row=row,native_state=state,submission=submission).items()):return
     proof=None
     if detail is not None:
-        data=e.encoded(detail);path=root/'host-history/objects'/hashlib.sha256(data).hexdigest()
+        data=e.encoded(detail);path=root/'host-history/objects'/uuid.uuid4().hex
         proof=q._save(root,path,detail)
     recovery.append(root,base,phase,row=row,query=proof,native_state=state,
                     submission=submission,context=context)

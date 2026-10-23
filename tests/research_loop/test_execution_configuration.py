@@ -76,13 +76,13 @@ def test_cli_selection_is_frozen_before_real_native_host_wiring(tmp_path,monkeyp
     assert frozen['configuration']==options and frozen['executor']==executor
     assert settings['experiment_mode']=='local'  # Ownership, not the backend type.
     assert not list((root/'jobs').glob('*')) and not list((root/'project/nodes').glob('*/work/experiment-config.json'))
-    before=c.digest(root/'settings.json');selection.write_text('{}')
+    before=(root/'settings.json').read_bytes();selection.write_text('{}')
     ran,result=cli('run','--root',root)
     assert ran.returncode==0 and result['status']=='finish',result
     work=c.workspace(root,2);job=c.read(root/'jobs/002.json');config=c.read(execution.origin(root,2)/'experiment-config.json')
-    assert c.digest(root/'settings.json')==before and job['execution_config_sha256']
+    assert (root/'settings.json').read_bytes()==before and job['execution_config_ref']
     assert config['execution_interface']['executor']==executor
-    assert config['scope']['job_sha256']==c.digest(root/'jobs/002.json') and config['native_attempt']['number']==0
+    assert config['scope']['job_ref']==c.record_ref(root/'jobs/002.json') and config['native_attempt']['number']==0
     from scidiscovery.research_loop import experiment_client
     assert config['record_dir']==str(experiment_client.record_directory(root,2)) and config['admission']['mode']=='soft'
     assert config.get('registered_implementation')==frozen.get('implementation')
@@ -169,8 +169,8 @@ def frozen_fixture(tmp_path,executor,options):
     path=tmp_path/'experiment-config.json'
     config=e.freeze(dict(options,
         admission=dict(version=1,mode='hard'),record_dir=str(tmp_path/'records'),
-        scope=dict(handoff_protocol=c.CURRENT,step=2,role='W',job_sha256='a'*64,
-            execution_key='b'*64,mechanism_ref=None)),executor,path=path)
+        scope=dict(handoff_protocol=c.CURRENT,step=2,role='W',job_ref=dict(path='/fixture/jobs/002.json'),
+            execution_key=dict(path='/fixture/native-evidence/002/native-intent.json'),mechanism_ref=None)),executor,path=path)
     c.write(path,config)
     return path,config
 
@@ -195,7 +195,7 @@ def test_describe_retains_complete_large_public_contract(tmp_path,remote_registr
     assert e.main(['--config',str(path),'describe','--key',contract['key'],'--output',str(output)])==0
     result=json.loads(capsys.readouterr().out)
     assert output.stat().st_size>256000 and e.proof(output)==result['contract']
-    assert result['contract']['sha256']==contract['sha256']
+    assert result['contract']==contract
     assert c.read(output)['description']=='x'*256001
 
 
@@ -232,13 +232,13 @@ def test_trusted_cov_launcher_configuration_preserves_exact_host_bindings(tmp_pa
     finish(root, 1, 'H', [], action='experiment')
     job = c.build_job(root, 2, 'W', [1])
     record = execution.origin(root, 2)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/002.json'),
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/002.json'),
         **profiles.binding(settings, job)))
     output = tmp_path / 'cov-config.json'
     result = cov_lineage.configure(root, 2, [sys.executable], root / 'runs', output,
         receipt_channel='backend_file')
     assert result['status'] == 'configured'
-    config, _ = cov_lineage._config(output)
+    config = cov_lineage._config(output)
     assert config['scope'] == stage_scope(root, job)
     assert config['record_dir'] == str(experiment_client.record_directory(root, 2))
     assert config['native_attempt'] == dict(number=0, execution_key=execution.identity(root, 2))
@@ -318,7 +318,7 @@ def test_binding_and_adapter_config_errors_precede_native_launch(tmp_path,execut
         model='no-model',reasoning_effort='high',execution_config=dict(executor=executor,configuration=configuration))
     finish(root,1,'H',[],action='experiment');job=c.build_job(root,2,'W',[1]);record=execution.origin(root,2)
     from scidiscovery.research_loop import profiles
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json'),**profiles.binding(c.settings(root),job)))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),**profiles.binding(c.settings(root),job)))
     monkeypatch.setattr(native.subprocess,'Popen',lambda *a,**k:pytest.fail('Invalid configuration must not launch native'))
     with pytest.raises(ValueError):native.run_native(root,2)
     assert not (record/'native-process.json').exists() and not list((c.workspace(root,2)/'work/lineage/calls').glob('*'))
@@ -333,7 +333,7 @@ def test_default_local_cli_keeps_workspace_cwd_for_single_script(tmp_path,execut
         max_tokens=1000,max_seconds=60,max_steps=4,model='no-model',reasoning_effort='high')
     selected=settings['execution_config'];assert selected['executor']=='local_execution:command'
     finish(root,1,'H',[],action='experiment');job=c.build_job(root,2,'W',[1]);record=execution.origin(root,2)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json'),**profiles.binding(settings,job)))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),**profiles.binding(settings,job)))
     work=c.workspace(root,2);source=work/'work/child/run.py';source.parent.mkdir()
     (work/'relative-original.txt').write_text('workspace original')
     source.write_text('import pathlib\nassert pathlib.Path("relative-original.txt").read_text()=="workspace original"\npathlib.Path("artifacts/cwd-proof.txt").write_text(str(pathlib.Path.cwd()))\n')
@@ -368,7 +368,7 @@ def test_accepted_package_upgrade_allows_query_reconcile_and_submit(tmp_path,mon
     controller.prepare(root,goal,public,['never-launched'],max_tokens=100,max_seconds=20,max_steps=3,search_policy=None,
         model='no-model',reasoning_effort='high',execution_config=dict(executor='accepted_fixture:command',configuration=options))
     finish(root,1,'H',[],action='experiment');job=c.build_job(root,2,'W',[1]);record=execution.origin(root,2)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json'),**profiles.binding(c.settings(root),job)))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),**profiles.binding(c.settings(root),job)))
     path=c.workspace(root,2)/'work/experiment-config.json';config=e.configure(root,2,'accepted_fixture:command',options,path)
     script=tmp_path/'source.py';script.write_text('print("one original dispatch")\n')
     result=e.dispatch(config,script);assert result['status']=='known_success'
@@ -389,11 +389,11 @@ def test_source_metadata_upgrade_keeps_task_configuration_and_permission_checks(
     import copy
     _,config=frozen_fixture(tmp_path,'local_execution:command',dict(run_argv=[sys.executable]))
     # Existing accepted configurations may retain proofs for a removed installation.
-    config['execution_interface']['code']=[dict(path=str(tmp_path/'retired-tool.py'),sha256='0'*64,size_bytes=1)]
+    config['execution_interface']['code']=[dict(path=str(tmp_path/'retired-tool.py'),size_bytes=1)]
     config['execution_interface']['plugin_version']='previous-installed-version'
     assert e.load(config) is not None
     altered=copy.deepcopy(config)
-    if changed=='task':altered['scope']['job_sha256']='f'*64
+    if changed=='task':altered['scope']['job_ref']='f'*64
     elif changed=='configuration':altered['run_argv']=[sys.executable,'-I']
     else:altered['execution_interface']['capabilities']['query']=False
     with pytest.raises(e.IntegrityError,match='contract or configuration'):

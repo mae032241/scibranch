@@ -34,7 +34,7 @@ if task['role']=='W':
   else:raise AssertionError('Retained execution projection writable')
  facts=json.loads((work/'work/author-closeout-science.json').read_text());assert len(facts['calls'])==2
  assert not (work/'work/author-closeout-facts.json').exists()
- assert 'source_sha256' not in json.dumps(facts) and 'model_sha256' not in json.dumps(facts)
+ assert 'source_ref' not in json.dumps(facts) and 'model_ref' not in json.dumps(facts)
  payload.update(stage_intent='review',mechanism_findings=None)
  (work/'artifacts/author.md').write_text('Independent synthetic author final contribution; no new experiment.')
  if MODE=='unknown':raise SystemExit(7)
@@ -54,7 +54,6 @@ print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=100 if MODE=
 '''
 
 
-
 def assert_original_delivery(root):
     actions=budget.closeout_state(root)['actions']
     assert [row['intent']['action_kind'] for row in actions]==['submit','confirm']
@@ -65,7 +64,7 @@ def assert_original_delivery(root):
         intent=row['intent']
         process=c.read(root/'host-delivery/action-processes'/(intent['action_id']+'-'+phase+'.json'))
         assert (process['action_id'],process['operation_id'],process['phase'])==(intent['action_id'],intent['operation_id'],phase)
-        assert process['identity']['task_sha256']==intent['operation_id']
+        assert process['identity']['task_ref']==intent['operation_id']
     assert list(candidate_audit.facts(root))==[]  # FINAL uses the original host audit, without another scientific A.
     assert c.read(root/'jobs/003.json')['final_only'] and not (root/'jobs/004.json').exists()
     assert c.read(root/'runs/submitted.json')['run_id']==1
@@ -145,7 +144,7 @@ def scene(tmp_path,monkeypatch,mode):
     c.write(origin/'native-outcome.json',dict(returncode=-15,stop_reason='token_limit',cleanup='observed_group_cleaned',
         metering=observation,thread_id='old-fixture-thread',budget_slice=report,usage=dict(unknown_steps=[2])))
     receipt=dict(pid=999999999,start_ticks=1,pgid=999999999,sid=999999999,ppid=1,
-        boot_id=budget.clock_stamp()['boot_id'],task_sha256=c.digest(root/'jobs/002.json'))
+        boot_id=budget.clock_stamp()['boot_id'],task_ref=c.record_ref(root/'jobs/002.json'))
     for name in ('runner-process.json','native-process.json'):c.write(origin/name,receipt)
     session=root/'native-homes/002/sessions/old.jsonl';session.parent.mkdir(parents=True)
     session.write_text(json.dumps(dict(type='session_meta',payload=dict(id='old-fixture-thread',cwd=str(c.workspace(root,2)))))+'\n')
@@ -156,7 +155,7 @@ def scene(tmp_path,monkeypatch,mode):
     (public/'task.toml').write_text('fixture=true\n');(public/'environment/Dockerfile').write_text('FROM fixture\n')
     manifest=tmp_path/'public-manifest.json'
     c.write(manifest,dict(task_revision='d78f5eb52ad754c5ee9154741af73130a85a65b8',
-        public_files_sha256={p.relative_to(public).as_posix():c.digest(p) for p in public.rglob('*') if p.is_file()}))
+        public_files=[p.relative_to(public).as_posix() for p in public.rglob('*') if p.is_file()]))
     codehost=actual.parent/'codex-code-mode-host'
     c.write(config,dict(scene_root=str(root),public_root=str(public),public_manifest=str(manifest),
         runs_dir=str(root/'runs'),submission_dir=str(root/'submission'),native=str(fake),

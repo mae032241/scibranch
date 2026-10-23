@@ -56,16 +56,16 @@ def test_author_closeout_prompt_defers_requirement_judgment_to_worker(tmp_path, 
     # prompt assembly and stdin path without constructing a synthetic grant.
     origin = execution.origin(root, 1)
     chain = [origin, *[origin / 'continuations' / f'{number:03d}' for number in range(1, attempt + 1)]]
-    anchor = dict(task_sha256=c.digest(root / 'jobs/001.json'), role=role,
+    anchor = dict(task_ref=c.record_ref(root / 'jobs/001.json'), role=role,
         boot_id=budget.clock_stamp()['boot_id'], advance_seconds=0., limits=nodes[role],
         shared_limits=dict(max_tokens=100000, max_seconds=600),
         previous_tokens=0, previous_seconds=0.)
     meter = dict(input_tokens=0, cached_input_tokens=0, output_tokens=0)
     for number, record in enumerate(chain):
-        intent = dict(task_sha256=anchor['task_sha256'], budget_slice=anchor)
+        intent = dict(task_ref=anchor['task_ref'], budget_slice=anchor)
         if number:
             intent.update(attempt=number, continuation_kind='author_closeout', context_mode='new_context',
-                root_intent_sha256=c.digest(origin / 'native-intent.json'), previous=execution.proof(chain[number - 1]))
+                root_intent_ref=c.record_ref(origin / 'native-intent.json'), previous=execution.proof(chain[number - 1]))
         c.write(record / 'native-intent.json', intent)
         c.write(record / 'runner-process.json', dict(fixture='no runner process'))
         if number < attempt:
@@ -107,7 +107,7 @@ def test_author_closeout_prompt_defers_requirement_judgment_to_worker(tmp_path, 
             return self.returncode
 
     monkeypatch.setattr(native.subprocess, 'Popen', CaptureProcess)
-    monkeypatch.setattr(runtime, 'process_identity', lambda pid, binding: dict(task_sha256=binding))
+    monkeypatch.setattr(runtime, 'process_identity', lambda pid, binding: dict(task_ref=binding))
     monkeypatch.setattr(runtime, 'process_matches', lambda *args: False)
     monkeypatch.setattr(runtime, 'cleanup_owned_group', lambda *args: 'observed_group_cleaned')
     outcome = native.run_native(root, 1, attempt)

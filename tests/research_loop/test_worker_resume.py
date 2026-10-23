@@ -129,7 +129,7 @@ def test_completed_output_repair_is_same_role_node_session_without_experiment_re
     assert c.read(first/'native-outcome.json')['returncode']==0
     assert (first/'science-output.json').read_bytes()!=execution.raw(root,1).read_bytes()
     intent=c.read(current/'native-intent.json')
-    assert intent['output_repair']['raw_sha256']==c.digest(first/'science-output.json')
+    assert intent['output_repair']['raw_ref']==c.file_ref(first/'science-output.json')
     assert intent['session']['workspace']==str(c.workspace(root,1))
     assert intent['session']['home']==str(root/'native-homes/001')
     assert intent['session']['thread_id']=='11111111-2222-4333-8444-555555555555'
@@ -151,7 +151,7 @@ def test_known_output_failure_keeps_execution_facts_and_repairs(tmp_path,kind):
     if kind=='missing':
         assert outcome['output_status']=='missing' and not (first/'science-output.json').exists()
     else:
-        assert outcome['raw_sha256']==c.digest(first/'science-output.json')
+        assert outcome['raw_ref']==c.file_ref(first/'science-output.json')
 
 
 def test_old_resume_policy_does_not_automatically_repair_successful_bad_output(tmp_path):
@@ -311,7 +311,7 @@ def test_known_failure_same_thread_success_keeps_originals_and_cumulative_budget
 def test_original_binding_tamper_never_creates_continuation(tmp_path, mutation):
     root=instance(tmp_path);first=fail(root)
     if mutation=='root_intent':
-        value=c.read(first/'native-intent.json');value['task_sha256']='0'*64
+        value=c.read(first/'native-intent.json');value['task_ref']=dict(path='/wrong/original.json')
         c.write(first/'native-intent.json',value)
     elif mutation=='process_receipt':
         value=c.read(first/'native-process.json');value['start_ticks']+=1
@@ -396,8 +396,8 @@ def test_unaccepted_intent_is_not_replayed_or_given_another_attempt(tmp_path):
     budget.transition(root,'advance','accepted fixture before runner')
     anchor=budget.accept_continuation(root,job,[first])
     record=first/'continuations/001';record.mkdir(parents=True)
-    c.write(record/'native-intent.json',dict(step=1,attempt=1,task_sha256=c.digest(root/'jobs/001.json'),
-        root_intent_sha256=c.digest(first/'native-intent.json'),previous=execution.proof(first),
+    c.write(record/'native-intent.json',dict(step=1,attempt=1,task_ref=c.record_ref(root/'jobs/001.json'),
+        root_intent_ref=c.record_ref(first/'native-intent.json'),previous=execution.proof(first),
         session=continuation.session(root,1,first),budget_slice=anchor))
     with pytest.raises(RuntimeError,match='unknown'):controller.worker_resume(root,1)
     assert not (first/'continuations/002').exists()
@@ -489,8 +489,8 @@ def test_stored_previous_token_anchor_cannot_refund_exact_prior_meter(tmp_path,v
     job=c.read(root/'jobs/001.json');budget.transition(root,'advance','accepted negative fixture')
     anchor=budget.accept_continuation(root,job,[first]);anchor['previous_tokens']=value
     record=first/'continuations/001';record.mkdir(parents=True)
-    intent=dict(step=1,attempt=1,task_sha256=c.digest(root/'jobs/001.json'),
-        root_intent_sha256=c.digest(first/'native-intent.json'),previous=execution.proof(first),
+    intent=dict(step=1,attempt=1,task_ref=c.record_ref(root/'jobs/001.json'),
+        root_intent_ref=c.record_ref(first/'native-intent.json'),previous=execution.proof(first),
         session=continuation.session(root,1,first),budget_slice=anchor)
     # A malicious raw receipt can contain NaN even though the host writer rejects it.
     (record/'native-intent.json').write_text(json.dumps(intent))
@@ -567,11 +567,10 @@ def large_native_session_tree(root):
 
 def test_large_native_session_tree_and_header_resume_same_original(tmp_path):
     root=instance(tmp_path);first=fail(root);session_file=large_native_session_tree(root)
-    import hashlib
     reference=continuation.session(root,1,first)
     assert reference['path']==str(session_file)
     with session_file.open('rb') as stream:header=stream.readline()
-    assert reference['header_sha256']==hashlib.sha256(header).hexdigest()
+    assert reference['header']==json.loads(header)
     result=controller.worker_resume(root,1)
     assert result['status']=='wait'
     accepted=c.read(execution.record(root,1)/'native-intent.json')
@@ -594,8 +593,8 @@ def test_large_native_session_header_hash_drift_cannot_launch_accepted_resume(tm
     reference=continuation.session(root,1,first);job=c.read(root/'jobs/001.json')
     budget.transition(root,'advance','exact original large-header negative control')
     anchor=budget.accept_continuation(root,job,[first]);record=first/'continuations/001';record.mkdir(parents=True)
-    c.write(record/'native-intent.json',dict(step=1,attempt=1,task_sha256=c.digest(root/'jobs/001.json'),
-        root_intent_sha256=c.digest(first/'native-intent.json'),previous=execution.proof(first),
+    c.write(record/'native-intent.json',dict(step=1,attempt=1,task_ref=c.record_ref(root/'jobs/001.json'),
+        root_intent_ref=c.record_ref(first/'native-intent.json'),previous=execution.proof(first),
         session=reference,budget_slice=anchor))
     value=json.loads(session_file.read_text());value['payload']['retained_metadata']+='changed after acceptance'
     session_file.write_text(json.dumps(value)+'\n')

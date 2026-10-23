@@ -1,12 +1,11 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "manuals": [
     {
       "release": "R-2020.09",
       "solver_kind": "sprocess",
       "title": "Sentaurus Process User Guide",
       "relative_path": "R-2020.09/sprocess_ug.pdf",
-      "sha256": "bcaf5cfe87bd276a2068fa6681a0b62b2526512b65a710a660d892c45ceaf5d9",
       "size_bytes": 10670223,
       "pages": 1338
     },
@@ -15,7 +14,6 @@
       "solver_kind": "sdevice",
       "title": "Sentaurus Device User Guide",
       "relative_path": "R-2020.09/sdevice_ug.pdf",
-      "sha256": "dae2c94b29c92705d3b8d6124c2f0ab595541ed48e4b220a425f72fac42794ce",
       "size_bytes": 9523113,
       "pages": 1654
     },
@@ -24,7 +22,6 @@
       "solver_kind": "release_notes",
       "title": "Sentaurus Release Notes",
       "relative_path": "R-2020.09/sentaurus_relnote.pdf",
-      "sha256": "0e6679154406b2d12356be28ab901a3786f48ca9b91b14f6769ada508bdbfbf9",
       "size_bytes": 37980,
       "pages": 2
     }

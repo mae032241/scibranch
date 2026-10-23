@@ -296,11 +296,10 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
                 from . import shared_originals
                 payload = contents.encode('utf-8')
                 original = shared_originals.publish_bytes(root,payload,policy=storage_limits,context=storage_context)
-                shared_originals.link(original,source,sha256=original.name,size_bytes=len(payload),
+                shared_originals.link(original,source,size_bytes=len(payload),
                     root=root,policy=storage_limits,context=storage_context)
-                settings['global_materials'].append(dict(source=source.relative_to(root).as_posix(),
-                    path='inputs/global/' + source.relative_to(globals_).as_posix(),
-                    sha256=contracts.digest(source)))
+                settings['global_materials'].append(dict(source=source.relative_to(root).as_posix(),size_bytes=len(payload),
+                    path='inputs/global/' + source.relative_to(globals_).as_posix()))
             if _source_facts_factory is not None:
                 if source_restrictions:
                     raise ValueError('Staged source facts cannot replace external source declarations')
@@ -338,7 +337,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
             skill_supply.validate(root, settings)
             contracts.write(root / "settings.json", settings)
             contracts.write(root / "settings-identity.json",
-                            dict(sha256=contracts.digest(root / "settings.json")))
+                            dict(path="settings.json"))
             with storage.mutation(root,0,policy=storage_limits,context=storage.Deadline(max_seconds)):
                 pass
     return settings
@@ -484,8 +483,7 @@ def _check_job(root, settings, step, role, parents, instruction, evidence_return
                 role, instruction, evidence_return, correction_request, author_correction):
             raise ValueError('Fork task differs from its exact bootstrap route')
         return job
-    expected_refs = [dict(path=f"inputs/parents/{parent:03d}/conclusion.json",
-        sha256=contracts.digest(execution.raw(root, parent)))
+    expected_refs = [dict(path=f"inputs/parents/{parent:03d}/conclusion.json",size_bytes=execution.raw(root,parent).stat().st_size)
         for parent in parents]
     if (evidence_return or {}).get('kind')=='formal_review':
         from . import formal_review
@@ -589,9 +587,9 @@ def _terminal_success(root, record):
             return False
         raw, pending = record / 'science-output.json', record / 'result.pending.json'
         if outcome.get('output_status') == 'missing':
-            return (outcome.get('raw_sha256') is None and outcome.get('cleanup') == 'observed_group_cleaned'
+            return (outcome.get('raw_ref') is None and outcome.get('cleanup') == 'observed_group_cleaned'
                     and not raw.exists() and not raw.is_symlink() and not pending.exists() and not pending.is_symlink())
-        return outcome.get('raw_sha256') == contracts.digest(contracts.regular(raw))
+        return outcome.get('raw_ref') == contracts.file_ref(contracts.regular(raw))
     except (KeyError, ValueError, OSError, TypeError):
         return False
 
@@ -631,7 +629,7 @@ def _wait_continuation_target(root):
     result = contracts.read(contracts.regular(record / 'result.json'))
     if result.get('next_action') != 'wait':
         return None
-    return dict(source_step=step, seal_sha256=contracts.digest(contracts.regular(identity)))
+    return dict(source_step=step, seal_ref=contracts.record_ref(contracts.regular(identity)))
 
 
 def _continue_wait(root, step, job, result, next_role, target):
@@ -641,7 +639,7 @@ def _continue_wait(root, step, job, result, next_role, target):
         return False
     path = root / 'host-control' / 'wait-continuations' / f'{step:03d}.json'
     expected = dict(source_step=step,
-        seal_sha256=contracts.digest(contracts.regular(_record(root, step) / 'result-identity.json')))
+        seal_ref=contracts.record_ref(contracts.regular(_record(root, step) / 'result-identity.json')))
     if path.exists():
         if contracts.read(contracts.regular(path)) != expected:
             raise ValueError('Wait continuation differs from its exact sealed source')
@@ -711,7 +709,7 @@ def _run(root, *, continue_wait=None):
         if route[0] is not None:
             sources = history.source_sequence(root,cutoff+1)
             cursor = dict(zip(('role','parents','instruction','evidence_return','correction_request','author_correction'),route))
-            cursor['source_refs'] = [dict(step=job['step'],seal_sha256=seal_sha) for job,_,_,seal_sha in sources]
+            cursor['source_refs'] = [dict(step=job['step'],seal_ref=seal_sha) for job,_,_,seal_sha in sources]
         return _start_budget_closeout(root,cutoff,step,blocked_role,reason,resume_cursor=cursor)
     for step in _step_numbers(root, first_step):
         # Reserve pending edits once at a new-node boundary, before admission.
@@ -1259,7 +1257,7 @@ def _run_final(root, begin):
         # Execution safety was checked above. Billing uncertainty cannot remove
         # accepted W originals or the final author's submission choice.
         if has_worker and policy is not None and policy['adapter'] is not None:
-            nodes = [dict(step=number, seal_sha256=contracts.digest(fork_runtime.source_record(root, number, 'result-identity.json'))) for number in accepted]
+            nodes = [dict(step=number, seal_ref=contracts.record_ref(fork_runtime.source_record(root, number, 'result-identity.json'))) for number in accepted]
             try:
                 sources = delivery.catalogue_sources(root, nodes, job=prospective_job)
             except delivery.DeliveryUnresolved as error:
@@ -1346,7 +1344,7 @@ def _start_closeout(root, cutoff, first_step, reason, *, export_only=False, auth
     if use_model:
         budget.transition(root, 'advance', 'prepare_closeout_inputs')
         at = budget.snapshot(root)['advance_seconds']
-        nodes = [dict(step=step, seal_sha256=contracts.digest(_record(root, step) / 'result-identity.json'))
+        nodes = [dict(step=step, seal_ref=contracts.record_ref(_record(root, step) / 'result-identity.json'))
                  for step in range(1, cutoff + 1)]
         try:
             sources = delivery.catalogue_sources(root, nodes)
@@ -1600,7 +1598,7 @@ def _run_closeout(root):
                 budget.transition(root, 'advance', 'closeout_engineering_repair_admission' if repair else 'closeout_author_admission')
                 if path.exists():
                     prior = contracts.read(path)
-                    if prior.get('purpose') != 'closeout' or prior.get('source_cutoff') != begin['source_cutoff'] or prior.get('direct_originals',prior['direct_refs']) != [dict(path=f'inputs/parents/{parent:03d}/conclusion.json',sha256=contracts.digest(execution.raw(root,parent))) for parent in parents]:
+                    if prior.get('purpose') != 'closeout' or prior.get('source_cutoff') != begin['source_cutoff'] or prior.get('direct_originals',prior['direct_refs']) != [dict(path=f'inputs/parents/{parent:03d}/conclusion.json',size_bytes=execution.raw(root,parent).stat().st_size) for parent in parents]:
                         return _closeout_result(root, 'retained_job_conflict', step=step)
                 if repair is None and closeout_settings.get('selection_policy') is not None:
                     stopped=shortlist.screen(root,begin,before_step=step)
@@ -1775,14 +1773,14 @@ def worker_closeout(root: Path, step: int, *, max_tokens, max_seconds, authoriza
         return _start_closeout(root,step,step+1,'operator_author_closeout')
 
 
-def worker_output_accept(root: Path, step: int, *, attempt, pending_sha256, session,
+def worker_output_accept(root: Path, step: int, *, attempt, pending_ref, session,
                          authorization_note, authorization_statement):
     """Explicitly accept one already returned author output; no native retry."""
     from .protocol import require_current
     from . import author_closeout
     root=Path(root).resolve();require_current(root)
     with _writer(root),_inactive_on_error(root,'completed_author_output_acceptance_failed'):
-        author_closeout.accept_completed_output(root,step,attempt=attempt,pending_sha256=pending_sha256,session=session,
+        author_closeout.accept_completed_output(root,step,attempt=attempt,pending_ref=pending_ref,session=session,
             authorization_note=authorization_note,authorization_statement=authorization_statement)
         return _start_closeout(root,step,step+1,'operator_completed_author_output_acceptance')
 

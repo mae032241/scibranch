@@ -161,7 +161,7 @@ def test_original_slice_excludes_explicit_pause_but_does_not_reset(tmp_path, mon
     assert intent == original
 
 
-@pytest.mark.parametrize('field', ['role', 'task_sha256', 'boot_id', 'limits'])
+@pytest.mark.parametrize('field', ['role', 'task_ref', 'boot_id', 'limits'])
 def test_changed_accepted_identity_cannot_refund_or_launch(tmp_path, field):
     root = instance(tmp_path, limits=policy())
     c.write(root / 'host-started.json', budget.clock_stamp())
@@ -238,7 +238,7 @@ def test_amend_rejects_original_n6_intent_without_terminal_outcome(tmp_path):
     budget.transition(root, 'advance', 'original accepted node')
     job = c.build_job(root, 1, 'H', [])
     record = c.host_record(c.workspace(root, 1))
-    c.write(record / 'native-intent.json', dict(step=1, task_sha256=c.digest(root / 'jobs/001.json'),
+    c.write(record / 'native-intent.json', dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json'),
                                               budget_slice=budget.accept_node(root, job)))
     paths = [root / 'settings.json', record / 'native-intent.json',
              *sorted((root / 'control-ledger').glob('*.json'))]
@@ -281,7 +281,7 @@ def test_actual_popen_rechecks_late_budget_before_native_submission(tmp_path, mo
     budget.transition(root, 'advance', 'accepted original node')
     job = c.build_job(root, 1, 'H', [])
     record = c.host_record(c.workspace(root, 1))
-    c.write(record / 'native-intent.json', dict(step=1, task_sha256=c.digest(root / 'jobs/001.json'),
+    c.write(record / 'native-intent.json', dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json'),
                                               budget_slice=budget.accept_node(root, job)))
     now[0] = 160.  # The original intent is retained; no shared active time remains.
     monkeypatch.setattr(native.subprocess, 'Popen', lambda *a, **kw: pytest.fail('Late budget must block native Popen'))
@@ -319,7 +319,7 @@ def test_controller_restart_rejoins_same_slice_and_counts_one_dispatch(tmp_path)
         owner = c.read(record / 'runner-process.json')
         first.kill()
         first.communicate(timeout=3)
-        assert runtime.process_matches(owner, owner['task_sha256'])
+        assert runtime.process_matches(owner, owner['task_ref'])
         second = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         fronts.append(second)
         (work / 'work/release').touch()
@@ -408,7 +408,7 @@ def test_admission_reuses_one_local_observation_and_next_boundary_reads_mutation
     root = instance(tmp_path, limits=policy(tokens=1000), max_tokens=100)
     job = c.build_job(root, 1, 'H', [])
     record = execution.origin(root, 1)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/001.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json')))
     reads = []
     original = budget._read_events
     def observed(*args, **kwargs):
@@ -446,7 +446,7 @@ def test_admission_reuses_one_local_observation_and_next_boundary_reads_mutation
 
 def test_current_budget_ledger_rejects_retired_usage_reserve_event(tmp_path):
     root = instance(tmp_path, limits=policy())
-    event = dict(seq=1, parent_sha256=None, settings_sha256=c.digest(root / 'settings.json'),
+    event = dict(seq=1, parent_ref=None, settings_ref=c.record_ref(root / 'settings.json'),
                  kind='native_usage_reserve', **budget.clock_stamp())
     c.write(root / 'control-ledger/000001.json', event)
     with pytest.raises(ValueError, match='ledger identity'):

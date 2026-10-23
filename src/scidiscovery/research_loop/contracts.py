@@ -1,15 +1,13 @@
 """Thin scientific packets and exact direct-node seals; no MCP dispatch protocol.
 
-Only the controller supplies identities and lineage. These seals attest bytes,
-not scientific validity, independent qualification or external-effect authority.
+Only the controller supplies identities and lineage. Seals bind original paths,
+producers and declared sizes, not content fingerprints or scientific validity.
 """
 from __future__ import annotations
 
-from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
 import fcntl
-import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -108,67 +106,23 @@ def record_writer(record_root, *, blocking=True, exclusive=False):
         os.close(descriptor)
 
 
-def _stream_digest(path: Path):
-    result = hashlib.sha256()
-    with path.open('rb') as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
-            result.update(chunk)
-    return result.hexdigest()
+def record_path(path):
+    path = Path(path).absolute()
+    if path.resolve() != path or any(item.is_symlink() for item in (path, *path.parents)):
+        raise ValueError('Exact original path without links required')
+    regular(path)
+    return str(path)
 
 
-_digest_transaction = ContextVar('scid_validation_digests', default=None)
+def record_ref(path):
+    """Reference one exact control record; never read scientific payloads."""
+    return dict(path=record_path(path))
 
 
-@contextmanager
-def verified_digests():
-    """Deduplicate SHA reads within one explicit, synchronous validation call.
-
-    This trusted same-user soft-boundary optimization stores no verdicts. Every
-    use still checks the exact file generation; the cache never leaves its call.
-    """
-    if _digest_transaction.get() is not None:
-        yield
-        return
-    cache=OrderedDict();token=_digest_transaction.set(cache)
-    try:yield
-    finally:
-        cache.clear();_digest_transaction.reset(token)
-
-
-def _digest_generation(path):
-    actual=path.resolve(strict=True);value=actual.stat()
-    if not stat.S_ISREG(value.st_mode):return None
-    return (str(path.absolute()),str(actual),value.st_dev,value.st_ino,value.st_mode,
-        value.st_size,value.st_mtime_ns,value.st_ctime_ns)
-
-
-def _readonly_metadata_change(before, after):
-    """A fresh read may tolerate ctime churn on the same immutable inode."""
-    return (before is not None and after is not None and before != after
-        and before[:-1] == after[:-1] and stat.S_IMODE(before[4]) == 0o400)
-
-
-def digest(path: Path):
-    cache=_digest_transaction.get()
-    if cache is None:return _stream_digest(path)
-    binding=None
-    for attempt in range(3):
-        generation=_digest_generation(path)
-        if generation is None and binding is None:return _stream_digest(path)
-        if generation is None or binding is not None and generation[:-1]!=binding:
-            raise ValueError('Original changed during digest validation')
-        binding=generation[:-1]
-        value=cache.get(generation)
-        if value is None:value=_stream_digest(path)
-        # Check hits and misses; retries must look up the new generation and
-        # never publish a digest from an unstable read into this call's cache.
-        checked=_digest_generation(path)
-        if checked!=generation:
-            if attempt<2 and _readonly_metadata_change(generation,checked):continue
-            raise ValueError('Original changed during digest validation')
-        cache[generation]=value;cache.move_to_end(generation)
-        if len(cache)>4096:cache.popitem(last=False)
-        return value
+def file_ref(path):
+    """Locate a declared original; this is not a content fingerprint."""
+    path = Path(record_path(path))
+    return dict(path=str(path), size_bytes=path.stat().st_size)
 
 
 def settings(root: Path, job=None):
@@ -182,9 +136,9 @@ def settings(root: Path, job=None):
         return configuration_updates.for_job(root, job)
     path = regular(root / 'settings.json')
     identity = read(regular(root / 'settings-identity.json'))
-    # Read once: verify and parse the same bytes, not two racing reads.
+    # Parse the exact frozen control locator. No content fingerprint is computed.
     data = path.read_bytes()
-    if hashlib.sha256(data).hexdigest() != identity.get('sha256'):
+    if {key:value for key,value in identity.items() if key!='cold_owner'} != dict(path='settings.json'):
         raise ValueError('Frozen instance settings changed')
     return json.loads(data)
 
@@ -412,7 +366,7 @@ def _parent_view(job, ref, root=None, *, limitation_bytes=1024):
             view['evidence_omitted_count'] = len(entries) - 16
     if root is not None:
         path=regular(workspace(Path(root),job['step'])/ref['path'])
-        if digest(path)!=ref['sha256']:
+        if path.stat().st_size!=ref['size_bytes']:
             raise ValueError('Direct scientific original changed')
         payload=read(path)
         parent_step=int(Path(ref['path']).parts[2])
@@ -423,34 +377,30 @@ def _parent_view(job, ref, root=None, *, limitation_bytes=1024):
 
 
 def material_name(work, row):
-    """Scientific name of one verified local or archived material row."""
+    """Scientific name of one exact local or retained material row."""
     source=Path(row['source'])
     from . import originals
-    owner = originals.node(work.parents[2], int(work.name)) if originals.inherited(work.parents[2], int(work.name)) else None
-    if owner is not None:
-        actual = originals.material_path(work.parents[2], row)
-        if source.is_relative_to(owner.logical_workspace):
-            return source.relative_to(owner.logical_workspace).as_posix()
-        prefix = f'inputs/parents/{int(work.name):03d}/artifacts/'
-        if (source != Path(owner.original_root) / 'host-history/objects' / row['sha256']
-                or not row['path'].startswith(prefix) or actual.stat().st_size != row['size_bytes']):
-            raise ValueError('Inherited entry point has no exact original output binding')
-        return row['path'][len(prefix):]
-    if source.is_relative_to(work):
-        local=source.relative_to(work).as_posix()
-    else:
-        # Selected managed scientific assets are retained in the verified
-        # private object archive. Their logical export path, not that private
-        # address, is the current role's citation/entry-point identity.
-        prefix=f'inputs/parents/{int(work.name):03d}/artifacts/'
-        if (source!=work.parents[2]/'host-history/objects'/row['sha256']
-                or not row['path'].startswith(prefix)
-                or source.stat().st_size!=row['size_bytes'] or digest(regular(source))!=row['sha256']):
-            raise ValueError('Scientific entry point has no exact retained output binding')
-        local=row['path'][len(prefix):]
-        normalized=PurePosixPath(local)
-        if normalized.is_absolute() or '..' in normalized.parts or '\\' in local or normalized.as_posix()!=local:
-            raise ValueError('Scientific entry point has no canonical public output path')
+    root=work.parents[2];step=int(work.name)
+    owner=originals.node(root,step) if originals.inherited(root,step) else None
+    logical_root=Path(owner.original_root) if owner is not None else root
+    logical_work=owner.logical_workspace if owner is not None else work
+    if source.is_relative_to(logical_work):
+        return source.relative_to(logical_work).as_posix()
+    prefix=f'inputs/parents/{step:03d}/artifacts/'
+    if not row['path'].startswith(prefix):
+        raise ValueError('Scientific entry point has no exact retained output binding')
+    local=row['path'][len(prefix):];normalized=PurePosixPath(local)
+    if normalized.is_absolute() or '..' in normalized.parts or '\\' in local or normalized.as_posix()!=local:
+        raise ValueError('Scientific entry point has no canonical public output path')
+    managed=logical_root/'host-runtime/experiment-control'/f'{step:03d}'/'records/calls'
+    call=(normalized.parts[1] if len(normalized.parts)>=4 and normalized.parts[0]=='experiments'
+          and normalized.parts[2]=='artifacts' else None)
+    if not (source.parent==logical_root/'host-history/objects'
+            or call is not None and source.is_relative_to(managed/call)):
+        raise ValueError('Scientific entry point has no exact retained output binding')
+    actual=originals.material_path(root,row) if owner is not None else regular(source)
+    if actual.stat().st_size!=row['size_bytes']:
+        raise ValueError('Scientific entry point has no exact retained output binding')
     return local
 
 
@@ -549,7 +499,7 @@ def selected_inputs(work, payload, job, diagnostics=None):
         material_seen.add(row['path'])
         source = Path(row['source'])
         # The sealed public path identifies the producer even when a managed
-        # output's exact bytes live in this instance's content-addressed archive.
+        # output's retained bytes live in this instance's original archive.
         match = re.fullmatch(r'inputs/parents/([0-9]{3,})/artifacts/(.+)', row['path'])
         normalized = PurePosixPath(row['path'])
         if (match is None or '..' in normalized.parts or '\\' in row['path']
@@ -563,21 +513,18 @@ def selected_inputs(work, payload, job, diagnostics=None):
         owner = originals.node(root, origin_step)
         original = owner.logical_workspace
         if (not source.is_relative_to(original)
-                and source != Path(owner.original_root) / 'host-history/objects' / row['sha256']):
+                and source.parent != Path(owner.original_root) / 'host-history/objects'):
             raise ValueError('Implementation reuse requires an original instance node')
         identity = read(originals.source_record(owner, 'result-identity.json'))
         actual = originals.material_path(root, row)
         if (row not in identity['materials'] or source.resolve() != source.absolute()
-                or digest(originals.source_record(owner, 'result.json')) != identity['sha256']
-                or digest(regular(_execution_raw(root, origin_step))) != identity['raw_sha256']
-                or originals.original_ref(owner, f'jobs/{origin_step:03d}.json')['sha256'] != identity['job_sha256']
-                or digest(regular(actual)) != row['sha256'] or actual.stat().st_size != row['size_bytes']):
+                or actual.stat().st_size != row['size_bytes']):
             raise ValueError('Selected original implementation changed or is not sealed')
         total += row['size_bytes']
         if output_quota_exceeded(policy,(entry['material']['size_bytes'] for entry in [*selected,dict(material=row)])):
             raise ValueError('Selected implementations exceed the frozen handoff bound')
         selected.append(dict(label=label[:160], origin_step=origin_step,
-                             origin_result_sha256=identity['sha256'], material=row))
+                             origin_result_ref=identity['result_ref'], material=row))
     return selected
 
 
@@ -793,7 +740,7 @@ def collect_materials(root: Path, step: int):
             context=read(author_closeout._check(root,proof))
             private_packages={author_closeout._check(root,item['original']) for item in context.get('artifact_masks',[])}
 
-    def add(path, relative):
+    def add(path, relative, *, source_kind='mutable'):
         nonlocal total
         path = regular(path)
         if path in private_packages:return  # Explicit compiler/author grant; never infer from a filename.
@@ -805,8 +752,11 @@ def collect_materials(root: Path, step: int):
         if policy.get('max_output_total_bytes') is not None and total > policy['max_output_total_bytes']:
             raise ValueError(f'Deliverable {relative!r} exhausts total byte budget '
                              f'({total} > {policy["max_output_total_bytes"]})')
-        rows.append(dict(source=str(path), path=f'inputs/parents/{step:03d}/artifacts/{relative}',
-                         sha256=digest(path), size_bytes=size))
+        from . import shared_originals, storage_policy as storage
+        frozen=shared_originals.retain(root,path,size_bytes=size,source_kind=source_kind,
+            policy=policy.get('storage_policy'),context=storage.Deadline(policy['max_seconds']))
+        rows.append(dict(source=str(frozen), original_source=str(path),
+                         path=f'inputs/parents/{step:03d}/artifacts/{relative}', size_bytes=size))
 
     def artifacts(base, prefix=''):
         if not base.exists() and not base.is_symlink():
@@ -846,7 +796,7 @@ def collect_materials(root: Path, step: int):
             outputs=history.scientific_outputs(root,job,call) if job.get('worker_view_version')==1 else call.get('outputs',[])
             for item in outputs:
                 if item.get('retention')!='archived':raise ValueError('Managed deliverable original unavailable')
-                add(root/item['path'],f'experiments/{call["call_id"]}/artifacts/{item["name"]}')
+                add(root/item['path'],f'experiments/{call["call_id"]}/artifacts/{item["name"]}',source_kind='managed_frozen')
     if len({row['path'] for row in rows}) != len(rows):
         raise ValueError('Deliverable paths collide with nested experiment outputs')
     return sorted(rows, key=lambda row: row['path'])
@@ -857,19 +807,36 @@ def global_materials(root: Path):
     rows = settings(root)['global_materials']
     for row in rows:
         source = regular(root / row['source'])
-        if digest(source) != row['sha256']:
+        if source.stat().st_size != row['size_bytes']:
             raise ValueError('Frozen global context changed')
     return rows
 
 
-def _bind_original(source: Path, destination: Path, sha256: str, *, root, size_bytes,
+def _bind_original(source: Path, destination: Path, *, root, size_bytes,
                    source_kind, context=None, policy=None):
-    """Bind a read-only view to an explicitly classified exact original."""
+    """Publish/reuse a controller-owned slot for the exact logical original.
+
+    The surrounding job/call owns the source/destination binding. File size is a
+    declared bound, not a content identity. Existing managed sources still require
+    exact inode aliases; existing mutable snapshots retain their first freeze.
+    """
     from . import shared_originals
-    frozen = shared_originals.retain(root, source, sha256=sha256, size_bytes=size_bytes,
-        source_kind=source_kind, context=context, policy=policy)
-    shared_originals.link(frozen, destination, sha256=sha256, size_bytes=size_bytes,
-        root=root, context=context, policy=policy)
+    source, destination, root = Path(source), Path(destination), Path(root)
+    if source_kind not in {'mutable','managed_frozen'}:
+        raise ValueError('Explicit mutable or managed_frozen source kind required')
+    if not destination.absolute().is_relative_to(root.absolute()):
+        raise ValueError('Original slot escaped its exact instance root')
+    if destination.exists() or destination.is_symlink():
+        shared_originals._path(destination)
+        shared_originals._file(destination,size_bytes,frozen=True)
+        if source_kind == 'managed_frozen' and not source.samefile(destination):
+            raise ValueError('Existing original alias changed its exact inode')
+        return destination
+    frozen = shared_originals.retain(root,source,size_bytes=size_bytes,
+        source_kind=source_kind,context=context,policy=policy)
+    shared_originals.link(frozen,destination,size_bytes=size_bytes,
+        root=root,context=context,policy=policy)
+    return destination
 
 
 @owner_effect
@@ -934,7 +901,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     input_inventory=storage.Inventory(policy.get('storage_policy'),context=storage.Deadline(policy['max_seconds']))
     for item in globals_:
         input_inventory.entry();input_inventory.file((root/item['source']).stat().st_size)
-        _bind_original(root / item['source'], work / item['path'], item['sha256'], root=root, policy=policy.get('storage_policy'), context=input_inventory.context, size_bytes=(root / item['source']).stat().st_size, source_kind='managed_frozen')
+        _bind_original(root / item['source'], work / item['path'], root=root, policy=policy.get('storage_policy'), context=input_inventory.context, size_bytes=(root / item['source']).stat().st_size, source_kind='managed_frozen')
     refs, materials, entry_points, selected = [], [], [], []
     if review_binding is not None:
         materials=review_binding['materials'];selected=review_binding['selected']
@@ -944,8 +911,8 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         # Pass the author's science, not the controller envelope and its parent
         # references. Historical lineage remains in the host-owned node tree.
         source = _execution_raw(root, parent)
-        ref = dict(path=f'inputs/parents/{parent:03d}/conclusion.json', sha256=digest(source))
-        if worker_view_version!=1:_bind_original(source, work / ref['path'], ref['sha256'], root=root, policy=policy.get('storage_policy'), context=input_inventory.context, size_bytes=(source).stat().st_size, source_kind='mutable')
+        ref = dict(path=f'inputs/parents/{parent:03d}/conclusion.json', size_bytes=source.stat().st_size)
+        if worker_view_version!=1:_bind_original(source, work / ref['path'], root=root, policy=policy.get('storage_policy'), context=input_inventory.context, size_bytes=(source).stat().st_size, source_kind='mutable')
         (work / Path(ref['path']).parent / 'artifacts').mkdir(parents=True,exist_ok=True)
         refs.append(ref)
         from . import originals
@@ -973,7 +940,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     for item in materials:
         input_inventory.entry();input_inventory.file(item['size_bytes'])
         from . import originals
-        _bind_original(originals.material_path(root, item), work / item['path'], item['sha256'], root=root, policy=policy.get('storage_policy'), context=input_inventory.context, size_bytes=item['size_bytes'], source_kind='mutable')
+        _bind_original(originals.material_path(root, item), work / item['path'], root=root, policy=policy.get('storage_policy'), context=input_inventory.context, size_bytes=item['size_bytes'], source_kind='managed_frozen')
     # No recursive parent expansion; per-file identities stay in host storage.
     job = dict(step=step, role=role, goal_text=policy['objective'], public_root=policy['public_root'],
                instruction=instruction, direct_refs=refs, direct_materials=materials, direct_entry_points=entry_points, global_materials=globals_,
@@ -990,7 +957,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         job['final_report'] = final_report
         if retained is None and phase is not None:
             job['closeout_begin'] = dict(seq=phase['seq'],
-                sha256=digest(root / 'control-ledger' / f'{phase["seq"]:06d}.json'))
+                record=record_ref(root / 'control-ledger' / f'{phase["seq"]:06d}.json'))
         elif retained is not None and 'closeout_begin' in retained:
             job['closeout_begin'] = retained['closeout_begin']
     resumed = budget.normal_resume(root,step)
@@ -1024,7 +991,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     if policy.get('experiment_mode') is not None:
         job['experiment_mode'] = policy['experiment_mode']
     if policy.get('execution_config') is not None:
-        job['execution_config_sha256']=hashlib.sha256(json.dumps(policy['execution_config'],sort_keys=True).encode()).hexdigest()
+        job['execution_config_record']=policy['execution_config']
     advice = retained.get('role_guidance') if retained is not None else policy.get('role_guidance', {}).get(role)
     if advice is not None:
         job['role_guidance'] = advice
@@ -1044,7 +1011,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         engineering.bind_inputs(root,job)
     if purpose is not None:
         job.update(purpose=purpose, source_cutoff=source_cutoff, delivery_sources=delivery_sources,
-                   closeout_begin=dict(seq=begin['seq'], sha256=digest(root / 'control-ledger' / f'{begin["seq"]:06d}.json')))
+                   closeout_begin=dict(seq=begin['seq'], record=record_ref(root / 'control-ledger' / f'{begin["seq"]:06d}.json')))
         if role=='A' and policy.get('selection_policy') is not None:
             from . import shortlist
             mark = shortlist.marker(root,step)
@@ -1079,18 +1046,18 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         job['direct_refs']=[]
         for original in refs:
             parent=int(Path(original['path']).parts[2]);source=regular(_execution_raw(root,parent))
-            if digest(source)!=original['sha256']:raise ValueError('Direct producer original changed')
+            if source.stat().st_size!=original['size_bytes']:raise ValueError('Direct producer original changed')
             reported=candidate_refs.public_science_fields(read(source),candidate_refs.for_job(job))
             original_path=str(Path(original['path']).parent/'scientific-original.json')
             public=scientific_projection(reported,original_path)
-            if public!=reported:_bind_original(source, work/original_path, original['sha256'], root=root, policy=policy.get('storage_policy'), context=input_inventory.context, size_bytes=(source).stat().st_size, source_kind='mutable')
+            if public!=reported:_bind_original(source, work/original_path, root=root, policy=policy.get('storage_policy'), context=input_inventory.context, size_bytes=(source).stat().st_size, source_kind='mutable')
             target=work/original['path']
             if target.exists():
                 if read(regular(target))!=public:raise ValueError('Frozen parent scientific view changed')
             else:
                 write(target,public);target.chmod(0o400)
-            if digest(source)!=original['sha256']:raise ValueError('Direct producer original changed')
-            job['direct_refs'].append(dict(path=original['path'],sha256=digest(target)))
+            if source.stat().st_size!=original['size_bytes']:raise ValueError('Direct producer original changed')
+            job['direct_refs'].append(dict(path=original['path'],size_bytes=target.stat().st_size))
     job['implementation_options'] = options[:16]
     job['implementation_options_omitted_count'] = max(0, len(options) - 16)
     if projection_version == 1 and review_binding is None:
@@ -1173,7 +1140,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
                 from . import shared_originals
                 payload=(json.dumps(value,ensure_ascii=False,indent=2,allow_nan=False)+'\n').encode('utf-8')
                 original=shared_originals.publish_bytes(root,payload,policy=policy.get('storage_policy'),context=input_inventory.context)
-                shared_originals.link(original,path,sha256=original.name,size_bytes=len(payload),root=root,
+                shared_originals.link(original,path,size_bytes=len(payload),root=root,
                     policy=policy.get('storage_policy'),context=input_inventory.context)
             else:
                 write(path, value)
@@ -1191,21 +1158,21 @@ def _native_output_identity(root, step, native_record, intent, outcome):
     if outcome.get('stop_reason')=='author_closeout_token_limit' and intent.get('attempt')==2:
         from . import author_closeout
         accepted=author_closeout.accepted_output(root,step,native_record,intent,outcome)
-        if accepted is not None:return accepted['raw_sha256'],accepted
-    return outcome.get('raw_sha256'),None
+        if accepted is not None:return accepted['raw_ref'],accepted
+    return outcome.get('raw_ref'),None
 
 
 def _final_a_seal(native_record, outcome):
     if outcome.get('final_a_completion') is None:
         return None
-    return dict(native_outcome_sha256=digest(regular(native_record / 'native-outcome.json')),
-                usage_sha256=digest(regular(native_record / 'usage.json')) if (native_record / 'usage.json').exists() else None)
+    return dict(native_outcome_ref=record_ref(regular(native_record / 'native-outcome.json')),
+                usage_ref=record_ref(regular(native_record / 'usage.json')) if (native_record / 'usage.json').exists() else None)
 
 
 def _sealed_science(job, seal, raw, result, *, root=None, source=None):
     """Shared immutable science checks; no current control or authority reads."""
     from . import candidate_refs
-    if digest(regular(raw)) != seal['raw_sha256'] or digest(regular(result)) != seal['sha256']:
+    if regular(raw).stat().st_size != seal['raw_ref']['size_bytes'] or regular(result).stat().st_size != seal['result_ref']['size_bytes']:
         raise ValueError('Sealed scientific bytes changed')
     payload = candidate_refs.control_payload(job, science_payload(raw, job['role'],
         job.get('handoff_protocol', 1), 'selection' in job, **response_options(job)), root=root, source=source)
@@ -1218,8 +1185,7 @@ def validate_original(source, *, _active=None, _memo=None):
     """Validate retained source facts without renewing its execution grants."""
     from . import originals, qualification, formal_review, execution_inputs, history
     if _memo is None:
-        with verified_digests():
-            return validate_original(source, _active=set(), _memo={})
+        return validate_original(source, _active=set(), _memo={})
     active = set() if _active is None else _active
     memo = {} if _memo is None else _memo
     key = (originals.identity_key(source.origin_identity), source.step)
@@ -1234,14 +1200,14 @@ def validate_original(source, *, _active=None, _memo=None):
         raise ValueError('Fork original requires the current frozen protocol')
     job_path = originals.resolve_ref(source, dict(path=f'jobs/{source.step:03d}.json'))
     seal = read(originals.source_record(source, 'result-identity.json'))
-    if digest(job_path) != seal['job_sha256']:
+    if seal['job_ref'] != dict(path=str(Path(source.original_root)/'jobs'/f'{source.step:03d}.json')):
         raise ValueError('Source seal changed its exact original job')
     intent = read(originals.source_record(source, 'native-intent.json'))
     outcome = read(originals.source_record(source, 'native-outcome.json'))
     raw = originals.source_raw(source)
     result = originals.source_record(source, 'result.json')
-    if (intent.get('task_sha256') != seal['job_sha256'] or outcome.get('returncode') != 0
-            or outcome.get('raw_sha256') != seal['raw_sha256']):
+    if (intent.get('task_ref') != seal['job_ref'] or outcome.get('returncode') != 0
+            or outcome.get('raw_ref') != seal['raw_ref']):
         raise ValueError('Source terminal lost its exact original task/output')
     payload = _sealed_science(job, seal, raw, result, source=source)
     if job.get('scientific_response_fields') != response_fields(job, policy):
@@ -1250,15 +1216,15 @@ def validate_original(source, *, _active=None, _memo=None):
                 *job.get('direct_materials', []), *job.get('history', {}).get('files', []),
                 *job.get('history', {}).get('execution_recovery_materials', [])]:
         originals.resolve_ref(source, dict(path=f'project/nodes/{source.step:03d}/' + ref['path'],
-            **{field: ref[field] for field in ('sha256', 'size_bytes') if field in ref}))
+            **{field: ref[field] for field in ('size_bytes',) if field in ref}))
     for row in job.get('history', {}).get('nodes', []):
-        parent = originals.dependency(source, row['step'], seal_sha256=row['seal_sha256'])
+        parent = originals.dependency(source, row['step'], seal_ref=row['seal_ref'])
         validate_original(parent, _active=active, _memo=memo)
     for row in job.get('direct_originals', job.get('direct_refs', [])):
         step = int(Path(row['path']).parts[2])
         parent = originals.dependency(source, step)
         parent_seal = read(originals.source_record(parent, 'result-identity.json'))
-        if row['sha256'] != parent_seal['raw_sha256']:
+        if row['size_bytes'] != parent_seal['raw_ref']['size_bytes']:
             raise ValueError('Source direct original changed its exact producer')
     qualification.validate_original(source, job, seal)
     history.validate_observation_original(source, job, seal)
@@ -1289,16 +1255,16 @@ def validate(work: Path):
     raw = regular(native_record / 'science-output.json')
     result = regular(record / 'result.json')
     conclusion = regular(work / 'conclusion.json')
-    native_raw_sha,accepted=_native_output_identity(root,job['step'],native_record,intent,outcome)
+    native_raw_ref,accepted=_native_output_identity(root,job['step'],native_record,intent,outcome)
     if seal.get('final_a_completion') != _final_a_seal(native_record, outcome):
         raise ValueError('Final A completion receipt identity changed')
     expected_acceptance=accepted['receipt'] if accepted is not None else None
     if (seal.get('completed_output_acceptance')!=expected_acceptance
             or seal.get('completed_output_limitation')!=(accepted['facts'] if accepted is not None else None)):
         raise ValueError('Completed-output acceptance seal identity changed')
-    if (seal['job_sha256'] != digest(job_path) or intent['task_sha256'] != digest(job_path)
-            or seal['raw_sha256'] != digest(raw) or seal['sha256'] != digest(result)
-            or seal['raw_sha256'] != digest(conclusion) or native_raw_sha != seal['raw_sha256']
+    if (seal['job_ref'] != record_ref(job_path) or intent['task_ref'] != record_ref(job_path)
+            or seal['raw_ref'] != file_ref(raw) or seal['result_ref'] != file_ref(result)
+            or seal['raw_ref']['size_bytes'] != conclusion.stat().st_size or native_raw_ref != seal['raw_ref']
             or read(regular(work / 'science-task.json')) != science_view(job, root)):
         raise ValueError('Scientific node identity changed')
     from . import candidate_refs
@@ -1334,7 +1300,7 @@ def validate(work: Path):
     history.validate_observation(root, job, seal)
     for ref in seal['materials']:
         path = regular(originals.material_path(root, ref))
-        if path.stat().st_size != ref['size_bytes'] or digest(path) != ref['sha256']:
+        if path.stat().st_size != ref['size_bytes']:
             raise ValueError('Scientific original changed')
     return read(result)
 
@@ -1375,7 +1341,7 @@ def _validate_inputs(root, work, job):
     if job.get('experiment_mode')!=settings(root, job).get('experiment_mode'):
         raise ValueError('Frozen experiment mode differs from its original settings')
     selected=settings(root, job).get('execution_config')
-    if job.get('execution_config_sha256')!=(hashlib.sha256(json.dumps(selected,sort_keys=True).encode()).hexdigest() if selected is not None else None):
+    if job.get('execution_config_record')!=selected:
         raise ValueError('Frozen execution selection differs from its original settings')
     if job['role']=='W' and job.get('worker_fragment_policy')!=settings(root, job).get('worker_fragment_policy'):
         raise ValueError('Frozen W continuation configuration differs from its original settings')
@@ -1402,7 +1368,7 @@ def _validate_inputs(root, work, job):
         begin = next((event for event in events if event['kind'] == 'closeout_begin' and event['seq'] == boundary.get('seq')), None)
         if (job['purpose'] != 'closeout' or job['role'] not in {'A','W'} or job['role']=='W' and job.get('engineering_repair') is None or begin is None
                 or job.get('source_cutoff') != begin['source_cutoff'] or job['step'] < begin['first_step']
-                or job.get('closeout_begin') != dict(seq=begin['seq'],sha256=digest(root/'control-ledger'/f'{begin["seq"]:06d}.json'))):
+                or job.get('closeout_begin') != dict(seq=begin['seq'],record=record_ref(root/'control-ledger'/f'{begin["seq"]:06d}.json'))):
             raise ValueError('Closeout task boundary changed')
         from . import engineering
         if not job.get('final_only'):
@@ -1410,7 +1376,7 @@ def _validate_inputs(root, work, job):
             repaired = [number for number in engineering.steps(root,job['step']) if number > begin['source_cutoff']]
             if repaired:
                 nodes = [*expected_sources['source_nodes'], *[dict(step=number,
-                    seal_sha256=digest(host_record(workspace(root,number))/'result-identity.json')) for number in repaired]]
+                    seal_ref=record_ref(host_record(workspace(root,number))/'result-identity.json')) for number in repaired]]
                 expected_sources = delivery.catalogue_sources(root,nodes)
             if job.get('delivery_sources') != expected_sources:
                 raise ValueError('Closeout candidate originals differ from their immutable preparation')
@@ -1462,10 +1428,10 @@ def _validate_inputs(root, work, job):
     if any(row['material'] not in job['direct_materials'] for row in expected):
         raise ValueError('Selected implementation is absent from bound materials')
     for row in job['global_materials']:
-        if digest(regular(work / row['path'])) != row['sha256']:
+        if regular(work / row['path']).stat().st_size != row['size_bytes']:
             raise ValueError('The global context read by this role changed')
     for ref in job['direct_refs']:
-        if digest(regular(work / ref['path'])) != ref['sha256']:
+        if regular(work / ref['path']).stat().st_size != ref['size_bytes']:
             raise ValueError('Bound result changed')
     if job.get('worker_view_version')==1:
         from . import candidate_refs
@@ -1473,21 +1439,21 @@ def _validate_inputs(root, work, job):
             raise ValueError('Scientific parent view lost its exact original')
         for ref in job['direct_originals']:
             source=regular(_execution_raw(root,int(Path(ref['path']).parts[2])))
-            if digest(source)!=ref['sha256']:
+            if source.stat().st_size!=ref['size_bytes']:
                 raise ValueError('Direct producer original changed')
             reported=candidate_refs.public_science_fields(read(source),candidate_refs.for_job(job))
             original_path=str(Path(ref['path']).parent/'scientific-original.json')
             public=scientific_projection(reported,original_path)
-            if public!=reported and digest(regular(work/original_path))!=ref['sha256']:
+            if public!=reported and regular(work/original_path).stat().st_size!=ref['size_bytes']:
                 raise ValueError('Bound scientific original changed')
             if read(work/ref['path'])!=public:
                 raise ValueError('Scientific parent view differs from its verified original')
     for ref in job['direct_materials']:
         path = regular(originals.material_path(root, ref))
-        if path.stat().st_size != ref['size_bytes'] or digest(path) != ref['sha256']:
+        if path.stat().st_size != ref['size_bytes']:
             raise ValueError('Scientific original changed')
     for ref in job['direct_materials']:
-        if digest(regular(work / ref['path'])) != ref['sha256']:
+        if regular(work / ref['path']).stat().st_size != ref['size_bytes']:
             raise ValueError('The direct material actually read by this role changed')
 
 
@@ -1507,11 +1473,11 @@ def seal_result(root: Path, step: int):
     from . import execution
     native_record = execution.record(root, step)
     intent = read(regular(native_record / 'native-intent.json'))
-    if intent['task_sha256'] != digest(regular(job_path)):
+    if intent['task_ref'] != record_ref(regular(job_path)):
         raise ValueError('Native launch task changed')
     _validate_inputs(root, work, job)
     outcome = read(regular(native_record / 'native-outcome.json'))
-    native_raw_sha,accepted=_native_output_identity(root,step,native_record,intent,outcome)
+    native_raw_ref,accepted=_native_output_identity(root,step,native_record,intent,outcome)
     from . import budget
     final = budget.final_a_return(root, job, intent)
     if (type(outcome.get('returncode')) is not int or outcome['returncode'] != 0
@@ -1530,13 +1496,13 @@ def seal_result(root: Path, step: int):
     raw_path = native_record / 'science-output.json'
     pending = native_record / 'result.pending.json'
     if outcome.get('output_status') == 'missing':
-        if (outcome.get('raw_sha256') is not None or raw_path.exists() or raw_path.is_symlink()
+        if (outcome.get('raw_ref') is not None or raw_path.exists() or raw_path.is_symlink()
                 or pending.exists() or pending.is_symlink()):
             raise ValueError('Missing final output identity changed')
         from .output_repair import OutputRepairRequired
         raise OutputRepairRequired('missing_output', 'Return the required final scientific JSON; the completed work and checkpoints are already retained.')
     raw = regular(raw_path)
-    if native_raw_sha != digest(raw):
+    if native_raw_ref != file_ref(raw):
         raise ValueError('Terminal scientific output is unverified or changed')
     if intent.get('continuation_kind') == 'startup_successor':
         from .startup_recovery import validate_intent
@@ -1577,10 +1543,10 @@ def seal_result(root: Path, step: int):
     pending_executions = capture_pending(root, job)
     observations = history.capture(root, job, value, materials)
     from . import storage_policy as storage
-    _bind_original(raw, work / 'conclusion.json', digest(raw), policy=settings(root,job).get('storage_policy'), context=storage.Deadline(settings(root,job)['max_seconds']), root=root, size_bytes=(raw).stat().st_size, source_kind='mutable')
+    _bind_original(raw, work / 'conclusion.json', policy=settings(root,job).get('storage_policy'), context=storage.Deadline(settings(root,job)['max_seconds']), root=root, size_bytes=(raw).stat().st_size, source_kind='mutable')
     write(record / 'result.json', scientific_projection(value,'node:%03d/scientific-output' % job['step']))
-    seal = dict(sha256=digest(record / 'result.json'), raw_sha256=digest(raw),
-          job_sha256=digest(job_path), materials=materials, entry_points=entry_points,
+    seal = dict(result_ref=file_ref(record / 'result.json'), raw_ref=file_ref(raw),
+          job_ref=record_ref(job_path), materials=materials, entry_points=entry_points,
           scope='Exact bytes and direct lineage; not scientific qualification',
           **(dict(completed_output_acceptance=accepted['receipt'],completed_output_limitation=accepted['facts']) if accepted is not None else {}),
           **(dict(execution_ref=execution.reference(root, step)) if execution.reference(root, step) is not None else {}),

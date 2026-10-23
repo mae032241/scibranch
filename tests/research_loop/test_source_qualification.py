@@ -16,7 +16,7 @@ def instance(tmp_path, *, restriction=None, update=False, local=False):
     objective.write_text('Compare mechanisms without laundering source restrictions.')
     extra = public / 'update.md'
     extra.write_text(objective.read_text())  # Same bytes, a different original.
-    declarations = ([dict(source=str(objective), sha256=c.digest(objective), restriction=restriction)]
+    declarations = ([dict(source=str(objective), restriction=restriction)]
                     if restriction is not None else None)
     root = tmp_path / 'instance'
     controller.prepare(root, objective, public, ['fake'], max_tokens=1000,
@@ -69,7 +69,7 @@ def test_clear_is_scoped_and_missing_material_edges_remain_unknown(tmp_path):
     job, _, _ = finish(root, 1, 'H', [], action='experiment')
     assert q.status(root, job)['restriction'] == 'clear'
     assert 'not scientific review or execution permission' in q.status(root, job)['scope']
-    orphan = dict(source=str(root / 'same-bytes'), path='inputs/orphan', sha256='0' * 64, size_bytes=0)
+    orphan = dict(source=str(root / 'same-bytes'), path='inputs/orphan', size_bytes=0)
     forged = dict(job, step=2, direct_materials=[orphan], direct_refs=[])
     forged['source_provenance'] = q.bind_inputs(root, forged)
     assert q.status(root, forged)['restriction'] == 'unknown'
@@ -92,7 +92,7 @@ def test_output_proof_binds_materials_even_with_unchanged_scientific_json(tmp_pa
     job, _, record = finish(root, 1, 'H', [], action='experiment', files={'a.txt': 'a'})
     seal = c.read(record / 'result-identity.json')
     changed = dict(seal, materials=[{**seal['materials'][0], 'source': str(root / 'another-original')}])
-    assert changed['raw_sha256'] == seal['raw_sha256'] and changed['sha256'] == seal['sha256']
+    assert changed['raw_ref'] == seal['raw_ref']
     with pytest.raises(q.IntegrityError, match='output source proof changed'):
         q.validate_outputs(root, job, changed)
 
@@ -122,7 +122,7 @@ def test_cli_freezes_declared_public_source_and_rejects_alias_paths(tmp_path, ca
     objective.write_text('A plain scientific objective.')
     material = public / 'material.csv'
     material.write_text('x,y\n1,2\n')
-    declaration = dict(source=str(material), sha256=c.digest(material), restriction='restricted')
+    declaration = dict(source=str(material), restriction='restricted')
     config = tmp_path / 'sources.json'
     c.write(config, [declaration])
     root = tmp_path / 'instance'
@@ -140,7 +140,7 @@ def test_cli_freezes_declared_public_source_and_rejects_alias_paths(tmp_path, ca
     alias.symlink_to(material)
     with pytest.raises(q.IntegrityError, match='canonical regular'):
         q.source_configuration(public, [{**declaration, 'source': str(alias)}], [objective])
-    with pytest.raises(q.IntegrityError, match='digest differs'):
-        q.source_configuration(public, [{**declaration, 'sha256': '0' * 64}], [objective])
+    with pytest.raises(ValueError, match='source and clear/restricted'):
+        q.source_configuration(public, [{**declaration, 'unsupported': True}], [objective])
     with pytest.raises(ValueError, match='ambiguous'):
         q.source_configuration(public, [declaration, declaration], [objective])

@@ -94,7 +94,7 @@ if role=='W':
   assert not {'native_originals','original'} & row.keys()
   result=json.loads((work/row['result']).read_text())
   assert result['status']==row['status']
-  assert not {'proofs','scope','accepted','submission','sha256','config_sha256'} & result.keys()
+  assert not {'proofs','scope','accepted','submission','sha256','config_record'} & result.keys()
   assert not (work/row['result']).parent.joinpath('originals').exists()
   for item in packet['executions'][0]['outputs']:
    retained=work/item['path'];assert retained.read_bytes()==b'opaque original job package'
@@ -627,14 +627,14 @@ def test_sealed_unknown_recovery_binds_new_prefix_materials_and_resolves_origina
     assert not (c.workspace(root,4)/f'inputs/recovered/002/{call}/originals').exists()
     # Native control proofs remain reachable through the exact frozen host prefix.
     recovery_ref=successor['history']['execution_recoveries'][0]
-    assert root/recovery_ref['path']==refs[0] and c.digest(refs[0])==recovery_ref['sha256']
+    assert root/recovery_ref['path']==refs[0] and refs[0].stat().st_size==recovery_ref['size_bytes']
     recovery=c.read(root/recovery_ref['path']);row=recovery['row']
-    assert recovery['source_step']==2 and recovery['seal_sha256']==c.digest(old_record/'result-identity.json')
+    assert recovery['source_step']==2 and recovery['seal_ref']==c.record_ref(old_record/'result-identity.json')
     assert row['call_id']==call and row['status']==outcome
     assert row['accepted']==old_fact['managed_calls'][0]['accepted'] and row['scope']==old_fact['managed_calls'][0]['scope']
     history.validate_managed(root,job,[row])
     observation=c.read(root/row['observation']['snapshot'])
-    native_originals=[c.read(root/'host-history/objects'/proof['sha256']) for proof in observation['proofs']]
+    native_originals=[c.read(Path(proof['path'])) for proof in observation['proofs']]
     assert any(item.get('native_payload')=='retained-native-terminal-only' and item['call_id']==call
         and item['scope']==row['scope'] and item['status']==outcome for item in native_originals)
     # A fresh W interprets the appended original; no replacement managed submit.
@@ -644,7 +644,7 @@ def test_sealed_unknown_recovery_binds_new_prefix_materials_and_resolves_origina
     next_job=c.build_job(root,6,'W',[1,4,5]);record=execution.record(root,6)
     node_anchor=budget.accept_node(root,next_job)
     anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,next_job))
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/006.json'),**anchor))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/006.json'),**anchor))
     next_config=e.configure(root,6,'composed_execution:fixture',dict(synchronous=True),c.workspace(root,6)/'work/config.json')
     package=c.workspace(root,6)/'work/package';package.write_bytes(b'new scientific input')
     assert e.dispatch(next_config,package,new=True,mechanism='P')['status']=='known_success'
@@ -663,7 +663,7 @@ def legacy_two_calls(tmp_path,monkeypatch):
     # Historical parallel originals: construct the two accepted reservations via
     # the common registry contract, not a modern dispatch retry of unknown work.
     records=e.Records(config);adapter=e.load(config);package=c.workspace(root,2)/'work/package';proof=e.proof(package)
-    descriptor=e.LocalFileDescriptor(name='0002-'+uuid.uuid4().hex,local_path=str(package),sha256=proof['sha256'],size_bytes=proof['size_bytes'],media_type='application/octet-stream')
+    descriptor=e.LocalFileDescriptor(name='0002-'+uuid.uuid4().hex,local_path=str(package),size_bytes=proof['size_bytes'],media_type='application/octet-stream')
     accepted=records.accept(descriptor,adapter.acceptance_metadata(descriptor,new=True),config['execution_interface'],expected_calls=[first],mechanism='Q')
     adapter.dispatch_lease(accepted);external,state=adapter.submit(descriptor);records.bind_external(descriptor.name,external,state)
     with monkeypatch.context() as patch:
@@ -703,8 +703,8 @@ def test_wait_gate_preserves_known_missing_output_repair_diagnosis(tmp_path,comp
     from scidiscovery.research_loop import continuation, managed_wait
     from scidiscovery.research_loop.output_repair import OutputRepairRequired
     root=instance(tmp_path,dict(collect=False));job=c.build_job(root,2,'W',[1]);record=execution.origin(root,2)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json')))
-    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=dict(unknown_steps=[]),output_status='missing',raw_sha256=None,cleanup='observed_group_cleaned'))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json')))
+    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=dict(unknown_steps=[]),output_status='missing',raw_ref=None,cleanup='observed_group_cleaned'))
     managed_wait.before_seal(root,job,record)
     with pytest.raises(OutputRepairRequired,match='Return the required final scientific JSON'):c.seal_result(root,2)
     assert not (record/'execution-wait.json').exists()
@@ -717,7 +717,7 @@ def test_wait_gate_never_converts_uncertain_native_facts_to_free_waiting(tmp_pat
     root,job,config,cli,call=case(tmp_path,dict(collect=False))
     record=execution.origin(root,2);raw=record/'science-output.json';raw.write_text('{}')
     c.write(record/'native-outcome.json',dict(returncode=False if fault=='noninteger-native-code' else 0,
-        stop_reason=None,usage=dict(unknown_steps=[2] if fault=='unknown-native-usage' else []),raw_sha256=c.digest(raw)))
+        stop_reason=None,usage=dict(unknown_steps=[2] if fault=='unknown-native-usage' else []),raw_ref=c.file_ref(raw)))
     monkeypatch.setattr(e,'load',lambda *args,**kwargs:pytest.fail('Uncertain native facts must not enter managed waiting'))
     managed_wait.before_seal(root,job,record)
     assert not (record/'execution-wait.json').exists() and not (record/'checkpoint.json').exists()

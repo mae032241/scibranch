@@ -18,7 +18,7 @@ MAX_CONTEXTS = 128
 def context_artifacts(item):
     """Top-level proof descriptors have provider-owned scientific labels."""
     return [value for value in item.values() if isinstance(value,dict)
-        and {'path','sha256','size_bytes'} <= set(value)]
+        and {'path','size_bytes'} <= set(value)]
 
 
 def _parent_original(root, item, available, *, source=None):
@@ -51,7 +51,7 @@ def _parent_original(root, item, available, *, source=None):
     if completion is None:raise history.ObserverIntegrityError('Parent completion original unavailable')
     same=source['scope']['step']==item['scope']['step']
     if (not isinstance(binding,dict) or any(binding.get(key)!=value for key,value in
-            dict(call_id=source['call_id'],step=source['scope']['step'],completion_sha256=completion['sha256']).items())
+            dict(call_id=source['call_id'],step=source['scope']['step'],completion_ref=dict(path=str(Path(source['scope']['job_ref']['path']).parent.parent / completion['path']),size_bytes=completion['size_bytes'])).items())
             or parent['source']!=('same_node_completed_call' if same else 'sealed')
             or source['scope']['step']>item['scope']['step']):
         raise history.ObserverIntegrityError('Declared parent completion/source differs')
@@ -85,11 +85,11 @@ def contexts(root, job, items, archive, previous=()):
             raise ValueError('Context originals are missing')
         proofs=[]
         for proof in item['proofs']:
-            if not isinstance(proof,dict) or set(proof)!={'path','sha256','size_bytes'}:
+            if not isinstance(proof,dict) or set(proof)!={'path','size_bytes'}:
                 raise ValueError('Context original shape differs')
             original=archive(proof['path'])
-            if original['sha256'] is None:raise ValueError('Context archive read capacity unavailable')
-            if original['sha256']!=proof['sha256'] or original['size_bytes']!=proof['size_bytes']:
+            if original is None:raise ValueError('Context archive read capacity unavailable')
+            if not history._same_original(root, original, proof):
                 raise history.ObserverIntegrityError('Execution context original changed')
             proofs.append(original)
         if (job.get('search') or {}).get('breadth'):
@@ -105,12 +105,12 @@ def contexts(root, job, items, archive, previous=()):
         # the same original-byte validation, regardless of its scientific name.
         validated={**item,'proofs':proofs}
         for key,value in item.items():
-            if not isinstance(value,dict) or not {'path','sha256','size_bytes'} <= set(value):continue
-            if set(value)!={'path','sha256','size_bytes'}:
+            if not isinstance(value,dict) or not {'path','size_bytes'} <= set(value):continue
+            if set(value)!={'path','size_bytes'}:
                 raise ValueError('Provider context cannot predeclare host archive fields')
             original=archive(value['path'])
-            if original.get('sha256') is None:raise ValueError('Context artifact read capacity unavailable')
-            if any(original[field]!=value[field] for field in ('sha256','size_bytes')):
+            if original is None:raise ValueError('Context artifact read capacity unavailable')
+            if any(original[field]!=value[field] for field in ('size_bytes',)):
                 raise history.ObserverIntegrityError('Execution artifact changed')
             validated[key]=original
         _parent_original(root,validated,available)
@@ -140,7 +140,7 @@ def build(root, before_step, *, sources=None, search_state=None):
     for job,payload,seal,_ in sources:
         step=job['step'];owner=originals.node(root,step)
         nodes.append(dict(step=step,role=job['role'],parents=[int(Path(r['path']).parts[2]) for r in job['direct_refs']],
-                          source_sha256=seal['raw_sha256'],summary=payload['summary'],limitations=payload['limitations']))
+                          source_ref=seal['raw_ref'],summary=payload['summary'],limitations=payload['limitations']))
         for selected in seal.get('selected_inputs',[]):
             edges.append(dict(kind='reuse',subject=dict(node=step),target=dict(node=selected['origin_step'],material=selected['material']),scope='declared_handoff_not_proven_read'))
         receipt=seal.get('observations')
@@ -367,9 +367,9 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
     frozen=configuration_updates.for_new_job(root,step)
     context=storage.Deadline(frozen['max_seconds'])
     inventory=storage.Inventory(frozen.get('storage_policy'),context=context)
-    def bind_original(source,destination,sha256):
+    def bind_original(source,destination,original_reference):
         inventory.entry();inventory.file(source.stat().st_size)
-        c._bind_original(source, destination, sha256, root=root, policy=frozen.get('storage_policy'), context=context, size_bytes=(source).stat().st_size, source_kind='mutable')
+        c._bind_original(source, destination, root=root, policy=frozen.get('storage_policy'), context=context, size_bytes=(source).stat().st_size, source_kind='mutable')
     add,paged,files=history.page_writer(c.workspace(root,step),root=root,policy=frozen.get('storage_policy'),context=context)
     from . import candidate_refs
     references=candidate_refs.references(records) if worker_view_version==1 else {}
@@ -384,8 +384,8 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
             if public!=reported:
                 raw=c.regular(c._execution_raw(root,record['step']))
                 destination=c.workspace(root,step)/original_path
-                bind_original(raw,destination,source[2]['raw_sha256'])
-                files.append(dict(path=original_path,sha256=c.digest(destination),size_bytes=destination.stat().st_size,
+                bind_original(raw,destination,source[2]['raw_ref'])
+                files.append(dict(path=original_path,size_bytes=destination.stat().st_size,
                     kind='scientific_original'))
             text=json.dumps(public,ensure_ascii=False,allow_nan=False)
             record['detail']=[dict(step=record['step'],role=record['role'],
@@ -434,8 +434,8 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                 source=next(source for source in projection['sources'] if source[0]['step']==disposition['source_a'])
                 raw=c.regular(c._execution_raw(root,disposition['source_a']))
                 destination=c.workspace(root,step)/original
-                bind_original(raw,destination,source[2]['raw_sha256'])
-                files.append(dict(path=original,sha256=c.digest(destination),size_bytes=destination.stat().st_size,
+                bind_original(raw,destination,source[2]['raw_ref'])
+                files.append(dict(path=original,size_bytes=destination.stat().st_size,
                     kind='scientific_original'))
             row['disposition']=dict(reason=_clip(reason,160),reason_truncated=len(reason.encode())>160,
                 original=original)
@@ -485,7 +485,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                 if original.get('dispatch_intent') is not None:native.append(original['dispatch_intent'])
                 for number,proof in enumerate(native,1):
                     matches=[item for item in call['originals'] if Path(owner.original_root)/item['path']==Path(proof['path'])
-                             and item['sha256']==proof['sha256'] and item['size_bytes']==proof['size_bytes']]
+                             and item==proof and item['size_bytes']==proof['size_bytes']]
                     if len(matches)!=1:raise ValueError('Retirement native original is unavailable')
                     retained.append((matches[0],f'originals/{number:03d}'))
                 for item,name in retained:
@@ -495,8 +495,8 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                     if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
                         raise ValueError('Retirement proof materials exceed the original input bound')
                     target=f'{prefix}/{name}'
-                    bind_original(archive_path(item),c.workspace(root,step)/target,item['sha256'])
-                    recovery_materials.append(dict(path=target,sha256=item['sha256'],size_bytes=item['size_bytes']))
+                    bind_original(archive_path(item),c.workspace(root,step)/target,item)
+                    recovery_materials.append(dict(path=target,size_bytes=item['size_bytes']))
                 experiments.append(dict(step=record['step'],call_id=call['call_id'],execution_status='not_submitted',
                     **(dict(retirement_proof=f'{prefix}/retirement.json',native_originals=[f'{prefix}/{name}' for _,name in retained[1:]])
                        if worker_view_version != 1 else {}),
@@ -520,13 +520,13 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                     limits=configuration_updates.for_new_job(root,step)
                     if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
                         raise ValueError('Execution recovery materials exceed the original input bound')
-                    bind_original(archive_path(item),c.workspace(root,step)/output['path'],item['sha256'])
-                    recovery_materials.append(dict(path=output['path'],sha256=item['sha256'],size_bytes=item['size_bytes']))
+                    bind_original(archive_path(item),c.workspace(root,step)/output['path'],item)
+                    recovery_materials.append(dict(path=output['path'],size_bytes=item['size_bytes']))
             native_originals=[]
             if call['call_id'] in record.get('recovered_calls',[]):
                 observed=c.read(archive_path(call['observation']))
                 for number,proof in enumerate(observed['proofs'],1):
-                    matches=[item for item in call['originals'] if Path(owner.original_root)/item['path']==Path(proof['path']) and item['sha256']==proof['sha256']]
+                    matches=[item for item in call['originals'] if Path(owner.original_root)/item['path']==Path(proof['path']) and item==proof]
                     if len(matches)!=1 or matches[0]['retention']!='archived':raise ValueError('Recovered native original is unavailable')
                     if worker_view_version == 1:
                         continue  # Do not publish host control proofs as scientific inputs.
@@ -534,8 +534,8 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                     limits=configuration_updates.for_new_job(root,step)
                     if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
                         raise ValueError('Execution recovery originals exceed the original input bound')
-                    bind_original(archive_path(item),c.workspace(root,step)/target,item['sha256'])
-                    recovery_materials.append(dict(path=target,sha256=item['sha256'],size_bytes=item['size_bytes']))
+                    bind_original(archive_path(item),c.workspace(root,step)/target,item)
+                    recovery_materials.append(dict(path=target,size_bytes=item['size_bytes']))
                     native_originals.append(dict(path=target))
             native_pages=paged(native_originals,16,'originals',f'inputs/history/recoveries/{record["step"]:03d}/{call["call_id"]}','recovered-native-originals') if native_originals else []
             metrics=result.get('metrics',[])
@@ -602,7 +602,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
         view['candidates']['candidate_facts']=[]
         view['candidates']['candidate_facts_omitted_count']=len(candidate_rows)
         bounded_brief(view)
-    return dict(**(dict(execution_recoveries=projection['recovery_refs'],execution_recovery_materials=recovery_materials) if projection['recovery_refs'] else {}),**(dict(audit_projection_version=1, audit_receipts=audit_refs, adjacent_audit=adjacent_audit) if audit_projection_version == 1 else {}), nodes=[dict(step=row['step'],seal_sha256=row['seal_sha256']) for row in records],files=files,
+    return dict(**(dict(execution_recoveries=projection['recovery_refs'],execution_recovery_materials=recovery_materials) if projection['recovery_refs'] else {}),**(dict(audit_projection_version=1, audit_receipts=audit_refs, adjacent_audit=adjacent_audit) if audit_projection_version == 1 else {}), nodes=[dict(step=row['step'],seal_ref=row['seal_ref']) for row in records],files=files,
                 candidate_ids=[row['id'] for row in candidate_rows],
                 **(dict(candidate_nomination_ids=nomination_ids) if nomination_ids is not None else {}),
                 **(dict(candidate_references=references) if worker_view_version==1 else {}),

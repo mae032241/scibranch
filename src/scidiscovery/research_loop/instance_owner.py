@@ -5,7 +5,6 @@ from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from functools import wraps
 import fcntl
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -93,7 +92,7 @@ def _host_gate(root, *, exclusive, create=True, cold=False, allow_missing=False,
     fd = None
     try:
         _same_gate_path(directory, directory_fd, directory=True)
-        key = hashlib.sha256(files.canonical(dict(root=str(root), **identity))).hexdigest() + '.lock'
+        key = f'{identity["dev"]}-{identity["ino"]}.lock'
         try:
             fd = os.open(key, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
                 | (os.O_CREAT if create else 0), 0o600, dir_fd=directory_fd)
@@ -162,7 +161,7 @@ def _read(path):
 
 
 def _host():
-    return hashlib.sha256(Path('/etc/machine-id').read_bytes()).hexdigest()
+    return Path('/etc/machine-id').read_text().strip()
 
 
 def _identity(root):
@@ -189,7 +188,7 @@ def _binding(root):
     from . import contracts as c
     settings = c.settings(root)
     if (value.get('instance_id') != settings['goal_id']
-            or value.get('settings_sha256') != c.digest(root / 'settings.json')):
+            or value.get('settings_ref') != c.record_ref(root / 'settings.json')):
         raise files.ArchiveError('Enrolled owner lost its exact instance')
     return value
 
@@ -200,7 +199,7 @@ def _anchor(binding):
         raise files.ArchiveError('Original external owner anchor is unavailable')
     value = _read(directory / 'owner.json')
     if any(value.get(key) != binding.get(key) for key in
-            ('version', 'instance_id', 'settings_sha256', 'root', 'host', 'anchor_id')):
+            ('version', 'instance_id', 'settings_ref', 'root', 'host', 'anchor_id')):
         raise files.ArchiveError('External owner anchor differs from its binding')
     if ('transaction' in value and value.get('export_blob_ownership') not in ('shared', 'independent')
             or value.get('state') == 'restore_pending' and value.get('restore_blob_ownership') not in ('shared', 'independent')
@@ -343,7 +342,7 @@ def configuration_root(config):
     job_path = root / 'jobs' / f'{scope["step"]:03d}.json'
     job = c.read(c.regular(job_path))
     if (scope.get('step') != job['step'] or scope.get('role') != job['role']
-            or scope.get('job_sha256') != c.digest(job_path)):
+            or scope.get('job_ref') != c.record_ref(job_path)):
         raise files.ArchiveError('Managed execution owner lost its original job')
     return root
 
@@ -373,13 +372,13 @@ def enroll(root, anchor_directory):
         return existing
     from . import contracts as c
     settings = c.settings(root)
-    key = hashlib.sha256((settings['goal_id'] + c.digest(root / 'settings.json')).encode()).hexdigest()
+    key = files.safe_id(settings['goal_id'])
     directory = parent / key
-    value = dict(version=1, instance_id=settings['goal_id'], settings_sha256=c.digest(root / 'settings.json'),
+    value = dict(version=1, instance_id=settings['goal_id'], settings_ref=c.record_ref(root / 'settings.json'),
         root=str(root), host=_host(), anchor=str(directory), anchor_id=uuid.uuid4().hex, generation=1)
     if directory.exists():
         original = _read(directory / 'owner.json')
-        if (any(original.get(k) != value[k] for k in ('version','instance_id','settings_sha256','root','host','anchor'))
+        if (any(original.get(k) != value[k] for k in ('version','instance_id','settings_ref','root','host','anchor'))
                 or original.get('state') != 'active' or original.get('generation') != 1
                 or original.get('root_identity') != _identity(root)):
             raise files.ArchiveError('Existing enrollment anchor cannot be adopted or replaced')
@@ -407,12 +406,12 @@ def repair_enrollment(root, anchor_directory):
     if directory.parent != Path(anchor_directory).absolute():
         raise files.ArchiveError('Enrollment retry must use the original external anchor')
     original = _read(directory / 'owner.json')
-    binding = {key:original[key] for key in ('version','instance_id','settings_sha256','root','host','anchor','anchor_id','generation')}
+    binding = {key:original[key] for key in ('version','instance_id','settings_ref','root','host','anchor','anchor_id','generation')}
     from . import contracts as c
     if (marker != dict(anchor=binding['anchor'],anchor_id=binding['anchor_id'])
             or binding['host'] != _host() or binding['root'] != str(root)
             or binding['instance_id'] != c.settings(root)['goal_id']
-            or binding['settings_sha256'] != c.digest(root / 'settings.json')):
+            or binding['settings_ref'] != c.record_ref(root / 'settings.json')):
         raise files.ArchiveError('Enrollment retry lost its original host and instance')
     with exclusive(root,binding=binding) as (_, current, _):
         if current != original or current['state'] != 'active' or current['root_identity'] != _identity(root):
@@ -452,9 +451,12 @@ def _exclusive_owner(root, binding):
 def read_transition(root, checkpoint_ref, transfer_ref):
     from . import qualification as q
     checkpoint, transfer = q._read(root, checkpoint_ref), q._read(root, transfer_ref)
-    if (checkpoint.get('version') != 2 or checkpoint.get('kind') != 'cold_checkpoint'
+    retained = Path('host-runtime/restore') / files.safe_id(checkpoint['transaction'])
+    if (checkpoint.get('version') != 3 or checkpoint.get('kind') != 'cold_checkpoint'
             or checkpoint.get('blob_ownership') not in ('shared', 'independent')
             or transfer.get('version') != 1 or transfer.get('kind') != 'owner_restore'
+            or checkpoint_ref.get('path') != (retained / 'checkpoint.json').as_posix()
+            or transfer_ref.get('path') != (retained / 'transfer.json').as_posix()
             or transfer.get('restore_blob_ownership') not in ('shared', 'independent')
             or checkpoint.get('blob_ownership') == 'independent' and transfer.get('restore_blob_ownership') != 'independent'
             or transfer.get('checkpoint_ref') != checkpoint_ref
@@ -477,10 +479,14 @@ def verify_transition(root, checkpoint_ref, transfer_ref):
     if binding is None:
         raise files.ArchiveError('Restored owner binding is unavailable')
     _, anchor = _anchor(binding)
+    package = Path(anchor.get('output', ''))
+    package_checkpoint = package / 'checkpoint.json'
     if (anchor.get('state') not in {'restore_pending', 'active'}
             or anchor.get('generation') != transfer['to_generation']
             or anchor.get('transaction') != checkpoint['transaction']
-            or anchor.get('checkpoint_sha256') != checkpoint_ref['sha256']
+            or not package.is_absolute() or package.resolve() != package
+            or anchor.get('checkpoint_ref') != dict(path=str(package_checkpoint))
+            or _read(package_checkpoint) != checkpoint
             or anchor.get('export_blob_ownership') != checkpoint['blob_ownership']
             or anchor.get('restore_blob_ownership') != transfer['restore_blob_ownership']
             or anchor.get('root_identity') != _identity(root)

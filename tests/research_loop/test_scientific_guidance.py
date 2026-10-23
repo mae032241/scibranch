@@ -97,7 +97,7 @@ def test_observer_retains_public_actual_without_granting_audit_or_confirmation(t
     from test_lineage import scene
     root,config,digest=scene(tmp_path)
     script=c.workspace(root,2)/'work/train.py';script.write_text('success')
-    result=cov.run(config,digest,script,new=True)
+    result=cov.run(config,script,new=True)
     raw_row=json.loads((Path(config['record_dir'])/'calls'/result['call_id']/'row.json').read_text())
     feedback=cov.public_feedback(config,result)
     assert feedback['metric']==raw_row['metric'] and feedback['val_score']==raw_row['val_score']

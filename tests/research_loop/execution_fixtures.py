@@ -96,7 +96,7 @@ class DifferentExternalIdentity:
     def collect(self,external_run_id):
         assert external_run_id.startswith('remote-')
         path=self.records.directory(external_run_id.removeprefix('remote-'))/'source.py';item=e.proof(path)
-        descriptor=LocalFileDescriptor(name=self.config.get('collect_name','original'),local_path=str(path),sha256=item['sha256'],
+        descriptor=LocalFileDescriptor(name=self.config.get('collect_name','original'),local_path=str(path),
             size_bytes=item['size_bytes'],media_type='application/octet-stream')
         return (descriptor,descriptor) if self.config.get('duplicate_collection') else (descriptor,)
     def collect_original(self,call_id):return self.collect(self.records.external(call_id))

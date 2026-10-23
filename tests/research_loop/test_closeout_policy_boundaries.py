@@ -1,5 +1,6 @@
 """Frozen capabilities and selection policy apply at the actual controller entry."""
 import json
+from pathlib import Path
 import re
 import sys
 
@@ -40,7 +41,7 @@ def test_disabled_audit_with_adapter_returns_unavailable_without_external_execut
 @pytest.mark.parametrize('low_budget',[False,True])
 def test_accepted_audit_without_policy_still_counts_and_projects_unknown(tmp_path,low_budget):
     root=scene(tmp_path,[],audit=False,max_tokens=1120 if low_budget else 100000)
-    nodes=[dict(step=n,seal_sha256=c.digest(c.host_record(c.workspace(root,n))/'result-identity.json')) for n in (1,2)]
+    nodes=[dict(step=n,seal_ref=c.record_ref(c.host_record(c.workspace(root,n))/'result-identity.json')) for n in (1,2)]
     refs=delivery.catalogue_sources(root,nodes)
     budget.begin_closeout(root,2,3,'Retained accepted audit anomaly',delivery_sources=refs)
     job=c.build_job(root,3,'A',[1,2],purpose='closeout',source_cutoff=2,delivery_sources=refs)
@@ -60,7 +61,6 @@ def test_accepted_audit_without_policy_still_counts_and_projects_unknown(tmp_pat
     assert command(root,'run')['status']=='candidate_audit_unknown'
     assert path.read_bytes()==before and not path.with_name('outcome.json').exists()
     assert not (root/'host-delivery/leaf-output').exists()
-
 
 
 @pytest.mark.process_e2e
@@ -85,8 +85,8 @@ def test_ordinary_deliver_retains_exact_author_and_choice_without_final(tmp_path
     assert [row['intent']['action_kind'] for row in actions]==['submit','confirm']
     assert all(row['intent']['decision']['step']==3 and row['intent']['binding']['candidate_id']=='run-3' for row in actions)
     source=actions[0]['intent']['binding']['source']
-    assert source['objects']['source.py']['sha256']==c.digest(c.workspace(root,2)/'artifacts/train.py')
-    assert source['objects']['artifact']['sha256']==c.digest(root/'runs/model-3.pkl')
+    assert Path(source['objects']['source.py']['path']).read_bytes()==(c.workspace(root,2)/'artifacts/train.py').read_bytes()
+    assert Path(source['objects']['artifact']['path']).read_bytes()==(root/'runs/model-3.pkl').read_bytes()
     assert all(path.read_bytes()==raw for path,raw in originals.items())
     assert command(root,'run')['status']=='delivery_confirmed' and budget.closeout_state(root)['actions']==actions
     assert all(path.read_bytes()==raw for path,raw in originals.items()) and not (root/'jobs/004.json').exists()

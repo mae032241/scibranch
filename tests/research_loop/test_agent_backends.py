@@ -41,7 +41,7 @@ def prepare(tmp_path, *, max_steps=3, **options):
 def intent(root, role='H'):
     job=c.build_job(root,1,role,[])
     anchor=budget.accept_node(root,job)
-    value=dict(task_sha256=c.digest(root/'jobs/001.json'),**native.profiles.binding(c.settings(root),job))
+    value=dict(task_ref=c.record_ref(root/'jobs/001.json'),**native.profiles.binding(c.settings(root),job))
     if anchor is not None:value['budget_slice']=anchor
     c.write(execution.origin(root,1)/'native-intent.json',value)
     return execution.origin(root,1)
@@ -258,11 +258,11 @@ def test_controller_routes_completed_protocol_h_with_unknown_usage_without_repla
         assert c.read(record/'native-outcome.json')['metering']['coverage']=='unknown'
         assert not (record/'usage.json').exists()
         assert (c.workspace(root,step)/'work/launches').read_text()=='launch\n'
-        originals[step]={name:c.digest(record/name) for name in ('native-intent.json','native-outcome.json','native.jsonl')}
+        originals[step]={name:(record/name).read_bytes() for name in ('native-intent.json','native-outcome.json','native.jsonl')}
     assert controller.run(root)['status']=='final_a_completed'
     for step in (1,2):
         record=execution.origin(root,step)
-        assert originals[step]=={name:c.digest(record/name) for name in originals[step]}
+        assert originals[step]=={name:(record/name).read_bytes() for name in originals[step]}
         assert (c.workspace(root,step)/'work/launches').read_text()=='launch\n'
 
 
@@ -348,7 +348,7 @@ def test_formal_review_task_retains_subject_and_uses_launcher_for_independent_ru
     record=intent(root, 'A')
     job=c.read(root/'jobs/001.json');job['formal_review']={'exact':'original'}
     c.write(root/'jobs/001.json',job)
-    value=c.read(record/'native-intent.json');value['task_sha256']=c.digest(root/'jobs/001.json')
+    value=c.read(record/'native-intent.json');value['task_ref']=c.record_ref(root/'jobs/001.json')
     c.write(record/'native-intent.json',value)
     class LaunchCaptured(RuntimeError):
         pass

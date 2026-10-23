@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 from collections.abc import Mapping
@@ -76,9 +75,6 @@ class SchemaModel(BaseModel):
     def canonical_json(self) -> bytes:
         return canonical_json(self)
 
-    @property
-    def content_hash(self) -> str:
-        return canonical_sha256(self)
 
 
 def canonical_json(value: Any) -> bytes:
@@ -97,7 +93,8 @@ def canonical_json(value: Any) -> bytes:
 def canonical_sha256(value: Any) -> str:
     """Hash the canonical JSON representation of a value."""
 
-    return hashlib.sha256(canonical_json(value)).hexdigest()
+    from scidiscovery.execution_security import request_digest
+    return request_digest(_normalize_json(value))
 
 
 def _deep_freeze(value: Any, active: set[int] | None = None) -> Any:

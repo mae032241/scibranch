@@ -1,5 +1,4 @@
 """Explicit local result declarations projected into existing candidate bindings."""
-import hashlib
 import math
 from pathlib import Path
 
@@ -8,8 +7,10 @@ from . import experiments as e
 
 
 def identity(row, candidate):
-    return 'local-' + hashlib.sha256(e.encoded(dict(scope=row['scope'], call_id=row['call_id'],
-        artifact=candidate['artifact']))).hexdigest()
+    matches=[index for index, item in enumerate(declarations(row), 1) if item==candidate]
+    if len(matches)!=1:
+        raise ValueError('Candidate has no unique original declaration')
+    return f'local-{row["scope"]["step"]:03d}-{row["call_id"]}-{matches[0]:03d}'
 
 
 def protocol(interface):
@@ -45,7 +46,7 @@ def candidates(rows, *, diagnostics=None):
                 and 'artifacts/'+item['name']==candidate['artifact']] if valid else []
             declared_outputs=declared.get('outputs')
             valid=(valid and isinstance(declared_outputs,list) and len(matching_outputs)==1
-                and sum(isinstance(item,dict) and item.get('path')==candidate['artifact'] for item in declared_outputs)==1
+                and sum(isinstance(item,dict) and item.get('path',)==candidate['artifact'] for item in declared_outputs)==1
                 and sum(isinstance(item,dict) and item.get('artifact')==candidate['artifact'] for item in declarations)==1)
             if not valid:
                 if diagnostics is not None:diagnostics.append(dict(call_id=row['call_id'],code='declared_candidate_mapping_invalid'))
@@ -74,7 +75,7 @@ def sources(root, fact, candidate_id, *, source=None):
         source = originals.node(root, fact['managed_calls'][0]['scope']['step']) if fact.get('managed_calls') else None
     raw_id = candidate_refs.original_id(source.origin_identity, candidate_id) if source is not None else candidate_id
     def retained(proof):
-        bound=dict(path=proof['snapshot'],sha256=proof['sha256'],size_bytes=proof['size_bytes'])
+        bound=dict(path=proof['snapshot'],size_bytes=proof['size_bytes'])
         return originals.resolve_ref(source,bound)
     matches = [(row, item) for row in fact.get('managed_calls', [])
         for item in declarations(row)
@@ -98,12 +99,12 @@ def sources(root, fact, candidate_id, *, source=None):
     def proof(item):
         if item.get('retention') != 'archived':
             raise ValueError('Managed delivery original is not archived')
-        return dict(path=item['snapshot'], sha256=item['sha256'], size_bytes=item['size_bytes'])
+        return dict(path=item['snapshot'], size_bytes=item['size_bytes'])
     # Input names come from the accepted snapshot inventory, never basename matching.
     objects = {}
     for item in accepted['snapshot_files']:
         matches = [p for p in row['originals'] if Path(source.original_root) / p['path'] == Path(accepted['cwd']) / item['name']]
-        if len(matches) != 1 or any(matches[0][key] != item[key] for key in ('sha256', 'size_bytes')):
+        if len(matches) != 1 or any(matches[0][key] != item[key] for key in ('size_bytes',)):
             raise ValueError('Managed delivery input differs from accepted snapshot')
         objects['inputs/' + item['name']] = proof(matches[0])
     for item in row['outputs']:

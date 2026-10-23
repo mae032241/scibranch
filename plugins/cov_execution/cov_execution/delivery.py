@@ -5,7 +5,6 @@ launcher; its audit namespace cannot mount the real targets or private task data
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
@@ -29,18 +28,29 @@ def _exact(path, limit=None):
     return path
 
 
-def _sha(path, *, deadline=None):
-    digest=hashlib.sha256()
-    with _exact(path).open('rb') as stream:
-        while True:
-            if deadline is not None and time.clock_gettime(time.CLOCK_BOOTTIME) >= deadline:
-                raise TimeoutError('Original engineering check deadline reached')
-            block=stream.read(1024*1024)
-            if not block:break
-            digest.update(block)
-    if deadline is not None and time.clock_gettime(time.CLOCK_BOOTTIME) >= deadline:
-        raise TimeoutError('Original engineering check deadline reached')
-    return digest.hexdigest()
+def _generation(path):
+    info = _exact(path).stat()
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+
+
+def _copy_selected(source, destination):
+    before = _generation(source)
+    pending = destination.with_name(destination.name + '.rootless-pending')
+    if pending.exists() or pending.is_symlink():
+        raise ValueError('Uncertain delivery target temporary exists')
+    with source.open('rb') as original, pending.open('xb') as output:
+        opened = os.fstat(original.fileno())
+        if [opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns] != before:
+            raise ValueError('Selected source changed before copy')
+        shutil.copyfileobj(original, output, 1024 * 1024)
+        output.flush();os.fsync(output.fileno())
+        after = os.fstat(original.fileno())
+        if [after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns] != before or _generation(source) != before:
+            raise ValueError('Selected source changed during copy')
+    if pending.stat().st_size != before[2]:
+        raise ValueError('Selected source copy is incomplete')
+    os.replace(pending, destination)
+    return _generation(destination)
 
 
 def target(value):
@@ -66,17 +76,15 @@ def original(root, candidate, cfg, ledger_cache):
     matches = []
     for proof in candidate['evidence']:
         path = _exact(Path('/inputs') / proof['label'])
-        if proof['sha256'] not in ledger_cache:
+        if proof['label'] not in ledger_cache:
             data = path.read_bytes()
-            if hashlib.sha256(data).hexdigest() != proof['sha256']:
-                raise ValueError('Frozen public run evidence changed')
             indexed = {}
             for line in data.splitlines():
                 if not line.strip():continue
                 row = json.loads(line)
                 if type(row.get('run_id')) is int:indexed.setdefault(row['run_id'], []).append(row)
-            ledger_cache[proof['sha256']] = indexed
-        matches.extend((row, proof['label']) for row in ledger_cache[proof['sha256']].get(int(match[1]), []))
+            ledger_cache[proof['label']] = indexed
+        matches.extend((row, proof['label']) for row in ledger_cache[proof['label']].get(int(match[1]), []))
     if len(matches) != 1:
         raise SourceUnavailable('delivery_run_source_ambiguous')
     row, proof = matches[0]
@@ -131,10 +139,10 @@ def managed_objects(candidate, row):
         if proof.get('retention') != 'archived' or not isinstance(proof.get('input_label'), str):
             raise SourceUnavailable('delivery_managed_original_not_retained')
         label = proof['input_label']
-        if not re.fullmatch(r'execution/[0-9a-f]{64}', label):
+        if not re.fullmatch(r'execution/[A-Za-z0-9_.-]+', label):
             raise ValueError('Frozen execution proof label changed')
         path = _exact(Path('/inputs') / label)
-        if _sha(path) != proof['sha256'] or path.stat().st_size != proof['size_bytes']:
+        if path.stat().st_size != proof['size_bytes']:
             raise ValueError('Frozen managed execution original changed')
         return path
     source, model, receipt = unique('source.py'), unique('model.pkl'), unique('row.json')
@@ -289,7 +297,7 @@ def smoke_status(value):
 
 def _reply(request, status, note):
     value=dict(status=status,operation_id=request['operation_id'],candidate_id=request['candidate_id'],
-        artifact_sha256=request['artifact_sha256'],note=note)
+        artifact_ref=request['artifact_ref'],note=note)
     if status=='engineering_error' and request.get('phase')=='audit':
         value['recovery']='author_repair' if note in AUTHOR_REPAIR_CODES else 'control_retry' if note in {
             'audit_source_missing','audit_harness_unavailable','audit_process_failed'} else 'none'
@@ -326,7 +334,7 @@ def _current_guard(request):
     source=_exact(source)
     if source!=host:
         proof=next((item for item in request.get('inputs',[]) if item.get('label')=='scid-current-protocol'),None)
-        if proof is None or _sha(source, deadline=request.get('deadline_boottime') if request.get('phase')=='replay' else None)!=proof['sha256'] or source.stat().st_size!=proof['size_bytes']:
+        if proof is None or source.stat().st_size!=proof['size_bytes']:
             raise ValueError('Frozen current protocol original differs')
     runpy.run_path(str(source))['require_scope'](request.get('scope'))
 
@@ -353,7 +361,7 @@ def leaf(request):
                     objects = []
                     for label, path in [('artifact', model_path(Path(request['root']), row, cfg)),
                                         ('source.py', source_path(Path(request['root']), row))]:
-                        if path not in object_cache:object_cache[path] = dict(path=str(path), sha256=_sha(path), size_bytes=path.stat().st_size)
+                        if path not in object_cache:object_cache[path] = dict(path=str(path), size_bytes=path.stat().st_size)
                         objects.append(dict(label=label, **object_cache[path]))
                 item.update(status='audit_pending', evidence_label=evidence, objects=objects,
                     context=dict(row=row, identity_note=('Exact sealed managed call originals; public audit is still pending.' if managed else
@@ -365,17 +373,17 @@ def leaf(request):
             items.append(item)
         return dict(items=items, capabilities=['smoke'])
     if phase == 'replay':
-        for label, digest in request['object_digests'].items():
-            if _sha(Path('/inputs') / label, deadline=request['deadline_boottime']) != digest:
+        for label, reference in request['object_refs'].items():
+            if _exact(Path('/inputs') / label).stat().st_size != reference['size_bytes']:
                 raise ValueError('Frozen replay input changed')
         return _replay(request)
     run_id = request['context']['row']['run_id']
-    if request['candidate_id'] != f'run-{run_id}' or not re.fullmatch('[0-9a-f]{64}', request['operation_id']):
+    if request['candidate_id'] != f'run-{run_id}' or not isinstance(request['operation_id'],str) or not request['operation_id']:
         raise ValueError('Exact operation and candidate required')
-    if _sha('/inputs/artifact') != request['artifact_sha256']:
+    if _exact('/inputs/artifact').stat().st_size != request['artifact_ref']['size_bytes']:
         raise ValueError('Selected model bytes changed')
-    for label, digest in request['object_digests'].items():
-        if _sha(Path('/inputs') / label) != digest:raise ValueError('Frozen audit input changed')
+    for label, reference in request['object_refs'].items():
+        if _exact(Path('/inputs') / label).stat().st_size != reference['size_bytes']:raise ValueError('Frozen audit input changed')
     runs, submission = Path('/target/runs'), Path('/target/submission')
     if phase == 'smoke':
         return _smoke(request)
@@ -401,7 +409,7 @@ def leaf(request):
         except (OSError, ValueError):
             status, note = 'unclassified', 'audit_receipt_invalid'
         if status in {'audited','rejected'}:
-            try:matched=_sha(scratch/'submitted_model.pkl')==request['artifact_sha256']
+            try:matched=_exact(scratch/'submitted_model.pkl').stat().st_size==request['artifact_ref']['size_bytes']
             except (OSError,ValueError):matched=False
             if not matched:status,note='unclassified','audit_model_identity_changed'
         if status != 'audited':
@@ -412,32 +420,28 @@ def leaf(request):
         return _reply(request, 'audited', 'public_audit_completed_nonleaking')
     if phase == 'promote':
         audit = json.loads(_exact('/scratch/runs/submitted.json').read_text())
-        if not _audit(audit, run_id) or _sha('/scratch/runs/submitted_model.pkl') != request['artifact_sha256']:
+        if not _audit(audit, run_id) or _exact('/scratch/runs/submitted_model.pkl').stat().st_size != request['artifact_ref']['size_bytes']:
             return _reply(request, 'failed', 'audit_not_completed')
         artifact=_exact('/inputs/artifact')
         # A multi-file commit can be interrupted. The marker is written last;
         # anything partial stays unknown and is queried without resubmission.
-        for path in (runs / 'submitted_model.pkl', submission / 'model.pkl'):
-            pending=path.with_name(path.name+'.rootless-pending')
-            if pending.exists() or pending.is_symlink():raise ValueError('Uncertain delivery target temporary exists')
-            with artifact.open('rb') as source,pending.open('xb') as sink:
-                shutil.copyfileobj(source,sink,1024*1024);sink.flush();os.fsync(sink.fileno())
-            if _sha(pending)!=request['artifact_sha256']:raise ValueError('Delivery artifact changed during copy')
-            os.replace(pending,path)
+        published = {}
+        for name, path in [('run_model', runs/'submitted_model.pkl'), ('submission_model', submission/'model.pkl')]:
+            published[name] = _copy_selected(artifact, path)
         audit['model_path'] = str(Path(request['target']['runs']) / 'submitted_model.pkl')
         _replace(runs / 'submitted.json', (json.dumps(audit, allow_nan=False) + '\n').encode())
         marker = dict(operation_id=request['operation_id'], candidate_id=request['candidate_id'],
-                      artifact_sha256=request['artifact_sha256'], audit_sha256=_sha(runs / 'submitted.json'))
+                      artifact_ref=request['artifact_ref'], artifact_origin=request['artifact_origin'], audit=audit, published=published)
         _replace(runs / 'rootless-delivery-operation.json', (json.dumps(marker) + '\n').encode())
     elif phase != 'confirm':
         raise ValueError('Unknown delivery phase')
     try:
         marker = json.loads(_exact(runs/'rootless-delivery-operation.json').read_text())
         actual = json.loads(_exact(runs/'submitted.json').read_text())
-        if (all(marker.get(key) == request[key] for key in ('operation_id', 'candidate_id', 'artifact_sha256'))
-                and _audit(actual, run_id) and _sha(runs / 'submitted.json') == marker['audit_sha256']
-                and _sha(runs / 'submitted_model.pkl') == request['artifact_sha256']
-                and _sha(submission / 'model.pkl') == request['artifact_sha256']):
+        if (all(marker.get(key) == request[key] for key in ('operation_id', 'candidate_id', 'artifact_ref', 'artifact_origin'))
+                and _audit(actual, run_id) and actual == marker['audit']
+                and _generation(runs / 'submitted_model.pkl') == marker['published']['run_model']
+                and _generation(submission / 'model.pkl') == marker['published']['submission_model']):
             return _reply(request, 'confirmed', 'exact_public_submission_confirmed')
     except (OSError, ValueError, KeyError):
         pass

@@ -19,7 +19,7 @@ def proof(record):
         from . import startup_recovery
         if startup_recovery.path(record.parents[1],int(record.name)).exists():
             return startup_recovery.original_proof(record.parents[1],int(record.name))
-    return {name: c.digest(c.regular(record / name)) for name in names
+    return {name: c.record_ref(c.regular(record / name)) for name in names
             if name != 'usage.json' or (record/name).exists()}
 
 
@@ -36,12 +36,12 @@ def accepted_intents(root, step):
     """Enumerate accepted identities without traversing their execution results."""
     root = Path(root)
     first = origin(root,step)
-    task = c.digest(c.regular(root/'jobs'/f'{step:03d}.json'))
+    task = c.record_ref(c.regular(root/'jobs'/f'{step:03d}.json'))
     previous = None
     if (first/'native-intent.json').exists():
         value = c.read(c.regular(first/'native-intent.json'))
         _skill_intent(root, step, value)
-        if (value.get('task_sha256') != task or 'attempt' in value
+        if (value.get('task_ref') != task or 'attempt' in value
                 or 'step' in value and (type(value['step']) is not int or value['step'] != step)):
             raise ValueError('Original accepted native intent identity changed')
         previous = first
@@ -60,10 +60,10 @@ def accepted_intents(root, step):
         value = c.read(c.regular(file))
         _skill_intent(root, step, value)
         if (previous is None or number != accepted+1 or type(value.get('attempt')) is not int
-                or value['attempt'] != number or value.get('task_sha256') != task
+                or value['attempt'] != number or value.get('task_ref') != task
                 or 'step' in value and (type(value['step']) is not int or value['step'] != step)
-                or value.get('root_intent_sha256') != c.digest(c.regular(first/'native-intent.json'))
-                or (value.get('previous') or {}).get('native-intent.json') != c.digest(c.regular(previous/'native-intent.json'))):
+                or value.get('root_intent_ref') != c.record_ref(c.regular(first/'native-intent.json'))
+                or (value.get('previous') or {}).get('native-intent.json') != c.record_ref(c.regular(previous/'native-intent.json'))):
             raise ValueError('Accepted native continuation identity changed')
         accepted += 1
         previous = path
@@ -109,9 +109,9 @@ def records(root, step):
         startup_recovery.reconciled_original(root,step)
         limit=max(limit,1)
     repairs = 0
-    task = c.digest(c.regular(root / 'jobs' / f'{step:03d}.json'))
+    task = c.record_ref(c.regular(root / 'jobs' / f'{step:03d}.json'))
     original_intent = c.read(c.regular(first / 'native-intent.json'))
-    if original_intent.get('task_sha256') != task:
+    if original_intent.get('task_ref') != task:
         raise ValueError('Original native task identity changed')
     if (original_intent.get('budget_slice') or {}).get('final_return') is not None:
         budget.final_a_return(root, job, original_intent)
@@ -130,9 +130,9 @@ def records(root, step):
             raise ValueError('Final A output repair must retain its original completion authorization')
         if (intent.get('budget_slice') or {}).get('final_return') is not None:
             budget.final_a_return(root, job, intent)
-        if (number != len(result) or intent.get('attempt') != number or intent.get('task_sha256') != task
+        if (number != len(result) or intent.get('attempt') != number or intent.get('task_ref') != task
                 or intent.get('previous') != proof(result[-1])
-                or intent.get('root_intent_sha256') != c.digest(c.regular(first / 'native-intent.json'))):
+                or intent.get('root_intent_ref') != c.record_ref(c.regular(first / 'native-intent.json'))):
             raise ValueError('Native continuation chain changed')
         kind = intent.get('continuation_kind', 'repair')
         from . import continuation
@@ -158,7 +158,7 @@ def records(root, step):
                 raise ValueError('Native repair attempts exceed their original finite authorization')
         if kind == 'fragment':
             prior = result[-1] / 'checkpoint.json'
-            expected = dict(path=prior.relative_to(root).as_posix(), sha256=c.digest(c.regular(prior)))
+            expected = dict(path=prior.relative_to(root).as_posix())
             if intent.get('fragment_checkpoint') != expected:
                 raise ValueError('Fragment continuation changed its exact checkpoint')
         result.append(path)
@@ -205,7 +205,7 @@ def raw(root, step):
 
 def identity(root, step, attempt=None):
     path = record(root, step, attempt)
-    return c.digest(path / 'native-intent.json') if path != origin(root, step) else c.digest(root / 'jobs' / f'{step:03d}.json')
+    return c.record_ref(path / 'native-intent.json') if path != origin(root, step) else c.record_ref(root / 'jobs' / f'{step:03d}.json')
 
 
 def home(root, step, attempt=0):
@@ -227,13 +227,13 @@ def home(root, step, attempt=0):
 def _terminal(root, step, chain, outcome):
     """A terminal continuation cannot rebind its accepted intent before seal."""
     current = chain[-1]
-    binding = c.digest(c.regular(current / 'native-intent.json'))
+    binding = c.record_ref(c.regular(current / 'native-intent.json'))
     intent = c.read(current / 'native-intent.json')
     for name in ('runner-process.json', 'native-process.json'):
         path = c.regular(current / name)
         receipt = c.read(path)
-        if (c.digest(path) != outcome.get('execution_processes', {}).get(name)
-                or receipt.get('task_sha256') != binding
+        if (c.record_ref(path) != outcome.get('execution_processes', {}).get(name)
+                or receipt.get('task_ref') != binding
                 or receipt.get('boot_id') != intent['budget_slice']['boot_id']
                 or any(type(receipt.get(key)) is not int or receipt[key] <= 0
                        for key in ('pid', 'start_ticks', 'pgid', 'sid', 'ppid'))):

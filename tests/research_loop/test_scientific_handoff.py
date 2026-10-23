@@ -90,7 +90,7 @@ def registered_worker(root,step,parents,*,text='Exact managed scientific contrib
     record=execution.record(root,step)
     node_anchor=budget.accept_node(root,job)
     anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,job))
-    c.write(record/'native-intent.json',dict(step=step,task_sha256=c.digest(root/'jobs'/f'{step:03d}.json'),**anchor))
+    c.write(record/'native-intent.json',dict(step=step,task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),**anchor))
     c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
     original_intent=(record/'native-intent.json').read_bytes()
     output=root/f'local-config-{step}.json'
@@ -100,7 +100,7 @@ def registered_worker(root,step,parents,*,text='Exact managed scientific contrib
     assert result['status']=='known_success'
     binding=result['mechanism_binding']
     assert binding['mechanism_ref']=='h001.m1' and binding['source_h']==1
-    assert binding['source_h_sha256']==c.digest(execution.origin(root,1)/'result-identity.json')
+    assert binding['source_h_ref']==c.record_ref(execution.origin(root,1)/'result-identity.json')
     sealed=finish(root,step,'W',parents,text=text,mechanism_findings=[dict(mechanism='Mechanism',
         basis='observed',finding='The managed fixture produced an observation; target-condition validity is untested.')],
         preserve_native_intent=True)
@@ -285,7 +285,7 @@ def test_repair_requests_bind_original_root_without_role_paths(registered_scene)
 def test_progress_credit_is_current_worker_original_not_self_authored_a(scene):
     original_worker(scene)
     job, _, _ = finish(scene, 3, 'A', [1, 2], progress=dict(verdict='progress'))
-    expected = c.digest(c.host_record(c.workspace(scene, 2)) / 'science-output.json')
+    expected = c.file_ref(c.host_record(c.workspace(scene, 2)) / 'science-output.json')['path']
     assert correction._proofs(scene, job, dict(verdict='progress')) == {expected}
     next_job, _, _ = finish(scene, 4, 'A', [1, 2, 3], progress=dict(verdict='progress'))
     assert correction._proofs(scene, next_job, dict(verdict='progress')) == set()
@@ -295,15 +295,15 @@ def test_progress_binds_h_analysis_and_exact_extraction_return(scene):
     finish(scene, 1, 'H', [], action='analyze', search_choice=plan())
     job, _, _ = finish(scene, 2, 'A', [1], action='extract', progress=dict(verdict='progress'))
     assert correction._proofs(scene, job, dict(verdict='progress')) == {
-        c.digest(c.host_record(c.workspace(scene, 1)) / 'science-output.json')}
+        c.file_ref(c.host_record(c.workspace(scene, 1)) / 'science-output.json')['path']}
     c.build_job(scene, 3, 'E', [1, 2], evidence_return=dict(role='A', step=2))
     finish(scene, 3, 'E', [1, 2], text='Original bounded extraction')
     returned, _, _ = finish(scene, 4, 'A', [1, 2, 3], progress=dict(verdict='progress'))
     assert correction._proofs(scene, returned, dict(verdict='progress')) == {
-        c.digest(c.host_record(c.workspace(scene, 3)) / 'science-output.json')}
+        c.file_ref(c.host_record(c.workspace(scene, 3)) / 'science-output.json')['path']}
 
 
-def test_equal_worker_raws_have_only_one_progress_credit(correcting_scene):
+def test_equal_worker_raws_keep_independent_original_progress_credit(correcting_scene):
     scene = correcting_scene
     finish(scene, 1, 'H', [], action='experiment', search_choice=plan())
     finish(scene, 2, 'W', [1], text='Same original science bytes',mechanism_findings=PENDING_FINDINGS)
@@ -311,9 +311,8 @@ def test_equal_worker_raws_have_only_one_progress_credit(correcting_scene):
            search_choice=dict(dispositions=[], next_focus=focus()))
     finish(scene, 4, 'W', [1, 2, 3], text='Same original science bytes',mechanism_findings=PENDING_FINDINGS)
     finish(scene, 5, 'A', [1, 4], action='finish', progress=dict(verdict='progress'))
-    assert c.digest(c.host_record(c.workspace(scene, 2)) / 'science-output.json') == c.digest(
-        c.host_record(c.workspace(scene, 4)) / 'science-output.json')
-    assert correction.project(scene)['counters'] == dict(no_progress=0, unknown=1)
+    assert (c.host_record(c.workspace(scene, 2)) / 'science-output.json').read_bytes() == (c.host_record(c.workspace(scene, 4)) / 'science-output.json').read_bytes()
+    assert correction.project(scene)['counters'] == dict(no_progress=0, unknown=0)
 
 
 @pytest.mark.parametrize('fault', [None, 'missing_page', 'changed_page'])

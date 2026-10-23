@@ -4,11 +4,9 @@ Operator declarations share prepare's configuration trust boundary. These proofs
 cover declared/frozen inputs and outputs, not arbitrary native shell reads or an
 adversarial writer with access to host records. No scientific payload grants facts.
 """
-import hashlib
 import copy
 import json
 from pathlib import Path
-from scidiscovery import archive_io as files
 
 from . import configuration_updates
 from ..operations.provenance_rules import dependency_sources, inherited_restriction
@@ -42,9 +40,16 @@ def _source_path(source, ref):
 def _identity(path, *, source=None):
     if source is not None:
         actual = _source_path(source, dict(path=str(path)))
-        return dict(path=str(path), sha256=c.digest(actual), size_bytes=actual.stat().st_size)
+        return dict(path=str(path), size_bytes=actual.stat().st_size)
     path = _file(path)
-    return dict(path=str(path), sha256=c.digest(path), size_bytes=path.stat().st_size)
+    return dict(path=str(path), size_bytes=path.stat().st_size)
+
+
+def control_reference(root, ref, *, source=None):
+    """Name the original control record, preserving its logical instance root."""
+    logical_root = Path(source.original_root) if source is not None else Path(root)
+    path = Path(ref['path'])
+    return dict(path=str(path if path.is_absolute() else logical_root / path))
 
 
 def execution_payload(root, material):
@@ -76,7 +81,7 @@ def _ref(root, path, *, source=None):
         matches = [row for row in manifest['entries'] if root / originals.FORK_DIRECTORY / row['storage_path'] == actual]
         if len(matches) != 1:
             raise IntegrityError('Source receipt has no unique original identity')
-        return {field: matches[0][field] for field in ('origin_identity', 'path', 'sha256', 'size_bytes')}
+        return {field: matches[0][field] for field in ('origin_identity', 'path', 'size_bytes')}
     identity = _identity(path)
     return {**identity, 'path': path.relative_to(root).as_posix()}
 
@@ -118,10 +123,10 @@ def source_configuration(public_root, declarations, originals):
     public_root = Path(public_root).resolve()
     result, seen = [], set()
     for row in declarations:
-        if (not isinstance(row, dict) or set(row) != {'source', 'sha256', 'restriction'}
-                or not isinstance(row['source'], str) or not isinstance(row['sha256'], str)
+        if (not isinstance(row, dict) or set(row) != {'source', 'restriction'}
+                or not isinstance(row['source'], str)
                 or row['restriction'] not in ('clear', 'restricted')):
-            raise ValueError('Source declaration requires source, sha256 and clear/restricted restriction')
+            raise ValueError('Source declaration requires source and clear/restricted restriction')
         source = _file(row['source'])
         if str(source) not in allowed and not source.is_relative_to(public_root):
             raise ValueError('Declared source is not an original global input or public material')
@@ -129,8 +134,6 @@ def source_configuration(public_root, declarations, originals):
             raise ValueError('Source declaration is ambiguous')
         seen.add(str(source))
         identity = _identity(source)
-        if identity['sha256'] != row['sha256']:
-            raise IntegrityError('Declared source digest differs from the exact original')
         result.append(dict(origin=identity, restriction=row['restriction']))
     return result
 
@@ -142,7 +145,7 @@ def freeze_sources(root, configured, originals, globals_, *, policy, context, so
     for index, row in enumerate(configured):
         path = root / 'source-provenance' / 'originals' / f'{index:06d}'
         _check(row['origin'])
-        c._bind_original(Path(row['origin']['path']), path, row['origin']['sha256'], policy=policy, context=context, root=root, size_bytes=row['origin']['size_bytes'], source_kind=source_kind)
+        c._bind_original(Path(row['origin']['path']), path, policy=policy, context=context, root=root, size_bytes=row['origin']['size_bytes'], source_kind=source_kind)
         declarations.append({**row, 'retained': _ref(root, path)})
     globals_map = []
     for original, material in zip(originals, globals_):
@@ -182,7 +185,7 @@ def _inputs(root, job):
         document = _original_inputs(source, original)
         for edge in document['edges']:
             if edge['kind'] == 'producer':
-                producer = originals.dependency(source, edge['step'], seal_sha256=edge['seal']['sha256'])
+                producer = originals.dependency(source, edge['step'], seal_ref=control_reference(source.original_root, edge['seal'], source=source))
                 edge['seal'] = dict(edge['seal'], origin_identity=producer.origin_identity)
         return document
     sources = _sources(root)
@@ -202,7 +205,7 @@ def _inputs(root, job):
         step = int(Path(ref['path']).parts[2])
         source = originals.node(root, step)
         seal = c.read(originals.source_record(source, 'result-identity.json'))
-        if ref['sha256'] != seal['raw_sha256']:
+        if seal['raw_ref'].get('path',) != str(Path(source.original_root) / (source.native_record or f'native-evidence/{source.step:03d}') / 'science-output.json'):
             raise IntegrityError('Direct source does not name its exact producer original')
     steps.update(row['origin_step'] for row in job.get('selected_inputs', []))
     steps.update(row['step'] for row in job.get('delivery_sources', {}).get('source_nodes', []))
@@ -227,7 +230,7 @@ def _inputs(root, job):
         for step, row in same_origin:
             if row == material:continue
             if (len(matches) != 1 or row['path'] == material['path']
-                    or Path(material['source']) != root / 'host-history/objects' / material['sha256']):
+                    or not Path(material['source']).is_relative_to(root / 'host-history/objects')):
                 raise IntegrityError('Bound material differs from its exact producer original')
             # Shared archive bytes do not merge the logical material identities
             # or their producers. Verify each alias against its bound owner.
@@ -266,7 +269,7 @@ def _restriction(root, document, active, memo, sources):
     for edge in dependency_sources(None, document['edges']):
         if edge['kind'] == 'global':
             material = edge['material']
-            if c.digest(c.regular(root / material['source'])) != material['sha256']:
+            if c.regular(root / material['source']).stat().st_size != material['size_bytes']:
                 raise IntegrityError('Bound global original changed')
             states.append(_declaration(root, sources, edge['declaration'], memo))
         elif edge['kind'] == 'declaration':
@@ -282,9 +285,9 @@ def _restriction(root, document, active, memo, sources):
             step = edge['step']
             job_path = root / 'jobs' / f'{step:03d}.json'
             record = c.host_record(c.workspace(root, step))
-            if (seal['job_sha256'] != c.digest(c.regular(job_path))
-                    or seal['sha256'] != c.digest(c.regular(record / 'result.json'))
-                    or seal['raw_sha256'] != c.digest(c.regular(c._execution_raw(root, step)))):
+            if (seal['job_ref'] != c.record_ref(c.regular(job_path))
+                    or seal['result_ref'] != c.file_ref(c.regular(record / 'result.json'))
+                    or seal['raw_ref'] != c.file_ref(c.regular(c._execution_raw(root, step)))):
                 raise IntegrityError('Source producer differs from its exact scientific seal')
             parent = c.read(job_path)
             ref = seal.get('source_provenance')
@@ -342,7 +345,7 @@ def _original_inputs(source, job, *, _active=None):
         expected = _original_inputs(original, original_job, _active={*active, identity})
         for edge in expected['edges']:
             if edge['kind'] == 'producer':
-                producer = originals.dependency(original, edge['step'], seal_sha256=edge['seal']['sha256'])
+                producer = originals.dependency(original, edge['step'], seal_ref=control_reference(source.original_root, edge['seal'], source=source))
                 edge['seal'] = dict(edge['seal'], origin_identity=producer.origin_identity)
         if document != expected:
             raise IntegrityError('Original fork provenance changed its exact selected source')
@@ -380,10 +383,10 @@ def _original_inputs(source, job, *, _active=None):
     for edge in producers:
         if not 0 < edge['step'] < job['step']:
             raise IntegrityError('Original producer is outside its task input boundary')
-        parent = originals.dependency(source, edge['step'], seal_sha256=edge['seal']['sha256'])
+        parent = originals.dependency(source, edge['step'], seal_ref=control_reference(source.original_root, edge['seal'], source=source))
         seal = _source_read(parent, edge['seal'])
         job_ref = originals.original_ref(parent, f'jobs/{edge["step"]:03d}.json')
-        if seal['job_sha256'] != job_ref['sha256']:
+        if seal['job_ref'] != control_reference(parent.original_root, job_ref, source=parent):
             raise IntegrityError('Original provenance producer lost its exact task')
         missing = None if seal.get('source_provenance') else 'legacy_producer_without_source_proof'
         if edge.get('missing_reason') != missing:
@@ -437,12 +440,12 @@ def _original_input_status(source, *, active=None):
             else:
                 declaration = sources['declarations'][index]
                 retained = originals.resolve_ref(source, declaration['retained'])
-                actual = files.hash_file(retained)
-                if any(actual[field] != declaration['origin'][field] for field in ('sha256', 'size_bytes')):
+                actual = c.file_ref(retained)
+                if any(actual[field] != declaration['origin'][field] for field in ('size_bytes',)):
                     raise IntegrityError('Original public snapshot differs from its declaration')
                 states.append(declaration['restriction'])
         elif edge['kind'] == 'producer':
-            parent = originals.dependency(source, edge['step'], seal_sha256=edge['seal']['sha256'])
+            parent = originals.dependency(source, edge['step'], seal_ref=control_reference(source.original_root, edge['seal'], source=source))
             states.append(original_status(parent, active={*active, key})['restriction'])
         else:
             states.append('unknown')
@@ -471,7 +474,7 @@ def _output(root, job, seal, *, managed_coverage=None, source=None):
         if receipt['path'] != path:
             raise IntegrityError('Source observation receipt changed')
         actual = _source_path(source, receipt) if source is not None else _file(root / path)
-        if c.digest(actual) != receipt['sha256']:
+        if 'size_bytes' in receipt and actual.stat().st_size != receipt['size_bytes']:
             raise IntegrityError('Source observation receipt changed')
         observation = c.read(actual)
         observer_unknown = False
@@ -488,10 +491,9 @@ def _output(root, job, seal, *, managed_coverage=None, source=None):
             additional_inputs = not all(row['complete'] for row in managed_coverage) or observer_unknown
     elif managed_coverage is not None:
         raise IntegrityError('Managed input coverage has no original observation')
-    return dict(version=1, step=job['step'], job_sha256=seal['job_sha256'],
-                result_sha256=seal['sha256'], raw_sha256=seal['raw_sha256'],
-                materials_sha256=hashlib.sha256(json.dumps(seal['materials'], sort_keys=True,
-                    separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode('utf-8')).hexdigest(),
+    return dict(version=1, step=job['step'], job_ref=seal['job_ref'],
+                result_ref=seal['result_ref'], raw_ref=seal['raw_ref'],
+                materials=copy.deepcopy(seal['materials']),
                 inputs=job.get('source_provenance'), derivation='all_frozen_task_inputs',
                 observations=seal.get('observations'),
                 additional_input_restriction='unknown' if additional_inputs else 'clear',

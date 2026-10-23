@@ -15,16 +15,16 @@ def native_intent(root, job):
     """Use real stage anchors once; an accepted intent is never overwritten."""
     record = execution.record(root, job['step'])
     path = record / 'native-intent.json'
-    task = c.digest(root / 'jobs' / f'{job["step"]:03d}.json')
+    task = c.record_ref(root / 'jobs' / f'{job["step"]:03d}.json')
     if not path.exists():
         node_anchor = budget.accept_node(root, job)
         anchor = search.accept(root, job) if node_anchor is None else None
-        c.write(path, dict(step=job['step'], task_sha256=task,
+        c.write(path, dict(step=job['step'], task_ref=task,
             **(dict(search_slice=anchor) if anchor is not None else {}),
             **(dict(budget_slice=node_anchor) if node_anchor is not None else {})))
     original = c.regular(path).read_bytes()
     intent = c.read(path)
-    assert intent['task_sha256'] == task
+    assert intent['task_ref'] == task
     if job['role'] == 'W' and job.get('search') and budget.node_limits(root, job) is None:
         assert search.stop_reason(root, job, intent, budget.snapshot(root),
             dict(input_tokens=0, output_tokens=0)) is None
@@ -71,7 +71,7 @@ def finish(root, step, role, parents, text='A bounded scientific finding', actio
     c.write(record / 'science-output.json', payload)
     meter=dict(input_tokens=7,cached_input_tokens=2,output_tokens=3)
     c.write(record / 'usage.json',meter)
-    terminal=dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_sha256=c.digest(record/'science-output.json'))
+    terminal=dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_ref=c.file_ref(record/'science-output.json'))
     intent=c.read(record/'native-intent.json')
     if (intent.get('budget_slice') or {}).get('final_return') is not None:
         backend=backends.selected(c.settings(root,job))
@@ -280,9 +280,9 @@ def assert_public_author_request(root, job, remaining):
     assert public['original_science'] == f'inputs/parents/{request["source"]["step"]:03d}/conclusion.json'
     assert public['remaining_author_corrections'] == remaining
     text = json.dumps(view, ensure_ascii=False)
-    for key in ('job_sha256', 'raw_sha256', 'seal_sha256'):
+    for key in ('job_ref', 'raw_ref', 'seal_ref'):
         assert key not in text
-        assert all(identity[key] not in text for identity in (request['root'], request['source']))
+        assert all(identity[key]['path'] not in text for identity in (request['root'], request['source']))
 
 
 def original_bytes(root, steps):
@@ -463,12 +463,12 @@ def test_invalid_selection_gets_h_correction_before_experiment_and_never_uses_ol
 
 def terminal_payload(root, step, payload):
     record = c.host_record(c.workspace(root, step))
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs' / f'{step:03d}.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json')))
     if isinstance(payload.get('candidate_recommendation'),str):payload['selection_explanation']=selection_explanation()
     c.write(record / 'science-output.json', payload)
     c.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
     c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None,
-        usage=native.usage(root), raw_sha256=c.digest(record / 'science-output.json')))
+        usage=native.usage(root), raw_ref=c.file_ref(record / 'science-output.json')))
 
 
 def h_payload(choice):
@@ -480,7 +480,7 @@ def h_payload(choice):
 def test_unknown_submission_is_never_rerouted_or_replayed(scene, monkeypatch):
     c.build_job(scene, 1, 'H', [])
     record = c.host_record(c.workspace(scene, 1))
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(scene / 'jobs/001.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(scene / 'jobs/001.json')))
     def forbidden(*args, **kwargs):
         pytest.fail('Unknown native submission must not dispatch a correction or replay')
     monkeypatch.setattr(native, 'execute_native', forbidden)
@@ -677,7 +677,7 @@ def test_author_h_retains_n4_request_and_only_real_work_can_resolve_review(tmp_p
         assert state['review_request'] is None
         a_job = c.read(root / 'jobs/007.json')
         assert correction._proofs(root, a_job, dict(verdict='progress')) == {
-            c.digest(c.host_record(c.workspace(root, 6)) / 'science-output.json')}
+            c.file_ref(c.host_record(c.workspace(root, 6)) / 'science-output.json')['path']}
     else:
         assert calls == [(1, 'H'), (2, 'W'), (3, 'A'), (4, 'H'), (5, 'H'), (6, 'A')]
         a_job = c.read(root / 'jobs/006.json')

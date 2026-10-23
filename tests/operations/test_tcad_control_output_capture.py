@@ -1,5 +1,4 @@
 """F-13: authoring, packing, runner collection and analysis agree on control paths."""
-import hashlib
 import json
 
 import pytest
@@ -33,7 +32,10 @@ def test_sealed_log_alias_survives_real_packaging_collection_and_attestation(tmp
     assert job['expected_outputs'][0]['relative_path'] == PROCESS_LOG_PATH
     assert canonical_json(package.model_dump(mode='json')) == raw
     assert package.project.expected_outputs[0].relative_path == 'tcad.log'
-    assert package_execution_package_json(raw, output_root=tmp_path / 'prepared') == packaged
+    another=package_execution_package_json(raw, output_root=tmp_path/'prepared')
+    assert another.package_id!=packaged.package_id
+    assert another.job_spec.request_id!=packaged.job_spec.request_id
+    assert another.job_spec.archive_entries==packaged.job_spec.archive_entries
     work = tmp_path / 'remote/work'
     work.mkdir(parents=True)
     (work.parent / 'worker.log').write_bytes(b'captured stdout\n')

@@ -1,7 +1,6 @@
 """Coordinate the selected SSH runner with the main install transaction."""
 import argparse
 import base64
-import hashlib
 import json
 from pathlib import Path
 import shlex
@@ -30,15 +29,15 @@ def main():
         print("TCAD command executor is externally managed; bundled runner deployment is not applicable.")
         return
     config = read_transport_config(path)
-    transport_sha256 = hashlib.sha256(config.model_dump_json().encode()).hexdigest()
+    transport_record = config.model_dump(mode="json")
     if args.phase == "prepare":
         receipt = {"transaction": uuid.uuid4().hex, "transport_config": str(path),
-            "transport_sha256": transport_sha256, "state": "preparing"}
+            "transport_record": transport_record, "state": "preparing"}
         receipt_path.write_text(json.dumps(receipt))
         receipt_path.chmod(0o600)
     else:
         receipt = json.loads(receipt_path.read_bytes())
-        if receipt["transport_config"] != str(path) or receipt["transport_sha256"] != transport_sha256:
+        if receipt["transport_config"] != str(path) or receipt["transport_record"] != transport_record:
             raise RuntimeError("TCAD transport changed during installation")
     packet = {"phase": args.phase, "transaction": receipt["transaction"],
         "runner": config.remote_helper, "config": config.remote_config}

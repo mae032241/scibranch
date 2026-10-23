@@ -30,7 +30,7 @@ def test_real_main_client_contracts_and_retained_outputs(tmp_path, monkeypatch, 
     assert c.read(execution.origin(root, 2) / 'experiment-config.json') == config
     assert not (work/'work/lineage/calls').exists()
     assert not Path(config['record_dir']).is_relative_to(work)
-    assert 'config_sha256' in config['execution_interface']
+    assert 'config_record' in config['execution_interface']
     capabilities = invoke(capsys, path, 'capabilities')
     assert capabilities['contracts'][0]['key'] == 'opaque_input'
     assert 'sha256' not in capabilities['contracts'][0]
@@ -57,8 +57,8 @@ def test_real_main_client_contracts_and_retained_outputs(tmp_path, monkeypatch, 
     assert invoke(capsys, path, 'reconcile', '--call-id', call)['status'] == 'known_success'
     assert invoke(capsys, path, 'lineage-status')['counts']['known_success'] == 1
     accepted = e.Records(config).accepted(call)
-    assert accepted['prepared']['sha256'] == c.digest(source)
-    assert 'sha256' in c.read(e.Records(config).directory(call) / 'execution-observation.json')['outputs'][0]
+    assert accepted['prepared']['local_path'] == str(source)
+    assert 'sha256' not in c.read(e.Records(config).directory(call) / 'execution-observation.json')['outputs'][0]
 
 
 
@@ -117,7 +117,7 @@ def test_real_main_rejects_changed_client_or_private_original(tmp_path, monkeypa
         target = execution.origin(root, 2) / ('experiment-config.json' if mutation == 'private_config' else 'native-intent.json')
         value = c.read(target)
         if mutation == 'private_config':value['max_seconds'] += 1
-        else:value['task_sha256'] = '0' * 64
+        else:value['task_ref'] = dict(path='/wrong/original.json')
         c.write(target, value)
     assert invoke(capsys, path, 'capabilities', expected=3)['status'] == 'integrity_error'
     assert not e.Records(config).calls()
@@ -126,10 +126,10 @@ def test_real_main_rejects_changed_client_or_private_original(tmp_path, monkeypa
 def test_private_capability_comparison_still_rejects_change(tmp_path, monkeypatch, remote_registry, capsys):
     root, _, config, _ = case(tmp_path, monkeypatch)
     original = copy.deepcopy(config)
-    config['execution_interface']['public_capabilities'][0]['sha256'] = '0' * 64
+    config['execution_interface']['public_capabilities'][0]['schema_id'] = 'changed_schema'
     # Exercise exact frozen loading, not a standalone JSON cleanup helper.
     with pytest.raises(e.IntegrityError):e.load(config)
-    assert original['execution_interface']['public_capabilities'][0]['sha256'] != '0' * 64
+    assert original['execution_interface']['public_capabilities'][0]['schema_id'] != 'changed_schema'
 
 
 def test_unknown_original_cli_does_not_replay(tmp_path, monkeypatch, remote_registry, capsys):
@@ -558,7 +558,7 @@ def test_actual_nested_codex_sandbox_uses_host_bridge(tmp_path, execution_regist
     for name in ('train.csv','val.csv','meta.json'):(harness/name).write_text('{}')
     manifest=tmp_path/'public-manifest.json'
     c.write(manifest,dict(task_revision='d78f5eb52ad754c5ee9154741af73130a85a65b8',
-        public_files_sha256={p.relative_to(public).as_posix():c.digest(p) for p in public.rglob('*') if p.is_file()}))
+        public_files=[p.relative_to(public).as_posix() for p in public.rglob('*') if p.is_file()]))
     profile_name='namespace-network-allowed' if network_enabled else 'namespace-no-model'
     network_section=f'[permissions.{profile_name}.network]\nenabled=false'
     host_wrapper=tmp_path/'host-launcher.py'
@@ -594,8 +594,8 @@ def test_actual_nested_codex_sandbox_uses_host_bridge(tmp_path, execution_regist
     fake.chmod(0o555)
     root=comparison/'instance';operator=comparison/'operator.json'
     c.write(operator,dict(scene_root=str(root),public_root=str(public),public_manifest=str(manifest),runs_dir=str(root/'runs'),
-        submission_dir=str(root/'submission'),native=str(fake),native_sha256=c.digest(fake),
-        code_mode_host=dict(path=str(actual.parent/'codex-code-mode-host'),sha256=c.digest(actual.parent/'codex-code-mode-host')),
+        submission_dir=str(root/'submission'),native=str(fake),
+        code_mode_host=dict(path=str(actual.parent/'codex-code-mode-host')),
         task_python=python,scid_python=scid_python,model='no-model',reasoning_effort='high',profile=profile_name,
         runtime_paths=list(dict.fromkeys([*runtime_paths,str(actual.parent.parent)])),
         cov_engineering_check_reserve_seconds=0))
@@ -623,5 +623,5 @@ def test_actual_nested_codex_sandbox_uses_host_bridge(tmp_path, execution_regist
     assert proof['sibling_evidence_unreadable'] and proof['task_science_readable']
     config=c.read(execution.origin(root,2)/'experiment-config.json')
     accepted=e.Records(config).accepted(proof['call_id'])
-    assert accepted['prepared']['sha256']==c.digest(work/'inert-source.py')
+    assert accepted['prepared']['local_path']==str(work/'inert-source.py')
     assert not (work/'work/lineage/calls').exists()

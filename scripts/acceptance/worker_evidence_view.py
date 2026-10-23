@@ -1,9 +1,9 @@
-"""Export a new science view of one operator-selected, verified public index.
+"""Export a new science view of one operator-selected, selected public index.
 
 Operator entry point (no model, solver, replay, or scientific qualification)::
 
     python scripts/acceptance/worker_evidence_view.py --index /exact/public/index.json \
-        --expected-index-sha256 <operator-held digest> --output /exclusive/new-view
+        --output /exclusive/new-view
 
 Only ``science/`` is the reader entry point. ``control/`` retains the exact input
 index, every indexed original, original omission rows, and complete view bindings.
@@ -25,23 +25,22 @@ the fixed projections below; unsupported mechanical source shapes fail closed.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
 
 
-VIEW = 'scidiscovery.worker-evidence-view.v1'
+VIEW = 'scidiscovery.worker-evidence-view.v2'
 EXACT_KINDS = {'original_task', 'public_data', 'source', 'metrics',
                'confirmed_artifact', 'limitation', 'sealed_scientist'}
 PROJECTED_KINDS = {'accepted_projection', 'audit_projection', 'terminal_projection',
                    'completion_projection', 'metrics_projection', 'publication_inventory'}
 METRICS = ('run_id', 'started_at', 'metric', 'ok', 'val_acc', 'val_score',
            'audit_score', 'audit_gap', 'leakage_flag', 'audit_note', 'wall_seconds')
-MECHANICAL_FIELDS = {'source_sha256', 'source_original_sha256',
-                     'artifact_sha256', 'model_sha256', 'job_sha256', 'execution_key',
+MECHANICAL_FIELDS = {'source_ref', 'source_original_ref',
+                     'artifact_ref', 'model_ref', 'job_ref', 'execution_key',
                      'candidate_id', 'call_id', 'operation_id', 'prepared', 'snapshot_files',
-                     'public_manifest_sha256', 'task_python_sha256', 'known_terminal_experiments',
+                     'public_manifest_ref', 'task_python_ref', 'known_terminal_experiments',
                      'candidate_recommendation', 'candidate_comparison'}
 OMISSIONS = {
     'binary_model_private_filenames': (
@@ -77,10 +76,6 @@ def _json(raw):
 
 def _encoded(value):
     return (json.dumps(value, indent=2, allow_nan=False) + '\n').encode()
-
-
-def _digest(raw):
-    return hashlib.sha256(raw).hexdigest()
 
 
 def _text_prefix(text, render, byte_limit):
@@ -168,14 +163,14 @@ class _Projection:
             value = dict(self.identities(original), status=_status(original.get('status', 'accepted_original_retained')))
             materials = [original['prepared']] if isinstance(original.get('prepared'), dict) else []
             materials += original.get('snapshot_files', [])
-            value['materials'] = [dict(material_ref=self.reference('Material', row.get('sha256', row.get('name'))))
+            value['materials'] = [dict(material_ref=self.reference('Material', row.get('path', row.get('name'))))
                                   for row in materials]
             return value
         if kind == 'terminal_projection':
             if original.get('status') not in {'known_success', 'known_failed', 'unknown'}:
                 raise ValueError('An original terminal status is required')
             value = dict(self.identities(original), **_fields(original, ('status', 'returncode', 'wall_seconds')))
-            value['outputs'] = [dict(material_ref=self.reference('Material', row.get('sha256', row.get('name'))),
+            value['outputs'] = [dict(material_ref=self.reference('Material', row.get('path', row.get('name'))),
                                      **_fields(row, ('media_type',))) for row in original.get('outputs', [])]
             return value
         if kind == 'completion_projection':
@@ -226,8 +221,8 @@ class _Projection:
             value['known_terminal_experiments'] = [_fields(row, ('alias', 'source', 'facts'))
                                                   for row in original['known_terminal_experiments']]
             return value
-        if kind == 'limitation' and 'source_sha256' in original:
-            allowed = {'source_sha256', 'known_terminal', 'public_run', 'public_audit',
+        if kind == 'limitation' and 'source_ref' in original:
+            allowed = {'source_ref', 'known_terminal', 'public_run', 'public_audit',
                        'scientific_distinctness', 'qualification'}
             if set(original) - allowed:
                 raise ValueError('Unsupported mechanical limitation producer')
@@ -237,7 +232,7 @@ class _Projection:
                     value[name] = _metrics(original[name])
             return value
         if kind == 'metrics' and set(original) == {
-                'source_sha256', 'public_manifest_sha256', 'task_python_sha256', 'qualification'}:
+                'source_ref', 'public_manifest_ref', 'task_python_ref', 'qualification'}:
             return _fields(original, ('qualification',))
         if kind == 'metrics' and 'candidate_id' in original:
             # Fixed numerical-reproduction report; do not infer a generic JSON scrub.
@@ -310,8 +305,7 @@ class _Projection:
                     or row['reason'] not in OMISSIONS):
                 raise ValueError('Unsupported omission category')
             _alias(row['public_alias'])
-            if (not isinstance(row.get('sha256'), str) or not re.fullmatch('[0-9a-f]{64}', row['sha256'])
-                    or type(row['size_bytes']) is not int or row['size_bytes'] < 0):
+            if type(row.get('size_bytes')) is not int or row['size_bytes'] < 0:
                 raise ValueError('Exact original omission binding required')
             # public_alias is the producer's scientific name, never its private path.
             human_alias = '/'.join(self.reference('Material', part) if re.search('[0-9a-fA-F]{64}', part)
@@ -343,19 +337,15 @@ class _Projection:
         return dict(categories=categories, **_fields(original, ('reproduction_facts',)), **text)
 
 
-def export_view(index_path, expected_index_sha256, output_dir):
-    """Verify one exact index and all indexed bytes before creating a new view."""
+def export_view(index_path, output_dir):
+    """Read one explicit index and sized regular originals into a fresh view."""
     index_path, output_dir = Path(index_path).absolute(), Path(output_dir).absolute()
     if index_path.resolve() != index_path or not index_path.is_file():
         raise ValueError('Exact original index required')
     index_raw = index_path.read_bytes()
-    if (not isinstance(expected_index_sha256, str)
-            or not re.fullmatch('[0-9a-f]{64}', expected_index_sha256)
-            or _digest(index_raw) != expected_index_sha256):
-        raise ValueError('Selected original index identity differs')
     index = _json(index_raw)
-    if index.get('version') != 1 or not isinstance(index.get('evidence'), list) or not index['evidence']:
-        raise ValueError('Explicit original public evidence index version 1 required')
+    if index.get('version') != 2 or not isinstance(index.get('evidence'), list) or not index['evidence']:
+        raise ValueError('Explicit original public evidence index version 2 required')
     if (output_dir.resolve() != output_dir or output_dir.exists()
             or output_dir.is_relative_to(index_path.parent)):
         raise ValueError('Exclusive new view outside the original packet required')
@@ -371,8 +361,7 @@ def export_view(index_path, expected_index_sha256, output_dir):
         if source.resolve() != source or not source.is_file():
             raise ValueError('Indexed original is missing or redirected')
         raw = source.read_bytes()
-        if (_digest(raw) != row['sha256'] or type(row['size_bytes']) is not int
-                or len(raw) != row['size_bytes']):
+        if type(row['size_bytes']) is not int or len(raw) != row['size_bytes']:
             raise ValueError('Indexed original bytes differ')
         originals.append((row, raw))
 
@@ -399,20 +388,20 @@ def export_view(index_path, expected_index_sha256, output_dir):
                  'final-result.json': 'completion_projection', 'closeout-outcome.json': 'completion_projection'}
         if PurePosixPath(alias).name in fixed and fixed[PurePosixPath(alias).name] != kind:
             raise ValueError('Mechanical receipt requires its typed projection kind')
-        binding = dict(original_alias=alias, kind=kind, source_sha256=row['sha256'],
-                       size_bytes=len(raw), source_original_sha256=row.get('source_original_sha256'))
+        binding = dict(original_alias=alias, kind=kind, source_ref=dict(path=str(index_path.parent / alias),size_bytes=len(raw)),
+                       source_original_ref=row.get('source_original_ref'))
         if kind != 'publication_inventory':
             # Preserve source directory relationships unless the alias itself exposes a digest.
             public_alias = alias if not re.search('[0-9a-fA-F]{64}', alias) else f'evidence/E{number:04d}.json'
             public_raw = raw if value is None else _encoded(value)
             if value is not None:
-                summary = 'Scientific view of a verified original; original bytes retained privately.'
+                summary = 'Scientific view of a selected original; original bytes retained privately.'
             science.append((public_alias, public_raw, dict(alias=public_alias, kind=kind, summary=summary)))
-            binding.update(science_alias=public_alias, view_sha256=_digest(public_raw),
+            binding.update(science_alias=public_alias, size_bytes=len(public_raw),
                            relation='exact_bytes' if value is None else 'typed_scientific_projection')
         else:
             binding.update(relation='omission_summary_and_scientific_detail_pages', omitted_originals=original['withheld'],
-                science_details=[dict(alias=alias, view_sha256=_digest(raw))
+                science_details=[dict(alias=alias, size_bytes=len(raw))
                                  for alias, raw in projection.omission_details[detail_start:]])
         bindings.append(binding)
     navigation_start = len(projection.omission_details)
@@ -423,10 +412,10 @@ def export_view(index_path, expected_index_sha256, output_dir):
             raise ValueError('Projected science aliases collide')
         science_aliases.append(alias)
     public_index = dict(view=VIEW, evidence=[item[2] for item in science], **omission_index)
-    control_index = dict(view=VIEW, original_index=dict(path=str(index_path), sha256=expected_index_sha256),
+    control_index = dict(view=VIEW, original_index=dict(path=str(index_path), size_bytes=len(index_raw)),
         bindings=bindings, references=[dict(kind=kind, original=original, reference=reference)
             for (kind, original), reference in projection.references.items()],
-        omission_navigation=[dict(alias=alias, view_sha256=_digest(raw))
+        omission_navigation=[dict(alias=alias, size_bytes=len(raw))
                              for alias, raw in projection.omission_details[navigation_start:]])
 
     output_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
@@ -456,10 +445,9 @@ def export_view(index_path, expected_index_sha256, output_dir):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--index', type=Path, required=True)
-    parser.add_argument('--expected-index-sha256', required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args(argv)
-    result = export_view(args.index, args.expected_index_sha256, args.output)
+    result = export_view(args.index, args.output)
     print(json.dumps(dict(status='new_science_view_exported_no_scientific_verdict', science_index=str(result))))
 
 

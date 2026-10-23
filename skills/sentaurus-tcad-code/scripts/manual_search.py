@@ -4,13 +4,10 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import os
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 
@@ -44,12 +41,8 @@ def _manual(release: str, solver_kind: str) -> tuple[dict[str, object], Path]:
         raise ValueError("exact release-matched manual is unavailable")
     item = matches[0]
     path = CATALOG_PATH.parent / str(item["relative_path"])
-    raw = path.read_bytes()
-    if (
-        len(raw) != item["size_bytes"]
-        or hashlib.sha256(raw).hexdigest() != item["sha256"]
-    ):
-        raise ValueError("bundled manual integrity check failed")
+    if path.is_symlink() or not path.is_file() or path.stat().st_size != item['size_bytes']:
+        raise ValueError("bundled manual original is unavailable")
     return item, path
 
 
@@ -81,37 +74,9 @@ def _topic(release: str, solver_kind: str, topic: str) -> dict[str, object]:
     return matches[0]
 
 
-def _cached_manual_text(pdftotext: str, path: Path, sha256: str) -> bytes:
-    cache_root = Path(tempfile.gettempdir()) / "scidiscovery-sentaurus-manual-cache"
-    cache_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    target = cache_root / f"{sha256}.layout.txt"
-    try:
-        cached = target.read_bytes()
-    except FileNotFoundError:
-        completed = subprocess.run(
-            [pdftotext, "-layout", str(path), "-"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=90,
-        )
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{sha256}.", suffix=".tmp", dir=cache_root
-        )
-        try:
-            with os.fdopen(descriptor, "wb") as output:
-                output.write(completed.stdout)
-                output.flush()
-                os.fsync(output.fileno())
-            os.replace(temporary_name, target)
-            os.chmod(target, 0o600)
-        finally:
-            try:
-                os.unlink(temporary_name)
-            except FileNotFoundError:
-                pass
-        cached = completed.stdout
-    return cached
+def _manual_text(pdftotext: str, path: Path) -> bytes:
+    return subprocess.run([pdftotext,"-layout",str(path),"-"],check=True,
+        stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=90).stdout
 
 
 def main() -> int:
@@ -135,7 +100,7 @@ def main() -> int:
                     "release": item["release"],
                     "solver_kind": item["solver_kind"],
                     "title": item["title"],
-                    "manual_sha256": item["sha256"],
+                    "manual_ref": {"path":item["relative_path"],"size_bytes":item["size_bytes"]},
                     "topic": topic["topic"],
                     "start_page": topic["start_page"],
                     "end_page": topic["end_page"],
@@ -148,7 +113,7 @@ def main() -> int:
     pdftotext = shutil.which("pdftotext")
     if pdftotext is None:
         raise SystemExit("pdftotext is required for literal manual search")
-    pages = _cached_manual_text(pdftotext, path, str(item["sha256"])).decode(
+    pages = _manual_text(pdftotext, path).decode(
         "utf-8", errors="replace"
     ).split("\f")
     needle = args.query.casefold()
@@ -174,7 +139,7 @@ def main() -> int:
                 "release": item["release"],
                 "solver_kind": item["solver_kind"],
                 "title": item["title"],
-                "manual_sha256": item["sha256"],
+                "manual_ref": {"path":item["relative_path"],"size_bytes":item["size_bytes"]},
                 "query": args.query,
                 "hits": hits,
             },

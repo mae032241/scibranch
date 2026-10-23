@@ -1,5 +1,4 @@
 """Only sealed scientific output and explicitly sealed deliverables, without advancement."""
-import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -14,9 +13,7 @@ class Original:
     def __init__(self, path, proof=None):
         self.stream = None
         try:
-            if proof is not None and (type(proof.get('size_bytes')) is not int or proof['size_bytes']<0
-                    or not isinstance(proof.get('sha256'),str) or len(proof['sha256'])!=64
-                    or any(value not in '0123456789abcdef' for value in proof['sha256'])):
+            if proof is not None and (type(proof.get('size_bytes')) is not int or proof['size_bytes']<0):
                 raise ValueError('Scientific original proof is malformed')
             archive_io.check_path(path)
             descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -28,14 +25,7 @@ class Original:
             self.size = before.st_size
             if proof is not None and self.size != proof['size_bytes']:
                 raise ValueError('Sealed scientific original size changed')
-            digest = hashlib.sha256()
-            for block in iter(lambda:self.stream.read(1024*1024), b''):
-                digest.update(block)
-            self.sha256 = digest.hexdigest()
             self.check()
-            if proof is not None and self.sha256 != proof['sha256']:
-                raise ValueError('Sealed scientific original bytes changed')
-            self.stream.seek(0)
         except OSError:
             self.close()
             raise ValueError('Sealed scientific original is missing or inaccessible') from None
@@ -48,41 +38,25 @@ class Original:
         return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
     def check(self):
-        descriptor = self.stream.fileno()
-        for attempt in range(3):
-            current = self._identity(os.fstat(descriptor))
-            if current == self.identity:
-                return
-            if current[:-1] != self.identity[:-1] or stat.S_IMODE(current[2]) != 0o400:
-                break
-            # Another owner may link/unlink this readonly inode while a download
-            # is open. Recheck its complete bytes through the same descriptor,
-            # preserving the stream position and requiring a stable generation.
-            digest = hashlib.sha256()
-            offset = 0
-            while offset < self.size:
-                block = os.pread(descriptor, min(1024 * 1024, self.size - offset), offset)
-                if not block:
-                    break
-                digest.update(block); offset += len(block)
-            after = self._identity(os.fstat(descriptor))
-            if after != current:
-                if attempt < 2 and after[:-1] == current[:-1]:
-                    continue
-                break
-            if offset != self.size or digest.hexdigest() != self.sha256:
-                break
-            self.identity = after
+        current = self._identity(os.fstat(self.stream.fileno()))
+        if current == self.identity:
+            return
+        # Controlled hardlink creation may change ctime of an immutable inode.
+        if current[:-1] == self.identity[:-1] and stat.S_IMODE(current[2]) == 0o400:
+            self.identity = current
             return
         raise ValueError('Scientific original changed during reading')
 
     def copy_to(self, output):
-        digest = hashlib.sha256()
-        for block in iter(lambda:self.stream.read(1024*1024), b''):
-            self.check(); digest.update(block); output.write(block)
+        remaining = self.size
+        while remaining:
+            self.check()
+            block = self.stream.read(min(1024 * 1024, remaining))
+            if not block:
+                raise ValueError('Scientific original ended during transfer')
+            output.write(block)
+            remaining -= len(block)
         self.check()
-        if digest.hexdigest() != self.sha256:
-            raise ValueError('Scientific original changed during transfer')
 
     def close(self):
         if self.stream is not None:
@@ -102,9 +76,10 @@ def _json(path, proof=None):
         return value
 
 
-def _proof(path, sha256):
-    # Size is not separately recorded for these existing node JSON originals.
-    return dict(sha256=sha256, size_bytes=c.regular(path).stat().st_size)
+def _proof(path, reference):
+    if not isinstance(reference, dict) or reference.get('path') != str(path):
+        raise ValueError('Scientific original reference changed')
+    return dict(path=str(path), size_bytes=reference.get('size_bytes', c.regular(path).stat().st_size))
 
 
 def _sealed(root, step):
@@ -115,7 +90,7 @@ def _sealed(root, step):
         c.validate_original(source)
         seal = _json(originals.source_record(source, 'result-identity.json'))
         raw = originals.source_raw(source)
-        return root, seal, raw, _proof(raw, seal['raw_sha256'])
+        return root, seal, raw, dict(path=str(raw),size_bytes=seal['raw_ref']['size_bytes'])
     try:
         settings = c.settings(root)
         if type(step) is not int or not 1 <= step <= budget.historical_step_limit(root):
@@ -123,7 +98,7 @@ def _sealed(root, step):
         record = execution.origin(root, step)
         seal = _json(record/'result-identity.json')
         job_path = root/'jobs'/f'{step:03d}.json'
-        job = _json(job_path, _proof(job_path, seal['job_sha256']))
+        job = _json(job_path, _proof(job_path, seal['job_ref']))
         if job['step'] != step or job['role'] not in {'H','W','A','E'}:
             raise ValueError('Sealed scientific node identity changed')
         reference = execution.reference(root, step)
@@ -131,9 +106,9 @@ def _sealed(root, step):
             raise ValueError('Sealed scientific attempt reference changed')
         # The explicit original attempt avoids unrelated continuation/budget validation.
         raw = execution.record(root, step, attempt=reference['attempt'] if reference else 0)/'science-output.json'
-        with Original(record/'result.json', _proof(record/'result.json', seal['sha256'])):
+        with Original(record/'result.json', _proof(record/'result.json', seal['result_ref'])):
             pass
-        return root, seal, raw, _proof(raw, seal['raw_sha256'])
+        return root, seal, raw, _proof(raw, seal['raw_ref'])
     except OSError:
         raise ValueError('Sealed scientific node is unavailable') from None
 
@@ -164,7 +139,7 @@ def materials(root, step, *, after=0, limit=20):
             for number,row in enumerate(rows[after:after+limit], after)]
     last = after+len(page)
     return dict(step=step, items=page, total=len(rows), after=after, next_after=last if last<len(rows) else None,
-        scope='Exact sealed scientific deliverables; byte identity is not scientific qualification or execution permission.')
+        scope='Exact sealed scientific deliverables; original membership is not scientific qualification or execution permission.')
 
 
 def artifact(root, step, index):
@@ -185,6 +160,11 @@ def artifact(root, step, index):
     source = Path(material['source']); work = c.workspace(root,step)
     if not source.is_absolute() or not source.is_relative_to(root) or source.resolve()!=source:
         raise ValueError('Scientific deliverable source escaped its exact output owner')
+    if material.get('original_source') is not None:
+        c.material_name(work, material)
+        original=Path(material['original_source'])
+        if source.parent==root/'host-history/objects' and (original==work/'artifacts'/name or name.startswith('experiments/') and original==work/name):
+            return Original(source,material),name
     if source == work/'artifacts'/name or name.startswith('experiments/') and source == work/name:
         return Original(source,material), name
     # Managed results may have an existing retained original outside artifacts/.
@@ -193,15 +173,16 @@ def artifact(root, step, index):
     if receipt is not None:
         if receipt['path'] != f'host-history/observations/{step:03d}.json':
             raise ValueError('Scientific output receipt escaped its sealed node')
-        observation = _json(root/receipt['path'], _proof(root/receipt['path'], receipt['sha256']))
-        if observation['binding']['source_sha256'] != seal['raw_sha256']:
+        observation = _json(root/receipt['path'], dict(path=str(root/receipt['path']),size_bytes=receipt['size_bytes']))
+        if observation['binding']['source_ref'] != seal['raw_ref']:
             raise ValueError('Scientific output receipt differs from its sealed conclusion')
         for call in observation.get('managed_calls',[]):
             for output in call.get('outputs',[]):
                 if (name == f'experiments/{call["call_id"]}/artifacts/{output["name"]}'
-                        and call['scope']['step'] == step and call['scope']['job_sha256'] == seal['job_sha256']
-                        and source == root/output['path'] and output.get('retention') == 'archived'
-                        and all(output[key] == material[key] for key in ('sha256','size_bytes'))
-                        and output['snapshot'] == 'host-history/objects/'+material['sha256']):
+                        and call['scope']['step'] == step and call['scope']['job_ref'] == seal['job_ref']
+                        and output.get('retention') == 'archived'
+                        and output['size_bytes'] == material['size_bytes']
+                        and root/output['snapshot'] == source
+                        and source.resolve() == source and source.is_relative_to(root)):
                     return Original(root/output['snapshot'],material), name
     raise ValueError('Scientific deliverable is outside its exact sealed output owner')

@@ -4,7 +4,6 @@ Only the transport and gate dependencies are trusted stand-ins. Retirement,
 archival, W sealing/assessment and A screening use their production validators.
 No process, solver, actual authorization or independence qualification is claimed.
 """
-import hashlib
 import io
 from pathlib import Path
 
@@ -28,7 +27,7 @@ from test_worker_delivery import output, tree
 def test_retired_screen_call_seals_partial_and_cannot_be_reused_as_observed(tmp_path,execution_registry):
     root=prepare(tmp_path);h(root,labels=('P',))
     job=c.build_job(root,2,'W',[1]);record=execution.record(root,2)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json'),
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),
         search_slice=search.accept(root,job)))
     config=dict(transport='socket',socket_path=str(tmp_path/'unused.socket'),scope=stage_scope(root,job),
         record_dir=str(experiment_client.record_directory(root,2)),breadth=job['search']['breadth'],
@@ -37,12 +36,12 @@ def test_retired_screen_call_seals_partial_and_cannot_be_reused_as_observed(tmp_
     config['execution_interface']=dict(version=e.VERSION,executor='tcad_execution:tcad',
         code=[e.proof(Path(__file__).resolve())],observation_version=e.OBSERVATION_VERSION,
         terminal_evidence=TCADManagedExecution.terminal_evidence_kind,result_protocol=TCADManagedExecution.result_protocol,
-        config_sha256=hashlib.sha256(e.encoded(config)).hexdigest(),
+        config_record=dict(config),
         capabilities=vars(TCADManagedExecution.lifecycle_capabilities()))
     source=c.workspace(root,2)/'work/package.json'
     source.write_bytes(canonical_json(_small_resolved_execution_package().model_dump(mode='json')))
     identity=e.proof(source)
-    payload=LocalFileDescriptor(name='0001-retired',local_path=str(source),sha256=identity['sha256'],
+    payload=LocalFileDescriptor(name='0001-retired',local_path=str(source),
         size_bytes=identity['size_bytes'],media_type='application/json')
     owner=record/'trusted-owner.json';c.write(owner,dict(call_id=payload.name,scope=config['scope']))
     admission=ExecutionAdmission(outcome='policy',policy_digest='3'*64,policy={},
@@ -59,7 +58,7 @@ def test_retired_screen_call_seals_partial_and_cannot_be_reused_as_observed(tmp_
     accepted=wrapper.records.accept(prepared,wrapper.acceptance_metadata(prepared),config['execution_interface'],mechanism='P')
     wrapper.dispatch_lease(accepted)
     assert e.retire_original(config,wrapper,payload.name)['status']=='not_submitted'
-    changed=dict(config['breadth'],mechanisms=[dict(item,source_h_sha256='0'*64)
+    changed=dict(config['breadth'],mechanisms=[dict(item,source_h_ref=dict(path='/wrong/h-seal.json'))
         for item in config['breadth']['mechanisms']])
     with pytest.raises(e.IntegrityError,match='Accepted scientific mechanism binding changed'):
         e.Records(dict(config,breadth=changed)).accepted(payload.name)

@@ -43,7 +43,7 @@ def test_run_keeps_wait_and_continue_retains_originals_and_shared_usage(scene, m
         'inputs/parents/001/conclusion.json', 'inputs/parents/002/conclusion.json']
     transition = contracts.read(scene / 'host-control/wait-continuations/002.json')
     assert transition == dict(source_step=2,
-        seal_sha256=contracts.digest(scene / 'native-evidence/002/result-identity.json'))
+        seal_ref=contracts.record_ref(scene / 'native-evidence/002/result-identity.json'))
     assert all(path.read_bytes() == original for path, original in originals.items())
     assert (scene / 'settings.json').read_bytes() == settings
     assert (scene / 'host-started.json').read_bytes() == started

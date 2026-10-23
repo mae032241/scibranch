@@ -1,5 +1,4 @@
 """Public-view and inert artifact handoff boundaries; no training or unpickling."""
-import hashlib
 import json
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -29,8 +28,9 @@ def test_preparation_reproduces_public_meta_view_without_generator(tmp_path, mon
     exported = root / 'public/environment/harness/meta.json'
     assert json.loads(exported.read_text()) == {'public':'keep'}
     assert not (exported.parent / 'gen_dataset.py').exists()
-    assert set(manifest['public_files_sha256']) == set(local.PUBLIC)
-    assert manifest['original_public_files_sha256']['environment/harness/meta.json'] != manifest['public_files_sha256']['environment/harness/meta.json']
+    assert set(manifest['public_files']) == set(local.PUBLIC)
+    assert manifest['public_file_sizes']['environment/harness/meta.json'] == exported.stat().st_size
+    assert not any('sha256' in name for name in manifest)
     assert not manifest['launch_ready']
     local.verify_public(root, manifest)
 
@@ -45,7 +45,7 @@ def test_changed_public_view_rejected_before_namespace(tmp_path, monkeypatch, ch
         path = harness / 'train.csv'; path.unlink(); path.symlink_to(root / 'host-private/canary.txt')
     else:
         path = harness / 'meta.json'; path.write_text(json.dumps({'noise_sigma':'must not export'}))
-        manifest['public_files_sha256']['environment/harness/meta.json'] = hashlib.sha256(path.read_bytes()).hexdigest()
+        manifest['public_file_sizes']['environment/harness/meta.json'] = path.stat().st_size
     with pytest.raises((ValueError, OSError)): local.verify_public(root, manifest)
 
 
@@ -57,7 +57,7 @@ def test_handoff_has_no_inherited_nbody_two_mb_model_limit_or_unpickle(tmp_path,
     assert len(raw) > 2_000_000
     (root / 'output/submitted_model.pkl').write_bytes(raw)
     result = local.handoff(root)
-    assert result['submitted_model.pkl']['sha256'] == hashlib.sha256(raw).hexdigest()
+    assert result['submitted_model.pkl'] == dict(path=str(root / 'submission/submitted_model.pkl'),size_bytes=len(raw))
     assert (root / 'submission/submitted_model.pkl').read_bytes() == raw
     assert not json.loads((root / 'handoff.json').read_text())['trusted_host_unpickled']
 
@@ -115,3 +115,13 @@ def test_smoke_reuses_selected_existing_python_without_creating_environment(tmp_
     assert {path:path.read_bytes() for directory in (base, prefix)
         for path in directory.rglob('*') if path.is_file()} == original_files
     assert not (root / 'venv').exists()
+
+
+def test_public_size_validation_does_not_read_dataset_contents(tmp_path, monkeypatch):
+    root, manifest = prepared(tmp_path, monkeypatch)
+    original = local.helpers().regular_bytes
+    def read(path, maximum):
+        assert str(path).endswith('/meta.json')
+        return original(path, maximum)
+    monkeypatch.setattr(local.helpers(), 'regular_bytes', read)
+    local.verify_public(root, manifest)

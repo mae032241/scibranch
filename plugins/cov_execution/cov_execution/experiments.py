@@ -34,7 +34,7 @@ class CovExecution(LocalExecution):
                 inputs='exact accepted public runner/train.csv/val.csv/meta.json and task runtime',
                 selection='first rows in frozen CSV order', train_rows_max=32, validation_rows_max=8,
                 coverage='source import, one sampled train() call and sampled predict; installed runtime dependencies only',
-                limitation='Unexecuted paths, full-data training and public audit are untested. Installed libraries are shared, not individually frozen. Pre-acceptance input hash/copy costs belong to the original task, outside this diagnostic ceiling; no scientific qualification.'))
+                limitation='Unexecuted paths, full-data training and public audit are untested. Installed libraries are shared, not individually frozen. Pre-acceptance input preparation costs belong to the original task, outside this diagnostic ceiling; no scientific qualification.'))
         summary = dict(policy['check_scope'], total_call_seconds=self.config['max_seconds'],
             requested_reserve_seconds=replay_check.reserve_seconds(self.config), feedback_seconds=policy['feedback_seconds'],
             time_rule='Positive reserve includes check and feedback and shortens the experiment before dispatch; zero is best effort. Accepted originals retain their frozen deadlines.')
@@ -84,7 +84,7 @@ class CovExecution(LocalExecution):
         metadata = dict(parent=selected,parent_binding=binding,change_intent=change,runs_root=self.config['runs_root'],
             evaluation_key=self.config['evaluation_key'],
             command=[*self.config['run_argv'],'run','--script',payload.local_path],cwd=None,
-            receipt_transport=transport, config_sha256=e.hashlib.sha256(e.encoded(self.config)).hexdigest())
+            receipt_transport=transport, config_record=self.config)
         if channel == 'public_runner_main':
             try:
                 metadata['snapshot_files'], metadata['replay_runtime'] = self._replay_inputs(transport)
@@ -107,8 +107,7 @@ class CovExecution(LocalExecution):
                 raise TimeoutError('Original engineering preparation deadline reached')
 
         def link(source, destination, proof):
-            # Both sources are existing accepted call snapshots. The leaf will
-            # stream-verify their hashes within this same absolute deadline.
+            # Both sources are existing accepted call snapshots shared read-only.
             check()
             if source.resolve() != source:raise e.IntegrityError('Replay snapshot path changed')
             original = c.regular(source).stat()
@@ -126,24 +125,24 @@ class CovExecution(LocalExecution):
             # small bindings; do not hash every model/log a second time here.
             completed = json.loads(e.read(directory / 'completed.json'))
             runtime = accepted['replay_runtime']
-            operation = e.proof(directory / 'accepted.json')['sha256']
+            operation = call_id
             spec = dict(adapter=str(Path(cov_delivery.__file__).resolve()),
                 launcher_argv=[runtime['invoked_path'], str(Path(cov_delivery.__file__).resolve()), '--isolate'])
             stage = directory / 'engineering-replay'
             stage.mkdir()
             (stage / 'inputs/harness').mkdir(parents=True)
             (stage / 'scratch').mkdir()
-            objects = {'source.py': accepted['script']['sha256']}
+            objects = {'source.py': accepted['script']}
             link(directory / 'source.py', stage / 'inputs/source.py', accepted['script'])
             inputs = [dict(runtime, label='runtime-python')]
             for item in accepted['snapshot_files']:
                 label = item['name'].removeprefix('replay/')
                 link(directory / 'inputs' / item['name'], stage / 'inputs' / label, item)
-                objects[label] = item['sha256']
+                objects[label] = {key:item[key] for key in ('path','size_bytes')}
                 inputs.append(dict(item, label=label))
             request = dict(phase='replay', scope=accepted['scope'], operation_id=operation,
-                candidate_id=completed['candidate_id'], artifact_sha256=completed['model']['sha256'],
-                deadline_boottime=deadline_boottime, object_digests=objects, inputs=inputs,
+                candidate_id=completed['candidate_id'], artifact_ref=completed['model'],
+                deadline_boottime=deadline_boottime, object_refs=objects, inputs=inputs,
                 config=dict(python=runtime['invoked_path']), stage=str(stage))
             check()
         except TimeoutError:
@@ -173,16 +172,14 @@ class CovExecution(LocalExecution):
             path = stage / 'scratch' / name
             if path.exists():
                 c.regular(path).chmod(0o400)
-                proof = dict(path=str(path), size_bytes=path.stat().st_size, sha256=None)
-                try:proof['sha256'] = cov_delivery._sha(path, deadline=deadline_boottime)
-                except TimeoutError:proof['retention'] = 'original_unhashed_deadline_reached'
+                proof = dict(path=str(path), size_bytes=path.stat().st_size)
                 diagnostics.append(proof)
         if value is None:
             return dict(status='inconclusive' if started else 'not_run', note='check_did_not_complete', cleanup_confirmed=True,
                 samples=leaf_record.get('samples'), stage=leaf_record.get('stage'), diagnostic_originals=diagnostics,
                 completion='Timeout or failed leaf; bounded execution did not produce a verified result.')
         if (not isinstance(value, dict) or any(value.get(key) != request[key]
-                for key in ('operation_id', 'candidate_id', 'artifact_sha256'))
+                for key in ('operation_id', 'candidate_id', 'artifact_ref'))
                 or value.get('status') not in {'sample_replay_ok', 'dependency_error', 'inconclusive'}):
             return dict(status='unknown', note='invalid_sample_replay_result', cleanup_confirmed=True)
         return {key: value[key] for key in ('status', 'note', 'diagnostic', 'diagnostic_omitted_bytes', 'samples', 'stage')} | dict(
@@ -202,7 +199,7 @@ class CovExecution(LocalExecution):
     def command(self,accepted):
         # exp records the source's original path. Preserve that contract and
         # verify exact prepared bytes both before execution and in its receipt.
-        if e.proof(accepted['source_script'])['sha256']!=accepted['prepared']['sha256']:
+        if e.proof(accepted['source_script'])!=dict(path=accepted['prepared']['local_path'],size_bytes=accepted['prepared']['size_bytes']):
             raise e.IntegrityError('Original cov execution source changed')
         # The task interpreter retains its scientific libraries and permissions.
         # Only cov's stdout/receipt separation changes; generic execution is shared.
@@ -245,9 +242,7 @@ def validate_context(item, accepted, parent):
         if parent is None or parent.get('model') is None:
             raise e.IntegrityError('Cov parent has no earlier model original')
         completion=next((proof for proof in parent['proofs'] if Path(proof['path']).name=='completed.json'),None)
-        expected=dict(call_id=parent['call_id'],step=parent['scope']['step'],
-            completion_sha256=completion['sha256'],model_sha256=parent['model']['sha256'],
-            model_size_bytes=parent['model']['size_bytes'])
+        expected=cov._binding(parent,completion)
         if accepted.get('parent_binding')!=expected:
             raise e.IntegrityError('Cov parent model differs from the accepted original')
 

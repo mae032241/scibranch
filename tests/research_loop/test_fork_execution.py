@@ -295,7 +295,7 @@ def test_selected_final_a_rebuilds_child_phase_and_never_opens_normal_route(tmp_
     if repair_child_output:
         first, repaired = execution.records(child, 2)
         assert c.read(repaired / 'native-intent.json')['session']['thread_id'] == c.read(first / 'native-outcome.json')['thread_id']
-        assert c.read(repaired / 'native-intent.json')['output_repair']['raw_sha256'] == c.digest(first / 'science-output.json')
+        assert c.read(repaired / 'native-intent.json')['output_repair']['raw_ref'] == c.file_ref(first / 'science-output.json')
     assert budget.final_a_barrier(child)['step'] == 2
     again = instance_control.continue_instance(child)
     assert again['status'] == 'final_a_completed'
@@ -381,7 +381,7 @@ def test_selected_formal_review_keeps_neutral_input_and_checks_original_authors(
         grandthread = c.read(grandchild / 'native-evidence/004/native-outcome.json')['thread_id']
         assert grandthread not in {author_thread, old_review_thread, child_thread}
         assert ['codex_exec', grandthread] in grandproof['reviewer']['participants']
-        assert c.read(grandchild / 'native-evidence/004/native-intent.json')['task_sha256'] != child_intent['task_sha256']
+        assert c.read(grandchild / 'native-evidence/004/native-intent.json')['task_ref'] != child_intent['task_ref']
         assert grandproof != proof and 'origin_identity' not in grandseal['formal_review']
         assert [path.name for path in sorted((grandchild / 'jobs').iterdir())] == ['004.json', '005.json']
 
@@ -438,7 +438,7 @@ def test_selected_engineering_repair_uses_new_local_receipt_and_declines_old_del
     assert result['status'] == 'delivery_confirmed', '\n'.join(science_errors) or json.dumps(result, ensure_ascii=False, indent=2)
     parent_actions = budget.closeout_state(parent)['actions']
     parent_operations = {row['intent']['operation_id'] for row in parent_actions}
-    parent_decisions = {row['intent']['decision']['job_sha256'] for row in parent_actions}
+    parent_decisions = {row['intent']['decision']['job_ref']['path'] for row in parent_actions}
     target_marker = targets['runs'] / 'rootless-delivery-operation.json'
     parent_marker = target_marker.read_bytes()
     original = c.read(parent / 'jobs/004.json')
@@ -484,7 +484,6 @@ def test_selected_engineering_repair_uses_new_local_receipt_and_declines_old_del
     assert len(parents)==1
     retained=Path(parents[0]['model']['path'])
     assert retained.is_relative_to(child/'host-runtime/fork/inherited')
-    assert c.digest(retained)==parents[0]['model']['sha256']
     assert retained.stat().st_size==parents[0]['model']['size_bytes']
     calls=experiments.Records(configured).calls()
     assert len(calls)==1
@@ -504,16 +503,16 @@ def test_selected_engineering_repair_uses_new_local_receipt_and_declines_old_del
     assert operation not in parent_operations and binding['candidate_id'] == raw_parent
     final_step = budget.final_a_barrier(child)['step']
     assert final_step == 6
-    decision = dict(step=final_step, job_sha256=c.digest(child / 'jobs/006.json'),
-        raw_sha256=c.digest(child / 'native-evidence/006/science-output.json'),
-        seal_sha256=c.digest(child / 'native-evidence/006/result-identity.json'))
-    assert decision['job_sha256'] not in parent_decisions
+    decision = dict(step=final_step, job_ref=c.record_ref(child / 'jobs/006.json'),
+        raw_ref=c.file_ref(child / 'native-evidence/006/science-output.json'),
+        seal_ref=c.record_ref(child / 'native-evidence/006/result-identity.json'))
+    assert decision['job_ref']['path'] not in parent_decisions
     assert binding['decision'] == decision
     assert c.validate(c.workspace(child, final_step))['candidate_recommendation'] == raw_parent
     context = next(row for row in records if row['step'] == 4)['observation']['contexts']
     model = next(row for row in context if row['candidate_id'] == raw_parent)['model']
     artifact = binding['source']['objects']['artifact']
-    assert (artifact['sha256'], artifact['size_bytes']) == (model['sha256'], model['size_bytes'])
+    assert Path(child/model['snapshot']).read_bytes() == Path(child/artifact['path']).read_bytes()
     assert binding['source']['context']['row']['run_id'] == first_run_id
     assert all(row['intent']['binding'] == binding for row in actions)
     assert [row['outcome']['result']['status'] for row in actions] == ['confirmed', 'confirmed']
@@ -521,11 +520,12 @@ def test_selected_engineering_repair_uses_new_local_receipt_and_declines_old_del
     audit = c.read(audit_path)
     assert audit['outcome'] == 'exited' and audit['returncode'] == 0
     receipt = c.read(audit_path.parent / audit['streams']['stdout']['path'])
-    assert {key: receipt[key] for key in ('status', 'operation_id', 'candidate_id', 'artifact_sha256')} == dict(
-        status='audited', operation_id=operation, candidate_id=raw_parent, artifact_sha256=artifact['sha256'])
+    assert {key: receipt[key] for key in ('status', 'operation_id', 'candidate_id', 'artifact_ref')} == dict(
+        status='audited', operation_id=operation, candidate_id=raw_parent, artifact_ref=artifact)
     marker = c.read(target_marker)
     assert marker['operation_id'] == operation and marker['candidate_id'] == raw_parent
-    assert marker['artifact_sha256'] == c.digest(targets['submission'] / 'model.pkl') == artifact['sha256']
+    assert marker['artifact_ref'] == artifact
+    assert (targets['submission'] / 'model.pkl').read_bytes() == (child/artifact['path']).read_bytes()
     accepted_actions = copy.deepcopy(actions)
     assert instance_control.continue_instance(child)['status'] == 'delivery_confirmed'
     assert budget.closeout_state(child)['actions'] == accepted_actions

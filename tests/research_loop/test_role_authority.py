@@ -61,9 +61,9 @@ def a_source(root, *, action='continue_w'):
         limitations=['Original H constraints remain'],implementation_selection=None,search_review=None,
         candidate_recommendation=None,progress_assessment=None,decision_request=None,portfolio_review=None,
         next_action=action,route_reason=RECIPE)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json')))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json')))
     c.write(record/'science-output.json',payload);c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
-    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_sha256=c.digest(record/'science-output.json')))
+    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_ref=c.file_ref(record/'science-output.json')))
     return job,c.seal_result(root,2)
 
 

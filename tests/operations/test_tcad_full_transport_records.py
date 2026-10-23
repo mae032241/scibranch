@@ -1,5 +1,4 @@
 """Full TCAD protocol records exceed previews while explicit policy still applies."""
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -58,7 +57,7 @@ def test_command_standin_collect_retains_large_descriptor_response_and_logs(tmp_
     original /= 'data'
     original.write_bytes(b'original')
     record = dict(schema_version=1, name='original', local_path=str(original),
-        media_type='application/octet-stream', size_bytes=8, sha256=hashlib.sha256(b'original').hexdigest())
+        media_type='application/octet-stream', size_bytes=8)
     count = (8 * 1024 * 1024) // len(canonical_json(dict(record,name='output-0000'))) + 1
     metadata = tmp_path / 'descriptor.json'; metadata.write_text(json.dumps(record))
     script = tmp_path / 'transport.py'
@@ -66,7 +65,7 @@ def test_command_standin_collect_retains_large_descriptor_response_and_logs(tmp_
         'request=json.load(sys.stdin)\n'
         'record=json.load(open(sys.argv[1]))\n'
         f'outputs=[dict(record,name="output-%04d"%i) for i in range({count})]\n'
-        'json.dump(dict(schema_version=1,operation=request["operation"],ok=True,payload=dict(outputs=outputs)),sys.stdout)\n'
+        'json.dump(dict(schema_version=2,operation=request["operation"],ok=True,payload=dict(outputs=outputs)),sys.stdout)\n'
         'sys.stdout.flush()\n'
         f'sys.stderr.write("e"*{LARGE}+"END")\n')
     adapter = CommandTCADExecutorAdapter(CommandAdapterConfig(executable=sys.executable,
@@ -76,35 +75,31 @@ def test_command_standin_collect_retains_large_descriptor_response_and_logs(tmp_
     assert sum(len(canonical_json(item.model_dump(mode='json'))) for item in outputs) > 8 * 1024 * 1024
     log, = (root / 'logs').glob('*.stderr.log')
     assert log.stat().st_size == LARGE + 3
-    digest = hashlib.sha256()
     with log.open('rb') as stream:
-        for chunk in iter(lambda: stream.read(64 * 1024), b''): digest.update(chunk)
-        stream.seek(-3, os.SEEK_END); assert stream.read() == b'END'
-    expected=hashlib.sha256();remaining=LARGE
-    while remaining:
-        block=b'e'*min(64*1024,remaining);expected.update(block);remaining-=len(block)
-    expected.update(b'END')
-    assert digest.digest() == expected.digest()
-    assert log.name == digest.hexdigest() + '.stderr.log'
+        remaining=LARGE
+        while remaining:
+            size=min(64*1024,remaining)
+            assert stream.read(size)==b'e'*size
+            remaining-=size
+        assert stream.read()==b'END'
+    assert log.name.endswith('.stderr.log') and len(log.name.split('.')[0])==32
 
 
 def test_small_descriptors_and_logs_keep_identity_and_path_guards(tmp_path):
     root=tmp_path/'results';root.mkdir()
     original=root/'data';original.write_bytes(b'original')
     record=dict(schema_version=1,name='original',local_path=str(original),media_type='application/octet-stream',
-        size_bytes=8,sha256=hashlib.sha256(b'original').hexdigest())
+        size_bytes=8)
     adapter=CommandTCADExecutorAdapter(CommandAdapterConfig(executable=sys.executable),local_result_root=root)
-    original.write_bytes(b'tampered')
+    original.write_bytes(b'tampered size')
     with pytest.raises(RuntimeError, match='differs from its descriptor'):
         adapter._collected_outputs(dict(outputs=[record]))
     outside = tmp_path / 'outside'; outside.write_bytes(b'original')
     with pytest.raises(RuntimeError, match='outside its result root'):
         adapter._collected_outputs(dict(outputs=[dict(record, local_path=str(outside))]))
     raw=b'diagnostic END';log=preserve_log(root,'stderr',raw)
-    assert preserve_log(root,'stderr',raw)==log
-    log.write_bytes(b'x'*len(raw))  # Same size: identity must check the content hash.
-    with pytest.raises(ValueError, match='content identity'):
-        preserve_log(root, 'stderr', raw)
+    again=preserve_log(root,'stderr',raw)
+    assert again!=log and log.read_bytes()==again.read_bytes()==raw
 
 
 @pytest.mark.stress
@@ -113,7 +108,7 @@ def test_ssh_standin_keeps_large_rpc_response_header(tmp_path):
     ssh.write_text('#!' + sys.executable + '\nimport json,sys\n'
         'request=json.loads(sys.stdin.buffer.readline())\n'
         'response=dict(source_bytes=len(request["payload"]["request"]["original"]),original="x"*%d)\n' % LARGE +
-        'json.dump(dict(schema_version=1,operation="rpc",ok=True,payload=dict(response=response)),sys.stdout)\n'
+        'json.dump(dict(schema_version=2,operation="rpc",ok=True,payload=dict(response=response)),sys.stdout)\n'
         'sys.stdout.write("\\n")\n')
     ssh.chmod(0o700)
     client = SSHRemoteClient(SSHTCADTransportConfig(ssh_executable=str(ssh), destination='fixture@localhost',
@@ -131,7 +126,7 @@ def test_runner_via_local_ssh_standin_accepts_full_request_and_keeps_explicit_tr
     for number in range(7): original /= str(number) + 'r' * 135
     original.mkdir(parents=True)
     original /= 'zero'; original.write_bytes(b'')
-    record = dict(local_path=str(original), size_bytes=0, sha256=hashlib.sha256(b'').hexdigest())
+    record = dict(local_path=str(original), size_bytes=0)
     count = (1024 * 1024) // len(canonical_json(record)) + 1
     records = [record] * count
     assert len(canonical_json(dict(files=records))) > 1024 * 1024
@@ -173,8 +168,8 @@ def manifest_document(count):
     outputs=[]
     for number in range(count):
         path=f'frames/{number}.dat'
-        outputs.append(dict(name='generated_'+hashlib.sha256(path.encode()).hexdigest(),relative_path=path,
-            media_type='application/octet-stream',sha256=hashlib.sha256(b'x').hexdigest(),size_bytes=1))
+        outputs.append(dict(name='generated_'+str(number),relative_path=path,
+            media_type='application/octet-stream',size_bytes=1))
     return dict(started_at=None,completed_at='2026-10-16T00:00:00Z',terminal_state='succeeded',exit_code=0,
         error='',outputs=outputs)
 

@@ -16,8 +16,8 @@ def configuration(tmp_path, reserve=12):
     return dict(record_dir=str(tmp_path / 'lineage'), run_argv=[sys.executable], max_seconds=65,
         engineering_check_reserve_seconds=reserve, receipt_channel='public_runner_main',
         admission=dict(version=1, mode='hard'),
-        scope=dict(handoff_protocol=CURRENT, step=2, role='W', job_sha256='a'*64,
-                   execution_key='b'*64, mechanism_ref=None))
+        scope=dict(handoff_protocol=CURRENT, step=2, role='W', job_ref=dict(path=str(tmp_path/'jobs/002.json')),
+                   execution_key=dict(path=str(tmp_path/'jobs/002.json')), mechanism_ref=None))
 
 
 def test_operator_reserve_is_frozen_and_long_experiment_keeps_same_check_deadline(tmp_path, monkeypatch, execution_registry):
@@ -108,7 +108,6 @@ def test_optional_check_upgrade_keeps_original_deadline_and_single_call(tmp_path
     config=e.freeze(configuration(tmp_path),'cov_execution:experiment')
     adapter=e.load(config)
     bound=replay_check.acceptance(config,adapter)
-    bound['capability']['sha256']='0'*64  # Historical fingerprints are not current-tool admission.
     if expired:bound['deadline_boottime']=1.
     calls=[]
     def upgraded_check(self,call_id,*,deadline_boottime,on_process):

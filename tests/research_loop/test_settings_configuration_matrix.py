@@ -166,12 +166,12 @@ def test_executor_form_source_reaches_registered_adapter_bound_to_each_job(tmp_p
         work = c.workspace(root, job['step'])
         record = c.host_record(work)
         if job is new:
-            c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/002.json')))
+            c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/002.json')))
         config = experiments.configure(root, job['step'], 'local_execution:command', expected, work / 'work/execution.json')
         adapter = experiments.load(config)
         assert adapter.config['run_argv'] == expected['run_argv']
         assert adapter.config['max_seconds'] == expected['max_seconds']
-        assert config['scope']['job_sha256'] == c.digest(root / f'jobs/{job["step"]:03d}.json')
+        assert config['scope']['job_ref'] == c.record_ref(root / f'jobs/{job["step"]:03d}.json')
     with pytest.raises(ValueError, match='frozen operator selection'):
         experiments.configure(root, 1, 'local_execution:command', revised,
             c.workspace(root, 1) / 'work/wrong.json')
@@ -183,7 +183,7 @@ def test_executor_mode_control_changes_worker_execution_contract(tmp_path):
     save_form(root, {'executor.mode': 'local'})
     new = c.build_job(root, 2, 'W', [])
     assert old['experiment_mode'] == 'external' and new['experiment_mode'] == 'local'
-    assert 'execution_config_sha256' not in old and 'execution_config_sha256' in new
+    assert 'execution_config_record' not in old and 'execution_config_record' in new
     task = c.read(c.workspace(root, 2) / 'science-task.json')
     assert task['experiment_execution'].startswith('Host-configured registered W execution')
     assert c.settings(root, old).get('execution_config') is None

@@ -24,7 +24,7 @@ def fragment(tmp_path):
                        search_policy=None)
     job = c.build_job(root, 1, 'W', [])
     record = c.host_record(c.workspace(root, 1))
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/001.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json')))
     c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, cleanup='observed_group_cleaned'))
     c.write(record / 'usage.json', dict(input_tokens=10, cached_input_tokens=3, output_tokens=4))
     return root, job, record
@@ -42,7 +42,7 @@ def science(record, **changes):
     value.update(changes)
     c.write(record / 'science-output.json', value)
     outcome = c.read(record / 'native-outcome.json')
-    c.write(record / 'native-outcome.json', dict(outcome, raw_sha256=c.digest(record / 'science-output.json')))
+    c.write(record / 'native-outcome.json', dict(outcome, raw_ref=c.file_ref(record / 'science-output.json')))
 
 
 def test_missing_scientific_summary_preserves_native_identity_and_direct_results(fragment):
@@ -53,7 +53,7 @@ def test_missing_scientific_summary_preserves_native_identity_and_direct_results
     result.write_text('public_metric\n0.61\n')
     value = checkpoint.capture(root, job, record)
     assert value['science'] == dict(status='missing', diagnostic='missing_output')
-    assert value['binding']['stage_owner'] == c.digest(root / 'jobs/001.json')
+    assert value['binding']['stage_owner'] == c.record_ref(root / 'jobs/001.json')
     snapshot = value['materials'][0]['original']
     assert (root / snapshot['snapshot']).read_bytes() == result.read_bytes()
     assert not (record / 'result-identity.json').exists()
@@ -91,7 +91,7 @@ def test_invalid_science_is_saved_without_manufacturing_conclusion(fragment):
     root, job, record = fragment
     (record / 'science-output.json').write_text('{torn')
     c.write(record / 'native-outcome.json', dict(c.read(record / 'native-outcome.json'),
-        raw_sha256=c.digest(record / 'science-output.json')))
+        raw_ref=c.file_ref(record / 'science-output.json')))
     value = checkpoint.capture(root, job, record)
     assert value['science']['status'] == 'invalid'
     assert checkpoint.brief(root, job, record)['scientific_summary'] is None
@@ -178,7 +178,7 @@ def test_unrelated_native_attempt_cannot_be_checkpointed(fragment, tmp_path):
     root, job, record = fragment
     unrelated = tmp_path / 'unrelated'
     unrelated.mkdir()
-    c.write(unrelated / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/001.json')))
+    c.write(unrelated / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json')))
     with pytest.raises(ValueError, match='accepted original native attempt'):
         checkpoint.capture(root, job, unrelated)
     assert not (unrelated / 'checkpoint.json').exists()
@@ -286,7 +286,7 @@ def test_internal_runner_two_fragments_keep_one_w_stage_and_original_call(intern
     assert native.usage(root)['observed_tokens'] == 56
     configs = [c.read(path / 'experiment-config.json') for path in chain]
     assert configs[0]['scope'] == configs[1]['scope']
-    assert configs[0]['scope']['execution_key'] == c.digest(root / 'jobs/002.json')
+    assert configs[0]['scope']['execution_key'] == c.record_ref(root / 'jobs/002.json')
     calls = list((experiment_client.record_directory(root,2) / 'calls').iterdir())
     assert len(calls) == 1
     first = checkpoint.validate(root, jobs[1], chain[0])
@@ -318,7 +318,7 @@ def test_soft_target_allows_original_stage_to_continue_fragments(internal_fragme
     ended = checkpoint.stage_end(root, c.read(root / 'jobs/002.json'), record)
     assert ended['reason'] == 'worker_requested'
     seal = c.read(execution.origin(root, 2) / 'result-identity.json')
-    assert seal['execution_ref']['chain'][1]['stage-end.json'] == c.digest(record / 'stage-end.json')
+    assert seal['execution_ref']['chain'][1]['stage-end.json'] == c.record_ref(record / 'stage-end.json')
 
 
 def test_review_rechecked_after_original_writer_stops(internal_fragment_instance, monkeypatch):

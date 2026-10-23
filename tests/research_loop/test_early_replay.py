@@ -84,7 +84,7 @@ def replay_scene(tmp_path, monkeypatch, execution_registry):
         record_dir=str(tmp_path / 'work/lineage'), runs_root=str(runs), max_seconds=65,
         run_argv=[sys.executable, '-I', str(harness / 'exp_cli.py')], parents=[], evaluation_key='fixture-v1',
         admission=dict(version=1, mode='hard'), scope=dict(handoff_protocol=CURRENT, step=2, role='W',
-            job_sha256='a' * 64, execution_key='b' * 64, mechanism_ref=None)),
+            job_ref=dict(path='/fixture/jobs/002.json'), execution_key=dict(path='/fixture/native-evidence/002/native-intent.json'), mechanism_ref=None)),
         'cov_execution:experiment', path=config_path)
     config_path.write_text(json.dumps(config))
 

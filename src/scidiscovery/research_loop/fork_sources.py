@@ -8,8 +8,6 @@ from __future__ import annotations
 import copy
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
-import errno
-import hashlib
 import json
 import fcntl
 import os
@@ -34,7 +32,7 @@ def _json(path):
 
 
 def _key(identity, path, proof):
-    return o.identity_key(identity) + ':' + o.relative(path) + ':' + proof['sha256'] + ':' + str(proof['size_bytes'])
+    return o.identity_key(identity) + ':' + o.relative(path)
 
 
 
@@ -267,20 +265,20 @@ class _Closure:
     def add(self, source, path, *, proof=None, visibility='host_proof'):
         path = o.relative(path)
         identity = source.origin_identity
-        ref = dict(path=path, **({field: proof[field] for field in ('sha256', 'size_bytes') if field in proof} if proof else {}))
+        ref = dict(path=path, **({field: proof[field] for field in ('size_bytes',) if field in proof} if proof else {}))
         try:
             actual = o.resolve_ref(source, ref)
         except (OSError, ValueError):
             if proof is None or proof.get('retention') != 'archived' or not proof.get('snapshot'):
                 raise
             actual = o.resolve_ref(source, dict(ref, path=o.relative(proof['snapshot'])))
-        checked = files.hash_file(actual)
-        if any(field in ref and checked[field] != ref[field] for field in ('sha256', 'size_bytes')):
+        checked = files.stat_file(actual)
+        if any(field in ref and checked[field] != ref[field] for field in ('size_bytes',)):
             raise ValueError('Original changed while collecting its exact proof')
         key = _key(identity, path, checked)
-        entry = dict(origin_identity=identity, path=path, sha256=checked['sha256'],
+        entry = dict(origin_identity=identity, path=path,
             size_bytes=checked['size_bytes'], mode=0o400,
-            storage_path=f'inherited/{o.identity_key(identity)}/versions/{checked["sha256"]}/{checked["size_bytes"]}/{path}',
+            storage_path=f'inherited/{o.identity_key(identity)}/{path}',
             visibility=visibility)
         previous = self.entries.get(key)
         if previous is None:
@@ -297,7 +295,7 @@ class _Closure:
         if origin_key in self.origins and self.origins[origin_key] != origin:
             raise ValueError('Original instance has conflicting logical root identity')
         self.origins[origin_key] = origin
-        return dict(origin_identity=identity, path=path, sha256=entry['sha256'], size_bytes=entry['size_bytes'])
+        return dict(origin_identity=identity, path=path, size_bytes=entry['size_bytes'])
 
     def snapshot(self, root):
         """Retain the inert owner inventory; its superset is never a science cut."""
@@ -317,15 +315,14 @@ class _Closure:
             path = row['path']
             # The same versions are retained above under their original identity.
             # Re-archiving the inherited store would recursively duplicate it.
-            if (path == o.FORK_DIRECTORY or path.startswith(o.FORK_DIRECTORY + '/')
-                    or path == 'host-history/fork-cache'):
+            if path == o.FORK_DIRECTORY or path.startswith(o.FORK_DIRECTORY + '/'):
                 continue
             if row['kind'] == 'file':
                 self.add(source, path, proof=row, visibility='private_snapshot')
             elif row['kind'] == 'gap':
                 self.blocked.append(dict(code='fork_input_missing', path=path,
                     reason='unrecognized_framework_ownership_not_traversed'))
-                inventory.append(row)
+                inventory.append({key: value for key, value in row.items() if key != 'source_stat'})
             else:
                 inventory.append({key: value for key, value in row.items() if key != 'source_stat'})
         self.directory_inventory.append(dict(origin_identity=source.origin_identity,
@@ -334,7 +331,7 @@ class _Closure:
             detail='The current owner inventory retains bytes; only original frozen task bindings define the historical scientific cut.'))
 
     def settings(self, source):
-        self.add(source, 'settings.json', proof=dict(sha256=source.origin_identity['settings_sha256']))
+        self.add(source, 'settings.json')
         self.add(source, 'settings-identity.json')
         job = o.source_job(source)
         revision = job.get('configuration_revision')
@@ -357,11 +354,11 @@ class _Closure:
             predecessor = None
             for number in range(1, marker['seq'] + 1):
                 ref = self.add(source, f'control-ledger/{number:06d}.json',
-                    proof=dict(sha256=marker['sha256']) if number == marker['seq'] else None)
+                    proof=marker if number == marker['seq'] else None)
                 event = _json(o.resolve_ref(source, ref))
-                if event.get('seq') != number or event.get('parent_sha256') != predecessor:
+                if event.get('seq') != number or event.get('parent_ref') != predecessor:
                     raise ValueError('Final source phase ledger chain changed')
-                predecessor = ref['sha256']
+                predecessor = dict(path=str(Path(source.original_root) / ref['path']))
                 events.append(event)
             accepted = events[-1]
             if accepted.get('kind') != 'final_a_return' or accepted.get('step') != job['step']:
@@ -373,11 +370,10 @@ class _Closure:
             cutoff = job.get('source_cutoff', (job.get('final_report') or {}).get('source_cutoff'))
             if event.get('mode') != 'final' or event.get('first_step') != job['step'] or event.get('source_cutoff') != cutoff:
                 raise ValueError('Final source accepted phase changed its exact cutoff')
-            boundary = dict(seq=event['seq'], sha256=self.entry(source.origin_identity,
-                f'control-ledger/{event["seq"]:06d}.json')['sha256'])
+            boundary = dict(seq=event['seq'], path=f'control-ledger/{event["seq"]:06d}.json')
         if boundary is None:
             return None
-        return self.add(source, f'control-ledger/{boundary["seq"]:06d}.json', proof=dict(sha256=boundary['sha256']))
+        return self.add(source, f'control-ledger/{boundary["seq"]:06d}.json', proof=boundary)
 
     def task(self, source, *, selected=False):
         from . import contracts as c
@@ -400,7 +396,7 @@ class _Closure:
         for boundary in boundaries:
             for number in range(1, boundary['seq'] + 1):
                 self.add(source, f'control-ledger/{number:06d}.json',
-                    proof=dict(sha256=boundary['sha256']) if number == boundary['seq'] else None)
+                    proof=boundary if number == boundary['seq'] else None)
         if job.get('delivery_sources', {}).get('catalogue'):
             self.add(source, f'project/nodes/{step:03d}/inputs/delivery-candidates.json',
                 visibility='scientific_input' if selected else 'historical_science')
@@ -423,9 +419,9 @@ class _Closure:
                 directory += f'/nodes/{marker["normal_step"]:03d}'
             elif marker.get('repair_step'):
                 directory += f'/repairs/{marker["repair_step"]:03d}'
-            screen_ref = self.add(owner, directory + '/screen.json', proof=dict(sha256=marker['sha256']))
+            screen_ref = self.add(owner, directory + '/screen.json', proof=marker)
             screen = _json(o.resolve_ref(owner, screen_ref))
-            self.add(owner, directory + '/shortlist.json', proof=dict(sha256=screen['shortlist_sha256']))
+            self.add(owner, directory + '/shortlist.json', proof=screen['shortlist_ref'])
         if (o.source_settings(source).get('correction_policy') is not None or job.get('correction_request')) and 'control_cut' not in job:
             self.blocked.append(dict(code='fork_input_missing', input='control_cut.correction_events',
                 reason='historical_correction_cut_unverifiable', path=f'jobs/{step:03d}.json'))
@@ -460,37 +456,35 @@ class _Closure:
         for row in job.get('history', {}).get('nodes', []):
             if not 0 < row['step'] < step:
                 raise ValueError('Original task dependency crosses its exact input boundary')
-            self.sealed(o.dependency(source, row['step'], seal_sha256=row['seal_sha256']), row['seal_sha256'])
+            self.sealed(o.dependency(source, row['step'], seal_ref=row['seal_ref']), row['seal_ref'])
         if job.get('formal_review') is not None:
             request_source = o.source_for_ref(source, job['formal_review'])
             request = _json(o.resolve_ref(request_source, job['formal_review']))
             for producer_step, seal_ref in [(request['requester']['step'], request['requester']['seal']),
                     (request['subject']['producer_step'], request['subject']['producer_seal'])]:
-                owner = o.dependency(request_source, producer_step, seal_sha256=seal_ref['sha256'])
-                self.sealed(owner, seal_ref['sha256'])
+                owner = o.dependency(request_source, producer_step, seal_ref=seal_ref)
+                self.sealed(owner, seal_ref)
         self.task_active.remove(key)
         self.tasks[key] = (job, job_ref, task_ref)
         return self.tasks[key]
 
-    def sealed(self, source, seal_sha):
+    def sealed(self, source, seal_binding):
         key = (o.identity_key(source.origin_identity), source.step)
         if key in self.seals:
-            if self.seals[key]['seal_ref']['sha256'] != seal_sha:
-                raise ValueError('One original node has conflicting sealed identities')
             return self.seals[key]
         job, job_ref, _ = self.task(source)
         step = source.step
         seal_path = f'native-evidence/{step:03d}/result-identity.json'
-        seal_ref = self.add(source, seal_path, proof=dict(sha256=seal_sha))
+        seal_ref = self.add(source, seal_path, proof=seal_binding)
         seal = _json(o.resolve_ref(source, seal_ref))
-        if seal.get('job_sha256') != job_ref['sha256']:
+        if seal.get('job_ref') != dict(path=str(Path(source.original_root) / job_ref['path'])):
             raise ValueError('Inherited seal lost its exact original job')
         raw = o.source_raw(source)
         record = self._logical_path(source, raw).rsplit('/', 1)[0]
         self.records[f'{o.identity_key(source.origin_identity)}:{step}'] = record
-        self.add(source, record + '/science-output.json', proof=dict(sha256=seal['raw_sha256']), visibility='historical_science')
-        self.add(source, f'native-evidence/{step:03d}/result.json', proof=dict(sha256=seal['sha256']), visibility='historical_science')
-        self.add(source, f'project/nodes/{step:03d}/conclusion.json', proof=dict(sha256=seal['raw_sha256']), visibility='historical_science')
+        self.add(source, record + '/science-output.json', proof=seal['raw_ref'], visibility='historical_science')
+        self.add(source, f'native-evidence/{step:03d}/result.json', proof=seal['result_ref'], visibility='historical_science')
+        self.add(source, f'project/nodes/{step:03d}/conclusion.json', proof=seal['raw_ref'], visibility='historical_science')
         self.attempts(source, selected=False)
         if seal.get('compiled_implementations'):
             self.compilation_inventory(source)
@@ -549,9 +543,9 @@ class _Closure:
             return None  # A frozen, never-submitted logical task has no call to resume.
         if not paths:
             raise ValueError('Selected task lacks its original accepted native intent')
-        task_sha = self.entry(source.origin_identity, f'jobs/{step:03d}.json')['sha256']
+        task_ref = dict(path=str(Path(source.original_root) / f'jobs/{step:03d}.json'))
         for record, intent in paths:
-            if intent.get('task_sha256') != task_sha:
+            if intent.get('task_ref') != task_ref:
                 raise ValueError('Original native intent changed its exact task')
             visibility = 'effect_only' if selected else 'host_proof'
             self.add(source, record + '/native-intent.json', visibility=visibility)
@@ -581,7 +575,7 @@ class _Closure:
 
 
 def inspect_source(parent_root, selected_job_ref):
-    """Inspect an exact step or an exact {origin_identity,path,sha256} job ref."""
+    """Inspect an exact step or an exact {origin_identity,path,size_bytes} job ref."""
     from . import contracts as c
     root = files.check_path(Path(parent_root).absolute())
     initial = c.settings(root)
@@ -605,7 +599,7 @@ def inspect_source(parent_root, selected_job_ref):
     closure.snapshot(root)
     job, job_ref, task_ref = closure.task(source, selected=True)
     if isinstance(selected_job_ref, dict):
-        if any(selected_job_ref.get(field) != job_ref[field] for field in ('origin_identity', 'path', 'sha256')):
+        if any(selected_job_ref.get(field) != job_ref[field] for field in ('origin_identity', 'path', 'size_bytes')):
             raise ValueError('Selected fork job identity changed')
     prefix = []
     visible_sources = {item.step: item for item in o.source_sequence(root, step)}
@@ -616,17 +610,17 @@ def inspect_source(parent_root, selected_job_ref):
         request_source = o.source_for_ref(source, job['formal_review'])
         request = _json(o.resolve_ref(request_source, job['formal_review']))
         requester = o.dependency(request_source, request['requester']['step'],
-            seal_sha256=request['requester']['seal']['sha256'])
+            seal_ref=request['requester']['seal'])
         requester_job = o.source_job(requester)
         science_nodes = [*requester_job.get('history', {}).get('nodes', []),
-            dict(step=requester.step, seal_sha256=request['requester']['seal']['sha256'])]
+            dict(step=requester.step, seal_ref=request['requester']['seal'])]
     for row in science_nodes:
         if type(row.get('step')) is not int or row['step'] >= step:
             raise ValueError('Selected task history crosses its input boundary')
-        ancestor = visible_sources.get(row['step']) or o.dependency(source, row['step'], seal_sha256=row['seal_sha256'])
+        ancestor = visible_sources.get(row['step']) or o.dependency(source, row['step'], seal_ref=row['seal_ref'])
         if ancestor is None:
             raise ValueError('Selected history has no exact visible sealed original')
-        prefix.append(closure.sealed(ancestor, row['seal_sha256']))
+        prefix.append(closure.sealed(ancestor, row['seal_ref']))
         visible_sources[row['step']] = ancestor
     if len({row['step'] for row in prefix}) != len(prefix):
         raise ValueError('Selected task history is ambiguous')
@@ -671,7 +665,7 @@ def inspect_source(parent_root, selected_job_ref):
     if len(ancestry) > MAX_ANCESTRY:
         raise ValueError('Fork ancestry exceeds its finite depth bound')
     history_owner=o.history_source(source,job)
-    result = dict(version=1, kind='scientific_fork', source=dict(origin_identity=source.origin_identity,
+    result = dict(version=2, kind='scientific_fork', source=dict(origin_identity=source.origin_identity,
         step=step, job_ref=job_ref, science_task_ref=task_ref, native_intent_path=native_intent, intent_kind=_kind(job)),
         cut=dict(history=copy.deepcopy(job.get('history', {})),
             correction_events=[dict(ref, origin_identity=ref.get('origin_identity', source.origin_identity))
@@ -689,13 +683,7 @@ def inspect_source(parent_root, selected_job_ref):
         inherited_costs=_inherited_costs(closure, prefix),
         limitations=closure.limitations, blocked_reasons=closure.blocked,
         source_paths=closure.paths, source_root=str(root))
-    result['source_fingerprint'] = fingerprint(result)
     return result
-
-
-def fingerprint(plan):
-    return hashlib.sha256(files.canonical({key: value for key, value in plan.items()
-        if key not in SOURCE_LOCATORS | {'source_fingerprint'}})).hexdigest()
 
 
 def _existing_directory(path):
@@ -708,11 +696,8 @@ def _existing_directory(path):
 
 
 def storage_blockers(plan, target_directory):
-    """Inspect link devices and cache availability without writing either root."""
+    """Inspect explicit source/destination devices without a content cache."""
     device = _existing_directory(Path(target_directory).absolute()).stat().st_dev
-    from . import instance_archive
-    root = files.check_path(Path(plan['source_root']).absolute())
-    bindings = instance_archive._immutable_bindings(root)
     for entry in plan['entries']:
         source = files.check_path(Path(plan['source_paths'][_key(entry['origin_identity'], entry['path'], entry)]))
         info = source.stat()
@@ -720,36 +705,12 @@ def storage_blockers(plan, target_directory):
             raise ValueError('Fork original is not a regular file')
         if info.st_dev != device:
             return [dict(code='fork_storage_unsupported', reason='Fork originals and target require the same filesystem')]
-        if not instance_archive._managed_original(root, source, entry, bindings):
-            cas = files.check_path(root / 'host-history/objects' / entry['sha256'])
-            if cas.exists():
-                if cas.stat().st_dev != device:
-                    return [dict(code='fork_storage_unsupported', reason='Fork content store and target require the same filesystem')]
-                continue
-            directory = _existing_directory(root / 'host-history/fork-cache')
-            if directory.stat().st_dev != device:
-                return [dict(code='fork_storage_unsupported', reason='Fork snapshot cache and target require the same filesystem')]
-            cache = files.check_path(root / 'host-history/fork-cache' / entry['sha256'])
-            if cache.exists() and cache.stat().st_dev != device:
-                return [dict(code='fork_storage_unsupported', reason='Fork snapshot cache and target require the same filesystem')]
-            if not cache.exists() and not stat.S_IMODE(directory.stat().st_mode) & 0o222:
-                return [dict(code='fork_storage_unsupported', reason='Fork needs a writable private source snapshot cache')]
     return []
-
-
-def _shared_original(source, entry, source_root, *, context, policy, bindings):
-    from . import instance_archive
-    root = Path(source_root)
-    return instance_archive._snapshot_original(root, source, entry, context=context, policy=policy,
-        managed=instance_archive._managed_original(root, source, entry, bindings))
-
 
 def copy_source(plan, target_store):
     """Retain shared originals in the exact child/host-runtime/fork directory."""
     if plan.get('blocked_reasons'):
         raise ValueError('Fork source has unresolved original effects')
-    if fingerprint(plan) != plan.get('source_fingerprint'):
-        raise ValueError('Fork source plan changed after inspection')
     target_store = files.check_path(Path(target_store).absolute())
     blockers = storage_blockers(plan, target_store)
     if blockers:
@@ -760,30 +721,39 @@ def copy_source(plan, target_store):
     context = storage.Deadline(65)
     policy = storage.for_root(source_root)
     inventory = storage.Inventory(policy, context=context)
-    bindings = instance_archive._immutable_bindings(source_root)
-    retained = {}
+    managed_inodes = instance_archive._managed_inodes(source_root,
+        instance_archive._immutable_bindings(source_root), context=context)
+    retained = {}; generations = {}; aliases = {}
     for entry in plan['entries']:
         inventory.entry(); inventory.file(entry['size_bytes'])
         key = _key(entry['origin_identity'], entry['path'], entry)
         source = Path(plan['source_paths'][key])
-        try:
-            source = _shared_original(source, entry, source_root, context=context, policy=policy, bindings=bindings)
-        except OSError as error:
-            if error.errno in {errno.EACCES, errno.EROFS}:
-                raise files.SharingUnsupported('Fork needs a writable private source snapshot cache') from error
-            raise
-        retained[key] = target_store / entry['storage_path']
-        files.link_verified(source, retained[key], entry, context=context)
+        proof = files.stat_file(source, context=context)
+        if proof['size_bytes'] != entry['size_bytes']:
+            raise ValueError('Fork source size changed after preview')
+        generations[key] = proof
+        target = target_store / entry['storage_path']
+        identity = tuple(proof['source_stat'][:2])
+        managed = instance_archive._managed_original(source_root, source, entry, managed_inodes)
+        if managed:
+            files.link_original(source, target, entry, context=context)
+        elif identity in aliases:
+            files.link_original(aliases[identity], target, entry, context=context)
+        else:
+            files.copy_original(source, target, dict(entry, kind='file'), context=context)
+        aliases[identity] = target; retained[key] = target
     (target_store / 'public').mkdir(exist_ok=True, mode=0o700)
     for snapshot in plan.get('public_snapshots', []):
         ref = snapshot['original_ref']
         source = retained[_key(ref['origin_identity'], ref['path'], ref)]
-        files.link_verified(source, target_store / 'public' / o.relative(snapshot['path']),
-            dict(kind='file', mode=0o400, sha256=ref['sha256'], size_bytes=ref['size_bytes']), context=context)
-    # Recheck every original after all links/imports, not just each local read.
+        files.link_original(source, target_store / 'public' / o.relative(snapshot['path']),
+            dict(kind='file', mode=0o400, size_bytes=ref['size_bytes']), context=context)
     for entry in plan['entries']:
-        proof = files.hash_file(Path(plan['source_paths'][_key(entry['origin_identity'], entry['path'], entry)]), context=context)
-        if any(proof[field] != entry[field] for field in ('sha256', 'size_bytes')):
+        key = _key(entry['origin_identity'], entry['path'], entry)
+        after = files.stat_file(Path(plan['source_paths'][key]), context=context)
+        before = generations[key]
+        if (after['size_bytes'] != before['size_bytes'] or after['mode'] != before['mode']
+                or after['source_stat'][:3] != before['source_stat'][:3]):
             raise ValueError('Fork source changed during retention; preview is stale')
     manifest = {key: copy.deepcopy(value) for key, value in plan.items() if key not in SOURCE_LOCATORS}
     files.durable_json(target_store / 'origins.json', manifest['origins'])
@@ -794,7 +764,7 @@ def copy_source(plan, target_store):
 
 def validate_manifest(child_root, *, full=False):
     manifest = o._manifest(child_root)
-    if manifest is None or fingerprint(manifest) != manifest.get('source_fingerprint'):
+    if manifest is None or manifest.get('version') != 2 or manifest.get('kind') != 'scientific_fork':
         raise ValueError('Fork manifest identity changed')
     if len(manifest['entries']) > MAX_ENTRIES or sum(row['size_bytes'] for row in manifest['entries']) > MAX_BYTES:
         raise ValueError('Fork source closure exceeds its finite bounds')

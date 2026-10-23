@@ -5,7 +5,6 @@ remain inherited; readonly modes are a soft boundary for trusted same-user code.
 """
 from __future__ import annotations
 
-import hashlib
 import importlib.metadata
 import importlib.util
 import json
@@ -13,6 +12,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import uuid
 
 from . import contracts as c
 
@@ -20,19 +20,6 @@ DEFAULT_ROOT = '/opt/scidiscovery-thin/skills'
 DIRECTORY = 'host-control/skills'
 MANIFEST = DIRECTORY + '/manifest.json'
 _NAME = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z')
-_SHARED_STORE_HINT = ('Set SCID_SHARED_STORE to an absolute private directory owned by this user '
-    'on the instance filesystem; the filesystem must support hardlinks. No copy fallback.')
-
-
-def _hash(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-
-
-def _manifest_digest(value):
-    payload = (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + '\n').encode()
-    return hashlib.sha256(payload).hexdigest()
-
-
 def _name(value):
     if not isinstance(value, str) or not _NAME.fullmatch(value):
         raise ValueError('Skill and set names must be simple directory names')
@@ -75,9 +62,7 @@ def _tree(directory, *, inventory=None, context=None):
             relative = path.relative_to(directory).as_posix()
             if '\\' in relative:
                 raise ValueError('Skill resource paths must be portable relative paths')
-            from scidiscovery import archive_io as files
-            proof = files.hash_file(path, context=context)
-            rows.append(dict(path=relative, sha256=proof['sha256'], size_bytes=info.st_size))
+            rows.append(dict(path=relative, size_bytes=info.st_size))
         elif stat.S_ISDIR(info.st_mode):
             if path != directory:
                 directories.append(path.relative_to(directory).as_posix())
@@ -126,8 +111,8 @@ def _module_identity(module):
     if spec is None or spec.origin is None:
         raise ValueError('Declared native Skill launcher module is unavailable')
     path = files.check_path(Path(spec.origin).absolute())
-    proof = files.hash_file(path)
-    return dict(name=module, path=str(path), **{key: proof[key] for key in ('sha256', 'size_bytes')})
+    c.regular(path)
+    return dict(name=module, path=str(path))
 
 
 def _provider(entry, module):
@@ -221,31 +206,12 @@ def prepare(value, *, backend, launcher, existing=None, policy=None, context=Non
         tree = _tree(source / item, inventory=inventory, context=context)
         if tree['metadata']['name'] != item:
             raise ValueError('Selected Skill directory and native name must match')
-        objects[item] = dict(tree_sha256=_hash(tree), **tree)
-    manifest = dict(version=1, sets=declared['sets'], objects=objects)
-    result = dict(declared, manifest=dict(path=MANIFEST, sha256=_manifest_digest(manifest)))
+        objects[item] = tree
+    manifest = dict(version=2, freeze_id=uuid.uuid4().hex, sets=declared['sets'], objects=objects)
+    result = dict(declared, manifest=dict(path=MANIFEST, version=manifest['freeze_id']))
     if loader is not None:
         result['launcher'] = loader
     return result, manifest
-
-
-def _shared_store():
-    """Private mechanical cache; it confers neither scientific identity nor permission."""
-    from scidiscovery import archive_io as files
-    configured = os.environ.get('SCID_SHARED_STORE')
-    cache = Path(os.environ.get('XDG_CACHE_HOME', str(Path.home() / '.cache')))
-    path = Path(configured) if configured is not None else cache / 'scidiscovery' / 'shared-store'
-    if not path.is_absolute():
-        raise ValueError('SCID_SHARED_STORE requires an exact absolute directory. ' + _SHARED_STORE_HINT)
-    try:
-        files.check_path(path)
-        path.mkdir(parents=True, exist_ok=True, mode=0o700)
-        info = path.stat()
-    except PermissionError:
-        raise PermissionError('Skill shared store is inaccessible. ' + _SHARED_STORE_HINT) from None
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
-        raise ValueError('Skill shared store must be a private directory owned by this user. ' + _SHARED_STORE_HINT)
-    return path
 
 
 def _readonly_directories(base):
@@ -257,76 +223,37 @@ def _readonly_directories(base):
 def freeze(root, settings, manifest, *, context=None):
     if manifest is None:
         return
-    if not manifest['objects']:
-        path = Path(root) / MANIFEST
-        c.write(path, manifest)
-        path.chmod(0o400)
-        validate(root, settings)
-        return
     from scidiscovery import archive_io as files
     from . import atomic_files, storage_policy as storage
     root = Path(root)
-    declared = settings['skills']
     policy = settings.get('storage_policy')
     context = context or storage.Deadline(65)
     inventory = storage.Inventory(policy, context=context)
-    # Apply the frozen logical inventory before any content hashing or importing.
-    unique = {}
+    growth = 0
     for tree in manifest['objects'].values():
         inventory.entry()
         for relative in tree['directories']:
             inventory.entry()
         for row in tree['files']:
             inventory.entry(); inventory.file(row['size_bytes'])
-            unique[row['sha256']] = row['size_bytes']
-    store = _shared_store()
-    if store.stat().st_dev != root.stat().st_dev:
-        raise files.SharingUnsupported('Skill sharing requires supported same-filesystem hardlinks. ' + _SHARED_STORE_HINT)
-    # One common cache lock covers all trees: competing trees never independently
-    # copy the same missing payload before publishing a winning object.
-    with storage.writer_lock(root, context=context), storage.writer_lock(store, context=context):
-        present = set()
-        objects = root / DIRECTORY / 'objects'
-        if objects.exists():
-            for tree in manifest['objects'].values():
-                for row in tree['files']:
-                    if (objects / tree['tree_sha256'] / row['path']).exists():
-                        present.add(row['sha256'])
-        growth = sum(size for digest, size in unique.items() if digest not in present)
-        with storage.mutation(root, growth, policy=policy, context=context):
-            for item, tree in manifest['objects'].items():
-                base = files.check_path(objects / tree['tree_sha256'])
-                base.mkdir(parents=True, exist_ok=True)
-                for relative in tree['directories']:
-                    (base / relative).mkdir(parents=True, exist_ok=True)
-                for row in tree['files']:
-                    source = Path(declared['root']) / item / row['path']
-                    blob = files.check_path(store / 'skills/objects' / row['sha256'])
-                    # Recheck the configured installation even when a cache hit exists.
-                    proof = files.hash_file(source, context=context)
-                    if any(proof[key] != row[key] for key in ('sha256', 'size_bytes')):
-                        raise ValueError('Skill source changed during preparation')
-                    if not blob.exists() and not blob.is_symlink():
-                        atomic_files.copy_original(source, blob, sha256=row['sha256'],
-                            size_bytes=row['size_bytes'], context=context)
-                    try:
-                        files.link_verified(blob, base / row['path'], dict(kind='file', mode=0o400, **row), context=context)
-                    except files.SharingUnsupported as error:
-                        raise files.SharingUnsupported('Skill sharing requires supported same-filesystem hardlinks. ' + _SHARED_STORE_HINT) from error
-                tree_path = store / 'skills/trees' / (tree['tree_sha256'] + '.json')
-                payload = (json.dumps(tree, ensure_ascii=False, indent=2, allow_nan=False) + '\n').encode()
-                files.check_path(tree_path)
-                if tree_path.exists():
-                    if stat.S_IMODE(tree_path.stat().st_mode) != 0o400 or tree_path.read_bytes() != payload:
-                        raise ValueError('Shared Skill tree manifest changed')
-                else:
-                    atomic_files.publish_bytes(tree_path, payload)
-                _readonly_directories(base)
+            growth += row['size_bytes']
+    with storage.writer_lock(root, context=context), storage.mutation(root, growth, policy=policy, context=context):
+        for item, tree in manifest['objects'].items():
+            base = files.check_path(root / DIRECTORY / 'objects' / _name(item))
+            base.mkdir(parents=True, exist_ok=True)
+            for relative in tree['directories']:
+                (base / relative).mkdir(parents=True, exist_ok=True)
+            source_root = Path(settings['skills']['root']) / item
+            if _tree(source_root, context=context) != tree:
+                raise ValueError('Skill source inventory changed during preparation')
+            for row in tree['files']:
+                atomic_files.copy_original(source_root / row['path'], base / row['path'],
+                    size_bytes=row['size_bytes'], context=context)
+            _readonly_directories(base)
     path = root / MANIFEST
     c.write(path, manifest)
     path.chmod(0o400)
     validate(root, settings)
-
 
 def validate(root, settings):
     declared = settings.get('skills')
@@ -338,16 +265,14 @@ def validate(root, settings):
     path = files.check_path(Path(root) / MANIFEST)
     manifest = c.read(c.regular(path))
     expected = declared.get('manifest')
-    if (expected != dict(path=MANIFEST, sha256=c.digest(path)) or manifest.get('version') != 1
+    if (expected != dict(path=MANIFEST, version=manifest.get('freeze_id')) or manifest.get('version') != 2
             or manifest.get('sets') != declared['sets'] or stat.S_IMODE(path.stat().st_mode) != 0o400):
         raise ValueError('Frozen Skill manifest changed')
     names = {item for row in declared['sets'].values() for item in row['items']}
     if set(manifest['objects']) != names:
         raise ValueError('Frozen Skill object inventory changed')
-    for tree in manifest['objects'].values():
-        if tree['tree_sha256'] != _hash({key: tree[key] for key in ('files', 'directories', 'metadata')}):
-            raise ValueError('Frozen Skill tree identity changed')
-        directory = Path(root) / DIRECTORY / 'objects' / tree['tree_sha256']
+    for item, tree in manifest['objects'].items():
+        directory = Path(root) / DIRECTORY / 'objects' / _name(item)
         if any(stat.S_IMODE(files.check_path(path).stat().st_mode) != 0o500
                 for path in [directory, *[directory / relative for relative in tree['directories']]]):
             raise ValueError('Frozen Skill directory permissions changed')
@@ -373,9 +298,9 @@ def binding(settings, job):
         settings.get('worker_profiles'), declared['sets'])[job['role']]
     name = profile.get('skill_set')
     items = declared['sets'][name]['items'] if name is not None else []
-    return dict(version=1, role=job['role'], worker=profile.get('worker'), skill_set=name,
+    return dict(version=2, role=job['role'], worker=profile.get('worker'), skill_set=name,
         configuration_revision=job.get('configuration_revision'),
-        selection_sha256=_hash(dict(manifest=declared['manifest'], items=items)))
+        manifest=declared['manifest'], items=items)
 
 
 def for_job(settings, job):
@@ -391,7 +316,7 @@ def _targets(root, settings, job):
     if manifest is None:
         return None
     name = job['skill_binding']['skill_set']
-    return {item: Path(root) / DIRECTORY / 'objects' / manifest['objects'][item]['tree_sha256']
+    return {item: Path(root) / DIRECTORY / 'objects' / item
             for item in (manifest['sets'][name]['items'] if name is not None else [])}
 
 
@@ -453,20 +378,20 @@ def inherit(root, settings):
     from . import originals
     source = originals.selected_source(root)
     manifest_path = originals.resolve_ref(source, dict(path=MANIFEST))
-    if c.digest(manifest_path) != settings['skills']['manifest']['sha256']:
-        raise ValueError('Inherited Skill manifest changed')
     manifest = c.read(manifest_path)
-    for tree in manifest['objects'].values():
-        base = Path(root) / DIRECTORY / 'objects' / tree['tree_sha256']
+    if settings['skills']['manifest'] != dict(path=MANIFEST, version=manifest.get('freeze_id')):
+        raise ValueError('Inherited Skill manifest binding changed')
+    for item, tree in manifest['objects'].items():
+        base = Path(root) / DIRECTORY / 'objects' / item
         for relative in tree['directories']:
             (base / relative).mkdir(parents=True, exist_ok=True)
-    paths = [MANIFEST, *[DIRECTORY + '/objects/' + tree['tree_sha256'] + '/' + row['path']
-        for tree in manifest['objects'].values() for row in tree['files']]]
+    paths = [MANIFEST, *[DIRECTORY + '/objects/' + item + '/' + row['path']
+        for item, tree in manifest['objects'].items() for row in tree['files']]]
     for relative in dict.fromkeys(paths):
         source_path = originals.resolve_ref(source, dict(path=relative))
-        files.link_verified(source_path, Path(root) / relative, dict(kind='file', **files.hash_file(source_path)))
-    for tree in manifest['objects'].values():
-        _readonly_directories(Path(root) / DIRECTORY / 'objects' / tree['tree_sha256'])
+        files.link_original(source_path, Path(root) / relative, dict(kind='file', **files.stat_file(source_path)))
+    for item in manifest['objects']:
+        _readonly_directories(Path(root) / DIRECTORY / 'objects' / item)
     validate(root, settings)
 
 

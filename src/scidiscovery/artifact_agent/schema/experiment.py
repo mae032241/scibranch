@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
-from .common import Identifier, SchemaModel, canonical_json, canonical_sha256
+from .common import Identifier, SchemaModel, canonical_json
 ScalarValue = str | int | float | bool
 from .units import supported_unit_spellings, unit_definition
 from ...operation_contract import SemanticRuleViolation, declared_violation

@@ -37,7 +37,7 @@ def outcome(root,job,payload):
 
 def _source(root, step):
     job, payload, seal, seal_sha = history._source(root, step)
-    return dict(step=step, job_sha256=seal['job_sha256'], raw_sha256=seal['raw_sha256'], seal_sha256=seal_sha)
+    return dict(step=step, job_ref=seal['job_ref'], raw_ref=seal['raw_ref'], seal_ref=seal_sha)
 
 
 def public_request(root, job):
@@ -156,7 +156,7 @@ def accepted(root, request, before_step):
                 continue
             intent = originals.source_record(source, 'native-intent.json')
             path = originals.resolve_ref(source, dict(path=f'jobs/{step:03d}.json'))
-            if c.read(c.regular(intent)).get('task_sha256') != c.digest(path):
+            if c.read(c.regular(intent)).get('task_ref') != dict(path=str(Path(source.original_root)/f'jobs/{step:03d}.json')):
                 raise ValueError('Author correction execution identity changed')
             count += 1
     return count

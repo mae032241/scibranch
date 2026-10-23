@@ -95,7 +95,7 @@ def test_retired_protocol_cannot_rebuild_lineage_or_mutate_originals(tmp_path,mo
     root=scene(tmp_path);finish(root,1,'H',[],action='wait')
     settings=c.read(root/'settings.json');settings['handoff_protocol']=protocol
     c.write(root/'settings.json',settings)
-    c.write(root/'settings-identity.json',dict(sha256=c.digest(root/'settings.json')))
+    c.write(root/'settings-identity.json',dict(path='settings.json'))
     def snapshot():
         return {path.relative_to(root).as_posix():(path.stat().st_mode,path.read_bytes() if path.is_file() else None)
                 for path in [root,*root.rglob('*')]}
@@ -129,7 +129,7 @@ def test_long_candidate_member_references_bound_brief_and_keep_complete_catalogu
     from scidiscovery.research_loop import experiments
     root=scene(tmp_path);finish(root,1,'H',[],action='experiment')
     c.build_job(root,2,'W',[1])
-    c.write(execution.origin(root,2)/'native-intent.json',dict(task_sha256=c.digest(root/'jobs/002.json')))
+    c.write(execution.origin(root,2)/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json')))
     config=experiments.configure(root,2,'local_execution:command',dict(run_argv=[sys.executable]),
         c.workspace(root,2)/'work/experiment-config.json')
     directory=c.workspace(root,2)/'experiments/alternatives';directory.mkdir(parents=True)
@@ -161,9 +161,9 @@ def test_known_failed_experiment_is_separate_from_original_scientific_conclusion
     from cov_execution import lineage as cov
     root,config,digest=call_scene(tmp_path)
     script=c.workspace(root,2)/'work/train.py';script.write_text('failed')
-    failed=cov.run(config,digest,script,new=True)
+    failed=cov.run(config,script,new=True)
     assert failed['status']=='known_failed' and failed['model'] is None
-    script.write_text('success');successful=cov.run(config,digest,script,new=True)
+    script.write_text('success');successful=cov.run(config,script,new=True)
     finish(root,2,'W',[1],summary='Valid bounded negative scientific conclusion')
     job=c.build_job(root,3,'A',[2]);work=c.workspace(root,3)
     candidates=pages(work,job['history']['view']['indexes']['candidates'],'candidates')

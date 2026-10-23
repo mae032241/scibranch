@@ -42,7 +42,7 @@ def test_role_index_paging_and_complete_scientific_text_are_readable_now(scene):
     assert not list((work / 'inputs/history').rglob('candidate.py'))
     assert [row['step'] for row in binding['view']['recent']] == [10, 11]
     assert c.read(scene / 'jobs/009.json')['direct_refs'] == [dict(
-        path='inputs/parents/008/conclusion.json', sha256=c.digest(c.workspace(scene, 9) / 'inputs/parents/008/conclusion.json'))]
+        path='inputs/parents/008/conclusion.json', size_bytes=(c.workspace(scene, 9) / 'inputs/parents/008/conclusion.json').stat().st_size)]
     h9 = next(row for row in lineage.project(scene, 12)['records'] if row['step'] == 9)
     assert h9['view']['h_parents'] == [6]
     assert 'failed' not in binding['view']  # limitations are author's declarations, no semantic guess.
@@ -120,7 +120,7 @@ def setup_observer(scene, tmp_path, body):
     config = history.observer_config(dict(adapter=str(path), config={}))
     settings = c.settings(scene);settings['history_observer'] = config
     c.write(scene / 'settings.json', settings)
-    c.write(scene / 'settings-identity.json', dict(sha256=c.digest(scene / 'settings.json')))
+    c.write(scene / 'settings-identity.json', dict(path='settings.json'))
     return path
 
 
@@ -138,7 +138,8 @@ print(json.dumps({"current_candidate":None,"coverage":{"status":"complete","note
     materials = c.read(c.host_record(c.workspace(scene, 2)) / 'result-identity.json')['materials']
     first = history.capture(scene, job, raw, materials)
     observation = c.read(scene / first['path'])
-    assert observation['actual_submission']['artifact']['sha256'] == c.digest(scene / 'artifact.bin')
+    assert observation['actual_submission']['artifact']['size_bytes'] == (scene / 'artifact.bin').stat().st_size
+    assert (scene / observation['actual_submission']['artifact']['snapshot']).read_bytes() == b'not a pickle, never executed'
     (scene / 'fact.json').write_text('{"measured":999}')
     assert history.capture(scene, job, raw, materials) == first
     assert c.read(scene / first['path']) == observation
@@ -271,7 +272,7 @@ def test_nodes_paginate_by_bytes_as_well_as_row_count(scene):
     assert read_pages(work, paths[0], 'records') == rows
 
 
-def test_observer_originals_survive_append_overwrite_and_are_deduplicated(scene, tmp_path):
+def test_observer_originals_survive_append_overwrite_and_reject_size_changes(scene, tmp_path):
     adapter = setup_observer(scene, tmp_path, '''import json,sys
 q=json.load(sys.stdin)
 print(json.dumps({"candidates":[],"current_candidate":None,"coverage":{"status":"complete","note":"Fixture"},"actual_submission":{"candidate_id":None,"artifact":"artifact.bin","evidence":["fact.json"]}}))
@@ -283,12 +284,10 @@ print(json.dumps({"candidates":[],"current_candidate":None,"coverage":{"status":
     proof = old['actual_submission']['artifact']
     assert proof['retention'] == 'archived'
     assert (scene / proof['snapshot']).read_bytes() == b'original submitted bytes'
-    assert len(list((scene / 'host-history/objects').iterdir())) == 2
     (scene / 'fact.json').write_text('{"observation":2}')
     (scene / 'artifact.bin').write_bytes(b'new submitted bytes')
     finish(scene, 3, 'A', [2])
     assert (scene / proof['snapshot']).read_bytes() == b'original submitted bytes'
-    assert len(list((scene / 'host-history/objects').iterdir())) == 4
     c.validate(c.workspace(scene, 2))  # Mutable public sources are not mistaken for frozen originals.
     (scene / proof['snapshot']).chmod(0o600);(scene / proof['snapshot']).write_bytes(b'tampered')
     with pytest.raises(ValueError, match='Archived observer original changed'):

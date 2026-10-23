@@ -145,7 +145,7 @@ def prepare(root, step, record, work, home, args, *, standard, resume_position=N
     """Freeze one host-only attempt; unsupported launchers still support reads."""
     from . import contracts as c, execution, experiments as e
     snapshot=record/'native-execution-permissions.json'
-    value=dict(version=1,task_sha256=c.digest(root/'jobs'/f'{step:03d}.json'),
+    value=dict(version=1,task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),
         native_attempt=dict(number=len(execution.records(root,step))-1,execution_key=execution.identity(root,step)),
         intent=e.proof(record/'native-intent.json'),
         native_argv=list(args),home=str(home),workspace=str(work))
@@ -208,10 +208,10 @@ def prepare(root, step, record, work, home, args, *, standard, resume_position=N
         if e.proof(snapshot)!=original or c.read(c.regular(snapshot))!=value:
             raise e.IntegrityError('Original native permissions changed')
         if (e.proof(record/'native-intent.json')!=value['intent']
-                or c.digest(root/'jobs'/f'{step:03d}.json')!=value['task_sha256']
+                or c.record_ref(root/'jobs'/f'{step:03d}.json')!=value['task_ref']
                 or accepted.get('native_attempt')!=value['native_attempt']
                 or accepted.get('scope')!=config['scope']
-                or config['scope']['job_sha256']!=value['task_sha256']):
+                or config['scope']['job_ref']!=value['task_ref']):
             raise e.IntegrityError('Scientific launch differs from its original native attempt')
         if 'unsupported' in value:raise e.UnsupportedExecution(value['unsupported'])
         for key in ('backend_configuration',):

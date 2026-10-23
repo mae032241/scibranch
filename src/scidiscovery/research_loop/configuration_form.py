@@ -6,8 +6,6 @@ supplies preparation defaults and never starts research or reads credentials.
 from __future__ import annotations
 
 import copy
-import base64
-import hashlib
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from html import escape
@@ -644,7 +642,7 @@ def render(draft, *, edit=False):
         rows.append('</details>')
     rows.append('<details class="advanced-category"><summary>其他导入字段 / 专家编辑</summary><p class="note">原样保留并校验额外字段；不支持的声明会在检查时提示。</p><div class="config-children" data-parent="@extra">'+tree(extras,'@extra')+'</div><button type="button" class="config-add secondary-button" data-parent="@extra">添加扩展字段</button></details></details>'
         + ('</section>' if edit else '<div class="setup-actions"><button type="button" hidden class="secondary-button" data-setup-go="1">← 返回任务与材料</button><span class="note">下一步会检查配置，尚不创建或运行研究。</span></div></section>'))
-    rows.append('<script>'+SCRIPT_SOURCE+'</script>')
+    rows.append('<script src="/assets/configuration.js"></script>')
     return '<div class="compact-configuration">'+'\n'.join(rows)+'</div>'
 
 
@@ -773,7 +771,6 @@ document.addEventListener('click', e => {
 });
 })();
 '''
-SCRIPT_CSP = "'sha256-" + base64.b64encode(hashlib.sha256(SCRIPT_SOURCE.encode()).digest()).decode() + "'"
 
 
 def _options(draft):

@@ -47,7 +47,7 @@ def audited_scene(tmp_path, monkeypatch):
     (root / 'submission').mkdir()
     script = c.workspace(root, 2) / 'work/train.py'
     script.write_text('success')
-    result = cov.run(config, digest, script, new=True)
+    result = cov.run(config, script, new=True)
     assert result['status'] == 'known_success'
     finish(root, 2, 'W', [1])
     c.write(root / 'host-started.json', budget.clock_stamp())
@@ -107,7 +107,7 @@ def test_audit_cannot_qualify_different_or_missing_candidate_artifact(tmp_path, 
     context = next(row for record in records for row in (record.get('observation') or {}).get('contexts', [])
                    if row['candidate_id'] == candidate)
     if identity == 'different':
-        context['model']['sha256'] = '0' * 64
+        context['model']['size_bytes'] += 1
     else:
         context['model'] = None
     rows = candidate_audit.project_receipts(root, records, [candidate_audit.receipt_ref(root, 3)])
@@ -172,7 +172,7 @@ def test_frozen_receipt_or_projection_page_corruption_hard_rejects(tmp_path, mon
 def test_closeout_author_prefix_keeps_exact_audit_without_inheriting_original_node(tmp_path, corrupt):
     from test_candidate_audit import audit_fixture, _seal_existing
     root = audit_fixture(tmp_path)
-    refs = delivery.freeze_sources(root, [dict(step=i, seal_sha256=history._source(root, i)[3]) for i in (1, 2)])
+    refs = delivery.freeze_sources(root, [dict(step=i, seal_ref=history._source(root, i)[3]) for i in (1, 2)])
     budget.begin_closeout(root, 2, 3, 'Explicit closeout', delivery_sources=refs)
     job = c.build_job(root, 3, 'A', [1, 2], purpose='closeout', source_cutoff=2, delivery_sources=refs)
     payload = dict(summary='Need adapter audit', scientific_result='Preserve original model for independent review',

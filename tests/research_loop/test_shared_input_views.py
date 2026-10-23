@@ -275,7 +275,7 @@ def registered_namespace(monkeypatch):
     from scidiscovery.research_loop import skill_supply
     registrations=[ExecutionInterfaceRegistration('namespace_fixture','1',RuntimePluginFactory(lambda _:None),
         native_launcher_module='namespace_fixture.launcher')]
-    identity=dict(sha256='a'*64)
+    identity=dict(path='/fixture/original-module.py')
     class Entry:
         name='namespace_fixture'
         value='namespace_fixture:REGISTRATION'
@@ -309,7 +309,7 @@ def test_registered_final_namespace_changes_fail_closed_on_dispatch_and_configur
     if damage=='version':
         registrations[0]=ExecutionInterfaceRegistration('namespace_fixture','2',RuntimePluginFactory(lambda _:None),
             native_launcher_module='namespace_fixture.launcher')
-    elif damage=='module':identity['sha256']='b'*64
+    elif damage=='module':identity['path']='/fixture/different-module.py'
     else:registrations.clear()
     with pytest.raises(ValueError,match='changed'):
         skill_supply.namespace_launcher(settings)

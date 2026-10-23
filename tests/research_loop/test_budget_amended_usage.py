@@ -24,7 +24,7 @@ def test_amended_step_six_counts_usage_and_keeps_its_unknown_distinct(tmp_path,c
     c.build_job(root,2,'W',[1]);original=execution.origin(root,2)
     old_meter=dict(input_tokens=100,cached_input_tokens=50,output_tokens=20)
     old_observation=dict(coverage='unknown',reason='terminal_usage_unreported',thread_id='old-two',tokens=old_meter)
-    c.write(original/'native-intent.json',dict(step=2,task_sha256=c.digest(root/'jobs/002.json')))
+    c.write(original/'native-intent.json',dict(step=2,task_ref=c.record_ref(root/'jobs/002.json')))
     c.write(original/'usage.json',old_meter);c.write(original/'usage-observation.json',old_observation)
     c.write(original/'native-outcome.json',dict(returncode=-15,stop_reason='token_limit',
         cleanup='observed_group_cleaned',thread_id='old-two',metering=old_observation))
@@ -36,11 +36,11 @@ def test_amended_step_six_counts_usage_and_keeps_its_unknown_distinct(tmp_path,c
     budget.amend(root,max_steps=24,authorization_note='Finite additional review steps.',authorization_statement='Finish retained work.')
     # This meter-only review uses the sealed H prefix; the unsealed W stays out
     # of scientific inputs while its historical consumption remains in accounting.
-    sources=delivery.freeze_sources(root,[dict(step=1,seal_sha256=c.digest(execution.origin(root,1)/'result-identity.json'))])
+    sources=delivery.freeze_sources(root,[dict(step=1,seal_ref=c.record_ref(execution.origin(root,1)/'result-identity.json'))])
     budget.begin_closeout(root,1,6,'fixture_bounded_review',delivery_sources=sources)
     job=c.build_job(root,6,'A',[1],purpose='closeout',source_cutoff=1,delivery_sources=sources)
     record=execution.origin(root,6)
-    c.write(record/'native-intent.json',dict(step=6,task_sha256=c.digest(root/'jobs/006.json'),
+    c.write(record/'native-intent.json',dict(step=6,task_ref=c.record_ref(root/'jobs/006.json'),
         budget_slice=budget.accept_node(root,job),**profiles.binding(c.settings(root),job)))
     meter=dict(input_tokens=11,cached_input_tokens=4,output_tokens=3)
     observation=dict(coverage=coverage,reason='terminal_usage_unreported' if coverage=='unknown' else None,tokens=meter)

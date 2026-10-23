@@ -310,10 +310,10 @@ def test_final_native_unknown_billing_preserves_explicit_exact_submit_and_confir
     marker = c.read(record / 'native-intent.json')['budget_slice']['final_return']
     assert all(row['intent']['final_return'] == marker for row in actions)
     assert actions[-1]['outcome']['result']['status'] == 'confirmed'
-    artifact_sha = actions[0]['intent']['binding']['source']['objects']['artifact']['sha256']
-    assert actions[-1]['outcome']['result']['artifact_sha256'] == artifact_sha
+    artifact = actions[0]['intent']['binding']['source']['objects']['artifact']
+    assert actions[-1]['outcome']['result']['artifact_ref'] == artifact
     assert c.read(root / 'runs/submitted.json')['run_id'] == 1
-    assert c.digest(root / 'runs/submitted_model.pkl') == c.digest(root / 'submission/model.pkl') == artifact_sha
+    assert (root / 'runs/submitted_model.pkl').read_bytes() == (root / 'submission/model.pkl').read_bytes() == Path(artifact['path']).read_bytes()
     originals = {path: path.read_bytes() for path in record.iterdir() if path.is_file()}
     submitted = {path: path.read_bytes() for path in (root / 'runs/submitted.json',root / 'runs/submitted_model.pkl',root / 'submission/model.pkl')}
     for command in (controller.run, controller.closeout):

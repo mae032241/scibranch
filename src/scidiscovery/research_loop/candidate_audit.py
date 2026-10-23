@@ -1,7 +1,7 @@
 """One explicit A-selected, scratch-only adapter audit; immutable node facts."""
 from __future__ import annotations
 
-import hashlib
+from scidiscovery import execution_security as security
 import json
 import math
 import os
@@ -32,13 +32,13 @@ def _save(path, value):
 
 def _decision(root, step):
     record = c.host_record(c.workspace(root, step))
-    return dict(step=step, job_sha256=c.digest(root / 'jobs' / f'{step:03d}.json'),
-                raw_sha256=c.digest(execution.raw(root, step)), seal_sha256=c.digest(record / 'result-identity.json'))
+    return dict(step=step, job_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json'),
+                raw_ref=c.file_ref(execution.raw(root, step)), seal_ref=c.record_ref(record / 'result-identity.json'))
 
 
 def _operation(root, decision, candidate):
-    return hashlib.sha256(delivery._bytes(dict(decision=decision, candidate_id=candidate,
-        settings_sha256=c.digest(root / 'settings.json')))).hexdigest()
+    return security.request_digest(dict(decision=decision, candidate_id=candidate,
+        settings_ref=c.record_ref(root / 'settings.json')))
 
 
 def _validate_request(root, intent):
@@ -53,19 +53,18 @@ def _validate_request(root, intent):
         raise ValueError('Candidate audit accepted budget or identity changed')
     if intent.get('fence_protocol') is not None:
         owner=intent.get('owner',{})
-        if (intent['fence_protocol']!=1 or owner.get('task_sha256')!=intent['operation_id']
+        if (intent['fence_protocol']!=1 or owner.get('task_ref')!=intent['operation_id']
                 or any(type(owner.get(key)) is not int or owner[key]<=0 for key in ('pid','start_ticks','pgid','sid'))
                 or not isinstance(owner.get('boot_id'),str)):
             raise ValueError('Candidate audit dispatch owner changed')
-    if (set(decision) != {'step','job_sha256','raw_sha256','seal_sha256'}
+    if (set(decision) != {'step','job_ref','raw_ref','seal_ref'}
             or type(decision['step']) is not int or decision['step'] <= 0
-            or any(not isinstance(decision[key],str) or len(decision[key]) != 64
-                or any(char not in '0123456789abcdef' for char in decision[key])
-                for key in ('job_sha256','raw_sha256','seal_sha256'))):
+            or any(not isinstance(decision[key],dict) or 'path' not in decision[key]
+                for key in ('job_ref','raw_ref','seal_ref'))):
         raise ValueError('Candidate audit declared author identity changed')
     job = c.read(c.regular(root/'jobs'/f'{decision["step"]:03d}.json'))
     if (job['role'] != 'A' or job['handoff_protocol'] < 9
-            or c.digest(root/'jobs'/f'{decision["step"]:03d}.json') != decision['job_sha256']):
+            or c.record_ref(root/'jobs'/f'{decision["step"]:03d}.json') != decision['job_ref']):
         raise ValueError('Candidate audit declared requester changed')
 
 
@@ -83,7 +82,7 @@ def require_eligibility(root, intent):
         begin = c.read(c.regular(file))
         if (job['purpose'] != 'closeout' or job['source_cutoff'] != begin['source_cutoff']
                 or job['step'] < begin['first_step'] or job['delivery_sources'] != engineering.sources(root,job['step'])
-                or marker['sha256'] != c.digest(file)):
+                or marker['record'] != c.record_ref(file)):
             raise ValueError('Candidate audit closeout boundary changed')
     if raw['next_action'] != 'audit' or raw['candidate_recommendation'] != intent['candidate_id']:
         raise ValueError('Candidate audit differs from the original scientific request')
@@ -98,11 +97,10 @@ def validate_intent(root, intent):
 
 def _dispatch_binding(root,intent):
     directory = _directory(root,intent['decision']['step'])
-    return dict(operation_id=intent['operation_id'],intent_sha256=c.digest(c.regular(directory/'intent.json')),
-        sources_sha256=c.digest(c.regular(directory/'sources.json')),binding_sha256=c.digest(c.regular(directory/'binding.json')))
+    return dict(operation_id=intent['operation_id'],intent_ref=c.record_ref(c.regular(directory/'intent.json')),
+        sources_ref=c.record_ref(c.regular(directory/'sources.json')),binding_ref=c.record_ref(c.regular(directory/'binding.json')))
 
 
-@c.verified_digests()
 def _validate_objects(root, intent, binding, refs):
     _validate_request(root, intent)
     require_eligibility(root,intent)
@@ -115,7 +113,6 @@ def _validate_objects(root, intent, binding, refs):
         raise ValueError('Candidate audit no longer binds its selected original')
 
 
-@c.verified_digests()
 def validate_binding(root, intent):
     validate_intent(root, intent)
     directory = _directory(root, intent['decision']['step'])
@@ -129,7 +126,6 @@ def validate_binding(root, intent):
         raise ValueError('Candidate audit dispatch identity changed')
 
 
-@c.verified_digests()
 def _outcome(root, step):
     directory = _directory(root, step)
     path = directory / 'outcome.json'
@@ -149,39 +145,39 @@ def _outcome(root, step):
     if value['accepted']:
         intent = c.read(c.regular(directory / 'intent.json'))
         validate_intent(root, intent)
-        if value['intent_sha256'] != c.digest(directory / 'intent.json'):
+        if value['intent_ref'] != c.record_ref(directory / 'intent.json'):
             raise ValueError('Candidate audit intent receipt changed')
-        if value.get('binding_sha256') is not None:
+        if value.get('binding_ref') is not None:
             binding = c.read(c.regular(directory / 'binding.json'))
             validate_binding(root, dict(intent, binding=binding))
-            if value['binding_sha256'] != c.digest(directory / 'binding.json'):
+            if value['binding_ref'] != c.record_ref(directory / 'binding.json'):
                 raise ValueError('Candidate audit binding receipt changed')
-        if value.get('recovery_sha256') is not None:
+        if value.get('recovery_ref') is not None:
             from . import audit_recovery
             recovery_path=root/'host-delivery/audit-recovery'/intent['operation_id']/'outcome.json'
             recovered=next((fact for row,fact in audit_recovery.facts(root) if row['operation_id']==intent['operation_id']),None)
             if (recovered is None or not recovered['cleanup_confirmed'] or recovered['status']!='engineering_error'
-                    or c.digest(c.regular(recovery_path))!=value['recovery_sha256']):
+                    or c.record_ref(c.regular(recovery_path))!=value['recovery_ref']):
                 raise ValueError('Candidate audit recovery original changed')
         result = value['result']
-        expected_artifact = binding['source']['objects']['artifact']['sha256'] if value.get('binding_sha256') is not None else None
+        expected_artifact = binding['source']['objects']['artifact'] if value.get('binding_ref') is not None else None
         if (result.get('operation_id') != intent['operation_id'] or result.get('candidate_id') != intent['candidate_id']
-                or result.get('artifact_sha256') != expected_artifact):
+                or result.get('artifact_ref') != expected_artifact):
             raise ValueError('Candidate audit result object identity changed')
         process_path = directory / 'process.json'
-        if value.get('process_sha256') is not None:
-            if c.digest(c.regular(process_path)) != value['process_sha256']:
+        if value.get('process_ref') is not None:
+            if c.record_ref(c.regular(process_path)) != value['process_ref']:
                 raise ValueError('Candidate audit process original changed')
             process = c.read(process_path)
             identity = process.get('identity', {})
             if (process.get('operation_id') != intent['operation_id'] or process.get('phase') != 'audit'
-                    or identity.get('task_sha256') != intent['operation_id']
+                    or identity.get('task_ref') != intent['operation_id']
                     or any(type(identity.get(key)) is not int or identity[key] <= 0 for key in ('pid', 'pgid', 'sid', 'start_ticks'))):
                 raise ValueError('Candidate audit process identity changed')
-        if result['status'] in {'audited','rejected'} and (value.get('binding_sha256') is None or value.get('process_sha256') is None):
+        if result['status'] in {'audited','rejected'} and (value.get('binding_ref') is None or value.get('process_ref') is None):
             raise ValueError('Audited receipt has no exact object and process original')
         result_path = directory / 'adapter-result.json'
-        if c.digest(c.regular(result_path)) != value['result_sha256'] or c.read(result_path) != value['result']:
+        if c.record_ref(c.regular(result_path)) != value['result_ref'] or c.read(result_path) != value['result']:
             raise ValueError('Candidate audit adapter result changed')
     elif value['result']['status'] != 'unavailable':
         raise ValueError('An unaccepted audit cannot acquire qualification')
@@ -216,10 +212,9 @@ def receipt_ref(root, step):
     if value is None:
         return None
     path = _directory(root, step) / 'outcome.json'
-    return dict(step=step, path=path.relative_to(root).as_posix(), sha256=c.digest(path))
+    return dict(step=step, path=path.relative_to(root).as_posix())
 
 
-@c.verified_digests()
 def public_receipt(root, ref):
     expected = receipt_ref(root, ref['step'])
     if expected != ref:
@@ -267,7 +262,7 @@ def _settle_preflight(root,intent):
         binding=c.read(c.regular(directory/'binding.json')) if (directory/'binding.json').exists() else None
         result=dict(status='unavailable',note='candidate_audit_preflight_not_dispatched',cleanup_confirmed=True,
             operation_id=intent['operation_id'],candidate_id=intent['candidate_id'],
-            artifact_sha256=binding['source']['objects']['artifact']['sha256'] if binding else None)
+            artifact_ref=binding['source']['objects']['artifact'] if binding else None)
         if recovered is not None:
             if not recovered.get('cleanup_confirmed') or recovered.get('status')!='engineering_error':return False
             result.update({key:recovered[key] for key in ('status','note','cleanup_confirmed')})
@@ -275,17 +270,17 @@ def _settle_preflight(root,intent):
         if result_path.exists():
             old=c.read(c.regular(result_path))
             if (old.get('status') not in {'unavailable','engineering_error'} or old.get('cleanup_confirmed') is not True
-                    or any(old.get(key)!=result[key] for key in ('operation_id','candidate_id','artifact_sha256'))):
+                    or any(old.get(key)!=result[key] for key in ('operation_id','candidate_id','artifact_ref'))):
                 return False
             result=old
         else:_save(result_path,result)
         _save(directory/'outcome.json',dict(decision=intent['decision'],candidate_id=intent['candidate_id'],accepted=True,
-            result=result,intent_sha256=c.digest(directory/'intent.json'),
-            binding_sha256=c.digest(directory/'binding.json') if binding else None,
-            result_sha256=c.digest(result_path),
-            process_sha256=c.digest(directory/'process.json') if (directory/'process.json').exists() else None,
+            result=result,intent_ref=c.record_ref(directory/'intent.json'),
+            binding_ref=c.record_ref(directory/'binding.json') if binding else None,
+            result_ref=c.record_ref(result_path),
+            process_ref=c.record_ref(directory/'process.json') if (directory/'process.json').exists() else None,
             leaf_output=delivery.leaf_refs(root,intent['operation_id']),
-            **(dict(recovery_sha256=c.digest(root/'host-delivery/audit-recovery'/intent['operation_id']/'outcome.json')) if recovered is not None else {})))
+            **(dict(recovery_ref=c.record_ref(root/'host-delivery/audit-recovery'/intent['operation_id']/'outcome.json')) if recovered is not None else {})))
         return True
 
 
@@ -309,9 +304,9 @@ def _unavailable_input(root,job,chosen,rows):
         _,_,seal,seal_sha=history._source(root,receipt['step'])
         observed=seal.get('observations')
         if observed is not None and any(row['id']==chosen for row in c.read(root/observed['path'])['candidates']):
-            sources.append(dict(step=receipt['step'],seal_sha256=seal_sha,observation=observed))
-    return hashlib.sha256(delivery._bytes(dict(settings_sha256=c.digest(root/'settings.json'),
-        candidate_id=chosen,sources=sources,unavailable=rows))).hexdigest()
+            sources.append(dict(step=receipt['step'],seal_ref=seal_sha,observation=observed))
+    return json.dumps(dict(settings_ref=c.record_ref(root/'settings.json'),
+        candidate_id=chosen,sources=sources,unavailable=rows), sort_keys=True)
 
 
 def execute(root, job, payload):
@@ -345,15 +340,15 @@ def execute(root, job, payload):
         result = result or dict(status=status, note=note, cleanup_confirmed=cleanup)
         if intent is not None and 'operation_id' not in result:
             result.update(operation_id=intent['operation_id'], candidate_id=chosen,
-                          artifact_sha256=binding['source']['objects']['artifact']['sha256'] if binding is not None and (directory/'binding.json').exists() else None)
+                          artifact_ref=binding['source']['objects']['artifact'] if binding is not None and (directory/'binding.json').exists() else None)
         value = dict(decision=decision, candidate_id=chosen, accepted=intent is not None, result=result)
-        if unavailable_input is not None:value['unavailable_input_sha256']=unavailable_input
+        if unavailable_input is not None:value['unavailable_input_ref']=unavailable_input
         if intent is not None:
             _save(directory / 'adapter-result.json', result)
-            value.update(intent_sha256=c.digest(directory / 'intent.json'),
-                         binding_sha256=c.digest(directory / 'binding.json') if binding is not None and (directory/'binding.json').exists() else None,
-                         result_sha256=c.digest(directory / 'adapter-result.json'),
-                         process_sha256=c.digest(directory / 'process.json') if (directory / 'process.json').exists() else None,
+            value.update(intent_ref=c.record_ref(directory / 'intent.json'),
+                         binding_ref=c.record_ref(directory / 'binding.json') if binding is not None and (directory/'binding.json').exists() else None,
+                         result_ref=c.record_ref(directory / 'adapter-result.json'),
+                         process_ref=c.record_ref(directory / 'process.json') if (directory / 'process.json').exists() else None,
                          leaf_output=(delivery.leaf_refs(root, resolved) if resolved else []) + delivery.leaf_refs(root, intent['operation_id']))
         _save(directory / 'outcome.json', value)
         if note=='candidate_audit_unchanged_originals_unavailable':return 'candidate_audit_originals_unavailable'
@@ -395,7 +390,7 @@ def execute(root, job, payload):
     intent['advance_seconds']=budget.snapshot(root)['advance_seconds']
     _save(directory / 'intent.json', intent)
     try:
-        if not job.get('delivery_sources'):resolved = hashlib.sha256(delivery._bytes(job['history']['nodes'])).hexdigest()
+        if not job.get('delivery_sources'):resolved = json.dumps(job['history']['nodes'], sort_keys=True)
         refs = (delivery.selected_sources(root, job['delivery_sources'], chosen, prepare=True, job=job)
             if job.get('delivery_sources') else delivery.freeze_sources(root, job['history']['nodes'], candidate_id=chosen, job=job))
         rows = [row for row in refs['items'] if row['candidate_id'] == chosen and row['status'] == 'audit_pending']
@@ -409,7 +404,7 @@ def execute(root, job, payload):
                 if prior_step>=step:break
                 old=_outcome(root,prior_step)
                 if (old is not None and old['result']['status']=='unavailable'
-                        and old.get('unavailable_input_sha256')==unavailable_input):unchanged=True;break
+                        and old.get('unavailable_input_ref')==unavailable_input):unchanged=True;break
             note='candidate_audit_unchanged_originals_unavailable' if unchanged else 'candidate_originals_unavailable'
             detail=next((row.get('reason') for row in failed if row.get('reason')),'delivery_source_unavailable')
             return finish('unavailable',note,result=dict(status='unavailable',note=note,cleanup_confirmed=True,
@@ -468,7 +463,7 @@ def candidate_artifacts(root, records):
             from . import lineage
             for artifact in lineage.context_artifacts(context):
                 if artifact.get('retention')=='archived':
-                    models.setdefault(context['candidate_id'],set()).add((artifact['sha256'],artifact['size_bytes']))
+                    models.setdefault(context['candidate_id'],set()).add((artifact['path'],artifact['size_bytes']))
         from . import generic_results
         # Candidate identities and bytes come from their exact frozen declaration.
         for call in observation.get('managed_calls',[]):
@@ -481,11 +476,11 @@ def candidate_artifacts(root, records):
                             from . import candidate_refs,originals
                             source=originals.node(root,record['step'])
                             identity=candidate_refs.origin_candidate(source.origin_identity,identity)
-                        models.setdefault(identity,set()).add((artifact['sha256'],artifact['size_bytes']))
+                        models.setdefault(identity,set()).add((artifact['path'],artifact['size_bytes']))
         actual = observation.get('actual_submission')
         if actual and actual.get('candidate_id') is not None and (actual.get('artifact') or {}).get('retention') == 'archived':
             model = actual['artifact']
-            models.setdefault(actual['candidate_id'], set()).add((model['sha256'], model['size_bytes']))
+            models.setdefault(actual['candidate_id'], set()).add((model['path'], model['size_bytes']))
     return models
 
 
@@ -498,12 +493,12 @@ def project_receipts(root, records, refs):
         value = _outcome(root, ref['step'])
         result, chosen = value['result'], value['candidate_id']
         binding = None
-        if value.get('binding_sha256') is not None:
+        if value.get('binding_ref') is not None:
             binding = c.read(c.regular(_directory(root, ref['step']) / 'binding.json'))
         artifact = binding['source']['objects']['artifact'] if binding is not None else None
         identities = models.get(chosen, set())
         match = ('unknown' if artifact is None or not identities else
-                 'matched' if identities == {(artifact['sha256'], artifact['size_bytes'])} else 'different')
+                 'matched' if identities == {(artifact['path'], artifact['size_bytes'])} else 'different')
         spec = (configuration_updates.for_step(root, ref['step']).get('delivery_policy') or {}).get('adapter')
         label = Path(spec['adapter']).name if spec is not None else 'unavailable'
         rows.append(dict(candidate_id=chosen, adapter_result=result['status'], artifact_binding=match,

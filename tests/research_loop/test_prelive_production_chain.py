@@ -1,5 +1,4 @@
 """Pre-live gate: latest frozen settings, real launcher/bwrap/controller/delivery, zero models."""
-import hashlib
 import json
 import os
 import runpy
@@ -42,7 +41,7 @@ def gate(tmp_path,settings,launcher,*extra):
 
 
 def originals(*paths):
-    return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
+    return {str(p):(p.stat().st_dev,p.stat().st_ino,p.stat().st_size,p.stat().st_mtime_ns,p.stat().st_ctime_ns) for p in paths}
 
 
 @pytest.mark.process_e2e
@@ -169,11 +168,11 @@ def source_prelive(tmp_path,comparison):
         *('environment/harness/'+name for name in ('exp_cli.py','runner.py','train.csv','val.csv','meta.json'))]
     manifest=source/'public-manifest.json'
     c.write(manifest,dict(task_revision='d78f5eb52ad754c5ee9154741af73130a85a65b8',
-        public_files_sha256={name:c.digest(public/name) for name in names}))
+        public_files=names))
     codehost=Path('/usr/bin/true').resolve();config=source/'launcher.json'
     c.write(config,dict(scene_root=str(root),public_root=str(public),public_manifest=str(manifest),
         runs_dir=str(root/'runs'),submission_dir=str(root/'submission'),native=str(codehost),
-        code_mode_host=dict(path=str(codehost),sha256=c.digest(codehost)),task_python=python,scid_python=str(shim),
+        code_mode_host=dict(path=str(codehost)),task_python=python,scid_python=str(shim),
         runtime_paths=runtime_paths,model='no-model',reasoning_effort='high',profile='prelive-no-model',
         cov_receipt_channel='public_runner_main'))
     adapter=descriptor(root,public,python=python)
@@ -187,7 +186,7 @@ def source_prelive(tmp_path,comparison):
         node_budget_policy={role:dict(max_observed_tokens=10000,max_seconds=60) for role in 'HWAE'},
         resume_policy=dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn'),
         worker_fragment_policy=dict(context='new_context'),selection_policy=dict(version=2) if comparison else None,
-        source_restrictions=[dict(source=str(harness/'train.csv'),sha256=c.digest(harness/'train.csv'),restriction='clear')],
+        source_restrictions=[dict(source=str(harness/'train.csv'),restriction='clear')],
         delivery_policy=delivery_policy(adapter),
         history_observer=dict(contract_version=2,adapter=str(Path(cov_lineage.__file__).resolve()),
             config=dict(runs='runs',calls='project/nodes',evaluation_key='covshift-public-val-v1')))
@@ -270,7 +269,7 @@ def test_source_normal_gate_uses_one_final_author_and_original_host_delivery(tmp
     assert len(verdict['chain'])==7 and verdict['chain'][-1]['role']=='A'
     assert verdict['chain'][-1]['purpose']=='closeout' and verdict['chain'][-1]['route']=='deliver'
     for check in ('source_provenance_equal_after_rebind','one_final_author','original_delivery_actions','final_host_audit_original','final_host_leaf_output',
-        'submission_bytes_match','source_unchanged','selection_comparison_sealed' if comparison else 'selection_disabled_preserved'):
+        'submission_size_match','source_metadata_unchanged','selection_comparison_sealed' if comparison else 'selection_disabled_preserved'):
         assert verdict['checks'][check],check
     assert originals(settings,launcher)==before
 
@@ -285,10 +284,10 @@ def test_source_provenance_rebinding_rejects_self_consistent_changed_facts(tmp_p
         root=tmp_path/f'instance-{index}';roots.append(root)
         controller.prepare(root,objective,public,['fake-no-launch'],max_tokens=1000,max_seconds=30,max_steps=4,
             model='no-model',reasoning_effort='high',search_policy=None,
-            source_restrictions=[dict(source=str(source),sha256=c.digest(source),
+            source_restrictions=[dict(source=str(source),
                 restriction='restricted' if index==1 and mutation=='restriction' else 'clear')])
         reference=c.settings(root)['source_provenance']
-        assert c.digest(root/reference['path'])==reference['sha256']  # Both outer proofs are self-consistent.
+        assert (root/reference['path']).stat().st_size==reference['size_bytes']  # Both declarations match their retained size.
     equal=runpy.run_path(str(GATE))['source_provenance_equal']
     assert not equal(roots[0],roots[1],[(str(roots[0]),str(roots[1])),(str(publics[0]),str(publics[1]))])
 
@@ -309,7 +308,7 @@ def test_polluted_public_harness_fails_before_any_scene_or_launch(tmp_path):
     source=tmp_path/'source';(source/'instance').mkdir(parents=True)
     for name in ('settings.json','settings-identity.json'):shutil.copyfile(settings.parent/name,source/'instance'/name)
     public=tmp_path/'public'
-    for name in c.read(Path(config['public_manifest']))['public_files_sha256']:
+    for name in c.read(Path(config['public_manifest']))['public_files']:
         (public/name).parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(Path(config['public_root'])/name,public/name)
     (public/'environment/harness/__pycache__').mkdir();(public/'environment/harness/__pycache__/runner.cpython-312.pyc').write_bytes(b'host bytecode')
     c.write(source/'launcher.json',dict(config,public_root=str(public)))
@@ -326,7 +325,7 @@ def _leaf_files(root,phase,count=1):
     for path in indexes:
         index=c.read(path);stream=index['streams']['stderr']
         data=(path.parent/stream['path']).read_bytes()
-        assert stream['sha256']==hashlib.sha256(data).hexdigest() and stream['kept_bytes']==len(data)
+        assert stream['kept_bytes']==len(data) and 'sha256' not in stream
         yield index,data
 
 
@@ -351,7 +350,7 @@ def test_isolated_leaf_failure_keeps_exact_traceback_as_host_only_output(tmp_pat
         if phase=='confirm':
             budget.action_outcome(root,submit,result);result=delivery.invoke(root,accepted(root,bound,'confirm'),10)
         assert result['status']==('engineering_error' if phase=='audit' else 'unknown')
-        keys={'status','operation_id','candidate_id','artifact_sha256','note','cleanup_confirmed'}
+        keys={'status','operation_id','candidate_id','artifact_ref','note','cleanup_confirmed'}
         if phase=='audit':
             assert result['failure_phase']=='audit'
             keys.add('failure_phase')
@@ -388,3 +387,23 @@ def test_leaf_output_tail_is_bounded_and_does_not_change_the_reply(tmp_path):
     assert delivery._call(dict(launcher_argv=[sys.executable,str(launcher)],adapter=str(launcher)),
         dict(phase='confirm',operation_id='a'*64),10,evidence=evidence)=={}
     assert (evidence/(('a'*64)+'-confirm-2.json')).is_file()
+
+
+def test_source_metadata_inventory_names_only_exact_selected_files(tmp_path,monkeypatch):
+    module=runpy.run_path(str(GATE))
+    source=tmp_path/'source';source.mkdir()
+    settings=source/'settings.json';c.write(settings,dict(handoff_protocol=CURRENT))
+    c.write(source/'settings-identity.json',dict(path='settings.json'))
+    public=tmp_path/'public';public.mkdir()
+    data=public/'data.csv';data.write_bytes(b'exact selected data')
+    ignored=public/'unselected.csv';ignored.write_bytes(b'not inventoried')
+    manifest=tmp_path/'manifest.json';c.write(manifest,dict(public_files=['data.csv']))
+    config=dict(public_root=str(public),public_manifest=str(manifest))
+    original=Path.read_bytes
+    def read(path):
+        if path in (data,ignored):pytest.fail('Metadata inventory must not read dataset contents')
+        return original(path)
+    monkeypatch.setattr(Path,'read_bytes',read)
+    files=module['source_files'](settings,config,c.read(manifest))
+    assert set(files)=={str(settings),str(source/'settings-identity.json'),str(manifest),str(data)}
+    assert files[str(data)]['size_bytes']==data.stat().st_size

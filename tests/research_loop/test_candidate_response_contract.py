@@ -108,12 +108,12 @@ def test_task_schema_and_consumption_omit_unused_auxiliary_fields_but_preserve_r
         decision_request={'unstructured':'original question'},portfolio_review={'observations':['limited']},
         candidate_comparison={'unstructured':'comparison'},extra_science=['Original data'],
         candidate_ids=[{'note':'scientific data'}],scientific_annotation={'id':'a scientific object','subject':{'candidate_ids':[{}]}})
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(scene/'jobs/003.json')))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(scene/'jobs/003.json')))
     c.write(record/'science-output.json',payload)
     original=(record/'science-output.json').read_bytes()
     c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
     c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(scene),
-        raw_sha256=c.digest(record/'science-output.json')))
+        raw_ref=c.file_ref(record/'science-output.json')))
     c.seal_result(scene,3)
     result=c.validate(work)
     assert all(result[key]==value for key,value in payload.items())
@@ -141,11 +141,11 @@ def test_invalid_explicit_implementation_selection_cannot_inherit_a_previous_cho
     assert job['selected_inputs']
     payload=dict(summary='Partial conclusion',scientific_result='The explicit selection is unavailable.',limitations=[],
         implementation_selection={'invalid':'explicit choice'} if invalid=='object' else ['overflow-sentinel'],stage_intent='review')
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(scene/'jobs/004.json')))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(scene/'jobs/004.json')))
     (record/'science-output.json').write_text(json.dumps(payload).replace('"overflow-sentinel"','1e999'))
     c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
     c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(scene),
-        raw_sha256=c.digest(record/'science-output.json')))
+        raw_ref=c.file_ref(record/'science-output.json')))
     c.seal_result(scene,4)
     seal=c.read(record/'result-identity.json')
     assert seal['control_outcome']['selection_status']=='unresolved' and not seal.get('selected_inputs')
@@ -165,10 +165,10 @@ def test_unrepresentable_optional_field_keeps_exact_raw_and_bound_parent_origina
     payload[key]='an ordinary note' if field=='surrogate_key' else ['overflow-sentinel']
     original=json.dumps(payload).replace('"overflow-sentinel"','1e999').encode()
     (record/'science-output.json').write_bytes(original)
-    c.write(record/'native-intent.json',dict(task_sha256=c.digest(scene/'jobs/003.json')))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(scene/'jobs/003.json')))
     c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
     c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(scene),
-        raw_sha256=c.digest(record/'science-output.json')))
+        raw_ref=c.file_ref(record/'science-output.json')))
     c.seal_result(scene,3);result=c.validate(work)
     assert result['summary']==payload['summary'] and key not in result
     note=next(value for value in result.values() if isinstance(value,dict) and value.get('kind')=='scientific_projection')

@@ -22,7 +22,7 @@ def main(argv=None):
     prepare.add_argument('--objective', type=Path)
     prepare.add_argument('--user-update', type=Path, action='append', default=[], help='Freeze an additional user statement in global inputs; repeat for more')
     prepare.add_argument('--public-root', type=Path)
-    prepare.add_argument('--source-restrictions', type=Path, help='Operator source declarations JSON array: exact absolute source, sha256, restriction (clear/restricted); source restrictions only, not review or execution permission')
+    prepare.add_argument('--source-restrictions', type=Path, help='Operator source declarations JSON array: exact absolute source, restriction (clear/restricted); source restrictions only, not review or execution permission')
     prepare.add_argument('--enable-formal-review', action='store_true', help='Allow an explicit A formal_review request for one selected scientific object; requires complete real native participant identities and grants no execution permission')
     prepare.add_argument('--enable-execution-authority', action='store_true', help='Freeze the optional execution request/decision contract; requires formal review and grants no execution without explicit resources and the trusted gate')
     prepare.add_argument('--execution-resource-policy', type=Path, help='Explicit version1 cumulative allowance JSON: wall_time_seconds/max_storage_bytes; no default grant')
@@ -136,14 +136,14 @@ def main(argv=None):
     startup.add_argument('--root',type=Path,required=True)
     startup.add_argument('--step',type=int,required=True)
     startup.add_argument('--reconciliation',type=Path,required=True)
-    startup.add_argument('--reconciliation-sha256',required=True)
+    startup.add_argument('--reconciliation-ref',type=json.loads,required=True)
     startup.add_argument('--native-home',type=Path,required=True)
     startup.add_argument('--authorization-statement',required=True)
     collector = commands.add_parser('native-startup-collect', help='Collect an existing sealed final A and its exact proven unstarted delivery; never launch native work')
     collector.add_argument('--root',type=Path,required=True)
     collector.add_argument('--step',type=int,required=True)
     collector.add_argument('--reconciliation',type=Path,required=True)
-    collector.add_argument('--reconciliation-sha256',required=True)
+    collector.add_argument('--reconciliation-ref',type=json.loads,required=True)
     collector.add_argument('--authorization-statement',required=True)
     author = commands.add_parser('worker-closeout', help='Explicit finite fresh-context author closeout using the exact retained W work')
     author.add_argument('--root', type=Path, required=True)
@@ -157,7 +157,7 @@ def main(argv=None):
     accept.add_argument('--root', type=Path, required=True)
     accept.add_argument('--step', type=int, required=True)
     accept.add_argument('--attempt', type=int, choices=[2], required=True)
-    accept.add_argument('--pending-sha256', required=True)
+    accept.add_argument('--pending-ref', type=json.loads, required=True)
     accept.add_argument('--session', type=Path, required=True)
     accept.add_argument('--authorization-note', required=True)
     accept.add_argument('--authorization-statement', required=True)
@@ -201,7 +201,7 @@ def main(argv=None):
     delete = commands.add_parser('instance-delete', help='Permanently delete one exact quiescent instance; retry only with the same operation ID')
     delete.add_argument('--root', type=Path, required=True)
     delete.add_argument('--instance-id', required=True, help='Exact frozen goal_id confirmation')
-    delete.add_argument('--settings-sha256', required=True, help='Exact frozen settings.json SHA256 confirmation')
+    delete.add_argument('--settings-ref', type=json.loads, required=True, help='Exact frozen settings.json reference JSON confirmation')
     delete.add_argument('--operation-id', required=True, help='Original deletion operation ID retained for crash and lost-response retries')
     inspect = commands.add_parser('archive-inspect', help='Verify a read-only package and page its complete manifest without running code or importing plugins')
     inspect.add_argument('--package', type=Path, required=True)
@@ -358,7 +358,7 @@ def main(argv=None):
         elif args.command == 'instance-delete':
             from .instance_delete import delete_instance
             result = delete_instance(root, instance_id=args.instance_id,
-                settings_sha256=args.settings_sha256, operation_id=args.operation_id)
+                settings_ref=args.settings_ref, operation_id=args.operation_id)
         elif args.command == 'archive-export':
             from .instance_archive import archive_export
             result = archive_export(root, args.output, independent=args.independent)
@@ -389,18 +389,18 @@ def main(argv=None):
         elif args.command == 'native-startup-collect':
             from . import startup_recovery
             result = startup_recovery.collect_delivery(root,args.step,reconciliation=args.reconciliation,
-                reconciliation_sha256=args.reconciliation_sha256,authorization_statement=args.authorization_statement)
+                reconciliation_ref=args.reconciliation_ref,authorization_statement=args.authorization_statement)
         elif args.command == 'native-startup-successor':
             from . import startup_recovery
             result = startup_recovery.start(root,args.step,reconciliation=args.reconciliation,
-                reconciliation_sha256=args.reconciliation_sha256,
+                reconciliation_ref=args.reconciliation_ref,
                 native_home=args.native_home,authorization_statement=args.authorization_statement)
         elif args.command == 'worker-closeout':
             result = controller.worker_closeout(root, args.step, max_tokens=args.max_tokens, max_seconds=args.max_seconds,
                 authorization_note=args.authorization_note,successor=args.successor,
                 authorization_statement=args.authorization_statement)
         elif args.command == 'worker-output-accept':
-            result=controller.worker_output_accept(root,args.step,attempt=args.attempt,pending_sha256=args.pending_sha256,
+            result=controller.worker_output_accept(root,args.step,attempt=args.attempt,pending_ref=args.pending_ref,
                 session=args.session,
                 authorization_note=args.authorization_note,authorization_statement=args.authorization_statement)
         elif args.command == 'worker-resume':

@@ -20,7 +20,7 @@ def advice(tmp_path, monkeypatch):
             node_budget_policy=policy(tokens=node_tokens,seconds=30) if node else None,delivery_policy=reserve)
         job=c.build_job(root,1,'H',[]);start_clock(root,'advisory fixture')
         anchor=budget.accept_node(root,job)
-        intent=dict(task_sha256=c.digest(root/'jobs/001.json'),**(dict(budget_slice=anchor) if anchor else {}))
+        intent=dict(task_ref=c.record_ref(root/'jobs/001.json'),**(dict(budget_slice=anchor) if anchor else {}))
         c.write(execution.origin(root,1)/'native-intent.json',intent)
         limits=budget.snapshot(root)
         if anchor:limits['advance_seconds']=anchor['advance_seconds']+5

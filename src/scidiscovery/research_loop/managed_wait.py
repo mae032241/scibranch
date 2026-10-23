@@ -85,7 +85,7 @@ def handoff(config,result,command,call_id=None):
             if (job['role']=='W' and continuation.wake_allowed(limits)
                     and original.get('native_attempt')==dict(number=len(execution.records(root,step))-1,
                         execution_key=execution.identity(root,step))
-                    and intent.get('task_sha256')==c.digest(root/'jobs'/f'{step:03d}.json')):
+                    and intent.get('task_ref')==c.record_ref(root/'jobs'/f'{step:03d}.json')):
                 wake=True
         action=handoff_action(state,original_bound=external is not None,query=query,
             wake_authorized=wake,terminal_verified=verified)
@@ -116,9 +116,9 @@ def _config(root,job,accepted):
 
 def validate(root,job,record):
     value=c.read(c.regular(record/NAME,limit=None))
-    if (value['job_sha256']!=c.digest(root/'jobs'/f'{job["step"]:03d}.json')
-            or value['checkpoint_sha256']!=c.digest(c.regular(record/'checkpoint.json'))
-            or value['outcome_sha256']!=c.digest(c.regular(record/'native-outcome.json'))):
+    if (value['job_ref']!=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json')
+            or value['checkpoint_ref']!=c.record_ref(c.regular(record/'checkpoint.json'))
+            or value['outcome_ref']!=c.record_ref(c.regular(record/'native-outcome.json'))):
         raise e.IntegrityError('Execution waiting checkpoint changed')
     checkpoint.validate(root,job,record)
     if not isinstance(value['calls'],list) or not value['calls']:
@@ -144,7 +144,7 @@ def before_seal(root,job,record):
     if outcome.get('output_status')=='missing' or not raw.is_file() or raw.is_symlink():return
     if (type(outcome.get('returncode')) is not int or outcome.get('returncode')!=0 or outcome.get('stop_reason')
             or outcome.get('usage',{}).get('unknown_steps') and not budget.native_completion_known(outcome, configuration_updates.for_job(root, job))
-            or outcome.get('raw_sha256')!=c.digest(c.regular(record/'science-output.json'))):return
+            or outcome.get('raw_ref')!=c.file_ref(c.regular(record/'science-output.json'))):return
     if (record/NAME).exists():
         validate(root,job,record)
         raise ExecutionWaiting()
@@ -173,8 +173,8 @@ def before_seal(root,job,record):
     from . import worker_delivery
     worker_delivery.writers_stopped(root,job,record)
     checkpoint.capture(root,job,record)
-    value=dict(job_sha256=c.digest(root/'jobs'/f'{job["step"]:03d}.json'),
-        checkpoint_sha256=c.digest(record/'checkpoint.json'),outcome_sha256=c.digest(record/'native-outcome.json'),calls=calls)
+    value=dict(job_ref=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json'),
+        checkpoint_ref=c.record_ref(record/'checkpoint.json'),outcome_ref=c.record_ref(record/'native-outcome.json'),calls=calls)
     c.write(record/NAME,value);(record/NAME).chmod(0o400)
     raise ExecutionWaiting()
 
@@ -262,22 +262,22 @@ def wake_packet(root,job,intent):
             for item in e.scientific_outputs(config,observed):
                 inventory.entry();inventory.file(item.size_bytes)
                 target=prefix+'/outputs/'+item.name
-                c._bind_original(Path(item.local_path), work/target, item.sha256, context=context, policy=config.get('storage_policy'), root=root, size_bytes=item.size_bytes, source_kind='mutable')
+                c._bind_original(Path(item.local_path), work/target, context=context, policy=config.get('storage_policy'), root=root, size_bytes=item.size_bytes, source_kind='mutable')
                 outputs.append(dict(name=item.name,path=target))
             rows.append(dict(status=observed['status'],result=prefix+'/result.json',outputs=outputs,
                 **(dict(native_state=observed['native_state']) if 'native_state' in observed else {})))
             continue
-        c._bind_original(Path(observed['completed']['path']), work/prefix/'result.json', observed['completed']['sha256'], root=root, policy=frozen.get('storage_policy'), context=context, size_bytes=observed['completed']['size_bytes'], source_kind='mutable')
+        c._bind_original(Path(observed['completed']['path']), work/prefix/'result.json', root=root, policy=frozen.get('storage_policy'), context=context, size_bytes=observed['completed']['size_bytes'], source_kind='mutable')
         outputs=[]
         for item in observed['outputs']:
             target=prefix+'/outputs/'+item['name']
             inventory.entry();inventory.file(item['size_bytes'])
-            c._bind_original(Path(item['path']), work/target, item['sha256'], root=root, policy=frozen.get('storage_policy'), context=context, size_bytes=item['size_bytes'], source_kind='managed_frozen');outputs.append(dict(name=item['name'],path=target))
+            c._bind_original(Path(item['path']), work/target, root=root, policy=frozen.get('storage_policy'), context=context, size_bytes=item['size_bytes'], source_kind='managed_frozen');outputs.append(dict(name=item['name'],path=target))
         originals=[]
         for index,item in enumerate(observed['proofs'],1):
             target=prefix+f'/originals/{index:03d}'
             inventory.entry();inventory.file(item['size_bytes'])
-            c._bind_original(Path(item['path']), work/target, item['sha256'], root=root, policy=frozen.get('storage_policy'), context=context, size_bytes=item['size_bytes'], source_kind='managed_frozen');originals.append(target)
+            c._bind_original(Path(item['path']), work/target, root=root, policy=frozen.get('storage_policy'), context=context, size_bytes=item['size_bytes'], source_kind='managed_frozen');originals.append(target)
         rows.append(dict(status=observed['status'],original=prefix+'/result.json',outputs=outputs,native_originals=originals,
             **(dict(native_state=observed['native_state']) if 'native_state' in observed else {})))
     c.write(work/'work/execution-results.json',dict(executions=rows,

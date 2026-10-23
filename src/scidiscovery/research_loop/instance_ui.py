@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import base64
 import copy
 import fcntl
-import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import html
 from html.parser import HTMLParser
@@ -36,7 +34,6 @@ from . import fork_ui
 
 
 _ENTRY_SCRIPT = "location.replace('./');"
-_ENTRY_SCRIPT_SOURCE = "'sha256-" + base64.b64encode(hashlib.sha256(_ENTRY_SCRIPT.encode()).digest()).decode() + "'"
 
 
 @contextmanager
@@ -72,7 +69,7 @@ class InstanceUI:
         self._serving = False
         self._approval_endpoint_origin = None
         self.secret = security.read_secret_file(secret_file, label='instance UI')
-        self.instance = ('workspace-' + uuid.uuid5(uuid.NAMESPACE_URL, str(self.root)).hex
+        self.instance = ('workspace-' + uuid.uuid4().hex
                          if workspace else settings['goal_id'])
         self.boot = uuid.uuid4().hex
         self.browser = BrowserAccessService(secret=self.secret, ui_session_id=self.boot)
@@ -101,6 +98,7 @@ class InstanceUI:
         self.view_memo = {}
         self.status_memo = {}
         self.candidate_cache = {}
+        self.history_pages = {}
         self._refresh_approval_host()
         self.translation = translation_service or ui_translation.TranslationService(self.root / ".scid-ui", config=translation_config)
         self.translation_nonce = secrets.token_urlsafe(32)
@@ -142,8 +140,7 @@ class InstanceUI:
         # stream or authenticated translation service that caused the failure.
         return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1"><title>'
-            + html.escape(problem.title) + '</title><style>' + render.CSS
-            + '</style></head><body><main><h1>' + html.escape(problem.title) + '</h1>'
+            + html.escape(problem.title) + '</title><link rel="stylesheet" href="/assets/style.css"></head><body><main><h1>' + html.escape(problem.title) + '</h1>'
             + body + '</main></body></html>').encode()
 
     def _failure(self, error):
@@ -250,7 +247,7 @@ class InstanceUI:
 
     def _form_nonce(self, browser_token, action, identity='', *, bindings=None):
         """Bounded, stable credentials for this session/action/logical form only."""
-        key = (browser_token, action, hashlib.sha256(identity.encode()).hexdigest())
+        key = (browser_token, action, identity)
         with self.control_lock:
             now = time.monotonic()
             self.form_nonces = {key: row for key, row in self.form_nonces.items()
@@ -775,7 +772,7 @@ class InstanceUI:
             if manager and (row['status'] == 'pending' or row['status'] == 'applied' and row.get('scope') == 'research' and not row.get('future_revocation')):
                 body += self._form(token, 'guidance-revoke', hidden, '撤回后续建议')
             body += '</article>'
-        body += '</section>' + ('<script>' + ui_guidance.SCRIPT + '</script>' if manager else '')
+        body += '</section>' + ('<script src="/assets/guidance.js"></script>' if manager else '')
         return (problem.status if problem else 200), self._page('方向建议', body, live=False), {}
 
     def _operations_page(self, token):
@@ -1409,7 +1406,7 @@ class InstanceUI:
         # identify this display projection; changing any source invalidates it.
         steps = [row['step'] for row in (job.get('history') or {}).get('nodes', [])]
         sources = [(number, reader.node(number), reader.observation(number)) for number in steps]
-        key = hashlib.sha256(json.dumps([str(self.root), job, sources, history_only], sort_keys=True).encode()).hexdigest()
+        key = json.dumps([str(self.root), job, sources, history_only], sort_keys=True)
         value = self.candidate_cache.get(key)
         if value is None:
             value = ui_view.candidate_projection(self.root, step, job=job, reader=reader, history_only=history_only)
@@ -1419,24 +1416,34 @@ class InstanceUI:
         return copy.deepcopy(value)
 
     def _candidate_history(self, *, through=None, prefix=None, after=0):
-        numbers = self._sealed_steps()
-        through = max(numbers, default=0) if through is None else through
-        numbers = [step for step in numbers if step <= through]
-        reader = ui_view.Reader(self.root, self.view_memo)
-        entries, missing = [], []
-        for step in numbers:
-            try:
-                node = reader.node(step)
-                entries.append((step, node, reader.observation(step)))
-            except Exception:
-                missing.append(step)
-        identity = hashlib.sha256(json.dumps([self.instance, through, entries, missing], sort_keys=True).encode()).hexdigest()
-        if prefix is not None and not hmac.compare_digest(prefix, identity):
-            raise ui_errors.InputError('prefix', '候选历史原件身份已变化。', '从候选历史入口重新打开；旧分页不会静默混入新观察。')
-        # The comparison page keeps its original subject-input prefix. This
-        # independent history uses all readable sealed sources through the cut.
-        job = dict(history=dict(nodes=[dict(step=step) for step, _, _ in entries]))
-        projection = self._candidates(through + 1, job=job, reader=reader, history_only=True)
+        if prefix is not None:
+            saved = self.history_pages.get(prefix)
+            if saved is None or saved['through'] != through:
+                raise ui_errors.InputError('prefix', '候选历史分页已过期。', '从候选历史入口重新打开。')
+            identity = prefix
+            missing = saved['missing']
+            projection = copy.deepcopy(saved['projection'])
+        else:
+            numbers = self._sealed_steps()
+            through = max(numbers, default=0) if through is None else through
+            reader = ui_view.Reader(self.root, self.view_memo)
+            entries, missing = [], []
+            for step in numbers:
+                if step > through:
+                    continue
+                try:
+                    reader.node(step)
+                    reader.observation(step)
+                    entries.append(dict(step=step))
+                except Exception:
+                    missing.append(step)
+            job = dict(history=dict(nodes=entries))
+            projection = self._candidates(through + 1, job=job, reader=reader, history_only=True)
+            identity = uuid.uuid4().hex
+            while len(self.history_pages) >= 8:
+                self.history_pages.pop(next(iter(self.history_pages)))
+            self.history_pages[identity] = dict(through=through, missing=missing,
+                                              projection=copy.deepcopy(projection))
         total = len(projection['index'])
         projection['index'] = projection['index'][after:after + 20]
         rows = ui_view.candidate_rows(projection, clean=ui_view.cleaner(self.root), all_candidates=True)
@@ -1462,14 +1469,14 @@ class InstanceUI:
                 return self._delete_page(token, form=form, problem=problem)
             settings = display.settings(self.root)
             form = self.delete_requests.setdefault(token, dict(root=str(self.root), instance_id=settings['goal_id'],
-                settings_sha256=hashlib.sha256((self.root / 'settings.json').read_bytes()).hexdigest(), operation_id=uuid.uuid4().hex))
+                settings_ref=json.dumps(c.record_ref(self.root/'settings.json'),sort_keys=True), operation_id=uuid.uuid4().hex))
         body = self._navigation() + '<p>永久删除此精确实例。服务会拒绝运行中、未知结果、挂载、嵌套实例或仍由 UI 持锁的目标。独立实例 UI 请先关闭，再从工作台加载删除；工作台不会释放其它持有者的锁。</p>'
         if problem:
             body += problem.markup()
         fields = ''
-        for key in ('root', 'instance_id', 'settings_sha256', 'operation_id'):
+        for key in ('root', 'instance_id', 'settings_ref', 'operation_id'):
             value = form[key]
-            fields += '<label>' + {'root': '目标绝对路径', 'instance_id': 'goal_id', 'settings_sha256': 'settings_sha256', 'operation_id': 'operation_id'}[key] + '<input name="' + key + '" readonly value="' + html.escape(value, quote=True) + '"></label>'
+            fields += '<label>' + {'root': '目标绝对路径', 'instance_id': 'goal_id', 'settings_ref': 'settings_ref', 'operation_id': 'operation_id'}[key] + '<input name="' + key + '" readonly value="' + html.escape(value, quote=True) + '"></label>'
         fields += '<label>确认删除上述实例<input name="confirmation" required placeholder="DELETE"></label>'
         body += self._form(token, 'delete', fields, '确认永久删除此实例')
         return (problem.status if problem else 200), self._page('删除实例', body, live=False), {}
@@ -1512,10 +1519,10 @@ class InstanceUI:
             member = self._guarded(ui_view.candidate_file, reader, chosen, projection, clean=clean) \
                 if chosen and 'error' not in projection else None
             if member and 'error' not in member:
-                confirmed = ((closeout or {}).get('last_confirmed') or {}).get('artifact_sha256')
-                kind = '下载交付文件' if card['delivery_state'] == 'confirmed' and confirmed == member['sha256'] else '下载推荐候选的研究文件'
+                confirmed = ((closeout or {}).get('last_confirmed') or {}).get('artifact_ref')
+                kind = '下载交付文件' if card['delivery_state'] == 'confirmed' and confirmed == member['reference'] else '下载推荐候选的研究文件'
                 files += ui.link(kind + '：' + member['name'].rsplit('/', 1)[-1], '/nodes/' + str(member['step']) + '/materials/' + str(member['index']), cls='primary')
-                files += '<p class="note">sha256 ' + ui.esc(member['sha256'][:16]) + '… · 第 ' + ui.esc(member['step']) + ' 阶段研究文件</p>'
+                files += '<p class="note">第 ' + ui.esc(member['step']) + ' 阶段研究文件</p>'
             files += ui.link('查看完整原文', '#full-text', cls='secondary-link')
         rows = self._guarded(lambda: ui_view.candidate_rows(projection, recommended=projection.get('recommended')
             if card.get('next_action') == 'audit' else (card.get('chosen') or {}).get('id')
@@ -1562,6 +1569,17 @@ class InstanceUI:
             child = self.deleted_children.get(index) if parts[3] in {'delete', 'control/delete'} else None
             child = child or self._child(index)
             return self._mounted(child.get('/' + parts[3] + ('?' + parsed.query if parsed.query else ''), host=host, cookie=cookie), int(parts[2]))
+        assets = {
+            '/assets/style.css': (render.CSS, 'text/css; charset=utf-8'),
+            '/assets/progress.js': (render.PROGRESS_SCRIPT, 'application/javascript; charset=utf-8'),
+            '/assets/translation.js': (render.translation_client.SCRIPT, 'application/javascript; charset=utf-8'),
+            '/assets/configuration.js': (configuration_form.SCRIPT_SOURCE, 'application/javascript; charset=utf-8'),
+            '/assets/guidance.js': (ui_guidance.SCRIPT, 'application/javascript; charset=utf-8'),
+            '/assets/entry.js': (_ENTRY_SCRIPT, 'application/javascript; charset=utf-8'),
+        }
+        if parsed.path in assets and not parsed.query:
+            content, media_type = assets[parsed.path]
+            return 200, content.encode(), {'Content-Type': media_type}
         if parsed.path in {'/manage', '/view'}:
             query = parse_qs(parsed.query, strict_parsing=True)
             values = query.get('token', [])
@@ -1574,10 +1592,9 @@ class InstanceUI:
             # The relative script target also remains inside mounted children.
             page = self._page('正在打开工作台', '<p>正在建立本地浏览会话…</p>'
                 '<p><a href="/">进入工作台</a>（未自动跳转时点击）</p>'
-                '<script>' + _ENTRY_SCRIPT + '</script>', live=False)
+                '<script src="/assets/entry.js"></script>', live=False)
             return 200, page, {'Set-Cookie': access_cookie(self.instance, token),
-                'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': render.CSP.replace(
-                    'script-src ', 'script-src ' + _ENTRY_SCRIPT_SOURCE + ' ', 1)}
+                'Referrer-Policy': 'no-referrer'}
         browser_token = self._browser(cookie, scope='read')
         if parsed.path == '/favicon.ico':
             return 204, b'', {}
@@ -1787,7 +1804,7 @@ class InstanceUI:
         if len(parts) == 2 and parts[0] == 'control':
             action = parts[1]
             schemas = {
-                'delete': {'root', 'instance_id', 'settings_sha256', 'operation_id', 'confirmation'},
+                'delete': {'root', 'instance_id', 'settings_ref', 'operation_id', 'confirmation'},
                 'pause': set(), 'start': set(), 'resume': {'step'}, 'continue': {'ack_correction', 'authorization_note'},
                 'create': {'selection'}, 'load-config': {'config_path'}, 'configure': None, 'configuration-update': None,
                 'open': {'root'}, 'configuration': {'config_path', 'config_text', 'mode'},
@@ -1862,7 +1879,7 @@ class InstanceUI:
             if form['root'] != str(self.root) or form['confirmation'] != 'DELETE':
                 raise ui_errors.InputError('confirmation', '删除目标或确认文字不匹配。', '核对目标绝对路径、身份和原操作编号；填写 DELETE。')
             instance_delete.delete_instance(self.root, instance_id=form['instance_id'],
-                settings_sha256=form['settings_sha256'], operation_id=form['operation_id'])
+                settings_ref=json.loads(form['settings_ref']), operation_id=form['operation_id'])
             parent = self.workspace_host
             if parent is None:
                 self.live_stop.set()

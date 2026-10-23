@@ -2,7 +2,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import errno
-import hashlib
 import os
 from pathlib import Path
 import stat
@@ -158,15 +157,14 @@ def test_mutable_first_freeze_interruption_leaves_no_alias_and_retry_is_independ
     source, target = tmp_path / 'source', tmp_path / 'retained/original'
     payload = b'a' * (2 * 1024 * 1024)
     source.write_bytes(payload)
-    digest = hashlib.sha256(payload).hexdigest()
     with pytest.raises(TimeoutError):
-        c._bind_original(source, target, digest, root=tmp_path, size_bytes=len(payload), source_kind='mutable', context=InterruptedCopy())
+        c._bind_original(source, target, root=tmp_path, size_bytes=len(payload), source_kind='mutable', context=InterruptedCopy())
     assert not target.exists()
     assert not list(target.parent.glob('.*.partial'))
-    c._bind_original(source, target, digest, root=tmp_path, size_bytes=source.stat().st_size, source_kind='mutable')
+    c._bind_original(source, target, root=tmp_path, size_bytes=source.stat().st_size, source_kind='mutable')
     assert target.read_bytes() == payload
     assert target.stat().st_ino != source.stat().st_ino
-    assert target.stat().st_ino == (tmp_path/'host-history/objects'/digest).stat().st_ino
+    assert target.stat().st_ino == next((tmp_path/'host-history/objects').iterdir()).stat().st_ino
     source.write_bytes(b'mutated writable scientific input')
     assert target.read_bytes() == payload
 
@@ -176,7 +174,6 @@ def test_copy_fault_never_publishes_partial_original(tmp_path, monkeypatch, faul
     source, target = tmp_path / 'source', tmp_path / 'target'
     payload = b'a' * (2 * 1024 * 1024)
     source.write_bytes(payload)
-    digest = hashlib.sha256(payload).hexdigest()
     original_stream, original_temporary = files._regular_stream, files._temporary
 
     class BrokenStream:
@@ -219,21 +216,21 @@ def test_copy_fault_never_publishes_partial_original(tmp_path, monkeypatch, faul
         else:
             patch.setattr(files, '_regular_stream', broken_stream)
         with pytest.raises((OSError, ValueError)):
-            files.copy_original(source, target, sha256=digest, size_bytes=len(payload))
+            files.copy_original(source, target, size_bytes=len(payload))
     assert not target.exists()
     assert not list(tmp_path.glob('.*.partial'))
     source.write_bytes(payload)
-    files.copy_original(source, target, sha256=digest, size_bytes=len(payload))
+    files.copy_original(source, target, size_bytes=len(payload))
     assert target.read_bytes() == payload
 
 
-@pytest.mark.parametrize('fault',['source_proof','different_bytes','disk_full'])
+@pytest.mark.parametrize('fault',['source_proof','different_size','disk_full'])
 def test_stream_publication_fault_never_exposes_a_partial_original(tmp_path,monkeypatch,fault):
     target=tmp_path/'streamed-original';raw=b'complete log'
     def blocks():
         yield raw[:3]
         if fault=='source_proof':raise ValueError('Raw original changed at EOF')
-        yield b'wrong' if fault=='different_bytes' else raw[3:]
+        yield b'wrong' if fault=='different_size' else raw[3:]
     temporary=files._temporary
     class FullOutput:
         def __init__(self,stream):self.stream=stream
@@ -245,7 +242,7 @@ def test_stream_publication_fault_never_exposes_a_partial_original(tmp_path,monk
         with temporary(path) as (partial,stream):yield partial,FullOutput(stream)
     if fault=='disk_full':monkeypatch.setattr(files,'_temporary',full)
     with pytest.raises((ValueError,OSError)):
-        files.publish_stream(target,blocks(),sha256=hashlib.sha256(raw).hexdigest(),size_bytes=len(raw))
+        files.publish_stream(target,blocks(),size_bytes=len(raw))
     assert not target.exists() and not list(tmp_path.glob('.*.partial'))
 
 
@@ -253,14 +250,13 @@ def test_existing_damaged_or_linked_original_is_never_overwritten(tmp_path):
     source, target = tmp_path / 'source', tmp_path / 'target'
     source.write_bytes(b'exact')
     target.write_bytes(b'damaged')
-    digest = hashlib.sha256(b'exact').hexdigest()
     with pytest.raises(ValueError):
-        c._bind_original(source, target, digest, root=tmp_path, size_bytes=source.stat().st_size, source_kind='mutable')
+        c._bind_original(source, target, root=tmp_path, size_bytes=source.stat().st_size, source_kind='mutable')
     assert target.read_bytes() == b'damaged'
     target.unlink()
     target.symlink_to(source)
     with pytest.raises(ValueError):
-        c._bind_original(source, target, digest, root=tmp_path, size_bytes=source.stat().st_size, source_kind='mutable')
+        c._bind_original(source, target, root=tmp_path, size_bytes=source.stat().st_size, source_kind='mutable')
     assert target.is_symlink() and source.read_bytes() == b'exact'
 
 
@@ -268,7 +264,7 @@ def test_tcad_first_freeze_interruption_preserves_unowned_legacy_partial(tmp_pat
     from tcad_artifact import managed_execution as tcad
     source, target = tmp_path / 'source', tmp_path / 'target'
     source.write_bytes(b't' * (2 * 1024 * 1024))
-    descriptor = LocalFileDescriptor(name='target', local_path=str(source), sha256=c.digest(source),
+    descriptor = LocalFileDescriptor(name='target', local_path=str(source),
         size_bytes=source.stat().st_size, media_type='application/octet-stream')
     legacy_partial = tmp_path / '.target.partial'
     legacy_partial.write_bytes(b'Unowned bytes from a prior writer')
@@ -280,18 +276,18 @@ def test_tcad_first_freeze_interruption_preserves_unowned_legacy_partial(tmp_pat
     tcad._retain_original(descriptor,target,SimpleNamespace(remaining_seconds=lambda: 1),root=tmp_path,policy=None)
     assert target.read_bytes() == source.read_bytes()
     assert stat.S_IMODE(target.stat().st_mode) == 0o400
-    assert target.stat().st_ino == (tmp_path/'host-history/objects'/descriptor.sha256).stat().st_ino
+    assert target.stat().st_ino == next((tmp_path/'host-history/objects').iterdir()).stat().st_ino
 
 
 def test_original_submission_and_collection_recover_without_resubmission(tmp_path, monkeypatch, remote_registry):
-    scope = dict(handoff_protocol=CURRENT, step=2, role='W', job_sha256='a' * 64,
-        execution_key='b' * 64, mechanism_ref=None)
+    scope = dict(handoff_protocol=CURRENT, step=2, role='W', job_ref=dict(path=str(tmp_path/'jobs/002.json')),
+        execution_key=dict(path=str(tmp_path/'native-evidence/002/native-intent.json')), mechanism_ref=None)
     config = e.freeze(dict(record_dir=str(tmp_path / 'records'), scope=scope,
         admission=dict(version=1, mode='hard'), max_seconds=10), 'remote_execution:fixture')
     source = tmp_path / 'package'
     source.write_bytes(b'p' * (2 * 1024 * 1024))
     descriptor = LocalFileDescriptor(name='original-call', local_path=str(source),
-        sha256=c.digest(source), size_bytes=source.stat().st_size, media_type='application/octet-stream')
+         size_bytes=source.stat().st_size, media_type='application/octet-stream')
     records, adapter = e.Records(config), e.load(config)
     accepted = records.accept(descriptor, adapter.acceptance_metadata(descriptor), config['execution_interface'])
     adapter.dispatch_lease(accepted)
@@ -321,7 +317,7 @@ def test_original_submission_and_collection_recover_without_resubmission(tmp_pat
     original_link = shared.link
 
     def interrupted_retention(source, target, **options):
-        if target.parent.name == 'observed-originals' and options['sha256'] == descriptor.sha256:
+        if target.parent.name == 'observed-originals' and options['size_bytes'] == descriptor.size_bytes:
             raise TimeoutError('Original collection deadline reached')
         return original_link(source, target, **options)
 
@@ -330,7 +326,7 @@ def test_original_submission_and_collection_recover_without_resubmission(tmp_pat
         with pytest.raises(TimeoutError):
             e.record_observation(config, adapter, descriptor.name)
     directory = records.directory(descriptor.name)
-    assert not (directory / 'observed-originals' / descriptor.sha256).exists()
+    assert not list((directory / 'observed-originals').glob('*'))
     assert not (directory / 'execution-observation.json').exists()
     observed = e.record_observation(config, adapter, descriptor.name)
     assert observed['status'] == 'known_success'
@@ -354,9 +350,9 @@ def test_seal_namespace_contention_precedes_history_and_conclusion_materializati
         patch.setattr(c, 'seal_result', lambda *args: None)
         job, work, record = finish(root, 2, 'W', [1], files={'candidate.txt': 'Retained original candidate'})
     stopped_native(root, record)
-    job_identity = c.digest(root / 'jobs/002.json')
+    job_identity = c.record_ref(root / 'jobs/002.json')
     native_identity = execution.identity(root, 2)
-    raw_identity = c.digest(record / 'science-output.json')
+    raw_identity = c.file_ref(record / 'science-output.json')
     assert job['execution_authority']
     with authority.writer(root):
         before = tree(root)
@@ -368,9 +364,9 @@ def test_seal_namespace_contention_precedes_history_and_conclusion_materializati
     assert not (record / 'result.json').exists()
     assert not (record / 'result-identity.json').exists()
     c.seal_result(root, 2)
-    assert c.digest(root / 'jobs/002.json') == job_identity
+    assert c.record_ref(root / 'jobs/002.json') == job_identity
     assert execution.identity(root, 2) == native_identity
-    assert c.digest(record / 'science-output.json') == raw_identity
+    assert c.file_ref(record / 'science-output.json') == raw_identity
     assert len(execution.records(root, 2)) == 1
-    assert c.read(record / 'result-identity.json')['job_sha256'] == job_identity
+    assert c.read(record / 'result-identity.json')['job_ref'] == job_identity
     assert (work / 'conclusion.json').read_bytes() == (record / 'science-output.json').read_bytes()

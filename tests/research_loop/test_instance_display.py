@@ -20,9 +20,9 @@ def scene(tmp_path, *, attempt=0):
     source.parent.mkdir(parents=True)
     source.write_bytes(b'x,y\r\n1,2\r\n')
     material = dict(source=str(source), path='inputs/parents/001/artifacts/z%20literal.csv',
-                    sha256='saved identity is not rechecked', size_bytes=source.stat().st_size)
-    seal = dict(materials=[material], raw_sha256='saved raw identity',
-                observations=dict(path='host-history/observations/001.json', sha256='saved receipt identity'))
+                    size_bytes=source.stat().st_size)
+    seal = dict(materials=[material], raw_ref='saved raw identity',
+                observations=dict(path='host-history/observations/001.json', size_bytes=0))
     if attempt:
         seal['execution_ref'] = dict(attempt=attempt, chain=['never rebuild this chain'])
     write(record / 'result-identity.json', seal)
@@ -32,7 +32,7 @@ def scene(tmp_path, *, attempt=0):
     write(root / 'jobs/001.json', dict(step=1, role='H'))
     write(root / 'settings.json', dict(goal='saved goal'))
     write(root / 'host-history/observations/001.json',
-          dict(binding=dict(source_sha256='a changed saved binding'), managed_calls=[]))
+          dict(binding=dict(source_ref='a changed saved binding'), managed_calls=[]))
     return root, record, source
 
 
@@ -72,7 +72,7 @@ def test_saved_display_never_revalidates_or_samples_file_generation(tmp_path, mo
         node = display.node(root, 1)
         assert node['payload']['conclusion'] == 'saved scientific finding'
         assert node['result']['saved'] == 'canonical result'
-        assert display.observation(root, 1, node)['binding']['source_sha256'] == 'a changed saved binding'
+        assert display.observation(root, 1, node)['binding']['source_ref'] == 'a changed saved binding'
         assert json.loads(read(display.science(root, 1))) == node['payload']
         assert display.materials(root, 1)['items'] == [dict(index=1, name='z%20literal.csv', size_bytes=10)]
         original, name = display.artifact(root, 1, 1)
@@ -97,7 +97,7 @@ def test_archived_member_streams_only_the_saved_object(tmp_path, legacy_source):
     archive.write_bytes(b'An existing saved archive object.\x00\xff')
     source = root / 'project/nodes/001/work/calls/call-1/outputs/curve.csv' if legacy_source else archive
     member = dict(source=str(source), path='inputs/parents/001/artifacts/experiments/call-1/artifacts/curve.csv',
-                  sha256='old saved digest', size_bytes=123)
+                  size_bytes=123)
     seal = json.loads((record / 'result-identity.json').read_text())
     seal['materials'] = [member]
     write(record / 'result-identity.json', seal)

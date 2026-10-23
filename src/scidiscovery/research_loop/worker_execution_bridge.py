@@ -176,7 +176,7 @@ def _execute(server, arguments):
         if (body!=expected or accepted.get('scope')!=config['scope']
                 or accepted.get('native_attempt')!=config.get('native_attempt')
                 or accepted.get('interface')!=config['execution_interface']
-                or accepted.get('config_sha256')!=config['execution_interface']['config_sha256']
+                or accepted.get('config_record')!=config['execution_interface']['config_record']
                 or e.Records(config).accepted(accepted['call_id'])!=accepted):
             raise e.IntegrityError('Scientific process differs from its accepted frozen configuration')
         _configuration(server)
@@ -232,7 +232,7 @@ def _verify_calls(config, calls):
             if relative.is_absolute() or '..' in relative.parts or relative.as_posix()!=item['name']:
                 raise e.IntegrityError('Cached submission snapshot namespace changed')
             actual=e.proof(directory/'inputs'/relative)
-            if any(actual[key]!=item[key] for key in ('sha256','size_bytes')):
+            if any(actual[key]!=item[key] for key in ('size_bytes',)):
                 raise e.IntegrityError('Cached submission input snapshot changed')
         if current['completed'] is not None:
             completed=json.loads(e.read(directory/'completed.json'))
@@ -240,7 +240,7 @@ def _verify_calls(config, calls):
                 if e.proof(item['path'])!=item:
                     raise e.IntegrityError('Cached submission terminal original changed')
             for item in completed.get('outputs',[]):
-                if e.proof(item['path'])!={key:item[key] for key in ('path','sha256','size_bytes')}:
+                if e.proof(item['path'])!={key:item[key] for key in ('path','size_bytes')}:
                     raise e.IntegrityError('Cached submission output original changed')
         if current['observation'] is not None:
             observed=json.loads(e.read(directory/'execution-observation.json'))
@@ -381,7 +381,7 @@ def _descendants(owner):
     rows=[]
     for path in Path('/proc').iterdir():
         if not path.name.isdecimal():continue
-        try:rows.append(runtime.process_identity(int(path.name),owner['task_sha256']))
+        try:rows.append(runtime.process_identity(int(path.name),owner['task_ref']))
         except (OSError,ValueError,IndexError):continue
     while True:
         found=[row for row in rows if row['ppid'] in parents and row['pid'] not in parents]
@@ -396,7 +396,7 @@ def _cleanup_bridge_children(identity):
         children=_descendants(identity)
         if not children:return 'observed_group_cleaned'
         for child in reversed(children):
-            if runtime.process_matches(child,identity['task_sha256']):
+            if runtime.process_matches(child,identity['task_ref']):
                 try:os.kill(child['pid'],signal.SIGKILL)
                 except ProcessLookupError:pass
             try:os.waitpid(child['pid'],os.WNOHANG)
@@ -418,7 +418,7 @@ def _bridge_process(server,initial,parent_pid,ready):
         if os.getppid()!=parent_pid:raise _BridgeStopped()
         # Fork transfers only the immutable launch closure. Never retain the
         # parent's owner/controller/record locks or their logical held tokens.
-        c._record_writers.set({});c._digest_transaction.set(None)
+        c._record_writers.set({})
         instance_owner._held.set({});instance_owner._gates.set({})
         for path in Path('/proc/self/fd').iterdir():
             descriptor=int(path.name)
@@ -544,13 +544,13 @@ def stopped(record, identity):
     process=record/'bridge-process.json'
     if not process.exists():return  # Attempts without a bridge retain their contract.
     receipt=c.read(c.regular(process))
-    if receipt.get('task_sha256')!=identity or runtime.process_matches(receipt,identity):
+    if receipt.get('task_ref')!=identity or runtime.process_matches(receipt,identity):
         raise BlockingIOError('Original execution bridge still owns this attempt')
     path=record/'bridge-outcome.json'
     if not path.exists():raise ValueError('Original execution bridge cleanup is unconfirmed')
     outcome=c.read(c.regular(path))
     if (outcome.get('cleanup')!='observed_group_cleaned' or any(outcome.get('process',{}).get(key)!=receipt.get(key)
-            for key in ('pid','boot_id','start_ticks','pgid','sid','task_sha256'))):
+            for key in ('pid','boot_id','start_ticks','pgid','sid','task_ref'))):
         raise ValueError('Original execution bridge cleanup is unconfirmed')
 
 

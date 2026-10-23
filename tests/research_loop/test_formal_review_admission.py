@@ -20,7 +20,7 @@ def soft(managed, *, max_seconds=None):
     if max_seconds is not None:value['max_seconds']=max_seconds
     directory=managed.root/'host-review';directory.mkdir()
     (directory/'accept.lock').touch(mode=0o444)
-    value['admission']=dict(version=1,mode='soft',directory=str(directory),stage_anchor=value['scope']['job_sha256'])
+    value['admission']=dict(version=1,mode='soft',directory=str(directory),stage_anchor=value['scope']['job_ref'])
     value['native_attempt']=dict(number=0,execution_key=value['scope']['execution_key'])
     value=experiments.freeze(value,managed.executor,path=managed.config)
     managed.config.write_text(json.dumps(value))
@@ -83,7 +83,7 @@ def test_host_soft_target_keeps_new_managed_execution_available(managed, target)
     finish(root,1,'H',[],action='experiment')
     job=c.build_job(root,2,'W',[1]);start_clock(root,'Soft W target remains advisory')
     record=execution.record(root,2)
-    intent=dict(task_sha256=c.digest(root/'jobs/002.json'),budget_slice=budget.accept_node(root,job))
+    intent=dict(task_ref=c.record_ref(root/'jobs/002.json'),budget_slice=budget.accept_node(root,job))
     c.write(record/'native-intent.json',intent)
     c.write(record/'usage.json',dict(input_tokens=2 if target=='tokens' else 0,cached_input_tokens=0,output_tokens=0))
     if target=='time':
@@ -233,7 +233,7 @@ def original_stage(tmp_path):
     root=scene(tmp_path,tokens=2,seconds=20,total_seconds=60,resume=True,search_policy=None)
     job=c.build_job(root,1,'H',[]);start_clock(root,'Original no-model stage')
     record=execution.record(root,1)
-    intent=dict(task_sha256=c.digest(root/'jobs/001.json'),budget_slice=budget.accept_node(root,job))
+    intent=dict(task_ref=c.record_ref(root/'jobs/001.json'),budget_slice=budget.accept_node(root,job))
     c.write(record/'native-intent.json',intent)
     return root,job,record,intent
 
@@ -253,8 +253,8 @@ def test_restart_and_same_stage_attempt_reconstruct_cumulative_review_without_re
     c.write(first/'native-outcome.json',dict(returncode=1,budget_slice=report))
     anchor=budget.accept_continuation(root,job,[first])
     next_record=first/'continuations/001'
-    next_intent=dict(attempt=1,task_sha256=intent['task_sha256'],previous=execution.proof(first),
-        root_intent_sha256=c.digest(first/'native-intent.json'),budget_slice=anchor)
+    next_intent=dict(attempt=1,task_ref=intent['task_ref'],previous=execution.proof(first),
+        root_intent_ref=c.record_ref(first/'native-intent.json'),budget_slice=anchor)
     c.write(next_record/'native-intent.json',next_intent)
     current=experiments.configure(root,1,'local_execution:command',dict(run_argv=[sys.executable]),config)
     assert current['scope']==initial['scope'] and current['admission']==initial['admission']
@@ -275,7 +275,7 @@ def test_publisher_ignores_stale_arguments_and_recomputes_nonsticky_original_fac
     finish(root,1,'H',[],action='experiment')
     start_clock(root,'Current W with a sealed original H')
     job=c.build_job(root,2,'W',[1]);record=execution.record(root,2)
-    intent=dict(task_sha256=c.digest(root/'jobs/002.json'),budget_slice=budget.accept_node(root,job))
+    intent=dict(task_ref=c.record_ref(root/'jobs/002.json'),budget_slice=budget.accept_node(root,job))
     c.write(record/'native-intent.json',intent)
     old_limits=budget.snapshot(root);old_meter=dict(input_tokens=0,cached_input_tokens=0,output_tokens=0)
     admission=budget.review_configuration(root,job)

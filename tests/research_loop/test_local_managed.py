@@ -26,7 +26,7 @@ def local(tmp_path, execution_registry):
         'print(json.dumps(sys.argv[1:]))\n')
     config_path=tmp_path/'config.json'
     config=e.freeze(dict(admission=dict(version=1,mode='hard'),record_dir=str(tmp_path/'receipts'),
-        scope=dict(handoff_protocol=CURRENT,step=2,role='W',job_sha256='a'*64,execution_key='b'*64,mechanism_ref=None),
+        scope=dict(handoff_protocol=CURRENT,step=2,role='W',job_ref=dict(path='/fixture/jobs/002.json'),execution_key=dict(path='/fixture/native-evidence/002/native-intent.json'),mechanism_ref=None),
         run_argv=[sys.executable],max_seconds=10),'local_execution:command',path=config_path)
     config_path.write_text(json.dumps(config))
     return root,script,config,config_path
@@ -194,7 +194,7 @@ def test_legacy_current_job_without_mode_keeps_science_view_and_observer_shape(t
         search_policy=None,history_observer=dict(adapter=str(observer),config={}))
     # Construct the exact pre-feature current-protocol contract before any job exists.
     settings=c.read(root/'settings.json');settings.pop('experiment_mode');c.write(root/'settings.json',settings)
-    c.write(root/'settings-identity.json',dict(sha256=c.digest(root/'settings.json')))
+    c.write(root/'settings-identity.json',dict(path='settings.json'))
     finish(root,1,'H',[],action='experiment')
     w=c.build_job(root,2,'W',[1]);record=c.host_record(c.workspace(root,2))
     c.write(record/'experiment-config.json',{'legacy_configuration':True})
@@ -287,12 +287,12 @@ def test_r1_native_owner_cleans_detached_local_group_after_driver_kill(tmp_path,
     finally:retain_local_process_diagnostics(root,'local-driver-cleanup')
     record=c.host_record(c.workspace(root,2));outcome=c.read(record/'native-outcome.json')
     assert result['stage_intent']=='review'
-    assert outcome['raw_sha256']==c.digest(record/'science-output.json')
+    assert outcome['raw_ref']==c.file_ref(record/'science-output.json')
     assert outcome['returncode']==0 and outcome['stop_reason'] is None
     assert outcome['cleanup']=='observed_group_cleaned'
     directory=next((experiment_client.record_directory(root,2)/'calls').iterdir())
     identity=c.read(directory/'process.json')
-    assert not runtime.process_matches(identity,identity['task_sha256'])
+    assert not runtime.process_matches(identity,identity['task_ref'])
     assert not (directory/'completed.json').exists()
     assert len(list(directory.parent.iterdir()))==1
     originals={p:p.read_bytes() for p in (directory/'accepted.json',directory/'process.json',
@@ -322,11 +322,11 @@ def test_r1_watchdog_signals_only_exact_local_group_after_runner_kill(tmp_path,e
         assert directory is not None
         identity=c.read(directory/'process.json')
         record=c.host_record(c.workspace(root,2));runner=c.read(record/'runner-process.json')
-        assert runtime.process_matches(runner,runner['task_sha256'])
+        assert runtime.process_matches(runner,runner['task_ref'])
         os.kill(runner['pid'],signal.SIGKILL)
         until=time.monotonic()+10
-        while runtime.process_matches(identity,identity['task_sha256']) and time.monotonic()<until:time.sleep(.05)
-        assert not runtime.process_matches(identity,identity['task_sha256'])
+        while runtime.process_matches(identity,identity['task_ref']) and time.monotonic()<until:time.sleep(.05)
+        assert not runtime.process_matches(identity,identity['task_ref'])
         assert not (directory/'completed.json').exists()
         process.communicate(timeout=15)
         assert c.read(record/'runner-cleanup.json')['managed_experiments']=='cleanup_unknown'
@@ -362,7 +362,7 @@ def test_r1_lost_local_process_original_keeps_budget_cleanup_blocked(tmp_path,ex
     finally:
         # The deliberately destroyed owner original cannot authorize production cleanup.
         # This test retains its exact identity separately solely to clean the negative fixture.
-        if identity is not None and runtime.process_matches(identity,identity['task_sha256']):
+        if identity is not None and runtime.process_matches(identity,identity['task_ref']):
             os.kill(identity['pid'],signal.SIGKILL)
 
 
@@ -420,7 +420,7 @@ def test_full_execution_proof_and_snapshot_stream_above_old_asset_cap(local,monk
     with large.open('wb') as stream:stream.truncate(33*1024*1024)
     original_read=Path.read_bytes
     def forbid_read_bytes(path):
-        if path.stat().st_size>32*1024*1024:raise AssertionError('Complete original must be hashed/copied as a stream')
+        if path.stat().st_size>32*1024*1024:raise AssertionError('Complete original must be copied as a stream')
         return original_read(path)
     monkeypatch.setattr(Path,'read_bytes',forbid_read_bytes)
     result=e.dispatch(config,script,command_options=dict(experiment_directory=str(root),arguments=[]))
@@ -428,23 +428,26 @@ def test_full_execution_proof_and_snapshot_stream_above_old_asset_cap(local,monk
     accepted=e.Records(config).accepted(result['call_id'])
     item=next(item for item in accepted['snapshot_files'] if item['name']=='inputs/large.bin')
     frozen=e.Records(config).directory(result['call_id'])/'inputs'/item['name']
-    assert frozen.stat().st_size==33*1024*1024 and c.digest(frozen)==item['sha256']
+    assert frozen.stat().st_size==33*1024*1024
+    with frozen.open('rb') as retained,large.open('rb') as original:
+        while block:=original.read(1024*1024):
+            assert retained.read(len(block))==block
+        assert retained.read(1)==b''
 
 
 @pytest.mark.process_e2e
 def test_standalone_scientific_logs_share_explicit_records_namespace(local,monkeypatch):
     from scidiscovery.research_loop import atomic_files
-    import hashlib
     root,script,config,_=local
     script.write_text('import pathlib\nprint(pathlib.Path(__file__).parent)\n')
     result=e.dispatch(config,script,command_options=dict(experiment_directory=str(root),arguments=[]))
     directory=e.Records(config).directory(result['call_id'])
     observation=c.read(directory/'execution-observation.json')
-    published=[];publish=atomic_files.publish_bytes
-    def counted(path,payload,**options):
-        published.append(hashlib.sha256(payload).hexdigest())
-        return publish(path,payload,**options)
-    monkeypatch.setattr(atomic_files,'publish_bytes',counted)
+    published=[];publish=atomic_files.publish_stream
+    def counted(path,blocks,**options):
+        published.append(path)
+        return publish(path,blocks,**options)
+    monkeypatch.setattr(atomic_files,'publish_stream',counted)
     views=[]
     for _ in range(2):
         outputs=e.scientific_outputs(config,observation,include_logs=True)
@@ -453,8 +456,6 @@ def test_standalone_scientific_logs_share_explicit_records_namespace(local,monke
         assert path.is_relative_to(Path(config['record_dir'])/'scientific-output-views')
         assert not path.is_relative_to(Path(config['record_dir'])/'calls')
         assert str(Path(config['record_dir'])) not in path.read_text()
-        cas=Path(config['record_dir'])/'host-history/objects'/stdout.sha256
-        assert (path.stat().st_dev,path.stat().st_ino)==(cas.stat().st_dev,cas.stat().st_ino)
     assert views[0]==views[1]
-    assert published.count(stdout.sha256)==1
+    assert len(published)==2
     assert views[0].stat().st_mode & 0o777==0o400

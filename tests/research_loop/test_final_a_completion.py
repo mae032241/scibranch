@@ -161,8 +161,6 @@ def test_no_adapter_final_report_runs_before_worker_at_exhausted_shared_balance(
     assert (root/'native-evidence/001/result-identity.json').read_bytes()==h_seal
 
 
-
-
 @pytest.mark.parametrize('config',[dict(returncode=7),dict(missing=True),dict(unsafe=True)])
 def test_final_token_permission_does_not_qualify_bad_transport(tmp_path,config):
     root=instance(tmp_path,final=True,**config)
@@ -245,7 +243,7 @@ def test_unknown_final_delivery_confirms_same_original_once_per_explicit_run(tmp
 def final_hint(tmp_path):
     root=instance(tmp_path,final=True)
     job=c.build_job(root,2,'A',[1],final_report=dict(source_cutoff=1,stopped_original=None))
-    intent=dict(step=2,task_sha256=c.digest(root/'jobs/002.json'),budget_slice=budget.accept_node(root,job))
+    intent=dict(step=2,task_ref=c.record_ref(root/'jobs/002.json'),budget_slice=budget.accept_node(root,job))
     record=c.host_record(c.workspace(root,2))
     meter=dict(input_tokens=280900,cached_input_tokens=100000,output_tokens=34)
     c.write(record/'native-intent.json',intent)

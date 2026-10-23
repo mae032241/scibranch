@@ -46,7 +46,7 @@ def finish(root, step, role, parents, text="A bounded scientific finding", actio
             progress_assessment=progress, decision_request=request, portfolio_review=None)
     if role in {"H", "A"}:
         payload.update(next_action=action, route_reason="Exact scientific question")
-    intent = dict(task_sha256=c.digest(path))
+    intent = dict(task_ref=c.record_ref(path))
     if role == 'W':
         intent['search_slice'] = search.accept(root, job)
     c.write(record / "native-intent.json", intent)
@@ -54,7 +54,7 @@ def finish(root, step, role, parents, text="A bounded scientific finding", actio
     meter = dict(input_tokens=7, cached_input_tokens=2, output_tokens=3)
     c.write(record / "usage.json", meter)
     c.write(record / "native-outcome.json", dict(returncode=0, stop_reason=None,
-        usage=native.usage(root), raw_sha256=c.digest(record / "science-output.json"),
+        usage=native.usage(root), raw_ref=c.file_ref(record / "science-output.json"),
         search_slice=search.report(root, job, intent, meter)))
     c.seal_result(root, step)
     return job, work, record
@@ -63,7 +63,7 @@ def finish(root, step, role, parents, text="A bounded scientific finding", actio
 def assert_progress_source(root, assessed_step, source_step):
     job = c.read(root / "jobs" / f"{assessed_step:03d}.json")
     assert correction._proofs(root, job, {"verdict": "progress"}) == {
-        c.digest(c.host_record(c.workspace(root, source_step)) / "science-output.json")}
+        str(c.host_record(c.workspace(root, source_step)) / "science-output.json")}
 
 
 @pytest.fixture
@@ -181,7 +181,7 @@ def test_retired_authored_evidence_paths_cannot_seal_as_progress(scene, monkeypa
     finish(scene,3,'A',[1,2],action='finish',progress=dict(verdict='progress',evidence=[path]))
     record = c.host_record(c.workspace(scene, 3))
     assert c.read(record / 'science-output.json')['progress_assessment'] == dict(verdict='progress', evidence=[path])
-    assert c.read(record / 'native-outcome.json')['raw_sha256'] == c.digest(record / 'science-output.json')
+    assert c.read(record / 'native-outcome.json')['raw_ref'] == c.file_ref(record / 'science-output.json')
     seal=c.read(record/'result-identity.json')
     assert dict(code='scientific_field_unresolved',subject='progress_assessment') in seal['control_outcome']['diagnostics']
     assert correction.project(scene)['counters']==dict(no_progress=0,unknown=1)
@@ -385,7 +385,7 @@ def test_unknown_pause_ack_known_judgment_ends_unknown_issue(scene, monkeypatch,
     assert calls[-2:] == [(13, 'W'), (14, 'A')]
 
 
-def test_identical_raw_bytes_at_different_nodes_receive_only_one_credit(scene, monkeypatch):
+def test_identical_raw_bytes_at_distinct_nodes_keep_distinct_progress_sources(scene, monkeypatch):
     worker(monkeypatch, {
         3: dict(verdict='progress'),
         5: dict(verdict='progress'),
@@ -393,9 +393,8 @@ def test_identical_raw_bytes_at_different_nodes_receive_only_one_credit(scene, m
     assert controller.run(scene)['status'] == 'finish'
     assert_progress_source(scene, 3, 2)
     assert_progress_source(scene, 5, 4)
-    assert c.digest(c.host_record(c.workspace(scene, 2)) / 'science-output.json') == c.digest(
-        c.host_record(c.workspace(scene, 4)) / 'science-output.json')
-    assert correction.project(scene)['counters'] == dict(no_progress=0, unknown=1)
+    assert (c.host_record(c.workspace(scene, 2)) / 'science-output.json').read_bytes() == (c.host_record(c.workspace(scene, 4)) / 'science-output.json').read_bytes()
+    assert correction.project(scene)['counters'] == dict(no_progress=0, unknown=0)
 
 
 def test_crash_after_trigger_before_any_h_job_reconstructs_h(scene, monkeypatch):
@@ -518,7 +517,7 @@ def test_cross_instance_fact_copy_and_progress_source_tamper_rejected(scene, mon
     copied = tmp_path / 'copied';shutil.copytree(scene, copied)
     settings = c.settings(copied);settings['goal_id'] = 'another-instance'
     c.write(copied / 'settings.json', settings)
-    c.write(copied / 'settings-identity.json', dict(sha256=c.digest(copied / 'settings.json')))
+    c.write(copied / 'settings-identity.json', dict(path='settings.json'))
     with pytest.raises(ValueError, match='identity'):
         correction.project(copied)
     raw = c.host_record(c.workspace(scene, 2)) / 'science-output.json'

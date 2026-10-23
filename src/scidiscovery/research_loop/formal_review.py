@@ -3,7 +3,6 @@
 These host facts grant review qualification only. They do not grant execution,
 renew budgets, or establish independence for unobserved native helpers.
 """
-import hashlib
 import json
 from pathlib import Path
 from typing import get_args
@@ -74,13 +73,13 @@ def capture_participants(root, job):
                    outcome=q._ref(root, record / 'native-outcome.json'))
         binding = outcome.get('native_identity') or {}
         try:
-            if binding.get('participant_scope') != 'codex_exec_single_agent_v1' or not binding.get('path'):
+            if binding.get('participant_scope') != 'codex_exec_single_agent_v1' or not binding.get('path',):
                 raise ValueError('native_participant_identity_unsupported')
             original = continuation.session(root, job['step'], record, home=binding['home'],
                 session_path=binding['path'], identity_proof=True)
             with c.regular(Path(original['path'])).open('rb') as stream:
                 line = stream.readline()
-            if hashlib.sha256(line).hexdigest() != original['header_sha256']:
+            if json.loads(line) != original['header']:
                 raise q.IntegrityError('Native session header changed before retention')
             path = c.host_record(c.workspace(root, job['step'])) / 'authorship' / f'{number:03d}.json'
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,14 +154,14 @@ def _inherited_participants(source, job, seal):
         intent_path = originals.resolve_ref(source, row['intent'])
         intent = c.read(intent_path)
         outcome = c.read(originals.resolve_ref(source, row['outcome']))
-        if row['attempt'] != number or intent['task_sha256'] != seal['job_sha256']:
+        if row['attempt'] != number or intent['task_ref'] != seal['job_ref']:
             raise q.IntegrityError('Inherited authorship changed its original task or attempt')
         if number == 0:
-            first_digest = c.digest(intent_path)
-        elif (intent.get('attempt') != number or intent.get('root_intent_sha256') != first_digest
+            first_digest = q.control_reference(source.original_root,row['intent'])
+        elif (intent.get('attempt') != number or intent.get('root_intent_ref') != first_digest
                 or (intent.get('previous') or {}).get('native-intent.json') != previous):
             raise q.IntegrityError('Inherited authorship omitted its original attempt chain')
-        previous = c.digest(intent_path)
+        previous = q.control_reference(source.original_root,row['intent'])
         if row['status'] != 'known':
             complete = False
             continue
@@ -195,7 +194,7 @@ def validate_original(source, job, seal, payload):
     proof = c.read(originals.resolve_ref(source, ref))
     subject = request['subject']
     producer = originals.dependency(context, subject['producer_step'],
-        seal_sha256=subject['producer_seal']['sha256'])
+        seal_ref=subject['producer_seal'])
     original_seal = c.read(originals.resolve_ref(producer, subject['producer_seal']))
     if subject['material'] not in original_seal['materials']:
         raise q.IntegrityError('Original formal review lost its exact subject')
@@ -208,7 +207,7 @@ def validate_original(source, job, seal, payload):
         authors_complete=actual_authors['complete'], reviewers_complete=reviewer['complete'])
     expected = dict(version=1, review_step=job['step'], subject=subject, request=job['formal_review'],
         contract=request['contract'], authors=actual_authors, reviewer=reviewer,
-        native_authorship=seal.get('native_authorship'), raw_sha256=seal['raw_sha256'], result_sha256=seal['sha256'],
+        native_authorship=seal.get('native_authorship'), raw_ref=seal['raw_ref'], result_ref=seal['result_ref'],
         verdict=payload['verdict'], independence=independent,
         status='passed' if independent == 'independent' and payload['verdict'] == 'pass' else 'not_qualified')
     if request['authors'] != actual_authors or proof != expected:
@@ -268,17 +267,17 @@ def authors(root, step, active=None, memo=None, *, source=None):
             if declared is not None:
                 contributions.extend(declared['contributions'])
         for original in compiled_originals:
-            producer = originals.dependency(owner, original['producer_step'], seal_sha256=original['producer_seal']['sha256'])
+            producer = originals.dependency(owner, original['producer_step'], seal_ref=original['producer_seal'])
             origin_seal = c.read(originals.resolve_ref(producer, original['producer_seal']))
             contributions.append(dict(origin_step=original['producer_step'],
-                origin_result_sha256=origin_seal['sha256'], material=execution_inputs.resolve_native_original(
+                origin_result_ref=origin_seal['result_ref'], material=execution_inputs.resolve_native_original(
                     root, original, compiler_job=job, source=context), producer_seal=original['producer_seal']))
         for selected in contributions:
             origin = selected['origin_step']
             producer = originals.dependency(owner, origin,
-                seal_sha256=selected.get('producer_seal', {}).get('sha256'))
+                seal_ref=selected.get('producer_seal'))
             origin_seal = c.read(originals.source_record(producer, 'result-identity.json'))
-            if selected['material'] not in origin_seal['materials'] or selected['origin_result_sha256'] != origin_seal['sha256']:
+            if selected['material'] not in origin_seal['materials'] or selected['origin_result_ref'] != origin_seal['result_ref']:
                 raise q.IntegrityError('Declared author contribution differs from its exact producer')
             contributor = authors(root, origin, {*active, key}, memo, source=producer)
             complete = complete and contributor['complete']
@@ -300,7 +299,7 @@ def _subject(root, selected):
         c.validate(c.workspace(root, step))
     path = originals.source_record(source, 'result-identity.json')
     seal = c.read(path)
-    if item['material'] not in seal['materials'] or item['origin_result_sha256'] != seal['sha256']:
+    if item['material'] not in seal['materials'] or item['origin_result_ref'] != seal['result_ref']:
         raise q.IntegrityError('Formal review subject differs from its exact producer')
     ref = (originals.original_ref(source, f'native-evidence/{step:03d}/result-identity.json')
         if source.inherited else q._ref(root, path))
@@ -399,7 +398,7 @@ def request_route(root, job, payload, parents):
 
 def input_binding(root, reference):
     """Exact material and producer metadata, without mounting authored conclusions."""
-    from . import originals
+    from . import originals, history
     context, request = _request_original(root, reference)
     requester = originals.source_job(context)
     subject = request['subject']
@@ -409,7 +408,7 @@ def input_binding(root, reference):
             or subject['material'] not in seal['materials']):
         raise q.IntegrityError('Formal review inputs differ from the exact requested subject')
     selected = dict(label='Exact reviewed artifact', origin_step=subject['producer_step'],
-        origin_result_sha256=seal['sha256'], material=subject['material'])
+        origin_result_ref=seal['result_ref'], material=subject['material'])
     materials=[subject['material']];scientific=[];steps=[]
     compiled=[row for row in seal.get('compiled_implementations',[]) if row['material']==subject['material']]
     if compiled and compiled[0].get('client_binding') is not None:
@@ -420,8 +419,7 @@ def input_binding(root, reference):
             client_binding=compiled[0]['client_binding'],source=source)
         author=compiler['author']
         originals.resolve_ref(originals.source_for_ref(producer,author),author)
-        scientific=[dict(source=str(Path(producer.original_root)/author['path']),path='inputs/review/scientific-implementation.json',
-            sha256=author['sha256'],size_bytes=author['size_bytes'])]
+        scientific=[dict(source=str(Path(producer.original_root)/author['path']),path='inputs/review/scientific-implementation.json',size_bytes=author['size_bytes'])]
         materials.extend(scientific)
         owner=q._read(root,compiler['job'],source=source)
         for item in compiler['inputs']:
@@ -430,7 +428,7 @@ def input_binding(root, reference):
             steps.append(item['original']['producer_step'])
     return dict(materials=materials, selected=[selected],
         **(dict(compiler_scientific_materials=scientific,scientific_source_steps=sorted(set(steps))) if scientific else {}),
-        history=dict(nodes=[dict(step=subject['producer_step'], seal_sha256=subject['producer_seal']['sha256'])],
+        history=dict(nodes=[dict(step=subject['producer_step'], seal_ref=history.source_seal_ref(producer))],
                      files=[], candidate_ids=[], view={}))
 
 
@@ -624,7 +622,7 @@ def _qualification(root, job, payload, seal):
         authors_complete=current_authors['complete'], reviewers_complete=reviewer['complete'])
     return dict(version=1, review_step=job['step'], subject=subject, request=job['formal_review'],
         contract=request['contract'], authors=current_authors, reviewer=reviewer,
-        native_authorship=seal.get('native_authorship'), raw_sha256=seal['raw_sha256'], result_sha256=seal['sha256'],
+        native_authorship=seal.get('native_authorship'), raw_ref=seal['raw_ref'], result_ref=seal['result_ref'],
         verdict=payload['verdict'], independence=independent,
         status='passed' if independent=='independent' and payload['verdict']=='pass' else 'not_qualified')
 
@@ -662,7 +660,7 @@ def subject_for_receipt(root, receipt):
     if 'origin_identity' in receipt:
         context = originals.for_origin(root, receipt['origin_identity'], step=proof['review_step'])
         owner = originals.dependency(context, subject['producer_step'],
-            seal_sha256=subject['producer_seal']['sha256'])
+            seal_ref=subject['producer_seal'])
         subject['producer_seal'].setdefault('origin_identity', owner.origin_identity)
     return subject
 

@@ -27,7 +27,7 @@ def test_saved_workbench_results_and_downloads_do_not_requalify(tmp_path, monkey
     def forbidden(*args, **options):
         raise AssertionError('Browsing invoked scientific admission or hash validation')
     for module, names in (
-        (c, ('settings', 'validate', 'digest')),
+        (c, ('settings', 'validate', 'file_ref')),
         (history, ('source_sequence', '_source', 'candidate_materials')),
         (instance_science, ('_sealed', 'science', 'materials', 'artifact')),
         (qualification, ('validate_inputs', 'status', 'validate_outputs')),
@@ -257,7 +257,7 @@ def test_saved_status_memo_caches_only_terminal_attempts_and_rechecks_changes(tm
     assert first['usage']['observed_tokens'] == 10
     c.build_job(root, 2, 'A', [1])
     record = root / 'native-evidence/002'; record.mkdir(exist_ok=True)
-    c.write(record / 'native-intent.json', dict(task_sha256=c.digest(root / 'jobs/002.json')))
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/002.json')))
     c.write(record / 'usage.json', dict(input_tokens=1, output_tokens=1))
     ui_saved_status.status(root, memo=memo)
     c.write(record / 'usage.json', dict(input_tokens=3, output_tokens=2))

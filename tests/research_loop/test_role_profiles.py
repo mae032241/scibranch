@@ -95,10 +95,10 @@ def test_no_configuration_preserves_legacy_job_and_intent_binding(tmp_path):
 def test_changed_profile_rejected_before_native_submission(tmp_path,monkeypatch,damage):
     root=prepare(tmp_path,role_profiles=OVERRIDES)
     job=c.build_job(root,1,'H',[])
-    intent=dict(task_sha256=c.digest(root/'jobs/001.json'),native_profile=job['native_profile'])
+    intent=dict(task_ref=c.record_ref(root/'jobs/001.json'),native_profile=job['native_profile'])
     if damage=='job':
         job['native_profile']=dict(DEFAULTS,model='different')
-        c.write(root/'jobs/001.json',job);intent['task_sha256']=c.digest(root/'jobs/001.json')
+        c.write(root/'jobs/001.json',job);intent['task_ref']=c.record_ref(root/'jobs/001.json')
     elif damage=='intent':intent['native_profile']=dict(DEFAULTS,service_tier='different')
     else:intent.pop('native_profile')
     c.write(execution.origin(root,1)/'native-intent.json',intent)
