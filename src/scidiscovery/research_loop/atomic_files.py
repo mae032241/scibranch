@@ -145,3 +145,32 @@ def copy_original(source, path, *, sha256, size_bytes=None, mode=0o400, context=
             _verify_copy(path, sha256, limit, context)
         temporary.unlink()
         _sync_directory(path.parent)
+
+
+def publish_stream(path, blocks, *, sha256, size_bytes, context=None):
+    """Verify bounded generated blocks before publishing one frozen inode."""
+    path = Path(path)
+    digest, size = hashlib.sha256(), 0
+    _check(context)
+    with _temporary(path) as (temporary, output):
+        for block in blocks:
+            _check(context)
+            if type(block) is not bytes:
+                raise ValueError('Atomic stream requires bytes blocks')
+            size += len(block)
+            if size > size_bytes:
+                raise ValueError('Atomic stream exceeds its declared identity')
+            digest.update(block)
+            output.write(block)
+        if (digest.hexdigest(), size) != (sha256, size_bytes):
+            raise ValueError('Atomic stream identity changed during publication')
+        _check(context)
+        _finish(output, 0o400)
+        _check(context)
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError:
+            _verify_copy(path, sha256, size_bytes, context)
+        temporary.unlink()
+        _sync_directory(path.parent)
+        _check(context)

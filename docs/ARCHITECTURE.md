@@ -220,6 +220,22 @@ quota refusal so exhaustion cannot erase recovery facts; their bytes remain in
 subsequent usage scans. Pre-dispatch acceptance, payloads, logs and materialization
 retain their quota checks.
 
+Verified hardlink aliases of an immutable inode already owned by the same instance
+add no regular-file bytes and do not rescan instance usage, even if existing usage
+already exceeds the configured limit. This does not permit new content: independent
+freezes, new projections and log writes still require admission. Usage scans tolerate
+entries or descendant directories disappearing during the scan; a missing root or
+other access errors remain failures. With an instance byte limit enabled, growing
+process logs still incur usage scans; no usage cache survives an unlocked interval.
+
+Local scientific log projections stream complete content through the original ordered
+path replacements, including matches across block boundaries. One finite operation
+deadline covers both logs, input verification, transformation and publication. A first
+streaming pass determines the output identity without writing; only a missing CAS
+object requires a second pass into one atomic output inode. Existing content is reused
+without another full write. Memory depends on bounded blocks and replacement metadata,
+not the full log length; raw originals remain unchanged and are never truncated.
+
 Control retains exact binding indexes, full receipts and per-file omission inventories;
 default scientific views expose human references, observations and limitations. New
 views are labelled projections, while source, user originals and scientific prose

@@ -1,5 +1,6 @@
 """New scientific projections preserve original validation and scientific bytes."""
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -155,6 +156,87 @@ def test_author_science_facts_verify_real_calls_without_publishing_receipt_catal
     completed=record_directory(root,2)/'calls'/call/'completed.json'
     completed.chmod(0o600);completed.write_text('{}')
     with pytest.raises(ValueError):author_closeout.science_facts(root,2)
+
+
+@pytest.mark.process_e2e
+def test_real_collect_streams_exact_logs_reuses_cas_and_recovers_same_call(tmp_path,execution_registry,monkeypatch,capsys):
+    from scidiscovery.research_loop import atomic_files, local_experiments, scientific_log_projection as logs
+    root,config,call=local_candidate(tmp_path)
+    directory=Path(config['record_dir'])/'calls'/call
+    observation=c.read(directory/'execution-observation.json')
+    accepted=c.read(directory/'accepted.json')
+    evidence=[directory/name for name in ('accepted.json','completed.json','execution-observation.json',
+                                         'stdout.raw','stderr.raw','terminal.json')]
+    before={path:path.read_bytes() for path in evidence}
+    replacements={str(directory):f'[retained execution {call}]',
+        config['record_dir']:'[retained executions]',accepted['script']['path']:accepted['prepared']['local_path'],
+        str(directory/'inputs'):accepted['experiment_directory']}
+    for item in accepted['snapshot_files']:
+        replacements[str(directory/'inputs'/item['name'])]=item['path']
+    replacements[str(directory/'outputs')]=str(Path(accepted['experiment_directory'])/'artifacts')
+    expected={}
+    for stream in ('stdout','stderr'):
+        raw=before[directory/(stream+'.raw')]
+        for source,destination in sorted(replacements.items(),key=lambda row:len(row[0]),reverse=True):
+            raw=raw.replace(os.fsencode(source),os.fsencode(destination))
+        expected[stream]=raw
+    raw_views={Path(item['path']) for item in observation['outputs']
+        if item['source']['path'] in {str(directory/'stdout.raw'),str(directory/'stderr.raw')}}
+    read_bytes=Path.read_bytes
+    def bounded_only(path):
+        if path in raw_views:pytest.fail('Real collect read an entire retained raw log')
+        return read_bytes(path)
+    monkeypatch.setattr(Path,'read_bytes',bounded_only)
+    monkeypatch.setattr(local_experiments.subprocess,'Popen',lambda *a,**k:pytest.fail('Collect repeated execution'))
+    project=logs.project;publish=atomic_files.publish_stream
+    contexts=[];writes=[];failure=dict(enabled=False)
+    def projected(path,**options):
+        contexts.append(options['context'])
+        options['block_size']=7
+        def blocks():
+            for index,block in enumerate(project(path,**options)):
+                if failure['enabled'] and index==1:raise TimeoutError('original collect interrupted')
+                yield block
+        return blocks()
+    def published(path,blocks,**options):
+        def counted():
+            for block in blocks:
+                assert len(block)<=7
+                writes.append(len(block))
+                yield block
+        return publish(path,counted(),**options)
+    monkeypatch.setattr(logs,'project',projected)
+    monkeypatch.setattr(atomic_files,'publish_stream',published)
+    config_path=c.workspace(root,2)/'work/experiment-config.json'
+    args=['--config',str(config_path),'collect','--call-id',call]
+    capsys.readouterr()
+    def collect():
+        contexts.clear()
+        code=experiments.main(args)
+        reply=json.loads(capsys.readouterr().out)
+        assert contexts and all(context is contexts[0] for context in contexts)
+        return code,reply
+    code,first=collect()
+    assert code==0 and first['status']=='collected' and first['call_id']==call
+    assert sum(writes)==sum(map(len,expected.values()))
+    for stream in ('stdout','stderr'):
+        target=next(Path(item['path']) for item in first['outputs']
+            if item['name']=='execution-logs/'+stream+'.txt')
+        assert read_bytes(target)==expected[stream]
+        assert config['record_dir'].encode() not in expected[stream]
+        assert b'host-history/objects' not in expected[stream]
+    assert b'b'*64 in expected['stdout']
+    first_writes=list(writes)
+    code,second=collect()
+    assert code==0 and second['outputs']==first['outputs'] and writes==first_writes
+    failure['enabled']=True
+    code,failed=collect()
+    assert code==3 and failed['status']=='integrity_error'
+    failure['enabled']=False
+    code,recovered=collect()
+    assert code==0 and recovered['outputs']==first['outputs'] and writes==first_writes
+    assert experiments.Records(config).calls()==[directory]
+    assert before=={path:read_bytes(path) for path in evidence}
 
 
 @pytest.mark.process_e2e

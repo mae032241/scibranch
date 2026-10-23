@@ -462,7 +462,7 @@ def _scientific_projection_directory(config):
     return projection_directory
 
 
-def _validated_scientific_outputs(selected):
+def _validated_scientific_outputs(selected, *, operation_context=None):
     names=set()
     for descriptor in selected:
         if not isinstance(descriptor,LocalFileDescriptor):raise IntegrityError('Scientific output descriptor is malformed')
@@ -471,17 +471,20 @@ def _validated_scientific_outputs(selected):
                 or '\\' in descriptor.name or descriptor.name in names):
             raise IntegrityError('Scientific output requires distinct canonical names')
         names.add(descriptor.name)
-        item=proof(descriptor.local_path)
+        item=proof(descriptor.local_path,context=operation_context)
         if item['sha256']!=descriptor.sha256 or item['size_bytes']!=descriptor.size_bytes:
             raise IntegrityError('Scientific output original changed')
     return selected
 
 
-def scientific_outputs(config, observation, *, adapter=None, include_logs=False):
+def scientific_outputs(config, observation, *, adapter=None, include_logs=False, operation_context=None):
     """Producer-owned science files from an already verified full observation."""
+    from . import storage_policy as storage
+    context=operation_context or storage.Deadline(config.get('max_seconds',65))
+    storage.check(context)
     if 'scientific_outputs' in observation and (not include_logs or config['execution_interface'].get('result_protocol')!=LOCAL_RESULT_PROTOCOL):
         return _validated_scientific_outputs(tuple(LocalFileDescriptor.model_validate(item['descriptor']).model_copy(update={'local_path':item['path']})
-            for item in observation['scientific_outputs']))
+            for item in observation['scientific_outputs']),operation_context=context)
     descriptors=tuple(LocalFileDescriptor.model_validate(item['descriptor']).model_copy(update={'local_path':item['path']})
         for item in observation['outputs'])
     if adapter is None:
@@ -497,10 +500,13 @@ def scientific_outputs(config, observation, *, adapter=None, include_logs=False)
         selected=tuple(method(descriptors,projection_directory=_scientific_projection_directory(config)))
     elif config['execution_interface'].get('result_protocol')==LOCAL_RESULT_PROTOCOL:
         def original(reference):
-            actual=proof(reference['path'])
+            actual=proof(reference['path'],context=context)
             if any(actual[key]!=reference[key] for key in ('sha256','size_bytes')):
                 raise IntegrityError('Scientific output completion original changed')
-            return json.loads(read(Path(reference['path'])))
+            storage.check(context)
+            value=json.loads(read(Path(reference['path'])))
+            storage.check(context)
+            return value
         completed=original(observation['completed'])
         if any(completed.get(key)!=observation.get(key) for key in ('call_id','scope','mechanism_binding','status')):
             raise IntegrityError('Scientific outputs differ from their exact completed call')
@@ -513,6 +519,11 @@ def scientific_outputs(config, observation, *, adapter=None, include_logs=False)
         selected=[collected({key:output[key] for key in ('path','sha256','size_bytes')}).model_copy(
             update={'name':output['name']}) for output in completed.get('outputs',[])]
         if include_logs:
+            from . import shared_originals, scientific_log_projection, experiment_client
+            limits=config.get('storage_policy')
+            inventory=storage.Inventory(limits,context=context)
+            for item in selected:
+                inventory.entry();inventory.file(item.size_bytes)
             accepted=original(observation['accepted'])
             if any(accepted.get(key)!=observation.get(key) for key in ('call_id','scope','mechanism_binding')):
                 raise IntegrityError('Scientific logs differ from their exact accepted call')
@@ -525,6 +536,8 @@ def scientific_outputs(config, observation, *, adapter=None, include_logs=False)
                 for item in accepted['snapshot_files']:
                     replacements[str(directory/'inputs'/item['name'])]=item['path']
                 replacements[str(directory/'outputs')]=str(Path(accepted['experiment_directory'])/'artifacts')
+            replacements=scientific_log_projection.encode_replacements(replacements)
+            storage.check(context)
             target_directory=_scientific_projection_directory(config)/'local-logs'/observation['call_id']
             if target_directory.resolve()!=target_directory:
                 raise IntegrityError('Scientific log projection changed its host namespace')
@@ -532,42 +545,38 @@ def scientific_outputs(config, observation, *, adapter=None, include_logs=False)
             log_name='execution-logs';suffix=1
             while any(item.name in {log_name+'/stdout.txt',log_name+'/stderr.txt'} for item in selected):
                 suffix+=1;log_name=f'execution-logs-{suffix}'
+            root=experiment_client.root_for_configuration(config,allow_standalone=True) or Path(config['record_dir'])
             for stream in ('stdout','stderr'):
                 matches=[item for item in completed['proofs'] if item['path']==str(directory/(stream+'.raw'))]
                 if len(matches)!=1:raise IntegrityError('Scientific log has no exact retained transport original')
-                descriptor=collected(matches[0]);raw=Path(descriptor.local_path).read_bytes()
-                if hashlib.sha256(raw).hexdigest()!=descriptor.sha256 or len(raw)!=descriptor.size_bytes:
-                    raise IntegrityError('Scientific log original changed')
-                rendered=raw
-                for source,destination in sorted(replacements.items(),key=lambda row:len(row[0]),reverse=True):
-                    rendered=rendered.replace(os.fsencode(source),os.fsencode(destination))
+                descriptor=collected(matches[0])
+                def blocks():
+                    return scientific_log_projection.project(descriptor.local_path,sha256=descriptor.sha256,
+                        size_bytes=descriptor.size_bytes,replacements=replacements,context=context)
+                inventory.entry()
+                identity=scientific_log_projection.measure(blocks(),context=context,inventory=inventory)
                 target=target_directory/(stream+'.txt')
                 if target.is_symlink():raise IntegrityError('Scientific log projection must be an original file')
-                from . import shared_originals,storage_policy as storage,experiment_client
-                limits=config.get('storage_policy')
-                context=storage.Deadline(config['max_seconds'])
-                root=experiment_client.root_for_configuration(config,allow_standalone=True) or Path(config['record_dir'])
-                original=shared_originals.publish_bytes(root,rendered,policy=limits,context=context)
-                shared_originals.link(original,target,sha256=hashlib.sha256(rendered).hexdigest(),
-                    size_bytes=len(rendered),root=root,policy=limits,context=context)
-                item=proof(target)
+                original=shared_originals.publish_stream(root,blocks,**identity,policy=limits,context=context)
+                shared_originals.link(original,target,**identity,root=root,policy=limits,context=context)
+                item=proof(target,context=context)
                 selected.append(LocalFileDescriptor(name=log_name+'/'+stream+'.txt',local_path=str(target),
                     sha256=item['sha256'],size_bytes=item['size_bytes'],media_type='text/plain'))
         selected=tuple(selected)
     else:selected=descriptors
-    return _validated_scientific_outputs(selected)
+    return _validated_scientific_outputs(selected,operation_context=context)
 
 
-def _collected_view(config, call_id, observation, adapter):
+def _collected_view(config, call_id, observation, adapter, *, operation_context=None):
     """Give retained scientific outputs stable names without object-store addresses."""
     from . import contracts as c,experiment_client
     root=experiment_client.root_for_configuration(config)
     work=c.workspace(root,config['scope']['step'])
     result = []
     from . import storage_policy as storage
-    context=storage.Deadline(config['max_seconds'])
+    context=operation_context or storage.Deadline(config['max_seconds'])
     inventory=storage.Inventory(config.get('storage_policy'),context=context)
-    for descriptor in scientific_outputs(config,observation,adapter=adapter,include_logs=True):
+    for descriptor in scientific_outputs(config,observation,adapter=adapter,include_logs=True,operation_context=context):
         inventory.entry();inventory.file(descriptor.size_bytes)
         target = work / 'work/retained-experiments' / call_id / 'outputs' / descriptor.name
         c._bind_original(Path(descriptor.local_path), target, descriptor.sha256, context=context, policy=config.get('storage_policy'), root=root, size_bytes=descriptor.size_bytes, source_kind='mutable')
@@ -1297,7 +1306,7 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
     source=_source_projection(config,accepted)
     value['scientific_source']=retain(source) if source is not None else None
     value['public_result']=_run_view(adapter.public_result(result))
-    selected=scientific_outputs(config,value,adapter=adapter)
+    selected=scientific_outputs(config,value,adapter=adapter,operation_context=operation_context)
     value['scientific_outputs']=[dict(retain(dict(path=item.local_path,sha256=item.sha256,size_bytes=item.size_bytes)),
         name=item.name,descriptor=item.model_dump(mode='json')) for item in selected]
     verify_observation(value,lambda item:Path(item['path']),context=operation_context)
@@ -1633,6 +1642,10 @@ def main(argv=None):
             if not getattr(lifecycle_capabilities(adapter),capability):
                 raise UnsupportedExecution('Requested original execution operation unavailable')
             config,adapter=original_adapter(config,args.call_id,capability)
+            if args.command=='collect':
+                from . import storage_policy as storage
+                operation_context=storage.Deadline(config['max_seconds'])
+                storage.check(operation_context)
             if args.command=='query':result=adapter.status_details(args.call_id)
             elif args.command=='reconcile':
                 observed=record_observation(config,adapter,args.call_id)
@@ -1653,13 +1666,14 @@ def main(argv=None):
                     result=adapter.status_details(args.call_id)
             elif args.command=='collect':
                 descriptors=adapter.collect_original(args.call_id)
+                storage.check(operation_context)
                 result=dict(status='collected',outputs=[item.model_dump(mode='json') for item in descriptors])
             else:result=dict(status=adapter.cancel_original(args.call_id))
             if args.command=='collect':
-                observed=record_observation(config,adapter,args.call_id,collected=descriptors)
+                observed=record_observation(config,adapter,args.call_id,collected=descriptors,operation_context=operation_context)
                 if observed is None:raise IntegrityError('Collected execution has no verified terminal observation')
                 if instance_owner.configuration_root(config) is not None:
-                    result=_collected_view(config,args.call_id,observed,adapter)
+                    result=_collected_view(config,args.call_id,observed,adapter,operation_context=operation_context)
             elif args.command in {'query','lookup'} and execution_status(result.get('state')) in {'known_success','known_failed'}:
                 if (Records(config).directory(args.call_id)/'execution-observation.json').exists():
                     record_observation(config,adapter,args.call_id)

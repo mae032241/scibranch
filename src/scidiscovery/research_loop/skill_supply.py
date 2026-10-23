@@ -20,6 +20,8 @@ DEFAULT_ROOT = '/opt/scidiscovery-thin/skills'
 DIRECTORY = 'host-control/skills'
 MANIFEST = DIRECTORY + '/manifest.json'
 _NAME = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z')
+_SHARED_STORE_HINT = ('Set SCID_SHARED_STORE to an absolute private directory owned by this user '
+    'on the instance filesystem; the filesystem must support hardlinks. No copy fallback.')
 
 
 def _hash(value):
@@ -203,11 +205,15 @@ def _shared_store():
     cache = Path(os.environ.get('XDG_CACHE_HOME', str(Path.home() / '.cache')))
     path = Path(configured) if configured is not None else cache / 'scidiscovery' / 'shared-store'
     if not path.is_absolute():
-        raise ValueError('SCID_SHARED_STORE requires an exact absolute directory')
-    files.check_path(path)
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if not path.is_dir() or path.stat().st_uid != os.getuid() or stat.S_IMODE(path.stat().st_mode) & 0o077:
-        raise ValueError('Skill shared store must be a private directory owned by this user')
+        raise ValueError('SCID_SHARED_STORE requires an exact absolute directory. ' + _SHARED_STORE_HINT)
+    try:
+        files.check_path(path)
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        info = path.stat()
+    except PermissionError:
+        raise PermissionError('Skill shared store is inaccessible. ' + _SHARED_STORE_HINT) from None
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+        raise ValueError('Skill shared store must be a private directory owned by this user. ' + _SHARED_STORE_HINT)
     return path
 
 
@@ -244,7 +250,7 @@ def freeze(root, settings, manifest, *, context=None):
             unique[row['sha256']] = row['size_bytes']
     store = _shared_store()
     if store.stat().st_dev != root.stat().st_dev:
-        raise files.SharingUnsupported('Skill sharing requires supported same-filesystem hardlinks')
+        raise files.SharingUnsupported('Skill sharing requires supported same-filesystem hardlinks. ' + _SHARED_STORE_HINT)
     # One common cache lock covers all trees: competing trees never independently
     # copy the same missing payload before publishing a winning object.
     with storage.writer_lock(root, context=context), storage.writer_lock(store, context=context):
@@ -272,7 +278,10 @@ def freeze(root, settings, manifest, *, context=None):
                     if not blob.exists() and not blob.is_symlink():
                         atomic_files.copy_original(source, blob, sha256=row['sha256'],
                             size_bytes=row['size_bytes'], context=context)
-                    files.link_verified(blob, base / row['path'], dict(kind='file', mode=0o400, **row), context=context)
+                    try:
+                        files.link_verified(blob, base / row['path'], dict(kind='file', mode=0o400, **row), context=context)
+                    except files.SharingUnsupported as error:
+                        raise files.SharingUnsupported('Skill sharing requires supported same-filesystem hardlinks. ' + _SHARED_STORE_HINT) from error
                 tree_path = store / 'skills/trees' / (tree['tree_sha256'] + '.json')
                 payload = (json.dumps(tree, ensure_ascii=False, indent=2, allow_nan=False) + '\n').encode()
                 files.check_path(tree_path)

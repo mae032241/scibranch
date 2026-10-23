@@ -340,6 +340,128 @@ def test_cas_first_new_bytes_and_managed_aliases_never_rewrite_payload(tmp_path,
     assert second.read_bytes()==raw
 
 
+@pytest.mark.parametrize('quota_enabled',[False,True])
+def test_streamed_cas_competitors_write_once_and_hits_do_not_replay(tmp_path,monkeypatch,quota_enabled):
+    root=tmp_path/'instance';root.mkdir()
+    raw=b'projected complete log\n'*16
+    identity=dict(sha256=hashlib.sha256(raw).hexdigest(),size_bytes=len(raw))
+    limits=dict(enabled=quota_enabled,max_instance_bytes=len(raw))
+    publish=atomic_files.publish_stream;written=[]
+    def counted(target,blocks,**options):
+        def counted_blocks():
+            for block in blocks:
+                written.append(len(block))
+                yield block
+        return publish(target,counted_blocks(),**options)
+    monkeypatch.setattr(atomic_files,'publish_stream',counted)
+    if not quota_enabled:
+        monkeypatch.setattr(storage,'usage',lambda *a,**k:pytest.fail('Disabled quota scanned usage'))
+    start=threading.Barrier(2)
+    def retain():
+        start.wait(timeout=5)
+        return shared.publish_stream(root,lambda:iter((raw[:7],raw[7:])),policy=limits,**identity)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures=[executor.submit(retain) for _ in range(2)]
+        originals=[future.result(timeout=10) for future in futures]
+    assert originals[0]==originals[1] and sum(written)==len(raw)
+    def forbidden():pytest.fail('An existing CAS projection was physically generated again')
+    assert shared.publish_stream(root,forbidden,policy=limits,**identity)==originals[0]
+    alias=root/'views/log.txt'
+    shared.link(originals[0],alias,root=root,policy=limits,**identity)
+    assert _inode(alias)==_inode(originals[0]) and alias.read_bytes()==raw
+    originals[0].chmod(0o600);originals[0].write_bytes(b'corrupt')
+    with pytest.raises(ValueError):shared.publish_stream(root,forbidden,policy=limits,**identity)
+
+
+def test_streamed_cas_capacity_rejects_before_creating_a_partial(tmp_path):
+    root=tmp_path/'instance';root.mkdir()
+    raw=b'new bytes'
+    def forbidden():pytest.fail('Quota rejection began writing the projection')
+    with pytest.raises(storage.StorageQuotaExceeded,match='max_instance_bytes'):
+        shared.publish_stream(root,forbidden,sha256=hashlib.sha256(raw).hexdigest(),size_bytes=len(raw),
+                              policy=dict(enabled=True,max_instance_bytes=1))
+    assert not (root/'host-history/objects').exists()
+
+
+def test_streamed_cas_uses_original_deadline_during_publication(tmp_path):
+    root=tmp_path/'instance';root.mkdir()
+    class Deadline:
+        expired=False
+        def remaining_seconds(self):
+            if self.expired:raise TimeoutError('same original deadline')
+            return 1
+    context=Deadline()
+    def blocks():
+        yield b'a'
+        context.expired=True
+        yield b'b'
+    with pytest.raises(TimeoutError,match='same original deadline'):
+        shared.publish_stream(root,blocks,sha256=hashlib.sha256(b'ab').hexdigest(),size_bytes=2,context=context)
+    assert not list((root/'host-history/objects').iterdir())
+
+
+def test_usage_tolerates_only_entries_and_descendant_directories_that_disappear(tmp_path,monkeypatch):
+    root=tmp_path/'instance';root.mkdir()
+    (root/'kept').write_bytes(b'keep');os.link(root/'kept',root/'alias')
+    (root/'temporary.partial').write_bytes(b'12')
+    (root/'vanished').write_bytes(b'not counted')
+    child=root/'child';child.mkdir()
+    scandir=storage.os.scandir
+    class Entry:
+        def __init__(self,entry):self.entry=entry;self.path=entry.path
+        def stat(self,**options):
+            if self.entry.name=='vanished':Path(self.path).unlink()
+            return self.entry.stat(**options)
+    class Entries:
+        def __init__(self,entries):self.entries=entries
+        def __enter__(self):self.entries.__enter__();return self
+        def __exit__(self,*args):return self.entries.__exit__(*args)
+        def __iter__(self):return (Entry(entry) for entry in self.entries)
+    def disappearing(directory):
+        if Path(directory)==child:child.rmdir()
+        return Entries(scandir(directory))
+    monkeypatch.setattr(storage.os,'scandir',disappearing)
+    assert storage.usage(root)==6
+
+
+@pytest.mark.parametrize('failure',[PermissionError('denied'),NotADirectoryError('changed'),OSError(errno.EIO,'IO error')])
+def test_usage_does_not_hide_non_enoent_scan_failures(tmp_path,monkeypatch,failure):
+    root=tmp_path/'instance';root.mkdir()
+    def broken(directory):raise failure
+    monkeypatch.setattr(storage.os,'scandir',broken)
+    with pytest.raises(type(failure)):storage.usage(root)
+
+
+def test_usage_missing_root_is_not_zero(tmp_path):
+    with pytest.raises(FileNotFoundError):storage.usage(tmp_path/'missing')
+
+
+def test_exact_same_root_aliases_allow_zero_growth_over_quota_without_admitting_new_bytes(tmp_path,monkeypatch):
+    root=tmp_path/'instance';root.mkdir()
+    raw=b'previously retained bytes'
+    identity=dict(sha256=hashlib.sha256(raw).hexdigest(),size_bytes=len(raw))
+    original=shared.publish_bytes(root,raw)
+    limits=dict(enabled=True,max_instance_bytes=1)
+    first=root/'views/first';second=root/'views/second'
+    with monkeypatch.context() as check:
+        check.setattr(storage,'usage',lambda *a,**k:pytest.fail('A strict alias scanned usage'))
+        shared.link(original,first,root=root,policy=limits,**identity)
+        shared.link(original,first,root=root,policy=limits,**identity)
+        shared.link(original,second,root=root,policy=limits,**identity)
+        assert _inode(first)==_inode(second)==_inode(original)
+        collision=root/'independent';collision.write_bytes(raw);collision.chmod(0o400)
+        with pytest.raises(ValueError,match='shared inode'):
+            shared.link(original,collision,root=root,policy=limits,**identity)
+        outside=tmp_path/'outside';outside.write_bytes(raw);outside.chmod(0o400)
+        with pytest.raises(ValueError,match='escaped'):
+            shared.link(outside,root/'views/external',root=root,policy=limits,**identity)
+    with pytest.raises(storage.StorageQuotaExceeded,match='max_instance_bytes'):
+        shared.publish_bytes(root,b'x',policy=limits)
+    # Zero growth is proven only by strict link, not inferred by mutation(0).
+    with pytest.raises(storage.StorageQuotaExceeded,match='max_instance_bytes'):
+        with storage.mutation(root,0,policy=limits):pytest.fail('Generic zero-growth mutation bypassed admission')
+
+
 def test_accepted_script_and_snapshot_entry_share_one_first_freeze(tmp_path,monkeypatch,remote_registry):
     from scidiscovery.research_loop.protocol import CURRENT
     scope=dict(handoff_protocol=CURRENT,step=2,role='W',job_sha256='a'*64,

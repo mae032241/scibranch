@@ -227,6 +227,28 @@ def test_copy_fault_never_publishes_partial_original(tmp_path, monkeypatch, faul
     assert target.read_bytes() == payload
 
 
+@pytest.mark.parametrize('fault',['source_proof','different_bytes','disk_full'])
+def test_stream_publication_fault_never_exposes_a_partial_original(tmp_path,monkeypatch,fault):
+    target=tmp_path/'streamed-original';raw=b'complete log'
+    def blocks():
+        yield raw[:3]
+        if fault=='source_proof':raise ValueError('Raw original changed at EOF')
+        yield b'wrong' if fault=='different_bytes' else raw[3:]
+    temporary=files._temporary
+    class FullOutput:
+        def __init__(self,stream):self.stream=stream
+        def write(self,block):
+            self.stream.write(block[:1])
+            raise OSError(errno.ENOSPC,'Injected full disk')
+    @contextmanager
+    def full(path):
+        with temporary(path) as (partial,stream):yield partial,FullOutput(stream)
+    if fault=='disk_full':monkeypatch.setattr(files,'_temporary',full)
+    with pytest.raises((ValueError,OSError)):
+        files.publish_stream(target,blocks(),sha256=hashlib.sha256(raw).hexdigest(),size_bytes=len(raw))
+    assert not target.exists() and not list(tmp_path.glob('.*.partial'))
+
+
 def test_existing_damaged_or_linked_original_is_never_overwritten(tmp_path):
     source, target = tmp_path / 'source', tmp_path / 'target'
     source.write_bytes(b'exact')

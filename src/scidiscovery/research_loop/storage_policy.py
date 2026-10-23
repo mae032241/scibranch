@@ -130,10 +130,20 @@ def usage(root, *, context=None):
     pending = [Path(root)]
     while pending:
         check(context)
-        with os.scandir(pending.pop()) as entries:
+        directory = pending.pop()
+        try:
+            entries = os.scandir(directory)
+        except FileNotFoundError:
+            if directory == Path(root):
+                raise
+            continue
+        with entries:
             for entry in entries:
                 check(context)
-                info = entry.stat(follow_symlinks=False)
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
                 if stat.S_ISDIR(info.st_mode):
                     pending.append(Path(entry.path))
                 elif stat.S_ISREG(info.st_mode):

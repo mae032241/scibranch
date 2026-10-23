@@ -519,7 +519,8 @@ def test_skill_cache_damage_is_rejected_without_repair(tmp_path):
     assert blob.read_bytes() == b'damaged private cache'
 
 
-def test_skill_shared_link_failure_is_explicit_and_never_copies_again(tmp_path, monkeypatch):
+@pytest.mark.parametrize('error_code', ['EXDEV', 'EOPNOTSUPP'])
+def test_skill_shared_link_failure_is_explicit_and_never_copies_again(tmp_path, monkeypatch, error_code):
     import errno
     from scidiscovery import archive_io
     from scidiscovery.research_loop import atomic_files
@@ -528,12 +529,80 @@ def test_skill_shared_link_failure_is_explicit_and_never_copies_again(tmp_path, 
     def no_copy(*args, **kwargs):
         raise AssertionError('A cache hit must never copy a resource')
     def unsupported(*args, **kwargs):
-        raise OSError(errno.EXDEV, 'fixture requires another filesystem')
+        raise OSError(getattr(errno, error_code), 'fixture does not support this hardlink')
     monkeypatch.setattr(atomic_files, 'copy_original', no_copy)
     monkeypatch.setattr(archive_io.os, 'link', unsupported)
-    with pytest.raises(archive_io.SharingUnsupported):
+    with pytest.raises(archive_io.SharingUnsupported,
+            match=r'SCID_SHARED_STORE.*absolute private directory.*instance filesystem.*support hardlinks.*No copy fallback') as caught:
         _freeze_selected(tmp_path / 'second', source, 'alpha')
+    assert str(tmp_path) not in str(caught.value)
     assert not (tmp_path / 'second' / skill_supply.MANIFEST).exists()
+
+
+def test_skill_cross_filesystem_store_error_is_actionable_before_copy(tmp_path, monkeypatch):
+    from scidiscovery import archive_io
+    from scidiscovery.research_loop import atomic_files
+    source = library(tmp_path)
+    store = skill_supply._shared_store()
+    original_stat = Path.stat
+    def another_device(path, **kwargs):
+        info = original_stat(path, **kwargs)
+        if path == store:
+            values = list(info); values[2] += 1
+            return os.stat_result(values)
+        return info
+    def no_copy(*args, **kwargs):
+        raise AssertionError('A cross-filesystem store must fail before copying')
+    monkeypatch.setattr(Path, 'stat', another_device)
+    monkeypatch.setattr(atomic_files, 'copy_original', no_copy)
+    with pytest.raises(archive_io.SharingUnsupported,
+            match=r'SCID_SHARED_STORE.*absolute private directory.*instance filesystem.*support hardlinks.*No copy fallback') as caught:
+        _freeze_selected(tmp_path / 'instance', source, 'alpha')
+    assert str(tmp_path) not in str(caught.value)
+    assert not (store / 'skills').exists()
+    assert not (tmp_path / 'instance' / skill_supply.MANIFEST).exists()
+
+
+@pytest.mark.parametrize('configuration', ['relative', 'public_mode'])
+def test_skill_shared_store_configuration_error_is_actionable_without_repair(tmp_path, monkeypatch, configuration):
+    store = tmp_path / 'private-store'
+    if configuration == 'relative':
+        configured = 'relative-store'
+    else:
+        store.mkdir(mode=0o755)
+        store.chmod(0o755)
+        configured = str(store)
+    monkeypatch.setenv('SCID_SHARED_STORE', configured)
+    with pytest.raises(ValueError,
+            match=r'SCID_SHARED_STORE.*absolute private directory.*instance filesystem.*support hardlinks.*No copy fallback') as caught:
+        skill_supply._shared_store()
+    assert str(tmp_path) not in str(caught.value)
+    assert os.environ['SCID_SHARED_STORE'] == configured
+    if configuration == 'public_mode':
+        assert stat.S_IMODE(store.stat().st_mode) == 0o755
+        assert list(store.iterdir()) == []
+
+
+@pytest.mark.parametrize('operation', ['check_path', 'mkdir', 'stat'])
+def test_skill_shared_store_permission_error_preserves_type_and_hides_path(tmp_path, monkeypatch, operation):
+    from scidiscovery import archive_io
+    store = tmp_path / 'inaccessible-store'
+    monkeypatch.setenv('SCID_SHARED_STORE', str(store))
+    def denied(*args, **kwargs):
+        raise PermissionError(13, 'permission denied', str(store))
+    if operation == 'check_path':
+        monkeypatch.setattr(archive_io, 'check_path', denied)
+    else:
+        original = getattr(Path, operation)
+        def selected(path, *args, **kwargs):
+            if path == store:
+                return denied()
+            return original(path, *args, **kwargs)
+        monkeypatch.setattr(Path, operation, selected)
+    with pytest.raises(PermissionError, match='SCID_SHARED_STORE') as caught:
+        skill_supply._shared_store()
+    assert str(store) not in str(caught.value)
+    assert os.environ['SCID_SHARED_STORE'] == str(store)
 
 
 def test_skill_frozen_scan_limits_reject_before_hashing(tmp_path, monkeypatch):

@@ -378,8 +378,10 @@ A role's explicit fields override its named Worker's model fields and `skill_set
 The source is inspected only for the union of explicitly declared set items.
 Prepare independently freezes selected contents once in a host-private shared
 store, then creates instance-owned hardlinks. `SCID_SHARED_STORE` may select an
-exact store instead of the default user cache; it must support hardlinks to the
-instance filesystem. Unsupported sharing fails without copying each bundle again.
+absolute private directory owned by the current user instead of the default user
+cache. For a store permission or sharing error, set it to such a directory on the
+instance filesystem, which must support hardlinks even when its device matches.
+Unsupported sharing fails without a copy fallback or an automatic store change.
 Removing the store does not remove an instance's existing references. Roles/nodes
 share those bytes through `.agents/skills` projections.
 Changing the installation source or environment does not refresh an instance.
@@ -389,8 +391,9 @@ Missing, changed, linked or incomplete source assets fail before model launch.
 
 角色显式字段覆盖命名 Worker 的模型字段和 `skill_set`。初建只读取全部显式集合的有限并集，
 Skill 内容在宿主私有共享库首次独立冻结，实例取得自有硬链接，角色和节点通过 `.agents/skills` 共享投影。
-`SCID_SHARED_STORE` 可替代默认用户缓存，指定与实例支持同文件系统硬链接的精确库路径；
-共享不支持时明确拒绝，不重新复制整套资产。删除库目录不影响实例已持有的引用。
+`SCID_SHARED_STORE` 可替代默认用户缓存，指定当前用户拥有的绝对私有目录。
+库权限或共享错误时，将它设置为实例文件系统上的此类目录；即使设备相同，文件系统仍须支持硬链接。
+共享不支持时明确拒绝，不退回复制或自动更换库路径。删除库目录不影响实例已持有的引用。
 安装来源或环境变更不刷新已建实例。配置修订只能改选已冻结集合与 Worker 绑定，新 ID 或版本
 要求新实例，既有任务保持原绑定。缺失、变更、链接或不完整资产在模型启动前拒绝。
 

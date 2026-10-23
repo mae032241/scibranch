@@ -148,6 +148,25 @@ def publish_bytes(root, payload, *, context=None, policy=None):
     return target
 
 
+def publish_stream(root, blocks_factory, *, sha256, size_bytes, context=None, policy=None):
+    """Replay a measured projection only when its CAS object is absent."""
+    root = _path(root)
+    _identity(sha256, size_bytes)
+    context = context or storage.Deadline(65)
+    target = _path(root / 'host-history/objects' / sha256)
+    limits = storage.for_root(root) if policy is None else storage.configuration(policy)
+    storage.Inventory(limits, context=context).file(size_bytes)
+    with storage.writer_lock(root, context=context):
+        if target.exists():
+            _frozen(target, sha256, size_bytes, context)
+        else:
+            with storage.mutation(root, size_bytes, policy=limits, context=context, target=target):
+                atomic_files.publish_stream(target, blocks_factory(), sha256=sha256,
+                                            size_bytes=size_bytes, context=context)
+                _frozen(target, sha256, size_bytes, context)
+    return target
+
+
 def link(original, destination, *, sha256, size_bytes, root, context=None, policy=None):
     root, original, destination = _path(root), _path(original), _path(destination)
     _identity(sha256, size_bytes)
@@ -156,7 +175,9 @@ def link(original, destination, *, sha256, size_bytes, root, context=None, polic
     context = context or storage.Deadline(65)
     limits = storage.for_root(root) if policy is None else storage.configuration(policy)
     storage.Inventory(limits,context=context).file(size_bytes)
-    with storage.writer_lock(root,context=context), storage.mutation(root,0,policy=limits,context=context):
+    # A verified inode already inside root adds no regular-file bytes, even
+    # when existing independent content has put the instance over its limit.
+    with storage.writer_lock(root,context=context):
         before = _frozen(original,sha256,size_bytes,context)
         def existing():
             generation = _frozen(destination,sha256,size_bytes,context)
