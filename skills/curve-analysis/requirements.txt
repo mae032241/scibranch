@@ -1,0 +1,3 @@
+pydantic>=2.8,<3
+# Required by score --plot and diagnose; numerical normalize/score do not import Pillow.
+Pillow>=10

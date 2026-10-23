@@ -381,6 +381,8 @@ def _prepare(plan, request, transaction, *, _on_created=None):
         destination = storage_root / 'host-runtime/fork'
         destination.parent.mkdir(parents=True, exist_ok=True)
         source_store.rename(destination)
+        from . import skill_supply
+        skill_supply.inherit(storage_root, selected_settings)
         configured = _child_source_facts(storage_root, global_materials, plan)
         # Prepare will verify these exact retained originals when it freezes
         # declarations. Seed immutable aliases so public payloads stay shared.

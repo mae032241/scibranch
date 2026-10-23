@@ -1,0 +1,3 @@
+pydantic>=2.8,<3
+Pillow>=10
+# PDF inspection additionally needs the system executable Poppler pdfimages.

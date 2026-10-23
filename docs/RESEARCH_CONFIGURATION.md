@@ -338,3 +338,69 @@ new configuration freezes the registration's observer/delivery defaults. Explici
 operator policies still apply; installing a provider grants no execution authority.
 Cov 执行来自独立插件，核心安装不含 Cov；注册提供的新实例默认观察与交付配置仍须冻结，
 安装本身不授予执行权限。
+
+## Selected framework Skills / 按角色选择框架 Skill
+
+Default role selections are empty. Declare finite named sets, then bind a role or
+named Worker profile explicitly. The source defaults to `/opt/scidiscovery-thin/skills`;
+installed wrappers set `SCID_SKILLS_ROOT` to their own persistent prefix's `skills/`.
+Explicit `[skills].root` takes precedence. A source may be read-only.
+
+默认各角色为空集合。显式声明有限集合，再绑定角色或命名 Worker。默认来源为
+`/opt/scidiscovery-thin/skills`；安装 wrapper 用 `SCID_SKILLS_ROOT` 指向自身持久前缀，
+显式 `[skills].root` 优先。来源目录可以只读。
+
+```toml
+[skills]
+root = "/opt/scidiscovery-thin/skills"
+[skills.sets.tcad]
+items = ["sentaurus-tcad-code"]
+[skills.sets.analysis]
+items = ["curve-analysis", "scientific-paper-evidence"]
+[agent.workers.analysis]
+model = "gpt-6.1-sol"
+reasoning_effort = "high"
+service_tier = "default"
+skill_set = "analysis"
+[agent.roles.W]
+skill_set = "tcad"
+[agent.roles.A]
+worker = "analysis"
+```
+
+A role's explicit fields override its named Worker's model fields and `skill_set`.
+The source is inspected only for the union of explicitly declared set items.
+Prepare freezes each selected ordinary bundle once in instance-owned immutable
+storage. Roles/nodes share those bytes through `.agents/skills` projections.
+Changing the installation source or environment does not refresh an instance.
+Configuration revisions may select only its already frozen sets and Worker bindings;
+new bundle IDs or versions require a new instance. Existing jobs retain their binding.
+Missing, changed, linked or incomplete source assets fail before model launch.
+
+角色显式字段覆盖命名 Worker 的模型字段和 `skill_set`。初建只读取全部显式集合的有限并集，
+每个 Skill 普通文件树在实例内冻结一次，角色和节点通过 `.agents/skills` 共享投影。
+安装来源或环境变更不刷新已建实例。配置修订只能改选已冻结集合与 Worker 绑定，新 ID 或版本
+要求新实例，既有任务保持原绑定。缺失、变更、链接或不完整资产在模型启动前拒绝。
+
+Standard Codex supports this projection directly. A provider-declared module
+launcher may implement the same exact contract; Cov uses
+`python -m cov_execution.launcher --config /exact/operator.json`.
+Other script/protocol/custom launchers reject nonempty managed sets when they lack
+a verified loading contract. Empty sets preserve existing behavior. Framework
+selection does not hide native user/system/plugin Skills or change native home,
+sandbox, shell, network, web or subagent permissions. A Skill grants no execution
+permission, independent-review verdict or scientific qualification.
+
+标准 Codex 直接发现投影；适配器声明的模块 launcher 可实现相同合同，Cov 使用上述模块入口。
+缺少可核实加载合同的任意脚本、protocol 或自定义 launcher 对非空集合明确拒绝，空集合维持原行为。
+此选择只限框架受管集合，不隐藏原生用户、系统、插件来源，不改变原生 home 或声明权限。
+Skill 不授予执行权限、独审结论或科学资格。
+
+Archives retain each frozen file once and omit only verified derived projections.
+Forks retain child-owned original references and rebuild projections under the child
+root; source installation and parent deletion cannot remove those child references.
+Cold restore likewise rebuilds and verifies local projections before runnable use.
+Read-only modes remain a soft boundary against trusted same-user processes.
+
+归档每份冻结原件只保留一次，只排除已验证的派生投影。fork 保留子实例自有原件引用，并在子根
+重建投影，不依赖安装来源或父实例继续存在；冷恢复同样在运行前重建核对。只读权限仍属同用户软边界。

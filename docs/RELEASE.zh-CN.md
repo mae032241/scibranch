@@ -6,8 +6,8 @@
 ## 支持范围
 
 应用提供 `scid-research`、`scid-experiment` 与按需启动的实例 UI。科研控制器使用原生科学线程、
-明确实例根目录、冻结输入和有限预算。可复用的 Operation 编译器声明、schema、回调及领域
-adapter 作为库保留；[Plugin API](PLUGIN_RUNTIME_API.md)说明其当前职责。
+明确实例根目录、冻结输入和有限预算。执行适配器保留安装接口，科学算法由选定 Skill 资产提供；
+非执行 registry 与 Operation 宿主已退役。[接口参考](PLUGIN_RUNTIME_API.md)说明保留合同。
 [当前架构](ARCHITECTURE.zh-CN.md)和[CLI 指南](ROOTLESS_CLI.zh-CN.md)定义行为、权限及恢复边界。
 
 源码、HTTP 与合成进程检查只建立其实际覆盖的行为，不证明真实原生线程续接、浏览器、TCAD

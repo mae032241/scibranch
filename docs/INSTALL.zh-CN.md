@@ -2,6 +2,8 @@
 
 简体中文 | [English](INSTALL.md)
 
+支持宿主为 Linux，依赖 POSIX 文件系统和锁语义。原生 Windows 不支持，WSL2 未验证；安装器不提供 Windows 适配。
+
 安装器支持 `scid-research` 与 `scid-experiment`，离线构建并发布应用与选定插件。
 依赖须由操作员预先提供；安装不连接模型、创建科研实例或启动服务。
 `SCID_DEPLOY_MODE` 仅接受 `thin`，其他值在修改文件前失败。
@@ -19,14 +21,18 @@ scid-research --help
 核心提供 `local_execution:command`，不安装 Cov。需要 Cov 时选择
 `SCID_PLUGINS=cov_execution`，安装独立发行包 `scidiscovery-cov-execution`；
 其 `cov_execution:experiment` 入口、observer、回执与交付提供方随同一插件发布。
-`SCID_PLUGINS=tcad_artifact,curve_score` 可选择本地插件；依赖插件须显式列入，不安装外部依赖。
-可选图插件还需现有 Pillow/pdfimages 环境；预检失败不进入发布事务。
+`SCID_PLUGINS=tcad_artifact` 选择 TCAD，不再依赖曲线插件；不安装外部依赖。
+安装器逐项核对 core 依赖的版本和 marker（含 cryptography 与 Python 3.10 的 tomli），
+发布前实际导入 browser/UI。全部 Skill 作为普通文件持久发布到 `$SCID_INSTALL_ROOT/skills`，
+wrapper 以 `SCID_SKILLS_ROOT` 指向该目录；新实例显式 `[skills].root` 优先。pip 临时源码不是安装资源。
+图像能力按 Skill 的 `requirements.txt` 和 CLI preflight 提供 Pillow；只有 PDF 图像提取需要 Poppler pdfimages。
+核心不要求图像依赖。
 插件安装不证明 SSH、许可证或真实 solver 资格；远端 runner 的独立部署见[传输合同](tcad_transport_contract.md)。
 
 安装只发布 `scid-research` 和 `scid-experiment`，不创建实例、预算、凭据、平台配置或服务。
 既有 site 或任一同名 wrapper 会拒绝覆盖；这不是原地升级工具。
 `deploy/reinstall.sh` 是操作员的 sudo 包装，同样只支持新前缀安装，不绕过覆盖检查。
-代码变化后旧冻结实例不会静默采用新实现或重新签名。
+科学配置与原件身份保持冻结；实现升级需按下述新前缀合同显式切换。
 
 `deploy/install.sh status` 检查 wrapper 归属；`sudo deploy/install.sh uninstall` 仅删除匹配当前配置的两个 wrapper，
 保留包前缀和实例原件。发布失败沿既有事务回滚新 wrapper；意外出现的其他命令 owner 保留并报告。
@@ -35,3 +41,7 @@ scid-research --help
 运行实例、UI、批准与恢复见[CLI 指南](ROOTLESS_CLI.zh-CN.md)。
 模型、执行环境与权限的准备见[原生试验指南](NATIVE_TRIAL_LAUNCH.zh-CN.md)；
 安装成功不证明真实模型、浏览器或求解器资格。
+
+实现升级需新 `SCID_INSTALL_ROOT` 和独立且已存在的 `SCID_BIN_ROOT`，验证后停止或核对旧写者，
+再显式切换命令入口。保留旧前缀供回退；reinstall 只是 fresh install 包装，不覆盖原 site/wrapper。
+科学配置、原件及冻结 Skill 属于实例，代码实现升级不承诺旧协议实例兼容。

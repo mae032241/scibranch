@@ -75,12 +75,14 @@ def test_thin_publication_failure_rolls_back_only_new_wrappers(tmp_path):
     prepared=tmp_path/'prepared-site';prepared.mkdir();(prepared/'retained').write_bytes(b'Prepared fixture bytes, not a package.')
     Path(environment['SCID_INSTALL_ROOT']).mkdir()
     environment['PREPARED_SITE']=str(prepared)
+    skill_stage=tmp_path/'prepared-skills';skill_stage.mkdir();(skill_stage/'SKILL.md').write_text('fixture')
+    environment['PREPARED_SKILLS']=str(skill_stage)
     # Only package supply/preflight and privilege checks are stand-ins. Actual
     # activation, transaction manifest, wrapper creation and rollback run.
     result=shell(environment,'''require_root() { :; }
 validate_source() { :; }
 validate_base_python() { :; }
-install_packages() { PACKAGE_STAGE="$PREPARED_SITE"; }
+install_packages() { PACKAGE_STAGE="$PREPARED_SITE"; SKILL_STAGE="$PREPARED_SKILLS"; }
 probe_thin_package() { return 43; }
 systemctl() { exit 91; }
 configure_platform() { exit 92; }
@@ -151,14 +153,59 @@ def test_reinstaller_passes_operator_python_and_selected_plugins_as_data(tmp_pat
         command.write_text('#!/bin/sh\n' + body + '\n')
         command.chmod(0o755)
     environment['PATH'] = str(binary) + os.pathsep + environment['PATH']
-    environment['SCID_PLUGINS'] = 'tcad_artifact,curve_score'
+    environment['SCID_PLUGINS'] = 'tcad_artifact'
     result = subprocess.run(['bash', str(SCRIPT.with_name('reinstall.sh')), 'reinstall'],
         env=environment, capture_output=True, text=True, timeout=10, check=False)
     assert result.returncode == 0, result.stderr
     arguments = result.stdout.splitlines()
     assert arguments[0] == 'env'
     assert 'SCID_PYTHON=' + sys.executable in arguments
-    assert 'SCID_PLUGINS=tcad_artifact,curve_score' in arguments
+    assert 'SCID_PLUGINS=tcad_artifact' in arguments
     assert not any(value.startswith(('SCID_WORKSPACE=', 'SCID_STATE_ROOT=')) for value in arguments)
     assert arguments[-2:] == [str(SCRIPT), 'install']
+    assert_preserved(originals)
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('observed', [None, '41.0', '47.0'])
+def test_no_deps_preflight_rejects_missing_or_wrong_cryptography_before_publication(tmp_path, observed):
+    environment, originals = scene(tmp_path)
+    patch = tmp_path / 'dependency-patch'; patch.mkdir()
+    (patch / 'sitecustomize.py').write_text(
+        'import importlib.metadata as metadata\n'
+        'original = metadata.version\n'
+        'def version(name):\n'
+        '    if name == "cryptography":\n'
+        + ('        raise metadata.PackageNotFoundError(name)\n' if observed is None
+           else f'        return {observed!r}\n')
+        + '    return original(name)\nmetadata.version = version\n')
+    environment['PYTHONPATH'] = str(patch)
+    result = shell(environment, 'validate_base_python')
+    assert result.returncode != 0
+    assert 'base Python dependency' in result.stderr and 'cryptography' in result.stderr
+    assert not Path(environment['SCID_INSTALL_ROOT']).exists()
+    assert not (Path(environment['SCID_BIN_ROOT']) / 'scid-research').exists()
+    assert_preserved(originals)
+
+
+@pytest.mark.process_e2e
+def test_fresh_prefix_publishes_persistent_skills_and_wrapper_default(tmp_path):
+    environment, originals = scene(tmp_path)
+    prefix = Path(environment['SCID_INSTALL_ROOT']); prefix.mkdir()
+    source = tmp_path / 'source-skills'; (source / 'fixture').mkdir(parents=True)
+    (source / 'fixture' / 'SKILL.md').write_text('frozen fixture bytes')
+    site_stage = prefix / '.site.new.fixture'; site_stage.mkdir()
+    skill_stage = prefix / '.skills.new.fixture'
+    import shutil
+    shutil.copytree(source, skill_stage)
+    environment.update(PREPARED_SITE=str(site_stage), PREPARED_SKILLS=str(skill_stage))
+    result = shell(environment, '''PACKAGE_STAGE="$PREPARED_SITE"
+SKILL_STAGE="$PREPARED_SKILLS"
+activate_packages
+''')
+    assert result.returncode == 0, result.stderr
+    shutil.rmtree(source)
+    assert (prefix / 'skills/fixture/SKILL.md').read_text() == 'frozen fixture bytes'
+    wrapper = (Path(environment['SCID_BIN_ROOT']) / 'scid-research').read_text()
+    assert 'SCID_SKILLS_ROOT=' + str(prefix / 'skills') in wrapper
     assert_preserved(originals)

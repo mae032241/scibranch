@@ -9,8 +9,8 @@
 配置与调用见[CLI 指南](../../docs/ROOTLESS_CLI.zh-CN.md)和
 [传输合同](../../docs/tcad_transport_contract.md)。
 
-插件也保留可复用 schema、项目物化器、解析器及 Operation 声明。这些属于
-[库合同](../../docs/PLUGIN_RUNTIME_API.md)，不提供 Run/Artifact 应用或 Operation 调度器。
+适配器保留执行 schema、项目物化、传输和策略检查。曲线、PLX 与日志分析由
+[curve-analysis Skill](../../skills/curve-analysis/SKILL.md) 提供；接口见[执行合同](../../docs/PLUGIN_RUNTIME_API.md)。
 科学 Worker 编写 solver 项目并判断结果；确定性代码解析精确源码、case anchors、capability、
 文件绑定与资源策略，不发明物理模型或从不完整请求生成求解器代码。
 

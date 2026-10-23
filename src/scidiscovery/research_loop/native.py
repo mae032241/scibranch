@@ -75,6 +75,8 @@ def execute_native(root: Path, step: int, *, final_report=None):
     job_path = root / "jobs" / f"{step:03d}.json"
     job = read(job_path)
     profile_binding = profiles.binding(settings, job)
+    from . import skill_supply
+    skill_supply.project(root, settings, job)
     node_anchor = control_budget.accept_node(root, job, final_report=final_report)
     if not control_budget.task_step_available(root, step) and not (node_anchor or {}).get('final_return'):
         raise control_budget.NodeBudgetUnavailable('step_limit')
@@ -156,6 +158,8 @@ def run_native(root: Path, step: int, attempt=0):
     if intent.get('task_sha256') != digest(job_path):
         raise ValueError('Native execution task changed')
     profile = profiles.validate_intent(settings, job, intent)
+    from . import skill_supply
+    skill_supply.project(root, settings, job)
     if job.get('experiment_mode') != settings.get('experiment_mode'):
         raise ValueError('Frozen experiment mode changed')
     experiment_config=None

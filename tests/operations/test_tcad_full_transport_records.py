@@ -14,7 +14,6 @@ from scidiscovery.plugin_runtime.collection import run_bounded
 from tcad_artifact.command_adapter import CommandAdapterConfig, CommandTCADExecutorAdapter
 from tcad_artifact.project_packager import ExecutionPackage, RuntimeAttestation, TCADRuntimeManifest
 from tcad_artifact.ssh_transport import SSHRemoteClient, SSHTCADTransportConfig
-from tcad_artifact.transform_adapter import attest_runtime
 from tcad_artifact.transport_logs import preserve_log
 from tests.operations.test_runtime_plugin_configuration import _execution_package
 from tests.operations.test_tcad_archive_collection import _client
@@ -180,23 +179,6 @@ def manifest_document(count):
         error='',outputs=outputs)
 
 
-@pytest.mark.stress
-def test_complete_large_manifest_is_consumed_by_attestation_transform():
-    # 8191 output checks + two contract checks cross the old 8192-check cap.
-    count=8191;document = manifest_document(count)
-    manifest = TCADRuntimeManifest.model_validate_json(canonical_json(document), strict=True)
-    package = ExecutionPackage.model_validate_json(_execution_package(), strict=True)
-    package = package.model_copy(update={'project':package.project.model_copy(update={'expected_outputs':(), 'collect_generated_outputs':True})})
-    inputs = dict(execution_package=canonical_json(package.model_dump(mode='json')), runtime_manifest=canonical_json(document),
-        **{'output__'+item.name:b'x' for item in manifest.outputs})
-    response = attest_runtime(inputs)
-    report = RuntimeAttestation.model_validate_json(response['runtime_attestation'][0], strict=True)
-    assert report.verdict == 'pass' and report.solver_native_output_count == count and len(report.checks) == count+2
-    inputs['output__'+manifest.outputs[-1].name] = b'y'
-    bad = RuntimeAttestation.model_validate_json(attest_runtime(inputs)['runtime_attestation'][0], strict=True)
-    assert bad.verdict == 'fail' and len(bad.checks) == count+2
-    errors = ['retained error %s' % index for index in range(4097)]
-    assert TCADRuntimeManifest.model_validate_json(canonical_json(dict(document,collection_errors=errors)), strict=True).collection_errors == tuple(errors)
 
 
 @pytest.mark.parametrize('fault', ['duplicate_name', 'duplicate_path', 'escape'])
@@ -206,23 +188,3 @@ def test_manifest_keeps_uniqueness_and_path_guards(fault):
     elif fault == 'duplicate_path': document['outputs'][-1]['relative_path'] = document['outputs'][0]['relative_path']
     else: document['outputs'][-1]['relative_path'] = '../escape.dat'
     with pytest.raises(ValueError): TCADRuntimeManifest.model_validate_json(canonical_json(document), strict=True)
-
-
-@pytest.mark.parametrize('failure', ['undeclared_outputs', 'terminal_error'])
-def test_complete_attestation_failure_reason_is_retained_from_native_manifest(failure):
-    document = manifest_document(0 if failure=='terminal_error' else 64)
-    package = ExecutionPackage.model_validate_json(_execution_package(), strict=True)
-    # These outputs are intentionally undeclared; failure must remain a readable
-    # engineering attestation, rather than failing to serialize its own reason.
-    package = package.model_copy(update={'project':package.project.model_copy(update={'expected_outputs':(), 'collect_generated_outputs':False})})
-    if failure == 'terminal_error':
-        document.update(terminal_state='failed',exit_code=1,error='e' * 8192 + '; diagnostic collection failed: storage quota exceeded',outputs=[])
-    original = canonical_json(document)
-    response = attest_runtime(dict(execution_package=canonical_json(package.model_dump(mode='json')),runtime_manifest=original))
-    report = RuntimeAttestation.model_validate_json(response['runtime_attestation'][0], strict=True)
-    assert report.verdict == 'fail'
-    check = next(item for item in report.checks if item.check_key == ('terminal_state' if failure == 'terminal_error' else 'undeclared_outputs'))
-    assert check.status == 'fail' and len(check.rationale) > 4096
-    if failure == 'terminal_error': assert document['error'] in check.rationale
-    else: assert all(item['name'] in check.rationale for item in document['outputs'])
-    assert canonical_json(document) == original

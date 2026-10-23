@@ -7,3 +7,5 @@
 
 `install_ssh_tcad_runner.sh` 独立部署领域执行后端，另需明确管理员配置与部署授权；
 见[传输合同](../docs/tcad_transport_contract.md)。
+
+持久 Skill 来源为 `$SCID_INSTALL_ROOT/skills`，wrapper 为新实例选择该路径。

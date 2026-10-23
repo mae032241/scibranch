@@ -10,3 +10,5 @@ the same fresh-prefix requirement.
 `install_ssh_tcad_runner.sh` deploys the independent domain execution backend.
 It requires separate administrator configuration and deployment authorization;
 see the [transport contract](../docs/tcad_transport_contract.md).
+
+The persistent Skill source is `$SCID_INSTALL_ROOT/skills`; wrappers select it for new instances.

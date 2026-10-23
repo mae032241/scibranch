@@ -12,11 +12,12 @@ readonly PYTHON="${SCID_PYTHON:-$(command -v python3 || true)}"
 readonly PLUGIN_SPECIFICATION="${SCID_PLUGINS:-}"
 readonly INSTALL_ROOT="${SCID_INSTALL_ROOT:-/opt/scidiscovery-thin}"
 readonly SITE_ROOT="${INSTALL_ROOT}/site"
+readonly SKILL_ROOT="${INSTALL_ROOT}/skills"
 readonly BACKUP_ROOT="${SCID_BACKUP_ROOT:-/var/backups/scidiscovery-thin}"
 PACKAGE_STAGE=""
+SKILL_STAGE=""
 TRANSACTION_ROOT=""
 ROLLBACK_ARMED=0
-FIGURE_DEPENDENCY_CONTRACT=""
 declare -a SELECTED_PLUGINS=()
 declare -a SELECTED_PLUGIN_DISTRIBUTIONS=()
 
@@ -40,7 +41,7 @@ validate_thin_paths() {
 require_thin_sources() {
     local path plugin_ids plugin_distributions
     validate_thin_paths
-    for path in pyproject.toml README.md deploy/plugin_selection.py deploy/install_transaction.py src/scidiscovery/research_loop/cli.py; do
+    for path in pyproject.toml README.md deploy/plugin_selection.py deploy/install_transaction.py src/scidiscovery/research_loop/cli.py skills/sentaurus-tcad-code/SKILL.md skills/curve-analysis/SKILL.md skills/scientific-paper-evidence/SKILL.md; do
         [[ -f "$SOURCE_ROOT/$path" ]] || die "missing thin source: ${path}"
     done
     if [[ -n "$PLUGIN_SPECIFICATION" ]]; then
@@ -54,7 +55,7 @@ require_thin_sources() {
 validate_thin_targets() {
     local path
     # No inference about live writers: code is published only into a new prefix.
-    for path in "$SITE_ROOT" "$CLI_ROOT/scid-research" "$CLI_ROOT/scid-experiment"; do
+    for path in "$SITE_ROOT" "$SKILL_ROOT" "$CLI_ROOT/scid-research" "$CLI_ROOT/scid-experiment"; do
         [[ ! -e "$path" && ! -L "$path" ]] || die "thin target already exists; preserve the existing deployment: ${path}"
     done
 }
@@ -75,40 +76,38 @@ validate_source() {
     for plugin in "${SELECTED_PLUGINS[@]}"; do
         pythonpath+=":${SOURCE_ROOT}/plugins/${plugin}"
     done
-    PYTHONNOUSERSITE=1 PYTHONPATH="$pythonpath" "$PYTHON" -c 'import scidiscovery.research_loop.cli, scidiscovery.research_loop.experiments'
+    PYTHONNOUSERSITE=1 PYTHONPATH="$pythonpath" "$PYTHON" -c 'import scidiscovery.research_loop.cli, scidiscovery.research_loop.experiments, scidiscovery.browser_access, scidiscovery.research_loop.instance_ui'
 }
 
 validate_base_python() {
     "$PYTHON" -m pip --version
-    "$PYTHON" - <<'PY'
+    "$PYTHON" - "$SOURCE_ROOT/pyproject.toml" <<'PY'
 from importlib.metadata import PackageNotFoundError, version
-from packaging.version import Version
+from pathlib import Path
+from packaging.requirements import Requirement
 import sys
-
-
-def parsed_version(distribution: str) -> Version:
+try:
+    import tomllib
+except ModuleNotFoundError:
     try:
-        raw = version(distribution)
-    except PackageNotFoundError as exc:
-        raise SystemExit(
-            f"missing base Python dependency: {distribution}; "
-            "install it with Conda or the system Python package manager"
-        ) from exc
-    print(f"base dependency: {distribution}={raw}")
-    return Version(raw)
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        raise SystemExit("missing base Python dependency: tomli>=2; required for Python <3.11") from None
 
-
-if not Version("2") <= parsed_version("pydantic") < Version("3"):
-    raise SystemExit("base Python requires pydantic>=2,<3")
-if not Version("10") <= parsed_version("Pillow") < Version("13"):
-    raise SystemExit("base Python requires Pillow>=10,<13")
-if not Version("4") <= parsed_version("jsonschema") < Version("5"):
-    raise SystemExit("base Python requires jsonschema>=4,<5")
-if parsed_version("setuptools") < Version("68"):
-    raise SystemExit("base Python requires setuptools>=68")
-if sys.version_info < (3, 11):
-    parsed_version("tomli")
-print("base Python dependency check: pass")
+project = tomllib.loads(Path(sys.argv[1]).read_text())
+requirements = [*project['project'].get('dependencies', ()), *project['build-system']['requires']]
+for raw in requirements:
+    requirement = Requirement(raw)
+    if requirement.marker is not None and not requirement.marker.evaluate({'extra': ''}):
+        continue
+    try:
+        observed = version(requirement.name)
+    except PackageNotFoundError:
+        raise SystemExit(f'missing base Python dependency: {requirement}; install it before --no-deps deployment') from None
+    if requirement.specifier and observed not in requirement.specifier:
+        raise SystemExit(f'incompatible base Python dependency: {requirement}; found {observed}')
+    print(f'base dependency: {requirement.name}={observed}')
+print('base Python dependency check: pass')
 PY
 }
 
@@ -116,21 +115,10 @@ require_root() {
     [[ "$(id -u)" -eq 0 ]] || die "install and uninstall require sudo"
 }
 
-validate_figure_dependencies() {
-    [[ " ${SELECTED_PLUGINS[*]} " == *" curve_figure_evidence "* ]] || return 0
-    local prefix="${1:-}" observed
-    if [[ -n "$prefix" ]]; then
-        observed="$(PYTHONNOUSERSITE=1 PYTHONPATH="$prefix" "$PYTHON" "$prefix/curve_figure_evidence/figure_dependencies.py" --installed)" || die "installed figure dependency preflight failed"
-        [[ "$observed" == "$FIGURE_DEPENDENCY_CONTRACT" ]] || die "installed figure dependency contract changed"
-    else
-        FIGURE_DEPENDENCY_CONTRACT="$(PYTHONNOUSERSITE=1 PYTHONPATH="${SOURCE_ROOT}/plugins/curve_figure_evidence" "$PYTHON" "$SOURCE_ROOT/plugins/curve_figure_evidence/curve_figure_evidence/figure_dependencies.py")" || die "figure dependency preflight failed"
-        printf 'Verified figure dependencies: %s\n' "$FIGURE_DEPENDENCY_CONTRACT"
-    fi
-}
 
 preview() {
     printf 'Thin deployment: stage packages at %s; publish scid-research/scid-experiment at %s.\n' "$SITE_ROOT" "$CLI_ROOT"
-    printf 'Source: %s\nPython: %s\nPlugins: %s\n' "$SOURCE_ROOT" "$PYTHON" "${PLUGIN_SPECIFICATION:-none}"
+    printf 'Source: %s\nPython: %s\nExecution adapters: %s\nSkill source: %s\n' "$SOURCE_ROOT" "$PYTHON" "${PLUGIN_SPECIFICATION:-none}" "$SKILL_ROOT"
     printf 'No instance, budget, database, platform profile or service is created.\n'
 }
 
@@ -213,16 +201,6 @@ install_packages() {
         --progress-bar off --upgrade \
         --target "$stage" "${package_roots[@]}"
     rm -rf "$source_stage"
-    if [[ -n "$FIGURE_DEPENDENCY_CONTRACT" ]]; then
-        # This is the sole runtime binding for exact PDF image recovery.
-        "$PYTHON" - "$stage/curve_figure_evidence/figure_dependencies.json" \
-            "$FIGURE_DEPENDENCY_CONTRACT" <<'PY'
-from pathlib import Path
-import sys
-Path(sys.argv[1]).write_text(sys.argv[2] + '\n', encoding='utf-8')
-PY
-        validate_figure_dependencies "$stage"
-    fi
     selected_distributions="$(IFS=,; printf '%s' "${SELECTED_PLUGIN_DISTRIBUTIONS[*]}")"
     validate_distribution_cohort "$stage"
     probe_thin_package "$stage"
@@ -233,11 +211,21 @@ PY
         scidiscovery.runtime_identity verify \
         --manifest "$stage/runtime-identity.json"
     PACKAGE_STAGE="$stage"
+    SKILL_STAGE="${INSTALL_ROOT}/.skills.new.$$"
+    [[ ! -e "$SKILL_STAGE" && ! -L "$SKILL_STAGE" ]] || die "skill stage already exists"
+    cp -a "$SOURCE_ROOT/skills" "$SKILL_STAGE"
+    find "$SKILL_STAGE" -type d -name __pycache__ -prune -exec rm -rf {} +
+    find "$SKILL_STAGE" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+    [[ -z "$(find "$SKILL_STAGE" ! -type d ! -type f -print -quit)" ]] || die "skill assets must be ordinary files and directories"
+    chmod -R a-w "$SKILL_STAGE"
+    find "$SKILL_STAGE" -type d -exec chmod a+rx {} +
 }
 
 probe_thin_package() {
     PYTHONNOUSERSITE=1 PYTHONPATH="$1" "$PYTHON" - <<'PY'
 from importlib.metadata import distribution
+import scidiscovery.browser_access
+import scidiscovery.research_loop.instance_ui
 scripts = [entry for entry in distribution('scidiscovery').entry_points if entry.group == 'console_scripts']
 if {entry.name for entry in scripts} != {'scid-research', 'scid-experiment'}:
     raise SystemExit('unexpected console entry point in thin package')
@@ -251,13 +239,14 @@ PY
 }
 
 thin_cli_wrapper() {
-    local quoted_python quoted_site
+    local quoted_python quoted_site quoted_skills
     printf -v quoted_python '%q' "$PYTHON"
     printf -v quoted_site '%q' "$SITE_ROOT"
+    printf -v quoted_skills '%q' "$SKILL_ROOT"
     cat <<EOF
 #!/usr/bin/env bash
-env PYTHONNOUSERSITE=1 PYTHONPATH=${quoted_site} ${quoted_python} -m scidiscovery.runtime_identity verify --manifest ${quoted_site}/runtime-identity.json || exit
-exec env PYTHONNOUSERSITE=1 PYTHONPATH=${quoted_site} ${quoted_python} -m $1 "\$@"
+env PYTHONNOUSERSITE=1 PYTHONPATH=${quoted_site} SCID_SKILLS_ROOT=${quoted_skills} ${quoted_python} -m scidiscovery.runtime_identity verify --manifest ${quoted_site}/runtime-identity.json || exit
+exec env PYTHONNOUSERSITE=1 PYTHONPATH=${quoted_site} SCID_SKILLS_ROOT=${quoted_skills} ${quoted_python} -m $1 "\$@"
 EOF
 }
 
@@ -276,6 +265,10 @@ publish_thin_cli() {
 activate_packages() {
     [[ -n "$PACKAGE_STAGE" && -d "$PACKAGE_STAGE" ]] || die "validated package stage is unavailable"
     validate_thin_targets
+    [[ -n "$SKILL_STAGE" && -d "$SKILL_STAGE" ]] || die "validated skill stage is unavailable"
+    mv -T -n -- "$SKILL_STAGE" "$SKILL_ROOT"
+    [[ ! -e "$SKILL_STAGE" ]] || die "skill source appeared during publication; preserve it: ${SKILL_ROOT}"
+    SKILL_STAGE=""
     mv -T -n -- "$PACKAGE_STAGE" "$SITE_ROOT"
     [[ ! -e "$PACKAGE_STAGE" ]] || die "thin prefix appeared during publication; preserve it: ${SITE_ROOT}"
     PACKAGE_STAGE=""
@@ -319,6 +312,7 @@ rollback_install() {
         fi
     fi
     [[ -z "$PACKAGE_STAGE" ]] || rm -rf "$PACKAGE_STAGE"
+    [[ -z "$SKILL_STAGE" ]] || rm -rf "$SKILL_STAGE"
     printf 'Thin rollback retained the package prefix; instance data was untouched.\n' >&2
     exit "$status"
 }
@@ -337,9 +331,8 @@ install_all() {
     require_root
     thin_deployment_lock
     validate_thin_targets
-    validate_source
     validate_base_python
-    validate_figure_dependencies
+    validate_source
     install_packages
     begin_install_transaction
     activate_packages
@@ -381,7 +374,7 @@ uninstall_services() {
 main() {
     [[ "$#" -le 1 ]] || die "usage: $0 [--dry-run|install|status|uninstall]"
     case "${1:---dry-run}" in
-        --dry-run) require_sources; validate_source; validate_base_python; validate_figure_dependencies; preview ;;
+        --dry-run) require_sources; validate_base_python; validate_source; preview ;;
         install) require_sources; install_all ;;
         status) status ;;
         uninstall) uninstall_services ;;

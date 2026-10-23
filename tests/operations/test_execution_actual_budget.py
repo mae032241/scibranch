@@ -14,15 +14,6 @@ def test_config_separates_one_hour_request_from_six_hour_pool():
         budget_key='a'*64).outcome == 'require_human_approval'
 
 
-def test_debug_timing_settles_once_and_keeps_other_reservations():
-    from tcad_artifact.local_debug_service import _settle_wall_usage
-    ledger, record = {'reserved_wall_seconds': 360}, {'reserved_wall_seconds': 120}
-    _settle_wall_usage(ledger, record, 2.2)
-    assert ledger['reserved_wall_seconds'] == 243 and record['actual_wall_seconds'] == 3
-    _settle_wall_usage(ledger, record, 0)
-    assert ledger['reserved_wall_seconds'] == 243
-
-
 @pytest.mark.parametrize('manifest,expected', [
     ({'resource_usage': {'elapsed_seconds': 2.1}}, {'wall_time_seconds': 3}),
     ({'started_at': '2026-09-30T00:00:00Z', 'completed_at': '2026-09-30T00:00:07Z'}, {'wall_time_seconds': 7}),

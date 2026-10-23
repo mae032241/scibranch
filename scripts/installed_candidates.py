@@ -41,7 +41,7 @@ def _copy_runtime_distribution(name: str, destination: Path) -> None:
 
 def _supply_runtime_dependencies(site_packages: Path) -> None:
     for package_name in (
-        "annotated-types", "Pillow", "attrs", "jsonschema",
+        "annotated-types", "attrs", "jsonschema",
         "jsonschema-specifications", "pydantic", "pydantic_core",
         "referencing", "rpds-py", "typing-extensions", "typing-inspection",
         "cryptography", "cffi", "pycparser",
@@ -93,14 +93,12 @@ def _candidate_creator(repository: Path, root: Path):
         "core": (repository, "scidiscovery-"),
         "tcad": (repository / "plugins/tcad_artifact", "tcad_artifact-"),
         "cov": (repository / "plugins/cov_execution", "scidiscovery_cov_execution-"),
-        "curve": (repository / "plugins/curve_score", "scidiscovery_curve_score-"),
-        "figure": (repository / "plugins/curve_figure_evidence", "scidiscovery_curve_figure_evidence-"),
     }
     selections = {
         "core": ("core",),
-        "all_domains": ("core", "tcad", "curve", "figure", "cov"),
+        "all_domains": ("core", "tcad", "cov"),
         "cov": ("core", "cov"),
-        "tcad_resolved": ("core", "curve", "tcad"),
+        "tcad_resolved": ("core", "tcad"),
     }
     built = {}
 

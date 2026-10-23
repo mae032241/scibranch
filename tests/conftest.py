@@ -1,38 +1,11 @@
 from __future__ import annotations
 
-from importlib.metadata import EntryPoint, EntryPoints
 import fcntl
 import os
 from pathlib import Path
 
 import pytest
 
-
-
-_SOURCE_FULL_PLUGINS = EntryPoints(
-    (
-        EntryPoint(
-            name="builtin",
-            value="scidiscovery.builtin_plugin:CORE_PLUGIN",
-            group="scidiscovery.plugins",
-        ),
-        EntryPoint(
-            name="general_science",
-            value="scidiscovery.general_science_plugin:PLUGIN",
-            group="scidiscovery.plugins",
-        ),
-        EntryPoint(
-            name="tcad_artifact",
-            value="tcad_artifact.plugin:PLUGIN",
-            group="scidiscovery.plugins",
-        ),
-        EntryPoint(
-            name="curve_score",
-            value="curve_score.plugin:PLUGIN",
-            group="scidiscovery.plugins",
-        ),
-    )
-)
 
 
 @pytest.fixture(autouse=True)
@@ -46,20 +19,6 @@ def _source_subprocess_paths(monkeypatch, request):
     if inherited:
         paths.append(inherited)
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join(paths))
-
-
-@pytest.fixture(autouse=True)
-def _source_checkout_plugin_metadata(monkeypatch: pytest.MonkeyPatch, request):
-    """Model the default full install without writing egg-info into the checkout."""
-
-    if Path(request.node.path).is_relative_to(Path(__file__).parent / "installation"):
-        yield
-        return
-    from scidiscovery.operations import catalog as catalog_module
-    monkeypatch.setattr(catalog_module, "entry_points", lambda: _SOURCE_FULL_PLUGINS)
-    catalog_module.compile_installed_catalog.cache_clear()
-    yield
-    catalog_module.compile_installed_catalog.cache_clear()
 
 
 _LANES = {"installed": "installed", "process_e2e": "process", "stress": "stress", "live_platform": "live"}

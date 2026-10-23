@@ -1,4 +1,4 @@
-"""Runtime-factory protocol referenced by the immutable Operation catalog."""
+"""Installed execution adapter factory and nonserialized host gate services."""
 
 from __future__ import annotations
 
@@ -13,22 +13,8 @@ HOST_EXECUTION_GATE_CONTRACT = MappingProxyType(dict(version=1,
     source='nonserialized_execution_host_services', admission='prepare_and_submit', resources='control_ledger'))
 
 
-@dataclass(frozen=True, slots=True)
-class ArchiveStorageSelection:
-    paths: tuple[str, ...] = ()
-    unsupported: tuple[str, ...] = ()
-    unowned: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class ArchiveStorage:
-    """Trusted ownership projection; core retains all file/migration IO.
-
-    run_owner(id, require_task_origin=True) also verifies the frozen recovery root.
-    """
-
-    root: Path
-    inspect: Callable[[str, tuple[str, ...], Callable[..., str]], ArchiveStorageSelection]
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,21 +46,15 @@ class RuntimePluginContext:
 @dataclass(frozen=True, slots=True)
 class RuntimePluginContribution:
     execution_adapters: Mapping[str, Any] = field(default_factory=dict)
-    tool_services: Mapping[str, Any] = field(default_factory=dict)
-    reconcilers: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         adapters = dict(self.execution_adapters)
-        services = dict(self.tool_services)
         if any(
             not key or value is None
-            for key, value in (*adapters.items(), *services.items())
+            for key, value in adapters.items()
         ):
             raise ValueError("runtime plugin contribution contains an invalid binding")
-        if len(self.reconcilers) != len({id(item) for item in self.reconcilers}):
-            raise ValueError("runtime plugin contribution repeats a reconciler")
         object.__setattr__(self, "execution_adapters", MappingProxyType(adapters))
-        object.__setattr__(self, "tool_services", MappingProxyType(services))
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,14 +62,11 @@ class RuntimePluginFactory:
     """One installed, trusted startup factory; not an Agent capability."""
 
     build: Callable[[RuntimePluginContext], RuntimePluginContribution]
-    archive_storage: Callable[[RuntimePluginContext], Mapping[str, ArchiveStorage]] | None = None
     configure: Callable[..., dict] | None = None
     requires_config_file: bool = False
     def __post_init__(self) -> None:
         if not callable(self.build):
             raise TypeError("runtime plugin factory must be callable")
-        if self.archive_storage is not None and not callable(self.archive_storage):
-            raise TypeError("runtime plugin archive storage factory must be callable")
         if self.configure is not None and not callable(self.configure):
             raise TypeError("runtime plugin configuration callback must be callable")
         if type(self.requires_config_file) is not bool:
@@ -102,6 +79,4 @@ __all__ = [
     "HOST_EXECUTION_GATE_KEY", "HOST_EXECUTION_GATE_SCHEMA", "HOST_EXECUTION_GATE_CONTRACT",
     "RuntimePluginContribution",
     "RuntimePluginFactory",
-    "ArchiveStorage",
-    "ArchiveStorageSelection",
 ]

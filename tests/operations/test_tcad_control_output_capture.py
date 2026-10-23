@@ -72,39 +72,3 @@ def test_capture_conflicts_rejected_before_execution(change):
             'media_type': 'text/plain'}]
     with pytest.raises(ValidationError):
         DeckProjectDraft.model_validate_json(canonical_json(body), strict=True)
-
-
-@pytest.mark.parametrize('runtime_path', [PROCESS_LOG_PATH, 'A.plx'])
-def test_collected_process_log_enters_analysis_with_same_transport_mapping(runtime_path):
-    from scidiscovery.artifact_agent.schema.refs import ArtifactRef
-    from scidiscovery.operations.input_validation import (
-        InputBindingDescriptor, OperationInvocationError, ValidationSources,
-    )
-    from tcad_artifact.result_analysis import validate_analysis_inputs
-    from tests.operations import test_tcad_result_analysis as fixture
-    plan, package, manifest, plx, _ = fixture.analysis_materials(output_names=('A',))
-    project = package.project.model_dump(mode='json')
-    project['expected_outputs'][0]['capture'] = 'process_log'
-    package = package.model_copy(update={'project': DeckProjectDraft.model_validate_json(canonical_json(project), strict=True)})
-    value = json.loads(manifest)
-    value['outputs'][0]['relative_path'] = runtime_path
-    raw = dict(experiment_plan=canonical_json(plan.model_dump(mode='json')),
-        execution_package=canonical_json(package.model_dump(mode='json')),
-        runtime_manifest=canonical_json(value), solver_outputs_001=plx)
-    descriptors = {}
-    for alias, data in raw.items():
-        digest = hashlib.sha256(data).hexdigest()
-        solver_output = alias == 'solver_outputs_001'
-        descriptors[alias] = InputBindingDescriptor(source_name=alias,
-            port_name='solver_outputs' if solver_output else alias,
-            artifact_ref=ArtifactRef(artifact_id='art_' + alias, sha256=digest,
-                kind='fixture', schema_id='scidiscovery.fixture-control-capture.v1'),
-            media_type='application/x-synopsys-plx' if solver_output else 'application/json',
-            size_bytes=len(data), sha256=digest, output_name='A' if solver_output else None)
-    sources = ValidationSources(raw, descriptors)
-    assert package.project.expected_outputs[0].relative_path == 'A.plx'
-    if runtime_path == PROCESS_LOG_PATH:
-        validate_analysis_inputs(sources)
-    else:
-        with pytest.raises(OperationInvocationError, match='input_project_output_mismatch'):
-            validate_analysis_inputs(sources)

@@ -1011,7 +1011,10 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         from . import formal_review
         job['formal_review_version']=1
         formal_review.bind_job(root,job)
-    from . import profiles
+    from . import profiles, skill_supply
+    skill_binding = skill_supply.binding(policy, job)
+    if skill_binding is not None:
+        job['skill_binding'] = skill_binding
     if policy.get('role_profiles') is not None:
         job['native_profile'] = profiles.selected(policy, role)
     if retained is not None:
@@ -1172,6 +1175,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
                     raise ValueError('Frozen scientific task changed')
             else:
                 write(path, value)
+    skill_supply.project(root, policy, job)
     return job
 
 

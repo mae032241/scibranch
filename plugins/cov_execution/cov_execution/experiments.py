@@ -279,4 +279,4 @@ def research_defaults(configuration, *, root):
 REGISTRATION=ExecutionInterfaceRegistration('cov_execution','1',RuntimePluginFactory(build),
     scientific_source=LocalExecution.scientific_source,
     context_validator=validate_context,research_defaults=research_defaults,engineering_feedback=engineering_feedback,
-    projection_contract='cov.public-projections.v1')
+    projection_contract='cov.public-projections.v1', native_launcher_module='cov_execution.launcher')

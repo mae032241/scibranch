@@ -29,10 +29,3 @@ def test_command_transport_error_retains_stderr_instead_of_only_message(tmp_path
         adapter.capabilities()
     assert next((tmp_path / "logs").glob("*.stderr.log")).read_bytes() == raw
     assert b"protocol failure" in next((tmp_path / "logs").glob("*.stdout.log")).read_bytes()
-
-
-def test_missing_capture_does_not_qualify_successful_process():
-    from tcad_artifact.debug_adapter import _earliest_diagnostic
-    layer, summary = _earliest_diagnostic(terminal="succeeded", exit_code=0,
-        error="diagnostic collection failed: limit", log="", output_count=1)
-    assert layer == "output_contract" and "incomplete" in summary

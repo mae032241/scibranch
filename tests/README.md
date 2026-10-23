@@ -22,7 +22,7 @@
 
 `tests/installation/check_source_release.py` 是**单独显式选择**的源码发布包检查，名称不匹配默认测试发现。它检查发布文件、原件hash与manifest，不运行发布包中的pytest或安装检查。源码发布与wheel是不同交付路径，不能以一个冒充另一个；不在默认安装烟顺带构建整份源码发布包。
 
-`tests/installation/check_retired_entrypoints.py` 也须显式选择，用于安装产物的退役入口检查；默认 installed 组只发现 `test_packaging.py`。两项 `check_*.py` 按各自发布变更范围运行，不能把默认安装烟的通过写成它们已验证。
+默认 installed 组只发现 `test_packaging.py`；core cohort 同时验证已安装产物的旧平台入口、模块和文件退役，不再另外构建或解包同一个 core wheel。`check_source_release.py` 仍须按源码发布差异显式选择，属于独立交付路径，安装检查通过不代表源码发布清单已验证。
 
 ## 选择与证据
 
@@ -47,4 +47,6 @@ Cov 独立插件使用同一目标和 `--installation-cohort cov`。日志属于
 
 `scripts/run_tests.py` 现有RSS、可用内存采样和超时止损不是内核聚合硬内存限制。安装与功能分组不能替代资源隔离；是否具备资源域隔离须由具体运行环境证明，不能从测试通过推断。
 
-薄层检查不依赖旧 Run/Artifact/session 宿主 fixture；共享库检查可以使用其合同所需的独立存储原语。未运行的源码、安装、真实平台资格分别记为未验证，不将静态审查写成动态通过。
+薄层检查不依赖旧 Run/Artifact/session 宿主 fixture。旧 catalog/finalizer/Operation 平台及其测试已退役，
+`tests/operations/` 仅保留真实执行、传输、预算和恢复负控；确定性算法检查在 `tests/skills/`，
+使用随资产保留的功能 fixture，不需要旧宿主。Skill 选择、冻结与生命周期检查在 `test_skill_supply.py`。未运行的源码、安装、真实平台资格分别记为未验证，不将静态审查写成动态通过。

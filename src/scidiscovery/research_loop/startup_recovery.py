@@ -40,7 +40,9 @@ def _origin(root, step):
 
 def _original_paths(root, step):
     record = _origin(root,step)
-    files = dict(settings=Path(root)/'settings.json',job=Path(root)/'jobs'/f'{step:03d}.json',
+    job_path = c.regular(Path(root)/'jobs'/f'{step:03d}.json')
+    job = c.read(job_path)
+    files = dict(settings=configuration_updates.settings_path(root, job),job=job_path,
         intent=record/'native-intent.json',outcome=record/'native-outcome.json',
         stream=record/'native.jsonl',stderr=record/'native.stderr',observation=record/'usage-observation.json',
         runner=record/'runner-process.json',native=record/'native-process.json',
@@ -50,6 +52,14 @@ def _original_paths(root, step):
 
 def _originals(root, step):
     return {name:_ref(file) for name,file in _original_paths(root,step).items()}
+
+
+def _bound_settings(originals):
+    # Revision originals contain the policy under settings; their whole-file
+    # proof stays bound in the permit, exactly like the initial settings file.
+    value = c.read(Path(originals['settings']['path']))
+    job = c.read(Path(originals['job']['path']))
+    return value['settings'] if job.get('configuration_revision') is not None else value
 
 
 def _native_attribution(report):
@@ -66,7 +76,7 @@ def _native_attribution(report):
 
 def _evidence(root, step, report, originals, *, initial=False):
     _native_attribution(report)
-    settings,job = c.read(Path(originals['settings']['path'])),c.read(Path(originals['job']['path']))
+    settings,job = _bound_settings(originals),c.read(Path(originals['job']['path']))
     subject = report.get('subject') or {}
     judgment = report.get('engineering_judgment') or {}
     sources = (report.get('positive_source_flow_evidence') or {}).get('sources') or []
@@ -150,10 +160,12 @@ def validate(root, step, value=None):
             or claim['anchor']['task_sha256'] != originals['job']['sha256']
             or intent['budget_slice'] != dict(claim['anchor'],final_return=marker)):
         raise ValueError('Startup successor changed its original final claim')
-    profiles.validate_intent(c.read(Path(originals['settings']['path'])),job,intent)
+    profiles.validate_intent(_bound_settings(originals),job,intent)
+    if value.get('skill_binding') != job.get('skill_binding'):
+        raise ValueError('Startup successor changed the frozen Skill binding')
     if value.get('final_return') != marker:
         raise ValueError('Startup successor changed its original final claim')
-    if value['native_profile'] != profiles.for_job(c.read(Path(originals['settings']['path'])),c.read(Path(originals['job']['path']))):
+    if value['native_profile'] != profiles.for_job(_bound_settings(originals),job):
         raise ValueError('Startup successor changed the frozen A profile')
     _review_binding(root,value)
     home = Path(value['native_home'])
@@ -190,7 +202,7 @@ def require_eligibility(root, step, value=None, *, initial=False):
 def _review_binding(root, value, current=None):
     """Exact historical review semantics; no verdict or new review is granted."""
     from . import formal_review
-    policy = c.read(Path(value['originals']['settings']['path'])).get('formal_review_policy')
+    policy = _bound_settings(value['originals']).get('formal_review_policy')
     if policy is None:
         if value.get('review_contract') is not None:raise ValueError('Startup recovery invented a review contract')
         return None
@@ -243,7 +255,8 @@ def validate_intent(root, job, intent):
             or intent.get('root_intent_sha256') != value['originals']['intent']['sha256']
             or intent.get('previous') != original_proof(root,job['step'],value)
             or intent.get('budget_slice') != original['budget_slice']
-            or intent.get('native_profile') != value['native_profile']):
+            or intent.get('native_profile') != value['native_profile']
+            or intent.get('skill_binding') != value.get('skill_binding')):
         raise ValueError('Startup successor changed its one exact fresh-context execution')
     return value
 
@@ -306,9 +319,12 @@ def start(root, step, *, reconciliation, reconciliation_sha256, native_home, aut
             if not evidence.exists():
                 with evidence.open('xb') as stream:stream.write(source.read_bytes())
                 evidence.chmod(0o400)
+            original_job = c.read(Path(originals['job']['path']))
             value = dict(version=1,scope='first_model_submission_after_reconciled_startup',root=str(root),step=step,
                 successor_attempt=1,originals=originals,reconciliation=_ref(evidence),final_return=marker,
-                native_profile=profiles.for_job(settings,c.read(Path(originals['job']['path']))),native_home=str(home),
+                native_profile=profiles.for_job(settings,original_job),
+                **({'skill_binding':original_job['skill_binding']} if 'skill_binding' in original_job else {}),
+                native_home=str(home),
                 review_contract=({**settings['formal_review_policy']['contract'],
                     'path':str(root/settings['formal_review_policy']['contract']['path'])} if settings.get('formal_review_policy') is not None else None),
                 native_home_config=_ref(home/'config.toml') if (home/'config.toml').exists() else None,
@@ -327,6 +343,7 @@ def start(root, step, *, reconciliation, reconciliation_sha256, native_home, aut
             original = c.read(Path(value['originals']['intent']['path']))
             intent = dict(step=step,attempt=1,continuation_kind='startup_successor',context_mode='new_context',
                 task_sha256=value['originals']['job']['sha256'],native_profile=value['native_profile'],
+                **({'skill_binding':value['skill_binding']} if 'skill_binding' in value else {}),
                 root_intent_sha256=value['originals']['intent']['sha256'],previous=original_proof(root,step,value),
                 startup_recovery=_ref(permit_path),budget_slice=original['budget_slice'])
             validate_intent(root,job,intent)
@@ -355,7 +372,7 @@ def _collection_report(root, original, report):
             or judgment.get('delivery_dispatch') != 'not_dispatched'
             or not flow.get('mandatory_failure_chain') or not flow.get('first_external_dispatch')
             or not flow.get('conclusion') or subject.get('step') != step or subject.get('native_attempt') != 1
-            or subject.get('goal_id') != c.read(Path(original['originals']['settings']['path']))['goal_id']
+            or subject.get('goal_id') != _bound_settings(original['originals'])['goal_id']
             or subject.get('final_return') != original['final_return']):
         raise ValueError('Exact positive independent delivery non-dispatch evidence is required')
     refs = report['originals']

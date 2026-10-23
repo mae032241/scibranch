@@ -16,8 +16,8 @@ Current references describe the supported commands, reusable contracts and their
 | 插件与共享合同 / Plugins and shared contracts | [Plugin API](PLUGIN_RUNTIME_API.md) · [角色输出 / Role output](role-result-json-protocol-v1.md) |
 | TCAD 执行 / TCAD execution | [传输合同 / Transport](tcad_transport_contract.md) · [中文插件说明](../plugins/tcad_artifact/README.zh-CN.md) · [English plugin reference](../plugins/tcad_artifact/README.md) |
 | TCAD 资格边界 / TCAD qualification limits | [中文](TCAD_QUALIFICATION_STATUS.zh-CN.md) · [English](TCAD_QUALIFICATION_STATUS.md) |
-| 图证据 / Figure evidence | [中文](../plugins/curve_figure_evidence/README.zh-CN.md) · [English](../plugins/curve_figure_evidence/README.md) |
-| 曲线评分 / Curve analysis | [中文](../plugins/curve_score/README.zh-CN.md) · [English](../plugins/curve_score/README.md) |
+| 图证据 / Figure evidence | [Skill](../skills/scientific-paper-evidence/SKILL.md) |
+| 曲线评分 / Curve analysis | [Skill](../skills/curve-analysis/SKILL.md) |
 | 原生试验准备 / Native trial preparation | [启动与资源指南](NATIVE_TRIAL_LAUNCH.zh-CN.md) |
 | 源码检查 / Source checks | [测试分组](../tests/README.md) · [Contributing](../CONTRIBUTING.md) |
 

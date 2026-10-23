@@ -35,80 +35,12 @@ def test_primary_installer_has_valid_shell_syntax() -> None:
     assert completed.returncode == 0, completed.stderr
 
 
-def _figure_supply(root: Path) -> dict[str, str]:
-    """Expose the real pdfimages binary to the operator preflight."""
-    binary = root / "figure-bin"
-    binary.mkdir()
-    (binary / "pdfimages").symlink_to(shutil.which("pdfimages"))
-    for name, body in {
-        "systemd-path": f"printf '%s\\n' '{binary}'\n",
-        "systemctl": "exit 0\n",
-    }.items():
-        command = binary / name
-        command.write_text("#!/bin/sh\n" + body, encoding="utf-8")
-        command.chmod(0o755)
-    return {"PATH": f"{binary}:{os.environ['PATH']}"}
 
 
-@pytest.mark.process_e2e
-def test_figure_preflight_exercises_exact_pdf_image_recovery(
-    tmp_path: Path, monkeypatch
-) -> None:
-    import runpy
-
-    project = Path(__file__).resolve().parents[2]
-    monkeypatch.setenv("PATH", _figure_supply(tmp_path)["PATH"])
-    monkeypatch.setattr(sys, "argv", ["figure_dependencies.py"])
-    runpy.run_path(str(project / "plugins/curve_figure_evidence/curve_figure_evidence/figure_dependencies.py"),
-                   run_name="__main__")
 
 
-@pytest.mark.process_e2e
-def test_figure_installed_preflight_rechecks_the_frozen_contract(
-    tmp_path: Path,
-) -> None:
-    project = Path(__file__).resolve().parents[2]
-    environment = {**os.environ, **_figure_supply(tmp_path),
-        "SCID_WORKSPACE": str(tmp_path), "SCID_PYTHON": sys.executable}
-    site = tmp_path / "site"
-    shutil.copytree(project / "plugins/curve_figure_evidence/curve_figure_evidence", site / "curve_figure_evidence",
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    completed = subprocess.run(["bash", "-c", '''source "$1"
-SELECTED_PLUGINS=(curve_figure_evidence)
-validate_figure_dependencies
-printf '%s\\n' "$FIGURE_DEPENDENCY_CONTRACT" > "$2/curve_figure_evidence/figure_dependencies.json"
-validate_figure_dependencies "$2"
-"$SCID_PYTHON" -c 'import json,sys; p=sys.argv[1]; v=json.load(open(p)); v["poppler_version"]="different"; open(p,"w").write(json.dumps(v))' "$2/curve_figure_evidence/figure_dependencies.json"
-validate_figure_dependencies "$2"
-''', "bash", str(project / "deploy/install.sh"), str(site)],
-        cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=60)
-    assert completed.returncode != 0
-    assert completed.stderr.count("figure dependency preflight: pass") == 2
-    assert "pdfimages version differs" in completed.stderr
-    contract = json.loads((site / "curve_figure_evidence/figure_dependencies.json").read_bytes())
-    assert set(contract) == {"pillow_version", "poppler_version", "executables"}
-    assert set(contract["executables"]) == {"pdfimages"}
-    assert all(Path(path).is_absolute() for path in contract["executables"].values())
 
 
-@pytest.mark.process_e2e
-def test_figure_preflight_observes_dependencies_without_identity_inputs(
-    tmp_path: Path,
-) -> None:
-    project = Path(__file__).resolve().parents[2]
-    environment = {key: value for key, value in os.environ.items() if not key.startswith("SCID_FIGURE_")}
-    environment.update(_figure_supply(tmp_path))
-    environment.update(SCID_WORKSPACE=str(tmp_path), SCID_PYTHON=sys.executable)
-    completed = subprocess.run([
-        "bash", "-c", 'source "$1"; SELECTED_PLUGINS=(curve_figure_evidence); validate_figure_dependencies',
-        "bash", str(project / "deploy/install.sh")],
-        cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=60)
-    assert completed.returncode == 0, completed.stderr
-    contract = json.loads(completed.stdout.removeprefix("Verified figure dependencies: "))
-    from PIL import __version__
-    assert contract["pillow_version"] == __version__
-    assert contract["poppler_version"]
-    assert set(contract["executables"]) == {"pdfimages"}
 
 
 @pytest.mark.process_e2e
@@ -119,7 +51,7 @@ def test_installer_rejects_removed_case_plugin_before_installation(tmp_path: Pat
     completed = subprocess.run(
         [str(project_root / "deploy/install.sh"), "--dry-run"],
         cwd=project_root,
-        env={**os.environ, "SCID_PLUGINS": "tcad_artifact,curve_score,curve_figure_evidence,ingaas_fig4",
+        env={**os.environ, "SCID_PLUGINS": "tcad_artifact,ingaas_fig4",
              "SCID_WORKSPACE": str(workspace), "SCID_PYTHON": sys.executable},
         capture_output=True, text=True, timeout=30, check=False,
     )

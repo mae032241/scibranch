@@ -4,7 +4,7 @@ import re
 import subprocess
 from pydantic import ValidationError
 
-__all__ = ["redact", "exception_facts", "recovery_facts", "RunOutputError", "RunCheckerError"]
+__all__ = ["redact", "exception_facts", "recovery_facts"]
 
 # Stages are set at the local boundary that knows whether an action was sent.
 # Exception type or a remote error message alone cannot establish that fact.
@@ -22,7 +22,7 @@ def recovery_facts(stage: str) -> dict:
             "recovery_condition": condition}
 
 def redact(value: str) -> str:
-    from .workspace import _SECRET
+    _SECRET = re.compile(rb"(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|\bsk-[A-Za-z0-9_-]{20,}\b|(?:api[_-]?key|password|secret)[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9_./+=-]{12,})", re.IGNORECASE)
     value = re.sub(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)", "[redacted private key]", value)
     value = re.sub(r"Command ['\"].*(?:timed out|returned non-zero exit status|died with)", "Command [redacted argv] failed:", value)
     value = _SECRET.sub(b"[redacted]", value.encode("utf-8", errors="replace")).decode("utf-8")
@@ -78,22 +78,3 @@ def exception_facts(error: Exception, *, layer: str, action: str) -> dict:
             **({"origin_layer": redact(str(upstreams[-1].get("origin_layer", upstreams[-1].get("layer", "unknown"))))[:80]} if upstreams else {}),
             "causes": chain[:12],
             "category": "timeout" if any("timeout" in x or x["type"] == "TimeoutError" for x in chain) else "runtime_failure"}
-
-
-class RunOutputError(RuntimeError):
-    def __init__(
-        self, message: str, *, details: tuple[dict[str, str], ...] = (), recorded: bool = False,
-        category: str = "output_rejected",
-    ) -> None:
-        super().__init__(message)
-        self.details = details
-        self.recorded = recorded
-        self.category = category
-
-
-class RunCheckerError(RuntimeError):
-    """Control integrity or checker failure, never a request to rewrite output."""
-
-    def __init__(self, message: str, *, category: str = "checker_failure") -> None:
-        super().__init__(message)
-        self.category = category if category in {"checker_failure", "integrity_failure", "admission_defect", "tool_timeout"} else "checker_failure"

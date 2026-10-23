@@ -24,14 +24,13 @@ from unittest.mock import patch
 import scidiscovery
 from scidiscovery import plugin_configuration
 from scidiscovery.research_loop import ui_errors
-from PIL import Image
 import jsonschema
 import pydantic
 import cryptography
 
 prefix = Path(sys.prefix).resolve()
 assert "include-system-site-packages = false" in (prefix / "pyvenv.cfg").read_text()
-for module in (scidiscovery, plugin_configuration, ui_errors, Image, jsonschema, pydantic, cryptography):
+for module in (scidiscovery, plugin_configuration, ui_errors, jsonschema, pydantic, cryptography):
     assert Path(module.__file__).resolve().is_relative_to(prefix), module.__file__
 package = distribution("scidiscovery")
 for script, target in {
@@ -54,17 +53,9 @@ if cohort == "tcad":
 assert sorted(entry.name for entry in execution) == sorted(execution_names)
 for entry in execution:
     assert entry.load() is not None
-plugin_names = {"builtin", "general_science"}
-if cohort == "tcad":
-    plugin_names |= {"curve_score", "tcad_artifact"}
-plugins = entry_points().select(group="scidiscovery.plugins")
-assert sorted(entry.name for entry in plugins) == sorted(plugin_names)
-for entry in plugins:
-    assert entry.load() is not None
-
-root = resources.files("scidiscovery")
-assert root.joinpath("default_agent_settings.json").read_bytes()
-assert any(item.name.endswith(".sql") for item in resources.files("scidiscovery.artifact_agent.storage").joinpath("migrations").iterdir())
+assert not tuple(entry_points().select(group="scidiscovery.plugins"))
+from scidiscovery import browser_access
+from scidiscovery.research_loop import instance_ui
 assert {entry.name for entry in package.entry_points if entry.group == "console_scripts"} == {"scid-research", "scid-experiment"}
 assert not resources.files("scidiscovery.artifact_agent").joinpath("interfaces").is_dir()
 assert not resources.files("scidiscovery.artifact_agent").joinpath("approval_ui").is_dir()
@@ -75,6 +66,17 @@ assert not (prefix / "share/scidiscovery/roles").exists()
 assert not (prefix / "share/scidiscovery/deploy/systemd").exists()
 
 if cohort == "core":
+    from importlib.util import find_spec
+    assert find_spec("PIL") is None
+    # Retired wheel surfaces are checked against this already installed cohort;
+    # no second core wheel build/unpack is needed.
+    installed_files = {str(path) for path in package.files or ()}
+    for name in ("analysis_artifacts", "calculation_proof", "pdf_tool", "catalog", "invoke", "spec", "tooling"):
+        assert "scidiscovery/operations/" + name + ".py" not in installed_files
+        assert find_spec("scidiscovery.operations." + name) is None
+    for module in ("scidiscovery.platforms.codex", "scidiscovery.platforms.codex_root_host"):
+        assert find_spec(module) is None
+    assert not any(entry.group == "scidiscovery.instance_views" for entry in package.entry_points)
     for name in ("tcad-artifact", "scidiscovery-curve-score", "scidiscovery-curve-figure-evidence", "scidiscovery-cov-execution"):
         try:
             distribution(name)
@@ -93,7 +95,8 @@ if cohort == "core":
             raise AssertionError(f"core unexpectedly exposed {module}")
 elif cohort == "cov":
     distribution("scidiscovery-cov-execution")
-    from cov_execution import experiments as cov, lineage, delivery, receipt, observer
+    from cov_execution import experiments as cov, lineage, delivery, receipt, observer, launcher
+    assert callable(launcher.main)
     from scidiscovery.research_loop import experiments
     declared, binding = experiments.registration("cov_execution:experiment")
     assert declared is cov.REGISTRATION and binding == "experiment"
@@ -101,19 +104,16 @@ elif cohort == "cov":
                for module in (cov, lineage, delivery, receipt, observer))
     assert callable(observer.observe) and callable(delivery.leaf)
 else:
-    # One pip install of core + TCAD resolves curve from the same wheelhouse;
-    # all_domains --no-deps was never equivalent evidence for this requirement.
+    # Installed TCAD discovers the real execution registration without curve plugins.
     tcad = distribution("tcad-artifact")
-    distribution("scidiscovery-curve-score")
     scripts = [entry for entry in tcad.entry_points if entry.group == "console_scripts"]
-    assert sorted(entry.name for entry in scripts) == ["scidiscovery-tcad-transport", "tcad-control-daemon", "tcad-control-mcp"]
+    assert sorted(entry.name for entry in scripts) == ["scidiscovery-tcad-transport", "tcad-control-daemon"]
     for entry in scripts:
         assert callable(entry.load())
         result = subprocess.run([str(prefix / "bin" / entry.name), "--help"],
                                 capture_output=True, text=True, timeout=10)
         assert result.returncode == 0 and "usage:" in result.stdout, result.stderr
-    assert any(requirement.startswith("scidiscovery-curve-score") for requirement in tcad.requires or ())
-    assert resources.files("tcad_artifact").joinpath("roles/parameter_evidence_extractor.md").read_bytes()
+    assert not any("curve" in requirement for requirement in tcad.requires or ())
     assert tuple((prefix / "share/tcad-artifact/systemd").glob("*.in"))
     assert tuple((prefix / "share/tcad-artifact/config").glob("*.json"))
     from scidiscovery.research_loop import experiments

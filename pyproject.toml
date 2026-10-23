@@ -10,7 +10,6 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "cryptography>=42,<47",
-  "Pillow>=10,<13",
   "jsonschema>=4,<5",
   "pydantic>=2,<3",
   "tomli>=2; python_version < '3.11'",
@@ -26,23 +25,15 @@ test = [
 scid-research = "scidiscovery.research_loop.cli:main"
 scid-experiment = "scidiscovery.research_loop.experiments:main"
 
-[project.entry-points."scidiscovery.plugins"]
-builtin = "scidiscovery.builtin_plugin:CORE_PLUGIN"
-general_science = "scidiscovery.general_science_plugin:PLUGIN"
-
 [project.entry-points."scidiscovery.execution_interfaces"]
 local_execution = "scidiscovery.research_loop.local_experiments:REGISTRATION"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.package-data]
-"scidiscovery" = ["default_agent_settings.json"]
-"scidiscovery.artifact_agent.storage" = ["migrations/*.sql"]
-
 [tool.pytest.ini_options]
 addopts = "--strict-markers"
-pythonpath = ["src", ".", "plugins/cov_execution", "plugins/tcad_artifact", "plugins/curve_score", "plugins/curve_figure_evidence", "tests/fixtures/plugins/architecture_operation_plugin", "tests/fixtures/plugins/table_observation_plugin", "tests/fixtures/plugins/blind_csv_operation_plugin"]
+pythonpath = ["src", ".", "plugins/cov_execution", "plugins/tcad_artifact"]
 testpaths = ["tests"]
 norecursedirs = ["portable_delivery"]
 markers = [

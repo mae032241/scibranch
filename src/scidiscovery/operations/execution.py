@@ -63,6 +63,9 @@ class ExecutionInterfaceRegistration:
     engineering_feedback: Callable | None = None
     legacy_retirement: Callable | None = None
     projection_contract: str | None = None
+    # Trusted installed provider implements selective native Skill mounts.
+    # This declaration grants no execution permission or backend selection.
+    native_launcher_module: str | None = None
 
 
 class ExecutionAdapter(Protocol):

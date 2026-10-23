@@ -48,6 +48,12 @@ def _path(value):
 
 
 def _excluded(root, parts):
+    if (len(parts) == 5 and parts[:2] == ('project', 'nodes')
+            and parts[2].isascii() and parts[2].isdecimal() and int(parts[2]) > 0
+            and parts[2] == f'{int(parts[2]):03d}' and parts[3:] == ('.agents', 'skills')):
+        from . import skill_supply
+        skill_supply.archive_projection(root, int(parts[2]))
+        return 'verified_derived_skill_projection'
     if parts[:2] == ('host-history', 'fork-cache'):
         return 'immutable_fork_snapshot_cache'
     if parts[0] == 'native-homes':
@@ -122,7 +128,7 @@ def _inventory(root):
             source_stat=[info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns])
         unknown = (parts[0] not in ROOT_FILES | ROOT_DIRS
             or len(parts) == 2 and parts[0] == 'project' and parts[1] not in {'global', 'nodes'}
-            or len(parts) == 2 and parts[0] == 'host-control' and parts[1] not in {'configuration', 'guidance', 'guidance-revocations', 'operations', 'wait-continuations'}
+            or len(parts) == 2 and parts[0] == 'host-control' and parts[1] not in {'configuration', 'guidance', 'guidance-revocations', 'operations', 'wait-continuations', 'skills'}
             or len(parts) == 2 and parts[0] == 'host-runtime' and parts[1] not in {'experiment-control', 'restore', 'fork'})
         if unknown:
             yield dict(path=name, kind='gap', reason='unrecognized_framework_ownership_not_traversed', **identity)
@@ -886,6 +892,8 @@ def checkpoint_restore(root, package):
             _restore_dependencies(configuration['active_settings'])
             if configuration['pending']:
                 _restore_dependencies(configuration['settings'])
+            from . import skill_supply
+            skill_supply.rebuild(root)
             if anchor['state'] != 'active':
                 files.durable_json(root / 'pause.request', dict(reason='cold_checkpoint_restored'))
                 anchor['state'] = 'active'

@@ -35,6 +35,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
             portfolio_policy: dict | None = None, exploration_order_version: int | None = None,
             worker_fragment_policy: dict | None = None, role_budget_policy: dict | None = None,
             selection_policy: dict | None = None, role_profiles: dict | None = None,
+            worker_profiles: dict | None = None, skills: dict | None = None,
             experiment_mode: str | None = None, execution_config: dict | None = None,
             source_restrictions: list[dict] | None = None, formal_review_policy: dict | None = None,
             execution_authority_policy: dict | None = None,
@@ -99,9 +100,11 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
         raise ValueError('Reasoning effort and service tier must be nonempty strings or null')
     if native_backend != 'codex' and resume_policy is not None:
         raise ValueError('The selected backend does not support Codex continuation policies')
-    from . import profiles
-    frozen_profiles = profiles.normalize(role_profiles, dict(model=model, reasoning_effort=reasoning_effort,
-        service_tier=service_tier)) if role_profiles is not None else None
+    from . import profiles, skill_supply
+    frozen_skills, skill_manifest = skill_supply.prepare(skills, backend=native_backend,
+        launcher=launcher, existing=_existing_settings)
+    frozen_profiles = profiles.normalize(role_profiles if role_profiles is not None else {}, dict(model=model, reasoning_effort=reasoning_effort,
+        service_tier=service_tier), worker_profiles, (frozen_skills or {}).get('sets', {})) if role_profiles is not None or worker_profiles is not None else None
     if (not isinstance(launcher, list) or not launcher
             or not all(isinstance(item, str) and item.strip() for item in launcher)):
         raise ValueError("An explicit native launcher argument list is required")
@@ -213,6 +216,11 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     from .protocol import CURRENT
     if frozen_profiles is not None:
         settings['role_profiles'] = frozen_profiles
+    if worker_profiles is not None:
+        settings['worker_profiles'] = worker_profiles
+        settings['role_profile_declarations'] = role_profiles or {}
+    if frozen_skills is not None:
+        settings['skills'] = frozen_skills
     settings['handoff_protocol']=CURRENT
     settings['handoff_authority_version']=settings['lineage_projection_version']=settings['selection_protocol']=1
     settings['node_budget_mode'] = node_budget_mode
@@ -267,6 +275,8 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     if authority_policy is not None:
         settings['execution_authority_policy'] = dict(authority_policy)
     if validate_only:
+        if _existing_settings is not None:
+            skill_supply.validate(root, settings)
         return settings
     from .instance_owner import creation
     with creation(root):
@@ -318,6 +328,8 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
                 settings['formal_review_policy']=formal_review.freeze_contract(root)
             if authority_policy is not None:
                 settings['execution_authority_policy']=execution_authority.freeze_configuration(root)
+            skill_supply.freeze(root, settings, skill_manifest)
+            skill_supply.validate(root, settings)
             contracts.write(root / "settings.json", settings)
             contracts.write(root / "settings-identity.json",
                             dict(sha256=contracts.digest(root / "settings.json")))

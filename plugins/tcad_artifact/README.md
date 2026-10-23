@@ -18,9 +18,9 @@ files and optional `implementation_compilation.capability_snapshot_path` without
 contacting a backend or creating adapter state. Settings freeze with the instance;
 editing the top-level plugin file does not amend an existing instance.
 
-This plugin also retains reusable schemas, project materializers, parsers and
-Operation declarations. These are [library contracts](../../docs/PLUGIN_RUNTIME_API.md);
-they do not provide a Run/Artifact application or an Operation scheduler.
+This adapter retains execution schemas, project materializers, transport and policy
+checks. Curve/PLX/log analysis belongs to the [curve-analysis Skill](../../skills/curve-analysis/SKILL.md).
+See the [execution API](../../docs/PLUGIN_RUNTIME_API.md).
 Scientific Workers author solver projects and assess results. Deterministic code
 resolves exact source, case anchors, capability, file bindings and resource policy.
 It does not invent physical models or generate a solver deck from an underspecified request.

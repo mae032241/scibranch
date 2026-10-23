@@ -30,8 +30,7 @@ jobs:
           python -m pip install -e '.[test]'
           python -m pip install -e plugins/cov_execution
           python -m pip install -e plugins/tcad_artifact
-          python -m pip install -e plugins/curve_score
-          python -m pip install -e plugins/curve_figure_evidence
+          python -m pip install -r skills/curve-analysis/requirements.txt -r skills/scientific-paper-evidence/requirements.txt
       - name: Source tests
         run: python scripts/run_tests.py --config scripts/test_resources_ci.json --lane source --per-file --output .test-evidence/ci-source
       - name: Process lifecycle tests

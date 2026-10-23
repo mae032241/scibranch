@@ -9,6 +9,7 @@ from scidiscovery.research_loop import (
     controller, delivery, execution_authority as authority, execution_recovery,
     formal_review as review, profiles, qualification as q, research_config,
 )
+from execution_fixtures import execution_registry
 from test_delivery import delivery_policy
 from test_history_handoff import finish
 
@@ -117,8 +118,7 @@ def test_cov_launcher_uses_verified_revision_profile_and_keeps_base_assertion(tm
     snapshot(root, settings)
     job = c.build_job(root, 2, 'H', [])
     path = Path(__file__).resolve().parents[2] / 'scripts/acceptance/rootless_cov_launcher.py'
-    spec = importlib.util.spec_from_file_location('revision_cov_launcher', path)
-    launcher = importlib.util.module_from_spec(spec); spec.loader.exec_module(launcher)
+    from cov_execution import launcher
     monkeypatch.setenv('THIN_HWA_ROLE', 'H')
     monkeypatch.setenv('THIN_HWA_JOB_MANIFEST', str(root / 'jobs/002.json'))
     declared = dict(c.settings(root), scene_root=str(root))
@@ -127,3 +127,60 @@ def test_cov_launcher_uses_verified_revision_profile_and_keeps_base_assertion(tm
     import pytest
     with pytest.raises(ValueError, match='launcher_role_profiles_mismatch'):
         launcher.native_profile(dict(declared, model='invented-launcher-model'))
+
+
+def test_cov_accepted_attempt_uses_private_skill_context_and_rejects_changed_role_model(tmp_path, monkeypatch, execution_registry):
+    import os
+    import pytest
+    from cov_execution import launcher
+    from test_skill_supply import prepare as prepare_skills
+    from scidiscovery.research_loop import backends, execution, runtime
+
+    for named_worker in (False, True):
+        case = tmp_path / ('named' if named_worker else 'role'); case.mkdir()
+        role = dict(worker='analyst') if named_worker else dict(skill_set='first')
+        workers = {'analyst': dict(model='worker-specific-model', skill_set='first')} if named_worker else None
+        operator_file = case / 'operator.json'
+        operator_file.write_text('{}')
+        module_launcher = [sys.executable, '-m', 'cov_execution.launcher', '--config', str(operator_file)]
+        root, _ = prepare_skills(case, roles={'H': role}, workers=workers, launcher=module_launcher)
+        job = c.build_job(root, 1, 'H', [])
+        assert job.get('configuration_revision') is None
+        record = execution.record(root, 1)
+        frozen = updates.for_job(root, job)
+        c.write(record / 'native-intent.json', dict(
+            task_sha256=c.digest(root / 'jobs/001.json'),
+            budget_slice=budget.accept_node(root, job), **profiles.binding(frozen, job)))
+        identity = execution.identity(root, 1)
+        c.write(record / 'runner-process.json', runtime.process_identity(os.getppid(), identity))
+        c.write(record / 'native-process.json', runtime.process_identity(os.getpid(), identity))
+        monkeypatch.setenv('THIN_HWA_ROLE', 'H')
+        monkeypatch.setenv('THIN_HWA_JOB_MANIFEST', str(root / 'jobs/001.json'))
+        monkeypatch.setenv('THIN_HWA_NATIVE_HOME', str(execution.home(root, 1)))
+        declared = dict(scene_root=str(root), model='fixture', reasoning_effort='high',
+                        role_profiles={'H': role})
+        assert 'skills' not in declared and 'worker_profiles' not in declared
+        output = record / 'result.pending.json'
+        work = c.workspace(root, 1)
+        schema = record / 'science-result.schema.json'
+        expected = profiles.for_job(frozen, job)
+        assert expected['model'] == ('worker-specific-model' if named_worker else 'fixture')
+        backend = backends.selected(frozen)
+        assert backend.launcher == module_launcher and not backend.supports_native_schema_flag
+        assert frozen['skills']['launcher']['provider']['native_launcher_module'] == 'cov_execution.launcher'
+        argv = backend.launch(expected, work, output, schema,
+            job.get('native_role_instruction', c.ROLE_INSTRUCTIONS['H']))[len(backend.launcher):]
+        assert '--output-schema' not in argv
+        without_role_refs = {key: value for key, value in declared.items() if key != 'role_profiles'}
+        for operator in (declared, without_role_refs):
+            assert launcher.native_profile(operator) == expected
+            assert launcher.accepted_attempt(operator, work, output) == schema
+            effective = launcher.native_args(operator, work, argv)
+            assert effective[effective.index('--model') + 1] == expected['model']
+            assert effective[effective.index('--output-schema') + 1] == str(schema)
+        changed = dict(declared, role_profiles={'H': dict(role, model='changed-launcher-model')})
+        for consume in (lambda: launcher.native_profile(changed),
+                        lambda: launcher.accepted_attempt(changed, work, output),
+                        lambda: launcher.native_args(changed, work, argv)):
+            with pytest.raises(ValueError, match='launcher_role_profiles_mismatch'):
+                consume()

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from scidiscovery.research_loop import budget,contracts as c,controller,execution,native,runtime,startup_recovery as recovery
+from scidiscovery.research_loop import budget,configuration_updates,contracts as c,controller,execution,native,profiles,research_config,runtime,startup_recovery as recovery
 from test_history_handoff import finish
 
 
@@ -26,16 +26,29 @@ print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=17,cached_in
 '''
 
 
-def _scene(tmp_path, *, unknown=False, action='finish', legacy=False, review=False):
+def _scene(tmp_path, *, unknown=False, action='finish', legacy=False, review=False, skill_revision=False):
     public=tmp_path/'public';public.mkdir();goal=public/'goal';goal.write_text('Assess exact existing W evidence.')
     home=tmp_path/'native-home';home.mkdir();(home/'config.toml').write_text('fixture=true\n')
     launcher=tmp_path/'native.py';launcher.write_text('HOME='+repr(str(home))+'\nUNKNOWN='+repr(unknown)+'\nACTION='+repr(action)+'\n'+LAUNCHER)
     root=tmp_path/'instance'
     controller.prepare(root,goal,public,[sys.executable,str(launcher)],max_tokens=100 if legacy else 10000,max_seconds=60,max_steps=12,
-        model='fixture-no-model',reasoning_effort='high',role_profiles={},search_policy=None,
+        model='fixture-no-model',reasoning_effort='high',
+        role_profiles={'A':dict(skill_set='initial')} if skill_revision else {},search_policy=None,
+        skills=dict(sets={name:dict(items=[]) for name in ('initial','selected')}) if skill_revision else None,
         formal_review_policy={'version':1} if review else None,node_budget_mode='soft',
         node_budget_policy={role:dict(max_observed_tokens=100,max_seconds=10) for role in 'HWAE'})
-    finish(root,1,'H',[],action='experiment');finish(root,2,'W',[1])
+    if skill_revision:
+        for step,role,parents,action_ in [(1,'H',[],'experiment'),(2,'W',[1],'wait')]:
+            job=c.build_job(root,step,role,parents)
+            c.write(execution.origin(root,step)/'native-intent.json',dict(
+                task_sha256=c.digest(root/'jobs'/f'{step:03d}.json'),
+                **profiles.binding(configuration_updates.for_job(root,job),job)))
+            finish(root,step,role,parents,action=action_,preserve_native_intent=True)
+        document=research_config.to_document(root)
+        document['agent']['roles']['A']['skill_set']='selected'
+        configuration_updates.submit(root,document,expected_revision=0)
+    else:
+        finish(root,1,'H',[],action='experiment');finish(root,2,'W',[1])
     c.write(root/'host-started.json',budget.clock_stamp());budget.transition(root,'advance','fixture original startup')
     if legacy:
         job=c.build_job(root,3,'A',[1,2])
@@ -59,7 +72,8 @@ def _scene(tmp_path, *, unknown=False, action='finish', legacy=False, review=Fal
 def failed_original(tmp_path,root,job,anchor,home):
     from scidiscovery.research_loop import profiles
     record=execution.origin(root,3)
-    intent=dict(step=3,task_sha256=c.digest(root/'jobs/003.json'),native_profile=profiles.for_job(c.settings(root),job),budget_slice=anchor)
+    intent=dict(step=3,task_sha256=c.digest(root/'jobs/003.json'),
+        **profiles.binding(configuration_updates.for_job(root,job),job),budget_slice=anchor)
     c.write(record/'native-intent.json',intent)
     identity=dict(pid=99999999,start_ticks=1,pgid=99999999,sid=99999999,ppid=1,
         boot_id=budget.clock_stamp()['boot_id'],task_sha256=intent['task_sha256'])
@@ -422,3 +436,28 @@ def test_startup_accepts_original_attribution_without_pinning_current_executable
     changed=dict(permit,native_program=dict(permit['native_program'],sha256='b'*64))
     with pytest.raises(ValueError,match='source attribution'):
         recovery.validate(root,3,changed)
+
+
+
+@pytest.mark.process_e2e
+def test_startup_recovery_binds_original_skill_revision_instead_of_initial_or_latest(tmp_path):
+    root,options=_scene(tmp_path,skill_revision=True)
+    job=c.read(root/'jobs/003.json')
+    assert job['skill_binding']['skill_set']=='selected'
+    selected=root/job['configuration_revision']['path']
+    selected_bytes=selected.read_bytes()
+    document=research_config.to_document(root,configuration_updates.current(root))
+    document['agent']['roles']['A']['skill_set']='initial'
+    configuration_updates.submit(root,document,expected_revision=1)
+    saved=originals(root)
+    result=recovery.start(root,3,**options)
+    assert result['status']=='final_a_completed',json.dumps(result,indent=2)
+    permit=recovery.validate(root,3)
+    assert permit['originals']['settings']['path']==str(selected)
+    assert permit['originals']['settings']['sha256']==c.digest(selected)
+    assert selected.read_bytes()==selected_bytes
+    assert configuration_updates.current(root)['role_profiles']['A']['skill_set']=='initial'
+    intent=c.read(execution.record(root,3)/'native-intent.json')
+    assert intent['skill_binding']==job['skill_binding']==permit['skill_binding']
+    assert all(file.read_bytes()==data for file,data in saved.items())
+    assert (c.workspace(root,3)/'work/submission-count').read_text()=='one\n'

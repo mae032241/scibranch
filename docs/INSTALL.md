@@ -2,6 +2,8 @@
 
 [简体中文](INSTALL.zh-CN.md) | English
 
+The supported host platform is Linux with POSIX filesystem/locking behavior. Native Windows is unsupported and WSL2 is unverified. No Windows adaptation is installed.
+
 The installer builds and publishes `scid-research`, `scid-experiment` and selected
 plugins offline. Operators must provide dependencies beforehand. Installation does
 not contact a model, create a research instance or start services.
@@ -34,10 +36,16 @@ The core supplies `local_execution:command` without installing Cov. Select
 `SCID_PLUGINS=cov_execution` for the independently packaged
 `scidiscovery-cov-execution` adapter and its `cov_execution:experiment` entry point.
 Its observer, receipt and delivery providers ship in the same package.
-`SCID_PLUGINS=tcad_artifact,curve_score` selects local plugins. Explicitly include
-plugin dependencies; the installer does not fetch external dependencies.
-The optional figure plugin also requires existing Pillow/pdfimages; dependency
-preflight fails before publication begins. Installation does not qualify SSH,
+`SCID_PLUGINS=tcad_artifact` selects TCAD; it no longer depends on a curve plugin.
+The installer checks every active core dependency version and marker, including
+cryptography and Python 3.10 tomli, before publication; it imports the browser/UI
+entry points during package probing. It fetches no external dependencies.
+All bundled Skills are copied as ordinary files to `$SCID_INSTALL_ROOT/skills`,
+independently of pip's temporary build tree. The wrappers set `SCID_SKILLS_ROOT`
+to that persistent path; explicit `[skills].root` overrides this default for new
+instances. Skill dependencies are optional for core: use each bundle's
+`requirements.txt` and CLI preflight. Pillow is required for image tools;
+Poppler `pdfimages` is required only for PDF image extraction. Installation does not qualify SSH,
 licenses or real solvers. See the [transport contract](tcad_transport_contract.md)
 for the independently deployed remote runner.
 
@@ -45,7 +53,12 @@ Installation publishes only `scid-research` and `scid-experiment`. It creates no
 instance, budget, credential, platform profile or service. Existing sites or either
 command wrapper cause refusal; this is not an in-place upgrade tool.
 `deploy/reinstall.sh` is an operator sudo wrapper with the same fresh-prefix rule.
-Changed code never silently upgrades or re-signs frozen instances.
+For an implementation upgrade, install to a new `SCID_INSTALL_ROOT` and a separate
+existing `SCID_BIN_ROOT`, validate that deployment, stop or reconcile old writers,
+then explicitly switch command paths. Retain the old prefix for rollback.
+Scientific configuration, original identities and frozen Skill bytes remain
+instance-owned; changing shared implementation code is a separate upgrade and
+provides no compatibility guarantee for old protocols.
 
 `deploy/install.sh status` checks wrapper ownership. `sudo deploy/install.sh uninstall`
 removes only the two matching wrappers, retaining code and instance originals.

@@ -23,6 +23,15 @@ def proof(record):
             if name != 'usage.json' or (record/name).exists()}
 
 
+def _skill_intent(root, step, intent):
+    if 'skill_binding' not in intent and c.settings(Path(root)).get('skills') is None:
+        return
+    settings = configuration_updates.for_step(root, step)
+    if settings.get('skills') is not None or 'skill_binding' in intent:
+        from . import profiles
+        profiles.validate_intent(settings, c.read(c.regular(Path(root) / 'jobs' / f'{step:03d}.json')), intent)
+
+
 def accepted_intents(root, step):
     """Enumerate accepted identities without traversing their execution results."""
     root = Path(root)
@@ -31,6 +40,7 @@ def accepted_intents(root, step):
     previous = None
     if (first/'native-intent.json').exists():
         value = c.read(c.regular(first/'native-intent.json'))
+        _skill_intent(root, step, value)
         if (value.get('task_sha256') != task or 'attempt' in value
                 or 'step' in value and (type(value['step']) is not int or value['step'] != step)):
             raise ValueError('Original accepted native intent identity changed')
@@ -48,6 +58,7 @@ def accepted_intents(root, step):
             if any(path.iterdir()):raise ValueError('Unaccepted continuation has unexpected execution facts')
             continue
         value = c.read(c.regular(file))
+        _skill_intent(root, step, value)
         if (previous is None or number != accepted+1 or type(value.get('attempt')) is not int
                 or value['attempt'] != number or value.get('task_sha256') != task
                 or 'step' in value and (type(value['step']) is not int or value['step'] != step)
@@ -64,6 +75,8 @@ def records(root, step):
     first = origin(root, step)
     result = [first]
     directory = first / 'continuations'
+    if (first / 'native-intent.json').exists():
+        _skill_intent(root, step, c.read(c.regular(first / 'native-intent.json')))
     if not directory.exists():return result
     if directory.resolve() != directory:raise ValueError('Native continuation directory changed')
     settings = configuration_updates.for_step(root, step)
@@ -109,6 +122,7 @@ def records(root, step):
             if any(path.iterdir()):raise ValueError('Unaccepted continuation has unexpected execution facts')
             continue
         intent = c.read(c.regular(path / 'native-intent.json'))
+        _skill_intent(root, step, intent)
         output_repair=intent.get('continuation_kind')=='repair' and isinstance(intent.get('output_repair'),dict) and 'work_repair' not in intent
         if (original_intent.get('budget_slice') or {}).get('final_return') is not None and intent.get('continuation_kind') != 'startup_successor' and not output_repair:
             raise ValueError('Final A return cannot acquire another native attempt')

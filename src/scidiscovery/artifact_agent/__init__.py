@@ -1,8 +1,7 @@
-"""Immutable Artifact and task control-plane package.
+"""Retained execution payload schema leaves, without an Artifact host.
 
-The package initializer is intentionally side-effect free.  Callers import
-services from their owning modules so loading one boundary cannot initialize
-unrelated schemas, plugins, storage, or runtime state.
+Import concrete schemas from their owning modules; this initializer performs no
+registration, storage initialization or eager aggregate import.
 """
 
 __all__: tuple[str, ...] = ()

@@ -12,6 +12,7 @@ FROZEN_TASK_SETTINGS = (
     'native_backend', 'native_options', 'native_launcher_argv', 'max_output_item_bytes', 'max_output_total_bytes',
     'final_a_completion_policy', 'live_feedback_version', 'experiment_interface_version',
     'managed_admission_version', 'worker_view_version', 'storage_policy',
+    'skills', 'worker_profiles', 'role_profile_declarations',
 )
 
 
@@ -141,6 +142,10 @@ def _selected_base(root, selected, *, bind_inputs=False):
     job.pop('configuration_revision', None)
     if binding is not None and binding['configuration_revision'] is not None:
         job['configuration_revision'] = binding['configuration_revision']
+    from . import skill_supply
+    skill_supply.for_job(selected['settings'], selected['job'])
+    if revision.get('skills') is not None:
+        job['skill_binding'] = skill_supply.binding(revision, job)
     job['public_root'] = revision['public_root']
     if job['goal_text'] != revision['objective']:
         raise ValueError('Fork cannot replace the selected original scientific objective')
@@ -223,6 +228,8 @@ def build_selected_job(root, step):
     if path.exists():
         job = c.read(c.regular(path))
         validate_selected_job(root, c.workspace(root, step), job)
+        from . import skill_supply
+        skill_supply.project(root, configuration_updates.for_job(root, job), job)
         return job
     # First admission verifies the complete immutable closure. Later reads
     # verify metadata plus the exact members they consume.
@@ -253,6 +260,8 @@ def build_selected_job(root, step):
             if combined:
                 job['user_guidance'] = combined
             _publish_selected(root, work, job)
+    from . import skill_supply
+    skill_supply.project(root, frozen, job)
     return job
 
 

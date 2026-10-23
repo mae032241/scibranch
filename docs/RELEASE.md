@@ -7,9 +7,10 @@
 
 The application provides `scid-research`, `scid-experiment` and an on-demand
 instance UI. The research controller uses native scientific threads, explicit
-instance roots, frozen inputs and finite budgets. Reusable Operation/compiler
-declarations, schemas, callbacks and domain adapters remain library surfaces;
-the [Plugin API](PLUGIN_RUNTIME_API.md) identifies their current owners.
+instance roots, frozen inputs and finite budgets. Execution adapters remain installed
+interfaces; scientific algorithms ship as selected Skill bundles. The old
+non-execution registry and Operation host are retired. The [adapter API](PLUGIN_RUNTIME_API.md)
+identifies the surviving contracts.
 [Architecture](ARCHITECTURE.md) and the [CLI guide](ROOTLESS_CLI.zh-CN.md)
 define behavior, permission and recovery boundaries.
 

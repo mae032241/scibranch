@@ -54,7 +54,7 @@ def revisions(root, *, through=None):
                 or not isinstance(value.get('settings'), dict)):
             raise ValueError('Configuration revision identity changed')
         for key in ('goal_id', 'objective', 'public_root', 'global_materials', 'source_provenance',
-                    'time_budget_basis', 'handoff_protocol', 'final_a_completion_policy'):
+                    'time_budget_basis', 'handoff_protocol', 'final_a_completion_policy', 'skills'):
             if value['settings'].get(key) != original.get(key):
                 raise ValueError('Configuration revision changed immutable research identity')
         rows.append(value)

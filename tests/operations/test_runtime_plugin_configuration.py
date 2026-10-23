@@ -370,7 +370,7 @@ def _managed_tcad_case(tmp_path, *, retirement=False):
         mechanism_ref=None, handoff_protocol=CURRENT)
     config = dict(transport='socket', socket_path=str(tmp_path / 'unused.socket'),
         scope=scope, record_dir=str(tmp_path / 'records'), native_attempt=dict(number=0),
-        admission=dict(version=1, mode='hard'))
+        admission=dict(version=1, mode='hard'), max_seconds=60)
     # Trusted DI boundary only; this does not claim a real core freeze.
     config['execution_interface'] = dict(version=e.VERSION, executor='tcad_execution:tcad',
         observation_version=e.OBSERVATION_VERSION, terminal_evidence='adapter_result', result_protocol=None,
@@ -635,10 +635,10 @@ def test_managed_tcad_retirement_found_job_never_becomes_non_submission(tmp_path
     external, _ = wrapper.submit(prepared)  # Native reply exists before core external binding.
     backend.state = 'queued'
     reply = e.retire_original(config, wrapper, payload.name)
-    assert reply['status'] == 'cancelling' and wrapper.records.external(payload.name) == external
+    assert reply['status'] == 'queued' and wrapper.records.external(payload.name) == external
     assert e.retirement(config, payload.name) is None
-    assert e.retire_original(config, wrapper, payload.name)['status'] == 'cancelling'
-    assert backend.events.count('cancel') == 1
+    assert e.retire_original(config, wrapper, payload.name)['status'] == 'queued'
+    assert 'cancel' not in backend.events
     backend.found = None  # A lost backend database cannot erase the original known job.
     with pytest.raises(e.IntegrityError, match='contradicts'):
         e.retire_original(config, wrapper, payload.name)

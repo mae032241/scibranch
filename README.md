@@ -2,6 +2,8 @@
 
 [简体中文](README.zh-CN.md) | English
 
+Current platform support is Linux: the framework uses POSIX file/lock semantics and Linux namespaces. Native Windows is unsupported; WSL2 has not been qualified. Skill freezing/role selection is a general contract, while read-only namespace mounts are a Linux backend implementation.
+
 SciDiscovery is a CLI-first scientific research framework with Codex and an explicit
 agent-protocol backend. It runs H/W/A/E threads against an explicit objective and
 frozen inputs, with finite shared budgets,
@@ -40,10 +42,13 @@ The core installs the local execution interface. Cov execution, receipt handling
 public observation and delivery belong to the optional `cov_execution` plugin
 (`SCID_PLUGINS=cov_execution`), with the stable executor key
 `cov_execution:experiment`. The optional TCAD adapter provides detached solver execution through bounded
-transport. Curve plugins provide deterministic scoring and paper-figure evidence
-capabilities. Installing a plugin registers its declared capabilities; it does not
-supply a solver, license or scientific qualification. Plugin declarations also
-remain available as libraries through the [Plugin API](docs/PLUGIN_RUNTIME_API.md).
+transport. Deterministic curve scoring and paper-figure extraction ship as
+self-contained `curve-analysis` and `scientific-paper-evidence` Skills. The installer
+publishes these and `sentaurus-tcad-code` into its persistent `skills/` directory.
+Select Skill sets per role or named Worker in the [configuration reference](docs/RESEARCH_CONFIGURATION.md).
+Instances freeze selected bundle bytes once and project only the current role's
+selection. Skills grant no execution permission or scientific qualification.
+The [execution adapter API](docs/PLUGIN_RUNTIME_API.md) owns the installed adapter contract.
 
 ## Install and start
 
@@ -131,8 +136,8 @@ to omissions, not the entire evidence index. Details describe missing materials;
 [Documentation index](docs/README.md) · [Architecture](docs/ARCHITECTURE.md) ·
 [Release scope](docs/RELEASE.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
 
-The active controller lives in `src/scidiscovery/research_loop/`; domain algorithms,
-contracts and adapters live in `plugins/`. Use the [test lanes](tests/README.md)
+The active controller lives in `src/scidiscovery/research_loop/`; execution adapters
+live in `plugins/`, and deterministic scientific tools and guidance live in `skills/`. Use the [test lanes](tests/README.md)
 with supervised, serial, exact targets. Functional tests do not build or install
 packages. `scripts/build_git_release.py` creates a source distribution with a
 per-file SHA256 manifest from explicitly selected source, current references,

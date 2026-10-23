@@ -2,6 +2,8 @@
 
 简体中文 | [English](README.md)
 
+当前框架仅支持 Linux，依赖 POSIX 文件/锁语义及 Linux namespace；原生 Windows 不支持，WSL2 未验证。Skill 冻结和角色选择是通用合同，只读 namespace 挂载是 Linux backend 实现。
+
 SciDiscovery 是以 CLI 为核心、提供 Codex 与显式 Agent 协议后端的科研框架。
 它围绕明确目标与冻结输入运行 H/W/A/E 线程，提供有限共享预算、科学结果封存及原调用恢复。科学 Worker 负责模型选择与结论；
 确定性控制负责身份、输入绑定、资格校验、预算和执行权限。
@@ -21,15 +23,18 @@ SciDiscovery 是以 CLI 为核心、提供 Codex 与显式 Agent 协议后端的
 | `scid-research` | 准备实例，运行、查看、暂停和继续研究，收束并导出结果。 |
 | `scid-research start` | 为明确实例启动或连接 detached 控制进程。 |
 | `scid-research fork-preview` / `fork-create` | 从精确历史逻辑任务预览并创建暂停的新分支。 |
+| `scid-research instance-delete` | 按精确身份永久删除静止实例；同一操作通过持久回执核对。 |
 | `scid-research serve-ui` | 同一实例的可选网页，提供实例控制和封存结果分页。 |
 | `scid-research archive-*` / `checkpoint-*` | 导出和核验原件、恢复指定材料，或执行限定的同宿主冷迁移。 |
 | `scid-experiment` | 使用受管本地实验或声明的领域执行接口。 |
 
 核心只安装本地执行接口。Cov 执行、回执、公开观察与交付由可选 `cov_execution` 插件提供，
 通过 `SCID_PLUGINS=cov_execution` 显式安装；执行器标识保持 `cov_execution:experiment`。
-可选 TCAD adapter 通过有界传输提供 detached solver 执行；曲线插件提供确定性评分和论文图
-证据能力。安装插件只注册其声明能力，不提供 solver、许可证或科学资格。插件声明也可按
-[Plugin API](docs/PLUGIN_RUNTIME_API.md)作为库使用。
+可选 TCAD adapter 通过有界传输提供 detached solver 执行。确定性曲线评分和论文图提取迁为
+自包含的 `curve-analysis`、`scientific-paper-evidence` Skill，与 `sentaurus-tcad-code`
+一起持久安装到安装前缀的 `skills/`。按角色或命名 Worker 显式选择集合，实例冻结选中资产，
+节点只投影本角色集合；见[配置参考](docs/RESEARCH_CONFIGURATION.md)。Skill 不授予执行权限或科学资格。
+执行适配器合同见[接口参考](docs/PLUGIN_RUNTIME_API.md)。
 
 ## 安装与开始使用
 

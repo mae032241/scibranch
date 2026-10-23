@@ -7,7 +7,7 @@ from typing import Annotated, Literal
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from .common import Identifier, SchemaModel, canonical_json, canonical_sha256
-from .scientific_foundation import ScalarValue
+ScalarValue = str | int | float | bool
 from .units import supported_unit_spellings, unit_definition
 from ...operation_contract import SemanticRuleViolation, declared_violation
 
@@ -442,89 +442,3 @@ class ExperimentPortfolio(SchemaModel):
             if not selected:
                 raise ValueError("scientific portfolio requires selected hypotheses")
         return self
-
-
-def deterministic_validation_check_keys(plan: ValidationPlan) -> tuple[Identifier, ...]:
-    """Return deterministic checks in their immutable declaration order."""
-
-    return tuple(
-        check.check_key
-        for dimension in (plan.numerical, plan.physical, plan.experimental)
-        for check in dimension.checks
-        if check.evaluation_mode == "deterministic_threshold"
-    )
-
-
-def validate_experiment_portfolio(value: dict[str, object]) -> dict[str, object]:
-    portfolio = ExperimentPortfolio.model_validate_json(
-        canonical_json(value), strict=True
-    )
-    return portfolio.model_dump(mode="json")
-
-
-def validate_experiment_input_objective(inputs: dict[str, bytes]) -> None:
-    """Cross-input identity at admission or deterministic materialization."""
-    from .cognitive import HypothesisProposal
-    from .research_objective import ResearchObjectiveContract
-
-    objective = ResearchObjectiveContract.model_validate_json(inputs["research_objective"], strict=True)
-    hypotheses = HypothesisProposal.model_validate_json(inputs["hypothesis_portfolio"], strict=True)
-    if hypotheses.research_objective_key != objective.objective_key:
-        raise ValueError("hypothesis portfolio research_objective_key differs from research objective")
-
-
-def validate_experiment_design_task_output(
-    value: dict[str, object],
-    inputs: dict[str, bytes],
-    handoff: dict[str, object],
-) -> None:
-    """Check selected hypotheses against the bound portfolio without goal copying."""
-
-    del handoff
-    portfolio = ExperimentPortfolio.model_validate_json(
-        canonical_json(value), strict=True
-    )
-    if portfolio.study_kind == "engineering":
-        return
-    raw_objective = inputs.get("research_objective")
-    raw_hypotheses = inputs.get("hypothesis_portfolio")
-    if raw_objective is None:
-        raise SemanticRuleViolation("scientific experiment design requires research_objective")
-    if raw_hypotheses is None:
-        raise SemanticRuleViolation("scientific experiment design requires hypothesis_portfolio")
-    from .cognitive import HypothesisProposal
-    from .research_objective import ResearchObjectiveContract
-
-    objective = ResearchObjectiveContract.model_validate_json(
-        raw_objective, strict=True
-    )
-    hypotheses = HypothesisProposal.model_validate_json(raw_hypotheses, strict=True)
-    hypothesis_keys = {item.hypothesis_key for item in hypotheses.hypotheses}
-    selected = set(portfolio.selected_hypothesis_keys)
-    if not selected.issubset(hypothesis_keys):
-        raise SemanticRuleViolation(
-            "experiment portfolio selects a hypothesis absent from the supplied portfolio"
-        )
-
-
-__all__ = [
-    "ExperimentCase",
-    "CaseExpectation",
-    "ComparisonContract",
-    "ComparisonVariable",
-    "ExperimentFactor",
-    "ExperimentPortfolio",
-    "ExperimentProposal",
-    "ExperimentValueAssessment",
-    "FactorSetting",
-    "IdentifiabilityClaim",
-    "MetricThreshold",
-    "PredictionTest",
-    "ResourceEstimate",
-    "ValidationCheck",
-    "ValidationDimensionPlan",
-    "ValidationPlan",
-    "deterministic_validation_check_keys",
-    "validate_experiment_portfolio",
-    "validate_experiment_design_task_output",
-]

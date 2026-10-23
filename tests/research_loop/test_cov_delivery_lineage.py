@@ -104,8 +104,7 @@ def current_managed_scene(tmp_path,monkeypatch):
     # The production callback freezes the native home and exact source/runner,
     # then runs the actual installed sandbox inside its bwrap mounts. No model.
     repo=Path(__file__).resolve().parents[2]
-    spec=importlib.util.spec_from_file_location('current_cov_launcher',repo/'scripts/acceptance/rootless_cov_launcher.py')
-    launcher=importlib.util.module_from_spec(spec);spec.loader.exec_module(launcher)
+    from cov_execution import launcher
     receipt_path=str(Path(cov_receipt.__file__).resolve())
     settings=dict(scene_root=str(root),public_root=str(public),runs_dir=str(root/'runs'),submission_dir=str(root/'submission'),
         native=str(actual),code_mode_host=dict(path=str(actual.parent/'codex-code-mode-host')),

@@ -175,9 +175,9 @@ managed policy、额外可写根以及无法忠实投影后端权限的自定义
 `scidiscovery.execution_interfaces` 发现执行接口，薄实例冻结所选执行器、操作者配置及执行合同。
 框架、插件及工具源码升级不使科学任务或已接受调用失效；历史源码指纹仅作元数据，不作准入条件。
 任务、输入、成果原件、声明权限、有限预算及外部调用身份仍须精确绑定，升级不授权重放未知调用。
-保留的 Operation 编译器、插件声明、共享 schema、抽取的回调及独立存储原语不是旧 MCP 服务入口。
-`artifact_agent/service` 旧 Run/SQL 宿主及运行辅助模块已删除；存储库保留不表示薄链依赖它作为宿主。
-不按目录名删除 adapter、来源规则或存储校验。Operation ABI 以 `operations/spec.py` 为准，当前为 26；插件接口见[API](PLUGIN_RUNTIME_API.md)。
+非执行插件 registry、Operation 编译宿主、Artifact 存储宿主、helper 与 finalizer 已退役。
+保留执行叶 schema、来源规则、有界进程 IO 和真实 wire transport；沿用其窄模块路径减少纯搬移，
+不再提供 catalog 或科学调度。曲线和图证据算法为自包含 Skill 脚本；执行扩展见[接口参考](PLUGIN_RUNTIME_API.md)。
 
 ## 不可退化的边界
 
@@ -388,3 +388,11 @@ CLI result/materials/artifact 与网页通过同一精确原件 API 读取，下
 TCAD 专项提升资格所需证据见[资格状态](TCAD_QUALIFICATION_STATUS.zh-CN.md)。
 
 使用方法见[CLI 指南](ROOTLESS_CLI.zh-CN.md)，部署见[安装](INSTALL.zh-CN.md)，验证口径见[发布](RELEASE.zh-CN.md)。
+
+## 受管 Skill 资产
+
+`skill_supply.py` 每实例只冻结显式集合资产一次，把角色/Worker 选择绑定到任务与 native intent。
+普通原件属于实例，`.agents/skills` 是已验证、可重建的发现投影。来源更新不刷新冻结字节，
+修订只能改选已冻结集合，新 ID/版本要求新实例。归档、fork 和冷恢复保留普通对象，
+在接收根重建投影，不依赖安装来源或父实例继续存在。原生用户/系统/插件 Skill 继续继承，
+原生权限 profile 保持原语义；具体配置见[配置参考](RESEARCH_CONFIGURATION.md)。

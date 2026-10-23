@@ -45,7 +45,7 @@ def test_git_release_builder_emits_clean_manifested_source(tmp_path: Path) -> No
     assert (output / "docs/TCAD_QUALIFICATION_STATUS.md").is_file()
     assert not (output / "plugins/table_observation").exists()
     assert {path.name for path in (output / "plugins").iterdir() if path.is_dir()} == {
-        "curve_score", "curve_figure_evidence", "tcad_artifact", "cov_execution",
+        "tcad_artifact", "cov_execution",
     }
     assert not (output / "deploy/apply_ingaas_fig4_profile.sh").exists()
     assert not tuple(output.rglob("figure_geometry.json"))
@@ -54,7 +54,7 @@ def test_git_release_builder_emits_clean_manifested_source(tmp_path: Path) -> No
                  "state_format", "portable_bundle"):
         assert not (output / f"src/scidiscovery/artifact_agent/{name}.py").exists()
     for name in ("analysis_artifacts", "calculation_proof", "pdf_tool"):
-        assert (output / f"src/scidiscovery/operations/{name}.py").is_file()
+        assert not (output / f"src/scidiscovery/operations/{name}.py").exists()
     assert not (output / "src/scidiscovery/platforms/codex_worker.py").exists()
     assert not (output / "experiments/worker_process_v2").exists()
     # The release manifest is the explicit publication policy; archived research
@@ -74,14 +74,10 @@ def test_git_release_builder_emits_clean_manifested_source(tmp_path: Path) -> No
     assert not (output / "roles").exists()
     assert not (output / "src/scidiscovery/artifact_agent/interfaces").exists()
     assert not (output / "src/scidiscovery/artifact_agent/approval_ui").exists()
-    assert (
-        output / "plugins/curve_figure_evidence/curve_figure_evidence/figure_worker_tool.py"
-    ).is_file()
-    assert (
-        output
-        / "plugins/curve_figure_evidence/curve_figure_evidence/plugin.py"
-    ).is_file()
-    assert not (output / "skills/scientific-paper-evidence").exists()
+    for skill, entry in (("curve-analysis", "curve_analysis.py"), ("scientific-paper-evidence", "figure_evidence.py")):
+        assert (output / "skills" / skill / "SKILL.md").is_file()
+        assert (output / "skills" / skill / "scripts" / entry).is_file()
+        assert (output / "skills" / skill / "requirements.txt").is_file()
     manual_root = output / "skills/sentaurus-tcad-code/references/manuals"
     for relative, digest in (
         (
@@ -129,10 +125,9 @@ def test_git_release_builder_emits_clean_manifested_source(tmp_path: Path) -> No
     # Independent consumer requirements: do not derive these from the builder's
     # own allowlists, which previously made missing CI/test inputs invisible.
     required = (
-        "docs/PLUGIN_RUNTIME_API.md", "tests/conftest.py", "tests/operations/conftest.py",
-        "tests/fixtures/plugins/blind_csv_operation_plugin/blind_csv_plugin/plugin.py",
-        "tests/fixtures/plugins/architecture_operation_plugin/pyproject.toml",
-        "tests/fixtures/plugins/table_observation_plugin/pyproject.toml",
+        "docs/PLUGIN_RUNTIME_API.md", "tests/conftest.py",
+        "scripts/acceptance/worker_evidence_view.py", "scripts/verify_lifecycle_fixes.py",
+        "tests/operations/test_remote_runner_recovery.py", "tests/operations/tcad_policy_fixtures.py",
         "scripts/run_tests.py", "scripts/test_resources.json", "scripts/test_resources_ci.json",
         "scripts/installed_candidates.py", "scripts/probe_native_code_mode.py",
         "scripts/compiled_worker_process_guard.py",
@@ -162,8 +157,7 @@ def test_git_release_builder_emits_clean_manifested_source(tmp_path: Path) -> No
         "README.md", "README.zh-CN.md", "CHANGELOG.md", "CONTRIBUTING.md", "NOTICE.md",
         "SECURITY.md", "deploy/README.md", "deploy/README.zh-CN.md", "tests/README.md",
         "plugins/tcad_artifact/README.md", "plugins/tcad_artifact/README.zh-CN.md",
-        "plugins/curve_score/README.md", "plugins/curve_score/README.zh-CN.md",
-        "plugins/curve_figure_evidence/README.md", "plugins/curve_figure_evidence/README.zh-CN.md",
+        "skills/curve-analysis/SKILL.md", "skills/scientific-paper-evidence/SKILL.md",
         *release["DOCUMENTS"],
     )
     for relative in current_references:

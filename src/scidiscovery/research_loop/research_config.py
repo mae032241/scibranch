@@ -106,7 +106,7 @@ def from_document(document, *, base):
     document = copy.deepcopy(document)
     base = Path(base).expanduser().resolve()
     _table(document, {'version', 'research', 'agent', 'permissions', 'budget',
-                      'executor', 'delivery', 'ui', 'policies'}, 'research configuration')
+                      'executor', 'delivery', 'ui', 'policies', 'skills'}, 'research configuration')
     if type(document.get('version', 1)) is not int or document.get('version', 1) != 1:
         raise ValueError('Unsupported research configuration version')
     research = _table(document.get('research', {}),
@@ -134,7 +134,7 @@ def from_document(document, *, base):
             {**row, 'source': str(_path(row['source'], base, 'source_restrictions.source'))}
             if 'source' in row else row for row in rows]
     agent = _table(document.get('agent', {}),
-        {'backend', 'launcher', 'model', 'reasoning_effort', 'service_tier', 'roles', 'native'}, 'agent')
+        {'backend', 'launcher', 'model', 'reasoning_effort', 'service_tier', 'roles', 'workers', 'native'}, 'agent')
     for key in ('model', 'reasoning_effort', 'service_tier'):
         if key in agent:
             result[key] = agent[key]
@@ -151,6 +151,13 @@ def from_document(document, *, base):
     result['launcher'] = launcher
     if 'roles' in agent:
         result['role_profiles'] = agent['roles']
+    if 'workers' in agent:
+        result['worker_profiles'] = agent['workers']
+    if 'skills' in document:
+        selected = copy.deepcopy(_table(document['skills'], {'root', 'sets'}, 'skills'))
+        if 'root' in selected:
+            selected['root'] = str(_path(selected['root'], base, 'skills.root'))
+        result['skills'] = selected
     options = _table(agent.get('native', {}),
         {'sandbox_workspace_write', 'features'}, 'agent.native')
     options = copy.deepcopy(options)
@@ -336,7 +343,9 @@ def to_document(root, settings=None):
                  service_tier=value.get('service_tier'))
     agent = {key: copy.deepcopy(item) for key, item in agent.items() if item is not None}
     if 'role_profiles' in value:
-        agent['roles'] = copy.deepcopy(value['role_profiles'])
+        agent['roles'] = copy.deepcopy(value.get('role_profile_declarations', value['role_profiles']))
+    if 'worker_profiles' in value:
+        agent['workers'] = copy.deepcopy(value['worker_profiles'])
     native = value.get('native_options') or {}
     permissions = {key: copy.deepcopy(native[key]) for key in ('workspace', 'network', 'web', 'subagents') if key in native}
     extra = {key: copy.deepcopy(native[key]) for key in ('sandbox_workspace_write', 'features') if key in native}
@@ -376,6 +385,8 @@ def to_document(root, settings=None):
         policies['worker_context'] = copy.deepcopy(value['worker_fragment_policy']['context'])
     result = dict(version=1, research=research, agent=agent, permissions=permissions,
                   budget=budgets, executor=executor, policies=policies, ui=copy.deepcopy(value.get('ui', {})))
+    if value.get('skills') is not None:
+        result['skills'] = {key: copy.deepcopy(value['skills'][key]) for key in ('root', 'sets')}
     if value.get('delivery_policy') is not None:
         result['delivery'] = copy.deepcopy(value['delivery_policy'])
         adapter = result['delivery'].get('adapter')

@@ -68,3 +68,22 @@ port = 0
 open_browser = false
 # Host-private credential source reference only; no credential bytes are copied.
 # approval_secret_file = "private/operator.key"
+
+# Framework Skills are empty by default. Uncomment explicit sets and role/Worker
+# bindings to select installed bundles. Source is read-only and frozen per instance;
+# a new bundle/version requires a new instance. Installation wrappers select their
+# own persistent skills directory; root below overrides that default.
+# [skills]
+# root = "/opt/scidiscovery-thin/skills"
+# [skills.sets.tcad]
+# items = ["sentaurus-tcad-code"]
+# [skills.sets.analysis]
+# items = ["curve-analysis", "scientific-paper-evidence"]
+# [agent.workers.analysis]
+# model = "gpt-6.1-sol"
+# reasoning_effort = "high"
+# service_tier = "default"
+# skill_set = "analysis"
+# [agent.roles.W]
+# skill_set = "tcad"
+# Add worker = "analysis" to the existing [agent.roles.A] section to bind A.

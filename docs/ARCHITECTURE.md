@@ -265,12 +265,12 @@ plugin and tool source may be upgraded without invalidating a scientific task or
 accepted calls. Historical source fingerprints are metadata, not admission gates.
 Task/input/artifact originals, declared permissions, finite budgets and exact external
 call identities remain binding; an upgrade never authorizes replay of an unknown call.
-Retained Operation/compiler declarations and shared
-`artifact_agent` schemas/storage primitives and the extracted Operation callbacks are
-independent libraries. The old `artifact_agent/service` Run/SQL host and its runtime
-helpers are deleted; the thin loop does not require that storage library as its host.
-Keep adapter, provenance and storage validation dependencies regardless of directory age.
-Operation ABI is defined by `operations/spec.py` (currently 26); see the [plugin API](PLUGIN_RUNTIME_API.md).
+The non-execution plugin registry, Operation/compiler host, Artifact storage host,
+helpers and finalizers are retired. Narrow execution schemas, provenance rules,
+process IO and wire transports remain under their existing module paths to avoid
+unnecessary file movement. They contain no catalog or scientific scheduler.
+Deterministic curve and figure algorithms are self-contained Skill scripts;
+[execution adapter API](PLUGIN_RUNTIME_API.md) describes the surviving extension seam.
 
 ## Invariants
 
@@ -449,7 +449,7 @@ surfaces, not arbitrary native reads or scientific correctness.
 ## Historical-task forks
 
 `fork_service.py` provides the shared CLI/UI preview and create path. A parent must
-use frozen protocol 23, be completed and quiescent, and retain the exact selected
+use the supported current frozen protocol, be completed and quiescent, and retain the exact selected
 logical task N and its declared dependency originals. Unsupported protocols,
 missing historical cuts, ambiguous identities and missing originals are refused.
 Unknown native, managed-execution or delivery effects must first be reconciled
@@ -607,7 +607,7 @@ reference-count database or garbage-collection authority is introduced.
 
 ## Extension rules
 
-Domain algorithms, scientific schemas and execution adapters belong to plugins.
+Scientific algorithms and usage guidance belong to selected Skill bundles; execution adapters belong to independently installed adapter packages.
 Core routes frozen declared capabilities without branching on a domain or plugin
 name to decide scientific behavior. Schema shape, declared scientific semantics
 and validation must agree; engineering failures must not be disguised as scientific
@@ -632,3 +632,15 @@ TCAD-specific promotion evidence is defined in the [qualification status](TCAD_Q
 See the [CLI guide](ROOTLESS_CLI.zh-CN.md), [installation](INSTALL.md) and [release scope](RELEASE.md).
 
 Adapter audit, smoke and scratch recovery requests contain staged candidate originals and the frozen scientific configuration, without the real delivery target. Only promote and confirm requests receive that target. This reduces unnecessary host information in the phase interface; same-user execution remains a soft boundary.
+
+## Selected framework Skill assets
+
+`skill_supply.py` freezes explicitly declared bundle sets once per instance and
+binds role/Worker selections to jobs and native intents. Ordinary bundle files
+remain instance-owned; `.agents/skills` is a validated, rebuildable discovery
+projection. Source installation updates do not refresh frozen bytes. Revisions
+select existing frozen sets only; new IDs/versions require a new instance.
+Archive/fork/cold restore retain ordinary objects and rebuild projections under
+the receiving root. They cannot depend on a surviving installation or parent.
+Native user/system/plugin sources remain inherited, and existing native permission
+profiles remain unchanged. See [configuration](RESEARCH_CONFIGURATION.md#selected-framework-skills--按角色选择框架-skill).

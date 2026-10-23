@@ -15,20 +15,6 @@ REPOSITORY = Path(__file__).resolve().parents[2]
 SKILL = REPOSITORY / "skills/sentaurus-tcad-code"
 
 
-def test_source_tcad_resources_and_experiment_capability(source_catalog, monkeypatch):
-    source_catalog('curve_score', 'tcad_artifact')
-    from pathlib import Path
-    from scidiscovery.operations.catalog import compile_installed_catalog
-    from tcad_artifact import plugin
-    from tcad_artifact.experiment_capability import CAPABILITY
-    from tcad_artifact.parameter_operations import EXTRACT_PROMPT
-    from scidiscovery.operation_declaration import OPERATION_AGENT_PREAMBLE
-    monkeypatch.setattr(Path, "home", lambda: (_ for _ in ()).throw(AssertionError("host skill lookup")))
-    catalog = compile_installed_catalog()
-    assert catalog.operation("science.experiment.v1").digest
-    assert "sentaurus-tcad-code" in CAPABILITY.instructions
-    assert EXTRACT_PROMPT == OPERATION_AGENT_PREAMBLE + (Path(plugin.__file__).parent / "roles/parameter_evidence_extractor.md").read_text()
-    assert not (Path(plugin.__file__).parent / "SKILL.md").exists()
 
 
 @pytest.mark.skipif(shutil.which("pdftotext") is None, reason="pdftotext is required")

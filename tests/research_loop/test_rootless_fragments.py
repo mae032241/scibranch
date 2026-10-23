@@ -16,8 +16,8 @@ from scidiscovery.research_loop import backends,budget,checkpoint,contracts as c
 @pytest.fixture
 def launcher():
     repo=Path(__file__).resolve().parents[2]
-    spec=importlib.util.spec_from_file_location('actual_rootless_fragment_launcher',repo/'scripts/acceptance/rootless_cov_launcher.py')
-    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    from cov_execution import launcher
+    module=launcher
     return module
 
 

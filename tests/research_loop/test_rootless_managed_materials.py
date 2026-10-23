@@ -12,8 +12,7 @@ from scidiscovery.research_loop import contracts as c, execution
 
 
 def prepared(tmp_path, monkeypatch):
-    spec=importlib.util.spec_from_file_location('managed_cov_launcher',Path(__file__).resolve().parents[2]/'scripts/acceptance/rootless_cov_launcher.py')
-    launcher=importlib.util.module_from_spec(spec);spec.loader.exec_module(launcher)
+    from cov_execution import launcher
     root,job,config,cli=case(tmp_path,monkeypatch)
     # Identical bytes under distinct call/descriptor identities must stay distinct.
     for label in ('P','Q'):run(root,cli,label)
@@ -109,8 +108,7 @@ def test_managed_exports_reject_unbound_or_changed_originals(tmp_path,monkeypatc
 
 def test_launcher_reads_full_control_job_and_streams_large_material_digest(tmp_path,monkeypatch):
     import json
-    spec=importlib.util.spec_from_file_location('large_control_launcher',Path(__file__).resolve().parents[2]/'scripts/acceptance/rootless_cov_launcher.py')
-    launcher=importlib.util.module_from_spec(spec);spec.loader.exec_module(launcher)
+    from cov_execution import launcher
     job=tmp_path/'job.json';value=dict(direct_materials=[],full_control_metadata='x'*(5*1024*1024))
     with job.open('w') as stream:json.dump(value,stream)
     assert json.loads(launcher.regular(job))==value
@@ -123,3 +121,131 @@ def test_launcher_reads_full_control_job_and_streams_large_material_digest(tmp_p
         return original(path)
     monkeypatch.setattr(Path,'read_bytes',no_large_read)
     assert launcher.file_digest(asset)==digest
+
+
+def test_selected_skill_mounts_and_grants_use_frozen_objects_without_private_manifest(tmp_path, monkeypatch):
+    import json
+    import sys
+    from cov_execution import launcher
+    from test_skill_supply import prepare, _object
+    from scidiscovery.research_loop import skill_supply
+    root, source = prepare(tmp_path)
+    job = c.build_job(root, 1, 'H', [])
+    work = c.workspace(root, 1)
+    monkeypatch.setenv('THIN_HWA_JOB_MANIFEST', str(root / 'jobs/001.json'))
+    monkeypatch.setenv('THIN_HWA_ROLE', 'H')
+    settings = dict(scene_root=str(root), public_root=str(tmp_path / 'public'),
+        runs_dir=str(root / 'runs'), submission_dir=str(root / 'submission'),
+        native=sys.executable, code_mode_host=dict(path=sys.executable), runtime_paths=[],
+        task_python=sys.executable, scid_python=sys.executable, profile='selected-skills',
+        model='fixture', reasoning_effort='high', _worker_science_view=True)
+    home = root / 'host-runtime/skill-home'
+    launcher.prepare_home(settings, work, home)
+    mounts = skill_supply.native_mounts(root, job)
+    selected = _object(root, 'alpha'); unselected = _object(root, 'beta')
+    assert {(Path(origin), Path(target)) for origin, target in mounts} == {
+        (work / '.agents/skills', work / '.agents/skills'), (selected, selected)}
+    config = (home / 'config.toml').read_text()
+    assert json.dumps(str(selected)) + '="read"' in config
+    assert str(unselected) not in config and str(root / skill_supply.MANIFEST) not in config
+    command = launcher.outer(settings, work, home, ['/usr/bin/true'])
+    for origin, target in mounts:
+        assert any(command[index:index+3] == ['--ro-bind', str(origin), str(target)]
+                   for index in range(len(command)-2))
+    assert str(unselected) not in command and str(root / skill_supply.MANIFEST) not in command
+    backend = launcher.outer(dict(settings, _backend=True), work, home, ['/usr/bin/true'])
+    assert str(selected) not in backend
+    # Installation/source removal cannot change the objects supplied to this node.
+    import shutil
+    shutil.rmtree(source)
+    assert launcher.native_skill_mounts(settings, work) == mounts
+
+
+@pytest.mark.process_e2e
+def test_cov_outer_reads_selected_skill_in_real_namespace_without_copy_or_private_store(tmp_path, monkeypatch):
+    import hashlib
+    import json
+    import shutil
+    import subprocess
+    import sys
+    from cov_execution import launcher
+    from test_skill_supply import prepare, _object
+    from scidiscovery.research_loop import skill_supply
+
+    assert shutil.which('bwrap'), 'This namespace check requires real bubblewrap support'
+    python = Path('/usr/bin/python3')
+    assert python.is_file(), 'This namespace check requires the system Python interpreter'
+    public = tmp_path / 'public'
+    harness = public / 'environment/harness'; harness.mkdir(parents=True)
+    (public / 'instruction.md').write_text('Fixed namespace visibility fixture; no scientific execution.')
+    for name in ('exp_cli.py', 'runner.py', 'train.csv', 'val.csv', 'meta.json'):
+        (harness / name).write_text('fixture\n')
+    operator = tmp_path / 'operator.json'; operator.write_text('{}')
+    root, source = prepare(tmp_path, launcher=[sys.executable, '-m', 'cov_execution.launcher',
+                                              '--config', str(operator)])
+    job = c.build_job(root, 1, 'H', [])
+    work = c.workspace(root, 1)
+    monkeypatch.setenv('THIN_HWA_JOB_MANIFEST', str(root / 'jobs/001.json'))
+    monkeypatch.setenv('THIN_HWA_ROLE', 'H')
+    native = str(python.resolve(strict=True))
+    settings = dict(scene_root=str(root), public_root=str(public), runs_dir=str(root / 'runs'),
+        submission_dir=str(root / 'submission'), native=native, code_mode_host=dict(path=native),
+        runtime_paths=[], task_python=str(python), scid_python=sys.executable,
+        profile='selected-skills-namespace', model='fixture', reasoning_effort='high',
+        _worker_science_view=True)
+    home = root / 'host-runtime/skill-home'
+    launcher.prepare_home(settings, work, home)
+    selected = _object(root, 'alpha'); unselected = _object(root, 'beta')
+    original = selected / 'SKILL.md'
+    before = original.stat()
+    expected = dict(sha256=hashlib.sha256(original.read_bytes()).hexdigest(),
+                    device=before.st_dev, inode=before.st_ino)
+    bindings = dict(projection=str(work / '.agents/skills'), selected=str(selected),
+                    unselected=str(unselected), manifest=str(root / skill_supply.MANIFEST),
+                    expected=expected)
+    shutil.rmtree(source)
+    check = r'''
+import errno, hashlib, json, os, sys
+from pathlib import Path
+value = json.loads(sys.argv[1]); backend = sys.argv[2] == 'backend'
+projection = Path(value['projection']); selected = Path(value['selected'])
+# Relative discovery links resolve from their own location, independently of CWD.
+os.chdir('/task-tmp')
+assert (projection / 'alpha').is_symlink()
+assert {path.name for path in projection.iterdir()} == {'alpha'}
+assert not Path(value['unselected']).exists()
+assert not Path(value['manifest']).exists()
+if backend:
+    assert not selected.exists() and not (projection / 'alpha/SKILL.md').exists()
+    print(json.dumps(dict(backend_skill_objects_visible=False)))
+else:
+    manual = projection / 'alpha/SKILL.md'
+    info = manual.stat()
+    assert manual.resolve() == selected / 'SKILL.md'
+    assert hashlib.sha256(manual.read_bytes()).hexdigest() == value['expected']['sha256']
+    assert (info.st_dev, info.st_ino) == (value['expected']['device'], value['expected']['inode'])
+    assert {path.name for path in selected.parent.iterdir()} == {selected.name}
+    probe = selected / '.write-probe'
+    try:
+        descriptor = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except OSError as error:
+        assert error.errno == errno.EROFS, error
+    else:
+        os.close(descriptor); probe.unlink()
+        raise AssertionError('Selected Skill object mount was writable')
+    print(json.dumps(dict(selected_readable=True, original_inode=True, readonly=True,
+                         unselected_visible=False, private_manifest_visible=False)))
+'''
+    for backend in (False, True):
+        mode = 'backend' if backend else 'native'
+        command = launcher.outer(dict(settings, _backend=backend), work, home,
+                                 [str(python), '-c', check, json.dumps(bindings), mode])
+        result = subprocess.run(command, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stdout + result.stderr
+        observed = json.loads(result.stdout)
+        assert observed == (dict(backend_skill_objects_visible=False) if backend else
+                            dict(selected_readable=True, original_inode=True, readonly=True,
+                                 unselected_visible=False, private_manifest_visible=False))
+    assert original.stat().st_ino == before.st_ino
+    assert hashlib.sha256(original.read_bytes()).hexdigest() == expected['sha256']
+    skill_supply.validate(root, c.settings(root))
