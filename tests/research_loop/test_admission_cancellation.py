@@ -136,16 +136,22 @@ def test_real_instance_admission_lock_contention_has_no_invented_call(tmp_path, 
     assert execution_resume.capture_pending(root,c.read(root/'jobs/002.json')) is None
 
 
-@pytest.mark.parametrize('cleanup_failure',[False,True])
-def test_postprepare_local_refusal_cancels_only_current_temporary_preparation(tmp_path, monkeypatch, execution_registry, capsys, cleanup_failure):
+@pytest.mark.parametrize('refusal,cleanup_failure',[('review',False),('review',True),('breadth',False)])
+def test_postprepare_local_refusal_cancels_only_current_temporary_preparation(tmp_path, monkeypatch, execution_registry, capsys, refusal, cleanup_failure):
     root,_,config,_=case(tmp_path,monkeypatch,executor='local_execution:command')
     original=LocalExecution.prepare
+    admit=breadth.admit
     prepared=[]
     def changed(self,payload,**options):
         result=original(self,payload,**options)
-        prepared.append(payload.name);publish(config,pending=True)
+        prepared.append(payload.name)
+        if refusal=='review':publish(config,pending=True)
         return result
+    def admission(*args,**kwargs):
+        if prepared:raise breadth.OpportunityRequired('Controlled admission refusal after local preparation')
+        return admit(*args,**kwargs)
     monkeypatch.setattr(LocalExecution,'prepare',changed)
+    if refusal=='breadth':monkeypatch.setattr(breadth,'admit',admission)
     remove=shutil.rmtree
     if cleanup_failure:
         def failed(path,*args,**kwargs):
@@ -155,7 +161,7 @@ def test_postprepare_local_refusal_cancels_only_current_temporary_preparation(tm
         monkeypatch.setattr(shutil,'rmtree',failed)
     result=_cli(root,capsys,'run','--script',_source(root),'--mechanism','P')
     assert len(prepared)==1 and result['accepted'] is False and 'call_id' not in result
-    assert result['status']==('known_not_started' if cleanup_failure else 'review_required')
+    assert result['status']==('known_not_started' if cleanup_failure else 'review_required' if refusal=='review' else 'unresolved')
     if cleanup_failure:assert result['error']=='local_cleanup_failed'
     assert result['handoff']['reason']=='execution_not_accepted'
     assert 'call_id' not in result['handoff'] and e.Records(config).calls()==[]
@@ -163,6 +169,7 @@ def test_postprepare_local_refusal_cancels_only_current_temporary_preparation(tm
     _no_host_preparation(root,config)
     assert execution_resume.capture_pending(root,c.read(root/'jobs/002.json')) is None
     publish(config,pending=False)
+    monkeypatch.setattr(breadth,'admit',admit)
     class NextPreparationReached(Exception):pass
     def next_prepare(*args,**kwargs):raise NextPreparationReached()
     monkeypatch.setattr(LocalExecution,'prepare',next_prepare)
@@ -187,7 +194,7 @@ def test_live_local_preparation_cancellation_removes_only_its_temporary_director
     e.Records(config).preflight(expected_calls=[],mechanism='P')
 
 
-@pytest.mark.parametrize('error',[BlockingIOError,e.ConcurrentExecution])
+@pytest.mark.parametrize('error',[BlockingIOError,e.ConcurrentExecution,breadth.OpportunityRequired,e.ReviewRequired])
 def test_third_party_prepare_effect_exception_remains_unknown(tmp_path, monkeypatch, remote_registry, capsys, error):
     root,_,config,_=case(tmp_path,monkeypatch)
     effect=tmp_path/'observed-external-prepare-effect'
@@ -200,6 +207,40 @@ def test_third_party_prepare_effect_exception_remains_unknown(tmp_path, monkeypa
     assert result.get('accepted') is not False and result['handoff']['action']=='reconcile_or_stop'
     assert e.Records(config).calls()==[]
     assert not (e.Records(config).root/'host-preparations').exists()
+
+
+@pytest.mark.parametrize('hook,error',[('submit',breadth.OpportunityRequired),('result',breadth.OpportunityRequired),('public_result',e.ReviewRequired)])
+def test_accepted_provider_admission_error_preserves_original_call(tmp_path, monkeypatch, remote_registry, capsys, hook, error):
+    root,_,config,_=case(tmp_path,monkeypatch)
+    source=_source(root);effect=tmp_path/'observed-external-submit-effect'
+    submitted=[];submit=DifferentExternalIdentity.submit
+    def changed(self,descriptor):
+        result=submit(self,descriptor)
+        submitted.append(descriptor.name);effect.write_text(descriptor.name)
+        if hook=='submit':raise error('Provider refused after the original external submission')
+        return result
+    monkeypatch.setattr(DifferentExternalIdentity,'submit',changed)
+    if hook!='submit':
+        original=getattr(DifferentExternalIdentity,hook)
+        def refused(self,*args,**kwargs):
+            original(self,*args,**kwargs)
+            assert effect.is_file()
+            raise error('Provider callback failed after the original external submission')
+        monkeypatch.setattr(DifferentExternalIdentity,hook,refused)
+    expected=3 if hook=='public_result' else 2
+    result=_cli(root,capsys,'run','--payload',source,'--new-plan','--mechanism','P',expected=expected)
+    call_id=effect.read_text();records=e.Records(config);directory=records.directory(call_id)
+    accepted=(directory/'accepted.json').read_bytes()
+    assert c.read(directory/'remote-terminal.json')['call_id']==call_id
+    assert c.read(directory/'completed.json')['status']=='known_success'
+    assert result['status']=='unknown' and result['call_id']==call_id
+    assert result.get('accepted') is not False and result['handoff']['call_id']==call_id
+    assert result['handoff']['reason']!='execution_not_accepted'
+    repeated=_cli(root,capsys,'run','--payload',source,'--new-plan','--mechanism','P',expected=expected)
+    assert repeated['status']=='unknown' and repeated['call_id']==call_id
+    assert repeated.get('accepted') is not False and repeated['handoff']['call_id']==call_id
+    assert submitted==[call_id] and [path.name for path in records.calls()]==[call_id]
+    assert (directory/'accepted.json').read_bytes()==accepted
 
 
 @pytest.mark.parametrize('refusal',['review','breadth'])
@@ -279,18 +320,24 @@ def test_bridge_keeps_verified_preparation_unknown_and_cached_retry_without_prep
 
 
 @pytest.mark.process_e2e
-def test_module_cli_canonical_prepare_conflict_after_effect_stays_unknown(tmp_path, monkeypatch, remote_registry):
+@pytest.mark.parametrize('error,expected',[
+    pytest.param('ConcurrentExecution',2,id='concurrent'),
+    pytest.param('OpportunityRequired',3,id='opportunity'),
+    pytest.param('ReviewRequired',3,id='review'),
+])
+def test_module_cli_canonical_prepare_conflict_after_effect_stays_unknown(tmp_path, monkeypatch, remote_registry, error, expected):
     plugin=tmp_path/'uncertain-plugin';plugin.mkdir()
     (plugin/'uncertain_prepare.py').write_text('''import json
 from pathlib import Path
 from execution_fixtures import DifferentExternalIdentity
 from scidiscovery.operations.execution import ExecutionInterfaceRegistration
 from scidiscovery.operations.runtime_plugins import RuntimePluginContribution,RuntimePluginFactory
-from scidiscovery.research_loop import experiments as e
+from scidiscovery.research_loop import breadth,experiments as e
 class UncertainPreparation(DifferentExternalIdentity):
     def prepare(self,payload,**options):
         with Path(self.config['effect']).open('a') as stream:stream.write(payload.name+'\\n')
-        raise e.ConcurrentExecution('Original preparation may already have external effects')
+        error=breadth.OpportunityRequired if self.config['error']=='OpportunityRequired' else getattr(e,self.config['error'])
+        raise error('Original preparation may already have external effects')
 def build(context):
     return RuntimePluginContribution(execution_adapters={'fixture':UncertainPreparation(json.loads(context.config_bytes))})
 REGISTRATION=ExecutionInterfaceRegistration('uncertain_prepare','1',RuntimePluginFactory(build))
@@ -301,11 +348,11 @@ REGISTRATION=ExecutionInterfaceRegistration('uncertain_prepare','1',RuntimePlugi
     monkeypatch.syspath_prepend(str(plugin))
     monkeypatch.setenv('PYTHONPATH',str(plugin)+os.pathsep+os.environ.get('PYTHONPATH',''))
     effect=tmp_path/'observed-module-prepare-effect'
-    root,_,config,_=case(tmp_path,monkeypatch,executor='uncertain_prepare:fixture',extra=dict(effect=str(effect)))
+    root,_,config,_=case(tmp_path,monkeypatch,executor='uncertain_prepare:fixture',extra=dict(effect=str(effect),error=error))
     result=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.experiments',
         '--config',str(c.workspace(root,2)/'work/experiment-config.json'),'run','--payload',str(_source(root)),
         '--new-plan','--mechanism','P'],capture_output=True,text=True,timeout=15)
-    assert result.returncode==2,(result.stdout,result.stderr)
+    assert result.returncode==expected,(result.stdout,result.stderr)
     assert not result.stderr
     response=json.loads(result.stdout)
     assert response['status']=='unknown' and response.get('accepted') is not False

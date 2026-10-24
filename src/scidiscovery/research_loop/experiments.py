@@ -20,7 +20,7 @@ import time
 import uuid
 from functools import wraps
 
-from . import configuration_updates
+from . import breadth, configuration_updates
 from . import instance_owner
 
 from scidiscovery.operations.execution import (AdapterCapability, ExecutionInterfaceRegistration,
@@ -61,6 +61,19 @@ class CommandOptionsError(ValueError):
 
 class ReviewRequired(ValueError):
     pass
+
+
+class _AdmissionReviewRequired(ReviewRequired):
+    """A control check proved this dispatch was not accepted."""
+
+
+class _AdmissionOpportunityRequired(breadth.OpportunityRequired):
+    """A control check proved this dispatch was not accepted."""
+
+
+def _raise_admission_refusal(error):
+    refusal = _AdmissionReviewRequired if isinstance(error, ReviewRequired) else _AdmissionOpportunityRequired
+    raise refusal(str(error)) from error
 
 
 class ConcurrentExecution(ValueError):
@@ -1390,7 +1403,7 @@ def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None
     from .protocol import require_scope
     require_scope(config.get('scope'))
     _require_new_execution(config)
-    from . import preparation_recovery, experiment_client, storage_policy as storage
+    from . import preparation_recovery, experiment_client, experiments as common, storage_policy as storage
     instance=experiment_client.root_for_configuration(config,allow_standalone=True)
     if instance is not None:
         unresolved=[row for row in preparation_recovery.retained_preparations(instance,Path(config['record_dir']),context=storage.Deadline(65)) if not row['resolved']]
@@ -1420,13 +1433,17 @@ def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None
     before=records.calls()
     for path in before:
         if retirement(original_configuration(config,path.name),path.name) is not None:continue
-        original,prior=original_adapter(config,path.name,'query')
-        details=prior.status_details(path.name)
-        state=execution_status(details.get('state'))
-        if state not in {'known_success','known_failed'} or records.external(path.name) is None:
-            return dict(status=state if state in PENDING_EXECUTION_STATES and records.external(path.name) is not None else 'unknown',
-                call_id=path.name,note='Preserve original execution; query its identity instead of replay')
-        observed=record_observation(original,prior,path.name)
+        try:
+            original,prior=original_adapter(config,path.name,'query')
+            details=prior.status_details(path.name)
+            state=execution_status(details.get('state'))
+            if state not in {'known_success','known_failed'} or records.external(path.name) is None:
+                return dict(status=state if state in PENDING_EXECUTION_STATES and records.external(path.name) is not None else 'unknown',
+                    call_id=path.name,note='Preserve original execution; query its identity instead of replay')
+            observed=record_observation(original,prior,path.name)
+        except (ReviewRequired,common.ReviewRequired,breadth.OpportunityRequired):
+            return dict(status='unknown',call_id=path.name,
+                note='Original accepted execution outcome is unknown; reconcile this exact call without resubmission.')
         if observed is None:
             return dict(status='unknown',call_id=path.name,
                 note='Original terminal execution has no verified observation; preserve its identity.')
@@ -1434,11 +1451,13 @@ def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None
             raise IntegrityError('Original cancellation has no bound native terminal observation')
     expected_calls=[path.name for path in before]
     try:records.preflight(expected_calls=expected_calls,mechanism=mechanism)
+    except (ReviewRequired,breadth.OpportunityRequired) as error:_raise_admission_refusal(error)
     except ConcurrentExecution:return _admission_conflict(config,expected_calls)
     call_id = f'{len(before)+1:04d}-{uuid.uuid4().hex}'
     if config.get('host_execution_authority') is not None:
         from . import execution_authority
-        call_id=execution_authority.host_services(config).call_identity(payload,len(before)+1,mechanism)
+        try:call_id=execution_authority.host_services(config).call_identity(payload,len(before)+1,mechanism)
+        except breadth.OpportunityRequired as error:_raise_admission_refusal(error)
     descriptor = payload.model_copy(update={'name':call_id})
     prepared = adapter.prepare(descriptor, preparation_profile='research_loop.v1', exchange_directory=records.root)
     options = dict(command_options=command_options) if command_options is not None else {}
@@ -1464,7 +1483,7 @@ def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None
                 payload_schema_version=item.payload_schema_version,media_type=item.media_type,
                 content=item.content.decode('utf-8'),size_bytes=len(item.content)),
                 view=method(prepared,metadata) if callable(method) else None)
-    from . import breadth, replay_check
+    from . import replay_check
     metadata['engineering_check'] = replay_check.acceptance(config, adapter)
     from .local_experiments import LocalExecution
     local_preparation=(type(adapter) is LocalExecution
@@ -1475,7 +1494,7 @@ def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None
     except (ReviewRequired,breadth.OpportunityRequired,ConcurrentExecution) as error:
         if local_preparation:
             if isinstance(error,ConcurrentExecution):return _admission_conflict(config,expected_calls)
-            raise
+            _raise_admission_refusal(error)
         # prepare may already have affected an external implementation. Local
         # snapshot removal cannot establish that the original preparation ended.
         if instance is not None:
@@ -1489,16 +1508,17 @@ def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None
     try:
         adapter.dispatch_lease(accepted)
         external_id,state=adapter.submit(prepared)
-    except (BlockingIOError,ConcurrentExecution):
+        records.bind_external(call_id,external_id,state)
+        observed=record_observation(config,adapter,call_id)
+        result=json.loads(read(observed['completed']['path'])) if observed is not None else adapter.result(call_id)
+        if observed is None and capabilities.query and records.external(call_id) is not None:
+            state=execution_status(adapter.status_details(call_id).get('state'))
+            if state in PENDING_EXECUTION_STATES:
+                result=dict(result,status=state,note='Original execution is '+state+'; preserve its identity without resubmission.')
+    except (BlockingIOError,ConcurrentExecution,common.ConcurrentExecution,
+            ReviewRequired,common.ReviewRequired,breadth.OpportunityRequired):
         return dict(status='unknown',call_id=call_id,
             note='Original accepted execution outcome is unknown; reconcile this exact call without resubmission.')
-    records.bind_external(call_id,external_id,state)
-    observed=record_observation(config,adapter,call_id)
-    result=json.loads(read(observed['completed']['path'])) if observed is not None else adapter.result(call_id)
-    if observed is None and capabilities.query and records.external(call_id) is not None:
-        state=execution_status(adapter.status_details(call_id).get('state'))
-        if state in PENDING_EXECUTION_STATES:
-            result=dict(result,status=state,note='Original execution is '+state+'; preserve its identity without resubmission.')
     return result
 
 
@@ -1647,7 +1667,7 @@ def main(argv=None):
         print(json.dumps(result,allow_nan=False));return 2
     except OSError:
         print(json.dumps(dict(status='integrity_error',note='Configuration client cannot be read; preserve its original and report the unavailable input.'),allow_nan=False));return 3
-    owner_lease = ExitStack();feedback_config=None
+    owner_lease = ExitStack();feedback_config=None;accepted_call_id=None
     try:
         config=json.loads(read(args.config.absolute()))
         if isinstance(config,dict) and 'worker_view_version' in config and 'scope' not in config:
@@ -1742,6 +1762,7 @@ def main(argv=None):
                             for row in preparation_recovery.retained_preparations(root,records.root,context=storage.Deadline(65)))
                 if not (approval or preaccept_unknown) or directory.exists():
                     records.accepted(call_id)
+                    accepted_call_id=call_id
                     observation=records.directory(call_id)/'execution-observation.json'
             if observation is not None and observation.exists():
                 observed=json.loads(read(observation))
@@ -1755,6 +1776,7 @@ def main(argv=None):
         elif args.command=='lineage-status':result=progress(config);code=0
         elif args.command=='retire':
             config,adapter=original_adapter(config,args.call_id,'retire')
+            accepted_call_id=args.call_id
             result=retire_original(config,adapter,args.call_id)
             result={key:result[key] for key in ('call_id','status','note','resource_accounting') if key in result}
             if isinstance(result.get('resource_accounting'),dict):result['resource_accounting']=_accounting_view(result['resource_accounting'])
@@ -1764,6 +1786,7 @@ def main(argv=None):
             if not getattr(lifecycle_capabilities(adapter),capability):
                 raise UnsupportedExecution('Requested original execution operation unavailable')
             config,adapter=original_adapter(config,args.call_id,capability)
+            accepted_call_id=args.call_id
             if args.command=='collect':
                 from . import storage_policy as storage
                 operation_context=storage.Deadline(config['max_seconds'])
@@ -1812,8 +1835,11 @@ def main(argv=None):
         result['feedback']=dict(version=1,budget=feedback.budget_hint(work),
             review=review_feedback(feedback_config),
             qualification='Execution metadata does not establish scientific or candidate qualification.')
-    except ReviewRequired as error:result=dict(status='review_required',reason=_diagnostic(error,'Original execution review required; request the declared review before continuing',config=feedback_config),accepted=False);code=2
-    except breadth.OpportunityRequired as error:result=dict(status='unresolved',accepted=False,note=_diagnostic(error,'Choose an available authorized H mechanism before another request',config=feedback_config));code=2
+    except (_AdmissionReviewRequired,common._AdmissionReviewRequired) as error:result=dict(status='review_required',reason=_diagnostic(error,'Original execution review required; request the declared review before continuing',config=feedback_config),accepted=False);code=2
+    except (_AdmissionOpportunityRequired,common._AdmissionOpportunityRequired) as error:result=dict(status='unresolved',accepted=False,note=_diagnostic(error,'Choose an available authorized H mechanism before another request',config=feedback_config));code=2
+    except (ReviewRequired,common.ReviewRequired,breadth.OpportunityRequired) as error:
+        result=dict(status='unknown',**(dict(call_id=accepted_call_id) if accepted_call_id is not None else {}),
+            note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config));code=3
     except (ConcurrentExecution,common.ConcurrentExecution) as error:result=dict(status='unknown',note=_diagnostic(error,'Execution preparation outcome is unknown; preserve the original preparation without replay',config=feedback_config));code=2
     except (IntegrityError,common.IntegrityError,feedback.history.ObserverIntegrityError) as error:result=dict(status='integrity_error',note=_diagnostic(error,'Execution original integrity check failed; preserve originals and report this call',config=feedback_config));code=3
     except OSError as error:result=dict(status='integrity_error',note=_diagnostic(error,'Execution original cannot be read; preserve originals and report the unavailable input',config=feedback_config));code=3
