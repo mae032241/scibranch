@@ -1022,13 +1022,13 @@ class Records:
         return {'known_success':'succeeded','known_failed':'failed','unknown':'unknown'}.get(completed.get('status'),'unknown')
 
 
-@_configuration_effect
 def dispatch(config, script, *, parent=None, new=False, change=None, mechanism=None, command_options=None):
     """Convenience input path; neutral callers may provide a descriptor directly."""
     from . import experiment_client
-    source=experiment_client.payload_path(config,Path(script).absolute());item=proof(source)
-    payload=LocalFileDescriptor(name='input',local_path=str(source),size_bytes=item['size_bytes'],media_type='application/octet-stream')
-    return dispatch_descriptor(config,payload,parent=parent,new=new,change=change,mechanism=mechanism,command_options=command_options)
+    with instance_owner.lease_for_configuration(config):
+        source=experiment_client.payload_path(config,Path(script).absolute());item=proof(source)
+        payload=LocalFileDescriptor(name='input',local_path=str(source),size_bytes=item['size_bytes'],media_type='application/octet-stream')
+        return dispatch_descriptor(config,payload,parent=parent,new=new,change=change,mechanism=mechanism,command_options=command_options)
 
 
 def local_terminal_status(accepted, completed, terminal):
@@ -1371,16 +1371,17 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
     return value
 
 
-@_configuration_effect
 def dispatch_descriptor(config, payload, *, parent=None, new=False, change=None, mechanism=None, command_options=None):
-    from . import execution_authority
-    try:return _dispatch_descriptor(config,payload,parent=parent,new=new,change=change,mechanism=mechanism,command_options=command_options)
-    except execution_authority.AuthorityRequired as error:return error.feedback
-    except LocalPreparationCleanupError:
-        return dict(status='known_not_started',accepted=False,error='local_cleanup_failed',
-            note='Local temporary preparation could not be cleaned; this dispatch did not submit an execution.')
-    except BlockingIOError:return dict(status='unknown',note='Original accepted execution still owns its lease')
-    except ConcurrentExecution as error:return dict(status='unknown',note=str(error))
+    from . import execution_authority, experiment_client, storage_policy as storage
+    root=experiment_client.root_for_configuration(config,allow_standalone=True)
+    with instance_owner.lease_for_configuration(config), storage.bind(root,config.get('storage_policy')):
+        try:return _dispatch_descriptor(config,payload,parent=parent,new=new,change=change,mechanism=mechanism,command_options=command_options)
+        except execution_authority.AuthorityRequired as error:return error.feedback
+        except LocalPreparationCleanupError:
+            return dict(status='known_not_started',accepted=False,error='local_cleanup_failed',
+                note='Local temporary preparation could not be cleaned; this dispatch did not submit an execution.')
+        except BlockingIOError:return dict(status='unknown',note='Original accepted execution still owns its lease')
+        except ConcurrentExecution as error:return dict(status='unknown',note=str(error))
 
 
 def _admission_conflict(config, expected_calls):
@@ -1400,21 +1401,55 @@ def _admission_conflict(config, expected_calls):
 
 
 def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None, mechanism=None, command_options=None):
+    from . import contracts as c, experiment_client
+    records=Records(config)
+    with ExitStack() as originals:
+        try:originals.enter_context(c.record_writer(records.root,blocking=False))
+        except BlockingIOError:
+            return dict(status='known_not_started',accepted=False,
+                note='Managed execution records are busy; this dispatch did not prepare or accept a call.')
+        instance=experiment_client.root_for_configuration(config,allow_standalone=True)
+        if instance is not None:
+            from . import shared_input_views
+            shared_input_views.dynamic_root(instance,c.workspace(instance,config['scope']['step']),'retained-experiments')
+        original=_original_dispatch_state(config,payload,parent=parent,new=new,change=change,command_options=command_options)
+    if isinstance(original,dict):return original
+    adapter,capabilities,expected_calls=original
+    with ExitStack() as preparation:
+        try:preparation.enter_context(c.record_writer(records.root,blocking=False,exclusive=True))
+        except BlockingIOError:
+            return dict(status='known_not_started',accepted=False,
+                note='Managed execution records are busy; this dispatch did not prepare or accept a call.')
+        prepared=_prepare_descriptor(config,payload,adapter,expected_calls,
+            parent=parent,new=new,change=change,mechanism=mechanism,command_options=command_options)
+    if isinstance(prepared,dict):return prepared
+    with c.record_writer(records.root):
+        if prepared is None:return _admission_conflict(config,expected_calls)
+        descriptor,accepted=prepared
+        return _submit_descriptor(config,adapter,capabilities,descriptor,accepted)
+
+
+def _pending_dispatch(config, instance):
+    from . import preparation_recovery, execution_recovery, storage_policy as storage
+    if instance is None:return None
+    unresolved=[row for row in preparation_recovery.retained_preparations(instance,Path(config['record_dir']),context=storage.Deadline(65)) if not row['resolved']]
+    if unresolved:
+        row=unresolved[0]
+        return dict(status='unknown',call_id=row['call_id'],
+            note='Original host preparation is unresolved; no new preparation or submission is permitted.')
+    if execution_recovery.pending(instance):
+        return dict(status='unknown',note='Original host execution recovery is unresolved; preserve its identity without a new call.')
+    return None
+
+
+def _original_dispatch_state(config, payload, *, parent=None, new=False, change=None, command_options=None):
     from .protocol import require_scope
     require_scope(config.get('scope'))
     _require_new_execution(config)
-    from . import preparation_recovery, experiment_client, experiments as common, storage_policy as storage
+    from . import experiment_client, experiments as common
     instance=experiment_client.root_for_configuration(config,allow_standalone=True)
-    if instance is not None:
-        unresolved=[row for row in preparation_recovery.retained_preparations(instance,Path(config['record_dir']),context=storage.Deadline(65)) if not row['resolved']]
-        if unresolved:
-            row=unresolved[0]
-            return dict(status='unknown',call_id=row['call_id'],
-                note='Original host preparation is unresolved; no new preparation or submission is permitted.')
-    if instance is not None:
-        from . import execution_recovery
-        if execution_recovery.pending(instance):
-            return dict(status='unknown',note='Original host execution recovery is unresolved; preserve its identity without a new call.')
+    pending=_pending_dispatch(config,instance)
+    if pending is not None:return pending
     repair=config.get('engineering_repair')
     if repair is not None and (parent!=repair['candidate_id'] or new or not change or Records(config).calls()):
         raise ValueError('Engineering repair allows one exact parent candidate call with a declared change')
@@ -1450,13 +1485,24 @@ def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None
         if details.get('state')=='cancelled' and observed.get('native_state')!='cancelled':
             raise IntegrityError('Original cancellation has no bound native terminal observation')
     expected_calls=[path.name for path in before]
+    return adapter,capabilities,expected_calls
+
+
+def _prepare_descriptor(config, payload, adapter, expected_calls, *, parent=None, new=False, change=None, mechanism=None, command_options=None):
+    from . import experiment_client, preparation_recovery, storage_policy as storage
+    instance=experiment_client.root_for_configuration(config,allow_standalone=True)
+    pending=_pending_dispatch(config,instance)
+    if pending is not None:return pending
+    records=Records(config)
+    if [path.name for path in records.calls()]!=expected_calls:return None
+    _require_new_execution(config)
     try:records.preflight(expected_calls=expected_calls,mechanism=mechanism)
     except (ReviewRequired,breadth.OpportunityRequired) as error:_raise_admission_refusal(error)
-    except ConcurrentExecution:return _admission_conflict(config,expected_calls)
-    call_id = f'{len(before)+1:04d}-{uuid.uuid4().hex}'
+    except ConcurrentExecution:return None
+    call_id = f'{len(expected_calls)+1:04d}-{uuid.uuid4().hex}'
     if config.get('host_execution_authority') is not None:
         from . import execution_authority
-        try:call_id=execution_authority.host_services(config).call_identity(payload,len(before)+1,mechanism)
+        try:call_id=execution_authority.host_services(config).call_identity(payload,len(expected_calls)+1,mechanism)
         except breadth.OpportunityRequired as error:_raise_admission_refusal(error)
     descriptor = payload.model_copy(update={'name':call_id})
     prepared = adapter.prepare(descriptor, preparation_profile='research_loop.v1', exchange_directory=records.root)
@@ -1493,7 +1539,7 @@ def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None
             expected_calls=expected_calls,mechanism=mechanism,_local_preparation=local_preparation)
     except (ReviewRequired,breadth.OpportunityRequired,ConcurrentExecution) as error:
         if local_preparation:
-            if isinstance(error,ConcurrentExecution):return _admission_conflict(config,expected_calls)
+            if isinstance(error,ConcurrentExecution):return None
             _raise_admission_refusal(error)
         # prepare may already have affected an external implementation. Local
         # snapshot removal cannot establish that the original preparation ended.
@@ -1505,6 +1551,12 @@ def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None
                     note='Original host preparation preceded admission refusal and remains unresolved; preserve this exact call without a new preparation or submission.')
         return dict(status='unknown',
             note='Execution preparation preceded admission refusal and may have external effects; preserve the original preparation without a new preparation or submission.')
+    return prepared,accepted
+
+
+def _submit_descriptor(config, adapter, capabilities, prepared, accepted):
+    from . import experiments as common
+    records=Records(config);call_id=accepted['call_id']
     try:
         adapter.dispatch_lease(accepted)
         external_id,state=adapter.submit(prepared)

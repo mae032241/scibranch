@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -358,6 +359,97 @@ REGISTRATION=ExecutionInterfaceRegistration('uncertain_prepare','1',RuntimePlugi
     assert response['status']=='unknown' and response.get('accepted') is not False
     assert response['handoff']['action']=='reconcile_or_stop'
     assert len(effect.read_text().splitlines())==1 and e.Records(config).calls()==[]
+
+
+@pytest.mark.process_e2e
+def test_competing_cli_refuses_before_prepare_and_query_can_run_during_submit(tmp_path, monkeypatch, remote_registry):
+    plugin=tmp_path/'coordinated-plugin';plugin.mkdir()
+    (plugin/'coordinated_prepare.py').write_text('''import json,time
+from pathlib import Path
+from execution_fixtures import DifferentExternalIdentity
+from scidiscovery.operations.execution import ExecutionInterfaceRegistration
+from scidiscovery.operations.runtime_plugins import RuntimePluginContribution,RuntimePluginFactory
+from scidiscovery.research_loop import experiments as e
+class CoordinatedPreparation(DifferentExternalIdentity):
+    def entered(self,stage,call_id):
+        directory=Path(self.config['gates'])
+        with (directory/'events.jsonl').open('a') as stream:stream.write(json.dumps([stage,call_id])+'\\n')
+        (directory/(stage+'-ready')).write_text(call_id)
+    def wait(self,stage):
+        release=Path(self.config['gates'])/(stage+'-release')
+        deadline=time.monotonic()+20
+        while not release.exists():
+            if time.monotonic()>=deadline:raise TimeoutError('Bounded fixture handshake expired')
+            time.sleep(.02)
+    def prepare(self,payload,**options):
+        self.entered('prepare',payload.name);self.wait('prepare')
+        return super().prepare(payload,**options)
+    def acceptance_metadata(self,payload,**options):
+        self.entered('metadata',payload.name)
+        return super().acceptance_metadata(payload,**options)
+    def submit(self,payload):
+        self.entered('submit',payload.name);self.wait('submit')
+        return super().submit(payload)
+    @e.record_effect
+    def status_details(self,call_id):
+        if not (self.records.directory(call_id)/'completed.json').exists():
+            return dict(state='running',call_id=call_id)
+        return super().status_details(call_id)
+def build(context):
+    return RuntimePluginContribution(execution_adapters={'fixture':CoordinatedPreparation(json.loads(context.config_bytes))})
+REGISTRATION=ExecutionInterfaceRegistration('coordinated_prepare','1',RuntimePluginFactory(build))
+''')
+    metadata=plugin/'coordinated_prepare.dist-info';metadata.mkdir()
+    (metadata/'METADATA').write_text('Metadata-Version: 2.1\nName: coordinated-prepare\nVersion: 0\n')
+    (metadata/'entry_points.txt').write_text('[scidiscovery.execution_interfaces]\ncoordinated_prepare = coordinated_prepare:REGISTRATION\n')
+    monkeypatch.syspath_prepend(str(plugin))
+    monkeypatch.setenv('PYTHONPATH',str(plugin)+os.pathsep+os.environ.get('PYTHONPATH',''))
+    gates=tmp_path/'gates';gates.mkdir()
+    root,_,config,_=case(tmp_path,monkeypatch,executor='coordinated_prepare:fixture',extra=dict(gates=str(gates)))
+    client=c.workspace(root,2)/'work/experiment-config.json';source=_source(root)
+    command=[sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(client)]
+    run=['run','--payload',str(source),'--new-plan','--mechanism','P']
+    records=e.Records(config);events=budget._events(root,c.settings(root))[0]
+    winner=subprocess.Popen([*command,*run],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    def ready(stage):
+        path=gates/(stage+'-ready');deadline=time.monotonic()+10
+        while not path.exists():
+            assert winner.poll() is None,'The winning fixture exited before its handshake'
+            assert time.monotonic()<deadline,'The winning fixture did not reach its bounded handshake'
+            time.sleep(.02)
+        return path.read_text()
+    try:
+        call_id=ready('prepare')
+        loser=subprocess.run([*command,*run],capture_output=True,text=True,timeout=10)
+        assert loser.returncode==2 and not loser.stderr,(loser.stdout,loser.stderr)
+        refused=json.loads(loser.stdout)
+        assert refused['status']=='known_not_started' and refused['accepted'] is False
+        assert 'call_id' not in refused and refused['handoff']['reason']=='execution_not_accepted'
+        assert [json.loads(row) for row in (gates/'events.jsonl').read_text().splitlines()]==[['prepare',call_id]]
+        assert records.calls()==[] and not (records.root/'host-preparations').exists()
+        assert budget._events(root,c.settings(root))[0]==events
+        assert not (root/'execution-authority/calls').exists()
+        (gates/'prepare-release').touch()
+        assert ready('submit')==call_id
+        query=subprocess.run([*command,'query','--call-id',call_id],capture_output=True,text=True,timeout=10)
+        assert query.returncode==0 and not query.stderr,(query.stdout,query.stderr)
+        observed=json.loads(query.stdout)
+        assert observed['state']=='running' and observed['call_id']==call_id
+        assert winner.poll() is None and not (gates/'submit-release').exists()
+        (gates/'submit-release').touch()
+        stdout,stderr=winner.communicate(timeout=10)
+        assert winner.returncode==0 and not stderr,(stdout,stderr)
+        completed=json.loads(stdout)
+        assert completed['status']=='known_success' and completed['call_id']==call_id
+        assert [json.loads(row) for row in (gates/'events.jsonl').read_text().splitlines()]==[
+            ['prepare',call_id],['metadata',call_id],['submit',call_id]]
+        assert [path.name for path in records.calls()]==[call_id]
+        assert all(row['resolved'] for row in preparation_recovery.retained_preparations(root,records.root))
+        assert _temporary(records)==[]
+    finally:
+        (gates/'prepare-release').touch();(gates/'submit-release').touch()
+        if winner.poll() is None:
+            winner.kill();winner.communicate(timeout=5)
 
 
 def test_accepted_local_without_process_or_submission_remains_original_unknown(tmp_path, monkeypatch, execution_registry, capsys):
