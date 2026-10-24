@@ -792,6 +792,7 @@ class Records:
     def __init__(self, config):
         self.config = config
         self.root = Path(config['record_dir'])
+        self._preparation_node_held = False
         if self.root.resolve() != self.root:
             raise IntegrityError('Execution record namespace changed')
 
@@ -841,11 +842,19 @@ class Records:
             os.close(fd)
 
     @contextmanager
+    def _preparation_lease(self):
+        """One dispatch owns the existing node lock through preparation."""
+        with self.lease():
+            self._preparation_node_held = True
+            try:yield
+            finally:self._preparation_node_held = False
+
+    @contextmanager
     def admission_lease(self, *, context=None):
         """Use the same short lock order for preflight and durable acceptance."""
         with ExitStack() as locks:
             try:
-                locks.enter_context(self.lease())
+                if not self._preparation_node_held:locks.enter_context(self.lease())
                 locks.enter_context(self.lease('accept.lock',context=context))
             except BlockingIOError as error:
                 raise ConcurrentExecution('Another admission still owns its lease; no new call was accepted') from error
@@ -872,7 +881,7 @@ class Records:
 
     @_configuration_effect
     def accept(self, descriptor, metadata, interface, *, expected_calls=None, mechanism=None, recovery_admission=None, operation_context=None, _local_preparation=False):
-        """Short admission linearization point. No solver or domain IO under lock."""
+        """Snapshot inputs before the short accept.lock publication section."""
         _require_new_execution(self.config)
         from .protocol import require_scope
         require_scope(self.config['scope'])
@@ -1416,11 +1425,13 @@ def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None
     if isinstance(original,dict):return original
     adapter,capabilities,expected_calls=original
     with ExitStack() as preparation:
-        try:preparation.enter_context(c.record_writer(records.root,blocking=False,exclusive=True))
+        try:
+            preparation.enter_context(c.record_writer(records.root,blocking=False))
+            preparation.enter_context(records._preparation_lease())
         except BlockingIOError:
             return dict(status='known_not_started',accepted=False,
                 note='Managed execution records are busy; this dispatch did not prepare or accept a call.')
-        prepared=_prepare_descriptor(config,payload,adapter,expected_calls,
+        prepared=_prepare_descriptor(config,payload,adapter,records,expected_calls,
             parent=parent,new=new,change=change,mechanism=mechanism,command_options=command_options)
     if isinstance(prepared,dict):return prepared
     with c.record_writer(records.root):
@@ -1488,12 +1499,11 @@ def _original_dispatch_state(config, payload, *, parent=None, new=False, change=
     return adapter,capabilities,expected_calls
 
 
-def _prepare_descriptor(config, payload, adapter, expected_calls, *, parent=None, new=False, change=None, mechanism=None, command_options=None):
+def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, parent=None, new=False, change=None, mechanism=None, command_options=None):
     from . import experiment_client, preparation_recovery, storage_policy as storage
     instance=experiment_client.root_for_configuration(config,allow_standalone=True)
     pending=_pending_dispatch(config,instance)
     if pending is not None:return pending
-    records=Records(config)
     if [path.name for path in records.calls()]!=expected_calls:return None
     _require_new_execution(config)
     try:records.preflight(expected_calls=expected_calls,mechanism=mechanism)

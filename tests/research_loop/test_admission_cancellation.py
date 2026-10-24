@@ -452,6 +452,122 @@ REGISTRATION=ExecutionInterfaceRegistration('coordinated_prepare','1',RuntimePlu
             winner.kill();winner.communicate(timeout=5)
 
 
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('boundary',['prepare','copy'])
+def test_terminal_lifecycle_remains_available_during_next_preparation(tmp_path, monkeypatch, remote_registry, boundary):
+    plugin=tmp_path/'shared-lifecycle-plugin';plugin.mkdir()
+    (plugin/'shared_lifecycle.py').write_text('''import json
+from execution_fixtures import DifferentExternalIdentity
+from scidiscovery.operations.execution import ExecutionInterfaceRegistration
+from scidiscovery.operations.runtime_plugins import RuntimePluginContribution,RuntimePluginFactory
+from scidiscovery.research_loop import experiments as e
+class SharedLifecycle(DifferentExternalIdentity):
+    @e.record_effect
+    def status_details(self,call_id):return super().status_details(call_id)
+    @e.record_effect
+    def result(self,call_id):return super().result(call_id)
+    @e.record_effect
+    def collect_original(self,call_id):return super().collect_original(call_id)
+def build(context):
+    return RuntimePluginContribution(execution_adapters={'fixture':SharedLifecycle(json.loads(context.config_bytes))})
+REGISTRATION=ExecutionInterfaceRegistration('shared_lifecycle','1',RuntimePluginFactory(build))
+''')
+    metadata=plugin/'shared_lifecycle.dist-info';metadata.mkdir()
+    (metadata/'METADATA').write_text('Metadata-Version: 2.1\nName: shared-lifecycle\nVersion: 0\n')
+    (metadata/'entry_points.txt').write_text('[scidiscovery.execution_interfaces]\nshared_lifecycle = shared_lifecycle:REGISTRATION\n')
+    monkeypatch.syspath_prepend(str(plugin))
+    monkeypatch.setenv('PYTHONPATH',str(plugin)+os.pathsep+os.environ.get('PYTHONPATH',''))
+    root,_,config,_=case(tmp_path,monkeypatch,executor='shared_lifecycle:fixture')
+    source=_source(root)
+    first=e.dispatch(config,source,new=True,mechanism='P')
+    assert first['status']=='known_success'
+    records=e.Records(config);first_id=first['call_id']
+    accepted=(records.directory(first_id)/'accepted.json').read_bytes()
+    client=c.workspace(root,2)/'work/experiment-config.json'
+    gates=tmp_path/'preparation-gates';gates.mkdir()
+    writer_source=r'''
+import json,sys,time
+from pathlib import Path
+from scidiscovery.research_loop import contracts as c,experiments as e
+from shared_lifecycle import SharedLifecycle
+client,payload=map(Path,sys.argv[1:3]);gates=Path(sys.argv[3])
+boundary,role=sys.argv[4:6];call_id=None
+def stop():
+    (gates/'ready').write_text(call_id)
+    deadline=time.monotonic()+20
+    while not (gates/'release').exists():
+        if time.monotonic()>=deadline:raise TimeoutError('Bounded preparation handshake expired')
+        time.sleep(.02)
+prepare=SharedLifecycle.prepare
+def prepared(self,payload,**options):
+    global call_id
+    call_id=payload.name
+    with (gates/'events.jsonl').open('a') as stream:stream.write(json.dumps([role,'prepare',call_id])+'\n')
+    if role=='winner' and boundary=='prepare':stop()
+    return prepare(self,payload,**options)
+SharedLifecycle.prepare=prepared
+copy=c._bind_original
+def copied(*args,**kwargs):
+    result=copy(*args,**kwargs);target=Path(args[1])
+    if role=='winner' and boundary=='copy' and target.name=='source.py' and target.parent.name.startswith('.prepared-'):
+        stop()
+    return result
+c._bind_original=copied
+raise SystemExit(e.main(['--config',str(client),'run','--payload',str(payload),'--new-plan','--mechanism','Q']))
+'''
+    command=[sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(client)]
+    writer=[sys.executable,'-c',writer_source,str(client),str(source),str(gates),boundary]
+    winner=subprocess.Popen([*writer,'winner'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    try:
+        deadline=time.monotonic()+10
+        while not (gates/'ready').exists():
+            assert winner.poll() is None,'The writer exited before its preparation handshake'
+            assert time.monotonic()<deadline,'The writer did not reach its bounded preparation handshake'
+            time.sleep(.02)
+        call_id=(gates/'ready').read_text()
+        assert call_id!=first_id and [path.name for path in records.calls()]==[first_id]
+        competitor=subprocess.run([*writer,'competitor'],capture_output=True,text=True,timeout=5)
+        assert competitor.returncode==2 and not competitor.stderr,(competitor.stdout,competitor.stderr)
+        refused=json.loads(competitor.stdout)
+        assert [json.loads(row) for row in (gates/'events.jsonl').read_text().splitlines()]==[['winner','prepare',call_id]]
+        query=subprocess.run([*command,'query','--call-id',first_id],capture_output=True,text=True,timeout=5)
+        assert query.returncode==0 and not query.stderr,(query.stdout,query.stderr)
+        observed=json.loads(query.stdout)
+        assert observed['state']=='succeeded' and observed['call_id']==first_id
+        result=subprocess.run([sys.executable,'-c',
+            'import json,sys;from pathlib import Path;from scidiscovery.research_loop import contracts as c,experiments as e;'
+            'print(json.dumps(e.load(c.read(Path(sys.argv[1]))).result(sys.argv[2])))',
+            str(execution.record(root,2)/'experiment-config.json'),first_id],capture_output=True,text=True,timeout=5)
+        assert result.returncode==0 and not result.stderr,(result.stdout,result.stderr)
+        original=json.loads(result.stdout)
+        assert original['status']=='known_success' and original['call_id']==first_id
+        collected=subprocess.run([*command,'collect','--call-id',first_id],capture_output=True,text=True,timeout=5)
+        assert collected.returncode==0 and not collected.stderr,(collected.stdout,collected.stderr)
+        assert json.loads(collected.stdout)['status']=='collected'
+        if boundary=='prepare':
+            assert refused['status']=='known_not_started' and refused['accepted'] is False
+            assert 'call_id' not in refused and refused['handoff']['reason']=='execution_not_accepted'
+        else:
+            assert refused['status']=='unknown' and refused['call_id']==call_id
+            assert refused.get('accepted') is not False and refused['handoff']['action']=='reconcile_or_stop'
+        assert winner.poll() is None and not (gates/'release').exists()
+        assert [path.name for path in records.calls()]==[first_id]
+        assert (records.directory(first_id)/'accepted.json').read_bytes()==accepted
+        assert [json.loads(row) for row in (gates/'events.jsonl').read_text().splitlines()]==[['winner','prepare',call_id]]
+        (gates/'release').touch()
+        stdout,stderr=winner.communicate(timeout=10)
+        assert winner.returncode==0 and not stderr,(stdout,stderr)
+        completed=json.loads(stdout)
+        assert completed['status']=='known_success' and completed['call_id']==call_id
+        assert [path.name for path in records.calls()]==[first_id,call_id]
+        assert _temporary(records)==[]
+        assert all(row['resolved'] for row in preparation_recovery.retained_preparations(root,records.root))
+    finally:
+        (gates/'release').touch()
+        if winner.poll() is None:winner.kill()
+        winner.communicate(timeout=5)
+
+
 def test_accepted_local_without_process_or_submission_remains_original_unknown(tmp_path, monkeypatch, execution_registry, capsys):
     root,_,config,_=case(tmp_path,monkeypatch,executor='local_execution:command')
     def uncertain(*args,**kwargs):raise BlockingIOError('Original submission acknowledgement is unavailable')
@@ -473,19 +589,21 @@ def test_accepted_local_without_process_or_submission_remains_original_unknown(t
     assert (directory/'accepted.json').read_bytes()==accepted and len(e.Records(config).calls())==1
 
 
-def test_postprepare_local_race_keeps_competitor_identity_when_query_is_unavailable(tmp_path, monkeypatch, execution_registry, capsys):
+def test_preadmission_local_race_keeps_competitor_identity_when_query_is_unavailable(tmp_path, monkeypatch, execution_registry, capsys):
     root,_,config,_=case(tmp_path,monkeypatch,executor='local_execution:command')
-    prepare=LocalExecution.prepare
+    original_state=e._original_dispatch_state
     winner='0001-accepted-competitor'
-    def competing(self,payload,**options):
-        result=prepare(self,payload,**options)
+    def competing(settings,payload,**options):
+        result=original_state(settings,payload,**options)
+        adapter,_,_=result
         original=payload.model_copy(update={'name':winner})
-        e.Records(config).accept(original,self.acceptance_metadata(original),config['execution_interface'],
+        prepared=adapter.prepare(original,preparation_profile='research_loop.v1',exchange_directory=e.Records(config).root)
+        e.Records(config).accept(prepared,adapter.acceptance_metadata(prepared),config['execution_interface'],
             expected_calls=[],mechanism='P',_local_preparation=True)
         return result
     def unavailable(*args,**kwargs):raise OSError('Current original status observation is unavailable')
     def forbidden(*args,**kwargs):pytest.fail('A losing admission submitted another execution')
-    monkeypatch.setattr(LocalExecution,'prepare',competing)
+    monkeypatch.setattr(e,'_original_dispatch_state',competing)
     monkeypatch.setattr(LocalExecution,'status_details',unavailable)
     monkeypatch.setattr(LocalExecution,'submit',forbidden)
     result=_cli(root,capsys,'run','--script',_source(root),'--mechanism','P')
@@ -549,22 +667,20 @@ def test_real_native_racing_local_acceptance_returns_exact_winner_and_starts_onc
     installed=tmp_path/'runtime-fault-installed'
     _runtime_owner_fault(monkeypatch,f'''from pathlib import Path
 from scidiscovery.research_loop import experiments as e
-from scidiscovery.research_loop.local_experiments import LocalExecution
 winner=Path({str(winner)!r})
 Path({str(installed)!r}).write_text('Actual runtime owner installed the admission race')
-prepare=LocalExecution.prepare;entered=False
-def competing(self,payload,**options):
+original_state=e._original_dispatch_state;entered=False
+def competing(config,payload,**options):
     global entered
-    result=prepare(self,payload,**options)
+    result=original_state(config,payload,**options)
     if not entered:
         entered=True
-        config=dict(self.config,execution_interface=self.frozen_interface)
         prior=e.dispatch(config,Path(payload.local_path),command_options=dict(
             experiment_directory=str(Path(payload.local_path).parent),arguments=[]))
         assert prior['status']=='known_success'
         winner.write_text(prior['call_id'])
     return result
-LocalExecution.prepare=competing
+e._original_dispatch_state=competing
 ''')
     native_case._default_local_case(tmp_path,monkeypatch,True,False)
     root=tmp_path/'instance';config=c.read(execution.origin(root,2)/'experiment-config.json')
