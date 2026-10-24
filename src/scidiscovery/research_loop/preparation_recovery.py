@@ -485,9 +485,89 @@ def discard_owned_snapshot(config, binding_ref, *, reason, context):
     return _result(value, ref, 'partial_discarded')
 
 
-def _maintain(root, step, call_id, snapshot_token, *, action, max_seconds, authorization_note):
-    if (type(step) is not int or step <= 0 or not isinstance(call_id, str) or not e.ID.fullmatch(call_id)
-            or call_id in {'.', '..'} or not isinstance(snapshot_token, str) or not TOKEN.fullmatch(snapshot_token)
+def _local_configurations(root, step, records, context):
+    """Retained originals, never the current client or an installed provider."""
+    attempts = []
+    for attempt in execution.accepted_intents(root, step):
+        _check(context)
+        attempts.append(attempt)
+    if not attempts:
+        _fail('Unbound local cleanup requires retained native attempt originals')
+    interfaces = files.check_path(root / 'host-runtime/experiment-control' / f'{step:03d}' / 'interfaces')
+    expected = {f'{number:03d}.json' for number in range(len(attempts))}
+    observed = set()
+    for path in interfaces.iterdir():
+        _check(context)
+        files.check_path(path)
+        if not path.is_file():
+            _fail('Unbound local cleanup has an ambiguous interface namespace')
+        observed.add(path.name)
+    if observed != expected:
+        _fail('Unbound local cleanup requires every exact retained interface')
+    for number, (native, _) in enumerate(attempts):
+        _check(context)
+        config = _json(native / 'experiment-config.json', context)
+        interface = config.get('execution_interface')
+        execution_key = c.record_ref(root / 'jobs' / f'{step:03d}.json') if number == 0 else c.record_ref(native / 'native-intent.json')
+        if (experiment_client.root_for_configuration(config) != root or config['record_dir'] != str(records)
+                or config.get('scope', {}).get('step') != step
+                or config.get('native_attempt') != dict(number=number, execution_key=execution_key)
+                or not isinstance(interface, dict)
+                or interface.get('version') != e.VERSION
+                or interface.get('executor') != 'local_execution:command'
+                or interface.get('plugin_version') != '1'
+                or interface.get('observation_version') != e.OBSERVATION_VERSION
+                or interface.get('projection_contract') != 'scidiscovery.local-projections.v1'
+                or interface.get('terminal_evidence') != 'local_process'
+                or interface.get('result_protocol') != e.LOCAL_RESULT_PROTOCOL
+                or interface.get('config_record') != {key: value for key, value in config.items() if key != 'execution_interface'}
+                or config.get('host_execution_authority') is not None):
+            _fail('Unbound local cleanup requires an exclusively built-in local preparation namespace')
+        _configuration(root, config, context)
+
+
+def _unbound_local(root, step, records, snapshot_token, *, action, context):
+    from . import controller, instance_archive as archive, instance_delete as deletion
+    # The root source gate fences configuration and effects; the exact record
+    # writer lease also fences preparation before its temporary directory exists.
+    # Do not acquire the whole-instance archive owner inventory for one target.
+    with owner.source_lease(root), ExitStack() as locks:
+        locks.enter_context(controller._local_writer(root))
+        if (root / 'configuration.lock').exists():
+            archive._lock(locks, root / 'configuration.lock')
+        locks.enter_context(c.record_writer(records, blocking=False, exclusive=True))
+        owner.require_owner(root)
+        _check(context)
+        _local_configurations(root, step, records, context)
+        bindings = files.check_path(records / 'host-preparations')
+        if bindings.exists():
+            for calls in bindings.iterdir():
+                _check(context)
+                files.check_path(calls)
+                if not calls.is_dir() or not e.ID.fullmatch(calls.name) or calls.name in {'.', '..'}:
+                    _fail('Unbound local cleanup has an ambiguous host preparation namespace')
+                if files.check_path(calls / (snapshot_token + '.json')).exists():
+                    _fail('A bound host preparation requires its exact original call')
+        snapshot = files.check_path(records / ('.prepared-' + snapshot_token))
+        if not snapshot.exists():
+            _fail('The explicitly selected unbound local partial is absent')
+        identity = _identity(snapshot)
+        accepted = files.check_path(snapshot / 'accepted.json')
+        if accepted.exists():
+            _fail('Durable accepted snapshot cannot use unbound partial cleanup', 'preparation_publish_required')
+        deletion._preflight_tree(snapshot, identity, context=context)
+        if action == 'discard-partial':
+            deletion._remove_tree(snapshot, identity, context=context)
+        return dict(status='partial_discarded' if action == 'discard-partial' else 'partial',
+            call_id=None, snapshot_token=snapshot_token, binding=None)
+
+
+def _maintain(root, step, call_id, snapshot_token, *, action, max_seconds, authorization_note, unbound_local=False):
+    exact_call = isinstance(call_id, str) and e.ID.fullmatch(call_id) and call_id not in {'.', '..'}
+    if (type(step) is not int or step <= 0 or type(unbound_local) is not bool
+            or not (call_id is None if unbound_local else exact_call)
+            or unbound_local and action == 'publish-accepted'
+            or not isinstance(snapshot_token, str) or not TOKEN.fullmatch(snapshot_token)
             or action not in {'inspect', 'discard-partial', 'publish-accepted'}
             or type(max_seconds) not in (int, float) or not math.isfinite(max_seconds) or max_seconds <= 0
             or not isinstance(authorization_note, str) or not authorization_note.strip()):
@@ -499,6 +579,8 @@ def _maintain(root, step, call_id, snapshot_token, *, action, max_seconds, autho
     from . import protocol, instance_archive as archive
     protocol.require_current(root)
     records = experiment_client.record_directory(root, step)
+    if unbound_local:
+        return _unbound_local(root, step, records, snapshot_token, action=action, context=context)
     path = records / 'host-preparations' / call_id / (snapshot_token + '.json')
     with owner.source_lease(root), ExitStack() as locks:
         archive._owner_locks(locks, root, context=context)
@@ -544,15 +626,15 @@ def _maintain(root, step, call_id, snapshot_token, *, action, max_seconds, autho
         return _result(value, ref, 'accepted_published')
 
 
-def maintain(root, step, call_id, snapshot_token, *, action, max_seconds, authorization_note):
+def maintain(root, step, call_id, snapshot_token, *, action, max_seconds, authorization_note, unbound_local=False):
     try:
         return _maintain(root, step, call_id, snapshot_token, action=action,
-            max_seconds=max_seconds, authorization_note=authorization_note)
+            max_seconds=max_seconds, authorization_note=authorization_note, unbound_local=unbound_local)
     except (BlockingIOError, files.ArchiveError, RuntimeError) as error:
         cause = error
         while cause is not None:
             if isinstance(cause, BlockingIOError):
                 return dict(status='busy', call_id=call_id, snapshot_token=snapshot_token,
-                    binding=None, external_preparation_state='unknown')
+                    binding=None, **({} if unbound_local else dict(external_preparation_state='unknown')))
             cause = cause.__cause__
         raise

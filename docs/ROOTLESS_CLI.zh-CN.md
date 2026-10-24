@@ -333,7 +333,22 @@ TCAD 支持可选编译、精确封存、正式审查与后继执行的非空输
   unknown。完整 accepted 必须走发布；损坏的 accepted 不当作可删的残缺文件。清理成功不授权重提，
   未决记录仍阻断新 prepare、fork 和归档，不把目录消失解释成从未准备。
 
-旧的无绑定 `.prepared-*` 目录不自动清理或补造来源；此入口也不接受任意 records 路径或批量删除。
+内置本地执行在复制输入时被终止，或现场清理失败后，可能留下尚无调用绑定的准确目录。
+此时须显式选择同一入口的本地分支，不传 `--call-id`：
+
+```bash
+scid-research execution-preparation-maintain --root /absolute/instance --step N \
+  --unbound-local --snapshot-token EXACT_TOKEN --action discard-partial \
+  --max-seconds 30 --authorization-note '清理明确的本地残缺快照'
+```
+
+也可先用 `--action inspect`。此分支在取得源实例、控制器及准确 records 写者锁后，核对该 step
+所有保留 attempt 的配置原件与 interface 投影，要求它们完整、一致、均属于内置本地执行且无
+执行 authority。仅当前配置为 local、缺少绑定或缺少进程文件均不构成证明；第三方、混合历史、
+缺原件、已有目标绑定或任何 durable accepted 都拒绝。只删除明确 token 的现存残缺目录，
+不增加持久记录、不推断执行状态、不改预算，也不授权重试。目标不存在时拒绝，不能据此补造
+上次清理已完成的结论。其他无绑定 `.prepared-*` 不自动清理或补造来源；入口不接受任意 records
+路径或批量删除。
 已发布的历史绑定随原件保留；冷恢复使用保留的原清单证明其来源，不要求旧目录 inode 继续存在。
 现场维护仍核对原宿主、owner 和目录身份，不由历史可读性授予新维护权限。
 

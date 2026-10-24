@@ -724,7 +724,16 @@ Historical published bindings retain their original bytes across enrollment and
 cold restoration; restored archive metadata proves their provenance without the
 backup package remaining online. Reading that history grants no live maintenance
 authority over a different directory generation. Recovery of unbound temporary
-directories remains unsupported for automatic cleanup.
+directories remains explicit and targeted: the existing maintenance command's
+`--unbound-local` branch selects only root, step and the exact snapshot token.
+Under the source, controller and exact record-writer locks, it requires all
+retained attempt configuration originals and interface projections for that step
+to agree on the built-in local executor without execution authority. Missing or
+mixed originals, third-party preparation, a binding for the token, or any durable
+accepted record prevent cleanup. It removes only the existing selected partial
+with finite symlink-safe tree removal, writes no new recovery receipt, and changes
+no execution state, budget or retry permission. An absent target cannot establish
+a prior successful cleanup. Other unbound directories remain preserved.
 
 Ordinary read-only archives grant no advancing restore permission. Cross-host recovery,
 lost anchors and arbitrary native external reads remain outside support.

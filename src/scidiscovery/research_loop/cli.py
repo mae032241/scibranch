@@ -181,7 +181,9 @@ def main(argv=None):
     preparation = commands.add_parser('execution-preparation-maintain', help='Inspect or maintain one exact retained host snapshot; preserves unknown external preparation')
     preparation.add_argument('--root', type=Path, required=True)
     preparation.add_argument('--step', type=int, required=True)
-    preparation.add_argument('--call-id', required=True)
+    preparation_target = preparation.add_mutually_exclusive_group(required=True)
+    preparation_target.add_argument('--call-id')
+    preparation_target.add_argument('--unbound-local', action='store_true', help='Explicit local partial without a call binding; requires every retained attempt to prove the built-in local namespace')
     preparation.add_argument('--snapshot-token', required=True)
     preparation.add_argument('--action', choices=['inspect', 'discard-partial', 'publish-accepted'], required=True)
     preparation.add_argument('--max-seconds', type=float, required=True, help='Finite maintenance window; does not amend scientific or execution budgets')
@@ -385,7 +387,8 @@ def main(argv=None):
         elif args.command == 'execution-preparation-maintain':
             from . import preparation_recovery
             result = preparation_recovery.maintain(root, args.step, args.call_id, args.snapshot_token,
-                action=args.action, max_seconds=args.max_seconds, authorization_note=args.authorization_note)
+                action=args.action, max_seconds=args.max_seconds, authorization_note=args.authorization_note,
+                unbound_local=args.unbound_local)
         elif args.command == 'native-startup-collect':
             from . import startup_recovery
             result = startup_recovery.collect_delivery(root,args.step,reconciliation=args.reconciliation,

@@ -76,6 +76,46 @@ raise AssertionError('writer passed its durable stop')
 '''
 
 
+LOCAL_CRASH_WRITER = r'''
+import json, os, pathlib, signal, sys
+from scidiscovery.research_loop import contracts as c, experiments as e
+from scidiscovery.research_loop.local_experiments import LocalExecution
+config=c.read(pathlib.Path(sys.argv[1]));payload=pathlib.Path(sys.argv[2]);boundary=sys.argv[3]
+counter=pathlib.Path(sys.argv[4])
+original_prepare=LocalExecution.prepare
+def prepare(*args,**kwargs):
+    with counter.open('a') as stream:
+        stream.write('prepare\n');stream.flush();os.fsync(stream.fileno())
+    return original_prepare(*args,**kwargs)
+LocalExecution.prepare=prepare
+def submit(*args,**kwargs):
+    with counter.open('a') as stream:
+        stream.write('submit\n');stream.flush();os.fsync(stream.fileno())
+    raise AssertionError('Local crash fixture must stop before submission')
+LocalExecution.submit=submit
+def stop(path):
+    print(json.dumps(dict(ready=str(path))),flush=True)
+    while True:signal.pause()
+if boundary=='partial':
+    original=c._bind_original
+    def copy(*args,**kwargs):
+        result=original(*args,**kwargs)
+        target=pathlib.Path(args[1])
+        if target.name=='source.py' and target.parent.name.startswith('.prepared-'):stop(target)
+        return result
+    c._bind_original=copy
+else:
+    original=e.write
+    def write(path,*args,**kwargs):
+        result=original(path,*args,**kwargs)
+        if pathlib.Path(path).name=='accepted.json':stop(path)
+        return result
+    e.write=write
+e.dispatch(config,payload,new=True,mechanism='P')
+raise AssertionError('Local writer passed its durable stop')
+'''
+
+
 @contextmanager
 def _child(source, *arguments):
     environment = dict(os.environ)
@@ -99,6 +139,12 @@ def _child(source, *arguments):
 def _payload(root):
     path = c.workspace(root, 2) / 'work/opaque-package'
     path.write_bytes(b'opaque contract fixture; never executed as source\n')
+    return path
+
+
+def _local_payload(root):
+    path = c.workspace(root, 2) / 'work/local.py'
+    path.write_text('raise AssertionError("Local preparation fixture must never launch")\n')
     return path
 
 
@@ -144,6 +190,168 @@ def _no_replay(monkeypatch):
     for name in ('prepare', 'dispatch_lease', 'submit'):
         monkeypatch.setattr(DifferentExternalIdentity, name, forbidden)
     monkeypatch.setattr(breadth, 'admit', forbidden)
+
+
+def _unbound(root, snapshot, action='discard-partial', **changes):
+    options = dict(action=action, max_seconds=10, authorization_note='Exact built-in local residual only', unbound_local=True)
+    options.update(changes)
+    return recovery.maintain(root, 2, None, snapshot.name.removeprefix('.prepared-'), **options)
+
+
+def _unbound_cli(root, snapshot, action):
+    return cli.main(['execution-preparation-maintain', '--root', str(root), '--step', '2',
+        '--unbound-local', '--snapshot-token', snapshot.name.removeprefix('.prepared-'), '--action', action,
+        '--max-seconds', '10', '--authorization-note', 'Exact built-in local residual only'])
+
+
+@contextmanager
+def _local_writer(root, config, boundary='partial'):
+    original = execution.record(root, 2, config['native_attempt']['number']) / 'experiment-config.json'
+    counter = root.parent / 'local-preparation-counters'
+    with _child(LOCAL_CRASH_WRITER, original, _local_payload(root), boundary, counter) as (process, ready):
+        materialized = Path(ready['ready'])
+        assert materialized.is_file() and materialized.parent.name.startswith('.prepared-')
+        yield process, materialized.parent, counter
+
+
+def _killed_local(root, config, boundary='partial'):
+    with _local_writer(root, config, boundary) as (process, snapshot, counter):
+        process.send_signal(signal.SIGKILL)
+        assert process.wait(timeout=5) == -signal.SIGKILL
+    assert counter.read_text().splitlines() == ['prepare']
+    return snapshot, counter
+
+
+@pytest.mark.process_e2e
+def test_killed_unbound_local_writer_explicit_cli_cleanup_removes_only_its_blocker(tmp_path, monkeypatch, capsys):
+    write = c.write
+    def no_native(path, value):
+        return write(path, dict(value, native_started=False) if Path(path).name == 'native-outcome.json' else value)
+    monkeypatch.setattr(c, 'write', no_native)
+    root, _, config, _ = case(tmp_path, monkeypatch, executor='local_execution:command')
+    assert config.get('host_execution_authority') is None
+    with _local_writer(root, config) as (process, snapshot, counter):
+        assert not (snapshot / 'accepted.json').exists()
+        assert _unbound(root, snapshot)['status'] == 'busy'
+        assert snapshot.is_dir()
+        process.send_signal(signal.SIGKILL)
+        assert process.wait(timeout=5) == -signal.SIGKILL
+    finish(root, 2, 'W', [1], preserve_native_intent=True,
+        mechanism_findings=[dict(mechanism=label, basis='blocked',
+            finding='The fixture was killed before acceptance; no scientific observation is claimed.') for label in ('P', 'Q')])
+    assert any(row['code'] == 'unknown_managed_preparation' for row in fork_sources._parent_state(root))
+    with pytest.raises(archive.files.ArchiveError, match='Original preparation'):
+        archive._quiescent(root)
+    records = Path(config['record_dir'])
+    neighbor = records / 'unrelated-original'; neighbor.mkdir()
+    (neighbor / 'keep').write_bytes(b'untouched neighbor')
+    originals = {path: path.read_bytes() for path in [root / 'settings.json', root / 'jobs/002.json',
+        execution.origin(root, 2) / 'native-intent.json', execution.origin(root, 2) / 'experiment-config.json',
+        execution.origin(root, 2) / 'result-identity.json', records.parent / 'interfaces/000.json',
+        *sorted((root / 'control-ledger').glob('*.json'))]}
+    ledger = {path: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')}
+    from scidiscovery.research_loop import breadth
+    from scidiscovery.research_loop.local_experiments import LocalExecution
+    def forbidden(*args, **kwargs):
+        pytest.fail('Unbound cleanup entered prepare, admission or submission')
+    for target, name in ((LocalExecution, 'prepare'), (LocalExecution, 'submit'), (breadth, 'admit')):
+        monkeypatch.setattr(target, name, forbidden)
+    assert _unbound_cli(root, snapshot, 'inspect') == 0
+    assert json.loads(capsys.readouterr().out) == dict(status='partial', call_id=None,
+        snapshot_token=snapshot.name.removeprefix('.prepared-'), binding=None)
+    with pytest.raises((ValueError, OSError)):
+        recovery.maintain(root, 2, 'arbitrary-nonexistent-call', snapshot.name.removeprefix('.prepared-'),
+            action='discard-partial', max_seconds=10, authorization_note='A call ID is never a local cleanup selector')
+    assert _unbound_cli(root, snapshot, 'discard-partial') == 0
+    assert json.loads(capsys.readouterr().out) == dict(status='partial_discarded', call_id=None,
+        snapshot_token=snapshot.name.removeprefix('.prepared-'), binding=None)
+    assert not snapshot.exists() and not (records / 'host-preparations').exists()
+    assert (neighbor / 'keep').read_bytes() == b'untouched neighbor'
+    assert not any(row['code'] == 'unknown_managed_preparation' for row in fork_sources._parent_state(root))
+    archive._quiescent(root)
+    assert {path: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')} == ledger
+    assert all(path.read_bytes() == raw for path, raw in originals.items())
+    assert counter.read_text().splitlines() == ['prepare']
+    with pytest.raises(recovery.PreparationError, match='absent'):
+        _unbound(root, snapshot)
+
+
+def test_live_local_cleanup_failure_residual_can_be_explicitly_removed(tmp_path, monkeypatch, capsys):
+    import shutil
+    from scidiscovery.research_loop.local_experiments import LocalExecution
+    root, _, config, _ = case(tmp_path, monkeypatch, executor='local_execution:command')
+    assert config.get('host_execution_authority') is None
+    snapshots = []
+    original = c._bind_original
+    with monkeypatch.context() as patch:
+        def fail_after_copy(*args, **kwargs):
+            result = original(*args, **kwargs)
+            target = Path(args[1])
+            if target.name == 'source.py' and target.parent.name.startswith('.prepared-'):
+                snapshots.append(target.parent)
+                raise RuntimeError('Real local copy completed before fixture refusal')
+            return result
+        remove = shutil.rmtree
+        def failed_cleanup(path, *args, **kwargs):
+            if Path(path) in snapshots:
+                raise OSError('Exact live local cleanup fault')
+            return remove(path, *args, **kwargs)
+        def no_submit(*args, **kwargs):
+            pytest.fail('Cleanup-failure fixture submitted an execution')
+        patch.setattr(c, '_bind_original', fail_after_copy)
+        patch.setattr(shutil, 'rmtree', failed_cleanup)
+        patch.setattr(LocalExecution, 'submit', no_submit)
+        result = e.dispatch(config, _local_payload(root), new=True, mechanism='P')
+    assert result['status'] == 'known_not_started' and result['error'] == 'local_cleanup_failed'
+    assert len(snapshots) == 1 and (snapshots[0] / 'source.py').is_file()
+    assert not (snapshots[0] / 'accepted.json').exists()
+    ledger = {path: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')}
+    assert _unbound_cli(root, snapshots[0], 'discard-partial') == 0
+    assert json.loads(capsys.readouterr().out)['status'] == 'partial_discarded'
+    assert not snapshots[0].exists()
+    assert {path: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')} == ledger
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('kind', ['accepted', 'bound', 'thirdparty', 'mixed', 'missing_projection'])
+def test_unbound_cleanup_preserves_accepted_bound_and_ambiguous_namespaces(tmp_path, monkeypatch, remote_registry, kind):
+    executor = 'remote_execution:fixture' if kind in {'thirdparty', 'mixed'} else 'local_execution:command'
+    root, job, config, _ = case(tmp_path, monkeypatch, executor=executor, resume=kind == 'mixed')
+    if kind == 'mixed':
+        first = execution.origin(root, 2)
+        meter = dict(input_tokens=1, cached_input_tokens=0, output_tokens=1)
+        c.write(first / 'usage.json', meter)
+        report = budget.node_report(root, job, c.read(first / 'native-intent.json'), meter)
+        c.write(first / 'native-outcome.json', dict(native_started=False, returncode=1, stop_reason='fixture_known_failure',
+            budget_slice=dict(report, usage_observed=(first / 'usage.json').is_file())))
+        anchor = budget.accept_continuation(root, job, [first])
+        continuation = first / 'continuations/001'; continuation.mkdir(parents=True)
+        c.write(continuation / 'native-intent.json', dict(attempt=1, task_ref=c.record_ref(root / 'jobs/002.json'),
+            root_intent_ref=c.record_ref(first / 'native-intent.json'), previous=execution.proof(first), budget_slice=anchor))
+        config = e.configure(root, 2, 'local_execution:command', dict(run_argv=[sys.executable]),
+            c.workspace(root, 2) / 'work/experiment-config.json')
+    if kind == 'thirdparty':
+        row, counter = _killed(root, config, 'partial')
+        snapshot = Path(row['snapshot'])
+    else:
+        snapshot, counter = _killed_local(root, config, 'accepted' if kind == 'accepted' else 'partial')
+    if kind == 'bound':
+        payload = _local_payload(root)
+        descriptor = LocalFileDescriptor(name='bound-local-target', local_path=str(payload),
+            size_bytes=payload.stat().st_size, media_type='application/octet-stream')
+        recovery.bind_snapshot(config, snapshot, descriptor, dict(parent=dict(candidate_id=None)),
+            context=recovery.storage.Deadline(10))
+    elif kind == 'missing_projection':
+        (Path(config['record_dir']).parent / 'interfaces/000.json').unlink()
+    source = (snapshot / 'source.py').read_bytes()
+    counter_bytes = counter.read_bytes()
+    bindings = {path: path.read_bytes() for path in (Path(config['record_dir']) / 'host-preparations').glob('*/*.json')}
+    for action in ('inspect', 'discard-partial', 'publish-accepted'):
+        with pytest.raises((ValueError, OSError)):
+            _unbound(root, snapshot, action)
+    assert snapshot.is_dir() and (snapshot / 'source.py').read_bytes() == source
+    assert counter.read_bytes() == counter_bytes
+    assert all(path.read_bytes() == raw for path, raw in bindings.items())
 
 
 @pytest.mark.process_e2e
