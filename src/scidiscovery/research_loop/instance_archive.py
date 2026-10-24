@@ -269,8 +269,16 @@ def _quiescent(root):
         if cleanup.exists() and _read(cleanup).get('status') != 'observed_group_cleaned':
             raise files.ArchiveError('Native watchdog retained unknown cleanup')
     for records in _managed_roots(root):
-        if any(records.glob('.prepared-*')):
-            raise files.ArchiveError('Original preparation has not completed acceptance')
+        snapshot = next(records.glob('.prepared-*'), None)
+        if snapshot is not None:
+            step = int(records.parent.name if records.name == 'records' else records.parent.parent.name)
+            token = snapshot.name.removeprefix('.prepared-')
+            raise files.ArchiveError(
+                'Original preparation has not completed acceptance: '
+                f'{snapshot.relative_to(root).as_posix()}; --step {step} --snapshot-token {token}. '
+                'See scid-research execution-preparation-maintain --help. '
+                'Only for a proven built-in local unbound partial, use --unbound-local --action inspect; '
+                'bound or unknown preparations require the exact original call.')
         from . import preparation_recovery
         if any(not row['resolved'] for row in preparation_recovery.retained_preparations(root, records)):
             raise files.ArchiveError('Retained original host preparation is unresolved')

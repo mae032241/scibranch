@@ -239,9 +239,18 @@ def test_killed_unbound_local_writer_explicit_cli_cleanup_removes_only_its_block
     finish(root, 2, 'W', [1], preserve_native_intent=True,
         mechanism_findings=[dict(mechanism=label, basis='blocked',
             finding='The fixture was killed before acceptance; no scientific observation is claimed.') for label in ('P', 'Q')])
-    assert any(row['code'] == 'unknown_managed_preparation' for row in fork_sources._parent_state(root))
-    with pytest.raises(archive.files.ArchiveError, match='Original preparation'):
+    snapshot_path = snapshot.relative_to(root).as_posix()
+    selectors = f'--step 2 --snapshot-token {snapshot.name.removeprefix(".prepared-")}'
+    blocker, = [row for row in fork_sources._parent_state(root)
+        if row['code'] == 'unknown_managed_preparation' and row['path'] == snapshot_path]
+    assert selectors in blocker['reason']
+    assert 'execution-preparation-maintain --help' in blocker['reason']
+    assert 'Only for a proven built-in local unbound partial, use --unbound-local --action inspect' in blocker['reason']
+    with pytest.raises(archive.files.ArchiveError, match='Original preparation') as blocked_archive:
         archive._quiescent(root)
+    assert snapshot_path in str(blocked_archive.value) and selectors in str(blocked_archive.value)
+    assert 'execution-preparation-maintain --help' in str(blocked_archive.value)
+    assert 'Only for a proven built-in local unbound partial, use --unbound-local --action inspect' in str(blocked_archive.value)
     records = Path(config['record_dir'])
     neighbor = records / 'unrelated-original'; neighbor.mkdir()
     (neighbor / 'keep').write_bytes(b'untouched neighbor')
@@ -346,6 +355,12 @@ def test_unbound_cleanup_preserves_accepted_bound_and_ambiguous_namespaces(tmp_p
     source = (snapshot / 'source.py').read_bytes()
     counter_bytes = counter.read_bytes()
     bindings = {path: path.read_bytes() for path in (Path(config['record_dir']) / 'host-preparations').glob('*/*.json')}
+    blocker, = [row for row in fork_sources._parent_state(root)
+        if row['code'] == 'unknown_managed_preparation' and row['path'] == snapshot.relative_to(root).as_posix()]
+    assert f'--step 2 --snapshot-token {snapshot.name.removeprefix(".prepared-")}' in blocker['reason']
+    assert 'execution-preparation-maintain --help' in blocker['reason']
+    assert 'Only for a proven built-in local unbound partial' in blocker['reason']
+    assert 'bound or unknown preparations require the exact original call' in blocker['reason']
     for action in ('inspect', 'discard-partial', 'publish-accepted'):
         with pytest.raises((ValueError, OSError)):
             _unbound(root, snapshot, action)

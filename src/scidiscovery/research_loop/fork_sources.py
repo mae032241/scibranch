@@ -103,8 +103,14 @@ def _parent_state(root):
                 blocked.append(dict(code='unknown_native_effect', path=record.relative_to(root).as_posix()))
         if job.get('experiment_mode') is not None:
             records = experiment_client.record_directory(root, job['step'])
-            if any(records.glob('.prepared-*')):
-                blocked.append(dict(code='unknown_managed_preparation', path=records.relative_to(root).as_posix()))
+            snapshot = next(records.glob('.prepared-*'), None)
+            if snapshot is not None:
+                token = snapshot.name.removeprefix('.prepared-')
+                blocked.append(dict(code='unknown_managed_preparation', path=snapshot.relative_to(root).as_posix(),
+                    reason=f'Original preparation has not completed acceptance: --step {job["step"]} --snapshot-token {token}. '
+                    'See scid-research execution-preparation-maintain --help. '
+                    'Only for a proven built-in local unbound partial, use --unbound-local --action inspect; '
+                    'bound or unknown preparations require the exact original call.'))
             from . import preparation_recovery
             if any(not row['resolved'] for row in preparation_recovery.retained_preparations(root, records)):
                 blocked.append(dict(code='unknown_managed_preparation', path=records.relative_to(root).as_posix()))
