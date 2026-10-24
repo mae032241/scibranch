@@ -1,0 +1,361 @@
+from __future__ import annotations
+
+import os
+import shutil
+import stat
+
+import pytest
+
+
+@pytest.fixture
+def helper(tmp_path):
+    from scidiscovery.research_loop import code_versions
+    assert shutil.which('git', path=os.defpath), 'code version checks require host Git'
+    yield code_versions
+    root = tmp_path / 'instance'
+    if root.is_dir():
+        for step, call in ((7, 'call-1'), (7, 'call-2'), (1000, 'one-file')):
+            export = root / f'host-runtime/code-versions/exports/{step:03d}/{call}/tree'
+            try:
+                code_versions._directory(export.parent)
+            except FileNotFoundError:
+                continue
+            if export.is_symlink():
+                export.unlink()
+            code_versions.cleanup_export(root, step=step, call_id=call)
+
+
+def _source(tmp_path):
+    root = tmp_path / 'instance'
+    root.mkdir()
+    code = root / 'workspace/code'
+    code.mkdir(parents=True)
+    (code / 'main.py').write_bytes(b"print('original')\r\n")
+    return root, code
+
+
+def _capture(helper, root, code, call='call-1', **kwargs):
+    return helper.capture(root, step=7, call_id=call, code_root=code,
+                          entry='main.py', selection='directory', logical_root='code', **kwargs)
+
+
+@pytest.mark.process_e2e
+def test_capture_exports_raw_bytes_modes_despite_poisoned_git_environment(tmp_path, monkeypatch, helper):
+    root, code = _source(tmp_path)
+    workspace_git = code.parent / '.git'
+    workspace_git.mkdir()
+    (workspace_git / 'config').write_text('[core]\nrepositoryformatversion = 999\n', encoding='ascii')
+    original = {
+        'main.py': b"print('original')\r\n",
+        '.gitignore': b'ignored.txt\n',
+        '.gitattributes': b'* text eol=lf filter=forbidden\nmain.py export-ignore\n',
+        'ignored.txt': b'$Format:%H$\r\n',
+        'nested/helper.sh': b'#!/bin/sh\nprintf raw\\n\n',
+    }
+    (code / 'nested').mkdir()
+    for name, content in original.items():
+        path = code / name
+        path.write_bytes(content)
+        path.chmod(0o755 if name.endswith('.sh') else 0o644)
+    poison = tmp_path / 'poison'
+    poison.mkdir()
+    (poison / '.gitconfig').write_text(
+        '[filter "forbidden"]\nrequired = true\nclean = false\nsmudge = false\n', encoding='ascii')
+    for name, value in {
+        'HOME': str(poison), 'PATH': str(poison), 'GIT_DIR': str(workspace_git),
+        'GIT_WORK_TREE': str(poison), 'GIT_INDEX_FILE': str(poison / 'index'),
+        'GIT_OBJECT_DIRECTORY': str(poison / 'objects'), 'GIT_NAMESPACE': 'poison',
+        'GIT_ALTERNATE_OBJECT_DIRECTORIES': str(poison / 'alternates'),
+        'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'core.repositoryformatversion',
+        'GIT_CONFIG_VALUE_0': '999', 'GIT_AUTHOR_DATE': 'invalid date',
+    }.items():
+        monkeypatch.setenv(name, value)
+    version = _capture(helper, root, code)
+    assert set(version) == {'version', 'object_format', 'commit', 'tree_path',
+                            'selection', 'entry', 'logical_root'}
+    helper.verify(root, step=7, call_id='call-1', code_version=version)
+    export = helper.materialize(root, step=7, call_id='call-1', code_version=version)
+    assert export == root / 'host-runtime/code-versions/exports/007/call-1/tree'
+    for name, content in original.items():
+        assert (export / name).read_bytes() == content
+        assert stat.S_IMODE((export / name).stat().st_mode) == (0o555 if name.endswith('.sh') else 0o444)
+    assert stat.S_IMODE(export.stat().st_mode) == 0o555
+    assert not (workspace_git / 'index').exists()
+    assert not (poison / 'index').exists()
+    assert not (root / 'host-runtime/code-versions/repository.git/index').exists()
+    assert helper.materialize(root, step=7, call_id='call-1', code_version=version) == export
+
+
+@pytest.mark.process_e2e
+def test_pins_survive_draft_edits_cleanup_and_rematerialization(tmp_path, helper):
+    root, code = _source(tmp_path)
+    first = _capture(helper, root, code)
+    first_export = helper.materialize(root, step=7, call_id='call-1', code_version=first)
+    (code / 'main.py').write_bytes(b'new draft\n')
+    second = _capture(helper, root, code, call='call-2')
+    second_export = helper.materialize(root, step=7, call_id='call-2', code_version=second)
+    assert second['commit'] != first['commit']
+    (code / 'main.py').unlink()
+    helper.cleanup_export(root, step=7, call_id='call-1')
+    helper.cleanup_export(root, step=7, call_id='call-1')
+    assert not first_export.exists()
+    assert (second_export / 'main.py').read_bytes() == b'new draft\n'
+    for call, version in (('call-1', first), ('call-2', second)):
+        helper.verify(root, step=7, call_id=call, code_version=version)
+    restored = helper.materialize(root, step=7, call_id='call-1', code_version=first)
+    assert restored == first_export
+    assert (restored / 'main.py').read_bytes() == b"print('original')\r\n"
+    with pytest.raises(ValueError):
+        helper.verify(root, step=7, call_id='call-2', code_version=first)
+
+
+@pytest.mark.process_e2e
+def test_file_selection_is_complete_and_changed_same_call_refuses(tmp_path, helper):
+    root, code = _source(tmp_path)
+    (code / 'nested').mkdir()
+    (code / 'nested/main.py').write_bytes(b'one\n')
+    (code / 'unselected').symlink_to(code / 'main.py')
+    (code / 'unselected-empty').mkdir()
+    arguments = dict(step=1000, call_id='one-file', code_root=code, entry='nested/main.py',
+                     selection='file', logical_root='workspace/code', limits={'max_files': 1})
+    first = helper.capture(root, **arguments)
+    assert helper.capture(root, **arguments) == first
+    export = helper.materialize(root, step=1000, call_id='one-file', code_version=first)
+    assert (export / 'nested/main.py').read_bytes() == b'one\n'
+    assert not (export / 'main.py').exists()
+    assert not (export / 'unselected').exists()
+    (code / 'nested/main.py').write_bytes(b'two\n')
+    with pytest.raises(ValueError, match='already pins different code'):
+        helper.capture(root, **arguments)
+    helper.verify(root, step=1000, call_id='one-file', code_version=first)
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('case', ['file_bytes', 'total_bytes', 'files', 'scan_entries',
+                                  'symlink_file', 'symlink_directory', 'fifo', 'git_component',
+                                  'empty_directory'])
+def test_preflight_rejects_bounds_and_nonregular_code_before_repository_writes(tmp_path, helper, case):
+    root, code = _source(tmp_path)
+    limits = {}
+    if case == 'file_bytes':
+        limits = {'max_file_bytes': 1}
+    elif case == 'total_bytes':
+        limits = {'max_total_bytes': 1}
+    elif case == 'files':
+        (code / 'second.py').write_bytes(b'x')
+        limits = {'max_files': 1}
+    elif case == 'scan_entries':
+        (code / 'empty').mkdir()
+        limits = {'max_scan_entries': 1}
+    elif case == 'symlink_file':
+        (code / 'link').symlink_to(code / 'main.py')
+    elif case == 'symlink_directory':
+        (code / 'link').symlink_to(code.parent, target_is_directory=True)
+    elif case == 'fifo':
+        os.mkfifo(code / 'pipe')
+    elif case == 'git_component':
+        (code / '.git').mkdir()
+    else:
+        (code / 'empty').mkdir()
+    with pytest.raises(ValueError):
+        _capture(helper, root, code, limits=limits)
+    assert not (root / 'host-runtime').exists()
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('drift', ['bytes', 'executable', 'added_file', 'ancestor'])
+def test_capture_barrier_rechecks_drift_before_pinning(tmp_path, monkeypatch, helper, drift):
+    root, code = _source(tmp_path)
+    original_git = helper._git
+    changed = False
+
+    def git(private, arguments, **kwargs):
+        nonlocal changed
+        output = original_git(private, arguments, **kwargs)
+        if arguments[0] == 'commit-tree' and not changed:
+            changed = True
+            if drift == 'bytes':
+                (code / 'main.py').write_bytes(b'drift\n')
+            elif drift == 'executable':
+                (code / 'main.py').chmod(0o755)
+            elif drift == 'added_file':
+                (code / 'new.py').write_bytes(b'new\n')
+            else:
+                code.rename(code.with_name('old-code'))
+                code.mkdir()
+                (code / 'main.py').write_bytes(b"print('original')\r\n")
+        return output
+
+    monkeypatch.setattr(helper, '_git', git)
+    with pytest.raises(ValueError, match='changed'):
+        _capture(helper, root, code)
+    assert changed
+    ref = root / 'host-runtime/code-versions/repository.git/refs/scidiscovery/steps/007/calls/call-1'
+    assert not ref.exists()
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('selection', ['file', 'directory'])
+def test_preflight_directory_swap_never_reads_foreign_tree(tmp_path, monkeypatch, helper, selection):
+    root, code = _source(tmp_path)
+    nested = code / 'nested'
+    nested.mkdir()
+    (nested / 'helper.py').write_bytes(b'original code\n')
+    outside = tmp_path / 'scientific-input'
+    outside.mkdir()
+    (outside / 'helper.py').write_bytes(b'foreign scientific bytes\n')
+    original_open = helper._open_directory
+    swapped = False
+
+    def open_directory(path, *, dir_fd=None, expected=None):
+        nonlocal swapped
+        if path == 'nested' and dir_fd is not None and not swapped:
+            swapped = True
+            nested.rename(code / 'parked')
+            nested.symlink_to(outside, target_is_directory=True)
+        return original_open(path, dir_fd=dir_fd, expected=expected)
+
+    monkeypatch.setattr(helper, '_open_directory', open_directory)
+    with pytest.raises((OSError, ValueError)):
+        helper.capture(root, step=7, call_id='call-1', code_root=code, entry='nested/helper.py',
+                       selection=selection, logical_root='code')
+    assert swapped
+    assert not (root / 'host-runtime').exists()
+
+
+@pytest.mark.process_e2e
+def test_export_mutation_refuses_and_cleanup_never_follows_export_symlink(tmp_path, helper):
+    root, code = _source(tmp_path)
+    version = _capture(helper, root, code)
+    export = helper.materialize(root, step=7, call_id='call-1', code_version=version)
+    (export / 'main.py').chmod(0o644)
+    (export / 'main.py').write_bytes(b'mutated\n')
+    with pytest.raises(ValueError, match='differs'):
+        helper.materialize(root, step=7, call_id='call-1', code_version=version)
+    helper.cleanup_export(root, step=7, call_id='call-1')
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    sentinel = outside / 'keep'
+    sentinel.write_bytes(b'keep')
+    export.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError):
+        helper.cleanup_export(root, step=7, call_id='call-1')
+    with pytest.raises(ValueError):
+        helper.materialize(root, step=7, call_id='call-1', code_version=version)
+    assert sentinel.read_bytes() == b'keep'
+    export.unlink()
+    restored = helper.materialize(root, step=7, call_id='call-1', code_version=version)
+    assert (restored / 'main.py').read_bytes() == b"print('original')\r\n"
+
+
+@pytest.mark.process_e2e
+def test_cleanup_parent_swap_cannot_redirect_deletion(tmp_path, monkeypatch, helper):
+    root, code = _source(tmp_path)
+    version = _capture(helper, root, code)
+    export = helper.materialize(root, step=7, call_id='call-1', code_version=version)
+    holder = root / 'host-runtime/code-versions'
+    step_directory = export.parent.parent
+    parked = step_directory.with_name('parked')
+    outside_step = tmp_path / 'outside-step'
+    outside_tree = outside_step / 'call-1/tree'
+    outside_tree.mkdir(parents=True)
+    sentinel = outside_tree / 'keep'
+    sentinel.write_bytes(b'keep')
+    original_open = helper.os.open
+    swapped = False
+
+    def open_file(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if (dir_fd is None and os.fspath(path) in (str(holder), str(export.parent))
+                and not swapped):
+            swapped = True
+            step_directory.rename(parked)
+            step_directory.symlink_to(outside_step, target_is_directory=True)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(helper.os, 'open', open_file)
+    try:
+        with pytest.raises((OSError, ValueError)):
+            helper.cleanup_export(root, step=7, call_id='call-1')
+        assert swapped
+        assert sentinel.read_bytes() == b'keep'
+    finally:
+        monkeypatch.setattr(helper.os, 'open', original_open)
+        if step_directory.is_symlink():
+            step_directory.unlink()
+        if parked.exists():
+            parked.rename(step_directory)
+    assert (export / 'main.py').read_bytes() == b"print('original')\r\n"
+    helper.verify(root, step=7, call_id='call-1', code_version=version)
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('injection', ['extra_file', 'earlier_file'])
+def test_new_export_rechecks_complete_bytes_before_returning(tmp_path, monkeypatch, helper, injection):
+    root, code = _source(tmp_path)
+    (code / 'z.py').write_bytes(b'later\n')
+    version = _capture(helper, root, code)
+    export = root / 'host-runtime/code-versions/exports/007/call-1/tree'
+    original_blob = helper._blob
+    injected = False
+
+    def blob(private, record, context):
+        nonlocal injected
+        content = original_blob(private, record, context)
+        if content == b'later\n' and not injected:
+            injected = True
+            if injection == 'extra_file':
+                (export / 'extra.py').write_bytes(b'extra\n')
+            else:
+                (export / 'main.py').chmod(0o644)
+                (export / 'main.py').write_bytes(b'corrupted\n')
+                (export / 'main.py').chmod(0o444)
+        return content
+
+    monkeypatch.setattr(helper, '_blob', blob)
+    with pytest.raises(ValueError, match='differs'):
+        helper.materialize(root, step=7, call_id='call-1', code_version=version)
+    assert injected
+    assert not export.exists()
+    helper.verify(root, step=7, call_id='call-1', code_version=version)
+    monkeypatch.setattr(helper, '_blob', original_blob)
+    restored = helper.materialize(root, step=7, call_id='call-1', code_version=version)
+    assert (restored / 'main.py').read_bytes() == b"print('original')\r\n"
+
+
+@pytest.mark.process_e2e
+def test_original_effective_limits_can_be_supplied_to_verify_and_materialize(tmp_path, helper):
+    root, code = _source(tmp_path)
+    content = b'x' * (1048576 + 1)
+    (code / 'main.py').write_bytes(content)
+    limits = {'max_file_bytes': len(content)}
+    version = _capture(helper, root, code, limits=limits)
+    with pytest.raises(ValueError, match='max_file_bytes'):
+        helper.verify(root, step=7, call_id='call-1', code_version=version)
+    with pytest.raises(ValueError, match='max_file_bytes'):
+        helper.materialize(root, step=7, call_id='call-1', code_version=version)
+    helper.verify(root, step=7, call_id='call-1', code_version=version, limits=limits)
+    export = helper.materialize(root, step=7, call_id='call-1', code_version=version, limits=limits)
+    assert (export / 'main.py').read_bytes() == content
+
+
+@pytest.mark.process_e2e
+def test_invalid_identifiers_paths_and_version_shape_refuse(tmp_path, helper):
+    root, code = _source(tmp_path)
+    for call in ('.', '..', 'a..b', '.hidden', 'trailing.', 'x.lock', 'bad/ref'):
+        with pytest.raises(ValueError):
+            _capture(helper, root, code, call=call)
+    for step in (True, -1):
+        with pytest.raises(ValueError):
+            helper.capture(root, step=step, call_id='call', code_root=code, entry='main.py',
+                           selection='file', logical_root='code')
+    for entry, logical_root in (('../main.py', 'code'), ('./main.py', 'code'), ('main.py', '.')):
+        with pytest.raises(ValueError):
+            helper.capture(root, step=7, call_id='call', code_root=code, entry=entry,
+                           selection='file', logical_root=logical_root)
+    assert not (root / 'host-runtime').exists()
+    version = _capture(helper, root, code)
+    for changed in ({**version, 'version': True}, {**version, 'private_path': '/private'},
+                    {**version, 'tree_path': 'subtree'}, {**version, 'entry': '..'}):
+        with pytest.raises(ValueError):
+            helper.verify(root, step=7, call_id='call-1', code_version=changed)
