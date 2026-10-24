@@ -704,9 +704,18 @@ inode aliases, without content checksums or equality-based deduplication. A rest
 retry must match its original publication transaction and target inode; equal size
 or bytes at another target cannot establish idempotency. Derived workspace mount
 identities are excluded and rebuilt before a new native launch.
-Unpublished preparation snapshots retain one exact host binding before input
-materialization. Explicit maintenance can finish publication of an already durable,
-admitted accepted record, or discard only a partial snapshot with the original
+New dispatches check known review/breadth admission before prepare and execution
+resource allocation, then recheck the accepted-call set and admission under the
+existing short locks. In the exact built-in local adapter's current pre-submit
+flow, refusal or cancellation cleans only its own temporary preparation without
+registering external pending state. Cleanup failure remains a local cleanup
+problem. This exception neither infers no launch from missing files after a crash
+nor promises cancellation of a durably accepted call.
+
+For adapters whose preparation may have external effects, unpublished snapshots
+retain one exact host binding before input materialization. Explicit maintenance
+can publish an already durable, admitted accepted record, or discard only a
+partial snapshot with the original
 directory identity. Neither action reruns prepare, admission or submission. A
 discarded unresolved binding remains unknown in pending recovery and later Worker
 views, and blocks new preparation, fork and archive paths, including configurations
@@ -714,8 +723,8 @@ without execution authority. Original permissions, reservations and consumption 
 Historical published bindings retain their original bytes across enrollment and
 cold restoration; restored archive metadata proves their provenance without the
 backup package remaining online. Reading that history grants no live maintenance
-authority over a different directory generation. Legacy unbound temporary
-directories remain unsupported for automatic cleanup.
+authority over a different directory generation. Recovery of unbound temporary
+directories remains unsupported for automatic cleanup.
 
 Ordinary read-only archives grant no advancing restore permission. Cross-host recovery,
 lost anchors and arbitrary native external reads remain outside support.

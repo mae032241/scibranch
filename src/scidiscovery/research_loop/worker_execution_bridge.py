@@ -267,7 +267,8 @@ def _pending_cache(response,calls):
 
 def _response_calls(server, request, response, before):
     from . import experiments as e
-    references={path.name for path in e.Records(server.configuration).calls()}-before
+    records=e.Records(server.configuration)
+    references={path.name for path in records.calls()}-before
     result=response.get('result',{})
     if isinstance(result.get('call_id'),str):references.add(result['call_id'])
     for row in result.get('calls',[]):
@@ -277,7 +278,24 @@ def _response_calls(server, request, response, before):
     if '--call-id' in arguments:
         index=arguments.index('--call-id')
         if index+1<len(arguments):references.add(arguments[index+1])
-    return [_call_evidence(server.configuration,reference) for reference in sorted(references)]
+    calls=[];preparations=None
+    for reference in sorted(references):
+        directory=records.root/'calls'/reference
+        if (arguments[:1]==['run'] and result.get('status')=='unknown'
+                and result.get('call_id')==reference
+                and e.ID.fullmatch(reference) and reference not in {'.','..'}
+                and not directory.exists() and not directory.is_symlink()):
+            from . import experiment_client,preparation_recovery,storage_policy as storage
+            if preparations is None:
+                root=experiment_client.root_for_configuration(server.configuration)
+                preparations=preparation_recovery.retained_preparations(root,records.root,
+                    context=storage.Deadline(65))
+            if any(row['call_id']==reference and not row['resolved'] for row in preparations):
+                # This existing original is preparation-unknown, with no accepted
+                # call facts to cache. Retain the unknown response and exact ID.
+                continue
+        calls.append(_call_evidence(server.configuration,reference))
+    return calls
 
 
 def _handle(server, raw, *, retained=False):

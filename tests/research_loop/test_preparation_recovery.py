@@ -117,7 +117,7 @@ def _killed(root, config, boundary):
     assert row['status'] == 'unknown'
     assert Path(row['binding']['path']).is_file()
     assert not (Path(config['record_dir']) / 'calls' / row['call_id']).exists()
-    assert counter.read_text().splitlines() == (['prepare', 'admit'] if boundary == 'accepted' else ['prepare'])
+    assert counter.read_text().splitlines() == (['admit', 'prepare', 'admit'] if boundary == 'accepted' else ['admit', 'prepare'])
     return row, counter
 
 
@@ -173,7 +173,7 @@ def test_durable_accepted_cli_only_publishes_original_inode(tmp_path, monkeypatc
     assert recovery.retained_preparations(root, Path(config['record_dir']))[0]['resolved'] is True
     assert _maintain(root, row, 'publish-accepted')['status'] == 'already_published'
     assert e.Records(config).accepted(row['call_id'])['host_preparation'] == row['binding']
-    assert counter.read_text().splitlines() == ['prepare', 'admit']
+    assert counter.read_text().splitlines() == ['admit', 'prepare', 'admit']
     assert all(path.read_bytes() == raw for path, raw in originals.items())
     assert not (canonical / 'submission.json').exists()
 
@@ -203,7 +203,7 @@ def test_partial_discard_retains_unknown_and_blocks_prepare_and_pending(tmp_path
     descriptor = LocalFileDescriptor(**c.read(Path(row['binding']['path']))['prepared'])
     with pytest.raises((e.ConcurrentExecution, e.IntegrityError, recovery.PreparationError)):
         e.Records(config).accept(descriptor, dict(parent=dict(candidate_id=None)), config['execution_interface'], mechanism='P')
-    assert counter.read_text().splitlines() == ['prepare']
+    assert counter.read_text().splitlines() == ['admit', 'prepare']
     # There is deliberately no allocation, authority contract, accepted call or
     # original native cleanup proof; none may turn the retained binding into None.
     assert not job.get('execution_authority')
@@ -298,7 +298,7 @@ def test_exact_identity_and_tree_conflicts_preserve_target_and_neighbor(tmp_path
             _maintain(root, row, action)
     assert (neighbor / 'keep').read_bytes() == b'untouched neighbor'
     assert {path.name: path.read_bytes() for path in Path(row['binding']['path']).parent.iterdir()} == before
-    assert counter.read_text().splitlines() == ['prepare', 'admit']
+    assert counter.read_text().splitlines() == ['admit', 'prepare', 'admit']
 
 
 @pytest.mark.process_e2e
@@ -350,7 +350,7 @@ def test_exact_operation_retry_after_mutation_before_outcome(tmp_path, monkeypat
         assert (canonical.stat().st_dev, canonical.stat().st_ino) == identity
     else:
         assert recovery.retained_preparations(root, Path(config['record_dir']))[0]['resolved'] is False
-    assert counter.read_text().splitlines() == (['prepare', 'admit'] if boundary.startswith('publish') else ['prepare'])
+    assert counter.read_text().splitlines() == (['admit', 'prepare', 'admit'] if boundary.startswith('publish') else ['admit', 'prepare'])
 
 
 @pytest.mark.process_e2e
@@ -530,10 +530,10 @@ def _killed_authorized_resume(root, backend, call, config, boundary, operation=N
     rows = recovery.retained_preparations(root, Path(config['record_dir']))
     assert len(rows) == 1 and rows[0]['call_id'] == call and rows[0]['resolved'] is False
     expected = ['prepare', 'admit'] if boundary == 'accepted' else ['prepare']
-    # Ordinary run checks breadth while resolving its call identity; sealed
-    # resume uses the already frozen allocation and starts at provider prepare.
+    # Ordinary run checks breadth before preparation and while resolving its
+    # call identity; sealed resume starts at its already frozen allocation.
     if operation is not None:
-        expected = ['admit', *expected]
+        expected = ['admit', 'admit', *expected]
     assert counter.read_text().splitlines() == expected
     return rows[0], counter
 
@@ -600,12 +600,28 @@ def test_authorized_original_recovery_preserves_permission_reservation_budget_an
 @pytest.mark.process_e2e
 def test_unsealed_authority_partial_discard_blocks_ordinary_and_direct_prepare(chain, capsys, monkeypatch):
     from tcad_artifact import managed_execution
-    from scidiscovery.research_loop import breadth, execution_authority as authority
+    from scidiscovery.research_loop import breadth, execution_authority as authority, formal_review
     root, backend, output, active, config, _ = _reviewed_execution(chain, capsys)
+    job = c.read(root / 'jobs/006.json')
+    qualifications = job['execution_qualifications']
+    assert len(qualifications) == 1
+    subject = formal_review.subject_for_receipt(root, qualifications[0])
+    assert subject['producer_step'] == 2
+    bound = [*job['direct_materials'], *[row['material'] for row in job.get('selected_inputs', [])]]
+    material = subject['material']
+    assert material in bound
+    output = c.workspace(root, job['step']) / material['path']
+    assert e.proof(output)['size_bytes'] == material['size_bytes']
     admission = backend.execution_admission
     monkeypatch.setattr(backend, 'execution_admission', lambda *args, **kwargs:
         admission(*args, **kwargs).model_copy(update={'outcome': 'require_human_approval'}))
-    assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
+    diagnostic = e._diagnostic
+    def traced(error, *args, **kwargs):
+        traceback.print_exception(type(error), error, error.__traceback__)
+        return diagnostic(error, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(e, '_diagnostic', traced)
+        assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
     pending = json.loads(capsys.readouterr().out)
     assert pending['status'] == 'authorization_required'
     call = pending['call_id']
@@ -614,7 +630,7 @@ def test_unsealed_authority_partial_discard_blocks_ordinary_and_direct_prepare(c
     _approve(root, q._ref(root, requests[0]))
     row, counter = _killed_authorized_resume(root, backend, call, config, 'binding',
         operation=lambda: e.main(['--config', str(active), 'run', '--payload', str(output)]))
-    assert counter.read_text().splitlines() == ['admit', 'prepare']
+    assert counter.read_text().splitlines() == ['admit', 'admit', 'prepare']
     assert not (execution.origin(root, 6) / 'result-identity.json').exists()
     def forbidden(*args, **kwargs):
         pytest.fail('Retained unknown reached a second prepare/admission/submit')
@@ -624,14 +640,14 @@ def test_unsealed_authority_partial_discard_blocks_ordinary_and_direct_prepare(c
     result = recovery.maintain(root, 6, call, row['snapshot_token'], action='discard-partial',
         max_seconds=20, authorization_note='Original unsealed snapshot only')
     assert result['status'] == 'partial_discarded'
-    assert counter.read_text().splitlines() == ['admit', 'prepare']
+    assert counter.read_text().splitlines() == ['admit', 'admit', 'prepare']
     assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
     result = json.loads(capsys.readouterr().out)
     assert result['status'] == 'unknown' and result['call_id'] == call
     descriptor = LocalFileDescriptor(**c.read(Path(row['binding']['path']))['prepared'])
     with pytest.raises(e.ConcurrentExecution):
         e.Records(config).accept(descriptor, dict(parent=dict(candidate_id=None)), config['execution_interface'])
-    assert counter.read_text().splitlines() == ['admit', 'prepare']
+    assert counter.read_text().splitlines() == ['admit', 'admit', 'prepare']
     ref = execution_resume.capture_pending(root, c.read(root / 'jobs/006.json'))
     captured = q._read(root, ref)
     assert captured['complete'] is False

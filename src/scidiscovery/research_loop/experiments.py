@@ -67,6 +67,10 @@ class ConcurrentExecution(ValueError):
     pass
 
 
+class LocalPreparationCleanupError(ValueError):
+    """The current unsubmitted local preparation could not be removed."""
+
+
 def _configuration_effect(function):
     @wraps(function)
     def guarded(*args, **kwargs):
@@ -447,7 +451,7 @@ def _scientific_projection_directory(config):
         task=c.record_ref(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
         if config['scope'].get('job_ref')!=task:
             raise IntegrityError('Scientific projection differs from its exact original task')
-        projection_directory=root/'host-runtime/experiment-control'/task/'scientific-output-views'
+        projection_directory=root/'host-runtime/experiment-control'/f'{config["scope"]["step"]:03d}'/'scientific-output-views'
     if (projection_directory.resolve()!=projection_directory
             or root is not None and projection_directory.is_relative_to(record_directory)
             or projection_directory.is_relative_to(record_directory/'calls')):
@@ -823,8 +827,38 @@ class Records:
         finally:
             os.close(fd)
 
+    @contextmanager
+    def admission_lease(self, *, context=None):
+        """Use the same short lock order for preflight and durable acceptance."""
+        with ExitStack() as locks:
+            try:
+                locks.enter_context(self.lease())
+                locks.enter_context(self.lease('accept.lock',context=context))
+            except BlockingIOError as error:
+                raise ConcurrentExecution('Another admission still owns its lease; no new call was accepted') from error
+            yield
+
+    def admission_binding(self, mechanism, *, expected_calls=None, recovery_admission=None):
+        calls=self.calls()
+        if expected_calls is not None and [path.name for path in calls]!=expected_calls:
+            raise ConcurrentExecution('Another original execution was accepted; query its identity')
+        if recovery_admission is None:
+            review=review_status(self.config)
+            if review['requested'] and review['enforced']:raise ReviewRequired(review['reason'])
+        else:
+            recovery_admission()
+        from . import breadth
+        return breadth.admit(self.config.get('breadth'),mechanism,self.config['scope'],
+            [self.accepted(path.name) for path in calls])
+
     @_configuration_effect
-    def accept(self, descriptor, metadata, interface, *, expected_calls=None, mechanism=None, recovery_admission=None, operation_context=None):
+    def preflight(self, *, expected_calls, mechanism=None):
+        from . import storage_policy as storage
+        with self.admission_lease(context=storage.Deadline(self.config['max_seconds'])):
+            self.admission_binding(mechanism,expected_calls=expected_calls)
+
+    @_configuration_effect
+    def accept(self, descriptor, metadata, interface, *, expected_calls=None, mechanism=None, recovery_admission=None, operation_context=None, _local_preparation=False):
         """Short admission linearization point. No solver or domain IO under lock."""
         _require_new_execution(self.config)
         from .protocol import require_scope
@@ -852,7 +886,10 @@ class Records:
             prepared=descriptor.model_dump(mode='json'), interface=interface)
         host_preparation=None
         try:
-            host_preparation=preparation_recovery.bind_snapshot(self.config,directory,descriptor,accepted,context=operation_context)
+            # Only the live built-in local dispatch knows prepare had no external
+            # effect. A missing accepted/process file is never recovery evidence.
+            if not _local_preparation:
+                host_preparation=preparation_recovery.bind_snapshot(self.config,directory,descriptor,accepted,context=operation_context)
             if host_preparation is not None:accepted['host_preparation']=host_preparation
             files = metadata.get('snapshot_files', [])
             if not isinstance(files,list):raise ValueError('Managed input inventory required')
@@ -872,27 +909,22 @@ class Records:
                     raise IntegrityError('Managed input changed before acceptance')
                 target=directory/'inputs'/relative
                 c._bind_original(Path(item['path']), target, context=operation_context, root=self.storage_root(), policy=self.config.get('storage_policy'), size_bytes=item['size_bytes'], source_kind='mutable')
-            with self.lease():
-                if expected_calls is not None and [path.name for path in self.calls()]!=expected_calls:
-                    raise ConcurrentExecution('Another original execution was accepted; query its identity')
-                with self.lease('accept.lock',context=operation_context):
-                    if recovery_admission is None:
-                        review=review_status(self.config)
-                        if review['requested'] and review['enforced']:raise ReviewRequired(review['reason'])
-                    else:
-                        recovery_admission()
-                    from . import breadth
-                    binding=breadth.admit(self.config.get('breadth'),mechanism,self.config['scope'],
-                        [self.accepted(path.name) for path in self.calls()])
-                    if binding is not None:accepted['mechanism_binding']=binding
-                    write(directory/'accepted.json',accepted,root=self.storage_root(),
-                        policy=self.config.get('storage_policy'),context=operation_context)
-                    destination.parent.mkdir(exist_ok=True)
-                    from . import instance_archive
-                    instance_archive._publish(directory,destination)
+            with self.admission_lease(context=operation_context):
+                binding=self.admission_binding(mechanism,expected_calls=expected_calls,
+                    recovery_admission=recovery_admission)
+                if binding is not None:accepted['mechanism_binding']=binding
+                write(directory/'accepted.json',accepted,root=self.storage_root(),
+                    policy=self.config.get('storage_policy'),context=operation_context)
+                destination.parent.mkdir(exist_ok=True)
+                from . import instance_archive
+                instance_archive._publish(directory,destination)
         finally:
             if directory.exists():
-                if host_preparation is None:shutil.rmtree(directory)
+                if _local_preparation:
+                    try:shutil.rmtree(directory)
+                    except OSError as error:
+                        raise LocalPreparationCleanupError('Local temporary preparation cleanup failed before submission') from error
+                elif host_preparation is None:shutil.rmtree(directory)
                 elif not (directory/'accepted.json').exists():
                     preparation_recovery.discard_owned_snapshot(self.config,host_preparation,
                         reason='Original writer cleanup after incomplete acceptance',context=storage.Deadline(65))
@@ -1331,8 +1363,27 @@ def dispatch_descriptor(config, payload, *, parent=None, new=False, change=None,
     from . import execution_authority
     try:return _dispatch_descriptor(config,payload,parent=parent,new=new,change=change,mechanism=mechanism,command_options=command_options)
     except execution_authority.AuthorityRequired as error:return error.feedback
+    except LocalPreparationCleanupError:
+        return dict(status='known_not_started',accepted=False,error='local_cleanup_failed',
+            note='Local temporary preparation could not be cleaned; this dispatch did not submit an execution.')
     except BlockingIOError:return dict(status='unknown',note='Original accepted execution still owns its lease')
     except ConcurrentExecution as error:return dict(status='unknown',note=str(error))
+
+
+def _admission_conflict(config, expected_calls):
+    """Only called for control admission failures before any new submission."""
+    records=Records(config)
+    changed=[path for path in records.calls() if path.name not in expected_calls]
+    if changed:
+        call_id=changed[-1].name
+        try:
+            _,adapter=original_adapter(config,call_id,'query')
+            state=execution_status(adapter.status_details(call_id).get('state'))
+        except (OSError,ConcurrentExecution):state='unknown'
+        return dict(status=state,call_id=call_id,
+            note='Another original execution was accepted; preserve and query this exact call.')
+    return dict(status='known_not_started',accepted=False,
+        note='Execution admission did not accept this dispatch; no new call was submitted.')
 
 
 def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None, mechanism=None, command_options=None):
@@ -1381,6 +1432,9 @@ def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None
                 note='Original terminal execution has no verified observation; preserve its identity.')
         if details.get('state')=='cancelled' and observed.get('native_state')!='cancelled':
             raise IntegrityError('Original cancellation has no bound native terminal observation')
+    expected_calls=[path.name for path in before]
+    try:records.preflight(expected_calls=expected_calls,mechanism=mechanism)
+    except ConcurrentExecution:return _admission_conflict(config,expected_calls)
     call_id = f'{len(before)+1:04d}-{uuid.uuid4().hex}'
     if config.get('host_execution_authority') is not None:
         from . import execution_authority
@@ -1410,11 +1464,34 @@ def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None
                 payload_schema_version=item.payload_schema_version,media_type=item.media_type,
                 content=item.content.decode('utf-8'),size_bytes=len(item.content)),
                 view=method(prepared,metadata) if callable(method) else None)
-    from . import replay_check
+    from . import breadth, replay_check
     metadata['engineering_check'] = replay_check.acceptance(config, adapter)
-    accepted = records.accept(prepared, metadata, config['execution_interface'],expected_calls=[path.name for path in before],mechanism=mechanism)
-    adapter.dispatch_lease(accepted)
-    external_id,state=adapter.submit(prepared)
+    from .local_experiments import LocalExecution
+    local_preparation=(type(adapter) is LocalExecution
+        and config['execution_interface']['executor']=='local_execution:command')
+    try:
+        accepted = records.accept(prepared, metadata, config['execution_interface'],
+            expected_calls=expected_calls,mechanism=mechanism,_local_preparation=local_preparation)
+    except (ReviewRequired,breadth.OpportunityRequired,ConcurrentExecution) as error:
+        if local_preparation:
+            if isinstance(error,ConcurrentExecution):return _admission_conflict(config,expected_calls)
+            raise
+        # prepare may already have affected an external implementation. Local
+        # snapshot removal cannot establish that the original preparation ended.
+        if instance is not None:
+            pending=[row for row in preparation_recovery.retained_preparations(instance,records.root,
+                context=storage.Deadline(65)) if row['call_id']==call_id and not row['resolved']]
+            if pending:
+                return dict(status='unknown',call_id=call_id,
+                    note='Original host preparation preceded admission refusal and remains unresolved; preserve this exact call without a new preparation or submission.')
+        return dict(status='unknown',
+            note='Execution preparation preceded admission refusal and may have external effects; preserve the original preparation without a new preparation or submission.')
+    try:
+        adapter.dispatch_lease(accepted)
+        external_id,state=adapter.submit(prepared)
+    except (BlockingIOError,ConcurrentExecution):
+        return dict(status='unknown',call_id=call_id,
+            note='Original accepted execution outcome is unknown; reconcile this exact call without resubmission.')
     records.bind_external(call_id,external_id,state)
     observed=record_observation(config,adapter,call_id)
     result=json.loads(read(observed['completed']['path'])) if observed is not None else adapter.result(call_id)
@@ -1558,7 +1635,7 @@ def cli_help(command=None):
 
 def main(argv=None):
     # -m runs this file as __main__; registered factories import its canonical name.
-    from . import feedback, experiments as common
+    from . import breadth, feedback, experiments as common
     parser,_=_cli_parser()
     try:args=parser.parse_args(argv)
     except CallerError as error:
@@ -1670,6 +1747,8 @@ def main(argv=None):
                 observed=json.loads(read(observation))
                 verify_observation(observed,lambda item:Path(item['path']),interface=config['execution_interface'])
                 result=scientific_result(config,Records(config).accepted(result['call_id']),result,observed)
+            elif result.get('status')=='known_not_started' and result.get('accepted') is False:
+                result={key:result[key] for key in ('status','accepted','error','note') if key in result}
             else:result=adapter.public_result(result)
             result=_run_view(result)
             code={'known_success':0,'known_failed':1}.get(result['status'],2)
@@ -1734,6 +1813,8 @@ def main(argv=None):
             review=review_feedback(feedback_config),
             qualification='Execution metadata does not establish scientific or candidate qualification.')
     except ReviewRequired as error:result=dict(status='review_required',reason=_diagnostic(error,'Original execution review required; request the declared review before continuing',config=feedback_config),accepted=False);code=2
+    except breadth.OpportunityRequired as error:result=dict(status='unresolved',accepted=False,note=_diagnostic(error,'Choose an available authorized H mechanism before another request',config=feedback_config));code=2
+    except (ConcurrentExecution,common.ConcurrentExecution) as error:result=dict(status='unknown',note=_diagnostic(error,'Execution preparation outcome is unknown; preserve the original preparation without replay',config=feedback_config));code=2
     except (IntegrityError,common.IntegrityError,feedback.history.ObserverIntegrityError) as error:result=dict(status='integrity_error',note=_diagnostic(error,'Execution original integrity check failed; preserve originals and report this call',config=feedback_config));code=3
     except OSError as error:result=dict(status='integrity_error',note=_diagnostic(error,'Execution original cannot be read; preserve originals and report the unavailable input',config=feedback_config));code=3
     except (CommandOptionsError,common.CommandOptionsError) as error:result=dict(status='known_not_started',accepted=False,error='caller_error',note=_diagnostic(error,'Requested command options are unavailable; check exp help for this command',config=feedback_config));code=2

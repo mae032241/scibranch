@@ -204,8 +204,11 @@ def _default_local_case(tmp_path, monkeypatch, directory, network_enabled, *, ex
         except Exception as error:
             record=execution.origin(root,2)
             paths=[record/name for name in ('native.stderr','runner.stderr','native.jsonl','native-outcome.json','native-execution-permissions.json')]
-            paths.extend(root.glob('host-runtime/experiment-control/*/bridge-diagnostics/latest-error.json'))
-            paths.extend(root.glob('host-runtime/experiment-control/**/stderr.raw'))
+            configuration=record/'experiment-config.json'
+            if configuration.is_file():
+                settings=c.read(configuration);records=e.Records(settings)
+                paths.append(records.root.parent/'bridge-diagnostics/latest-error.json')
+                paths.extend(call/'stderr.raw' for call in records.calls())
             diagnostic=[]
             for path in paths:
                 if path.is_file():diagnostic.append(path.relative_to(root).as_posix()+':\n'+path.read_text(errors='replace')[-6000:])

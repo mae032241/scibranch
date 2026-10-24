@@ -53,6 +53,9 @@ def handoff(config,result,command,call_id=None):
             **(dict(call_id=call_id) if call_id is not None else {}),**fields)
     stop=lambda reason:hint('reconcile_or_stop',reason,
         'Reconcile this same original call once if supported, or report the unresolved obstacle. Never blindly poll, rerun or resubmit.')
+    if result.get('accepted') is False and result.get('status') in {'known_not_started','review_required','unresolved'}:
+        return dict(action='reconcile_or_stop',reason='execution_not_accepted',
+            instruction='This request was not accepted. Resolve the reported admission, input or local cleanup issue before another request; preserve any separately reported original call.')
     if not isinstance(config,dict):return stop('original_configuration_unavailable')
     call_id=result.get('call_id',call_id)
     if not isinstance(call_id,str):return stop('original_call_unavailable')
