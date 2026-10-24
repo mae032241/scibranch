@@ -20,6 +20,27 @@ def changed_task_settings(source, child):
     return [key for key in FROZEN_TASK_SETTINGS if source.get(key) != child.get(key)]
 
 
+def _validate_selected_settings(selected, settings):
+    changed = changed_task_settings(selected['settings'], settings)
+    if changed:
+        raise ValueError('Fork selected task configuration changed: ' + ', '.join(changed))
+
+
+def preflight_selected_settings(root, settings, *, step=None):
+    """Check a proposed snapshot only while the selected task is unbound."""
+    if not is_fork(root):
+        return
+    from . import configuration_updates, fork_sources
+    selected = fork_sources.selected_task(root)
+    selected_step = selected['job']['step']
+    if step is not None and step != selected_step:
+        return
+    if ((Path(root) / 'jobs' / f'{selected_step:03d}.json').exists()
+            or configuration_updates._reservation(root, selected_step) is not None):
+        return
+    _validate_selected_settings(selected, settings)
+
+
 def is_fork(root):
     path = Path(root) / 'host-runtime/fork/manifest.json'
     return path.exists() or path.is_symlink()
@@ -135,9 +156,7 @@ def _selected_base(root, selected, *, bind_inputs=False):
     from . import contracts as c, configuration_updates, execution_authority, qualification
     job = copy.deepcopy(selected['job'])
     revision = configuration_updates.for_new_job(root, job['step'])
-    changed = changed_task_settings(selected['settings'], revision)
-    if changed:
-        raise ValueError('Fork selected task configuration changed: ' + ', '.join(changed))
+    _validate_selected_settings(selected, revision)
     binding = configuration_updates._reservation(root, job['step'])
     job.pop('configuration_revision', None)
     if binding is not None and binding['configuration_revision'] is not None:

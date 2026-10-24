@@ -179,7 +179,7 @@ def _resource_authorization_revision(root, events):
 def submit(root, configuration, *, base=None, expected_revision=None,
            authorization_note=None):
     """Validate and queue a complete declaration using optimistic concurrency."""
-    from . import research_config, budget, formal_review, execution_authority
+    from . import research_config, budget, formal_review, execution_authority, fork_runtime
     root = Path(root).resolve()
     if not isinstance(configuration, dict):
         raise ValueError('Research configuration must be an object')
@@ -191,6 +191,7 @@ def submit(root, configuration, *, base=None, expected_revision=None,
         if expected_revision is not None and (type(expected_revision) is not int or expected_revision != len(values)):
             raise ValueError('Configuration revision changed; reload the configuration before saving')
         settings = research_config.validate_update(root, configuration, base=base)
+        fork_runtime.preflight_selected_settings(root, settings)
         document = research_config.to_document(root, settings)
         previous = editable(root)
         state = status(root)
@@ -261,7 +262,7 @@ def bind_new_job(root, step):
     A crash retains this reservation, and budget amendment uses an idempotency
     key. Subsequent saves cannot change the policy of the in-progress task.
     """
-    from . import budget
+    from . import budget, fork_runtime
     root = Path(root).resolve()
     with budget._operator_writer(root), _writer(root):
         path = root / 'jobs' / f'{step:03d}.json'
@@ -272,6 +273,8 @@ def bind_new_job(root, step):
         if reserved is not None:
             return reserved['configuration_revision']
         values = revisions(root)
+        fork_runtime.preflight_selected_settings(root,
+            values[-1]['settings'] if values else c.settings(root), step=step)
         ref = _reference(root, values[-1]) if values else None
         previously_bound = {(_reservation(root, int(path.stem))['configuration_revision'] or {}).get('revision', 0)
                             for path in (_directory(root) / 'bindings').glob('*.json')}
