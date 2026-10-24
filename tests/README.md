@@ -52,3 +52,5 @@ Cov 独立插件使用同一目标和 `--installation-cohort cov`。日志属于
 薄层检查不依赖旧 Run/Artifact/session 宿主 fixture。旧 catalog/finalizer/Operation 平台及其测试已退役，
 `tests/operations/` 仅保留真实执行、传输、预算和恢复负控；确定性算法检查在 `tests/skills/`，
 使用随资产保留的功能 fixture，不需要旧宿主。Skill 选择、冻结与生命周期检查在 `test_skill_supply.py`。未运行的源码、安装、真实平台资格分别记为未验证，不将静态审查写成动态通过。
+
+G1/G3 延后 CLI 诊断由用户在 G3 后独立运行：`python scripts/verify_g1_g3.py --list` 静态列出精确节点，`python scripts/verify_g1_g3.py --output .trial/<新目录>` 串行复用现有 guard，首个失败即停止，不重试。显式文件 `tests/research_loop/check_g1_g3_cli_validation.py` 不参与默认发现；本轮协调者只可选择六个合成字典 source 节点，进程节点保留给用户。`--case sandbox-startup` 仅探测已安装的选定 native sandbox、惰性载荷和极小 Git fixture；真实生产 launcher、Worker tool、注册 Cov 和完整 G1/G3 均为 `not_run`。本地报告保留 guard/log、有限 stdout/stderr、未达检查及独立的 fixture export/guard 清理状态；socket 目录未定位时为 unresolved，不推测路径。报告不供运行时消费或授予权限。
