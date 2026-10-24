@@ -30,14 +30,17 @@ def preflight_selected_settings(root, settings, *, step=None):
     """Check a proposed snapshot only while the selected task is unbound."""
     if not is_fork(root):
         return
-    from . import configuration_updates, fork_sources
-    selected = fork_sources.selected_task(root)
-    selected_step = selected['job']['step']
+    from . import configuration_updates, fork_sources, originals
+    manifest = originals._manifest(root)
+    if manifest is None:
+        raise ValueError('Fork manifest identity changed')
+    selected_step = manifest['source']['step']
     if step is not None and step != selected_step:
         return
     if ((Path(root) / 'jobs' / f'{selected_step:03d}.json').exists()
             or configuration_updates._reservation(root, selected_step) is not None):
         return
+    selected = fork_sources.selected_task(root)
     _validate_selected_settings(selected, settings)
 
 

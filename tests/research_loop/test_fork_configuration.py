@@ -7,7 +7,7 @@ import pytest
 
 from scidiscovery.research_loop import (
     budget, configuration_updates as updates, contracts as c, controller,
-    execution_authority, fork_runtime, fork_service, formal_review,
+    execution_authority, fork_runtime, fork_service, fork_sources, formal_review,
 )
 from test_history_handoff import finish
 
@@ -173,7 +173,7 @@ def test_selected_bind_rechecks_under_existing_locks_before_any_effect(selected_
 
 
 @pytest.mark.parametrize('built', [False, True])
-def test_selected_reservation_keeps_original_settings_and_allows_successor_edits(selected_fork, built):
+def test_selected_reservation_keeps_original_settings_and_allows_successor_edits(selected_fork, monkeypatch, built):
     root = selected_fork
     reserved = updates.bind_new_job(root, 2)
     original = copy.deepcopy(updates.for_new_job(root, 2))
@@ -182,7 +182,13 @@ def test_selected_reservation_keeps_original_settings_and_allows_successor_edits
     state = updates.status(root)
     document = state['configuration']
     document['agent']['model'] = 'successor-model'
-    saved = updates.submit(root, document, expected_revision=state['revision'])
+
+    def forbidden_selected_task(*args, **kwargs):
+        pytest.fail('Bound selected task settings consulted frozen task history')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fork_sources, 'selected_task', forbidden_selected_task)
+        saved = updates.submit(root, document, expected_revision=state['revision'])
     assert saved['pending']
     assert updates.bind_new_job(root, 2) == reserved
     assert updates.for_new_job(root, 2) == original
@@ -192,6 +198,8 @@ def test_selected_reservation_keeps_original_settings_and_allows_successor_edits
     assert updates.for_job(root, job) == original
     assert fork_runtime.build_selected_job(root, 2) == job
     assert (root / 'jobs/002.json').read_bytes() == original_job
-    updates.bind_new_job(root, 3)
+    with monkeypatch.context() as patch:
+        patch.setattr(fork_sources, 'selected_task', forbidden_selected_task)
+        updates.bind_new_job(root, 3)
     assert updates.for_new_job(root, 3)['model'] == 'successor-model'
     fork_runtime.validate_selected_job(root, c.workspace(root, 2), job)
