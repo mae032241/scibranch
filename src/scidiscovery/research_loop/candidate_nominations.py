@@ -11,6 +11,12 @@ from . import contracts as c
 from .output_repair import OutputRepairRequired
 
 
+SCOPE_GUIDANCE = (
+    "Use only this job's candidate_nomination_mechanisms: cover each unwaived entry with one representative "
+    "or explained gap, including deferred and screened. Screen covers its full list; improve/repair/validate "
+    "keep other mechanisms' prior declarations and gaps.")
+
+
 def configuration(extra_slots):
     if type(extra_slots) is not int or extra_slots < 0:
         raise ValueError('Candidate extra slots must be a nonnegative integer')
@@ -71,7 +77,7 @@ def require(root, job, payload):
     value=c.scientific_field(job,payload,'candidate_nominations')
     def repair(message):
         raise OutputRepairRequired('candidate_nominations_incomplete','Correct candidate_nominations: '+message+
-            '. Reuse retained originals; do not rerun or resubmit experiments.')
+            '. '+SCOPE_GUIDANCE+' Reuse retained originals; do not rerun or resubmit experiments.')
     if value is None:repair('declare representatives, extras and explicit gaps')
     required={row['mechanism_ref'] for row in job['candidate_nomination_mechanisms'] if row['status']!='waived'}
     known=set(job['history']['candidate_ids'])

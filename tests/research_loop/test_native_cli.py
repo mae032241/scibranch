@@ -10,6 +10,7 @@ import pytest
 
 from scidiscovery.research_loop import contracts, controller, execution, native, runtime
 from scidiscovery.research_loop.cli import main, status
+from execution_fixtures import execution_registry, remote_registry
 
 
 # Retain the real CLI/runner reproduction shape from the local defect audit.
@@ -268,6 +269,7 @@ def test_real_native_process_completes_without_root_or_loopx(instance):
     assert controller.run(instance) == result
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('view_version,role,mode', [
     pytest.param(1, 'W', 'local', id='public-worker'),
     pytest.param(0, 'W', 'local', id='explicit-legacy-worker'),
@@ -338,6 +340,44 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':7,'cached_inpu
     assert registered['command'] == command
     assert local == [*command, 'run', '--experiment-dir', 'experiments/<name>',
         '--script', 'experiments/<name>/run.py', '--', '<script args>']
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('mode',['screen','improve','repair','validate'])
+def test_native_nomination_prompt_uses_only_the_frozen_job_scope(instance,tmp_path,remote_registry,mode):
+    from scidiscovery.research_loop import candidate_nominations
+    from test_breadth_science import h,a,findings
+    from test_history_handoff import finish
+    from test_candidate_nominations import failed_worker_observation
+
+    h(instance,labels=('P','Q'))
+    step=2;parents=[1]
+    if mode!='screen':
+        if mode=='repair':failed_worker_observation(instance,tmp_path)
+        finish(instance,2,'W',[1],mechanism_findings=findings('P',blocked=('Q',)),preserve_native_intent=mode=='repair')
+        a(instance,3,[1,2],focus='h001.m1',mode=mode)
+        step=4;parents=[1,2,3]
+    job=contracts.build_job(instance,step,'W',parents)
+    assert job['search']['focus']==dict(mechanism_ref='h001.m1',action=mode)
+    if mode=='repair':assert job['search']['repair_binding']=='available'
+    expected=['h001.m1','h001.m2'] if mode=='screen' else ['h001.m1']
+    assert [row['mechanism_ref'] for row in job['candidate_nomination_mechanisms']]==expected
+    intent=dict(task_ref=contracts.record_ref(instance/'jobs'/f'{step:03d}.json'),
+        **native.profiles.binding(contracts.settings(instance),job))
+    anchor=native.control_budget.accept_node(instance,job)
+    if anchor is not None:intent['budget_slice']=anchor
+    else:intent['search_slice']=native.search.accept(instance,job)
+    contracts.write(execution.origin(instance,step)/'native-intent.json',intent)
+
+    outcome=native.run_native(instance,step)
+
+    assert outcome['returncode']==0 and outcome['stop_reason'] is None
+    launch=contracts.read(contracts.workspace(instance,step)/'work/captured-launch.json')
+    assert candidate_nominations.SCOPE_GUIDANCE in launch['prompt']
+    assert 'every unwaived H mechanism' not in launch['prompt']
+    assert 'Add at most '+str(job['candidate_nomination_policy']['extra_slots'])+' distinct extras' in launch['prompt']
+    task=contracts.read(contracts.workspace(instance,step)/'science-task.json')
+    assert [row['mechanism_ref'] for row in task['candidate_nomination_mechanisms']]==expected
 
 
 @pytest.mark.parametrize('reconnect', [False, True])

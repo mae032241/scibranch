@@ -9,7 +9,7 @@ import pytest
 from scidiscovery.research_loop import (candidate_nominations as nominations,
     candidate_refs, cli, contracts as c, delivery, execution, experiments,
     generic_results, history, budget, search)
-from execution_fixtures import execution_registry
+from execution_fixtures import execution_registry, remote_registry
 from test_breadth_science import prepare, h, a, findings
 from test_history_handoff import finish
 
@@ -22,6 +22,20 @@ def accepted_worker(root,tmp_path):
     c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),**anchor))
     config=experiments.configure(root,2,'local_execution:command',dict(run_argv=[sys.executable]),tmp_path/'config-2.json')
     return job,config
+
+
+def failed_worker_observation(root,tmp_path):
+    """Retain a deterministic adapter observation; no external service runs."""
+    job=c.build_job(root,2,'W',[1]);record=execution.record(root,2)
+    node_anchor=budget.accept_node(root,job)
+    anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,job))
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),**anchor))
+    config=experiments.configure(root,2,'remote_execution:fixture',
+        dict(outcome='known_failed',require_contract=True),tmp_path/'config-2.json')
+    payload=c.workspace(root,2)/'work/failed-observation.json'
+    c.write(payload,dict(message='remote-original'))
+    reply=experiments.dispatch(config,payload,mechanism='P')
+    assert reply['status']=='known_failed'
 
 
 def nomination_job(monkeypatch, *, slots=2):
@@ -202,15 +216,27 @@ def test_same_node_interface_identity_does_not_read_execution_results(tmp_path,e
         history._execution_interface(root,accepted)
 
 
-def test_local_worker_nominates_only_its_assigned_mechanism_and_keeps_other_gaps(tmp_path,monkeypatch):
+@pytest.mark.parametrize('mode',['improve','repair','validate'])
+def test_local_worker_nominates_only_its_assigned_mechanism_and_keeps_other_gaps(tmp_path,monkeypatch,remote_registry,mode):
     root=prepare(tmp_path);h(root,labels=('P','Q'))
     screen=c.build_job(root,2,'W',[1])
     assert {row['mechanism_ref'] for row in screen['candidate_nomination_mechanisms']}=={'h001.m1','h001.m2'}
-    finish(root,2,'W',[1],mechanism_findings=findings('P',blocked=('Q',)))
-    a(root,3,[1,2],focus='h001.m1',mode='improve')
+    incomplete=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref='h001.m1',reason='No retained model')])
+    with pytest.raises(nominations.OutputRepairRequired,match='cover every assigned'):
+        nominations.require(root,screen,dict(candidate_nominations=incomplete))
+    if mode=='repair':failed_worker_observation(root,tmp_path)
+    finish(root,2,'W',[1],mechanism_findings=findings('P',blocked=('Q',)),preserve_native_intent=mode=='repair')
+    a(root,3,[1,2],focus='h001.m1',mode=mode)
     local=c.build_job(root,4,'W',[1,2,3])
+    assert local['search']['focus']==dict(mechanism_ref='h001.m1',action=mode)
+    if mode=='repair':assert local['search']['repair_binding']=='available'
     assert [row['mechanism_ref'] for row in local['candidate_nomination_mechanisms']]==['h001.m1']
     monkeypatch.setattr(history,'managed_calls',lambda *args:[])
+    with pytest.raises(nominations.OutputRepairRequired) as missing:
+        nominations.require(root,local,dict(candidate_nominations=dict(representatives=[],extras=[],gaps=[])))
+    assert missing.value.code=='candidate_nominations_incomplete'
+    assert nominations.SCOPE_GUIDANCE in missing.value.diagnostic
+    assert 'do not rerun or resubmit experiments' in missing.value.diagnostic
     value=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref='h001.m1',reason='Local observation remains missing')])
     nominations.require(root,local,dict(candidate_nominations=value))
     value['gaps'].append(dict(mechanism_ref='h001.m2',reason='This is outside the assigned task'))

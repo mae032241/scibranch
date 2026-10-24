@@ -456,8 +456,8 @@ def run_native(root: Path, step: int, attempt=0):
     # Append after every branch that replaces the assignment, including formal
     # review and the bounded successor author turn.
     if job['role']=='W' and job.get('candidate_nomination_mechanisms'):
-        prompt += ('\nReturn candidate_nominations as your complete scientific comparison preview: one representative '
-            'or an explained gap for every unwaived H mechanism, including deferred and screened. '
+        from .candidate_nominations import SCOPE_GUIDANCE
+        prompt += ('\nReturn candidate_nominations as your scientific comparison preview. '+SCOPE_GUIDANCE+' '
             'Use each actual H mechanism_ref. Choose each model and explain its applicability yourself; a call binding '
             'does not classify its models. A model may explicitly represent multiple mechanisms when each reason '
             'explains that coverage. Use historical candidate references or {call_id,artifact} for one exact '
