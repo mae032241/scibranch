@@ -143,7 +143,7 @@ class SSHRemoteClient:
         if payload.get("size_bytes") != destination.stat().st_size:
             raise RuntimeError("VM download differs from response descriptor")
 
-    def get_many_to(self, items, *, on_complete, on_progress):
+    def get_many_to(self, items, *, on_complete, on_progress, spool=None):
         """One standard tar transfer per bounded request; no per-file SSH calls."""
         batch, records = [], []
         size = len(_canonical({"schema_version": 2, "operation": "get_archive", "payload": {"files": []}})) + 1
@@ -154,7 +154,7 @@ class SSHRemoteClient:
             record = {"local_path": descriptor.local_path, "size_bytes": descriptor.size_bytes}
             extra = len(_canonical(record)) + bool(records)
             if size + extra > HEADER_LIMIT and batch:
-                self._get_many_batch(batch, records, on_complete, on_progress)
+                self._get_many_batch(batch, records, on_complete, on_progress, spool=spool)
                 batch, records, size = [], [], base_size
                 extra = len(_canonical(record))
             if size + extra > HEADER_LIMIT:
@@ -163,13 +163,15 @@ class SSHRemoteClient:
             records.append(record)
             size += extra
         if batch:
-            self._get_many_batch(batch, records, on_complete, on_progress)
+            self._get_many_batch(batch, records, on_complete, on_progress, spool=spool)
 
-    def _get_many_batch(self, items, records, on_complete, on_progress):
+    def _get_many_batch(self, items, records, on_complete, on_progress, *, spool=None):
         # A standard uncompressed tar stream avoids remote archive disk usage.
         # Account for all member headers, padding, manifest and final tar record.
         archive_limit = len(_canonical(records)) + sum(x.size_bytes for x, _ in items) + 1024 * (len(items) + 1) + 10240
-        spool=items[0][1].parent if self.diagnostic_root is None else Path(self.diagnostic_root)
+        if spool is None:
+            spool=items[0][1].parent if self.diagnostic_root is None else Path(self.diagnostic_root)
+        spool = Path(spool)
         if spool.resolve()!=spool or not spool.is_dir():
             raise ValueError('result transfer spool requires its exact private directory')
         fd, temporary = tempfile.mkstemp(prefix=".results.", suffix=".tar.download", dir=spool)
@@ -610,8 +612,12 @@ class SSHTCADTransport:
         progress(current_file=None, current_file_bytes=0)
         batch_download = getattr(self.remote, "get_many_to", None)
         if pending and callable(batch_download):
+            # Keep archive temps with the exact run owner, where the existing
+            # single-writer restart cleanup can remove a killed receive.
+            options = {"spool": private_directory} if isinstance(self.remote, SSHRemoteClient) else {}
             batch_download(pending, on_complete=completed,
-                on_progress=lambda count: progress(phase="download_archive", archive_bytes=count, current_file=None, current_file_bytes=0))
+                on_progress=lambda count: progress(phase="download_archive", archive_bytes=count, current_file=None, current_file_bytes=0),
+                **options)
         else:
             for descriptor, path in pending:
                 if context: context.remaining_seconds()

@@ -200,7 +200,7 @@ def test_archive_request_paginates_metadata_without_per_file_calls(tmp_path, mon
     item = (_descriptor(source), tmp_path / 'destination')
     monkeypatch.setattr('tcad_artifact.ssh_transport.HEADER_LIMIT', 1024)
     batches = []
-    def batch(items, records, *_):
+    def batch(items, records, *_, spool=None):
         request = {'schema_version': 2, 'operation': 'get_archive', 'payload': {'files': records}}
         from tcad_artifact.ssh_transport import _canonical
         assert len(_canonical(request)) + 1 <= 1024
@@ -208,6 +208,52 @@ def test_archive_request_paginates_metadata_without_per_file_calls(tmp_path, mon
     monkeypatch.setattr(client, '_get_many_batch', batch)
     client.get_many_to([item] * 30, on_complete=lambda *_: None, on_progress=lambda _: None)
     assert sum(batches) == 30 and 1 < len(batches) < 30
+
+
+def test_collection_archive_spool_reuses_only_exact_run_cleanup(tmp_path, monkeypatch):
+    archive, items, _ = _archive(tmp_path)
+    descriptor = items[0][0]
+    local_root = tmp_path / 'local'
+    client = SSHRemoteClient(SSHTCADTransportConfig(
+        ssh_executable=sys.executable, destination='fixture@local',
+        remote_helper=str(tmp_path / 'helper'), remote_config=str(tmp_path / 'config'),
+        remote_exchange_root=str(tmp_path / 'exchange'), max_transfer_bytes=1024),
+        diagnostic_root=local_root)
+    transport = SSHTCADTransport(client, local_result_root=local_root)
+    run_id = 'run_' + 'a' * 32
+    owned = local_root / 'runs' / run_id
+    owned.mkdir(parents=True)
+    stale = owned / '.results.interrupted.tar.download'
+    stale.write_bytes(b'original run partial receive')
+    unrelated = [local_root / '.results.unknown.tar.download',
+                 local_root / 'runs' / ('run_' + 'b' * 32) / '.results.other.tar.download']
+    for path in unrelated:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'keep other owner')
+    monkeypatch.setattr(transport, '_rpc', lambda *_: {'outputs': [descriptor.model_dump(mode='json')]})
+    received = []
+
+    def receive(operation, payload, body, *, download_to, download_limit):
+        assert operation == 'get_archive' and payload == {'files': [_record(descriptor)]}
+        assert download_to.parent == owned
+        assert not stale.exists()
+        assert all(path.read_bytes() == b'keep other owner' for path in unrelated)
+        raw = archive.read_bytes()
+        assert len(raw) <= download_limit
+        download_to.write_bytes(raw)
+        received.append(download_to)
+        return {'schema_version': 2, 'operation': operation, 'ok': True,
+                'payload': {'files': 1}}, b''
+
+    monkeypatch.setattr(client, '_call', receive)
+    result = transport._collect(run_id)
+    assert Path(result['outputs'][0]['local_path']).read_bytes() == b'valid'
+    assert len(received) == 1 and not received[0].exists()
+    # Restart cleanup must still run when every completed output can be reused.
+    stale.write_bytes(b'original run interrupted receive')
+    assert transport._collect(run_id) == result
+    assert not stale.exists() and len(received) == 1
+    assert all(path.read_bytes() == b'keep other owner' for path in unrelated)
 
 
 @pytest.mark.process_e2e
