@@ -92,6 +92,45 @@ def test_final_host_material_is_sealed_in_place_without_a_conclusion_copy(
     assert (record / 'result-identity.json').read_bytes() == saved_seal
 
 
+@pytest.mark.parametrize('alias_relative', ['work/result-alias.txt', 'artifacts/result-alias.txt'],
+    ids=['scratch-alias', 'artifact-alias'])
+def test_final_host_material_rejects_mutable_hardlinks_before_chmod(
+        scene, monkeypatch, alias_relative):
+    root = scene
+    job = c.build_job(root, 1, 'W', [])
+    work = c.workspace(root, 1)
+    record = c.host_record(work)
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json')))
+    payload = dict(summary='One bounded contribution', scientific_result='A fixture observation with unresolved target limits.',
+        limitations=['Source contract fixture only'], implementation_selection=None,
+        stage_intent='review', mechanism_findings=None, candidate_nominations=None)
+    schema = c.result_schema('W', job['handoff_protocol'], **c.response_options(job))
+    for field in schema['properties']:
+        payload.setdefault(field, None)
+    raw = record / 'science-output.json'
+    c.write(raw, payload)
+    c.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
+    c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None,
+        native_started=True, cleanup='observed_group_cleaned', usage=native.usage(root), raw_ref=c.file_ref(raw)))
+    artifact = work / 'artifacts/result.txt'
+    artifact.write_bytes(b'The exact host result.')
+    artifact.chmod(0o600)
+    alias = work / alias_relative
+    alias.hardlink_to(artifact)
+    assert alias.samefile(artifact) and artifact.stat().st_nlink == 2
+    modes = {path: path.stat().st_mode for path in (artifact, alias)}
+    def forbidden(*args, **options):
+        pytest.fail('Host seal source fixture reached a process launch')
+    for name in ('Popen', 'run', 'call'):
+        monkeypatch.setattr(subprocess, name, forbidden)
+    stopped_attempt(root, job, record, monkeypatch)
+
+    with pytest.raises(ValueError, match='hard-link aliases'):
+        c.seal_result(root, 1)
+    assert {path: path.stat().st_mode for path in modes} == modes
+    assert not (record / 'result-identity.json').exists()
+
+
 def test_repeated_managed_proof_keeps_saved_original_identity(
         fragment, observed_local):
     root, job, _ = fragment

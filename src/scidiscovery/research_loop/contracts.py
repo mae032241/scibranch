@@ -769,6 +769,8 @@ def collect_materials(root: Path, step: int):
         if source_kind=='mutable':
             if path.resolve()!=path or not path.is_relative_to(work):
                 raise ValueError('Node deliverables must remain in their original owned workspace')
+            if path.stat().st_nlink != 1:
+                raise ValueError(f'Mutable deliverable {relative!r} must not have hard-link aliases')
             if path.stat().st_mode & 0o777 != 0o400:path.chmod(0o400)
         elif path.stat().st_mode & 0o777 != 0o400:
             raise ValueError('Managed output has not been sealed by its stopped writer')

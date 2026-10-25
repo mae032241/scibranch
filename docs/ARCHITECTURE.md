@@ -233,7 +233,9 @@ read-only dynamic root. These Local and node-owned raw/artifact originals are se
 actual writers are confirmed stopped. Repeated collection, observation, checkpoint
 and history views preserve first destinations and saved proofs; actual content
 consumption verifies the selected original without copying or refreshing it.
-Checkpoints do not seal current drafts. Required selected-control checks and saved older records
+Checkpoints do not seal current drafts. Fragment checkpoints neither retain draft contents nor
+restore deleted or lost drafts; continuation depends on drafts still present in the existing workspace.
+Required selected-control checks and saved older records
 remain, and output errors do not rewrite a known terminal outcome. Local calls without
 `code_version`, including the old `entry` branch, retain their existing copy behavior.
 
