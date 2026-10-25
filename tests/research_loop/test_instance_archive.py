@@ -1,5 +1,4 @@
-"""Small package and original-material checks; no model, HTTP or backend."""
-import errno
+"""Retired package entry points and direct sealed-node consumers; no native runs."""
 import json
 
 import pytest
@@ -34,255 +33,90 @@ def rewrite_manifest(package, values):
     archive.files.durable_json(package / 'archive.json', meta)
 
 
-def test_export_retains_scope_and_gaps_without_live_layout_or_credentials(tmp_path, capsys):
-    root, material = scene(tmp_path)
-    # These are archival bytes, not asserted valid correction/approval facts.
-    c.write(root / 'correction-ledger/000001.json', {'historical_fixture_only': True})
-    c.write(root / 'execution-authority/host-key-source.json', {'private_locator_fixture': 'never-copy-this'})
-    private = root / 'native-homes/001/cache/credentials'; private.parent.mkdir(parents=True)
-    private.write_bytes(b'never-copy-native-credential')
-    unknown = root / 'undeclared-store/secret'; unknown.parent.mkdir()
-    unknown.write_bytes(b'never-recursively-copy-unknown-store')
-    # public_root may be unavailable; its original reference stays explicit.
-    for source in (tmp_path / 'public').iterdir():
-        source.unlink()
-    (tmp_path / 'public').rmdir()
-    package = tmp_path / 'archive'
-    result = archive.archive_export(root, package)
-    assert result['restorable'] is False and result['gaps'] == 1
-    rows = entries(package); by_path = {row['path']: row for row in rows}
-    name = material.relative_to(root).as_posix()
-    assert by_path[name]['kind'] == 'file' and (package / by_path[name]['blob']).read_bytes() == material.read_bytes()
-    assert by_path['correction-ledger/000001.json']['kind'] == 'file'
-    assert by_path['native-homes']['kind'] == 'excluded'
-    assert by_path['execution-authority/host-key-source.json']['kind'] == 'excluded'
-    assert by_path['undeclared-store']['kind'] == 'gap' and 'undeclared-store/secret' not in by_path
-    assert not (package / 'settings.json').exists() and not (package / 'jobs').exists()
-    before = {path.name for path in package.iterdir()}
-    with pytest.raises((OSError, ValueError)):
-        controller.run(package)
-    assert {path.name for path in package.iterdir()} == before
-    first = archive.archive_inspect(package, limit=1)
-    assert first['entries'][0]['index'] == 1 and first['next_after'] == 1
-    second = archive.archive_inspect(package, after=first['next_after'], limit=1)
-    assert second['entries'][0]['index'] == 2
-    dependencies = archive.archive_inspect(package, section='dependencies')['entries']
-    assert any(row['owner'] == 'public_root' and row['coverage'] == 'external_tree_not_copied' for row in dependencies)
-    assert cli.main(['archive-inspect', '--package', str(package), '--limit', '1']) == 0
-    assert json.loads(capsys.readouterr().out)['restorable'] is False
-    unchanged = (package / 'manifest.jsonl').read_bytes()
-    with pytest.raises(archive.files.ArchiveError, match='already exists'):
-        archive.archive_export(root, package)
-    assert (package / 'manifest.jsonl').read_bytes() == unchanged
-
-
-def test_active_writer_and_unknown_native_preserve_originals_without_export(tmp_path):
-    root, material = scene(tmp_path); package = tmp_path / 'archive'
-    original = material.read_bytes()
-    with controller._writer(root):
-        with pytest.raises(archive.files.ArchiveError, match='Source read guard'):
-            archive.archive_export(root, package)
-    from scidiscovery.research_loop.instance_ui import _host_lock
-    with _host_lock(root):
-        with pytest.raises(archive.files.ArchiveError, match='owner is active'):
-            archive.archive_export(root, package)
-    from scidiscovery.research_loop.experiments import Records
-    with Records(dict(record_dir=str(root / 'project/nodes/001/work/lineage'))).lease():
-        with pytest.raises(archive.files.ArchiveError, match='owner is active'):
-            archive.archive_export(root, package)
-    assert not package.exists() and material.read_bytes() == original
-    c.build_job(root, 1, 'H', [])
-    c.write(root / 'native-evidence/001/native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json')))
-    with pytest.raises(archive.files.ArchiveError, match='outcome is absent'):
-        archive.archive_export(root, package)
-    assert not package.exists() and material.read_bytes() == original
-
-
-def test_export_preserves_pending_configuration_and_its_dependencies(tmp_path):
-    from scidiscovery.research_loop import configuration_updates, research_config
-    root, _ = scene(tmp_path)
-    document = research_config.to_document(root, c.settings(root))
-    document['agent']['launcher'] = ['fixture-next-launcher']
-    configuration_updates.submit(root, document, expected_revision=0)
-    private = root / 'host-control/unrecognized/private.json'
-    c.write(private, {'must_not_be_copied': True})
-    original = root / 'host-control/configuration/revisions/000001.json'
-    with configuration_updates._writer(root):
-        with pytest.raises(archive.files.ArchiveError):
-            archive.archive_export(root, tmp_path / 'busy-archive')
-    package = tmp_path / 'archive'
-    archive.archive_export(root, package)
-    rows = {row['path']: row for row in entries(package)}
-    retained = rows[original.relative_to(root).as_posix()]
-    assert retained['kind'] == 'file'
-    assert (package / retained['blob']).read_bytes() == original.read_bytes()
-    assert rows['configuration.lock']['kind'] == 'excluded'
-    assert rows['host-control/unrecognized']['kind'] == 'gap'
-    assert private.relative_to(root).as_posix() not in rows
-    dependencies = archive.archive_inspect(package, section='dependencies')['entries']
-    assert any(row['owner'] == 'configuration/1/native_launcher'
-               and row['reference'] == ['fixture-next-launcher'] for row in dependencies)
-
-
-@pytest.mark.parametrize('independent', [False, True])
-def test_copy_race_never_publishes_or_rolls_back_original_changes(tmp_path, monkeypatch, independent):
-    root, material = scene(tmp_path); package = tmp_path / 'archive'
-    snapshot = archive._snapshot_original
-
-    def concurrent_write(owner, source, entry, **options):
-        frozen = snapshot(owner, source, entry, **options)
-        if source == material:
-            source.write_bytes(b'Concurrent original writer changed these bytes.\n')
-            (source.parent / 'new-original.txt').write_bytes(b'New original must not disappear silently.\n')
-        return frozen
-
-    monkeypatch.setattr(archive, '_snapshot_original', concurrent_write)
-    with pytest.raises(archive.files.ArchiveError, match='scope changed|scope gained'):
-        archive.archive_export(root, package, independent=independent)
-    assert not package.exists() and material.read_bytes().startswith(b'Concurrent original')
-    assert (material.parent / 'new-original.txt').exists()
-    assert not list(tmp_path.glob('.archive-archive-*'))
-
-
-def test_inspect_rejects_traversal_duplicate_blob_changes_and_symlinks(tmp_path):
-    root, _ = scene(tmp_path); package = tmp_path / 'archive'
-    archive.archive_export(root, package)
-    original = entries(package)
-    bad = [dict(row) for row in original]; bad[0]['path'] = '../../outside'
-    rewrite_manifest(package, bad)
-    with pytest.raises(archive.files.ArchiveError, match='canonical'):
-        archive.archive_inspect(package)
-    bad = [dict(row) for row in original]; bad[1]['path'] = bad[0]['path']
-    rewrite_manifest(package, bad)
-    with pytest.raises(archive.files.ArchiveError, match='Duplicate'):
-        archive.archive_inspect(package)
-    rewrite_manifest(package, original)
-    row = next(row for row in original if row['kind'] == 'file')
-    blob = package / row['blob']; raw = blob.read_bytes(); blob.chmod(0o600)
-    blob.write_bytes(b'Corrupted blob')
-    blob.chmod(row['mode'])
-    with pytest.raises(archive.files.ArchiveError, match='blob changed'):
-        archive.archive_inspect(package)
-    blob.unlink(); outside = tmp_path / 'outside'; outside.write_bytes(raw); blob.symlink_to(outside)
-    with pytest.raises(archive.files.ArchiveError, match='symbolic links'):
-        archive.archive_inspect(package)
-
-
 def sealed_scene(tmp_path, monkeypatch):
+    from test_direct_input_bindings import stopped_seals
     from test_history_handoff import finish
-    root, archival_bytes = scene(tmp_path)
-    # The older archive-only fixture includes arbitrary bytes, not node outputs.
-    # Scientific outputs use the real workspace owner, without another /work/.
+    root, fixture_bytes = scene(tmp_path)
     work = c.workspace(root, 1)
     material = work / 'artifacts/writer.lock'
-    material.parent.mkdir(parents=True); material.write_bytes(archival_bytes.read_bytes())
+    material.parent.mkdir(parents=True)
+    material.write_bytes(fixture_bytes.read_bytes())
     nested = work / 'experiments/bounded/artifacts/nested.txt'
-    nested.parent.mkdir(parents=True); nested.write_bytes(b'Exact nested scientific bytes.\n')
-    original_seal = c.seal_result
-
-    def cleaned_seal(root, step):
-        # Synthetic native transport only; the actual seal/archive/restore paths run.
-        record = c.host_record(c.workspace(root, step))
-        outcome = c.read(record / 'native-outcome.json')
-        c.write(record / 'native-outcome.json', dict(outcome, cleanup='observed_group_cleaned'))
-        return original_seal(root, step)
-
-    monkeypatch.setattr(c, 'seal_result', cleaned_seal)
+    nested.parent.mkdir(parents=True)
+    nested.write_bytes(b'Exact nested scientific bytes.\n')
+    stopped_seals(monkeypatch)
     finish(root, 1, 'H', [], action='experiment')
-    package = tmp_path / 'archive'
-    archive.archive_export(root, package)
-    return root, package, material, nested
+    # Keep the historical helper's return shape without producing a package.
+    return root, tmp_path / 'archive', material, nested
 
 
-def test_restore_exact_missing_scientific_files_keeps_current_control_and_budget(tmp_path, monkeypatch, capsys):
-    from scidiscovery.research_loop import budget, instance_science as science
+@pytest.mark.parametrize('name', ['archive_export', 'archive_inspect', 'archive_restore_material'])
+def test_archive_public_apis_are_unavailable(name):
+    assert not hasattr(archive, name)
+
+
+@pytest.mark.parametrize('command', ['archive-export', 'archive-inspect', 'archive-restore-material'])
+def test_archive_commands_reject_before_touching_originals(tmp_path, capsys, command):
+    root = tmp_path / 'absent-instance'
+    output = tmp_path / 'new-package'
+    package = tmp_path / 'historical-package'
+    package.mkdir()
+    original = package / 'archive.json'
+    raw = b'Existing historical package bytes stay untouched.\n'
+    original.write_bytes(raw)
+    options = {
+        'archive-export': ['--root', str(root), '--output', str(output)],
+        'archive-inspect': ['--package', str(package)],
+        'archive-restore-material': ['--root', str(root), '--package', str(package), '--step', '1', '--index', '1'],
+    }
+    with pytest.raises(SystemExit) as error:
+        cli.main([command, *options[command]])
+    assert error.value.code == 2
+    assert 'invalid choice' in capsys.readouterr().err
+    assert not root.exists() and not output.exists()
+    assert original.read_bytes() == raw
+    assert [path.name for path in package.iterdir()] == ['archive.json']
+
+
+def test_help_has_no_archive_or_cold_package_commands(capsys):
+    with pytest.raises(SystemExit) as error:
+        cli.main(['--help'])
+    assert error.value.code == 0
+    help_text = capsys.readouterr().out
+    for name in ('archive-export', 'archive-inspect', 'archive-restore-material',
+                 'checkpoint-enroll', 'checkpoint-export', 'checkpoint-restore'):
+        assert name not in help_text
+    assert 'execution-recover' in help_text
+    assert 'execution-resume' in help_text
+    assert 'execution-preparation-maintain' in help_text
+
+
+def test_sealed_node_views_and_successor_reuse_originals_without_package(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import instance_science as science, originals
     root, package, material, nested = sealed_scene(tmp_path, monkeypatch)
-    # This real newer event must survive use of the older archive unchanged.
-    budget.amend(root, max_tokens=1100, authorization_note='Explicit newer operator ceiling; not restored from archive')
-    expected = {path: path.read_bytes() for path in (material, nested)}
-    control = {path.relative_to(root): path.read_bytes() for path in root.rglob('*')
-        if path.is_file() and path not in expected}
-    for path in expected:
-        path.unlink()
-    def forbidden(*args, **kwargs):
-        pytest.fail('Material restoration must not sample current budget or automatically continue research')
-    monkeypatch.setattr(budget, 'snapshot', forbidden)
-    monkeypatch.setattr(controller, '_run', forbidden)
-    members = science.materials(root, 1)['items']
-    for path, raw in expected.items():
-        member = next(row for row in members if row['name'] == ('writer.lock' if path == material else 'experiments/bounded/artifacts/nested.txt'))
-        args = ['archive-restore-material', '--root', str(root), '--package', str(package),
-                '--step', '1', '--index', str(member['index'])]
-        assert cli.main(args) == 0
-        assert json.loads(capsys.readouterr().out)['status'] == 'material_restored'
-        original, _ = science.artifact(root, 1, member['index'])
-        with original:
-            assert original.stream.read() == raw
-        assert cli.main(args) == 0
-        assert json.loads(capsys.readouterr().out)['status'] == 'material_already_present'
-    assert {path.relative_to(root): path.read_bytes() for path in root.rglob('*')
-        if path.is_file() and path not in expected} == control
-    assert not list((root / 'host-runtime').glob('material-restore-*'))
-
-
-def test_restore_rejects_conflicts_wrong_seal_and_control_targets(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import instance_science as science
-    root, package, material, _ = sealed_scene(tmp_path, monkeypatch)
-    index = next(row['index'] for row in science.materials(root, 1)['items'] if row['name'] == 'writer.lock')
-    original = material.read_bytes()
-    material.chmod(0o600)  # Deliberate fixture corruption, not production permission changes.
-    material.write_bytes(b'Current different original must survive.')
-    with pytest.raises(archive.files.ArchiveError, match='never overwritten'):
-        archive.archive_restore_material(root, package, step=1, index=index)
-    assert material.read_bytes() == b'Current different original must survive.'
-    material.unlink()
-    outside = tmp_path / 'outside'; outside.write_bytes(original); material.symlink_to(outside)
-    with pytest.raises(archive.files.ArchiveError, match='symbolic links'):
-        archive.archive_restore_material(root, package, step=1, index=index)
-    assert outside.read_bytes() == original
-    material.unlink()
-    seal_path = c.host_record(c.workspace(root, 1)) / 'result-identity.json'
-    sealed = seal_path.read_bytes(); mode = seal_path.stat().st_mode & 0o777; value = c.read(seal_path)
-    c.write(seal_path, dict(value, scope='A different producer seal is not the archived producer'))
-    with pytest.raises(archive.files.ArchiveError, match='exact current producer seal'):
-        archive.archive_restore_material(root, package, step=1, index=index)
-    seal_path.chmod(0o600); seal_path.write_bytes(sealed); seal_path.chmod(mode)
-    changed = c.read(seal_path)
-    changed['materials'][index-1]['source'] = str(root / 'settings.json')
-    c.write(seal_path, changed)
-    with pytest.raises(archive.files.ArchiveError, match='call and control originals are excluded'):
-        archive.archive_restore_material(root, package, step=1, index=index)
-    seal_path.chmod(0o600); seal_path.write_bytes(sealed); seal_path.chmod(mode)
-    with pytest.raises(archive.files.ArchiveError, match='index'):
-        archive.archive_restore_material(root, package, step=1, index=0)
-    assert not material.exists()
-
-
-def test_restore_refuses_active_unknown_and_competing_originals(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import instance_science as science
-    root, package, material, _ = sealed_scene(tmp_path, monkeypatch)
-    index = next(row['index'] for row in science.materials(root, 1)['items'] if row['name'] == 'writer.lock')
-    material.unlink()
-    with controller._writer(root):
-        with pytest.raises(RuntimeError, match='running controller'):
-            archive.archive_restore_material(root, package, step=1, index=index)
-    outcome_path = c.host_record(c.workspace(root, 1)) / 'native-outcome.json'
-    outcome = outcome_path.read_bytes()
-    c.write(outcome_path, dict(c.read(outcome_path), cleanup='cleanup_unknown'))
-    with pytest.raises(archive.files.ArchiveError, match='cleanup is unconfirmed'):
-        archive.archive_restore_material(root, package, step=1, index=index)
-    assert not material.exists()
-    outcome_path.write_bytes(outcome)
-    link = archive.os.link
-    def competing_file(source, destination, **kwargs):
-        if destination == material:
-            material.write_bytes(b'A competing original, never overwritten.')
-        return link(source, destination, **kwargs)
-    monkeypatch.setattr(archive.os, 'link', competing_file)
-    with pytest.raises(archive.files.ArchiveError, match='never overwritten'):
-        archive.archive_restore_material(root, package, step=1, index=index)
-    assert material.read_bytes() == b'A competing original, never overwritten.'
-    assert not list((root / 'host-runtime').glob('material-restore-*'))
+    record = c.host_record(c.workspace(root, 1))
+    paths = (material, nested, record / 'science-output.json', record / 'result-identity.json')
+    saved = {path: (path.stat().st_dev, path.stat().st_ino, path.stat().st_mode, path.read_bytes())
+             for path in paths}
+    successor = c.build_job(root, 2, 'W', [1])
+    selected = next(row for row in successor['direct_materials']
+                    if row.get('original_source', row['source']) == str(material))
+    assert not (c.workspace(root, 2) / selected['path']).exists()
+    # The existing handoff and views do not consume this old authoring input.
+    objective = root / c.settings(root)['global_materials'][0]['source']
+    objective.unlink()
+    with science.science(root, 1) as original:
+        assert original.stream.read() == saved[record / 'science-output.json'][3]
+    members = science.materials(root, 1)
+    member = next(row for row in members['items'] if row['name'] == 'writer.lock')
+    original, name = science.artifact(root, 1, member['index'])
+    with original:
+        assert name == 'writer.lock'
+        assert original.stream.read() == saved[material][3]
+    assert originals.material_path(root, selected) == material
+    assert {path: (path.stat().st_dev, path.stat().st_ino, path.stat().st_mode, path.read_bytes())
+            for path in paths} == saved
+    assert not package.exists()
 
 
 @pytest.mark.parametrize('legacy', [False, True])
@@ -297,15 +131,11 @@ def test_arbitrary_managed_writer_lease_blocks_lifecycle_without_domain_names(tm
     descriptor = os.open(lease, os.O_CREAT | os.O_RDONLY, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        with pytest.raises(archive.files.ArchiveError, match='owner is active'):
-            archive.archive_export(root, tmp_path / 'blocked-archive')
-        # Fork's read guard also sees old stores through the owning task.
         c.build_job(root, 1, 'H', [])
         job_path = root / 'jobs/001.json'
         job = c.read(job_path)
         job.pop('worker_view_version', None)
         c.write(job_path, job)
-        # Explicit old task version selects the legacy records owner.
         with pytest.raises(BlockingIOError):
             with fork_sources.source_guard(root):
                 pass
@@ -316,356 +146,3 @@ def test_arbitrary_managed_writer_lease_blocks_lifecycle_without_domain_names(tm
         assert root.exists() and material.exists()
     finally:
         os.close(descriptor)
-
-
-def test_archive_fences_first_managed_writer_after_lease_enumeration(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-    from scidiscovery.research_loop import experiments, experiment_client
-    root, _ = scene(tmp_path)
-    job = c.build_job(root, 1, 'H', [])
-    records = experiment_client.record_directory(root, 1)
-    effect = records / 'new-adapter-original'
-
-    class Writer:
-        config = dict(record_dir=str(records), scope=dict(step=1, role=job['role'],
-            job_ref=c.record_ref(root / 'jobs/001.json')))
-
-        @experiments.record_effect
-        def mutate(self):
-            records.mkdir(parents=True, exist_ok=True)
-            effect.write_bytes(b'writer must not begin during archive')
-
-    writer = Writer()
-    writer.records = SimpleNamespace(root=records)
-    original = archive._owner_locks
-    attempted = []
-
-    def after_enumeration(stack, source, **options):
-        original(stack, source, **options)
-        assert not (records / 'record-writer.lock').exists()
-        with pytest.raises(archive.files.ArchiveError, match='Source read guard'):
-            writer.mutate()
-        attempted.append(True)
-        assert not records.exists() and not effect.exists()
-
-    monkeypatch.setattr(archive, '_owner_locks', after_enumeration)
-    result = archive.archive_export(root, tmp_path / 'archive')
-    assert result['status'] == 'archive_exported' and attempted == [True]
-    assert not records.exists() and not effect.exists()
-
-
-@pytest.mark.parametrize('mode', [0o400, 0o600])
-def test_export_link_metadata_tolerance_is_limited_to_readonly_files(tmp_path, monkeypatch, mode):
-    import os
-    root, material = scene(tmp_path); package = tmp_path / 'archive'
-    material.chmod(mode)
-    alias = tmp_path / 'sibling-reference'
-    snapshot = archive._snapshot_original
-    before = material.stat()
-    def retain_sibling(owner, source, entry, **options):
-        frozen = snapshot(owner, source, entry, **options)
-        if source == material:
-            os.link(material, alias)
-            alias.unlink()
-        return frozen
-    monkeypatch.setattr(archive, '_snapshot_original', retain_sibling)
-    if mode == 0o400:
-        archive.archive_export(root, package)
-        row = next(row for row in entries(package) if row['path'] == material.relative_to(root).as_posix())
-        assert (package / row['blob']).read_bytes() == material.read_bytes()
-    else:
-        with pytest.raises(archive.files.ArchiveError, match='scope changed'):
-            archive.archive_export(root, package)
-        assert not package.exists()
-    assert material.stat().st_ino == before.st_ino and material.stat().st_mtime_ns == before.st_mtime_ns
-    assert material.stat().st_ctime_ns != before.st_ctime_ns
-
-
-@pytest.mark.parametrize('mutation', ['bytes', 'inode', 'mode', 'mtime', 'added', 'removed'])
-def test_readonly_export_still_rejects_every_non_ctime_change(tmp_path, monkeypatch, mutation):
-    import os
-    root, material = scene(tmp_path); package = tmp_path / 'archive'
-    material.chmod(0o400)
-    snapshot = archive._snapshot_original
-    def change_original(owner, source, entry, **options):
-        frozen = snapshot(owner, source, entry, **options)
-        if source != material:
-            return frozen
-        if mutation == 'bytes':
-            material.chmod(0o600); material.write_bytes(b'different original bytes'); material.chmod(0o400)
-        elif mutation == 'inode':
-            replacement = material.with_name('replacement')
-            replacement.write_bytes(material.read_bytes()); replacement.chmod(0o400)
-            before = material.stat(); os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
-            replacement.replace(material)
-        elif mutation == 'mode':
-            material.chmod(0o600)
-        elif mutation == 'mtime':
-            before = material.stat(); os.utime(material, ns=(before.st_atime_ns, before.st_mtime_ns + 1000000000))
-        elif mutation == 'added':
-            (material.parent / 'another-original').write_bytes(b'new original')
-        else:
-            material.unlink()
-        return frozen
-    monkeypatch.setattr(archive, '_snapshot_original', change_original)
-    with pytest.raises(archive.files.ArchiveError, match='scope changed|scope gained|scope lost'):
-        archive.archive_export(root, package)
-    assert not package.exists()
-
-
-def test_v2_unique_blobs_repeated_export_and_independent_source_lifetimes(tmp_path, monkeypatch):
-    import os
-    import shutil
-    from scidiscovery.research_loop import atomic_files, shared_originals, storage_policy
-    root, material = scene(tmp_path)
-    raw = b'opaque archive content\n' * 256
-    material.write_bytes(raw)
-    identity = {key: archive.files.stat_file(material)[key] for key in ('size_bytes',)}
-    frozen = shared_originals.retain(root, material, source_kind='mutable', **identity)
-    alias = root / 'project/nodes/001/inputs/duplicate-original'
-    shared_originals.link(frozen, alias, root=root, **identity)
-    duplicate = root / 'project/global/writable-copy'
-    duplicate.write_bytes(raw)
-    first, second = tmp_path / 'first-archive', tmp_path / 'second-archive'
-    original_modes = {path: path.stat().st_mode & 0o777 for path in (material, duplicate)}
-    result = archive.archive_export(root, first)
-    rows = [row for row in entries(first) if row['kind'] == 'file']
-    payload_rows = [row for row in rows if row['path'] in {frozen.relative_to(root).as_posix(), alias.relative_to(root).as_posix()}]
-    assert {row['blob'] for row in payload_rows} == {payload_rows[0]['blob']}
-    blob = first / payload_rows[0]['blob']
-    assert os.path.samefile(blob, frozen) and os.path.samefile(blob, alias)
-    assert not os.path.samefile(blob, material) and not os.path.samefile(blob, duplicate)
-    assert {path: path.stat().st_mode & 0o777 for path in original_modes} == original_modes
-    assert {row['storage'] for row in payload_rows} == {'immutable'}
-    independent_rows=[row for row in rows if row['path'] in {material.relative_to(root).as_posix(),duplicate.relative_to(root).as_posix()}]
-    assert len({row['blob'] for row in independent_rows})==2
-    assert not ({row['blob'] for row in independent_rows}&{row['blob'] for row in payload_rows})
-    assert result['files'] == len(rows)
-    assert result['bytes'] == sum(row['size_bytes'] for row in rows)
-    unique = {row['blob']: row['size_bytes'] for row in rows}
-    assert result['unique_blobs'] == len(unique)
-    assert result['blob_bytes'] == sum(unique.values())
-    usage = storage_policy.usage(root)
-    archive.archive_export(root, second)
-    assert storage_policy.usage(root) == usage
-    assert os.path.samefile(second / payload_rows[0]['blob'], blob)
-    shutil.rmtree(root)
-    assert blob.read_bytes() == raw
-    shutil.rmtree(first)
-    assert (second / payload_rows[0]['blob']).read_bytes() == raw
-    assert archive.archive_inspect(second)['unique_blobs'] == len(unique)
-
-
-def test_readonly_unknown_source_is_independently_frozen_and_quota_is_not_bypassed(tmp_path):
-    from scidiscovery.research_loop import storage_policy as storage
-    root, material = scene(tmp_path)
-    material.chmod(0o400)
-    package = tmp_path / 'limited-archive'
-    policy = storage.configuration(dict(enabled=True, max_instance_bytes=storage.usage(root)))
-    with storage.bind(root, policy), pytest.raises(storage.StorageQuotaExceeded, match='max_instance_bytes'):
-        archive.archive_export(root, package)
-    assert not package.exists() and material.stat().st_mode & 0o777 == 0o400
-    archive.archive_export(root, package)
-    row = next(row for row in entries(package) if row['path'] == material.relative_to(root).as_posix())
-    assert row['storage'] == 'independent'
-    assert (package / row['blob']).stat().st_ino != material.stat().st_ino
-
-
-@pytest.mark.parametrize('error_number', [errno.EXDEV, errno.EPERM, errno.EMLINK])
-def test_archive_share_failure_never_copies_or_publishes(tmp_path, monkeypatch, error_number):
-    from scidiscovery.research_loop import atomic_files
-    root, _ = scene(tmp_path)
-    archive.archive_export(root, tmp_path / 'warm-archive')
-    def unsupported(*args, **options):
-        raise OSError(error_number, 'injected sharing failure')
-    def forbidden(*args, **options):
-        pytest.fail('Sharing failure triggered a copy fallback')
-    monkeypatch.setattr(archive.files.os, 'link', unsupported)
-    monkeypatch.setattr(atomic_files, 'copy_original', forbidden)
-    package = tmp_path / 'unsupported-archive'
-    with pytest.raises(archive.files.SharingUnsupported, match='hardlink'):
-        archive.archive_export(root, package)
-    assert not package.exists()
-
-
-def test_archive_rejects_unlisted_blobs_and_invalid_storage(tmp_path):
-    root, _ = scene(tmp_path)
-    package = tmp_path / 'archive'
-    archive.archive_export(root, package)
-    rows = entries(package)
-    file_row = next(row for row in rows if row['kind'] == 'file')
-    malformed = [dict(row) for row in rows]
-    next(row for row in malformed if row['kind'] == 'file')['storage'] = 'writable_shared'
-    rewrite_manifest(package, malformed)
-    with pytest.raises(archive.files.ArchiveError, match='storage semantics'):
-        archive.archive_inspect(package)
-    rewrite_manifest(package, rows)
-    extra = package / 'blobs/unlisted'
-    extra.write_bytes(b'Unreferenced payload')
-    with pytest.raises(archive.files.ArchiveError, match='unlisted blob'):
-        archive.archive_inspect(package)
-    extra.unlink()
-    assert (package / file_row['blob']).stat().st_mode & 0o777 == 0o400
-
-
-def test_cli_independent_export_copies_each_unique_blob_once_and_preserves_source(tmp_path, monkeypatch, capsys):
-    import os
-    import shutil
-    from scidiscovery.research_loop import atomic_files, shared_originals
-    root, material = scene(tmp_path)
-    proof = {key: archive.files.stat_file(material)[key] for key in ('size_bytes',)}
-    frozen = shared_originals.retain(root, material, source_kind='mutable', **proof)
-    alias = root / 'project/nodes/001/inputs/same-content'
-    shared_originals.link(frozen, alias, root=root, **proof)
-    archive.archive_export(root, tmp_path / 'warm')
-    copied = []
-    original_copy = atomic_files.copy_original
-    def count_copy(source, target, **options):
-        if target.parent.name == 'blobs':
-            copied.append(target.name)
-        return original_copy(source, target, **options)
-    monkeypatch.setattr(atomic_files, 'copy_original', count_copy)
-    package = tmp_path / 'independent'
-    assert cli.main(['archive-export', '--root', str(root), '--output', str(package), '--independent']) == 0
-    result = json.loads(capsys.readouterr().out)
-    assert result['blob_ownership'] == 'independent'
-    assert len(copied) == len(set(copied)) == result['unique_blobs']
-    sources = {(path.stat().st_dev, path.stat().st_ino) for path in root.rglob('*') if path.is_file()}
-    assert all((path.stat().st_dev, path.stat().st_ino) not in sources for path in (package / 'blobs').iterdir())
-    rows = [row for row in entries(package) if row.get('path') == frozen.relative_to(root).as_posix()]
-    assert len({row['blob'] for row in rows}) == 1
-    blob = package / rows[0]['blob']; original = blob.read_bytes()
-    frozen.chmod(0o600); frozen.write_bytes(b'Live retained original deliberately changed')
-    assert blob.read_bytes() == original and not os.path.samefile(blob, alias)
-    shutil.rmtree(root)
-    assert archive.archive_inspect(package)['blob_ownership'] == 'independent'
-
-
-def test_independent_export_bypasses_only_cross_device_gate(tmp_path, monkeypatch, capsys):
-    import os
-    from pathlib import Path
-    root, _ = scene(tmp_path)
-    destination = tmp_path / 'other-filesystem'; destination.mkdir()
-    original_stat = Path.stat
-    def other_device(path, **options):
-        value = original_stat(path, **options)
-        if path == destination:
-            fields = list(value); fields[2] += 1
-            return os.stat_result(fields)
-        return value
-    monkeypatch.setattr(Path, 'stat', other_device)
-    with pytest.raises(archive.files.SharingUnsupported, match='same-filesystem'):
-        archive.archive_export(root, destination / 'shared')
-    package = destination / 'independent'
-    assert cli.main(['archive-export', '--root', str(root), '--output', str(package), '--independent']) == 0
-    assert json.loads(capsys.readouterr().out)['blob_ownership'] == 'independent'
-    assert not (destination / 'shared').exists()
-
-
-@pytest.mark.parametrize('independent_package', [False, True])
-def test_material_independent_effective_mode_refuses_existing_package_alias(tmp_path, monkeypatch, independent_package):
-    import os
-    from scidiscovery.research_loop import instance_science as science
-    root, package, material, _ = sealed_scene(tmp_path, monkeypatch)
-    if independent_package:
-        package = tmp_path / 'independent-material-package'
-        archive.archive_export(root, package, independent=True)
-    index = next(row['index'] for row in science.materials(root, 1)['items'] if row['name'] == 'writer.lock')
-    row = next(row for row in entries(package) if row['path'] == material.relative_to(root).as_posix())
-    material.unlink(); os.link(package / row['blob'], material)
-    original = material.stat()
-    with pytest.raises(archive.files.ArchiveError, match='shares a package inode'):
-        archive.archive_restore_material(root, package, step=1, index=index, independent=not independent_package)
-    assert material.stat().st_ino == original.st_ino and material.stat().st_mode == original.st_mode
-
-
-@pytest.mark.parametrize('independent_package', [False, True])
-def test_cli_material_independent_restores_isolated_bytes(tmp_path, monkeypatch, capsys, independent_package):
-    import os
-    from scidiscovery.research_loop import instance_science as science
-    root, package, material, _ = sealed_scene(tmp_path, monkeypatch)
-    if independent_package:
-        package = tmp_path / 'independent-material-package'
-        archive.archive_export(root, package, independent=True)
-    index = next(row['index'] for row in science.materials(root, 1)['items'] if row['name'] == 'writer.lock')
-    row = next(row for row in entries(package) if row['path'] == material.relative_to(root).as_posix())
-    raw = material.read_bytes(); material.unlink()
-    arguments = ['archive-restore-material', '--root', str(root), '--package', str(package), '--step', '1', '--index', str(index)]
-    if not independent_package:
-        arguments.append('--independent')
-    assert cli.main(arguments) == 0
-    assert json.loads(capsys.readouterr().out)['blob_ownership'] == 'independent'
-    assert material.read_bytes() == raw and material.stat().st_mode & 0o777 == 0o400
-    assert not os.path.samefile(material, package / row['blob'])
-    material.chmod(0o600); material.write_bytes(b'changed restored material')
-    assert (package / row['blob']).read_bytes() == raw
-
-
-@pytest.mark.parametrize('collision', ['linked', 'mode'])
-def test_independent_copy_rejects_existing_inode_or_mode_without_repair(tmp_path, collision):
-    import os
-    source = tmp_path / 'frozen'; source.write_bytes(b'Exact frozen original'); source.chmod(0o400)
-    target = tmp_path / 'target'
-    if collision == 'linked':
-        os.link(source, target)
-    else:
-        target.write_bytes(source.read_bytes()); target.chmod(0o600)
-    original = target.stat()
-    entry = dict(archive.files.stat_file(source), kind='file')
-    with pytest.raises(archive.files.ArchiveError, match='independent exact original'):
-        archive.files.copy_independent_verified(source, target, entry)
-    assert target.stat().st_ino == original.st_ino and target.stat().st_mode == original.st_mode
-
-
-def test_independent_copy_rejects_link_disguised_as_copy_without_repair(tmp_path, monkeypatch):
-    import os
-    from scidiscovery.research_loop import atomic_files
-    source = tmp_path / 'frozen'; source.write_bytes(b'Exact frozen original'); source.chmod(0o400)
-    target = tmp_path / 'target'
-    monkeypatch.setattr(atomic_files, 'copy_original', lambda source, target, **options: os.link(source, target))
-    with pytest.raises(archive.files.ArchiveError, match='independent exact original'):
-        archive.files.copy_independent_verified(source, target, archive.files.stat_file(source))
-    assert os.path.samefile(source, target) and source.read_bytes() == b'Exact frozen original'
-
-
-def test_v2_is_strict_readonly_inspection_and_v3_requires_ownership(tmp_path):
-    root, _ = scene(tmp_path); package = tmp_path / 'archive'
-    archive.archive_export(root, package)
-    metadata = c.read(package / 'archive.json')
-    invalid = dict(metadata); invalid.pop('blob_ownership')
-    archive.files.durable_json(package / 'archive.json', invalid)
-    with pytest.raises(archive.files.ArchiveError, match='Unsupported read-only archive format'):
-        archive.archive_inspect(package)
-    invalid['format'] = archive.SHARED_FORMAT
-    archive.files.durable_json(package / 'archive.json', invalid)
-    assert archive.archive_inspect(package)['blob_ownership'] == 'shared'
-    invalid['blob_ownership'] = 'independent'
-    archive.files.durable_json(package / 'archive.json', invalid)
-    with pytest.raises(archive.files.ArchiveError, match='Unsupported read-only archive format'):
-        archive.archive_inspect(package)
-
-
-def test_independent_material_quota_counts_a_new_inode(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import instance_science as science, storage_policy as storage
-    root, package, material, _ = sealed_scene(tmp_path, monkeypatch)
-    index = next(row['index'] for row in science.materials(root, 1)['items'] if row['name'] == 'writer.lock')
-    material.unlink()
-    policy = storage.configuration(dict(enabled=True, max_instance_bytes=storage.usage(root)))
-    with storage.bind(root, policy), pytest.raises(storage.StorageQuotaExceeded, match='max_instance_bytes'):
-        archive.archive_restore_material(root, package, step=1, index=index, independent=True)
-    assert not material.exists()
-
-
-def test_independent_export_unsupported_atomic_publication_cleans_exact_stage(tmp_path, monkeypatch):
-    root, material = scene(tmp_path); package = tmp_path / 'independent'
-    original = material.read_bytes(); original_mode = material.stat().st_mode
-    link = archive.files.os.link
-    def unsupported(source, destination, **options):
-        if destination.parent.name == 'blobs':
-            raise OSError(errno.EXDEV, 'Injected destination publication failure')
-        return link(source, destination, **options)
-    monkeypatch.setattr(archive.files.os, 'link', unsupported)
-    with pytest.raises(archive.files.SharingUnsupported, match='Independent copy publication'):
-        archive.archive_export(root, package, independent=True)
-    assert material.read_bytes() == original and material.stat().st_mode == original_mode
-    assert not package.exists() and not list(tmp_path.glob('.independent-archive-*'))

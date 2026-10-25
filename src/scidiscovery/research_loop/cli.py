@@ -196,45 +196,19 @@ def main(argv=None):
     serve.add_argument('--approval-secret-file', type=Path, help='Operator-owned regular 0600 browser host key; defaults to frozen ui.approval_secret_file')
     serve.add_argument('--translation-config', type=Path, help='Optional application translation TOML; independent of frozen scientific profiles')
     serve.add_argument('--port', type=int, help='Loopback port; defaults to frozen ui.port or an available port')
-    export = commands.add_parser('archive-export', help='Retain quiescent originals in a new inert package; default requires same-filesystem hardlinks')
-    export.add_argument('--root', type=Path, required=True)
-    export.add_argument('--output', type=Path, required=True)
-    export.add_argument('--independent', action='store_true', help='Use independent blob copies; independent packages always restore independently')
     delete = commands.add_parser('instance-delete', help='Permanently delete one exact quiescent instance; retry only with the same operation ID')
     delete.add_argument('--root', type=Path, required=True)
     delete.add_argument('--instance-id', required=True, help='Exact frozen goal_id confirmation')
     delete.add_argument('--settings-ref', type=json.loads, required=True, help='Exact frozen settings.json reference JSON confirmation')
     delete.add_argument('--operation-id', required=True, help='Original deletion operation ID retained for crash and lost-response retries')
-    inspect = commands.add_parser('archive-inspect', help='Verify a read-only package and page its complete manifest without running code or importing plugins')
-    inspect.add_argument('--package', type=Path, required=True)
-    inspect.add_argument('--after', type=int, default=0, help='Exact prior entry index; default starts at the first entry')
-    inspect.add_argument('--limit', type=int, default=20, help='Returned page size; all package bytes are still verified')
-    inspect.add_argument('--section', choices=['manifest', 'dependencies'], default='manifest')
-    restore = commands.add_parser('archive-restore-material', help='Restore one missing ordinary sealed file to its original instance; never restore control/call state or continue research')
-    restore.add_argument('--root', type=Path, required=True)
-    restore.add_argument('--package', type=Path, required=True)
-    restore.add_argument('--independent', action='store_true', help='Use independent blob copies; independent packages always restore independently')
-    restore.add_argument('--step', type=int, required=True)
-    restore.add_argument('--index', type=int, required=True, help='Exact member index from the sealed scientific materials page')
-    enroll = commands.add_parser('checkpoint-enroll', help='Explicitly bind a quiescent instance to an external same-host cold-transfer anchor')
-    enroll.add_argument('--root', type=Path, required=True)
-    enroll.add_argument('--anchor-directory', type=Path, required=True)
-    cold = commands.add_parser('checkpoint-export', help='Freeze this enrolled generation and export its complete cold state; never delete the source root')
-    cold.add_argument('--root', type=Path, required=True)
-    cold.add_argument('--output', type=Path, required=True)
-    cold.add_argument('--independent', action='store_true', help='Use independent blob copies; independent packages always restore independently')
-    resume_cold = commands.add_parser('checkpoint-restore', help='Restore a registered cold checkpoint only to its absent original same-host root; no automatic continuation')
-    resume_cold.add_argument('--root', type=Path, required=True)
-    resume_cold.add_argument('--package', type=Path, required=True)
-    resume_cold.add_argument('--independent', action='store_true', help='Use independent blob copies; independent packages always restore independently')
     arguments = list(argv) if argv is not None else sys.argv[1:]
     args = parser.parse_args(arguments)
     root_arg = getattr(args, 'root', None)
-    root = ((root_arg.expanduser() if args.command == 'execution-preparation-maintain' else root_arg.expanduser().absolute() if args.command in {'instance-delete', 'archive-export', 'archive-restore-material','checkpoint-enroll','checkpoint-export','checkpoint-restore'} else root_arg.expanduser().resolve())
+    root = ((root_arg.expanduser() if args.command == 'execution-preparation-maintain' else root_arg.expanduser().absolute() if args.command == 'instance-delete' else root_arg.expanduser().resolve())
             if root_arg is not None else None)
     try:
         workspace_ui = args.command == 'serve-ui' and args.workspace is not None
-        if args.command not in {'execution-preparation-maintain','instance-delete','prepare','config-check','config-inspect','status','archive-inspect','checkpoint-enroll','checkpoint-export','checkpoint-restore','fork-preview','fork-create'} and not workspace_ui:
+        if args.command not in {'execution-preparation-maintain','instance-delete','prepare','config-check','config-inspect','status','fork-preview','fork-create'} and not workspace_ui:
             from .protocol import require_current
             require_current(root)
         if args.command in {'fork-preview', 'fork-create'}:
@@ -361,24 +335,6 @@ def main(argv=None):
             from .instance_delete import delete_instance
             result = delete_instance(root, instance_id=args.instance_id,
                 settings_ref=args.settings_ref, operation_id=args.operation_id)
-        elif args.command == 'archive-export':
-            from .instance_archive import archive_export
-            result = archive_export(root, args.output, independent=args.independent)
-        elif args.command == 'archive-inspect':
-            from .instance_archive import archive_inspect
-            result = archive_inspect(args.package, after=args.after, limit=args.limit, section=args.section)
-        elif args.command == 'archive-restore-material':
-            from .instance_archive import archive_restore_material
-            result = archive_restore_material(root, args.package, step=args.step, index=args.index, independent=args.independent)
-        elif args.command == 'checkpoint-enroll':
-            from .instance_archive import checkpoint_enroll
-            result = checkpoint_enroll(root,args.anchor_directory)
-        elif args.command == 'checkpoint-export':
-            from .instance_archive import checkpoint_export
-            result = checkpoint_export(root,args.output,independent=args.independent)
-        elif args.command == 'checkpoint-restore':
-            from .instance_archive import checkpoint_restore
-            result = checkpoint_restore(root,args.package,independent=args.independent)
         elif args.command == 'execution-recover':
             result=controller.execution_recover(root,args.step)
         elif args.command == 'execution-resume':
@@ -451,7 +407,7 @@ def main(argv=None):
         if args.maintenance in {'query', 'cancel'}:
             recognized.update(PENDING_EXECUTION_STATES)
         return 0 if state in recognized else 2
-    return 0 if result.get('status') in {None, 'fork_preview_ready', 'fork_created', 'preserved_read_only', 'prepared', 'finish', 'final_a_completed', 'wait', 'paused', 'pause_requested', 'budget_amended', 'delivery_confirmed', 'execution_recovered', 'execution_resume_recorded', 'exported_unsubmitted', 'ui_stopped', 'archive_exported', 'archive_inspected', 'material_restored', 'material_already_present','checkpoint_enrolled','checkpoint_exported','checkpoint_restored','checkpoint_restore_already_completed','execution_maintained','config_checked','config_inspected','accepted','running','applied','operations','guidance_listed','pending','revoked','progress_read','progress_unavailable','artifact_downloaded'} else 2
+    return 0 if result.get('status') in {None, 'fork_preview_ready', 'fork_created', 'preserved_read_only', 'prepared', 'finish', 'final_a_completed', 'wait', 'paused', 'pause_requested', 'budget_amended', 'delivery_confirmed', 'execution_recovered', 'execution_resume_recorded', 'exported_unsubmitted', 'ui_stopped','execution_maintained','config_checked','config_inspected','accepted','running','applied','operations','guidance_listed','pending','revoked','progress_read','progress_unavailable','artifact_downloaded'} else 2
 
 
 if __name__ == '__main__':
