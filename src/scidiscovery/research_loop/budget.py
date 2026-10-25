@@ -26,7 +26,10 @@ def _duration(before, after, *, legacy_elapsed=False):
             raise ValueError('Control clock moved backwards; consumption is not refundable')
         return wall
     if before['boot_id'] != after['boot_id']:
-        raise ValueError('Control clock boot changed; elapsed interval cannot be verified')
+        # Persisted Unix timestamps survive a host restart. Keep previously
+        # measured intervals and charge the open cross-boot gap without ever
+        # refunding consumption if the wall clock was corrected backwards.
+        return max(0., after['at_unix'] - before['at_unix'])
     elapsed = after['at_boottime'] - before['at_boottime']
     # UTC can slew or step without a boot-clock reversal. It is a display
     # timestamp, never a second authority over advancement consumption.
@@ -1328,20 +1331,30 @@ def final_a_return(root, job, intent, *, events=None):
             raise ValueError('Final A return reference is missing from its original intent')
         return None
     startup = intent.get('continuation_kind') == 'startup_successor'
+    reentry = intent.get('continuation_kind') == 'reentry'
     repair = intent.get('continuation_kind') == 'repair' and isinstance(intent.get('output_repair'),dict) and 'work_repair' not in intent
     if startup:
         from . import startup_recovery
         startup_recovery.validate_intent(root,job,intent)
     expected_anchor = dict(accepted['anchor'], final_return=marker) if accepted is not None else None
+    if reentry and accepted is not None:
+        # An administrative reattachment completes this same final return.
+        # Its historical chain and cumulative consumption are checked below.
+        expected_anchor.update({key:intent['budget_slice'].get(key) for key in
+            ('boot_id','advance_seconds','previous_tokens','previous_seconds')})
     if repair and accepted is not None:
         number=intent.get('attempt')
         limits=settings.get('resume_policy') or {}
-        if (type(number) is not int or not 1 <= number <= limits.get('max_attempts',0)
+        if (type(number) is not int or number < 1
                 or not limits.get('output_repair',False)):
             raise ValueError('Final A return has no bounded output repair authorization')
         from . import continuation, execution
         first=execution.origin(root,job['step'])
         prior=first if number==1 else first/'continuations'/f'{number-1:03d}'
+        repairs = 1 + sum(contracts.read(contracts.regular(first/'continuations'/f'{previous:03d}'/'native-intent.json'))
+            .get('continuation_kind', 'repair') not in {'fragment','reentry'} for previous in range(1,number))
+        if repairs > limits.get('max_attempts',0):
+            raise ValueError('Final A return has no bounded output repair authorization')
         if (intent.get('root_intent_ref')!=contracts.record_ref(contracts.regular(first/'native-intent.json'))
                 or intent.get('previous')!=execution.proof(prior)):
             raise ValueError('Final A return output repair changed its exact source')
@@ -1349,9 +1362,9 @@ def final_a_return(root, job, intent, *, events=None):
         # Validate cumulative consumption in _node_duration; retain the original
         # ceilings, task and final-return marker while advancing this call's clock.
         expected_anchor.update({key:intent['budget_slice'].get(key) for key in
-            ('advance_seconds','previous_tokens','previous_seconds')})
-    if (accepted is None or _final_a_policy(settings) is None or ('attempt' in intent and not (startup or repair))
-            or intent.get('continuation_kind') is not None and not (startup or repair) or intent.get('step') != job['step']
+            ('boot_id','advance_seconds','previous_tokens','previous_seconds')})
+    if (accepted is None or _final_a_policy(settings) is None or ('attempt' in intent and not (startup or repair or reentry))
+            or intent.get('continuation_kind') is not None and not (startup or repair or reentry) or intent.get('step') != job['step']
             or job['role'] != 'A' or job.get('formal_review') is not None
             or intent.get('task_ref') != accepted['anchor']['task_ref']
             or accepted['step'] != job['step']
@@ -1531,7 +1544,13 @@ def _attempt_consumption(root, job, paths):
     for number, path in enumerate(paths):
         intent = contracts.read(contracts.regular(path / 'native-intent.json'))
         anchor = intent.get('budget_slice', {})
-        original = contracts.read(contracts.regular(path / 'native-outcome.json'))
+        interrupted = not (path / 'native-outcome.json').exists()
+        if interrupted:
+            from . import continuation
+            saved = continuation.interruption(root, job, path)
+            original = dict(budget_slice=saved['budget_slice'])
+        else:
+            original = contracts.read(contracts.regular(path / 'native-outcome.json'))
         from . import startup_recovery
         startup_original = not (path/'usage.json').exists() and number == 0 and startup_recovery.path(root,job['step']).exists()
         if startup_original:
@@ -1541,7 +1560,7 @@ def _attempt_consumption(root, job, paths):
             seconds = duration
             continue
         meter = contracts.read(contracts.regular(path / 'usage.json')) if (path/'usage.json').exists() else None
-        if meter is None and not native_completion_known(dict(original,stop_reason=None), contracts.settings(root, job)):
+        if meter is None and not interrupted and not native_completion_known(dict(original,stop_reason=None), contracts.settings(root, job)):
             raise ValueError('Missing billing has no known original completion')
         # An absent meter contributes no reported tokens to the lower bound;
         # retain its absence and unknown coverage, never publish a zero meter.
@@ -1573,10 +1592,9 @@ def _node_duration(root, job, intent, limits):
     if (not isinstance(anchor, dict) or anchor.get('task_ref') != contracts.record_ref(root / 'jobs' / f'{job["step"]:03d}.json')
             or anchor.get('role') != job['role'] or anchor.get('limits') != node_limits(root, job)
             or final is None and anchor.get('shared_limits') != {key: limits[key] for key in ('max_tokens', 'max_seconds')}
-            or anchor.get('boot_id') != clock_stamp()['boot_id']
             or type(anchor.get('advance_seconds')) not in (int, float)
             or not math.isfinite(anchor['advance_seconds']) or anchor['advance_seconds'] < 0):
-        raise ValueError('Accepted node budget identity or boot changed')
+        raise ValueError('Accepted node budget identity changed')
     prior = anchor.get('previous_seconds', 0.)
     prior_tokens = anchor.get('previous_tokens', 0)
     if type(prior_tokens) is not int or prior_tokens < 0:
@@ -1736,7 +1754,7 @@ def accept_continuation(root, job, paths, *, output_repair=None):
         final_a_return(root,job,original)
         if seconds >= policy['max_seconds']:
             raise NodeBudgetUnavailable('worker_resume_node_exhausted')
-        return dict(original['budget_slice'],advance_seconds=limits['advance_seconds'],
+        return dict(original['budget_slice'],boot_id=clock_stamp()['boot_id'],advance_seconds=limits['advance_seconds'],
             previous_tokens=tokens,previous_seconds=seconds)
     if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0:
         raise NodeBudgetUnavailable('worker_resume_node_exhausted')
@@ -1836,8 +1854,8 @@ def used_steps(root, *, events=None):
     from . import execution
     from . import fork_runtime
     prepared = fork_runtime.local_steps(root)
-    continuations = sum(1 for step in prepared for record,_ in execution.accepted_intents(root,step)
-        if record != execution.origin(root,step))
+    continuations = sum(1 for step in prepared for record,intent in execution.accepted_intents(root,step)
+        if record != execution.origin(root,step) and intent.get('continuation_kind') != 'reentry')
     from . import candidate_audit
     from . import audit_recovery
     audits = sum(1 for _ in candidate_audit.intents(root)) + sum(1 for _ in audit_recovery.intents(root))
@@ -2165,7 +2183,7 @@ def publish_review(root,job,intent,limits,meter,*,observed):
         path=directory/'review.json'
         if path.exists():
             old=contracts.read(contracts.regular(path))
-            if old.get('stage_anchor')!=task or old.get('scope')!=value['scope'] or old.get('boot_id')!=stamp['boot_id']:
+            if old.get('stage_anchor')!=task or old.get('scope')!=value['scope']:
                 raise ValueError('Host review projection binding changed')
         contracts.write(path,value);path.chmod(0o400)
     finally:os.close(fd)

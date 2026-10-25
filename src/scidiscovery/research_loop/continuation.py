@@ -92,8 +92,17 @@ def session(root, step, record, *, home=None, session_path=None, identity_proof=
     from . import backends
     if not backends.selected(configuration_updates.for_step(root, step)).supports_resume:
         raise ResumeUnavailable('worker_resume_unsupported_backend')
-    outcome = c.read(c.regular(record / 'native-outcome.json'))
+    outcome_path = record / 'native-outcome.json'
+    outcome = c.read(c.regular(outcome_path)) if outcome_path.exists() else {}
     thread = outcome.get('thread_id')
+    if not outcome_path.exists():
+        with c.regular(record / 'native.jsonl').open('rb') as stream:
+            for line in stream:
+                try:event = json.loads(line)
+                except ValueError:continue  # The final line can be interrupted.
+                if isinstance(event, dict) and event.get('type') == 'thread.started':
+                    thread = event.get('thread_id')
+                    break
     try:
         if str(uuid.UUID(thread)) != thread:raise ValueError
     except (ValueError, TypeError, AttributeError):
@@ -108,8 +117,10 @@ def session(root, step, record, *, home=None, session_path=None, identity_proof=
                 found = True
                 break
     if not found:raise ResumeUnavailable('worker_resume_thread_unavailable')
-    number = execution.records(root, step).index(record)
-    home = Path(home) if home is not None else execution.home(root, step, number)
+    if home is None:
+        number = execution.records(root, step).index(record)
+        home = execution.home(root, step, number)
+    home = Path(home)
     if home.resolve() != home:raise ValueError('Original native home changed')
     matches = []
     paths = [Path(session_path)] if session_path is not None else (home / 'sessions').rglob('*.jsonl')
@@ -124,6 +135,112 @@ def session(root, step, record, *, home=None, session_path=None, identity_proof=
     if len(matches) != 1:raise ResumeUnavailable('worker_resume_session_unavailable')
     return dict(thread_id=thread, home=str(home), workspace=str(c.workspace(root, step)),
                 **(dict(thread_event=thread_event) if identity_proof else {}), **matches[0])
+
+
+def interruption(root, job, record):
+    """Retain observed consumption at reentry, without inventing an outcome."""
+    saved = c.read(c.regular(record / 'interruption.json'))
+    binding = (c.record_ref(root / 'jobs' / f'{job["step"]:03d}.json')
+               if record == execution.origin(root, job['step']) else c.record_ref(record / 'native-intent.json'))
+    if (saved.get('task_ref') != c.record_ref(root / 'jobs' / f'{job["step"]:03d}.json')
+            or saved.get('intent_ref') != c.record_ref(record / 'native-intent.json')
+            or type(saved.get('advance_seconds')) not in (int, float)):
+        raise ValueError('Interrupted original identity changed')
+    for name in ('runner-process.json', 'native-process.json'):
+        identity = c.read(c.regular(record / name))
+        if (saved.get('processes', {}).get(name) != c.record_ref(record / name)
+                or identity.get('task_ref') != binding
+                or not isinstance(identity.get('boot_id'), str) or not identity['boot_id']
+                or identity['boot_id'] == saved.get('stamp', {}).get('boot_id')
+                or any(type(identity.get(key)) is not int or identity[key] <= 0
+                       for key in ('pid','start_ticks','pgid','sid','ppid'))):
+            raise ValueError('Interrupted original process binding changed')
+    return saved
+
+
+def validate_reentry(root, job, intent, prior):
+    saved = interruption(root, job, prior)
+    original = c.read(c.regular(prior / 'native-intent.json'))
+    anchor = intent.get('budget_slice', {})
+    expected = dict(original['budget_slice'], boot_id=anchor.get('boot_id'),
+        advance_seconds=saved['advance_seconds'],
+        previous_tokens=saved['budget_slice']['observed_tokens'],
+        previous_seconds=saved['budget_slice']['advance_seconds'])
+    policy = configuration_updates.for_step(root, job['step']).get('resume_policy') or {}
+    default_home = policy.get('native_home') if policy.get('output_only') else None
+    home = original.get('native_home', original.get('session', {}).get('home',
+        default_home or str(root / 'native-homes' / f'{job["step"]:03d}')))
+    selected = intent.get('session') or {}
+    if (intent.get('interruption') != c.record_ref(prior / 'interruption.json')
+            or not isinstance(anchor.get('boot_id'), str) or not anchor['boot_id']
+            or anchor != expected
+            or selected.get('home') != home
+            or selected != session(root, job['step'], prior, home=home, session_path=selected.get('path'))):
+        raise ValueError('Reentry changed its original session or consumed budget')
+
+
+def reenter(root, step):
+    """Resume the original local session after reboot, retaining all old facts."""
+    with budget._operator_writer(root):
+        return _reenter_locked(root, step)
+
+
+def _reenter_locked(root, step):
+    from .protocol import require_current
+    require_current(root)
+    # Reentry continues an already accepted full task. The policy's output-only
+    # restriction still governs new repairs/wakes, not this interrupted task.
+    validate_launcher(root, step)
+    job = validate_task(root, step)
+    require_current(root, job)
+    paths = execution.records(root, step); prior = paths[-1]
+    state = runtime.node_state(root, step)
+    if state in {'running','terminal','sealed','waiting','unstarted'}:
+        return c.read(c.regular(prior / 'native-intent.json'))
+    if state != 'interrupted':
+        raise ResumeUnavailable('worker_resume_original_not_interrupted')
+    session_ref = session(root, step, prior)
+    settings = configuration_updates.for_step(root, step)
+    from . import profiles
+    original = c.read(c.regular(prior / 'native-intent.json'))
+    if (original.get('continuation_kind') in {'author_closeout','startup_successor'}
+            or original.get('output_repair') or original.get('work_repair')
+            or original.get('execution_wake') and (settings.get('resume_policy') or {}).get('output_only')
+            or not isinstance(original.get('budget_slice'), dict)):
+        raise ResumeUnavailable('worker_resume_interrupted_scope_unavailable')
+    profile_binding = profiles.binding(settings, job)
+    profiles.validate_intent(settings, job, original)
+    budget.transition(root, 'advance', 'resume_interrupted_original')
+    marker = prior / 'interruption.json'
+    if not marker.exists():
+        stamp = budget.clock_stamp(); snapshot = budget.snapshot(root, sample_stamp=stamp)
+        meter = c.read(c.regular(prior / 'usage.json')) if (prior / 'usage.json').exists() else None
+        reported = meter or dict(input_tokens=0, cached_input_tokens=0, output_tokens=0)
+        if native._usage_event(dict(type='turn.completed', usage=reported)) != reported:
+            raise ValueError('Interrupted native usage changed')
+        report = dict(role=job['role'], limits=original['budget_slice']['limits'],
+            advance_seconds=budget._node_duration(root,job,original,snapshot),
+            observed_tokens=original['budget_slice'].get('previous_tokens',0)+reported['input_tokens']+reported['output_tokens'],
+            dispatches=len(paths), usage_observed=meter is not None, **reported)
+        c.write(marker, dict(task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json'),
+            intent_ref=c.record_ref(prior / 'native-intent.json'), stamp=stamp,
+            advance_seconds=snapshot['advance_seconds'], budget_slice=report,
+            processes={name:c.record_ref(prior/name) for name in ('runner-process.json','native-process.json')}))
+    saved = interruption(root, job, prior)
+    anchor = dict(original['budget_slice'], boot_id=budget.clock_stamp()['boot_id'],
+        advance_seconds=saved['advance_seconds'], previous_tokens=saved['budget_slice']['observed_tokens'],
+        previous_seconds=saved['budget_slice']['advance_seconds'])
+    number = len(paths); record = execution.origin(root, step) / 'continuations' / f'{number:03d}'
+    record.mkdir(parents=True, exist_ok=True)
+    intent = dict(step=step, attempt=number, continuation_kind='reentry', **profile_binding,
+        task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json'),
+        root_intent_ref=c.record_ref(paths[0] / 'native-intent.json'), previous=execution.proof(prior),
+        session=session_ref, budget_slice=anchor, interruption=c.record_ref(marker))
+    validate_reentry(root, job, intent, prior)
+    with (record / 'native-intent.json').open('x') as stream:
+        json.dump(intent, stream);stream.flush();os.fsync(stream.fileno())
+    runtime.start(root, step, number)
+    return intent
 
 
 
@@ -312,7 +429,7 @@ def _eligible_original(root, step, paths, *, successful=False, wait_runner=False
         if c.record_ref(c.regular(last / name)) != outcome.get('execution_processes', {}).get(name):
             raise ValueError('Original execution process receipt changed')
         identity = c.read(c.regular(last / name))
-        if (identity.get('task_ref') != binding or identity.get('boot_id') != budget.clock_stamp()['boot_id']
+        if (identity.get('task_ref') != binding or not isinstance(identity.get('boot_id'), str) or not identity['boot_id']
                 or any(type(identity.get(key)) is not int or identity[key] <= 0
                        for key in ('pid', 'start_ticks', 'pgid', 'sid', 'ppid'))):
             raise ValueError('Original execution process identity is invalid')
@@ -395,7 +512,10 @@ def start(root, step):
     if (execution.origin(root, step) / 'result-identity.json').exists():
         return c.validate(c.workspace(root, step))
     paths = execution.records(root, step)
-    if runtime.node_state(root, step) in {'running','waiting'} or (len(paths) > 1 and runtime.node_state(root, step) == 'unknown'):
+    if runtime.node_state(root, step) == 'interrupted':
+        reenter(root, step)
+        return native.wait_native(root, step, _reentry_started=True)
+    if runtime.node_state(root, step) in {'running','waiting','unstarted'} or (len(paths) > 1 and runtime.node_state(root, step) == 'unknown'):
         return native.wait_native(root, step)  # An accepted attempt is collected before cap checks.
     last = paths[-1]
     outcome = c.read(c.regular(last / 'native-outcome.json'))
@@ -432,7 +552,7 @@ def start(root, step):
     from . import correction
     if correction.gate(root, step - 1) is not None:
         raise ResumeUnavailable('worker_resume_correction_paused')
-    repairs = sum(c.read(path / 'native-intent.json').get('continuation_kind', 'repair') != 'fragment' for path in paths[1:])
+    repairs = sum(c.read(path / 'native-intent.json').get('continuation_kind', 'repair') not in {'fragment','reentry'} for path in paths[1:])
     if repairs >= limits['max_attempts']:raise ResumeUnavailable('worker_resume_limit')
     settings = configuration_updates.for_step(root, step)
     from . import fork_runtime
@@ -496,7 +616,7 @@ def wake_start(root,step,observations):
     if any((execution.origin(root,later)/'native-intent.json').exists()
             for later in fork_runtime.local_steps(root, include_native=True) if later > step):
         raise ResumeUnavailable('worker_resume_successor_present')
-    attempts=sum(c.read(path/'native-intent.json').get('continuation_kind','repair')!='fragment' for path in paths[1:])
+    attempts=sum(c.read(path/'native-intent.json').get('continuation_kind','repair') not in {'fragment','reentry'} for path in paths[1:])
     if attempts>=limits['max_attempts']:raise ResumeUnavailable('worker_resume_limit')
     _eligible_original(root,step,paths,successful=True,wait_runner=True)
     session_ref=session(root,step,last)

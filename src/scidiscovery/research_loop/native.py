@@ -45,6 +45,8 @@ def usage(root: Path, *, budget_events=None):
             if metadata is None and observation.exists():metadata = read(observation)
             if metadata is not None and metadata.get('coverage') == 'unknown' and step not in unknown:
                 unknown.append(step)
+            if (record / 'interruption.json').exists() and not outcome.exists() and step not in unknown:
+                unknown.append(step)
             for key in totals:totals[key] += value[key]
     result=dict(**totals, observed_tokens=totals['input_tokens'] + totals['output_tokens'], unknown_steps=unknown)
     result.update(control_budget.usage_accounting(root,result,events=budget_events))
@@ -94,10 +96,11 @@ def execute_native(root: Path, step: int, *, final_report=None):
     return wait_native(root, step)
 
 
-def wait_native(root: Path, step: int):
+def wait_native(root: Path, step: int, *, _reentry_started=False):
     """Completion polling is transport; only the original outcome can seal."""
     record = execution.record(root, step)
     startup_until = time.monotonic() + 5
+    reentry_started = _reentry_started
     while True:
         from . import managed_wait
         if (record/managed_wait.NAME).exists() and not (execution.origin(root,step)/'result-identity.json').exists():
@@ -105,6 +108,18 @@ def wait_native(root: Path, step: int):
             record=execution.record(root,step);startup_until=time.monotonic()+5
             continue
         state = runtime.node_state(root, step)
+        if state == 'unstarted' and read(record / 'native-intent.json').get('continuation_kind') == 'reentry' and not reentry_started:
+            runtime.start(root, step, read(record / 'native-intent.json')['attempt'])
+            reentry_started = True
+            startup_until = time.monotonic() + 5
+            continue
+        if state == 'interrupted':
+            from . import continuation
+            continuation.reenter(root, step)
+            record = execution.record(root, step)
+            reentry_started = True
+            startup_until = time.monotonic() + 5
+            continue
         if state in {"terminal", "sealed"}:
             from . import continuation, worker_delivery
             job = read(root / 'jobs' / f'{step:03d}.json')
@@ -127,7 +142,7 @@ def wait_native(root: Path, step: int):
                 continue
             return result
         if state != "running":
-            if state == 'unknown' and time.monotonic() < startup_until:
+            if state in {'unknown','unstarted'} and time.monotonic() < startup_until:
                 # A probe can race original receipt publication. Re-probe only
                 # this accepted execution in the existing startup window; a
                 # second file read cannot turn the earlier unknown into proof

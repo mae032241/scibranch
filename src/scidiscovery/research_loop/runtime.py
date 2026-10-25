@@ -98,7 +98,7 @@ def signal_observed_group(child):
 
 
 def node_state(root, step):
-    """Read original facts; unknown never permits a replacement submission."""
+    """Read original facts, retaining a reboot interruption as the same work."""
     record = execution.record(root, step)
     if (execution.origin(root, step) / 'result-identity.json').exists():
         return 'sealed'
@@ -116,12 +116,38 @@ def node_state(root, step):
         intent = contracts.read(record / 'native-intent.json')
         if intent['task_ref'] != contracts.record_ref(root / 'jobs' / f'{step:03d}.json'):
             return 'unknown'
+        if intent.get('continuation_kind') == 'reentry' and not any(
+                (record / name).exists() for name in ('runner-process.json','native-process.json')):
+            return 'unstarted'  # Reuse this accepted reentry, including its exact session.
         runner = contracts.read(record / 'runner-process.json')
         if process_matches(runner, binding):
             return 'running'
+        child = record / 'native-process.json'
+        if child.exists() and process_matches(contracts.read(child), binding):
+            return 'running'
+        if interrupted(record, binding):
+            return 'interrupted'
     except (OSError, ValueError, KeyError, TypeError):
         pass
     return 'unknown'
+
+
+def interrupted(record, binding):
+    """A reboot ends these local writers; it says nothing about external calls."""
+    if (record / 'native-outcome.json').exists():
+        return False
+    current_boot = budget.clock_stamp()['boot_id']
+    try:
+        receipts = [contracts.read(contracts.regular(record / name))
+                    for name in ('runner-process.json', 'native-process.json')]
+        return all(receipt.get('task_ref') == binding
+                   and isinstance(receipt.get('boot_id'), str) and receipt['boot_id']
+                   and receipt['boot_id'] != current_boot
+                   and all(type(receipt.get(key)) is int and receipt[key] > 0
+                           for key in ('pid', 'start_ticks', 'pgid', 'sid', 'ppid'))
+                   for receipt in receipts) and receipts[0]['boot_id'] == receipts[1]['boot_id']
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 from .instance_owner import effect as owner_effect

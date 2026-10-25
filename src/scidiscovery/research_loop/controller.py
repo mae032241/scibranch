@@ -733,7 +733,7 @@ def _run(root, *, continue_wait=None):
                     return _finish(root, settings, "native_outcome_unsealed", completed, last,
                         reason="The original scientific job is missing; retained work is preserved without replay", next_role=role)
                 retained_job = contracts.read(job_path)
-                if (runtime.node_state(root, step) in {"running","waiting","terminal"} or checkpoint.enabled(root, retained_job)
+                if (runtime.node_state(root, step) in {"running","waiting","terminal","interrupted","unstarted"} or checkpoint.enabled(root, retained_job)
                         or worker_delivery.applicable(retained_job)):
                     try:
                         native.wait_native(root, step)

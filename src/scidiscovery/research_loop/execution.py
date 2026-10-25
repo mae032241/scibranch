@@ -11,6 +11,9 @@ def origin(root, step):
 
 def proof(record):
     names = ['native-intent.json', 'native-outcome.json', 'usage.json']
+    if not (record / 'native-outcome.json').exists() and (record / 'interruption.json').exists():
+        names = ['native-intent.json', 'interruption.json', 'runner-process.json',
+                 'native-process.json', 'usage.json']
     if (record / 'checkpoint.json').exists():
         names.append('checkpoint.json')
     if (record / 'stage-end.json').exists():
@@ -87,6 +90,10 @@ def records(root, step):
     from . import budget
     author_permit=root/'host-recovery/author-closeout'/f'{step:03d}.json'
     limit = budget.historical_step_limit(root) - 1 if fragments else max(repair_limit,int(author_permit.exists()))
+    # Reattaching an interrupted author does not spend a scientific retry.
+    limit += sum(1 for path in directory.iterdir() if path.is_dir()
+        and (path/'native-intent.json').exists()
+        and c.read(c.regular(path/'native-intent.json')).get('continuation_kind') == 'reentry')
     from . import author_closeout
     successor=author_closeout.successor_path(root,step)
     verified_authors=None
@@ -124,7 +131,7 @@ def records(root, step):
         intent = c.read(c.regular(path / 'native-intent.json'))
         _skill_intent(root, step, intent)
         output_repair=intent.get('continuation_kind')=='repair' and isinstance(intent.get('output_repair'),dict) and 'work_repair' not in intent
-        if (original_intent.get('budget_slice') or {}).get('final_return') is not None and intent.get('continuation_kind') != 'startup_successor' and not output_repair:
+        if (original_intent.get('budget_slice') or {}).get('final_return') is not None and intent.get('continuation_kind') not in {'startup_successor','reentry'} and not output_repair:
             raise ValueError('Final A return cannot acquire another native attempt')
         if output_repair and (original_intent.get('budget_slice') or {}).get('final_return') is not None and (intent.get('budget_slice') or {}).get('final_return') != original_intent['budget_slice']['final_return']:
             raise ValueError('Final A output repair must retain its original completion authorization')
@@ -142,8 +149,10 @@ def records(root, step):
         if ((settings.get('resume_policy') or {}).get('output_only') and kind in {'repair','fragment','execution_wake'}
                 and not output_repair and not wake_authorized):
             raise ValueError('Output-only policy cannot authorize scientific continuation')
-        if kind not in {'repair', 'fragment', 'execution_wake','author_closeout','startup_successor'} or kind == 'fragment' and not fragments:
+        if kind not in {'repair', 'fragment', 'execution_wake','author_closeout','startup_successor','reentry'} or kind == 'fragment' and not fragments:
             raise ValueError('Native continuation kind differs from its frozen policy')
+        if kind == 'reentry':
+            continuation.validate_reentry(root, job, intent, result[-1])
         if kind == 'startup_successor':
             if not startup or number != 1:raise ValueError('Only one exact startup successor is authorized')
             startup_recovery.validate_intent(root,job,intent)
@@ -229,15 +238,18 @@ def _terminal(root, step, chain, outcome):
     current = chain[-1]
     binding = c.record_ref(c.regular(current / 'native-intent.json'))
     intent = c.read(current / 'native-intent.json')
+    process_boot = None
     for name in ('runner-process.json', 'native-process.json'):
         path = c.regular(current / name)
         receipt = c.read(path)
         if (c.record_ref(path) != outcome.get('execution_processes', {}).get(name)
                 or receipt.get('task_ref') != binding
-                or receipt.get('boot_id') != intent['budget_slice']['boot_id']
+                or not isinstance(receipt.get('boot_id'), str) or not receipt['boot_id']
+                or process_boot is not None and receipt['boot_id'] != process_boot
                 or any(type(receipt.get(key)) is not int or receipt[key] <= 0
                        for key in ('pid', 'start_ticks', 'pgid', 'sid', 'ppid'))):
             raise ValueError('Terminal continuation differs from its accepted process identity')
+        process_boot = receipt['boot_id']
     from . import budget
     budget._attempt_consumption(root, c.read(root / 'jobs' / f'{step:03d}.json'), chain)
     from . import continuation

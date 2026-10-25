@@ -68,6 +68,13 @@ def capture_participants(root, job):
     from . import continuation
     rows, participants, complete = [], set(), True
     for number, record in enumerate(execution.records(root, job['step'])):
+        if not (record / 'native-outcome.json').exists():
+            continuation.interruption(root, job, record)
+            rows.append(dict(attempt=number, intent=q._ref(root, record / 'native-intent.json'),
+                outcome=None, interruption=q._ref(root, record / 'interruption.json'),
+                status='unsupported', reason='native_execution_interrupted'))
+            complete = False
+            continue
         outcome = c.read(c.regular(record / 'native-outcome.json'))
         row = dict(attempt=number, intent=q._ref(root, record / 'native-intent.json'),
                    outcome=q._ref(root, record / 'native-outcome.json'))
@@ -118,6 +125,15 @@ def participants(root, job, seal, *, source=None):
     found, complete = set(), True
     from . import continuation
     for number, (row, record) in enumerate(zip(proof['attempts'], chain)):
+        if row.get('outcome') is None:
+            continuation.interruption(root, job, record)
+            if (row.get('attempt') != number or row.get('status') != 'unsupported'
+                    or row.get('intent') != q._ref(root, record / 'native-intent.json')
+                    or row.get('interruption') != q._ref(root, record / 'interruption.json')
+                    or (record / 'native-outcome.json').exists()):
+                raise q.IntegrityError('Authorship changed its interrupted original')
+            complete = False
+            continue
         if (row['attempt'] != number or row['intent'] != q._ref(root, record / 'native-intent.json')
                 or row['outcome'] != q._ref(root, record / 'native-outcome.json')):
             raise q.IntegrityError('Authorship differs from its original native attempt')
@@ -149,19 +165,29 @@ def _inherited_participants(source, job, seal):
         return dict(complete=False, participants=[], reason='native_identity_unavailable')
     proof = c.read(originals.resolve_ref(source, ref))
     found, complete = set(), True
-    first_digest = previous = None
+    first_digest = previous = previous_interruption = None
     for number, row in enumerate(proof['attempts']):
         intent_path = originals.resolve_ref(source, row['intent'])
         intent = c.read(intent_path)
-        outcome = c.read(originals.resolve_ref(source, row['outcome']))
         if row['attempt'] != number or intent['task_ref'] != seal['job_ref']:
             raise q.IntegrityError('Inherited authorship changed its original task or attempt')
         if number == 0:
             first_digest = q.control_reference(source.original_root,row['intent'])
         elif (intent.get('attempt') != number or intent.get('root_intent_ref') != first_digest
-                or (intent.get('previous') or {}).get('native-intent.json') != previous):
+                or (intent.get('previous') or {}).get('native-intent.json') != previous
+                or previous_interruption is not None and (intent.get('previous') or {}).get('interruption.json') != previous_interruption):
             raise q.IntegrityError('Inherited authorship omitted its original attempt chain')
         previous = q.control_reference(source.original_root,row['intent'])
+        previous_interruption = None
+        if row.get('outcome') is None:
+            saved = c.read(originals.resolve_ref(source, row['interruption']))
+            if (row.get('status') != 'unsupported' or saved.get('task_ref') != seal['job_ref']
+                    or saved.get('intent_ref') != previous):
+                raise q.IntegrityError('Inherited interrupted authorship changed')
+            previous_interruption = q.control_reference(source.original_root,row['interruption'])
+            complete = False
+            continue
+        outcome = c.read(originals.resolve_ref(source, row['outcome']))
         if row['status'] != 'known':
             complete = False
             continue
