@@ -239,14 +239,13 @@ PY
 }
 
 thin_cli_wrapper() {
-    local quoted_python quoted_site quoted_skills
+    local quoted_python quoted_site
     printf -v quoted_python '%q' "$PYTHON"
     printf -v quoted_site '%q' "$SITE_ROOT"
-    printf -v quoted_skills '%q' "$SKILL_ROOT"
     cat <<EOF
 #!/usr/bin/env bash
-env PYTHONNOUSERSITE=1 PYTHONPATH=${quoted_site} SCID_SKILLS_ROOT=${quoted_skills} ${quoted_python} -m scidiscovery.runtime_identity verify --manifest ${quoted_site}/runtime-identity.json || exit
-exec env PYTHONNOUSERSITE=1 PYTHONPATH=${quoted_site} SCID_SKILLS_ROOT=${quoted_skills} ${quoted_python} -m $1 "\$@"
+env PYTHONNOUSERSITE=1 PYTHONPATH=${quoted_site} ${quoted_python} -m scidiscovery.runtime_identity verify --manifest ${quoted_site}/runtime-identity.json || exit
+exec env PYTHONNOUSERSITE=1 PYTHONPATH=${quoted_site} ${quoted_python} -m $1 "\$@"
 EOF
 }
 

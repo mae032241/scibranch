@@ -154,10 +154,7 @@ def from_document(document, *, base):
     if 'workers' in agent:
         result['worker_profiles'] = agent['workers']
     if 'skills' in document:
-        selected = copy.deepcopy(_table(document['skills'], {'root', 'sets'}, 'skills'))
-        if 'root' in selected:
-            selected['root'] = str(_path(selected['root'], base, 'skills.root'))
-        result['skills'] = selected
+        result['skills'] = copy.deepcopy(_table(document['skills'], {'sets'}, 'skills'))
     options = _table(agent.get('native', {}),
         {'sandbox_workspace_write', 'features'}, 'agent.native')
     options = copy.deepcopy(options)
@@ -239,8 +236,8 @@ def from_document(document, *, base):
     return result
 
 
-def normalize(options):
-    """Apply the CLI's established defaults once, before common validation."""
+def normalize(options, *, frozen_skill_selection=None):
+    """Apply defaults; an exact fork retains its already expanded Skill names."""
     result = copy.deepcopy(options)
     if result.get('native_options') is None:
         result['native_options'] = {}
@@ -266,6 +263,13 @@ def normalize(options):
         # A host credential source reference only. Never read or copy its bytes.
         ui['approval_secret_file'] = str(Path(ui['approval_secret_file']).expanduser().resolve())
     result['ui'] = ui
+    if frozen_skill_selection is not None:
+        from . import skill_supply
+        if not isinstance(frozen_skill_selection, dict):
+            raise ValueError('Frozen Skill selection must be retained settings data')
+        frozen_sets=skill_supply.configuration(dict(sets=frozen_skill_selection.get('sets', {})))['sets']
+        if skill_supply.configuration(result.get('skills'))['sets']!=frozen_sets:
+            raise ValueError('Frozen Skill selection changed during fork preparation')
     selected=result.get('execution_config')
     if isinstance(selected,dict) and 'executor' in selected:
         from . import experiments
@@ -273,8 +277,18 @@ def normalize(options):
         if declared.research_defaults is not None:
             prepared=experiments.operator_configuration(selected)
             defaults=declared.research_defaults(prepared['configuration'],root=result['root'])
-            if not isinstance(defaults,dict) or set(defaults)-{'history_observer','delivery_adapter'}:
-                raise ValueError('Execution provider defaults exceed observation/delivery scope')
+            if not isinstance(defaults,dict) or set(defaults)-{'history_observer','delivery_adapter','optional_skill_sets'}:
+                raise ValueError('Execution provider defaults exceed observation/delivery/optional Skill scope')
+            optional_sets=defaults.get('optional_skill_sets')
+            if optional_sets is not None and frozen_skill_selection is None:
+                from . import skill_supply
+                offered=skill_supply.configuration(dict(sets=optional_sets))['sets']
+                configured=skill_supply.configuration(result.get('skills'))['sets']
+                for name,row in offered.items():
+                    if name in configured and configured[name]!=row:
+                        raise ValueError('Explicit Skill set conflicts with the selected execution provider')
+                    configured.setdefault(name,copy.deepcopy(row))
+                result['skills']=dict(sets=configured)
             observer=defaults.get('history_observer')
             if observer is not None:
                 selected_observer=result.get('history_observer')
@@ -409,7 +423,7 @@ def to_document(root, settings=None):
     result = dict(version=1, research=research, agent=agent, permissions=permissions,
                   budget=budgets, executor=executor, policies=policies, ui=copy.deepcopy(value.get('ui', {})))
     if value.get('skills') is not None:
-        result['skills'] = {key: copy.deepcopy(value['skills'][key]) for key in ('root', 'sets')}
+        result['skills'] = dict(sets=copy.deepcopy(value['skills']['sets']))
     if value.get('delivery_policy') is not None:
         result['delivery'] = copy.deepcopy(value['delivery_policy'])
         adapter = result['delivery'].get('adapter')

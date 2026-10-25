@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md) | English
 
-Current platform support is Linux: the framework uses POSIX file/lock semantics and Linux namespaces. Native Windows is unsupported; WSL2 has not been qualified. Skill freezing/role selection is a general contract, while read-only namespace mounts are a Linux backend implementation.
+Current platform support is Linux: the framework uses POSIX file/lock semantics and Linux namespaces. Native Windows is unsupported; WSL2 has not been qualified. Skill source binding and role selection are general contracts, while read-only namespace mounts are a Linux backend implementation.
 
 SciDiscovery is a CLI-first scientific research framework with Codex and an explicit
 agent-protocol backend. It runs H/W/A/E threads against an explicit objective and
@@ -45,8 +45,10 @@ transport. Deterministic curve scoring and paper-figure extraction ship as
 self-contained `curve-analysis` and `scientific-paper-evidence` Skills. The installer
 publishes these and `sentaurus-tcad-code` into its persistent `skills/` directory.
 Select Skill sets per role or named Worker in the [configuration reference](docs/RESEARCH_CONFIGURATION.md).
-Instances freeze selected bundle bytes once and project only the current role's
-selection. Skills grant no execution permission or scientific qualification.
+Instances freeze names and source bindings; native discovery reads the selected
+installation directories in place through read-only mounts, without instance copies.
+Plugins may offer optional sets; only explicit role/Worker selection enables them.
+Skills grant no execution permission or scientific qualification.
 The [execution adapter API](docs/PLUGIN_RUNTIME_API.md) owns the installed adapter contract.
 
 ## Install and start

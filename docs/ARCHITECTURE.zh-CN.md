@@ -516,15 +516,27 @@ TCAD 专项提升资格所需证据见[资格状态](TCAD_QUALIFICATION_STATUS.z
 
 ## 受管 Skill 资产
 
-`skill_supply.py` 将显式资产独立复制冻结到实例私有的 `host-control/skills/objects`。
-没有全局共享库或 `SCID_SHARED_STORE` 设置；角色/节点通过硬链接共享这些受管冻结原件，
-共享不支持时明确拒绝，不退回复制。角色/Worker 选择绑定到任务与 native intent，
-删除安装来源或兄弟实例不影响本实例持有的原件引用。
-`.agents/skills` 是已验证、可重建的发现投影。来源更新不刷新冻结字节，
-修订只能改选已冻结集合，新 ID/版本要求新实例。fork 保留所选普通 Skill 对象，在 child
-重建投影；child 持有的对象不依赖安装来源或父实例继续存在。已退役归档/cold 包操作
-不提供 Skill 恢复路径。原生用户/系统/插件 Skill 继续继承，
-原生权限 profile 保持原语义；具体配置见[配置参考](RESEARCH_CONFIGURATION.md)。
+`skill_supply.py` 将新实例绑定到实际 CLI 安装的唯一 `skills/` 树：源码发行与 `src/` 相邻，
+薄安装与 `site/` 相邻，受支持的标准 wheel 布局使用 `sys.prefix/skills`。裸 wheel 不包含
+这些外置资产；配置或 `SCID_SKILLS_ROOT` 不能覆盖来源。
+
+Prepare 冻结展开后的命名集合与来源绑定，不冻结 bundle 字节。已有角色/Worker 的
+`skill_set` 选择实际启用项。仅明确选中的执行插件可通过 `research_defaults.optional_skill_sets`
+提供可选集合，安装或提供本身不启用。job 与 native intent 绑定准确集合、成员和配置修订；
+既有执行和 fork 选择不引入插件后来的可选声明。修订只可改选已冻结集合，改变清单要求新实例。
+
+`.agents/skills` 是可校验、可重建的发现投影；最终 native 挂载接缝将所选安装目录原地只读
+bind。新实例不创建 Skill 对象、字节 manifest、副本或硬链接，安装与实例可以跨文件系统。
+准备阶段只检查选中目录及手册元数据；资源仍为安装中的实时资产，绑定路径的更新会被后续
+消费者读到。选中目录或手册缺失、链接时，诊断明确列出 Skill 名称、准确预期路径与修复方式。
+
+保留的 Skill schema v2 manifest/对象继续只读使用。fork 无本地旧库时，通过准确登记的父
+Source 核对身份和原 manifest 绑定，再直接读取父对象，不复制 Skill 字节。父库删除会使
+这些消费不可用，并报告准确来源路径；不自动迁移，也不恢复已退役归档/cold 包操作。
+
+此选择不屏蔽原生用户/系统/插件 Skill 来源，不改变已声明的原生权限；科学后端子进程不接收
+Skill 挂载。Cov 仍将配置的认证复制到独立 native home，本变更未建立共享凭据、刷新或登出。
+只读挂载仍属同用户软边界；具体配置见[配置参考](RESEARCH_CONFIGURATION.md)。
 
 ## 未发布准备快照的准确恢复
 

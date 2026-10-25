@@ -862,17 +862,36 @@ Adapter audit, smoke and scratch recovery requests contain staged candidate orig
 
 ## Selected framework Skill assets
 
-`skill_supply.py` independently copies selected bundle contents into the instance's
-private `host-control/skills/objects` directory. There is no global shared store or
-`SCID_SHARED_STORE` setting. Role/node projections share those managed frozen
-originals by hardlink; unsupported sharing fails without a copy fallback.
-Role/Worker selections remain bound to jobs and native intents. Instance-owned
-references survive installation or sibling-instance removal;
-`.agents/skills` is a validated, rebuildable discovery projection. Source
-installation updates do not refresh frozen bytes. Revisions
-select existing frozen sets only; new IDs/versions require a new instance.
-Fork retains the selected ordinary Skill objects and rebuilds projections under
-the receiving root; these child-owned objects do not depend on a surviving installation
-or parent. Retired archive/cold package operations grant no Skill restoration path.
-Native user/system/plugin sources remain inherited, and existing native permission
-profiles remain unchanged. See [configuration](RESEARCH_CONFIGURATION.md#selected-framework-skills--按角色选择框架-skill).
+`skill_supply.py` binds each new instance to the actual CLI installation's single
+`skills/` tree. Source releases use the tree beside `src/`; thin installations use
+the tree beside `site/`; the supported standard wheel layout uses
+`sys.prefix/skills`. Bare wheels do not include these external assets. Source roots
+cannot be supplied by configuration or `SCID_SKILLS_ROOT`.
+
+Prepare freezes expanded named sets and source bindings, not bundle bytes. Existing
+role/Worker `skill_set` selects actual use. Only the explicitly selected execution
+provider may offer `research_defaults.optional_skill_sets`; installation or an offer
+alone enables nothing. Jobs and native intents bind exact set/items and revision;
+retained execution and fork selection do not import newer offers. Revisions select
+already frozen sets only; changing their inventory requires a new instance.
+
+`.agents/skills` is a validated, rebuildable discovery projection. Selected
+installation directories are bound read-only in place at the final native mount
+seam. New instances create no Skill objects, byte manifests, copies or hardlinks;
+source and instance may cross filesystems. Only selected directories and manual
+metadata are checked during preparation. Resources remain live installation assets;
+updates at the frozen source path are visible to later consumers. Missing or linked
+selected directories/manuals identify the Skill and exact expected repair path.
+
+Retained Skill schema v2 manifests and objects remain read-only consumers. A fork
+with no local legacy store resolves the exact registered parent Source, validates
+its identity and original manifest binding, then reads that parent's objects without
+copying. Parent removal makes those consumers unavailable with a precise source
+path; no automatic migration or retired archive/cold restoration is provided.
+
+This selection does not suppress native user/system/plugin Skill sources or change
+declared native permissions. Scientific backend subprocesses receive no Skill
+mounts. Cov still copies configured authentication into its separate native home;
+shared credentials, refresh and logout are not established by this change.
+Read-only mounts remain a soft boundary for trusted same-user processes. See
+[configuration](RESEARCH_CONFIGURATION.md#selected-framework-skills--按角色选择框架-skill).

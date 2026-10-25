@@ -358,7 +358,8 @@ def _prepare(plan, request, transaction, *, _on_created=None):
     document['budget'].update(request['budget'])
     document.get('executor', {}).pop('resource_policy', None)
     document['ui'] = dict(port=0, open_browser=False)
-    options = research_config.normalize(research_config.from_document(document, base=transaction))
+    options = research_config.normalize(research_config.from_document(document, base=transaction),
+        frozen_skill_selection=plan['selected_settings'].get('skills') or {'sets': {}})
     selected_settings = plan['selected_settings']
     # A declaration parser resolves path-like launchers for editing. The frozen
     # argv is already an exact validated binding; preserve its lexical spelling

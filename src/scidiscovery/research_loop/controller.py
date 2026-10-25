@@ -103,7 +103,8 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
         raise ValueError('The selected backend does not support Codex continuation policies')
     from . import profiles, skill_supply
     frozen_skills, skill_manifest = skill_supply.prepare(skills, backend=native_backend,
-        launcher=launcher, existing=_existing_settings, policy=storage_limits, context=storage_context)
+        launcher=launcher, existing=_existing_settings, policy=storage_limits, context=storage_context,
+        role_profiles=role_profiles, worker_profiles=worker_profiles)
     frozen_profiles = profiles.normalize(role_profiles if role_profiles is not None else {}, dict(model=model, reasoning_effort=reasoning_effort,
         service_tier=service_tier), worker_profiles, (frozen_skills or {}).get('sets', {})) if role_profiles is not None or worker_profiles is not None else None
     if (not isinstance(launcher, list) or not launcher

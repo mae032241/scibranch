@@ -66,6 +66,30 @@ scid-research run --root /absolute/path/new-instance
 rootless cov launcher 的 operator 配置应声明相同全局值与 `role_profiles`（可为等价的稀疏配置）；它核对冻结实例，再生成匹配的 CODEX_HOME 配置，拒绝不一致的 model/effort/tier 参数。
 这些记录证明请求参数一致，不代替服务端实际模型或计费观测。
 
+## 可选 Skill 选择
+
+Skill 来自实际 CLI 安装的唯一 `skills/` 目录，按所选目录原地只读绑定，不在实例复制字节，
+也不要求安装和实例位于同一文件系统。不支持 `[skills].root` 或 `SCID_SKILLS_ROOT` 覆盖；
+裸 wheel 不含外置 Skill 资产，须由部署在预期安装目录一次发布。
+在科研 TOML 声明集合，再为角色或命名 Worker 显式选择，例如：
+
+```toml
+[skills.sets.analysis]
+items = ["curve-analysis", "scientific-paper-evidence"]
+[agent.roles.W]
+skill_set = "analysis"
+```
+
+明确选中的执行插件可通过 `research_defaults.optional_skill_sets` 提供可选集合；安装插件
+或提供集合本身不启用任何角色。未声明角色/Worker 的 `skill_set` 即不注入。Prepare 冻结
+展开名称与来源绑定，资源字节仍来自安装；既有 job/intent 保持原选择。缺失所选目录时，
+错误列出名称、准确预期路径与修复方式。旧 Skill schema v2 的 fork 可依赖准确登记的父库，
+父原件缺失时明确不可用；不会为此创建 Skill 副本或迁移协议。
+
+此选择不屏蔽其它原生用户、系统或插件来源，不改变原生权限。Cov 仍复制配置的认证到独立
+native home，此变更未实现共享认证。完整来源、profile、更新与兼容合同见
+[配置参考](RESEARCH_CONFIGURATION.md#selected-framework-skills--按角色选择框架-skill)。
+
 ## 后台推进与用户方向
 
 `start --root ...` 后台启动或连接原实例控制进程，返回持久 `operation_id`；

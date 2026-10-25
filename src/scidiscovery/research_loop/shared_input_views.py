@@ -412,7 +412,7 @@ def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=Fal
         for path in host_aliases:
             if path != work / 'inputs':mappings[str(path)]=path
         for name in ('host-history/objects', 'project/global', 'source-provenance/originals',
-                'host-runtime/fork','host-control/skills/objects'):
+                'host-runtime/fork'):
             path = root / name
             if path.exists():
                 mappings[str(path)] = _exact(path)

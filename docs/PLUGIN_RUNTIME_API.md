@@ -27,6 +27,23 @@ is mandatory. Relative paths are resolved against that explicit configuration
 file. Host identities, gate services and admission facts cannot be supplied in
 operator JSON. The configuration reference owns public error behavior.
 
+`research_defaults(configuration, *, root)` may return only `history_observer`,
+`delivery_adapter` and `optional_skill_sets`. It is called for the explicitly
+selected `executor.config.executor`, not every installed provider. Optional Skill
+sets use the ordinary configuration shape, for example
+`{"optional_skill_sets": {"analysis": {"items": ["curve-analysis"]}}}`. Names must be
+simple directory names; each set has only an `items` array without duplicates.
+A same-named explicit set must have identical members. Offers grant no activation:
+a role or explicitly named Worker must select the set through `skill_set`.
+
+Skill bytes remain in the actual CLI installation's single `skills/` directory;
+this callback supplies no source root, asset bytes, native permissions or runtime
+registry. Prepare retains expanded names/source bindings, and ordinary retained
+execution/resume does not recall defaults. Fork preparation preserves that frozen
+selection and ignores later optional offers, while still checking the provider's
+defaults scope and observer/delivery gates. Bare wheels require separately published
+installation assets. See the [configuration contract](RESEARCH_CONFIGURATION.md#selected-framework-skills--按角色选择框架-skill).
+
 `factory.build(RuntimePluginContext(...))` returns immutable
 `RuntimePluginContribution.execution_adapters`. The context provides exact config
 bytes, an adapter-owned state root, the frozen execution interface and optional
@@ -104,11 +121,18 @@ The supported module invocation is `python [-B] [-I] -m <declared-module>
 --config <exact-operator-file> [--]`. A copied script or arbitrary wrapper cannot claim
 support through a prompt or a JSON flag. `cov_execution.launcher` implements this
 contract: it obtains verified `skill_supply.native_mounts(root, job)` on the host,
-mounts only the current role's discovery directory and selected frozen objects
-read-only, and grants the corresponding native file reads. The private manifest,
-unselected objects and other host-control paths are not mounted. Scientific backend
-subprocesses receive no Skill-object mounts. Native permission settings retain
-their declared semantics; selection is not a same-user security sandbox.
+mounts only the current role's discovery directory and selected installation
+directories read-only in place, and grants the corresponding native file reads.
+No whole Skill library, private manifest or unselected objects are supplied.
+Retained Skill schema v2 uses existing objects; a fork may depend on its exact
+registered parent's original store, with identity checks and precise missing-source
+diagnostics. No new Skill bytes are copied or hardlinked, including across filesystems.
+Scientific backend subprocesses receive no Skill mounts. Native permission settings
+retain their declared semantics; this selection does not suppress other native
+user/system/plugin sources or establish a same-user security sandbox. Cov's
+configured authentication is still copied to its separate native home; shared
+authentication, refresh and logout are outside this Skill loading contract.
+
 Git-bound Local artifacts publish
 directly at existing `work/retained-experiments/<call>/outputs`, with in-place sealing
 only after actual writers stop and read access through the existing read-only dynamic

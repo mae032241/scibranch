@@ -348,17 +348,19 @@ Cov 执行来自独立插件，核心安装不含 Cov；注册提供的新实例
 ## Selected framework Skills / 按角色选择框架 Skill
 
 Default role selections are empty. Declare finite named sets, then bind a role or
-named Worker profile explicitly. The source defaults to `/opt/scidiscovery-thin/skills`;
-installed wrappers set `SCID_SKILLS_ROOT` to their own persistent prefix's `skills/`.
-Explicit `[skills].root` takes precedence. A source may be read-only.
+named Worker profile explicitly. Assets come from the actual CLI installation's
+single `skills/` tree: beside `src/` in the source release, beside `site/` in the
+thin installation, or at `sys.prefix/skills` for the supported standard wheel layout.
+`[skills].root` and `SCID_SKILLS_ROOT` are not supported. A bare wheel does not
+include these external assets; deployment must publish the required bundles once
+in that installation's expected `skills/` directory.
 
-默认各角色为空集合。显式声明有限集合，再绑定角色或命名 Worker。默认来源为
-`/opt/scidiscovery-thin/skills`；安装 wrapper 用 `SCID_SKILLS_ROOT` 指向自身持久前缀，
-显式 `[skills].root` 优先。来源目录可以只读。
+默认各角色不启用 Skill。先声明有限集合，再显式绑定角色或命名 Worker。资产唯一来源是实际
+加载的 CLI 安装中的 `skills/`：源码发行与 `src/` 相邻，薄安装与 `site/` 相邻，受支持的
+标准 wheel 布局使用 `sys.prefix/skills`。不支持 `[skills].root` 或 `SCID_SKILLS_ROOT`
+覆盖。裸 wheel 不包含这些外置资产；部署须在该安装预期的 `skills/` 中一次发布所需 bundle。
 
 ```toml
-[skills]
-root = "/opt/scidiscovery-thin/skills"
 [skills.sets.tcad]
 items = ["sentaurus-tcad-code"]
 [skills.sets.analysis]
@@ -375,45 +377,70 @@ worker = "analysis"
 ```
 
 A role's explicit fields override its named Worker's model fields and `skill_set`.
-The source is inspected only for the union of explicitly declared set items.
-Prepare independently copies selected contents into the instance-private
-`host-control/skills/objects` directory. There is no global store or
-`SCID_SHARED_STORE` setting. Roles/nodes share these managed frozen originals through
-hardlinked `.agents/skills` projections; the instance filesystem must support
-hardlinks. Unsupported sharing fails without a copy fallback. Content identity and
-the limits of reference checks follow the [architecture](ARCHITECTURE.md).
-Changing the installation source or environment does not refresh an instance.
-Configuration revisions may select only its already frozen sets and Worker bindings;
-new bundle IDs or versions require a new instance. Existing jobs retain their binding.
-Missing, linked or incomplete source assets fail before model launch; reference checks
-do not detect same-size content changes.
+The explicitly selected execution provider may offer sets through
+`research_defaults.optional_skill_sets`, using the same `{name: {items: [names]}}`
+shape. Installing a plugin or declaring a set enables no role. Only a role's
+`skill_set`, including one inherited from its explicitly named Worker, selects it.
+An identical explicit/provider set is accepted; conflicting members are rejected.
+See the [provider API](PLUGIN_RUNTIME_API.md#registration-and-configuration).
 
-角色显式字段覆盖命名 Worker 的模型字段和 `skill_set`。初建只读取全部显式集合的有限并集，
-Skill 内容独立复制冻结在实例私有的 `host-control/skills/objects`，没有全局库或
-`SCID_SHARED_STORE` 设置。角色和节点通过 `.agents/skills` 硬链接投影共享这些受管冻结原件；
-实例文件系统须支持硬链接，不支持时明确拒绝，不退回复制。内容身份与引用检查限制见[架构](ARCHITECTURE.zh-CN.md)。
-安装来源或环境变更不刷新已建实例。配置修订只能改选已冻结集合与 Worker 绑定，新 ID 或版本
-要求新实例，既有任务保持原绑定。缺失、链接或不完整资产在模型启动前拒绝；引用检查不检测同大小的内容改变。
+角色显式字段覆盖命名 Worker 的模型字段和 `skill_set`。明确选中的执行插件可以通过
+`research_defaults.optional_skill_sets` 提供同形的可选集合。安装插件或声明集合本身不启用
+任何角色；只有角色的 `skill_set`（含明确引用的命名 Worker 所声明的值）才启用。显式声明
+与插件提供的同名集合相同则接受，成员冲突则拒绝。
+
+Prepare freezes expanded set names and installation source bindings, not bundle
+bytes. Only actually selected directories and their `SKILL.md` metadata are checked;
+unselected bundles are not read. Native discovery uses a validated, rebuildable
+`.agents/skills` projection and read-only directory binds to the selected originals.
+No Skill bytes, object store or byte manifest is created inside a new instance.
+Source and instance may be on different filesystems: no hardlink or copy fallback
+is needed. Bundle resources remain live installation assets; changing their bytes
+at the bound path changes what a later consumer reads. Missing or linked selected
+directories/manuals report the Skill name, exact expected path and repair action.
+
+Prepare 冻结展开后的集合名称和安装来源绑定，不冻结 bundle 字节。只检查实际选中目录及其
+`SKILL.md` 元数据，未选资产不读取。原生发现使用可校验、可重建的 `.agents/skills` 投影，
+并将所选原目录原地只读 bind；新实例内不创建 Skill 字节、对象库或字节 manifest。安装与
+实例可以跨文件系统，不依赖硬链接或复制回退。资源仍是安装中的实时资产；修改绑定路径中的
+字节会改变后续消费者读到的内容。选中目录或手册缺失、链接时，诊断列出 Skill 名称、准确
+预期路径和修复方式。
+
+Configuration revisions may change role/Worker selections within already frozen
+sets; changing the set inventory requires a new instance. Existing jobs and
+native intents retain their exact selection. Retained execution/resume does not
+re-query provider defaults. A fork also preserves the expanded original selection,
+including no selection, rather than importing newer optional offers.
+
+配置修订可在已冻结集合内更改角色/Worker 选择；改变集合清单要求新实例。既有 job 和 native
+intent 保持准确原选择，执行/续接不重取插件默认值。fork 同样保留原展开选择，包括原本没有
+启用 Skill 的状态，不引入插件后来新增的可选声明。
 
 Standard Codex supports this projection directly. A provider-declared module
 launcher may implement the same exact contract; Cov uses
 `python -m cov_execution.launcher --config /exact/operator.json`.
-Other script/protocol/custom launchers reject nonempty managed sets when they lack
-a verified loading contract. Empty sets preserve existing behavior. Framework
-selection does not hide native user/system/plugin Skills or change native home,
-sandbox, shell, network, web or subagent permissions. A Skill grants no execution
-permission, independent-review verdict or scientific qualification.
+Other script/protocol/custom launchers reject nonempty selected sets without a
+verified loading contract. Empty or unselected sets preserve existing behavior.
+This framework selection does not suppress native user/system/plugin sources or
+change native home, sandbox, shell, network, web or subagent permissions. A Skill
+grants no execution permission, independent-review verdict or scientific qualification.
+Cov still copies its configured `auth.json` into its separate native home; this
+Skill supply contract does not establish shared authentication, refresh or logout.
 
 标准 Codex 直接发现投影；适配器声明的模块 launcher 可实现相同合同，Cov 使用上述模块入口。
-缺少可核实加载合同的任意脚本、protocol 或自定义 launcher 对非空集合明确拒绝，空集合维持原行为。
-此选择只限框架受管集合，不隐藏原生用户、系统、插件来源，不改变原生 home 或声明权限。
-Skill 不授予执行权限、独审结论或科学资格。
+缺少可核实加载合同的任意脚本、protocol 或自定义 launcher 对实际选中的非空集合明确拒绝；
+空集合或未选集合维持原行为。框架选择不屏蔽原生用户、系统、插件来源，不改变原生 home、
+sandbox、shell、网络、web 或子代理权限。Skill 不授执行权限、独审结论或科学资格。
+Cov 仍把配置的 `auth.json` 复制到独立 native home；此 Skill 合同未实现共享认证、刷新或登出。
 
-Archives retain each frozen file once and omit only verified derived projections.
-Forks retain child-owned original references and rebuild projections under the child
-root; source installation and parent deletion cannot remove those child references.
-Cold restore likewise rebuilds and verifies local projections before runnable use.
-Read-only modes remain a soft boundary against trusted same-user processes.
+Retained Skill schema v2 records keep their existing read-only manifest/object
+interpretation. A fork without its own legacy store reads the exact registered
+parent original after identity checks; it creates no new Skill copies. That parent
+store must remain available, and a missing source reports its exact manifest path.
+This compatibility does not migrate scientific protocols or restore retired
+archive/cold-package operations. Read-only mounts remain a soft boundary for
+trusted same-user processes.
 
-归档每份冻结原件只保留一次，只排除已验证的派生投影。fork 保留子实例自有原件引用，并在子根
-重建投影，不依赖安装来源或父实例继续存在；冷恢复同样在运行前重建核对。只读权限仍属同用户软边界。
+保留的 Skill schema v2 记录继续按原只读 manifest/对象解释。fork 若无本地旧库，则核对身份后
+读取准确登记的父原件，不创建新的 Skill 副本；父库须继续存在，来源缺失时明确报告准确
+manifest 路径。这不迁移科学协议，也不恢复已退役的归档/cold 包入口。只读挂载仍属同用户软边界。

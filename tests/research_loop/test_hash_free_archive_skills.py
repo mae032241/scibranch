@@ -42,33 +42,25 @@ def test_link_requires_exact_inode_and_copy_rejects_equal_size_collision(tmp_pat
     assert alias.samefile(source)
 
 
-def test_selected_skill_freeze_has_instance_paths_and_no_shared_store(tmp_path, monkeypatch):
+def test_selected_skill_sources_are_shared_installation_assets_without_hash_or_copy(tmp_path, monkeypatch):
     source = tmp_path / 'library/alpha'
     frozen(source / 'SKILL.md', b'---\nname: alpha\ndescription: original fixture\n---\n')
     frozen(source / 'scripts/run.py', b'print("science")\n')
+    monkeypatch.setattr(skill_supply, 'source_root', lambda: source.parent)
     configured_cache = tmp_path / 'must-not-be-created'
     monkeypatch.setenv('SCID_SHARED_STORE', str(configured_cache))
-    roots = [tmp_path / 'first', tmp_path / 'second']
-    settings = []
-    for root in roots:
+    for root in (tmp_path / 'first', tmp_path / 'second'):
         root.mkdir()
-        declared, manifest = skill_supply.prepare(
-            dict(root=str(source.parent), sets={'chosen': dict(items=['alpha'])}),
-            backend='codex', launcher=['codex'])
-        value = dict(skills=declared, native_launcher_argv=['codex'])
+        declared, manifest = skill_supply.prepare(dict(sets={'chosen': dict(items=['alpha'])}),
+            backend='codex', launcher=['codex'], role_profiles={'H': dict(skill_set='chosen')})
+        value = dict(skills=declared, native_launcher_argv=['codex'],
+            role_profiles={'H': dict(skill_set='chosen')})
         skill_supply.freeze(root, value, manifest)
-        settings.append(value)
-        assert manifest['version'] == 2
-        assert set(manifest['objects']['alpha']['files'][0]) == {'path', 'size_bytes'}
-        assert skill_supply.validate(root, value) == manifest
-    first, second = [root / skill_supply.DIRECTORY / 'objects/alpha/scripts/run.py' for root in roots]
-    assert not first.samefile(second) and not first.samefile(source / 'scripts/run.py')
+        assert manifest is None and declared['version'] == 3
+        assert skill_supply.validate(root, value) == declared
+        assert not (root / skill_supply.DIRECTORY).exists()
+        assert declared['root'] == str(source.parent)
     assert not configured_cache.exists()
-    (source / 'scripts/run.py').chmod(0o600)
-    (source / 'scripts/run.py').write_bytes(b'changed external install')
-    assert first.read_bytes() == b'print("science")\n'
-    for root, value in zip(roots, settings):
-        assert skill_supply.validate(root, value)
 
 
 def archive_fixture(tmp_path, monkeypatch, *, independent):
