@@ -82,6 +82,14 @@ Job 的存储、内存、输出和时间限额分别约束；多 case 共用原 
 占用传输额度。上传从归档文件分块读取，不把完整归档放进内存。远端仍需落地输入；
 不移除 tar、改写流式打包协议或迁移 wire/schema。
 
+V3 使用管理员声明的内置 SSH transport 时，prepare 同步上传 JobSpec 和归档后，
+返回独立的原请求 marker。本次调用核对该 marker 及上传前记录的本地包身份后，
+删除自己刚生成的 `job.json`、`project.tar` 和空包目录；保留原始 execution package、
+编译器与输入原件。清理失败不改变已确认的 prepare 成功，也不触发再次准备或提交。
+V2、通用自定义 transport、开发调试的调用者原件以及响应未知或失败的 prepare 保留
+现有文件。历史遗留包没有持久化的准确清理归属，不按名称、年龄或目录扫描删除；
+这些包仍可能占用磁盘。本轮不新增 prepare 所有权协议。
+
 输出先把有界 tar 收到本地 `.results.*.tar.download`，再由 `unpack_results` 对照
 本次冻结清单逐成员核验名称、普通文件类型和大小，写入临时文件并 fsync 后
 `os.replace`；不使用 `extractall`。传输或解包结束、失败时均在 `finally` 删除临时

@@ -22,6 +22,7 @@ from scidiscovery.operation_contract import DiagnosticError, contract_diagnostic
 from .execution_control import FileDescriptor, SolverCapabilitySnapshot, TCADJobSpec
 from .execution_policy import ExecutionPolicySnapshot, execution_admission, collection_context
 from .project_packager import (
+    PackagedTCADProject,
     PackagerError,
     package_execution_package_json,
     materialize_execution_inputs,
@@ -193,6 +194,17 @@ class CommandTCADExecutorAdapter:
             preparation_profile=preparation_profile,
             context=getattr(self,'operation_context',None),
         )
+        cleanup = None
+        if preparation_profile == "tcad.execution-package.v3":
+            try:
+                configuration = bundled_ssh_configuration(self.config)
+                if configuration is not None:
+                    from .ssh_transport import read_transport_config
+                    transport = read_transport_config(configuration)
+                    cleanup = (transport, _prepared_package_identity(packaged, exchange_directory))
+            except (OSError, ValueError, RuntimeError):
+                # Cleanup admission must not change transport preparation.
+                pass
         value = self._call(
             "prepare",
             {
@@ -202,7 +214,21 @@ class CommandTCADExecutorAdapter:
                 "local_result_root": str(self.local_result_root),
             },
         )
-        return LocalFileDescriptor.model_validate(value["submission"], strict=True)
+        submission = LocalFileDescriptor.model_validate(value["submission"], strict=True)
+        if cleanup is not None:
+            try:
+                transport, identity = cleanup
+                _cleanup_prepared_package(packaged, exchange_directory, identity,
+                    submission, self.local_result_root, Path(transport.remote_exchange_root))
+            except (OSError, ValueError, RuntimeError):
+                # Remote preparation is already acknowledged. A local disposal
+                # failure must never turn the original request into a retry.
+                try:
+                    preserve_log(self.local_result_root, "stderr",
+                        b"TCAD prepared transfer copy cleanup was skipped or incomplete.\n")
+                except (OSError, ValueError):
+                    pass
+        return submission
 
     def prepare_development_debug(
         self,
@@ -471,6 +497,64 @@ def _without_schema(value: Any) -> dict[str, Any]:
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json", exclude={"schema_version"})
     raise TypeError("descriptor is not a schema model")
+
+
+def _prepared_package_identity(packaged: PackagedTCADProject, exchange_directory: Path):
+    """Snapshot only this call's two generated files and published directory."""
+    directory = packaged.package_directory
+    expected = exchange_directory / "prepared" / f"pkg_{packaged.package_id}"
+    if directory != expected or directory.resolve() != directory:
+        raise ValueError("prepared package directory changed")
+    paths = (directory, directory / "job.json", directory / "project.tar")
+    if (packaged.job_spec_file.local_path != str(paths[1])
+            or packaged.archive.local_path != str(paths[2])):
+        raise ValueError("prepared files differ from their generated owner")
+    metadata = tuple(os.lstat(path) for path in paths)
+    if (not stat.S_ISDIR(metadata[0].st_mode)
+            or any(not stat.S_ISREG(item.st_mode) or item.st_nlink != 1 for item in metadata[1:])
+            or metadata[1].st_size != packaged.job_spec_file.size_bytes
+            or metadata[2].st_size != packaged.archive.size_bytes):
+        raise ValueError("prepared package is no longer its ordinary generated files")
+    return tuple((item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns, item.st_ctime_ns)
+                 for item in metadata)
+
+
+def _cleanup_prepared_package(packaged, exchange_directory, identity, submission,
+                              local_result_root, remote_exchange_root):
+    # The administrator-selected bundled SSH provider synchronously closes both
+    # uploads before returning this independent marker. Generic command providers
+    # have no such consumption contract; V2 also has a local archive consumer.
+    request_id = packaged.job_spec.request_id
+    marker_path = local_result_root / "submissions" / f"{request_id}.json"
+    if (submission.local_path != str(marker_path) or marker_path.resolve() != marker_path
+            or submission.name != "execution_payload" or submission.media_type != "application/json"):
+        raise ValueError("prepared submission is not the original independent marker")
+    remote_directory = remote_exchange_root / "transport" / request_id
+    remote_archive = packaged.archive.model_copy(update={"local_path": str(remote_directory / "project.tar")})
+    remote_job = packaged.job_spec.model_copy(update={"input_archive": remote_archive})
+    expected_submission = FileDescriptor(name="execution_payload", local_path=str(remote_directory / "job.json"),
+        size_bytes=len(_canonical(remote_job.model_dump(mode="python"))), media_type="application/json")
+    expected_marker_size = len(_canonical(dict(schema_version=2, submission_id=request_id,
+        remote_submission=expected_submission.model_dump(mode="json"))))
+    metadata = os.lstat(marker_path)
+    if (not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size != expected_marker_size or submission.size_bytes != expected_marker_size):
+        raise ValueError("prepared submission marker changed")
+    raw = marker_path.read_bytes()
+    if len(raw) != expected_marker_size:
+        raise ValueError("prepared submission marker differs from its descriptor")
+    marker = json.loads(raw)
+    if (not isinstance(marker, dict) or marker.get("schema_version") != 2
+            or marker.get("submission_id") != request_id
+            or FileDescriptor.model_validate(marker.get("remote_submission"), strict=True) != expected_submission):
+        raise ValueError("prepared marker does not retain the exact original remote request")
+    # Preflight every owned path before deleting either file. rmdir preserves any
+    # unowned additions; no directory enumeration or recursive deletion is used.
+    if _prepared_package_identity(packaged, exchange_directory) != identity:
+        raise ValueError("prepared package identity changed during transport preparation")
+    Path(packaged.job_spec_file.local_path).unlink()
+    Path(packaged.archive.local_path).unlink()
+    packaged.package_directory.rmdir()
 
 
 def _within(path: Path, root: Path) -> bool:
