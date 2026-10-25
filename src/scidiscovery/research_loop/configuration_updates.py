@@ -195,7 +195,7 @@ def submit(root, configuration, *, base=None, expected_revision=None,
         document = research_config.to_document(root, settings)
         previous = editable(root)
         state = status(root)
-        events, _ = budget._events(root, c.settings(root))
+        events, _ = budget._events(root)
         budget_baseline = budget.authorization_revision(root)
         resource_baseline = _resource_authorization_revision(root, events)
         reauthorized = bool(explicit_authorization and values and state['pending'] and (
@@ -284,7 +284,7 @@ def bind_new_job(root, step):
             changed = row.get('budget_changes', {})
             operation = f'configuration-{row["revision"]}'
             resource_operation = operation + '-resources'
-            events, _ = budget._events(root, c.settings(root))
+            events, _ = budget._events(root)
             applied = next((event for event in events if event['kind'] == 'budget_amend'
                             and event.get('operation_id') == operation), None)
             resource_applied = next((event for event in events if event['kind'] == 'resource_grant'

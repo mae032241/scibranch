@@ -231,7 +231,8 @@ def wait_and_wake(root,step):
                 raise ExecutionWaiting('managed_execution_terminal_unverified')
             terminals.append(e.proof(path))
         if (root/'pause.request').exists():raise ExecutionWaiting('paused_before_execution_wake')
-        if budget.snapshot(root)['seconds_remaining']<=0:raise ExecutionWaiting('managed_execution_wait_deadline')
+        if budget.snapshot(root)['seconds_remaining']<=0:
+            raise ExecutionWaiting('managed_execution_wait_deadline' if has_pending else 'managed_execution_terminal_wake_deadline')
         if not has_pending:
             continuation.wake_start(root,step,terminals)
             return

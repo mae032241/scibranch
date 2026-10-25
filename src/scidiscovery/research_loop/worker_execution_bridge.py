@@ -131,6 +131,9 @@ def _publish(path, data):
         with tempfile.NamedTemporaryFile(dir=path.parent,prefix='.submission-',delete=False) as stream:
             temporary=Path(stream.name);stream.write(data);stream.flush();os.fsync(stream.fileno())
         os.replace(temporary,path)
+        parent=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(parent)
+        finally:os.close(parent)
     finally:
         if temporary is not None:temporary.unlink(missing_ok=True)
 
@@ -543,14 +546,10 @@ def _bridge_deadline(root,configuration):
     from . import budget,execution,native,contracts as c
     job=c.read(c.regular(root/'jobs'/f'{configuration['scope']['step']:03d}.json'))
     record=execution.record(root,job['step'],configuration['native_attempt']['number'])
-    intent=c.read(c.regular(record/'native-intent.json'))
+    c.read(c.regular(record/'native-intent.json'))
     stamp=budget.clock_stamp();limits=budget.snapshot(root,sample_stamp=stamp)
     seconds=budget.execution_available(root,job,limits,native.usage(root))['seconds']
-    if budget.node_mode(root)=='hard':
-        node=budget.node_limits(root,job)
-        if node is not None:seconds=min(seconds,node['max_seconds']-budget._node_duration(root,job,intent,limits))
-        if job.get('search') is not None:
-            seconds=min(seconds,job['search']['limits']['max_w_seconds']-(limits['advance_seconds']-intent['search_slice']['advance_seconds']))
+    budget.node_mode(root)  # Historical hard settings remain read-only.
     return time.clock_gettime(time.CLOCK_BOOTTIME)+max(0.,seconds)
 
 

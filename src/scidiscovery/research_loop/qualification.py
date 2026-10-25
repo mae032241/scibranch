@@ -212,7 +212,11 @@ def _inputs(root, job):
         step = int(Path(ref['path']).parts[2])
         source = originals.node(root, step)
         seal = c.read(originals.source_record(source, 'result-identity.json'))
-        if seal['raw_ref'].get('path',) != str(Path(source.original_root) / (source.native_record or f'native-evidence/{source.step:03d}') / 'science-output.json'):
+        # Local native_record=None means the canonical current attempt, not
+        # necessarily the first attempt. Inherited refs retain logical paths.
+        raw = (str(Path(source.original_root) / (source.native_record or f'native-evidence/{source.step:03d}') / 'science-output.json')
+            if source.inherited else str(c._execution_raw(source.storage_root, source.step)))
+        if seal['raw_ref'].get('path') != raw:
             raise IntegrityError('Direct source does not name its exact producer original')
     steps.update(row['origin_step'] for row in job.get('selected_inputs', []))
     steps.update(row['step'] for row in job.get('delivery_sources', {}).get('source_nodes', []))

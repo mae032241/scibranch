@@ -941,22 +941,27 @@ def _run(root, *, continue_wait=None):
             return _finish(root, settings, "sealed_node_invalid", completed, last,
                 reason=f"Retained node is not eligible for routing ({type(error).__name__})", next_role=role)
         completed, last = step, result
+        admission_refusal = share_stop or ((next_author or {}).get('reason') if (next_author or {}).get('reason') in role_share.REFUSALS else None)
+        if admission_refusal is not None and budget.execution_blocked(root):
+            return _finish(root, settings, 'waiting_execution', completed, last,
+                reason='Original execution remains live or unknown; optional admission refused: ' + admission_refusal,
+                next_role='H')
         if share_stop is not None:
-            final = start_final(completed, step + 1, next_role or role, share_stop,
-                pending=(next_role,next_parents,next_instruction,next_return,next_correction,next_author))
-            if final is not None:
-                return final
-            if settings.get('delivery_policy') is not None:
-                return _start_closeout(root, completed, step + 1, share_stop)
-            if budget.protected_final_report(settings):
-                return _start_final_report(root, completed, step + 1, next_role or role, share_stop)
-            return _finish(root, settings, 'role_budget_stop', completed, last, reason=share_stop)
+            (next_role, next_parents, next_instruction, next_return, current_h, current_w,
+             next_correction, next_author) = role_share.reconsider(root, step, job,
+                (next_role,next_parents,next_instruction,next_return,current_h,current_w,next_correction,next_author),
+                share_stop)
         if next_role is None:
+            if role == 'H' and result.get('next_action') == 'wait' and not budget.execution_blocked(root):
+                final = _start_budget_closeout(root, completed, step + 1, 'H', 'scientific_wait')
+                if final is not None:
+                    return final
+                return _finish(root, settings, 'final_unavailable', completed, last,
+                    reason='No frozen final-A completion policy; H wait has no pending external call')
             if settings.get('delivery_policy') is not None and result.get('next_action') == 'deliver':
                 return _start_closeout(root, completed, step + 1, 'scientific_deliver', authorization_step=step)
-            if result.get('next_action') == 'deliver':
-                return _finish(root, settings, 'delivery_unavailable', completed, last, reason='No frozen delivery policy')
-            return _finish(root, settings, result["next_action"], completed, last,
+            action = 'finish' if result.get('next_action') == 'deliver' else result["next_action"]
+            return _finish(root, settings, action, completed, last,
                 reason="Scientific role suggestion; overall goal success is not asserted")
         role, parents, instruction, evidence_return, correction_request = next_role, next_parents, next_instruction, next_return, next_correction
         author_correction = next_author
@@ -1141,7 +1146,7 @@ def _final_a_result(root, job, result):
 def _resume_final(root, begin):
     if begin['mode'] != 'final' or begin.get('resume_cursor') is None:
         return False
-    events,_ = budget._events(root,contracts.settings(root))
+    events,_ = budget._events(root)
     raised = budget._threshold_raised(events,begin['seq'])
     if not raised or budget.execution_blocked(root) or _launch_limit(root,contracts.settings(root)) is not None:
         return False

@@ -1,6 +1,8 @@
 """Replayed scientific-control outcomes and finite author clarification."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from . import execution
 
 from . import contracts as c, history, search
@@ -46,6 +48,9 @@ def public_request(root, job):
     from . import fork_runtime
     first = c.read(fork_runtime.source_record(root, request['root']['step'], 'result-identity.json'))
     diagnostics = first['control_outcome']['diagnostics']
+    from . import role_share
+    if request['reason'] in role_share.REFUSALS:
+        diagnostics = [dict(code=request['reason'], recovery='Choose another scientific route under the current admission limits. No new evidence or budget was supplied.')]
     if request['reason']=='formal_review_unavailable':
         from . import formal_review
         diagnostics=[dict(code=formal_review.unavailable(root,request['root']['step'])['failure']['reason'],
@@ -95,6 +100,24 @@ def validate_job(root, job):
         raise ValueError('Author correction root is not its first attempt')
     root_step = request['root']['step']
     root_job, root_payload, root_seal, _ = history._source(root, root_step)
+    from . import role_share
+    if request['reason'] in role_share.REFUSALS:
+        action = root_payload.get('next_action')
+        optional = (root_job['role'], action) in {('H', 'analyze'), ('A', 'revise_h'), ('A', 'audit'), ('A', 'formal_review')}
+        optional = optional or root_job['role'] == 'E' and (root_job.get('evidence_return') or {}).get('role') in {'H', 'A'}
+        optional = optional or root_job.get('formal_review') is not None
+        if root_job['role'] == 'A' and action == 'wait':
+            marker = root / 'host-control' / 'wait-continuations' / f'{root_step:03d}.json'
+            expected = dict(source_step=root_step, seal_ref=request['root']['seal_ref'])
+            if not marker.exists() or c.read(c.regular(marker)) != expected:
+                raise ValueError('Admission correction requires its exact explicit wait continuation')
+            optional = True
+        if (not optional or job.get('purpose') == 'closeout'
+                or not any(ref['path'] == f'inputs/parents/{request["source"]["step"]:03d}/conclusion.json' for ref in job['direct_refs'])):
+            raise ValueError('Admission correction must bind its exact refused optional decision')
+        # The immutable host job records the actual refusal made at its creation.
+        # Rechecking against an amended total would rewrite that historical fact.
+        return
     if job.get('purpose') == 'closeout':
         from . import budget, delivery
         begin = budget.closeout_state(root)['begin']

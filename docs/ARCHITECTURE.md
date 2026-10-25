@@ -527,15 +527,47 @@ Protocol 26 accepts only soft node settings. Older protocols remain read-only;
 frozen hard settings are never silently changed to soft. A denied start
 advances the existing control journal to durable `FINAL` (`closeout_begin` mode
 `final`); it never reclassifies an ordinary A as final from the remaining balance.
-An ordinary A's explicit `finish` ends the run without delivery. Its explicit
-`deliver` consumes only that sealed author's exact candidate authorization, with
-no additional FINAL author. When selection policy is enabled, the ordinary A
+An H `wait` with no pending or unknown external execution enters the existing
+durable FINAL phase; pending originals retain their waiting mechanism. This
+requires the frozen final-A completion capability; its absence is reported as
+`final_unavailable`, without inventing a completion grant.
+An ordinary A's explicit `finish` ends the run without delivery. Without a frozen
+delivery policy, `deliver` has the same stop behavior as `finish`, while its sealed
+scientific choice remains unchanged. With that policy, `deliver` consumes only
+that sealed author's exact candidate authorization, with no additional FINAL author. When selection policy is enabled, the ordinary A
 receives its frozen complete comparison catalogue before authoring its result;
 delivery verifies that same catalogue and all original qualification gates.
 Delivery failure or missing qualification retains the unresolved result without
-a new scientific author or automatic FINAL. Budget denial preserves the exact
-pending route; optional thinking shares use the ledger's effective total token
-authorization and are checked again before explicit budget increases can resume it.
+a new scientific author or automatic FINAL. Shared budget denial preserves the exact pending route. Optional H/A admission
+refusal instead returns a bounded control clarification to H, binding the exact
+sealed choice and actual admission reason through the existing author-correction
+request. Its first root and reason remain fixed across retries and budget changes;
+the existing two-correction allowance is not renewed. The next scientific choice
+still faces current role shares, repetition, shared budget and execution gates.
+Choosing W rejoins ordinary routing; control does not invent an experiment or new
+evidence. Live or unknown originals prevent this new H clarification.
+
+The ordinary control boundaries remain distinct:
+
+| Retained choice or control fact | Next boundary |
+| --- | --- |
+| H `wait`, no pending/unknown execution | Durable FINAL; `final_unavailable` if its frozen capability is absent. |
+| H `wait`, pending/unknown execution | Preserve waiting and the original call. |
+| Ordinary A `wait` | Stop at that sealed wait; only exact explicit continuation may reopen it. |
+| Ordinary A `finish` | Stop without submission or a goal-success assertion. |
+| Ordinary A `deliver`, no delivery policy | Stop as `finish`, preserving scientific route `deliver`. |
+| Ordinary A `deliver`, delivery policy present | Consume only that author's exact authorization; failure retains science and supplies no replacement author. |
+| Known completed output needs repair | Use only its frozen finite repair permission; exhaustion reports `output_repair_unavailable`. |
+| Scientific clarification allowance exhausted | Report `semantic_correction_required`; preserve the first root and consumed attempts. |
+| Optional H/A admission refused | Bounded H reconsideration under the same correction allowance and current admission gates. |
+| Shared new-action budget denied | Existing FINAL entry, preserving the pending route where applicable. |
+| External terminal verified, wake wall budget exhausted | Preserve terminal evidence and report `managed_execution_terminal_wake_deadline`; do not wake without admission. Still-pending deadline remains `managed_execution_wait_deadline`. |
+| Actual execution or cleanup unknown | Preserve the original unresolved boundary; no replay, replacement or invented cleanup. |
+
+Already accepted ordinary successors retain their exact scientific route when
+replayed after a budget amendment. Current role shares apply to new admission,
+including a prepared successor that has no native acceptance.
+
 FINAL authorizes one exact original A through `final_a_return`, using accepted W
 evidence and preserving missing inputs. Insufficient, zero or exceeded shared
 token, time or step budgets cannot veto this A or its original authorized host

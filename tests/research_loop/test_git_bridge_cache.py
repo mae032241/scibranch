@@ -151,3 +151,37 @@ def test_cached_unknown_keeps_same_calls_and_consumed_budget(terminal_code,fragm
     assert [path.name for path in e.Records(case.config).calls()]==calls and case.execution==[]
     assert not (case.directory/'execution-observation.json').exists()
     assert all(path.read_bytes()==raw for path,raw in case.originals.items())
+
+
+def test_bridge_publish_syncs_file_then_replace_then_parent(tmp_path, monkeypatch):
+    import os
+    import stat
+    events = []
+    fsync, replace = os.fsync, os.replace
+    def sync(descriptor):
+        events.append('directory_sync' if stat.S_ISDIR(os.fstat(descriptor).st_mode) else 'file_sync')
+        fsync(descriptor)
+    def publish(source, destination):
+        events.append('replace')
+        replace(source, destination)
+    monkeypatch.setattr(bridge.os, 'fsync', sync)
+    monkeypatch.setattr(bridge.os, 'replace', publish)
+    destination = tmp_path / 'response.json'
+    bridge._publish(destination, b'{"status":"unknown"}\n')
+    assert destination.read_bytes() == b'{"status":"unknown"}\n'
+    assert events == ['file_sync', 'replace', 'directory_sync']
+
+
+@pytest.mark.parametrize('receipt', ['missing', 'unknown', 'different_process'])
+def test_stopped_bridge_requires_positive_exact_cleanup(tmp_path, monkeypatch, receipt):
+    from scidiscovery.research_loop import runtime
+    identity = dict(path='jobs/001.json')
+    process = dict(pid=123, boot_id='original-boot', start_ticks=1, pgid=123, sid=123, task_ref=identity)
+    c.write(tmp_path / 'bridge-process.json', process)
+    if receipt != 'missing':
+        c.write(tmp_path / 'bridge-outcome.json', dict(
+            process=dict(process, start_ticks=2) if receipt == 'different_process' else process,
+            cleanup='cleanup_unknown' if receipt == 'unknown' else 'observed_group_cleaned'))
+    monkeypatch.setattr(runtime, 'process_matches', lambda *args: False)
+    with pytest.raises(ValueError, match='cleanup is unconfirmed'):
+        bridge.stopped(tmp_path, identity)

@@ -11,11 +11,11 @@ from test_worker_resume import FAKE, instance, wait_runner
 THREAD = '11111111-2222-4333-8444-555555555555'
 
 
-def interrupted_instance(tmp_path, monkeypatch, *, formal_review=False, output_only=False):
+def interrupted_instance(tmp_path, monkeypatch, *, formal_review=False, output_only=False, fake=FAKE):
     if formal_review or output_only:
         public=tmp_path/'public'; public.mkdir()
         objective=public/'objective.md'; objective.write_text('Continue the original bounded task.')
-        launcher=tmp_path/'native.py'; launcher.write_text(FAKE)
+        launcher=tmp_path/'native.py'; launcher.write_text(fake)
         root=tmp_path/'instance'
         controller.prepare(root,objective,public,[sys.executable,str(launcher)],
             max_tokens=1000,max_seconds=120,max_steps=6,model='no-model',reasoning_effort='high',
@@ -25,7 +25,7 @@ def interrupted_instance(tmp_path, monkeypatch, *, formal_review=False, output_o
                 **(dict(output_only=True,output_repair=True,execution_wake=True,
                     native_home=str(tmp_path/'original-native-home')) if output_only else {})))
     else:
-        root = instance(tmp_path, fake=FAKE)
+        root = instance(tmp_path, fake=fake)
     job = c.build_job(root, 1, 'H', [])
     current = budget.clock_stamp()
     old = dict(at_unix=current['at_unix']-10, at_boottime=100., boot_id='previous-host-boot')
@@ -186,9 +186,18 @@ def test_output_only_execution_wake_cannot_reenter_as_ordinary_full_task(tmp_pat
 @pytest.mark.parametrize('output_only',[False,True],ids=['ordinary','inherited_output_only'])
 @pytest.mark.parametrize('crash_before_spawn',[False,True])
 def test_run_and_continue_collect_same_session_without_replaying_original(tmp_path,monkeypatch,crash_before_spawn,output_only):
+    from uuid import NAMESPACE_URL, uuid5
     from scidiscovery.research_loop import instance_control
-    root,saved=interrupted_instance(tmp_path,monkeypatch,formal_review=True,output_only=output_only)
+    fake=FAKE.replace('import json,os,pathlib,sys', 'import json,os,pathlib,sys,uuid', 1).replace(
+        f'thread={THREAD!r}',
+        f"thread={THREAD!r} if 'resume' in args else str(uuid.uuid5(uuid.NAMESPACE_URL,str(work)))\n"
+        "if 'resume' not in args:\n"
+        " p=home/'sessions'/('rollout-'+work.name+'-'+thread+'.jsonl');p.parent.mkdir(parents=True,exist_ok=True)\n"
+        " p.write_text(json.dumps({'type':'session_meta','payload':{'id':thread,'cwd':str(work)}})+'\\n')", 1)
+    root,saved=interrupted_instance(tmp_path,monkeypatch,formal_review=True,output_only=output_only,fake=fake)
     assert c.read(root/'jobs/001.json')['formal_review_version']==1
+    # The supported prepare entry freezes this capability; do not amend its bytes.
+    assert c.settings(root)['final_a_completion_policy']==dict(version=1)
     if crash_before_spawn:
         with monkeypatch.context() as crash:
             crash.setattr(runtime,'start',lambda *args:(_ for _ in ()).throw(RuntimeError('interrupted before spawn')))
@@ -198,8 +207,16 @@ def test_run_and_continue_collect_same_session_without_replaying_original(tmp_pa
         pending=execution.record(root,1)/'native-intent.json'
         accepted=c.read(pending);accepted['budget_slice']['boot_id']='previous-reentry-boot'
         c.write(pending,accepted)
-    assert controller.run(root)['status']=='wait'
+    result=controller.run(root)
+    h_outcome=c.read(execution.record(root,1)/'native-outcome.json')
+    diagnostic=dict(status=result.get('status'),reason=result.get('reason'),
+        step=result.get('attempt_step',result.get('last_step')),
+        has_job_002=(root/'jobs/002.json').exists(),execution_blocked=budget.execution_blocked(root),
+        h_outcome={key:h_outcome.get(key) for key in ('returncode','stop_reason','cleanup')})
+    assert result['status']=='final_a_completed',diagnostic
+    assert result['reason']=='accepted_worker_evidence_unavailable',result
     wait_runner(root)
+    wait_runner(root,2)
     first,current=execution.records(root,1)
     expected_home=tmp_path/'original-native-home' if output_only else root/'native-homes/001'
     assert execution.home(root,1,0)==execution.home(root,1,1)==expected_home
@@ -215,10 +232,43 @@ def test_run_and_continue_collect_same_session_without_replaying_original(tmp_pa
     authorship=formal_review.q._read(root,seal['native_authorship'])
     assert authorship['attempts'][0]['outcome'] is None
     assert authorship['attempts'][0]['status']=='unsupported'
-    assert native.usage(root)['observed_tokens']==36
+    assert sum(c.read(path/'usage.json')['input_tokens']+c.read(path/'usage.json')['output_tokens']
+        for path in (first,current))==36
+    assert c.read(current/'native-outcome.json')['budget_slice']['observed_tokens']==36
+    final_job=c.read(root/'jobs/002.json')
+    assert final_job['role']=='A' and final_job['final_only'] is True
+    final_record,=execution.records(root,2)
+    assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
+    final_thread=str(uuid5(NAMESPACE_URL,str(c.workspace(root,2))))
+    assert final_thread!=THREAD
+    assert c.read(final_record/'native-outcome.json')['thread_id']==final_thread
+    final_home=execution.home(root,2)
+    assert final_home==(expected_home if output_only else root/'native-homes/002')
+    final_session=final_home/'sessions'/('rollout-002-'+final_thread+'.jsonl')
+    assert json.loads(final_session.read_text())['payload']==dict(id=final_thread,cwd=str(c.workspace(root,2)))
+    assert budget.final_a_barrier(root)['step']==2
+    begin=budget.closeout_state(root)['begin']
+    assert begin['mode']=='final' and begin['source_cutoff']==1 and begin['first_step']==2
+    assert begin['stop_reason']=='scientific_wait' and begin.get('resume_cursor') is None
+    assert native.usage(root)['observed_tokens']==58
     assert native.usage(root)['unknown_steps']==[1]  # Interrupted billing remains a lower bound.
-    assert budget.used_steps(root)==1
-    assert controller.run(root)['status']=='wait'
-    assert instance_control.continue_instance(root)['status']=='wait'  # H wait adds no A turn.
+    assert budget.used_steps(root)==2
+    usage=native.usage(root)
+    assert controller.run(root)['status']=='final_a_completed'
+    assert instance_control.continue_instance(root)['status']=='final_a_completed'
+    assert not (root/'jobs/003.json').exists() and native.usage(root)==usage
     assert (c.workspace(root,1)/'work/launches').read_text()=='resume\n'
+    assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
+    from scidiscovery.research_loop import qualification as q
+    read=c.read
+    for wrong_raw in (first/'science-output.json',final_record/'science-output.json'):
+        def different_original(path):
+            value=read(path)
+            if str(path)==str(first/'result-identity.json'):
+                return dict(value,raw_ref=dict(value['raw_ref'],path=str(wrong_raw)))
+            return value
+        with monkeypatch.context() as changed:
+            changed.setattr(c,'read',different_original)
+            with pytest.raises(q.IntegrityError,match='Direct source does not name its exact producer original'):
+                q._inputs(root,final_job)
     assert all(path.read_bytes()==data for path,data in saved.items())

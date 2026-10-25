@@ -10,6 +10,13 @@ from scidiscovery.research_loop import budget, contracts, controller, control_op
 from test_history_handoff import finish, scene
 
 
+@pytest.fixture(autouse=True)
+def _stopped_source_seals(request, monkeypatch):
+    if request.node.get_closest_marker('process_e2e') is None:
+        from test_direct_input_bindings import stopped_seals
+        stopped_seals(monkeypatch)
+
+
 def fixture_launch(monkeypatch, actions):
     calls = []
 
@@ -138,10 +145,12 @@ def test_continuation_keeps_the_existing_final_budget_boundary(scene, monkeypatc
     assert not (scene / 'jobs/003.json').exists()
 
 
-def test_h_wait_is_not_an_author_continuation(scene, monkeypatch):
+def test_h_wait_without_pending_is_final_not_an_author_continuation(scene, monkeypatch):
     calls = fixture_launch(monkeypatch, {1: 'wait'})
-    assert controller.run(scene)['status'] == 'wait'
-    assert instance_control.continue_instance(scene)['status'] == 'wait'
+    monkeypatch.setattr(controller, '_run_final', lambda root, begin: dict(status='final_boundary'))
+    assert controller.run(scene)['status'] == 'final_boundary'
+    assert instance_control.continue_instance(scene)['status'] == 'final_boundary'
+    assert budget.closeout_state(scene)['begin']['stop_reason'] == 'scientific_wait'
     assert calls == [1]
     assert not (scene / 'host-control/wait-continuations').exists()
 
@@ -173,18 +182,44 @@ def test_explicit_continue_preserves_aggregate_role_limits(tmp_path, monkeypatch
                   3: dict(action='experiment', tokens=100_000),
                   4: dict(tokens=500_000), 5: dict(action='wait', tokens=100_000)}
         expected = 'role_share_w_floor_reached'
+    last = max(script)
+    script.update({last + 1: dict(action='experiment', tokens=10),
+        last + 2: dict(tokens=10), last + 3: dict(action='finish', tokens=10)})
     launched = drive(monkeypatch, script)
     assert controller.run(root)['status'] == 'wait'
     before = list(launched)
-    final = []
-    monkeypatch.setattr(controller, '_run_final',
-        lambda root, begin: final.append(begin) or dict(status='final_a_boundary'))
-    assert instance_control.continue_instance(root)['status'] == 'final_a_boundary'
-    begin = budget.closeout_state(root)['begin']
-    assert final == [begin] and begin['mode'] == 'final'
-    assert begin['stop_reason'] == expected and begin['source_cutoff'] == max(script)
-    assert launched == before
-    assert not (root / 'jobs' / f'{max(script) + 1:03d}.json').exists()
+    assert instance_control.continue_instance(root)['status'] == 'finish'
+    assert launched == [*before, (last + 1, 'H'), (last + 2, 'W'), (last + 3, 'A')]
+    job = contracts.read(root / 'jobs' / f'{last + 1:03d}.json')
+    request = job['author_correction']
+    assert request['reason'] == expected and request['root']['step'] == last
+    assert contracts.read(root / 'host-control/wait-continuations' / f'{last:03d}.json') == dict(
+        source_step=last, seal_ref=contracts.record_ref(root / 'native-evidence' / f'{last:03d}' / 'result-identity.json'))
+    assert budget.closeout_state(root)['begin'] is None
+    assert contracts.read(root / 'jobs' / f'{last + 2:03d}.json').get('author_correction') is None
+
+
+@pytest.mark.parametrize('marker', ['missing', 'wrong'])
+def test_wait_admission_replan_requires_exact_explicit_continuation(tmp_path, monkeypatch, marker):
+    from test_role_budget_share import drive
+    from scidiscovery.research_loop import semantic
+    root = role_policy_scene(tmp_path)
+    launched = drive(monkeypatch, {1: dict(action='analyze', tokens=100_000),
+        2: dict(action='wait', tokens=3_400_000)})
+    assert controller.run(root)['status'] == 'wait'
+    job = contracts.read(root / 'jobs/002.json')
+    result = contracts.validate(contracts.workspace(root, 2))
+    route = ('A', [1, 2], 'Explicit continuation', None, 1, None, None, None)
+    code = role_share.reason(root, 2, job, result, 'A', allow_repeat=True)
+    assert code == 'role_share_thinking_reached'
+    corrected = role_share.reconsider(root, 2, job, route, code)
+    if marker == 'wrong':
+        contracts.write(root / 'host-control/wait-continuations/002.json', dict(source_step=1,
+            seal_ref=contracts.record_ref(root / 'native-evidence/002/result-identity.json')))
+    candidate = contracts.build_job(root, 3, 'H', corrected[1], instruction=corrected[2], author_correction=corrected[7])
+    with pytest.raises(ValueError, match='exact explicit wait continuation'):
+        semantic.validate_job(root, candidate)
+    assert launched == [(1, 'H'), (2, 'A')]
 
 
 def test_explicit_continue_only_waives_repeat_without_evidence(tmp_path, monkeypatch):
