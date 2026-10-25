@@ -41,12 +41,67 @@ def _context_sources(root, job):
     return references,texts
 
 
+def _context_reference(root, path, size_bytes):
+    """A scientific source descriptor, separate from root-relative control refs."""
+    return dict(path=str(Path(path)), source=str(Path(path)), size_bytes=size_bytes)
+
+
+def _context_source(root, reference):
+    from . import originals
+    return (originals.material_path(root, reference) if 'source' in reference
+        else _check(root, reference))
+
+
+def _context_compiler(root, job, item, *, controls_only=True):
+    """A permanent compiler identity never depends on an earlier export inode."""
+    from . import execution_inputs
+    if item['source'] != item['compiler']:
+        raise ValueError('Author compiler source is not its exact frozen input')
+    if item['material'] in job['direct_materials']:
+        compiler = execution_inputs.verify_compilation(root, item['compiler'], material=item['material'],
+            client_binding=item.get('client_binding'), controls_only=controls_only)
+    else:
+        binding, compiler = execution_inputs.verify_legacy_author_client(root, job, item['client_binding'])
+        grant = binding['legacy_authorization']
+        if grant['compiler'] != item['compiler'] or grant['material'] != item['material']:
+            raise ValueError('Author compiler source changed its existing authorization')
+    if item.get('code_version') != compiler.get('code_version') or 'code_version' not in compiler:
+        raise ValueError('Author compiler scientific code version changed')
+    owner = c.read(_check(root, compiler['job']))
+    execution_inputs._compiler_call_id(root, owner['step'], item['compiler'])
+    return compiler
+
+
+def _context_code(root, job, item, *, controls_only=True):
+    """Interpret only an existing compiler or exact retained accepted-call entry."""
+    if item['kind'] == 'compiler_author':
+        compiler = _context_compiler(root, job, item, controls_only=controls_only)
+        owner = c.read(_check(root, compiler['job']))
+        from . import execution_inputs
+        return owner['step'], execution_inputs._compiler_call_id(root, owner['step'], item['compiler'])
+    from . import code_versions, experiments as e
+    from .experiment_client import record_directory
+    accepted = c.read(_check(root, item['source']))
+    call_id = accepted['call_id']
+    config = c.read(c.regular(Path(root) / 'native-evidence' / f'{job["step"]:03d}' / 'experiment-config.json'))
+    expected = record_directory(root, job['step']) / 'calls' / call_id / 'accepted.json'
+    if (_check(root, item['source']) != expected or accepted['scope'] != config['scope']
+            or accepted['interface'] != config['execution_interface']
+            or accepted.get('code_version') != item['code_version']
+            or e._code_version_binding(config, accepted) != Path(root)):
+        raise ValueError('Author scientific code lost its exact accepted call')
+    code_versions._version(item['code_version'])
+    if not controls_only:
+        code_versions.verify(root, step=job['step'], call_id=call_id, code_version=item['code_version'])
+    return job['step'], call_id
+
+
 def science_context(root, job, record, *, permit=None, attempt=None):
     """A new author reads independent displays; retained task inputs stay frozen."""
     root=Path(root);work=c.workspace(root,job['step']);record=Path(record)
     c._validate_inputs(root,work,job)
     references,texts=_context_sources(root,job)
-    from . import candidate_refs
+    from . import candidate_refs, originals
     public=record/'author-science-context';public.mkdir()
     from . import shared_input_views
     shared_input_views.dynamic_root(root,public,'retained-implementations')
@@ -55,6 +110,8 @@ def science_context(root, job, record, *, permit=None, attempt=None):
     task=candidate_refs.public_fields(c.read(original_task),references)
     c.write(target,task);target.chmod(0o400)
     entries=[dict(kind='task',source=_ref(root,original_task),display=_ref(root,target))]
+    input_rows={item['path']: item for item in [*job['global_materials'], *job['direct_materials'],
+        *job['direct_refs'], *job['history']['files'], *job['history'].get('execution_recovery_materials', [])]}
     paths={item['path']:'source' for item in [*job['global_materials'],*job['direct_materials']]}
     compiled={}
     from . import execution_inputs,qualification
@@ -73,9 +130,9 @@ def science_context(root, job, record, *, permit=None, attempt=None):
         for item in compiler['inputs']:
             original=execution_inputs.resolve_native_original(root,item['original'],compiler_job=owner)
             destination=public/item['alias']
-            source=Path(original['source'])
-            c._bind_original(source, destination, policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=original['size_bytes'], source_kind='managed_frozen')
-            entries.append(dict(kind='source',source=_ref(root,source),display=_ref(root,destination)))
+            source=originals.material_path(root, original)
+            entries.append(dict(kind='source',source=dict(original, source=str(source)),
+                display=dict(path=destination.relative_to(root).as_posix(), size_bytes=original['size_bytes'])))
     paths.update((item['path'],'framework') for item in job['direct_refs'])
     paths.update((item['path'],'source' if item.get('kind')=='scientific_original' else 'framework')
         for item in job['history']['files'])
@@ -85,7 +142,9 @@ def science_context(root, job, record, *, permit=None, attempt=None):
         parent=int(Path(original['path']).parts[2]);raw=c.regular(c._execution_raw(root,parent))
         reported=candidate_refs.public_science_fields(c.read(raw),candidate_refs.for_job(job))
         name=str(Path(original['path']).parent/'scientific-original.json')
-        if c.scientific_projection(reported,name)!=reported:paths[name]='source'
+        if c.scientific_projection(reported,name)!=reported:
+            paths[name]='source'
+            input_rows[name]=dict(path=name,source=str(raw),size_bytes=original['size_bytes'])
     paths.update((item['path'],'source') for item in job['history'].get('execution_recovery_materials',[]))
     for name,kind in sorted(paths.items()):
         parts=Path(name).parts
@@ -94,16 +153,26 @@ def science_context(root, job, record, *, permit=None, attempt=None):
             continue  # Control originals stay retained; no public inventory link.
         target=public/name
         if kind=='compiler_author':
-            item=compiled[name];author=item['compiler']['author'];source=_check(root,author)
-            c._bind_original(source, target, policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=(source).stat().st_size, source_kind='managed_frozen')
-            entries.append(dict(kind=kind,source=_ref(root,source),display=_ref(root,target),
-                material=item['material'],compiler=item['binding']['compiler'],client_binding=item['binding'].get('client_binding')))
+            item=compiled[name]
+            if 'code_version' in item['compiler']:
+                entries.append(dict(kind=kind,source=item['binding']['compiler'],
+                    display=dict(path=target.relative_to(root).as_posix()), material=item['material'],
+                    compiler=item['binding']['compiler'], client_binding=item['binding'].get('client_binding'),
+                    code_version=item['compiler']['code_version']))
+            else:
+                author=item['compiler']['author'];source=_check(root,author)
+                entries.append(dict(kind=kind,source=_context_reference(root,source,author['size_bytes']),
+                    display=dict(path=target.relative_to(root).as_posix(),size_bytes=author['size_bytes']),
+                    material=item['material'],compiler=item['binding']['compiler'],client_binding=item['binding'].get('client_binding')))
             continue
-        source=c.regular(work/name);original=_ref(root,source)
+        row=input_rows[name]
+        bound=dict(row,source=row.get('source',str(work/name)))
+        source=originals.material_path(root,bound)
+        original=dict(bound,source=str(source))
         if kind=='framework':
             c.write(target,_context_projection(name,c.read(source),references,texts));target.chmod(0o400)
-        else:c._bind_original(source, target, policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=(source).stat().st_size, source_kind='managed_frozen')
-        entries.append(dict(kind=kind,source=original,display=_ref(root,target)))
+        entries.append(dict(kind=kind,source=original,display=(_ref(root,target) if kind=='framework' else
+            dict(path=target.relative_to(root).as_posix(),size_bytes=row['size_bytes']))))
     own=[];masks=[];implementations=[]
     if job.get('worker_view_version')!=1 and permit is not None:
         for number,compiler_path in enumerate(sorted(execution_inputs._directory(root,job['step']).glob('*/compiler.json')),1):
@@ -117,15 +186,21 @@ def science_context(root, job, record, *, permit=None, attempt=None):
             binding,compiler=execution_inputs.verify_legacy_author_client(root,job,binding_ref,require_intent=False)
             own.append(binding_ref)
             source_name=f'work/retained-implementations/I{number:03d}/implementation.json'
-            scientific=public/source_name;author=_check(root,compiler['author'])
-            c._bind_original(author, scientific, policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=(author).stat().st_size, source_kind='managed_frozen')
-            entries.append(dict(kind='source',source=_ref(root,author),display=_ref(root,scientific)))
+            scientific=public/source_name
+            if 'code_version' in compiler:
+                entries.append(dict(kind='compiler_author',source=compiler_ref,
+                    display=dict(path=scientific.relative_to(root).as_posix()),material=material,
+                    compiler=compiler_ref,client_binding=binding_ref,code_version=compiler['code_version']))
+            else:
+                author=_check(root,compiler['author'])
+                entries.append(dict(kind='source',source=_context_reference(root,author,compiler['author']['size_bytes']),
+                    display=dict(path=scientific.relative_to(root).as_posix(),size_bytes=compiler['author']['size_bytes'])))
             owner=qualification._read(root,compiler['job']);aliases=[]
             for item in compiler['inputs']:
                 original=execution_inputs.resolve_native_original(root,item['original'],compiler_job=owner)
-                input_source=Path(original['source']);display=public/item['alias']
-                c._bind_original(input_source, display, policy=c.settings(root,job).get('storage_policy'), root=root, size_bytes=original['size_bytes'], source_kind='managed_frozen');aliases.append(item['alias'])
-                entries.append(dict(kind='source',source=_ref(root,input_source),display=_ref(root,display)))
+                input_source=originals.material_path(root,original);display=public/item['alias'];aliases.append(item['alias'])
+                entries.append(dict(kind='source',source=dict(original,source=str(input_source)),
+                    display=dict(path=display.relative_to(root).as_posix(),size_bytes=original['size_bytes'])))
             note=public/'artifact-notes'/f'I{number:03d}.txt'
             note.parent.mkdir(parents=True,exist_ok=True)
             note.write_text('The native execution package is retained privately. Read '+source_name+
@@ -139,6 +214,8 @@ def science_context(root, job, record, *, permit=None, attempt=None):
         task['retained_implementations']=implementations
         target=public/'science-task.json';target.chmod(0o600);c.write(target,task);target.chmod(0o400)
         entries[0]['display']=_ref(root,target)
+    if permit is not None:
+        science_facts(root, job['step'], context_entries=entries, context_directory=public)
     manifest=record/'author-science-context.json'
     c.write(manifest,dict(version=1,step=job['step'],directory=public.relative_to(root).as_posix(),
         candidate_references=references,entries=entries,own_compiled_clients=own,artifact_masks=masks,
@@ -163,20 +240,30 @@ def validate_science_context(root, job, proof):
     for item in manifest.get('artifact_masks',[]):
         _check(root,item['original']);_check(root,item['display'])
     for item in manifest['entries']:
-        source=_check(root,item['source']);display=_check(root,item['display'])
+        if 'code_version' in item:
+            display=Path(root)/item['display']['path']
+            if (set(item['display']) != {'path'} or Path(item['display']['path']).is_absolute()
+                    or '..' in Path(item['display']['path']).parts or not display.is_relative_to(directory)):
+                raise ValueError('Author scientific display escaped its context')
+            _context_code(root, job, item)
+            continue
+        source=_context_source(root,item['source']);display=_declared_ref(root,item['display'])
         if not display.is_relative_to(directory):raise ValueError('Author scientific display escaped its context')
         if item['kind']=='compiler_author':
             from . import execution_inputs
             if item['material'] not in job['direct_materials']:raise ValueError('Author compiler source is not a frozen input')
             compiler=execution_inputs.verify_compilation(root,item['compiler'],material=item['material'],
                 client_binding=item['client_binding'])
-            if (_check(root,compiler['author'])!=source or not source.samefile(display)
+            if (_check(root,compiler['author'])!=source
+                    or 'source' not in item['source'] and not source.samefile(_check(root,item['display']))
                     or item['source']['size_bytes']!=item['display']['size_bytes']):
                 raise ValueError('Author compiler scientific display changed')
         elif item['kind']=='source':
-            if not source.samefile(display) or item['source']['size_bytes']!=item['display']['size_bytes']:
+            if (item['source']['size_bytes']!=item['display']['size_bytes']
+                    or 'source' not in item['source'] and not source.samefile(_check(root,item['display']))):
                 raise ValueError('Author scientific original changed')
         else:
+            display=_check(root,item['display'])
             name=display.relative_to(directory).as_posix()
             expected=(candidate_refs.public_fields(c.read(source),references) if item['kind']=='task' else
                 _context_projection(name,c.read(source),references,texts))
@@ -420,11 +507,18 @@ def terminal_facts(root, step):
     return dict(version=1,scope='Preserved terminal experiment facts only; no backend query or new experiment',calls=rows)
 
 
-def science_facts(root, step):
+def science_facts(root, step, *, context_entries=None, context_directory=None):
     """Scientific projection of freshly verified originals, never their directory index."""
-    from . import experiments as e
+    from . import experiments as e, originals
     facts=terminal_facts(root,step);work=c.workspace(Path(root),step);calls=[]
     config=c.read(Path(root)/'native-evidence'/f'{step:03d}'/'experiment-config.json')
+    def expose(reference, logical):
+        actual=originals.resolve_root_ref(root,reference)
+        if context_entries is not None:
+            context_entries.append(dict(kind='source',source=dict(reference,source=str(actual)),
+                display=dict(path=(Path(context_directory)/logical).relative_to(root).as_posix(),
+                    size_bytes=reference['size_bytes'])))
+        return work/logical
     for row in facts['calls']:
         directory=work/row['originals'];completed=c.read(directory/'completed.json')
         observation=c.read(directory/'execution-observation.json')
@@ -433,12 +527,25 @@ def science_facts(root, step):
         result=completed.get('result') or {}
         source=None
         original=observation.get('scientific_source')
-        if original is None and 'scientific_source' not in observation and config['execution_interface'].get('result_protocol')==e.LOCAL_RESULT_PROTOCOL:
+        if 'code_version' in accepted:
+            version=accepted['code_version']
+            if (observation.get('source_code_version') != version
+                    or e._code_version_binding(config,accepted) != Path(root)):
+                raise ValueError('Author scientific source lost its original code binding')
+            logical=Path('work/retained-experiments')/row['call_id']/'code'
+            if version['selection']=='file':logical=logical/version['entry']
+            source=work/logical/(version['entry'] if version['selection']=='directory' else '')
+            if context_entries is not None:
+                context_entries.append(dict(kind='source',source=_ref(root,directory/'accepted.json'),
+                    display=dict(path=(Path(context_directory)/logical).relative_to(root).as_posix()),
+                    code_version=version))
+        elif original is None and 'scientific_source' not in observation and config['execution_interface'].get('result_protocol')==e.LOCAL_RESULT_PROTOCOL:
             # Existing local source bytes already have a generic accepted binding.
             original=accepted['script']
-        if original is not None:
-            source=work/'work/retained-experiments'/row['call_id']/Path(original.get('source',original)['path']).name
-            c._bind_original(Path(original['path']), source, policy=config.get('storage_policy'), root=root, size_bytes=(Path(original['path'])).stat().st_size, source_kind='mutable')
+        if original is not None and 'code_version' not in accepted:
+            reference=original.get('source',original)
+            if not isinstance(reference,dict):reference=original
+            source=expose(reference,Path('work/retained-experiments')/row['call_id']/Path(reference['path']).name)
         value=dict(call_id=row['call_id'],candidate_id=row['candidate_id'],status=row['status'],
             mechanism={key:mechanism[key] for key in ('mechanism_ref',) if key in mechanism},
             source=source.relative_to(work).as_posix() if source is not None else None,
@@ -447,15 +554,19 @@ def science_facts(root, step):
             outputs=[],qualification=row['qualification'])
         scientific=e.scientific_outputs(config,observation)
         for output in scientific:
-            path=work/'work/retained-experiments'/row['call_id']/'outputs'/output.name
-            c._bind_original(Path(output.local_path), path, policy=config.get('storage_policy'), root=root, size_bytes=(Path(output.local_path)).stat().st_size, source_kind='mutable')
+            reference=next((item.get('source',item) for item in observation.get('scientific_outputs',[])
+                if item.get('name')==output.name),None)
+            if not isinstance(reference,dict):reference=dict(path=output.local_path,size_bytes=output.size_bytes)
+            path=expose(reference,Path('work/retained-experiments')/row['call_id']/'outputs'/output.name)
             value['outputs'].append(dict(name=output.name,path=path.relative_to(work).as_posix()))
         if config['execution_interface'].get('result_protocol')==e.LOCAL_RESULT_PROTOCOL:
             names={item.name for item in scientific};logs=[]
             for output in e.scientific_outputs(config,observation,include_logs=True):
                 if output.name in names:continue
-                path=work/'work/retained-experiments'/row['call_id']/'outputs'/output.name
-                c._bind_original(Path(output.local_path), path, policy=config.get('storage_policy'), root=root, size_bytes=(Path(output.local_path)).stat().st_size, source_kind='mutable')
+                reference=next((item.get('source',item) for item in observation.get('scientific_outputs',[])
+                    if item.get('name')==output.name),None)
+                if not isinstance(reference,dict):reference=dict(path=output.local_path,size_bytes=output.size_bytes)
+                path=expose(reference,Path('work/retained-experiments')/row['call_id']/'outputs'/output.name)
                 logs.append(dict(stream=Path(output.name).stem,path=path.relative_to(work).as_posix()))
             if logs:
                 value['logs_ref']=dict(note='Read stdout/stderr only as scientifically needed; known execution snapshot paths use scientific source names.',

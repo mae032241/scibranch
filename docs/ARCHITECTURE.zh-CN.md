@@ -139,21 +139,35 @@ Local 的 `--experiment-dir experiments/<name>` 只选独立运行工作目录�
 
 同一调用的 query、result、collect 和 cleanup 不依赖已删除的导出；实际消费代码须保留原
 commit 和准确调用 pin，按该版本重新物化，不回退可变草稿。新 compiler 记录使用
-`code_version`，不依赖 `author` 快照，原 UUID 身份仍保留；旧记录沿用原解释。执行局部的
-普通 `file_stat` 指纹按需补充路径/大小检查，不向全局材料或 qualification 引用
-添加指纹。原授权、预算、期限及未知原调用核对规则不变。
+`code_version`，不依赖 `author` 快照，原 UUID 身份仍保留；旧记录沿用原解释。
+代码审阅视图保留原 compiler 引用、UUID 和七字段 `code_version`，仅实际选中消费时物化
+导出。启动后须确认 native、bridge 及适用后端均已停止才清理导出；清理未知时保留已选导出。
+私有普通 `file_stat` 指纹按需补充路径/大小检查，`seal.materials` 行在实际停写后保存该证明。
+已选材料验证后仅移除该私有字段，公开材料及 qualification 引用字段保持不变。
+原授权、预算、期限及未知原调用核对规则不变。
 
 新 Git 绑定的 Local 成果直接写入已有 `work/retained-experiments/<call>/outputs`，沿既有只读动态根
 读取同一原件。这类 Local 成果与节点所属 raw/artifacts 原件均须确认实际写者停写后才原地封存。重复 collect、观察、
-checkpoint 和历史读取只核对已保存 proof，不再复制或刷新；checkpoint 不封存当前草稿。
+checkpoint 和历史视图保留首次目的地及已保存 proof；实际内容消费严格核对已选原件，不再复制或刷新。
+checkpoint 不封存当前草稿。
 必需的已选控制检查及旧记录解释保持，输出处理错误不改写已知终态。没有 `code_version` 的
 Local 调用（包括旧 `entry` 分支）保留既有复制语义。
 
-这只完成 G2 的 Local/节点输出切片；其他 provider、全局及跨节点输入、历史正文复用和代码
-审阅/交付视图仍待完成，G3 恢复及 fork/archive/delete 消费方尚未实现。既有归档/分支章节
+外部 global/declaration 及跨节点输入通过既有绑定解析准确实际原件，只读映到既有逻辑任务
+路径，不在节点复制正文，也不 chmod 外部来源。公开逻辑路径在宿主上未必有文件 alias。
+历史正文复用首次已有目的地。普通 catalogue、status 及 provenance 读取只核对留存控制关系，
+不重开未选科学正文或 Git pin；实际已选消费仍严格验证。交付保留 wire version 2 和
+`object_refs`，用零字节挂载点及只读 bind 暴露已选原件。
+
+Cov 在准确 call/run/receipt 核对后保留既有 `runs_root/model_run<run_id>.pkl` 原件，仍仅接受
+单脚本入口。新 TCAD command 采集将 native 科学输出、既有科学 `tcad_log` 及 facts 首写到
+既有节点/call 输出目录；manifest、transport-derived 文件、bindings 和传输 spool 保持私有。
+新 socket preparation 在准入或提交前明确不支持，准确旧 call 的查询仍受支持。
+
+新引用及 Git 代码的 G3 恢复和 fork/archive/delete 消费方仍待完成。既有归档/分支章节
 不证明新 Git 调用已有完整生命周期支持。真实 default native、registered Cov、Codex/
-命名空间及 replay leaf 验收留到 G3 后由用户独立 CLI 运行；源码改动不授科学资格，
-也不构成真实 sandbox 保证。
+命名空间、replay/model、solver 及 SSH 验收留到 G3 后由用户独立 CLI 运行；源码改动
+不授科学资格，也不构成真实 sandbox 保证。
 
 默认本地命令后端解析所选 Codex 安装的原生二进制，使用其 sandbox 和受限的科学子进程
 文件视图。已接受的 Git 代码导出只读映回逻辑科学代码目录；旧调用沿用原目录/脚本快照
@@ -167,11 +181,10 @@ managed policy、额外可写根以及无法忠实投影后端权限的自定义
 明确返回不支持，不为执行而替换其原生权限。内部权限 profile 不增加操作者配置项。
 这些文件视图不构成防同用户恶意进程的隔离，也不对泛原生执行提供统一隔离保证。
 
-上述 Local/节点输出路径以外的既有留存语义继续使用实例的 `host-history/objects/<uuid>`。
-每次独立冻结生成新对象路径，不按相同字节去重；受管冻结原件的宿主私有 alias 可跨 call
-共享 inode，但不合并原 call、origin 或科学路径。可变外部内容首次独立复制冻结；已接受输入快照、Worker 输入及 collect/wake 视图通过硬链接
-共享只读原件。需要编辑时把具体文件另存 `work/`，不预复制整棵输入树。共享要求同一文件系统，
-不支持时明确失败，不回退全量复制。是否为受管不可变来源由生命周期证明，不按0400或链接数猜测；
+既有 legacy 留存记录保留原 `host-history/objects/<uuid>` 路径及自有硬链接解释。
+每次独立冻结保留自己的身份，相同字节不合并原 call、origin 或科学路径。当前任务、wake、
+代码审阅和交付视图通过既有绑定解析已选原件，并用只读挂载暴露。需要编辑时把具体文件
+另存 `work/`，不预复制整棵输入树。是否为受管不可变来源由生命周期证明，不按0400或链接数猜测；
 0400 本身不构成防同用户主动 chmod 的写隔离。
 
 协议 26 在最终原生启动处用 Linux 只读挂载保护共享输入，包括自定义 protocol argv。

@@ -156,6 +156,18 @@ def _shared_view_context(root, job, intent, limits, *, final_return=None, author
     return storage_policy.Deadline(seconds)
 
 
+def _cleanup_code_exports(root, exports, *, launch_started, process, cleanup, bridge_stopped):
+    """Only this runner's selected exports, after every actual reader stopped."""
+    if not bridge_stopped or (launch_started and (process is None or cleanup != 'observed_group_cleaned')):
+        return
+    from . import code_versions, experiments as e
+    for export_step, call_id in dict.fromkeys(exports):
+        try:
+            code_versions.cleanup_export(root, step=export_step, call_id=call_id)
+        except (OSError, ValueError) as error:
+            e._diagnostic(error, 'Native context code export cleanup failed', config=None)
+
+
 def run_native(root: Path, step: int, attempt=0):
     from .protocol import require_current
     require_current(root)
@@ -531,6 +543,9 @@ def run_native(root: Path, step: int, attempt=0):
     cleanup = None
     thread_id = None
     scientific_lifetime = ExitStack()
+    code_exports = []
+    launch_started = False
+    bridge_stopped = False
     try:
         with (record / 'native.jsonl').open('wb') as log, (record / 'native.stderr').open('wb') as err, (record / 'native-public.jsonl').open('w') as public_log:
             # Submission happens here, after runner/watchdog startup. Recheck
@@ -567,12 +582,14 @@ def run_native(root: Path, step: int, attempt=0):
             limits=control_budget.snapshot(root,settings)
             view_context=_shared_view_context(root,job,intent,limits,final_return=final_return,
                 author_permit=permit if intent.get('continuation_kind')=='author_closeout' else None)
+            shared_input_views.selected_code_mounts(root,job,work,context=view_context,exports=code_exports)
             if namespace_launcher is None:
                 args=shared_input_views.wrap(root,job,work,args,context=view_context)
             else:
                 # Registered host preparation/bridge stays in its host view.
                 # Its frozen module owns the final scientific namespace seam.
                 shared_input_views.ensure_capability(context=view_context)
+            launch_started = True
             process = subprocess.Popen(args, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=err, env=env, start_new_session=True)
             process_id = runtime.process_identity(process.pid, execution.identity(root, step, attempt))
@@ -675,6 +692,7 @@ def run_native(root: Path, step: int, attempt=0):
     finally:
         try:
             scientific_lifetime.close()
+            bridge_stopped = True
         except (OSError,ValueError,RuntimeError) as bridge_error:
             error=error or bridge_error
             cleanup='cleanup_unknown';stop='cleanup_unknown'
@@ -699,12 +717,18 @@ def run_native(root: Path, step: int, attempt=0):
                 from . import local_experiments
                 try:managed_cleanup=local_experiments.cleanup(root,job)
                 except (OSError,ValueError,KeyError,TypeError):managed_cleanup='cleanup_unknown'
-                if managed_cleanup=='cleanup_unknown':
+                configured_local=(experiment_config is not None
+                    and experiment_config['execution_interface']['executor']=='local_execution:command')
+                managed_stopped=(managed_cleanup=='observed_group_cleaned'
+                    or not configured_local and managed_cleanup=='not_applicable')
+                if not managed_stopped:
                     cleanup='cleanup_unknown';stop='cleanup_unknown'
             if process.stdout is not None:
                 process.stdout.close()
             if process.stdin is not None and not process.stdin.closed:
                 process.stdin.close()
+        _cleanup_code_exports(root, code_exports, launch_started=launch_started,
+            process=process, cleanup=cleanup, bridge_stopped=bridge_stopped)
     stop = stop or terminal_fault
     if process is not None:
         observation = live_meter.poll()

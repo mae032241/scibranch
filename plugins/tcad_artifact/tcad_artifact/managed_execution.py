@@ -57,28 +57,26 @@ def _verify_descriptor(descriptor, context=None):
 
 
 def _verify_proof(original, context=None):
-    if not isinstance(original, dict) or _proof(original['path'], context) != original:
+    if (not isinstance(original, dict) or set(original) not in (
+            {'path','size_bytes'}, {'path','size_bytes','file_stat'})
+            or not isinstance(original.get('path'),str)
+            or type(original.get('size_bytes')) is not int or original['size_bytes']<0):
+        raise e.IntegrityError('TCAD original proof changed')
+    current=_proof(original['path'], context)
+    if any(current.get(key)!=value for key,value in original.items()):
         raise e.IntegrityError('TCAD original proof changed')
 
 
 def _write_original(path, value):
+    if Path(path).exists():
+        if json.loads(e.read(path)) != value:
+            raise e.IntegrityError('TCAD retained original changed')
+        return
     try:
         e.write(path, value)
     except FileExistsError:
         if json.loads(e.read(path)) != value:
             raise e.IntegrityError('TCAD retained original changed')
-
-
-def _retain_original(descriptor, target, context, *, root, policy):
-    """Freeze untrusted native bytes once, then hold a read-only shared alias."""
-    from scidiscovery.research_loop import storage_policy as storage
-    try:
-        c._bind_original(Path(descriptor.local_path),target,root=root,
-            size_bytes=descriptor.size_bytes,source_kind='mutable',policy=policy,context=context)
-    except storage.StorageQuotaExceeded:
-        raise
-    except ValueError as exc:
-        raise e.IntegrityError('TCAD original changed during retention') from exc
 
 
 class TCADManagedExecution:
@@ -208,15 +206,18 @@ class TCADManagedExecution:
         self._original_interface()
         if preparation_profile != 'research_loop.v1' or Path(exchange_directory) != self.records.root:
             raise ValueError('Exact managed TCAD preparation context required')
-        _verify_descriptor(payload,self.operation_context)
+        payload_proof=_verify_descriptor(payload,self.operation_context)
         binding_path=self._stage(payload.name)/'binding.json'
         if binding_path.exists():
             binding=json.loads(e.read(binding_path))
             if binding.get('payload')!=payload.model_dump(mode='json') or binding.get('target')!=self.target:
                 raise e.IntegrityError('Original TCAD preparation binding changed')
-            prepared=LocalFileDescriptor.model_validate(binding['prepared'])
+            prepared=LocalFileDescriptor.model_validate({key:value for key,value in binding['prepared'].items()
+                if key!='file_stat'})
             self._preparation(prepared)
             return prepared
+        if self.config.get('transport')=='socket':
+            raise e.UnsupportedExecution('TCAD socket cannot first-write new scientific outputs into the exact Node call directory; preparation and submission are unsupported')
         raw = Path(payload.local_path).read_bytes(); profile = _package_profile(raw)
         reviewed = validate_execution_package_json(raw, preparation_profile=profile)
         metadata, opener = self.input_metadata, self.open_input
@@ -229,15 +230,16 @@ class TCADManagedExecution:
         # No capability/policy RPC or transport prepare is permitted before this gate.
         permit = self._check('prepare', payload.name, payload)
         stage = _directory(self._stage(payload.name))
-        source = stage / 'package.json'
-        c._bind_original(Path(payload.local_path), source, context=self.operation_context, policy=self.config.get('storage_policy'), root=self.records.storage_root(), size_bytes=payload.size_bytes, source_kind='mutable')
-        original = payload.model_copy(update={'local_path': str(source)})
+        original = payload
         prepared = self.adapter.prepare(original, preparation_profile=profile,
             exchange_directory=stage, input_metadata=metadata, open_input=opener)
         prepared = prepared.model_copy(update={'name': payload.name})
-        _verify_descriptor(prepared,self.operation_context)
-        binding = dict(payload=payload.model_dump(mode='json'), retained_payload=original.model_dump(mode='json'),
-            prepared=prepared.model_dump(mode='json'),
+        prepared_proof=_verify_descriptor(prepared,self.operation_context)
+        if _verify_descriptor(payload,self.operation_context)!=payload_proof:
+            raise e.IntegrityError('TCAD package original changed during preparation')
+        binding = dict(payload=payload.model_dump(mode='json'),
+            retained_payload=dict(original.model_dump(mode='json'),file_stat=payload_proof['file_stat']),
+            prepared=dict(prepared.model_dump(mode='json'),file_stat=prepared_proof['file_stat']),
             target=self.target, authority=permit['receipt'],
             authorization=permit['authorization'].model_dump(mode='json'))
         if permit.get('reservation') is not None:
@@ -246,16 +248,25 @@ class TCADManagedExecution:
         os.chmod(stage / 'binding.json', 0o440)
         return prepared
 
-    def _preparation(self, descriptor):
+    def _preparation(self, descriptor, *, verify_inputs=True):
         value = json.loads(e.read(self._stage(descriptor.name) / 'binding.json'))
-        if value.get('prepared') != descriptor.model_dump(mode='json') or value.get('target') != self.target:
+        saved_prepared=value.get('prepared')
+        if (not isinstance(saved_prepared,dict)
+                or {key:item for key,item in saved_prepared.items() if key!='file_stat'} != descriptor.model_dump(mode='json')
+                or value.get('target') != self.target):
             raise e.IntegrityError('Original TCAD preparation target or descriptor changed')
-        _verify_descriptor(descriptor,self.operation_context)
+        _verify_proof(dict(path=descriptor.local_path,size_bytes=descriptor.size_bytes,
+            **({'file_stat':saved_prepared['file_stat']} if 'file_stat' in saved_prepared else {})),self.operation_context)
         payload = LocalFileDescriptor.model_validate(value['payload'])
-        retained = LocalFileDescriptor.model_validate(value['retained_payload'])
+        saved_payload=value['retained_payload']
+        retained = LocalFileDescriptor.model_validate({key:item for key,item in saved_payload.items() if key!='file_stat'})
         if retained.model_copy(update={'local_path': payload.local_path}) != payload:
             raise e.IntegrityError('TCAD retained package differs from its original descriptor')
-        _verify_descriptor(retained,self.operation_context)
+        if 'file_stat' in saved_payload and retained!=payload:
+            raise e.IntegrityError('TCAD package original path changed')
+        if verify_inputs:
+            _verify_proof(dict(path=retained.local_path,size_bytes=retained.size_bytes,
+                **({'file_stat':saved_payload['file_stat']} if 'file_stat' in saved_payload else {})),self.operation_context)
         _verify_proof(value['authority'])
         return value
 
@@ -305,7 +316,8 @@ class TCADManagedExecution:
         if seen != set(expected):
             raise e.IntegrityError('TCAD prepared archive omitted declared scientific inputs')
         archive_proof = _verify_descriptor(spec.input_archive,self.operation_context)
-        package_proof = _verify_descriptor(LocalFileDescriptor.model_validate(value['retained_payload']),self.operation_context)
+        package_proof = _verify_descriptor(LocalFileDescriptor.model_validate({key:item for key,item
+            in value['retained_payload'].items() if key!='file_stat'}),self.operation_context)
         root, job, intent = authority._host_context(self.config)
         authorization = q._read(root, {**value['authority'], 'path':str(Path(value['authority']['path']).relative_to(root))})
         subject = q._read(root, authorization['request'])['subject']
@@ -319,18 +331,18 @@ class TCADManagedExecution:
             evidence=[dict(item,path=Path(item['path']).relative_to(root).as_posix()) for item in (package_proof,archive_proof)],
             sources=dict(version=1,complete=True,sources=[dict(kind='producer',original=original)]))
 
-    def _bound(self, call):
+    def _bound(self, call, *, verify_inputs=True):
         accepted = self.records.accepted(call)
         descriptor = LocalFileDescriptor.model_validate(accepted['prepared'])
         if (accepted.get('native_attempt') != self.config.get('native_attempt')
                 or accepted.get('interface') != self._original_interface()
                 or descriptor.name != call
-                or accepted['script'].get('path') != str(self.records.directory(call) / 'source.py')
+                or accepted['script'].get('path') not in {descriptor.local_path,str(self.records.directory(call) / 'source.py')}
                 or accepted['script'].get('size_bytes') != descriptor.size_bytes
                 or accepted.get('execution_authority') != accepted.get('tcad', {}).get('authority')
                 or accepted.get('execution_reservation') != accepted.get('tcad', {}).get('reservation')
                 or accepted.get('execution_target') != self.target
-                or accepted.get('tcad') != self._preparation(descriptor)):
+                or accepted.get('tcad') != self._preparation(descriptor,verify_inputs=verify_inputs)):
             raise e.IntegrityError('TCAD call differs from its original acceptance')
         _verify_proof(accepted['script'],self.operation_context)
         return accepted, descriptor
@@ -408,6 +420,8 @@ class TCADManagedExecution:
                 or (directory / 'retirement-native').exists()
                 or self._lease != (descriptor.name, descriptor.model_dump(mode='json'))):
             raise e.UnsupportedExecution('TCAD original submission is unknown; lookup without resubmission')
+        if self.config.get('transport')=='socket':
+            raise e.UnsupportedExecution('TCAD socket cannot first-write new scientific outputs into the exact Node call directory; no submission was made')
         value = accepted['tcad']
         permit = self._check('submit', descriptor.name, LocalFileDescriptor.model_validate(value['payload']),
                              prepared=descriptor, prior=value['authority'])
@@ -479,7 +493,7 @@ class TCADManagedExecution:
                 dispatch_intent=e.proof(intent) if intent.exists() else None)
 
     def _query(self, call):
-        _, descriptor = self._bound(call)
+        _, descriptor = self._bound(call,verify_inputs=False)
         external = self.records.external(call)
         if external is None:
             return dict(state='unknown', call_id=call)
@@ -491,10 +505,13 @@ class TCADManagedExecution:
                     or receipt.get('external_run_id') != external
                     or execution_status(receipt.get('status', {}).get('state')) not in {'known_success', 'known_failed'}):
                 raise e.IntegrityError('TCAD retained terminal binding changed')
+            self._collection(call,receipt['status']['state'],self.operation_context,verify_outputs=False)
             return receipt['status']
-        found = self.lookup_submission(descriptor)
-        if found is None:
-            return dict(state='unknown', call_id=call)
+        backend=json.loads(e.read(directory/'tcad-backend-binding.json'))
+        if backend != dict(call_id=call,scope=self.config['scope'],
+                prepared_ref=dict(path=descriptor.local_path,size_bytes=descriptor.size_bytes),
+                external_run_id=external,target=self.target):
+            raise e.IntegrityError('TCAD retained backend binding changed')
         details = self.adapter.status_details(external)
         if 'run_id' in details and details['run_id'] != external:
             raise e.IntegrityError('TCAD status changed the original external identity')
@@ -506,7 +523,7 @@ class TCADManagedExecution:
             return dict(state='unknown', call_id=call, submission_disposition='not_submitted')
         path = self.records.directory(call) / 'completed.json'
         if path.exists():
-            value = self._completed(call)
+            value = self._completed(call,verify_outputs=False)
             return dict(state=value['native_state'], call_id=call,
                         external_run_id=self.records.external(call))
         return self._query(call)
@@ -520,20 +537,33 @@ class TCADManagedExecution:
     def status(self, external):
         return self.status_details(self._external_call(external))['state']
 
-    def _completed(self, call):
-        accepted, _ = self._bound(call)
+    def _completed(self, call, *, verify_outputs=True):
+        accepted, _ = self._bound(call,verify_inputs=False)
         value = json.loads(e.read(self.records.directory(call) / 'completed.json'))
         if (any(value.get(key) != accepted.get(key) for key in ('call_id', 'scope', 'mechanism_binding'))
                 or value.get('native_state') not in {'succeeded', 'failed', 'cancelled'}
                 or value.get('status') != execution_status(value['native_state'])):
             raise e.IntegrityError('TCAD completion differs from the original call')
+        directory=self.records.directory(call)
+        controls={directory/name for name in ('tcad-backend-binding.json','tcad-terminal-binding.json','collected.json')}
+        if not controls.issubset({Path(original['path']) for original in value['proofs']}):
+            raise e.IntegrityError('TCAD completion omitted original control proofs')
         for original in value['proofs']:
-            _verify_proof(original,self.operation_context)
-        self._collection(call, value['native_state'],self.operation_context)
+            if verify_outputs or Path(original['path']) in controls:
+                _verify_proof(original,self.operation_context)
+        collected=self._collection(call, value['native_state'],self.operation_context,verify_outputs=verify_outputs)
+        outputs={item['local_path']:item for item in collected['outputs']}
+        if any(Path(original['path']) not in controls and original['path'] not in outputs for original in value['proofs']):
+            raise e.IntegrityError('TCAD completion proof escaped its original collection')
+        for item in collected['outputs']:
+            expected=dict(path=item['local_path'],size_bytes=item['size_bytes'],
+                **({'file_stat':item['file_stat']} if 'file_stat' in item else {}))
+            if expected not in value['proofs']:
+                raise e.IntegrityError('TCAD completion omitted an original collected output')
         return value
 
-    def _collection(self, call, native, context=None):
-        accepted, prepared = self._bound(call)
+    def _collection(self, call, native, context=None, *, verify_outputs=True):
+        accepted, prepared = self._bound(call,verify_inputs=False)
         directory = self.records.directory(call)
         collected = json.loads(e.read(directory / 'collected.json'))
         receipt = json.loads(e.read(directory / 'tcad-terminal-binding.json'))
@@ -550,17 +580,21 @@ class TCADManagedExecution:
         if backend != dict(call_id=call, scope=accepted['scope'], prepared_ref=dict(path=prepared.local_path,size_bytes=prepared.size_bytes),
                            external_run_id=self.records.external(call), target=self.target):
             raise e.IntegrityError('TCAD retained backend binding changed')
-        outputs = tuple(LocalFileDescriptor.model_validate(item) for item in collected['outputs'])
-        for item in outputs:
+        outputs = tuple(LocalFileDescriptor.model_validate({key:value for key,value in item.items() if key!='file_stat'})
+            for item in collected['outputs'])
+        for saved,item in zip(collected['outputs'],outputs):
             if context is not None:
                 context.remaining_seconds()
-            if Path(item.local_path) != directory / 'tcad-originals' / item.name:
+            if 'file_stat' not in saved and Path(item.local_path) != directory / 'tcad-originals' / item.name:
                 raise e.IntegrityError('TCAD retained output escaped its original call')
-        self._inventory(outputs, native, context=context)
+            if verify_outputs or item.name=='tcad_manifest':
+                _verify_proof(dict(path=item.local_path,size_bytes=item.size_bytes,
+                    **({'file_stat':saved['file_stat']} if 'file_stat' in saved else {})),context)
+        self._inventory(outputs, native, context=context,verify_files=verify_outputs)
         return collected
 
     @staticmethod
-    def _inventory(outputs, native, *, context=None, verify_bytes=True):
+    def _inventory(outputs, native, *, context=None, verify_bytes=True, verify_files=True):
         names = {}
         for item in outputs:
             if context is not None:
@@ -569,7 +603,10 @@ class TCADManagedExecution:
             if (item.name in names or name.is_absolute() or '..' in name.parts or not name.parts
                     or name.as_posix() != item.name or '\\' in item.name):
                 raise e.IntegrityError('TCAD output names are ambiguous or noncanonical')
-            if verify_bytes:
+            if not verify_files:
+                if not Path(item.local_path).is_absolute():
+                    raise e.IntegrityError('Exact TCAD output path required')
+            elif verify_bytes:
                 _verify_descriptor(item, context)
             elif Path(item.local_path).resolve() != Path(item.local_path) or not Path(item.local_path).is_file():
                 raise e.IntegrityError('Exact TCAD output regular file required')
@@ -609,19 +646,27 @@ class TCADManagedExecution:
             inventory.entry();inventory.file(item.size_bytes)
         manifest = self._inventory(outputs, details['state'], context=context, verify_bytes=False)
         directory = self.records.directory(call)
-        originals = _directory(directory / 'tcad-originals')
+        from scidiscovery.research_loop.local_experiments import artifact_directory
+        node_outputs=artifact_directory(self.config,call)
         retained = []
         for item in outputs:
-            target = originals / item.name
-            _retain_original(item,target,context,root=self.records.storage_root(),policy=self.config.get('storage_policy'))
-            retained.append(item.model_copy(update={'local_path': str(target)}))
+            original=_verify_descriptor(item,context)
+            source=Path(item.local_path)
+            # Only this call's own stopped output namespace is ours to seal.
+            # An adapter's external output descriptor is verified in place.
+            if (source.is_relative_to(directory) or source.is_relative_to(self._stage(call))
+                    or source.is_relative_to(node_outputs)):
+                if source.stat().st_mode&0o777!=0o400:source.chmod(0o400)
+                if _proof(source,context)!=original:
+                    raise e.IntegrityError('Stopped TCAD output changed during sealing')
+            retained.append(dict(item.model_dump(mode='json'),file_stat=original['file_stat']))
         receipt = directory / 'tcad-terminal-binding.json'
         context.remaining_seconds()
         _write_original(receipt, dict(call_id=call, scope=self.config['scope'],
             external_run_id=self.records.external(call), prepared_ref=dict(path=self.records.accepted(call)['prepared']['local_path'],size_bytes=self.records.accepted(call)['prepared']['size_bytes']),
-            status=details, outputs=[item.model_dump(mode='json') for item in retained]))
+            status=details, outputs=retained))
         self.records.publish(call, 'collected.json', dict(native_state=manifest.terminal_state,
-            outputs=[item.model_dump(mode='json') for item in retained]))
+            outputs=retained))
 
     @e.record_effect
     def result(self, call):
@@ -631,7 +676,7 @@ class TCADManagedExecution:
         if (directory / 'completed.json').exists():
             return self._completed(call)
         unknown = dict(call_id=call, status='unknown', note='Original TCAD terminal evidence is not verified')
-        accepted, prepared = self._bound(call)
+        accepted, prepared = self._bound(call,verify_inputs=False)
         try:
             details = self._query(call)
         except (OSError, RuntimeError):
@@ -649,7 +694,11 @@ class TCADManagedExecution:
                 context = permit['context']
                 context.remaining_seconds()
                 if not (directory / 'collected.json').exists():
-                    outputs = self.adapter.collect_with_budget(self.records.external(call), context=context)
+                    options={}
+                    if self.config.get('transport')=='command':
+                        from scidiscovery.research_loop.local_experiments import artifact_directory
+                        options['output_directory']=artifact_directory(self.config,call)
+                    outputs = self.adapter.collect_with_budget(self.records.external(call), context=context,**options)
                     context.remaining_seconds()
                     self._retain(call, outputs, details, context)
                 collected = self._collection(call, details['state'], context)
@@ -662,7 +711,8 @@ class TCADManagedExecution:
             try:
                 proofs = [_proof(directory / name, context) for name in (
                     'tcad-backend-binding.json', 'tcad-terminal-binding.json', 'collected.json')]
-                proofs += [dict(path=item['local_path'], size_bytes=item['size_bytes'])
+                proofs += [dict(path=item['local_path'], size_bytes=item['size_bytes'],
+                    **({'file_stat':item['file_stat']} if 'file_stat' in item else {}))
                            for item in collected['outputs']]
                 context.remaining_seconds()
             except OSError:
@@ -673,13 +723,13 @@ class TCADManagedExecution:
 
     @e.record_effect
     def collect_original(self, call):
-        if self.result(call)['status'] == 'unknown':
+        if self.result(call)['status'] not in {'known_success','known_failed'}:
             raise e.UnsupportedExecution('Original TCAD terminal collection is not verified')
-        return tuple(LocalFileDescriptor.model_validate(item)
+        return tuple(LocalFileDescriptor.model_validate({key:value for key,value in item.items() if key!='file_stat'})
                      for item in json.loads(e.read(self.records.directory(call) / 'collected.json'))['outputs'])
 
     @staticmethod
-    def scientific_outputs(descriptors, *, projection_directory):
+    def scientific_outputs(descriptors, *, projection_directory, output_directory=None):
         """Project the verified producer manifest; solver data remain exact originals."""
         manifests = [item for item in descriptors if item.name == 'tcad_manifest']
         if len(manifests) != 1:
@@ -746,15 +796,35 @@ class TCADManagedExecution:
                 or not projection_directory.is_dir()):
             raise e.IntegrityError('Scientific TCAD projection requires its explicit canonical host directory')
         manifest_path=Path(manifests[0].local_path)
-        call=next((parent.name for parent in manifest_path.parents if parent.parent.name=='calls'),None)
-        directory = _directory(projection_directory / 'tcad/v3' / (call or uuid.uuid4().hex))
-        path = directory / 'tcad_execution_facts.json'
+        if projection_directory.parent.name=='calls':
+            call=projection_directory.name
+            base=projection_directory.parent.parent
+            if not e.ID.fullmatch(call) or base.name!='scientific-output-views':
+                raise e.IntegrityError('Scientific TCAD projection lost its exact original call scope')
+        else:
+            # Existing retained manifests identify their historical destination.
+            # External originals need the host's exact current call argument.
+            call=next((parent.name for parent in manifest_path.parents if parent.parent.name=='calls'),None)
+            if call is None or not e.ID.fullmatch(call):
+                raise e.IntegrityError('Scientific TCAD projection lacks its exact original call scope')
+            base=projection_directory
+        directory = _directory(base / 'tcad/v3' / call)
+        if output_directory is None:
+            path = directory / 'tcad_execution_facts.json'
+        else:
+            output_directory=Path(output_directory)
+            if (not output_directory.is_absolute() or output_directory.resolve()!=output_directory
+                    or not output_directory.is_dir() or output_directory.name!='outputs'
+                    or output_directory.parent.name!=call):
+                raise e.IntegrityError('Scientific TCAD facts require the exact Node call output directory')
+            path=output_directory/'tcad_execution_facts.json'
         if path.resolve() != path or path.is_symlink():
             raise e.IntegrityError('Scientific TCAD facts changed their host namespace')
         _write_original(path, facts)
         _write_original(directory / 'private-scientific-path-bindings.json',
             dict(manifest_ref=dict(path=manifests[0].local_path,size_bytes=manifests[0].size_bytes), outputs=path_bindings))
-        path.chmod(0o440)
+        mode=0o440 if output_directory is None else 0o400
+        if path.stat().st_mode&0o777!=mode:path.chmod(mode)
         original = _proof(path)
         result.append(LocalFileDescriptor(name='tcad_execution_facts.json', local_path=str(path),
             size_bytes=original['size_bytes'], media_type='application/json'))
@@ -785,7 +855,8 @@ class TCADManagedExecution:
         from .execution_control import _consumed_budget
         completed = self._completed(call)
         collected = json.loads(e.read(self.records.directory(call) / 'collected.json'))
-        outputs = tuple(LocalFileDescriptor.model_validate(item) for item in collected['outputs'])
+        outputs = tuple(LocalFileDescriptor.model_validate({key:value for key,value in item.items() if key!='file_stat'})
+            for item in collected['outputs'])
         manifest = self._inventory(outputs, completed['native_state'],context=self.operation_context)
         return _consumed_budget(manifest.model_dump(mode='json')) or {}
 

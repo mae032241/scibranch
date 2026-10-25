@@ -519,3 +519,46 @@ def test_staging_deadline_expires_before_any_leaf_dispatch(tmp_path, monkeypatch
         delivery._staged(tmp_path, dict(inputs=[], config={}),
             dict(candidate_id='exact', objects={'artifact': proof},artifact_origin=c.file_ref(original),context={}), 'same-call', tmp_path / 'stage',
             context=Expired())
+
+
+def test_selected_sources_ignore_missing_unconsumed_science(tmp_path,monkeypatch):
+    from test_direct_input_bindings import direct_instance, stopped_seals
+    from test_direct_public_collect import replace_equal_bytes
+    from scidiscovery.research_loop import generic_delivery, shared_originals
+    target=tmp_path/'target';target.mkdir()
+    adapter=generic_delivery.descriptor(target)
+    root,_=direct_instance(tmp_path,delivery_policy=delivery_policy(adapter))
+    stopped_seals(monkeypatch)
+    _,work,record=finish(root,1,'H',[],action='experiment',
+        files={'chosen.txt':'one selected original','unconsumed.txt':'an unused original'})
+    nodes=[dict(step=1,seal_ref=c.record_ref(record/'result-identity.json'))]
+    (work/'artifacts/unconsumed.txt').unlink()
+    assert delivery.catalogue_sources(root,nodes)['items']==[]
+    selected=work/'artifacts/chosen.txt'
+    spec=delivery._adapter(root)
+    objects={proof['label']:dict(path=proof['path'],size_bytes=proof['size_bytes'])
+        for proof in spec['inputs'] if proof['label']!='runtime-python'}
+    objects['artifact']=c.file_ref(selected)
+    source=dict(candidate_id='selected',status='audit_pending',ledger=c.file_ref(record/'result.json'),
+        objects=objects,artifact_origin=c.file_ref(selected),context=dict(kind='managed_local_result'))
+    refs=dict(items=[source],omitted_count=0,source_nodes=nodes)
+    assert delivery.validate_sources(root,refs)==refs
+    def copied(*args,**options):pytest.fail('Delivery staged scientific body bytes or an inode alias')
+    monkeypatch.setattr(shared_originals,'retain',copied)
+    monkeypatch.setattr(shared_originals,'link',copied)
+    stage=root/'host-delivery/selected-stage';stage.mkdir(parents=True)
+    request=delivery._staged(root,spec,source,'a'*64,stage,
+        job=dict(c.read(root/'jobs/001.json'),delivery_sources=dict(source_nodes=nodes)))
+    assert request['object_refs']['artifact']==c.file_ref(selected)
+    assert all((stage/'inputs'/label).stat().st_size==0 for label in objects)
+    assert (stage/'inputs/artifact').stat().st_ino!=selected.stat().st_ino
+    captured=[]
+    monkeypatch.setattr(generic_delivery.shutil,'which',lambda name:'/qualified/bwrap')
+    monkeypatch.setattr(generic_delivery.os,'execv',lambda binary,args:captured.extend(args))
+    generic_delivery.isolate(dict(request,phase='promote',target=spec['target']),spec['adapter'])
+    assert any(captured[index:index+3]==['--ro-bind',str(selected),'/inputs/artifact']
+        for index in range(len(captured)-2))
+    replace_equal_bytes(selected)
+    with pytest.raises(ValueError,match='changed|identity|original'):delivery.validate_sources(root,refs)
+    (record/'native-outcome.json').unlink()
+    with pytest.raises((OSError,ValueError),match='original|regular|control|No such|file'):delivery.catalogue_sources(root,nodes)

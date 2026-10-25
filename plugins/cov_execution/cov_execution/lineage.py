@@ -129,7 +129,7 @@ def _completed(directory, *, verify_assets=True, verify_source=True):
         from scidiscovery.research_loop import experiments
         root=experiments._code_version_binding(accepted.get('config_record'),accepted)
         temporary=experiments._code_export_entry(root,accepted)
-    model=directory/'model.pkl' if result['model'] is not None else None
+    model=Path(result['model']['path']) if result['model'] is not None else None
     for proof in result['proofs']:
         if Path(proof['path']) not in controls|{source,model}:
             raise IntegrityError('Progress proof escaped this exact call')
@@ -158,8 +158,10 @@ def _completed(directory, *, verify_assets=True, verify_source=True):
                 or (result['model'] is not None)!=ok
                 or (ok and row.get('model_path')!=str(Path(accepted['runs_root'])/f'model_run{row["run_id"]}.pkl'))):
             raise IntegrityError('Completion differs from immutable same-call transport')
-        if ok and ((verify_assets and any(_proof(directory/'model.pkl').get(key)!=item for key,item in result['model'].items()))
-                   or result['model']['path']!=str(directory/'model.pkl') or result['model'] not in result['proofs']):
+        # Existing completions keep their saved call/model.pkl meaning. New
+        # receipts bind the actual run output, without creating another model.
+        if ok and (model not in {Path(row['model_path']),directory/'model.pkl'}
+                   or result['model'] not in result['proofs']):
             raise IntegrityError('Completed model differs from this exact call original')
         required={str(path) for path in controls}
         if (not required.issubset({proof['path'] for proof in result['proofs']})
@@ -185,7 +187,7 @@ def _parent(config, name, new):
     if name is None:return dict(status='unknown',candidate_id=None,source='none'),None
     options = [(row['name'],row['candidate_id'],row['model'],'sealed',row['binding']) for row in config['parents']]
     for path in _calls(config):
-        result = _completed(path)
+        result = _completed(path, verify_assets=False)
         if result and result['status'] == 'known_success':
             options.append((result['candidate_id'],result['candidate_id'],result['model'],'same_node_completed_call',_binding(result,_proof(path/'completed.json'))))
     matches = [row for row in options if row[0] == name]
@@ -246,12 +248,14 @@ def _receipt(directory, accepted, rows, returncode, cleanup, transport_complete=
         path = Path(row.get('model_path',''))
         if path != Path(accepted['runs_root'])/f'model_run{row["run_id"]}.pkl':
             raise IntegrityError('Returned artifact is outside the public run scope')
-        from scidiscovery.research_loop import contracts as c, storage_policy as storage
+        from scidiscovery.research_loop import storage_policy as storage
         storage.Inventory(policy, context=context).file(path.stat().st_size)
-        original=_proof(path, context=context);archive=directory/'model.pkl'
-        c._bind_original(path, archive, size_bytes=original['size_bytes'],
-            root=storage_root, source_kind='mutable', context=context, policy=policy)
-        model=_proof(archive, context=context)
+        model=_proof(path, context=context)
+        # Receipt, row and terminal above establish this call's ownership and
+        # stopped writer. External or unconsumed assets never enter this seal.
+        if path.stat().st_mode&0o777!=0o400:path.chmod(0o400)
+        if _proof(path, context=context)!=model:
+            raise IntegrityError('Stopped model original changed during sealing')
     from scidiscovery.research_loop import shared_originals
     payload = (json.dumps(row,ensure_ascii=False,allow_nan=False,sort_keys=True)+'\n').encode()
     frozen = shared_originals.publish_bytes(storage_root, payload, context=context, policy=policy)
@@ -380,8 +384,11 @@ def observe(request):
         if node.name.isdecimal()
         for directory in sorted((experiment_client.record_directory(root, int(node.name)) / 'calls').glob('*'))]
     for directory in directories:
-        result = _completed(directory)
+        result = _completed(directory,verify_assets=False)
         accepted=json.loads(_read(directory/'accepted.json'))
+        if (result is not None and result['scope']['step']==request['step']
+                and result['call_id'] not in set(request.get('known_contexts',[]))):
+            result=_completed(directory)
         if result is not None:
             result['proofs'].append(_proof(directory/'completed.json'))
         if result is None:

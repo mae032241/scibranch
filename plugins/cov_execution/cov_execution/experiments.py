@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 import time
 
-from scidiscovery.operations.execution import AdapterCapability, ExecutionInterfaceRegistration
+from scidiscovery.operations.execution import AdapterCapability, ExecutionInterfaceRegistration, LocalFileDescriptor
 from scidiscovery.operations.runtime_plugins import RuntimePluginContribution, RuntimePluginFactory
 from scidiscovery.research_loop.local_experiments import LocalExecution
 from scidiscovery.research_loop import experiments as e
@@ -125,16 +125,23 @@ class CovExecution(LocalExecution):
             check()
             return actual
 
-        def link(original, destination):
+        code_root = None
+
+        def cleanup_export():
+            if code_root is None:return
+            from scidiscovery.research_loop import code_versions
+            try:
+                code_versions.cleanup_export(code_root, step=accepted['scope']['step'], call_id=call_id,
+                    context=storage.Deadline(65))
+            except Exception as error:
+                e._diagnostic(error, 'Replay code export cleanup remains unconfirmed', config=self.config)
+
+        def mountpoint(original, destination):
             check()
             if e.proof(original['path'])!=original:
                 raise e.IntegrityError('Accepted replay original changed before its view')
             destination.parent.mkdir(parents=True,exist_ok=True)
-            os.link(original['path'],destination,follow_symlinks=False)
-            linked=e.proof(destination)
-            if (linked['file_stat']!=original['file_stat']
-                    or e.proof(original['path'])!=original):
-                raise e.IntegrityError('Accepted replay view changed its exact original')
+            destination.touch(mode=0o400,exist_ok=False)
             check()
 
         def wire(original):
@@ -165,6 +172,7 @@ class CovExecution(LocalExecution):
                         code_version=accepted['code_version'], context=preparation)
                     tree = code_versions.materialize(root, step=accepted['scope']['step'], call_id=call_id,
                         code_version=accepted['code_version'], context=preparation)
+                    code_root = root
                 except TimeoutError:
                     raise
                 except (OSError, ValueError) as error:
@@ -175,12 +183,7 @@ class CovExecution(LocalExecution):
                 source = reference(accepted['script'])
             # Reuse the existing delivery view and wire fields. Pin and ordinary
             # fingerprints are consumed here, before the isolated leaf sees it.
-            if 'code_version' in accepted:
-                # The existing replay namespace binds object_refs['source.py']
-                # over this empty mountpoint; no permanent code alias is kept.
-                (stage/'inputs').mkdir(parents=True)
-                (stage/'inputs/source.py').touch(mode=0o400)
-            else:link(source,stage/'inputs/source.py')
+            mountpoint(source,stage/'inputs/source.py')
             objects = {'source.py': wire(source)}
             inputs = [dict(wire(runtime),invoked_path=runtime['invoked_path'],label='runtime-python')]
             for item in _replay_roles(accepted):
@@ -191,16 +194,20 @@ class CovExecution(LocalExecution):
                     # Legacy metadata names the public source; HEAD consumed an
                     # independent frozen call slot, whose contract stores size.
                     original=reference(dict(path=str(directory/'inputs'/item['name']),size_bytes=item['size_bytes']))
-                link(original,stage/'inputs'/label)
-                objects[label] = wire(original if current else item)
-                inputs.append(dict(wire(original if current else item),name=item['name'],label=label))
+                mountpoint(original,stage/'inputs'/label)
+                objects[label] = wire(original)
+                inputs.append(dict(wire(original),name=item['name'],label=label))
             request = dict(phase='replay', scope=accepted['scope'], operation_id=operation,
-                candidate_id=completed['candidate_id'], artifact_ref=completed['model'],
+                candidate_id=completed['candidate_id'], artifact_ref=wire(completed['model']) if completed['model'] else None,
                 deadline_boottime=deadline_boottime, object_refs=objects, inputs=inputs,
                 config=dict(python=runtime['invoked_path']), stage=str(stage))
             check()
         except TimeoutError:
+            cleanup_export()  # Preparation never started an external consumer.
             return dict(status='not_run', note='original_engineering_preparation_deadline_reached', cleanup_confirmed=True)
+        except BaseException:
+            cleanup_export()
+            raise
         started = False
         def process(phase, identity):
             nonlocal started
@@ -211,6 +218,11 @@ class CovExecution(LocalExecution):
                 on_process=process, evidence=directory / 'engineering-diagnostics')
         except delivery.DeliveryUnresolved as error:
             return dict(status='unknown', note=error.code, cleanup_confirmed=False)
+        except BaseException:
+            if not started:cleanup_export()
+            raise
+        # _call returns only after its actual leaf group is confirmed stopped.
+        cleanup_export()
         # Raw diagnostics stay in the persistent call stage. A deadline never
         # licenses another complete copy/hash just to produce the small view.
         leaf_record = {}
@@ -276,6 +288,22 @@ class CovExecution(LocalExecution):
         return result if result is not None else dict(status='unknown',call_id=call_id,note='Original call has no completion')
 
     @e.record_effect
+    def collect_original(self,call_id):
+        outputs = super().collect_original(call_id)
+        result = self.result(call_id)
+        model = result.get('model')
+        if model is None:return outputs
+        # result() consumes the saved same-call model proof, including legacy
+        # call/model.pkl records; the public name does not create a new file.
+        outputs=tuple(item for item in outputs if item.local_path!=model['path'])
+        return (*outputs,LocalFileDescriptor(name='model.pkl',local_path=model['path'],
+            size_bytes=model['size_bytes'],media_type='application/octet-stream'))
+
+    @staticmethod
+    def scientific_outputs(descriptors, *, projection_directory):
+        return tuple(item for item in descriptors if item.name == 'model.pkl')
+
+    @e.record_effect
     def status_details(self,call_id):
         state=self._state(call_id)
         directory=self.records.directory(call_id)
@@ -337,6 +365,7 @@ def research_defaults(configuration, *, root):
 
 
 REGISTRATION=ExecutionInterfaceRegistration('cov_execution','1',RuntimePluginFactory(build),
+    scientific_outputs=CovExecution.scientific_outputs,
     scientific_source=LocalExecution.scientific_source,
     context_validator=validate_context,research_defaults=research_defaults,engineering_feedback=engineering_feedback,
     projection_contract='cov.public-projections.v1', native_launcher_module='cov_execution.launcher')

@@ -109,17 +109,35 @@ read-only, and grants the corresponding native file reads. The private manifest,
 unselected objects and other host-control paths are not mounted. Scientific backend
 subprocesses receive no Skill-object mounts. Native permission settings retain
 their declared semantics; selection is not a same-user security sandbox.
-The G1 Git code branch now has a Local/node output slice: Git-bound Local artifacts publish
+Git-bound Local artifacts publish
 directly at existing `work/retained-experiments/<call>/outputs`, with in-place sealing
 only after actual writers stop and read access through the existing read-only dynamic
-root. Repeated collection, observation, checkpoint and history reads verify saved proof
-without copying or refreshing it; checkpoints do not seal current drafts. Required
-selected-control checks and old saved records remain, and output errors preserve known
+root. Repeated collection, observation, checkpoint and history views preserve first
+destinations and saved proofs; actual content consumption strictly verifies selected
+originals without copying or refreshing them. Checkpoints do not seal current drafts.
+Ordinary catalogue/status/provenance reads check retained controls without reopening
+unselected scientific bodies or Git pins. Output errors preserve known
 terminal status. Local calls without `code_version`, including old `entry` calls, keep
-their existing copy branch. Other providers, global/cross-node inputs, history-body reuse and code
-audit/delivery views remain pending G2; G3 recovery/fork/archive/delete are not implemented.
-Real default native, registered Cov, Codex/namespace and replay leaf validation remains
-deferred until G3 and an independent user CLI run; source support alone establishes
+their existing copy branch. External global/declaration and cross-node inputs use
+their exact actual originals through existing logical read-only mappings, without
+node body copies or external-source chmod; a host file alias need not exist. History
+bodies reuse their first existing destinations. Private `file_stat` in
+`seal.materials` rows is verified for selected use before returning the unchanged
+public material fields. Code audit views retain the original compiler reference, UUID and seven-field
+`code_version`; only selected use materializes an export. After launch, cleanup
+requires confirmed native, bridge and applicable backend shutdown; unknown retains it.
+
+Cov keeps the existing `runs_root/model_run<run_id>.pkl` original after exact
+call/run/receipt checks and retains its single-script entry contract. TCAD command
+collection first writes native scientific outputs, the existing scientific `tcad_log`
+and facts at the existing node/call output directory. Manifest, transport-derived
+files, bindings and transfer spool stay private. New socket-backed preparation is
+unsupported before admission or submission; exact old-call queries remain supported.
+
+G3 recovery and fork/archive/delete consumers for the new references and Git code
+remain pending. Real default native, registered Cov, Codex/namespace, replay/model,
+solver and SSH validation remains deferred until G3 and an independent user CLI run;
+source support alone establishes
 neither scientific qualification nor a real sandbox guarantee.
 
 ## Deterministic scientific assets
@@ -138,10 +156,11 @@ control does not manufacture a scientific verdict from it.
 ## Delivery input ownership
 
 Delivery adapters declare `readonly_inputs_version = 1` in their frozen adapter
-descriptor. Candidate inputs are read-only owning hardlinks staged on the instance
-filesystem; launchers must preserve read-only input access and provide separate
-writable scratch. Resolve, smoke, audit, replay, promote and confirm must not chmod
-or modify an input inode. Unsupported sharing fails before dispatch without a copy
+descriptor. Candidate staging keeps the existing wire version 2 and `object_refs`;
+zero-byte mountpoints receive read-only binds to exact selected originals. Launchers
+must preserve read-only input access and provide separate writable scratch.
+Resolve, smoke, audit, replay, promote and confirm must not chmod
+or modify an input inode. Unsupported mapping fails before dispatch without a copy
 fallback. Built-in launchers retain their read-only input mounts. A final requested
 writable delivery artifact may be independently materialized; this is an explicit
 output, not a repeated copy of the entire input stage. Native permissions and
@@ -156,7 +175,8 @@ same-original unknown-call reconciliation remain unchanged.
 registry, scientific qualification or retry authority.
 
 TCAD retains the independent daemon/socket and SSH command transport. The unused
-`tcad-control-mcp` stdio console is retired; socket JSON-RPC remains part of actual
-execution. See the [TCAD transport contract](tcad_transport_contract.md) and
+`tcad-control-mcp` stdio console is retired; socket JSON-RPC remains available for
+exact old-call queries under the preparation limitation above. See the
+[TCAD transport contract](tcad_transport_contract.md) and
 [qualification status](TCAD_QUALIFICATION_STATUS.md). Installed transport discovery,
 source tests or successful installation do not qualify a real solver or remote host.

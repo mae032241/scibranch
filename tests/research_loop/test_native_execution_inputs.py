@@ -96,6 +96,7 @@ def chain(tmp_path, monkeypatch, request):
     original_seal = c.seal_result
 
     def seal(root, step):
+        from test_direct_public_collect import stopped_attempt
         work = c.workspace(root, step); record = c.host_record(work)
         thread = str(uuid.uuid5(uuid.NAMESPACE_URL, 'native-input-fixture-' + str(step)))
         home = tmp_path / 'native-home'; session = home / 'sessions' / (thread + '.jsonl'); session.parent.mkdir(parents=True, exist_ok=True)
@@ -105,6 +106,7 @@ def chain(tmp_path, monkeypatch, request):
         outcome.update(thread_id=thread, native_identity=dict(participant_scope='codex_exec_single_agent_v1',
             home=str(home), path=str(session)))
         c.write(record / 'native-outcome.json', outcome)
+        stopped_attempt(root, c.read(root / 'jobs' / f'{step:03d}.json'), record, monkeypatch)
         return original_seal(root, step)
 
     monkeypatch.setattr(c, 'seal_result', seal)
@@ -185,6 +187,44 @@ def test_public_compile_exact_review_and_existing_run_keep_native_original(chain
     assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
     assert json.loads(capsys.readouterr().out)['call_id'] == result['call_id'] and backend.submits == 1
     assert output.read_bytes() == before
+
+
+def test_logical_inputs_mount_the_same_original_without_host_aliases(chain):
+    from scidiscovery.research_loop import experiment_client, originals, shared_input_views
+    root, _, _, config, _, _, _ = chain
+    job = c.read(root / 'jobs/002.json'); work = c.workspace(root, 2)
+    selected = [*job['global_materials'], *job['direct_materials']]
+    expected = []
+    for material in selected:
+        logical = work / material['path']
+        assert not logical.exists()
+        actual = originals.material_path(root, material)
+        reference = experiment_client.input_reference(config, logical)
+        assert reference == e.proof(actual)
+        expected.append(('--ro-bind', str(actual), str(logical)))
+    arguments = shared_input_views.mount_arguments(root, job, work, include_skills=False)
+    temporary = [arguments[index + 1] for index, flag in enumerate(arguments) if flag == '--tmpfs']
+    assert temporary == [str(work / 'inputs')]
+    assert arguments[-2:] == ['--remount-ro', str(work / 'inputs')]
+    mounted = [tuple(arguments[index:index + 3]) for index, flag in enumerate(arguments) if flag == '--ro-bind']
+    assert all(row in mounted for row in expected)
+    assert all(not (work / row['path']).exists() for row in selected)
+    marker=work/'work/execution-results/001/outputs/mesh.tdr'
+    shared_input_views._dynamic_mountpoints(work,work,{str(marker):Path(expected[-1][1])})
+    assert marker.read_bytes()==b''
+    marker.write_bytes(b'existing original stays untouched')
+    shared_input_views._dynamic_mountpoints(work,work,{str(marker):Path(expected[-1][1])})
+    assert marker.read_bytes()==b'existing original stays untouched'
+    with pytest.raises(e.IntegrityError, match='bound inputs'):
+        experiment_client.input_reference(config, work / 'inputs/undeclared.json')
+    material = job['direct_materials'][0]
+    actual = originals.material_path(root, material)
+    old = actual.stat(); replacement = actual.with_name(actual.name + '.replacement')
+    replacement.write_bytes(actual.read_bytes())
+    import os
+    os.utime(replacement, ns=(old.st_atime_ns, old.st_mtime_ns)); replacement.replace(actual)
+    with pytest.raises(ValueError, match='identity changed'):
+        experiment_client.input_reference(config, work / material['path'])
 
 
 def test_self_contained_v2_terminal_keeps_exact_inputs_and_next_subject_review(chain, capsys):

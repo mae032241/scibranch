@@ -431,24 +431,30 @@ Git 导出是临时视图；同一调用的 query/result/collect/cleanup 不依�
 其字节仍计入后续用量；不能为了守内容额度丢失原调用恢复事实。
 新 Git 绑定的 Local 成果直接写入已有 `work/retained-experiments/<call>/outputs`；确认实际写者停写后
 原地封存，W 沿既有只读动态目录读取同一原件。节点所属 raw/artifacts 原件同样先确认实际停写再原地封存。
-重复 collect、观察、checkpoint 和历史读取只核对已保存原件证明，不再复制或刷新；
-checkpoint 不封存当前草稿。必需的已选控制检查及旧记录解释保持，成果处理错误不改写已知终态。
+重复 collect、观察、checkpoint 和历史视图保留首次目的地及已保存原件证明；实际内容消费严格
+核对已选原件，不再复制或刷新。普通 catalogue/status/provenance 读取核对控制关系，不重开
+未选科学正文或 Git pin。checkpoint 不封存当前草稿。成果处理错误不改写已知终态。
 没有 `code_version` 的 Local 调用（包括旧 `entry` 分支）保留既有复制语义。
-其他 provider、科学输入与旧记录保留原留存合同：可变外部内容首次独立冻结后，已接受快照、节点输入
-和 collect/wake 视图通过自有硬链接共享只读原件，不为每个调用或节点重新复制。
-需要修改时将具体文件另存 `work/` 或自己的编写目录，不得 chmod 后改写共享输入。
-独立工作副本的修改不会污染原件；共享只读模式仍是可信同用户软边界。共享失败明确拒绝，
-不悄悄回退全量复制。原件逻辑来源和科学路径保持精确，相同字节不合并科学身份。
+外部 global/declaration 及跨节点输入通过既有绑定只读映射准确实际原件，不在节点复制正文或
+chmod 外部来源；公开逻辑路径在宿主上未必有文件 alias。历史正文复用首次已有目的地。
+旧记录保留原 archive/硬链接解释。需要修改时将具体文件另存 `work/` 或自己的编写目录。
+原件逻辑来源和科学路径保持精确，相同字节不合并科学身份；同用户访问仍是软边界。
 未在所选目录中的导入、环境及外部文件没有被快照，不据此承诺完整环境复现。
 脚本应使用相对路径读取受管输入；argv 不推断文件含义或改写绝对路径，原生访问本身不构成读取快照的证明。
 仅 `--script` 的单文件入口仍可用；需要兄弟代码模块和受管成果时使用独立 `--experiment-dir`。
 
 上述目录和 argv 能力属于通用 Local executor。Cov launcher 的 `exp run` 仅接受单个 `--script code/<name>/run.py`，由宿主 Git 固定该脚本；不支持 `--experiment-dir` 或 `--` 后的脚本参数，也不递归封存兄弟模块。旧调用保留其原 `source.py` 解释。可通过 `capabilities` 和 `describe --key cov_single_source --output <新文件>` 读取所选接口的完整合同。不支持的命令选项在准备、准入和提交前返回 `known_not_started`、`accepted: false` 和 `caller_error`；修正命令后仍须遵守原预算与调用身份。此合同随新实例和新执行身份冻结，不能热改旧冻结实例。
 
-这里在 G1 代码绑定上只增加 G2 的 Local/节点输出路径；其他 provider、全局及跨节点输入、
-历史正文复用与代码审阅/交付视图尚未完成，G3 恢复及 fork/archive/delete 消费方仍待实现。
+代码审阅视图保留原 compiler 引用、UUID 和七字段 `code_version`，仅选中消费时物化导出；
+启动后须确认 native、bridge 及适用后端已停止才清理导出，未知则保留。交付沿既有 wire version 2
+和 `object_refs` 以零字节挂载点及只读 bind 读取原件。Cov 保留既有
+`runs_root/model_run<run_id>.pkl` 成果原件。新 TCAD command 采集将科学输出、既有科学
+`tcad_log` 及 facts 首写到既有节点/call 输出目录，manifest、transport-derived 文件、bindings
+和传输 spool 保持私有。新 socket preparation 在准入或提交前明确不支持，准确旧 call 查询仍受支持。
+
+新引用及 Git 代码的 G3 恢复和 fork/archive/delete 消费方仍待完成。
 现有归档/分支规则不能证明新 Git 调用具备完整生命周期。真实 default native、registered Cov、
-Codex/命名空间及 replay leaf 验收留到 G3 后由用户独立 CLI 进行；当前源码改动不授科学资格，
+Codex/命名空间、replay/model、solver 及 SSH 验收留到 G3 后由用户独立 CLI 进行；当前源码改动不授科学资格，
 也不构成真实 sandbox 保证。
 
 科学代码可生成可选的 `artifacts/result.json`：

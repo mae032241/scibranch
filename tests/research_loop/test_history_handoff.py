@@ -79,6 +79,9 @@ MARKED = f'[retained implementation]({REUSED}#reuse-implementation)'
 
 
 def test_real_scientific_route_reuses_only_selected_file_without_ancestry(scene, monkeypatch):
+    from test_direct_input_bindings import stopped_seals
+    from scidiscovery.research_loop import originals
+    stopped_seals(monkeypatch)
     def execute(root, step):
         role = ('H', 'W', 'A', 'H', 'W', 'A')[step - 1]
         job = contracts.read(root / 'jobs' / f'{step:03d}.json')
@@ -87,7 +90,10 @@ def test_real_scientific_route_reuses_only_selected_file_without_ancestry(scene,
         files = {'candidate.py': 'def predict(): return 42\n', 'unused.txt': 'Private to old direct handoff'} if step == 2 else None
         if step == 5:
             work = contracts.workspace(root, step)
-            assert (work / REUSED).read_text() == 'def predict(): return 42\n'
+            declared=[row for row in job['direct_materials'] if row['path']==REUSED]
+            assert len(declared)==1
+            assert originals.material_path(root,declared[0]).read_text() == 'def predict(): return 42\n'
+            assert not (work / REUSED).exists()
             assert not (work / Path(REUSED).parent / 'unused.txt').exists()
             assert [ref['path'] for ref in job['direct_refs']] == ['inputs/parents/004/conclusion.json']
             view = contracts.read(work / 'science-task.json')
@@ -112,15 +118,21 @@ def test_real_scientific_route_reuses_only_selected_file_without_ancestry(scene,
     assert controller.run(scene)['status'] == 'finish'
 
 
-def test_structured_selection_inherits_and_deduplicates_without_ancestry(scene):
+def test_structured_selection_inherits_and_deduplicates_without_ancestry(scene,monkeypatch):
+    from test_direct_input_bindings import stopped_seals
+    stopped_seals(monkeypatch)
     source(scene)
     finish(scene, 3, 'A', [2], text=MARKED + ' ' + MARKED, selection=['W002-I001', 'W002-I001'])
     job, work, _ = finish(scene, 4, 'H', [3], text=MARKED)
-    assert len(job['selected_inputs']) == 1 and (work / REUSED).is_file()
+    from scidiscovery.research_loop import originals
+    assert len(job['selected_inputs']) == 1
+    selected=job['selected_inputs'][0]['material']
+    assert originals.material_path(scene,selected)==contracts.workspace(scene,2)/'artifacts/candidate.py'
+    assert not (work/REUSED).exists()
     successor = contracts.build_job(scene, 5, 'W', [4])
     assert len(successor['selected_inputs']) == 1
     assert len([row for row in successor['direct_materials'] if row['path'] == REUSED]) == 1
-    assert not list((contracts.workspace(scene, 5) / 'inputs').rglob('unused.txt'))
+    assert not any(row['path'].endswith('/unused.txt') for row in successor['direct_materials'])
 
 
 @pytest.mark.parametrize('target', [

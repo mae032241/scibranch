@@ -195,7 +195,7 @@ def code_selection(config, path, *, resolved=None, experiment_directory=None):
 
 
 def input_reference(config, path):
-    """Check the HEAD input binding, then fingerprint this call's frozen slot."""
+    """Resolve the exact task binding before fingerprinting its actual source."""
     from . import contracts as c, originals
     from .experiments import IntegrityError, proof
     path=Path(path).absolute()
@@ -211,16 +211,14 @@ def input_reference(config, path):
         if len(matches)!=1:raise IntegrityError('Scientific input binding is ambiguous')
         material=next(iter(matches.values()))
         original=originals.material_path(root,dict(material,source=material.get('source',str(work/material['path']))))
-        if proof(original)['size_bytes']!=material['size_bytes']:
-            raise IntegrityError('Scientific input differs from its original bound size')
-        # HEAD prepares an independent frozen scientific read slot. Its inode is
-        # deliberately distinct from the source's inode and absent from job rows.
-        slot=originals.resolve_root_ref(root,dict(path=str(work/material['path']),size_bytes=material['size_bytes']))
-        actual=slot if path==work/material['path'] else original
-        reference=proof(actual)
+        reference=proof(original)
         if reference['size_bytes']!=material['size_bytes']:
-            raise IntegrityError('Scientific input differs from its frozen read slot')
+            raise IntegrityError('Scientific input differs from its original bound size')
         return reference
     if not path.is_relative_to(work) or path==work or path.is_relative_to(work/'inputs'):
         raise IntegrityError('Scientific input is outside this task bound inputs or current workspace files')
+    from . import shared_input_views
+    if any(path.is_relative_to(work/'work'/name) for name in shared_input_views.DYNAMIC_ROOTS):
+        original=shared_input_views.logical_original(root,job,path)
+        if original is not None:return proof(original)
     return proof(path)

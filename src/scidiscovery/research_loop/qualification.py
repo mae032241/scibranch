@@ -62,8 +62,13 @@ def _check(identity, *, source=None):
     if source is not None:
         _source_path(source, identity)
         return
-    if _identity(identity['path']) != identity:
+    if (set(identity) not in ({'path','size_bytes'},{'path','size_bytes','file_stat'})
+            or _identity(identity['path'])!={key:identity[key] for key in ('path','size_bytes')}):
         raise IntegrityError('Source original identity changed')
+    if 'file_stat' in identity:
+        from . import originals
+        try:originals._check_identity(_file(identity['path']),identity)
+        except ValueError as error:raise IntegrityError('Source original identity changed') from error
 
 
 def _ref(root, path, *, source=None):
@@ -139,14 +144,14 @@ def source_configuration(public_root, declarations, originals):
 
 
 def freeze_sources(root, configured, originals, globals_, *, policy, context, source_kind):
-    """Retain declared bytes and the explicit original-to-global-copy mapping."""
+    """Freeze declared locators and the exact global source mapping."""
     root = Path(root).resolve()
     declarations = []
     for index, row in enumerate(configured):
-        path = root / 'source-provenance' / 'originals' / f'{index:06d}'
         _check(row['origin'])
-        c._bind_original(Path(row['origin']['path']), path, policy=policy, context=context, root=root, size_bytes=row['origin']['size_bytes'], source_kind=source_kind)
-        declarations.append({**row, 'retained': _ref(root, path)})
+        # The existing retained locator may name the supplied ordinary original.
+        # External data remain owned by their supplier and are never chmodded.
+        declarations.append({**row, 'retained': dict(row['origin'])})
     globals_map = []
     for original, material in zip(originals, globals_):
         original = Path(original).resolve()
@@ -225,8 +230,11 @@ def _inputs(root, job):
     # bytes from another path do not establish that membership or its origin.
     seals = [(edge['step'], _read(root, edge['seal'])) for edge in edges if edge['kind'] == 'producer']
     for material in job['direct_materials']:
-        matches = [(step, seal) for step, seal in seals if material in seal['materials']]
-        same_origin = [(step, row) for step, seal in seals for row in seal['materials'] if row['source'] == material['source']]
+        matches = [(step, seal) for step, seal in seals if any(
+            {key:value for key,value in row.items() if key!='file_stat'}==material
+            for row in seal['materials'])]
+        same_origin = [(step, {key:value for key,value in row.items() if key!='file_stat'})
+            for step, seal in seals for row in seal['materials'] if row['source'] == material['source']]
         for step, row in same_origin:
             if row == material:continue
             if (len(matches) != 1 or row['path'] == material['path']
@@ -243,22 +251,22 @@ def _inputs(root, job):
     return dict(version=1, step=job['step'], edges=edges, scope=SCOPE)
 
 
-def _declaration(root, sources, index, memo, *, public=False):
+def _declaration(root, sources, index, memo, *, public=False, verify_inputs=True):
     if index is None:
         return 'unknown'
-    key = ('declaration', index, public)
+    key = ('declaration', index, public, verify_inputs)
     if key in memo:
         return memo[key]
     row = sources['declarations'][index]
     retained = root / row['retained']['path']
-    _check({**row['retained'], 'path': str(retained)})
-    if public:
+    if verify_inputs:_check({**row['retained'], 'path': str(retained)})
+    if public and verify_inputs:
         _check(row['origin'])  # Native reads this original, not its retained copy.
     memo[key] = row['restriction']
     return row['restriction']
 
 
-def _restriction(root, document, active, memo, sources):
+def _restriction(root, document, active, memo, sources, *, verify_inputs=True):
     key = document['step']
     if key in active:
         return 'unknown'
@@ -269,31 +277,33 @@ def _restriction(root, document, active, memo, sources):
     for edge in dependency_sources(None, document['edges']):
         if edge['kind'] == 'global':
             material = edge['material']
-            if c.regular(root / material['source']).stat().st_size != material['size_bytes']:
+            if verify_inputs and c.regular(root / material['source']).stat().st_size != material['size_bytes']:
                 raise IntegrityError('Bound global original changed')
-            states.append(_declaration(root, sources, edge['declaration'], memo))
+            states.append(_declaration(root, sources, edge['declaration'], memo,verify_inputs=verify_inputs))
         elif edge['kind'] == 'declaration':
-            states.append(_declaration(root, sources, edge['declaration'], memo, public=True))
+            states.append(_declaration(root, sources, edge['declaration'], memo,public=True,verify_inputs=verify_inputs))
         elif edge['kind'] == 'producer':
             from . import originals
             if 'origin_identity' in edge['seal'] or originals.inherited(root, edge['step']):
                 source = originals.for_origin(root, edge['seal']['origin_identity'], step=edge['step']) if 'origin_identity' in edge['seal'] else originals.node(root, edge['step'])
-                c.validate_original(source)
-                states.append(original_status(source)['restriction'])
+                c.validate_original(source,controls_only=True)
+                states.append(original_status(source,controls_only=True)['restriction'])
                 continue
             seal = _read(root, edge['seal'])
             step = edge['step']
             job_path = root / 'jobs' / f'{step:03d}.json'
             record = c.host_record(c.workspace(root, step))
-            raw = c.regular(c._execution_raw(root, step))
-            raw_ref = dict(seal['raw_ref'])
-            if 'file_stat' in raw_ref:
-                from . import experiments
-                if raw_ref.pop('file_stat') != experiments.proof(raw)['file_stat']:
-                    raise IntegrityError('Source producer differs from its exact scientific seal')
-            if (seal['job_ref'] != c.record_ref(c.regular(job_path))
-                    or seal['result_ref'] != c.file_ref(c.regular(record / 'result.json'))
-                    or raw_ref != c.file_ref(raw)):
+            native_record=Path(seal['raw_ref']['path']).parent
+            if not native_record.is_relative_to(root/'native-evidence'/f'{step:03d}'):
+                raise IntegrityError('Source producer lost its exact native attempt')
+            intent=c.read(c.regular(native_record/'native-intent.json'))
+            outcome=c.read(c.regular(native_record/'native-outcome.json'))
+            raw_ref={key:seal['raw_ref'][key] for key in ('path','size_bytes')}
+            if (seal['job_ref']!=c.record_ref(c.regular(job_path))
+                    or seal['result_ref']!=c.file_ref(c.regular(record/'result.json'))
+                    or intent.get('task_ref')!=seal['job_ref'] or outcome.get('raw_ref')!=raw_ref
+                    or raw_ref['path']!=str(native_record/'science-output.json')
+                    or type(outcome.get('returncode')) is not int or outcome['returncode']!=0):
                 raise IntegrityError('Source producer differs from its exact scientific seal')
             parent = c.read(job_path)
             ref = seal.get('source_provenance')
@@ -301,13 +311,13 @@ def _restriction(root, document, active, memo, sources):
                 states.append('unknown')
                 continue
             proof = _read(root, ref)
-            expected = _output(root, parent, seal, managed_coverage=proof.get('managed_input_coverage'))
+            expected = _output(root,parent,seal,managed_coverage=proof.get('managed_input_coverage'),controls_only=True)
             if proof != expected:
                 raise IntegrityError('Source proof differs from its original producer')
             inputs = parent.get('source_provenance')
             validate_inputs(root, parent)
             state = (status(root, parent)['restriction'] if parent.get('fork_source') is not None else
-                _restriction(root, _read(root, inputs), active, memo, sources) if inputs else 'unknown')
+                _restriction(root,_read(root,inputs),active,memo,sources,verify_inputs=False) if inputs else 'unknown')
             states.append(inherited_restriction([state, proof['additional_input_restriction']]))
         else:
             states.append('unknown')
@@ -400,7 +410,9 @@ def _original_inputs(source, job, *, _active=None):
         bound_seals.append(seal)
     unknown = [row for row in document['edges'] if row['kind'] == 'unknown']
     for material in job['direct_materials']:
-        matches = [seal for seal in bound_seals if material in seal['materials']]
+        matches = [seal for seal in bound_seals if any(
+            {key:value for key,value in row.items() if key!='file_stat'}==material
+            for row in seal['materials'])]
         if len(matches) != 1 and not any(row.get('material') == material for row in unknown) and not job.get('formal_review'):
             raise IntegrityError('Original material has no exact declared producer')
     if any(row['kind'] not in {'global', 'declaration', 'producer', 'unknown'} for row in document['edges']):
@@ -408,7 +420,7 @@ def _original_inputs(source, job, *, _active=None):
     return copy.deepcopy(document)
 
 
-def validate_original(source, job, seal):
+def validate_original(source,job,seal,*,controls_only=False):
     """Verify original relationships without issuing a new qualification."""
     _original_inputs(source, job)
     ref = seal.get('source_provenance')
@@ -418,12 +430,12 @@ def validate_original(source, job, seal):
         return
     proof = _source_read(source, ref)
     expected = _output(source.storage_root, job, seal,
-        managed_coverage=proof.get('managed_input_coverage'), source=source)
+        managed_coverage=proof.get('managed_input_coverage'),source=source,controls_only=controls_only)
     if proof != expected:
         raise IntegrityError('Original output provenance differs from its exact sealed subject')
 
 
-def _original_input_status(source, *, active=None):
+def _original_input_status(source,*,active=None,controls_only=False):
     from . import originals
     active = set() if active is None else active
     key = (originals.identity_key(source.origin_identity), source.step)
@@ -433,7 +445,7 @@ def _original_input_status(source, *, active=None):
     if job.get('fork_source') is not None:
         original = originals.source_for_ref(source, job['fork_source']['job'])
         originals.resolve_ref(original, job['fork_source']['job'])
-        return _original_input_status(original, active={*active, key})
+        return _original_input_status(original,active={*active,key},controls_only=controls_only)
     settings = originals.source_settings(source)
     source_ref = settings.get('source_provenance')
     sources = _source_read(source, source_ref) if source_ref is not None else dict(declarations=[])
@@ -445,25 +457,26 @@ def _original_input_status(source, *, active=None):
                 states.append('unknown')
             else:
                 declaration = sources['declarations'][index]
-                retained = originals.resolve_ref(source, declaration['retained'])
-                actual = c.file_ref(retained)
-                if any(actual[field] != declaration['origin'][field] for field in ('size_bytes',)):
-                    raise IntegrityError('Original public snapshot differs from its declaration')
+                if not controls_only:
+                    retained = originals.resolve_ref(source, declaration['retained'])
+                    actual = c.file_ref(retained)
+                    if any(actual[field] != declaration['origin'][field] for field in ('size_bytes',)):
+                        raise IntegrityError('Original public snapshot differs from its declaration')
                 states.append(declaration['restriction'])
         elif edge['kind'] == 'producer':
             parent = originals.dependency(source, edge['step'], seal_ref=control_reference(source.original_root, edge['seal'], source=source))
-            states.append(original_status(parent, active={*active, key})['restriction'])
+            states.append(original_status(parent,active={*active,key},controls_only=controls_only)['restriction'])
         else:
             states.append('unknown')
     return dict(restriction=inherited_restriction(states), scope=SCOPE)
 
 
-def original_status(source, *, active=None):
+def original_status(source,*,active=None,controls_only=False):
     from . import originals
     job = originals.source_job(source)
     seal = c.read(originals.source_record(source, 'result-identity.json'))
-    validate_original(source, job, seal)
-    input_status = _original_input_status(source, active=active)
+    validate_original(source,job,seal,controls_only=controls_only)
+    input_status = _original_input_status(source,active=active,controls_only=controls_only)
     states = [input_status['restriction']]
     output = _source_read(source, seal['source_provenance']) if seal.get('source_provenance') else None
     if output is not None:
@@ -471,7 +484,7 @@ def original_status(source, *, active=None):
     return dict(restriction=inherited_restriction(states), scope=SCOPE)
 
 
-def _output(root, job, seal, *, managed_coverage=None, source=None):
+def _output(root,job,seal,*,managed_coverage=None,source=None,controls_only=False):
     additional_inputs = False
     if seal.get('observations') is not None:
         root = Path(root).resolve()
@@ -488,18 +501,20 @@ def _output(root, job, seal, *, managed_coverage=None, source=None):
         policy = originals.source_settings(source) if source is not None else configuration_updates.for_job(root, job)
         if policy.get('history_observer') is not None:
             from . import history
-            covered = history.observer_input_sources(root, job, observation, source=source)
+            covered = history.observer_input_sources(root,job,observation,source=source,controls_only=controls_only)
             observer_unknown = covered is None or not covered['complete']
         additional_inputs = bool(observation.get('managed_calls')) or observer_unknown
         if managed_coverage is not None:
             from . import history
-            history.validate_input_coverage(root, job, observation.get('managed_calls', []), managed_coverage, source=source)
+            history.validate_input_coverage(root,job,observation.get('managed_calls',[]),managed_coverage,
+                source=source,controls_only=controls_only)
             additional_inputs = not all(row['complete'] for row in managed_coverage) or observer_unknown
     elif managed_coverage is not None:
         raise IntegrityError('Managed input coverage has no original observation')
     return dict(version=1, step=job['step'], job_ref=seal['job_ref'],
                 result_ref=seal['result_ref'], raw_ref={key:seal['raw_ref'][key] for key in ('path','size_bytes')},
-                materials=copy.deepcopy(seal['materials']),
+                materials=[{key:value for key,value in row.items() if key!='file_stat'}
+                    for row in seal['materials']],
                 inputs=job.get('source_provenance'), derivation='all_frozen_task_inputs',
                 observations=seal.get('observations'),
                 additional_input_restriction='unknown' if additional_inputs else 'clear',
@@ -522,13 +537,13 @@ def seal_outputs(root, job, seal):
     return _save(root, path, _output(root, job, seal, managed_coverage=coverage))
 
 
-def validate_outputs(root, job, seal, *, source=None):
+def validate_outputs(root,job,seal,*,source=None,controls_only=False):
     if source is not None:
-        return validate_original(source, job, seal)
+        return validate_original(source,job,seal,controls_only=controls_only)
     ref = seal.get('source_provenance')
     if ref is not None:
         proof = _read(root, ref)
-        if proof != _output(root, job, seal, managed_coverage=proof.get('managed_input_coverage')):
+        if proof != _output(root,job,seal,managed_coverage=proof.get('managed_input_coverage'),controls_only=controls_only):
             raise IntegrityError('Frozen output source proof changed')
     if job.get('source_provenance') is not None and ref is None:
         raise IntegrityError('Output source proof is missing')
@@ -540,36 +555,40 @@ def status(root, job):
     if job.get('fork_source') is not None:
         from . import originals
         validate_inputs(root, job)
-        result = _original_input_status(originals.selected_source(root))
+        result = _original_input_status(originals.selected_source(root),controls_only=True)
         return dict(result, direct_input_count=len(_inputs(root, job)['edges']))
     ref = job.get('source_provenance')
     if ref is None:
         return dict(restriction='unknown', scope=SCOPE)
     validate_inputs(root, job)
     document = _read(root, ref)
-    return dict(restriction=_restriction(root, document, set(), {}, _sources(root)), direct_input_count=len(document['edges']), scope=SCOPE)
+    return dict(restriction=_restriction(root,document,set(),{},_sources(root),verify_inputs=False), direct_input_count=len(document['edges']), scope=SCOPE)
 
 
 def output_status(root, step, material=None):
     """Read exact sealed subject facts; this is not an execution admission gate."""
     root = Path(root).resolve()
     from . import originals
+    if material is not None:
+        material=c._public_materials(root,[material])[0]
     if originals.inherited(root, step):
         source = originals.node(root, step)
-        c.validate_original(source)
+        c.validate_original(source,controls_only=True)
         seal = c.read(originals.source_record(source, 'result-identity.json'))
-        if material is not None and material not in seal['materials']:
+        if material is not None and not any({key:value for key,value in row.items() if key!='file_stat'}==material for row in seal['materials']):
             raise IntegrityError('Material is not an exact original of the named producer')
-        return dict(original_status(source), missing_reason=None)
+        if material is not None:c._public_materials(root,[material],source=source)
+        return dict(original_status(source,controls_only=True),missing_reason=None)
     work = c.workspace(root, step)
-    c.validate(work)
-    job = c.read(root / 'jobs' / f'{step:03d}.json')
-    seal = c.read(c.host_record(work) / 'result-identity.json')
-    if material is not None and material not in seal['materials']:
+    from . import history
+    job,_,seal,_=history._source(root,step)
+    if material is not None and not any({key:value for key,value in row.items() if key!='file_stat'}==material for row in seal['materials']):
         raise IntegrityError('Material is not an exact original of the named producer')
+    if material is not None:c._public_materials(root,[material])
     ref = seal.get('source_provenance')
     if ref is None:
         return dict(restriction='unknown', missing_reason='legacy_producer_without_source_proof', scope=SCOPE)
+    validate_outputs(root,job,seal,controls_only=True)
     proof = _read(root, ref)
     state = inherited_restriction([status(root, job)['restriction'], proof['additional_input_restriction']])
     return dict(restriction=state, missing_reason=proof['missing_reason'], scope=SCOPE)

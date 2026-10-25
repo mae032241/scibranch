@@ -75,7 +75,8 @@ def sources(root, fact, candidate_id, *, source=None):
         source = originals.node(root, fact['managed_calls'][0]['scope']['step']) if fact.get('managed_calls') else None
     raw_id = candidate_refs.original_id(source.origin_identity, candidate_id) if source is not None else candidate_id
     def retained(proof):
-        bound=dict(path=proof['snapshot'],size_bytes=proof['size_bytes'])
+        bound=dict(path=proof['snapshot'],size_bytes=proof['size_bytes'],
+            **{key:proof[key] for key in ('file_stat',) if key in proof})
         return originals.resolve_ref(source,bound)
     matches = [(row, item) for row in fact.get('managed_calls', [])
         for item in declarations(row)
@@ -94,21 +95,24 @@ def sources(root, fact, candidate_id, *, source=None):
         raise ValueError('Managed candidate differs from declared sealed result')
     accepted = c.read(retained(row['accepted']))
     completed = c.read(retained(row['completed']))
-    if 'entry' not in accepted:
+    if 'entry' not in accepted and 'code_version' not in accepted:
         raise ValueError('Managed delivery requires retained experiment inputs')
     def proof(item):
         if item.get('retention') != 'archived':
             raise ValueError('Managed delivery original is not archived')
-        return dict(path=item['snapshot'], size_bytes=item['size_bytes'])
+        return dict(path=item['snapshot'],size_bytes=item['size_bytes'],
+            **{key:item[key] for key in ('file_stat',) if key in item})
     # Input names come from the accepted snapshot inventory, never basename matching.
     objects = {}
     for item in accepted['snapshot_files']:
-        matches = [p for p in row['originals'] if Path(source.original_root) / p['path'] == Path(accepted['cwd']) / item['name']]
+        matches = [p for p in row['originals'] if Path(source.original_root) / p['path'] == (Path(item['path']) if 'code_version' in accepted
+                else Path(accepted['cwd']) / item['name'])]
         if len(matches) != 1 or any(matches[0][key] != item[key] for key in ('size_bytes',)):
             raise ValueError('Managed delivery input differs from accepted snapshot')
         objects['inputs/' + item['name']] = proof(matches[0])
+    selected_name=declaration['artifact'].removeprefix('artifacts/')
     for item in row['outputs']:
-        objects['outputs/' + item['name']] = proof(item)
+        if item['name']==selected_name:objects['outputs/' + item['name']] = proof(item)
     completed_declarations=completed['result']['candidates']
     if sum(item==declaration for item in completed_declarations)!=1:
         raise ValueError('Managed candidate differs from completed result')
@@ -116,6 +120,9 @@ def sources(root, fact, candidate_id, *, source=None):
     return dict(candidate_id=candidate_id, status='audit_pending',
         ledger=proof(row['completed']), objects=objects,
         context=dict(kind='managed_local_result', call_id=row['call_id'],
-            replay=dict(entry=accepted['entry'], arguments=accepted['command'][accepted['script_index'] + 1:]),
+            replay=dict(entry=accepted.get('entry',accepted.get('code_version',{}).get('entry')),
+                arguments=accepted['command'][accepted['script_index'] + 1:]),
+            **(dict(source_code_version=dict(accepted['code_version']),
+                accepted={key:row['accepted'][key] for key in ('path','size_bytes')}) if 'code_version' in accepted else {}),
             candidate=declaration, metrics=completed['result']['metrics'],
             limitation='Declared public measurements; scientific validity and target optimality are not qualified.'))

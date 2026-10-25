@@ -61,7 +61,7 @@ def observer_config(value):
     return result
 
 
-def observer_input_sources(root, job, observation, *, source=None):
+def observer_input_sources(root,job,observation,*,source=None,controls_only=False):
     """Only the retained trusted contract/view; display coverage grants nothing."""
     from . import execution_inputs, qualification as q
     from . import originals
@@ -78,19 +78,24 @@ def observer_input_sources(root, job, observation, *, source=None):
         return None  # Optional adapter failure remains unknown, never implicit empty.
     if source is not None:
         logical_root = Path(source.original_root)
-        originals.source_raw(source)
+        if not controls_only:originals.source_raw(source)
         record = source.native_record
-        raw = logical_root / record / 'science-output.json' if record else Path(c._execution_raw(logical_root, job['step']))
+        raw=(Path(observation['binding']['source_ref']['path']) if controls_only else
+            logical_root/record/'science-output.json' if record else Path(c._execution_raw(logical_root,job['step'])))
     else:
         logical_root = Path(root)
-        raw = Path(c._execution_raw(root, job['step']))
+        raw=(Path(observation['binding']['source_ref']['path']) if controls_only else Path(c._execution_raw(root,job['step'])))
+    if not raw.is_relative_to(logical_root):raise q.IntegrityError('Observer raw source escaped its exact original instance')
+    raw_ref=(dict(path=raw.relative_to(logical_root).as_posix(),
+        size_bytes=observation['binding']['source_ref']['size_bytes']) if controls_only
+        else q._ref(root,raw,source=source))
     if (not isinstance(original, dict) or set(original) != {'contract','job','raw','view'}
             or original['contract'] != contract
             or original['job'] != q._ref(root, logical_root / 'jobs' / f'{job["step"]:03d}.json', source=source)
-            or q._read(root, original['job'], source=source) != job or original['raw'] != q._ref(root, raw, source=source)
+            or q._read(root, original['job'], source=source) != job or original['raw'] != raw_ref
             or dict(path=str(raw),size_bytes=original['raw']['size_bytes']) != observation['binding']['source_ref']):
         raise q.IntegrityError('Observer source view differs from its original task')
-    return execution_inputs.validate_source_view(root, job, original['view'], source=source)
+    return execution_inputs.validate_source_view(root,job,original['view'],source=source,controls_only=controls_only)
 
 
 def handle(row):
@@ -120,7 +125,7 @@ def resolve(root, target, receipts, *, current=None):
     row = next((row for row in rows if handle(row) == target), None)
     if row is None:
         raise ValueError('Historical implementation is not an exact sealed deliverable')
-    return row
+    return c._public_materials(root,[row])[0]
 
 
 def _proof(root, source, *, context=None, source_kind='mutable'):
@@ -131,9 +136,11 @@ def _proof(root, source, *, context=None, source_kind='mutable'):
     if not isinstance(relative,str):raise ValueError('Observer evidence path is not a string')
     snapshot=saved.get('snapshot',relative) if saved is not None else relative
     path = root / snapshot
-    if (Path(relative).is_absolute() or '..' in Path(relative).parts
-            or Path(snapshot).is_absolute() or '..' in Path(snapshot).parts or path.resolve() != path):
+    if (not isinstance(snapshot,str) or '..' in Path(relative).parts
+            or '..' in Path(snapshot).parts or path.resolve() != path):
         raise ObserverIntegrityError('Observer evidence must be an exact instance original')
+    if Path(snapshot).is_absolute() and (saved is None or 'file_stat' not in saved):
+        raise ObserverIntegrityError('External observer evidence requires its saved identity')
     c.regular(path)
     size = path.stat().st_size
     from . import experiments
@@ -149,11 +156,9 @@ def _proof(root, source, *, context=None, source_kind='mutable'):
         original=experiments.proof(path,context=context)
         return dict(path=relative,**{key:original[key] for key in ('size_bytes','file_stat')},
             retention='archived',snapshot=relative)
-    from . import shared_originals, storage_policy as storage
-    limits=storage.for_path(root,path)
-    snapshot=shared_originals.retain(root,path,size_bytes=size,source_kind=source_kind,context=context,policy=limits)
-    return dict(path=relative, size_bytes=size, retention='archived',
-                snapshot=snapshot.relative_to(root).as_posix())
+    original=experiments.proof(path,context=context)
+    return dict(path=relative,**{key:original[key] for key in ('size_bytes','file_stat')},
+        retention='archived',snapshot=relative)
 
 
 def source_control_ref(source, relative):
@@ -184,7 +189,7 @@ def _retained_original(root, row, proof):
 
 def _snapshot(proof):
     path=Path(proof.get('snapshot', ''))
-    if (proof.get('retention')!='archived' or path.is_absolute() or '..' in path.parts
+    if (proof.get('retention')!='archived' or (path.is_absolute() and 'file_stat' not in proof) or '..' in path.parts
             or path.as_posix()!=proof['snapshot'] or not path.parts):
         raise ObserverIntegrityError('Archived original has no exact snapshot path')
     return path.as_posix()
@@ -216,18 +221,27 @@ def read_adapter(config, request):
 
 
 
-def _managed_config(job,root=None):
+def _managed_config(job,root=None,*,controls_only=False):
     if job.get('formal_review'):return None
+    record=None
+    if root is not None:
+        if controls_only:
+            seal_path=Path(root)/'native-evidence'/f'{job["step"]:03d}'/'result-identity.json'
+            record=(Path(c.read(c.regular(seal_path))['raw_ref']['path']).parent
+                if seal_path.exists() else Path(root)/'native-evidence'/f'{job["step"]:03d}')
+            origin=Path(root)/'native-evidence'/f'{job["step"]:03d}'
+            if not record.is_relative_to(origin):raise ObserverIntegrityError('Managed source has no exact sealed native attempt')
+        else:record=execution.record(root,job['step'])
     configured = ((job.get('search') or {}).get('breadth') or 'experiment_mode' in job and
         (job['experiment_mode']=='local' and job['role']=='W'
-         or root is not None and (execution.record(root,job['step'])/'experiment-config.json').exists()))
+         or record is not None and (record/'experiment-config.json').exists()))
     return dict(adapter_ref='registered-originals-v1') if configured else None
 
 
 def _managed_proof(root,path,original,*,context=None,verify=True):
     path=Path(path)
     if Path(original['path'])==path:
-        relative=path.relative_to(root).as_posix()
+        relative=path.relative_to(root).as_posix() if path.is_relative_to(root) else str(path)
         saved=dict(path=relative,**{key:original[key] for key in ('size_bytes','file_stat') if key in original})
         if not verify:return dict(saved,retention='archived',snapshot=relative)
         return _proof(root,saved,context=context,source_kind='managed_frozen')
@@ -257,14 +271,14 @@ def _execution_interface(root, accepted):
     return config['execution_interface']
 
 
-def managed_status(root, row, *, context=None):
+def managed_status(root, row, *, context=None, verify_files=True):
     """One immutable terminal authority shared with Worker delivery and history."""
     from . import experiments
     from . import originals
     step = (row.get('scope') or {}).get('step')
     if type(step) is int and step > 0 and originals.inherited(root, step):
         source = originals.node(root, step)
-        validate_managed_original(source, originals.source_job(source), [row])
+        validate_managed_original(source,originals.source_job(source),[row],controls_only=not verify_files)
         return row['status']
     for name in ('accepted','completed','terminal','observation','retirement'):
         if row.get(name) is not None:_validate_proof(root,row[name],context=context)
@@ -277,7 +291,7 @@ def managed_status(root, row, *, context=None):
             raise ObserverIntegrityError('Retirement differs from the archived accepted call')
         try:
             experiments.verify_retirement(value,lambda item:root/_retained_original(root,row,item)['snapshot'],
-                interface=_execution_interface(root,accepted),context=context)
+                interface=_execution_interface(root,accepted),context=context,verify_files=verify_files)
         except (ValueError,OSError,KeyError,TypeError) as error:
             raise ObserverIntegrityError('Archived permanent retirement proof changed') from error
         return 'not_submitted'
@@ -293,7 +307,7 @@ def managed_status(root, row, *, context=None):
         try:
             return experiments.verify_observation(value,lambda proof:
                 root/_retained_original(root,row,proof)['snapshot'],interface=interface,context=context,
-                verify_files=not ('code_version' in accepted and experiments._local_original_observation(
+                verify_files=verify_files and not ('code_version' in accepted and experiments._local_original_observation(
                     dict(execution_interface=interface),value)))
         except (ValueError,OSError,KeyError,TypeError) as error:
             raise ObserverIntegrityError('Managed execution observation original changed') from error
@@ -312,7 +326,7 @@ def _managed_outputs(interface, completed, observed):
 
 
 @_job_storage
-def scientific_outputs(root, job, call):
+def scientific_outputs(root, job, call, *, verify_files=True):
     """Publish selected scientific assets from the full verified call archive."""
     from . import experiments, execution
     root=Path(root)
@@ -344,7 +358,9 @@ def scientific_outputs(root, job, call):
             result.append(dict(matches[0], path=matches[0]['snapshot'], name=descriptor.name,
                 origin_identity=source.origin_identity))
         return result
-    managed_status(root,call)  # All control originals remain mandatory and private.
+    managed_status(root,call,verify_files=verify_files)  # Control originals remain mandatory.
+    if not verify_files:
+        return [dict(row,path=row['snapshot']) for row in call.get('outputs',[])]
     if call.get('observation') is None:
         return call.get('outputs',[])
     accepted=c.read(c.regular(root/call['accepted']['snapshot']))
@@ -446,10 +462,10 @@ def managed_calls(root, job, *, context=None, call_ids=None):
     return result
 
 
-def validate_managed(root, job, rows, *, context=None):
+def validate_managed(root, job, rows, *, context=None, verify_files=True):
     from . import originals
     if originals.inherited(root, job['step']):
-        return validate_managed_original(originals.node(root, job['step']), job, rows)
+        return validate_managed_original(originals.node(root,job['step']),job,rows,controls_only=not verify_files)
     from . import breadth, generic_results
     from .protocol import stage_scope
     if not isinstance(rows,list):raise ObserverIntegrityError('Managed receipt list required')
@@ -477,12 +493,16 @@ def validate_managed(root, job, rows, *, context=None):
         direct=('code_version' in accepted and observed is not None
             and experiments._local_original_observation(dict(execution_interface=accepted['interface']),observed))
         unused=set()
-        if direct:
+        if not verify_files and observed is not None or direct:
             _,controls=experiments._observation_file_roles(observed,accepted,c.read(root/row['completed']['snapshot']))
-            unused={item['path'] for item in accepted.get('snapshot_files',[])}-controls
+            science,_=experiments._observation_file_roles(observed,accepted,c.read(root/row['completed']['snapshot']))
+            unused=({item['path'] for item in science}|{item['path'] for key in ('outputs','scientific_outputs')
+                for item in observed.get(key,[])}|({observed['scientific_source']['path']}
+                if observed.get('scientific_source') is not None else set()))-controls
         for proof in row.get('originals',[]):
             if str(root/proof['path']) not in unused:_validate_proof(root,proof,context=context)
-        for proof in row.get('outputs',[]):_validate_proof(root,proof,context=context)
+        if verify_files:
+            for proof in row.get('outputs',[]):_validate_proof(root,proof,context=context)
         if 'execution' in row:
             completed=c.read(root/row['completed']['snapshot'])
             observed=c.read(root/row['observation']['snapshot']) if row.get('observation') is not None else {}
@@ -516,7 +536,7 @@ def validate_managed(root, job, rows, *, context=None):
                     for key in ('size_bytes',)) for item,original in zip(row['originals'],originals))):
                 raise ObserverIntegrityError('Retirement native originals differ from the frozen receipt')
         if row['status'] not in {'known_success','known_failed','not_submitted','unknown'}:raise ObserverIntegrityError('Managed state differs')
-        if row['status']!=managed_status(root,row,context=context):
+        if row['status']!=managed_status(root,row,context=context,verify_files=verify_files):
             raise ObserverIntegrityError('Managed state differs from verified execution observation')
 
 
@@ -532,7 +552,7 @@ def _original_interface(source, accepted):
     return config['execution_interface']
 
 
-def validate_managed_original(source, job, rows):
+def validate_managed_original(source,job,rows,*,controls_only=False):
     """Verify retained call bindings/terminals without querying a provider."""
     from . import originals, experiments, breadth, generic_results
     job_ref = originals.original_ref(source, f'jobs/{job["step"]:03d}.json')
@@ -562,12 +582,12 @@ def validate_managed_original(source, job, rows):
         interface = _original_interface(source, accepted)
         if 'result_protocol' in row and row['result_protocol'] != generic_results.protocol(interface):
             raise ObserverIntegrityError('Inherited managed result protocol changed')
-        for proof in [*row.get('originals', []), *row.get('outputs', [])]:
-            proof_path(proof)
+        if not controls_only:
+            for proof in [*row.get('originals',[]),*row.get('outputs',[])]:proof_path(proof)
         status = 'unknown'
         if row.get('retirement') is not None:
             value = c.read(proof_path(row['retirement']))
-            experiments.verify_retirement(value, native_proof, interface=interface)
+            experiments.verify_retirement(value,native_proof,interface=interface,verify_files=not controls_only)
             status = 'not_submitted'
         elif row.get('completed') is not None:
             completed = c.read(proof_path(row['completed']))
@@ -575,7 +595,7 @@ def validate_managed_original(source, job, rows):
                 value = c.read(proof_path(row['observation']))
                 if not _same_original(source.original_root, value['accepted'], row['accepted']) or not _same_original(source.original_root, value['completed'], row['completed']):
                     raise ObserverIntegrityError('Inherited terminal differs from its exact accepted call')
-                status = experiments.verify_observation(value, native_proof, interface=interface)
+                status = experiments.verify_observation(value,native_proof,interface=interface,verify_files=not controls_only)
             elif interface.get('observation_version') is None:
                 terminal = c.read(proof_path(row['terminal'])) if row.get('terminal') else None
                 status = experiments.local_terminal_status(accepted, completed, terminal)
@@ -645,7 +665,7 @@ def managed_input_coverage(root, job, rows):
     return result
 
 
-def validate_input_coverage(root, job, rows, published, *, source=None):
+def validate_input_coverage(root,job,rows,published,*,source=None,controls_only=False):
     """Validate sealed refs/relations only; never recapture or upgrade coverage."""
     from . import execution_authority as authority, execution_inputs, qualification as q
     root = Path(source.original_root) if source is not None else Path(root).resolve()
@@ -653,6 +673,46 @@ def validate_input_coverage(root, job, rows, published, *, source=None):
         return q._read(root, ref, source=source)
     if not isinstance(published, list) or len(published) != len(rows):
         raise q.IntegrityError('Sealed managed input coverage omitted a call')
+    def saved_binding(accepted,published_binding):
+        # Match the five already-published control fields. This neither checks
+        # present admission/signatures nor opens aliases, scripts or packages.
+        if (not isinstance(published_binding,dict)
+                or set(published_binding)!={'subject','authority','request','decision','allocation'}):
+            raise q.IntegrityError('Sealed managed source control binding changed')
+        authority_ref=accepted.get('execution_authority')
+        if authority_ref is None:raise q.IntegrityError('Sealed managed source lost its original authority control')
+        q._check(authority_ref,source=source)
+        authority_path=Path(authority_ref['path'])
+        authorization=(c.read(q._source_path(source,authority_ref)) if source is not None
+            else c.read(c.regular(authority_path)))
+        request_ref=authorization['request'];request=read(request_ref)
+        allocation_ref=authorization['allocation'];allocation=read(allocation_ref)
+        decision_ref=authorization['decision'];decision=read(decision_ref)
+        ref_at=lambda path:q._ref(root,path,source=source)
+        expected=dict(subject=request['subject'],authority=ref_at(authority_path),
+            request=request_ref,decision=decision_ref,allocation=allocation_ref)
+        call=accepted['call_id'];attempt=accepted.get('native_attempt') or {};number=attempt.get('number')
+        if type(number) is not int or not 0<=number<10000:
+            raise q.IntegrityError('Sealed managed source native attempt changed')
+        native_record=root/'native-evidence'/f'{job["step"]:03d}'
+        if number:native_record=native_record/'continuations'/f'{number:03d}'
+        directory=root/'execution-authority/requests'/Path(request_ref['path']).parent.name
+        bound=allocation['binding'];subject=request['subject']
+        if (published_binding!=expected or authority_path!=directory/'authorization.json'
+                or request_ref!=ref_at(directory/'request.json')
+                or decision_ref!=ref_at(directory/'decision.json') or decision['request']!=request_ref
+                or allocation_ref!=ref_at(root/'execution-authority/calls'/call/'allocation.json')
+                or allocation['call_id']!=call or request['call_id']!=call
+                or request['job']!=ref_at(root/'jobs'/f'{job["step"]:03d}.json')
+                or accepted['scope']['job_ref']!=dict(path=str(root/'jobs'/f'{job["step"]:03d}.json'))
+                or any(authorization.get(key)!=accepted.get(key) for key in ('scope','native_attempt','interface','call_id'))
+                or any(bound.get(key)!=accepted.get(key) for key in ('scope','native_attempt','interface'))
+                or bound['subject']!=subject or bound['review']!=request['review']
+                or request['native_intent']!=ref_at(native_record/'native-intent.json')
+                or allocation['native_intent']!=request['native_intent']
+                or read(request['native_intent'])['task_ref']!=q.control_reference(root,request['job'])):
+            raise q.IntegrityError('Sealed managed source differs from its original call controls')
+        return subject
     verified_compilers = set()
     for row, value in zip(rows, published):
         if source is None:_validate_proof(root, row['accepted'])
@@ -671,6 +731,42 @@ def validate_input_coverage(root, job, rows, published, *, source=None):
         if row['status'] not in {'known_success','known_failed'}:
             raise q.IntegrityError('Nonterminal or not-submitted inputs have no complete coverage')
         accepted = read(dict(path=row['accepted']['snapshot'], size_bytes=row['accepted']['size_bytes']))
+        if controls_only:
+            keys={'call_id','accepted_ref','complete','missing_reason'}
+            subject=None
+            if 'input_sources' in value:
+                keys.add('input_sources')
+                if (accepted.get('input_sources') is None
+                        or value['input_sources']!=accepted['input_sources']['contract']):
+                    raise q.IntegrityError('Sealed declared-input control contract changed')
+                if accepted.get('execution_authority') is not None:
+                    keys.add('binding');subject=saved_binding(accepted,value.get('binding'))
+            else:
+                keys.update(('binding','compiler_ref'))
+                if 'client_binding' in value:keys.add('client_binding')
+                subject=saved_binding(accepted,value.get('binding'))
+            if set(value)!=keys or value['missing_reason'] is not None:
+                raise q.IntegrityError('Sealed managed input control shape changed')
+            if subject is not None:
+                from . import originals
+                producer=(originals.dependency(source,subject['producer_step'],seal_ref=subject['producer_seal'])
+                    if source is not None else originals.node(root,subject['producer_step']))
+                seal=read(subject['producer_seal'])
+                expected_ref=q._ref(producer.original_root,Path(producer.original_root)/'native-evidence'/
+                    f'{producer.step:03d}'/'result-identity.json',source=producer if producer.inherited else None)
+                if 'origin_identity' in subject['producer_seal']:expected_ref['origin_identity']=producer.origin_identity
+                matches=[row for row in seal.get('materials',[]) if
+                    {key:item for key,item in row.items() if key!='file_stat'}==subject['material']]
+                if (not 0<subject['producer_step']<job['step'] or subject['producer_seal']!=expected_ref or len(matches)!=1):
+                    raise q.IntegrityError('Sealed managed source producer metadata changed')
+                if 'compiler_ref' in value:
+                    compiled=dict(material=subject['material'],compiler=value['compiler_ref'],
+                        **(dict(client_binding=value['client_binding']) if 'client_binding' in value else {}))
+                    if [item for item in seal.get('compiled_implementations',[]) if item['material']==subject['material']]!=[compiled]:
+                        raise q.IntegrityError('Sealed managed compiler control binding changed')
+                    execution_inputs.verify_compilation(root,value['compiler_ref'],material=subject['material'],
+                        client_binding=value.get('client_binding'),source=source,controls_only=True)
+            continue
         if 'input_sources' in value:
             keys = {'call_id','accepted_ref','complete','missing_reason','input_sources'}
             declared = execution_inputs.managed_source_contributions(root, job, accepted, source=source)
@@ -885,12 +981,14 @@ def _source(root, step, *, resolve_choices=True):
     from . import originals
     if originals.inherited(root, step):
         source = originals.node(root, step)
-        c.validate_original(source)
+        c.validate_original(source,controls_only=True)
         job = originals.source_job(source)
         seal_path = originals.source_record(source, 'result-identity.json')
         seal = c.read(seal_path)
         from . import candidate_refs
-        payload = c.read(originals.source_raw(source))
+        raw=originals.resolve_ref(source,seal['raw_ref'])
+        _sealed_raw_ref(raw,seal)
+        payload=c.read(raw)
         if resolve_choices:
             payload = candidate_refs.control_payload(job, payload, root=root, source=source)
             mapping = candidate_refs.source_input_mapping(source, job)
@@ -900,18 +998,14 @@ def _source(root, step, *, resolve_choices=True):
                     for row in observed['candidates']})
             payload = candidate_refs.public_science_fields(payload, mapping)
         return candidate_refs.source_job_view(source, job), payload, seal, source_seal_ref(source)
-    record = c.host_record(c.workspace(root, step))
-    seal_path = c.regular(record / 'result-identity.json')
-    seal = c.read(seal_path)
-    raw = c.regular(execution.raw(root, step))
-    raw_ref = _sealed_raw_ref(raw, seal)
-    job_path = c.regular(root / 'jobs' / f'{step:03d}.json')
-    if (c.file_ref(raw) != raw_ref or c.record_ref(job_path) != seal['job_ref']
-            or c.file_ref(c.regular(record / 'result.json')) != seal['result_ref']):
-        raise ValueError('Historical scientific source changed')
-    job = c.read(job_path)
-    if job.get('handoff_protocol', 1) >= 3:
-        validate_observation(root, job, seal)
+    source=originals.node(root,step)
+    record=c.host_record(c.workspace(root,step))
+    seal_path=c.regular(record/'result-identity.json')
+    seal=c.read(seal_path)
+    c.validate_original(source,controls_only=True)
+    raw=originals.resolve_ref(source,seal['raw_ref'])
+    _sealed_raw_ref(raw,seal)
+    job=originals.source_job(source)
     from . import candidate_refs
     payload=c.read(raw)
     return job, candidate_refs.control_payload(job,payload,root=root) if resolve_choices else payload, seal, c.record_ref(seal_path)
@@ -935,7 +1029,8 @@ def direct_sources(root, job):
         original = originals.node(root, step)
         chooser = originals.node(root, job['step']) if originals.inherited(root, job['step']) else None
         input_path = (originals.resolve_ref(chooser, dict(ref, path=f'project/nodes/{job["step"]:03d}/' + ref['path']))
-            if chooser is not None else c.workspace(root, job['step']) / ref['path'])
+            if chooser is not None else originals.resolve_root_ref(root,dict(ref,
+                path=str(c.workspace(root,job['step'])/ref['path']))))
         outcome = c.read(originals.source_record(original, 'native-outcome.json'))
         if (c.regular(input_path).stat().st_size != ref['size_bytes']
                 or next((row for row in job.get('direct_originals',job['direct_refs']) if row['path']==ref['path']),None) is None
@@ -971,7 +1066,7 @@ def resolve_implementation(root, object_id, receipts):
             or object_id != f'{job["role"]}{step:03d}-I{index:03d}' or index < 1
             or index > len(seal['materials'])):
         raise UnresolvedImplementation('Implementation selection is outside its exact frozen source')
-    return sorted(seal['materials'], key=lambda row: row['path'])[index - 1]
+    return c._public_materials(root,[sorted(seal['materials'], key=lambda row: row['path'])[index - 1]])[0]
 
 
 def candidate_materials(root, job):
@@ -1006,11 +1101,11 @@ def candidate_materials(root, job):
                 matches=[row for row in seal['materials'] if row['path']==path
                     and all(row[key]==output[key] for key in ('size_bytes',))]
                 if len(matches)!=1:continue
-                material=matches[0]
+                material=c._public_materials(root,matches)[0]
             owner_step=int(Path(material['path']).parts[2])
             owner,_,owner_seal,_=_source(root,owner_step,resolve_choices=False)
             index=next((number for number,row in enumerate(sorted(owner_seal['materials'],key=lambda row:row['path']),1)
-                if row==material),None)
+                if {key:value for key,value in row.items() if key!='file_stat'}==material),None)
             if index is not None:
                 result.append(dict(candidate_id=candidate['id'],material=material,
                     implementation_id=f'{owner["role"]}{owner_step:03d}-I{index:03d}'))
@@ -1050,7 +1145,6 @@ def source_sequence(root, before_step, *, source_cutoff=None, extra_steps=()):
         steps = [*[number for number in normal_steps if number <= source_cutoff], *extra_steps]
     for step in steps:
         if source_cutoff is not None:
-            c.validate(c.workspace(root, step))
             if step > source_cutoff:
                 extra = c.read(root / 'jobs' / f'{step:03d}.json')
                 report = extra.get('final_report')
@@ -1061,7 +1155,7 @@ def source_sequence(root, before_step, *, source_cutoff=None, extra_steps=()):
     return sources
 
 
-def records_from_sources(root, sources, *, write_cache=True):
+def records_from_sources(root, sources, *, write_cache=True, include_details=True):
     if write_cache:
         from .protocol import require_current
         require_current(root)
@@ -1089,13 +1183,15 @@ def records_from_sources(root, sources, *, write_cache=True):
         # Only the index excerpt is shortened; current roles can read text pages.
         raw = c.regular(c._execution_raw(root,step))
         raw_ref = _sealed_raw_ref(raw,seal)
-        text = raw.read_text(encoding='utf-8')
-        detail = [dict(step=step, role=job['role'], source='node:%03d/scientific-output' % step,
-                       part=index + 1, parts=(len(text) + TEXT_CHARS - 1) // TEXT_CHARS,
-                       text=text[start:start + TEXT_CHARS])
-                  for index, start in enumerate(range(0, len(text), TEXT_CHARS))]
-        for index in range(len(detail)):
-            view['conclusion_pages'].append(f'inputs/history/nodes/{step:03d}/{index + 1:04d}.json')
+        detail = []
+        if include_details:
+            text = raw.read_text(encoding='utf-8')
+            detail = [dict(step=step, role=job['role'], source='node:%03d/scientific-output' % step,
+                           part=index + 1, parts=(len(text) + TEXT_CHARS - 1) // TEXT_CHARS,
+                           text=text[start:start + TEXT_CHARS])
+                      for index, start in enumerate(range(0, len(text), TEXT_CHARS))]
+            view['conclusion_pages'] = [f'inputs/history/nodes/{step:03d}/{index+1:04d}.json'
+                for index in range(len(detail))]
         observation = None
         if seal.get('observations'):
             observation = read_observation(root, job, seal)
@@ -1148,11 +1244,10 @@ def page_writer(work, *, root, policy=None, context=None):
             if c.regular(destination,limit=MAX_PAGE_BYTES).read_bytes()!=data:
                 raise ObserverIntegrityError('Frozen scientific history page changed')
         else:
-            from . import shared_originals
-            original = shared_originals.publish_bytes(root,data,policy=policy,context=context)
-            shared_originals.link(original,destination,
-                size_bytes=len(data),root=root,policy=policy,context=context)
-        files.append(dict(path=path, size_bytes=len(data)))
+            from . import atomic_files
+            with storage.mutation(root,len(data),policy=policy,context=context):
+                atomic_files.publish_bytes(destination,data)
+        files.append(dict(path=path, source=str(destination), size_bytes=len(data)))
     def paged(rows, row_limit, key, prefix, source=None):
         groups, group = [], []
         # Use the longest possible continuation path and count in packing checks.
@@ -1206,15 +1301,17 @@ def validate(root, work, binding):
         if seal_sha != row['seal_ref']:
             raise ValueError('Frozen historical node identity changed')
     for row in binding['files']:
-        path = work / row['path']
+        from . import originals
+        path = originals.resolve_root_ref(root,dict(row,path=str(work/row['path'])))
         limit=MAX_PAGE_BYTES
         if row.get('kind')=='scientific_original':
-            match=re.fullmatch(r'inputs/history/nodes/([0-9]{3,})/scientific-original\.json',row['path'])
-            if (match is None or row['path']!=f'inputs/history/nodes/{int(match[1]):03d}/scientific-original.json'
+            match=re.fullmatch(r'inputs/(?:history/nodes|parents)/([0-9]{3,})/scientific-original\.json',row['path'])
+            if (match is None or row['path'] not in {f'inputs/history/nodes/{int(match[1]):03d}/scientific-original.json',
+                        f'inputs/parents/{int(match[1]):03d}/scientific-original.json'}
                     or not any(ref['step']==int(match[1]) for ref in binding['nodes'])):
                 raise ValueError('Bound scientific original has no exact history source')
             _,_,seal,_=_source(root,int(match[1]),resolve_choices=False)
-            if set(row)!={'path','size_bytes','kind'} or row['size_bytes']!=seal['raw_ref']['size_bytes']:
+            if set(row)-{'source'}!={'path','size_bytes','kind'} or row['size_bytes']!=seal['raw_ref']['size_bytes']:
                 raise ValueError('Bound scientific original differs from its sealed source')
             limit=None
         if c.regular(path, limit=limit).stat().st_size != row['size_bytes'] or path.stat().st_size != row['size_bytes']:
@@ -1253,7 +1350,7 @@ def read_observation(root, job, seal):
         if seal.get('observations') is not None:raise ValueError('Formal review has an ordinary observer snapshot')
         return
     receipt = seal.get('observations')
-    config = c.settings(root, job).get('history_observer') or _managed_config(job,root)
+    config = c.settings(root, job).get('history_observer') or _managed_config(job,root,controls_only=True)
     if config is None:
         if receipt is not None:
             raise ValueError('Unconfigured observer snapshot in scientific seal')
@@ -1265,7 +1362,7 @@ def read_observation(root, job, seal):
     if path != expected or c.regular(path).stat().st_size != receipt.get('size_bytes',path.stat().st_size):
         raise ObserverIntegrityError('Sealed observer snapshot changed')
     value = c.read(path)
-    raw_ref = _sealed_raw_ref(c._execution_raw(root,job['step']),seal)
+    raw_ref=_sealed_raw_ref(originals.resolve_root_ref(root,seal['raw_ref']),seal)
     if value['binding'] != _observer_binding(raw_ref, config):
         raise ValueError('Observer snapshot source binding changed')
     return value
@@ -1297,7 +1394,7 @@ def validate_observation(root, job, seal):
         _validate_proof(root, proof)
 
 
-def validate_observation_original(source, job, seal):
+def validate_observation_original(source,job,seal,*,controls_only=False):
     """Validate retained observer contracts without invoking an adapter or writer."""
     from . import originals as o
     policy = o.source_settings(source)
@@ -1322,12 +1419,34 @@ def validate_observation_original(source, job, seal):
     if receipt is None or receipt.get('path',) != f'host-history/observations/{source.step:03d}.json':
         raise ObserverIntegrityError('Original observer snapshot lost its exact producer')
     value = c.read(o.resolve_ref(source, receipt))
-    raw_ref = _sealed_raw_ref(o.source_raw(source),seal)
+    raw_ref=({key:seal['raw_ref'][key] for key in ('path','size_bytes')} if controls_only
+        else _sealed_raw_ref(o.source_raw(source),seal))
     if value.get('binding') != _observer_binding(raw_ref, config):
         raise ObserverIntegrityError('Original observer snapshot binding changed')
-    observer_input_sources(source.storage_root, job, value, source=source)
+    observer_input_sources(source.storage_root,job,value,source=source,controls_only=controls_only)
     if managed is not None:
-        validate_managed_original(source, job, value.get('managed_calls', []))
+        validate_managed_original(source,job,value.get('managed_calls',[]),controls_only=controls_only)
+    if controls_only:
+        from . import experiments
+        for context_value in value.get('contexts',[]):
+            accepted_refs=[proof for proof in context_value.get('proofs',[]) if Path(proof['path']).name=='accepted.json']
+            if len(accepted_refs)!=1:raise ObserverIntegrityError('Original context has no exact accepted control')
+            accepted_ref=accepted_refs[0]
+            accepted=c.read(o.resolve_ref(o.source_for_ref(source,accepted_ref),dict(accepted_ref,path=accepted_ref['snapshot'])))
+            if any(accepted.get(key)!=context_value.get(key) for key in ('call_id','scope','parent','change_intent')):
+                raise ObserverIntegrityError('Original context differs from its saved accepted call')
+            completed_refs=[proof for proof in context_value.get('proofs',[]) if Path(proof['path']).name=='completed.json']
+            if context_value['status'] in {'known_success','known_failed'}:
+                if len(completed_refs)!=1:raise ObserverIntegrityError('Original context has no exact terminal control')
+                completed_ref=completed_refs[0]
+                completed=c.read(o.resolve_ref(o.source_for_ref(source,completed_ref),dict(completed_ref,path=completed_ref['snapshot'])))
+                if any(completed.get(key)!=accepted.get(key) for key in ('call_id','scope','mechanism_binding')):
+                    raise ObserverIntegrityError('Original context terminal changed its accepted call')
+                _,controls=experiments._observation_file_roles(None,accepted,completed,directory=Path(accepted_ref['path']).parent)
+                for proof in context_value['proofs']:
+                    if proof['path'] in controls:
+                        o.resolve_ref(o.source_for_ref(source,proof),dict(proof,path=proof['snapshot']))
+        return value
     proofs = [proof for row in value['candidates'] for proof in row['evidence']]
     for field in ('current_candidate', 'actual_submission'):
         if value.get(field) is not None:

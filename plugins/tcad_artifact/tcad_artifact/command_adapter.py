@@ -300,35 +300,67 @@ class CommandTCADExecutorAdapter:
                 raise RuntimeError("inspection output is outside its bounds")
         return value
 
-    def collect(self, external_run_id: str) -> tuple[LocalFileDescriptor, ...]:
+    def collect(self, external_run_id: str, *, output_directory=None) -> tuple[LocalFileDescriptor, ...]:
+        destination=self.local_result_root if output_directory is None else Path(output_directory)
+        if not destination.is_absolute() or destination.resolve()!=destination:
+            raise ValueError('collection requires its exact output directory')
         value = self._call(
             "collect",
             {
                 "run_id": external_run_id,
-                "local_result_root": str(self.local_result_root),
+                "local_result_root": str(destination),
             },
         )
-        return self._collected_outputs(value)
+        return self._collected_outputs(value,output_directory=output_directory)
 
-    def collect_with_budget(self, external_run_id: str, *, context: CollectionContext) -> tuple[LocalFileDescriptor, ...]:
+    def collect_with_budget(self, external_run_id: str, *, context: CollectionContext, output_directory=None) -> tuple[LocalFileDescriptor, ...]:
+        destination=self.local_result_root if output_directory is None else Path(output_directory)
+        if not destination.is_absolute() or destination.resolve()!=destination:
+            raise ValueError('collection requires its exact output directory')
         context = collection_context(context, self.execution_policy().runner)
         context.remaining_seconds()
         value = self._call("collect", {"run_id": external_run_id,
-            "local_result_root": str(self.local_result_root), "collection": context.wire(),
+            "local_result_root": str(destination), "collection": context.wire(),
             "progress_path": context.progress_path}, context=context)
-        return self._collected_outputs(value, context=context)
+        return self._collected_outputs(value, context=context,output_directory=output_directory)
 
-    def _collected_outputs(self, value, *, context=None):
+    def _collected_outputs(self, value, *, context=None,output_directory=None):
         outputs = tuple(
             LocalFileDescriptor.model_validate(item, strict=True)
             for item in value["outputs"]
         )
+        manifest=None
+        if output_directory is not None:
+            from .project_packager import TCADRuntimeManifest
+            destination=Path(output_directory)
+            if (not destination.is_absolute() or destination.resolve()!=destination
+                    or not destination.is_dir()):
+                raise RuntimeError('transport scientific output directory changed')
+            manifests=[item for item in outputs if item.name=='tcad_manifest']
+            if len(manifests)!=1:
+                raise RuntimeError('transport output requires one native manifest')
+            manifest_path=Path(manifests[0].local_path)
+            if (manifest_path.resolve()!=manifest_path or not _within(manifest_path,self.local_result_root)
+                    or not manifest_path.is_file() or manifest_path.stat().st_size!=manifests[0].size_bytes):
+                raise RuntimeError('transport manifest escaped its private result root')
+            manifest=TCADRuntimeManifest.model_validate_json(manifest_path.read_bytes(),strict=True)
+            if ({item.name for item in outputs}!={item.name for item in manifest.outputs}|{'tcad_manifest','tcad_log'}
+                    or len({item.name for item in outputs})!=len(outputs)):
+                raise RuntimeError('transport outputs differ from native inventory')
+            records={item.name:item for item in manifest.outputs}
         for item in outputs:
             if context is not None:
                 context.remaining_seconds()
-            path = Path(item.local_path).expanduser().absolute()
-            if not _within(path, self.local_result_root):
-                raise RuntimeError("transport output is outside its result root")
+            path = Path(item.local_path)
+            root=self.local_result_root
+            if manifest is not None:
+                record=records.get(item.name)
+                if item.name!='tcad_manifest' and (record is None or record.output_class!='transport_derived'):
+                    root=destination
+                if record is not None and (record.size_bytes,record.media_type)!=(item.size_bytes,item.media_type):
+                    raise RuntimeError('transport output differs from native manifest')
+            if not path.is_absolute() or path.resolve()!=path or not _within(path, root):
+                raise RuntimeError("transport output is outside its declared result root")
             metadata = os.lstat(path)
             if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
                 raise RuntimeError("transport output is not a regular file")

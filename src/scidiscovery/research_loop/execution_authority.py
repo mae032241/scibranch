@@ -673,8 +673,32 @@ def _accepted_input_subject(root, job, accepted, secret, *, source=None):
             if not hmac.compare_digest(signed.get('receipt_hmac', ''), security.receipt_hmac(secret, security.canonical(signed_body))):
                 raise q.IntegrityError('Managed source host signature changed')
     seal = read(subject['producer_seal']); material = subject['material']
+    selected = [row for row in seal['materials'] if
+        {key:value for key,value in row.items() if key != 'file_stat'} == material]
+    if len(selected) != 1:
+        raise q.IntegrityError('Managed source lost its exact selected producer material')
+    from . import originals
+    producer = (originals.dependency(source, subject['producer_step'], seal_ref=subject['producer_seal'])
+        if source is not None else originals.node(root, subject['producer_step']))
+    if c._public_materials(root, selected, source=producer)[0] != material:
+        raise q.IntegrityError('Managed source selected producer material changed')
     original = execution_inputs.compiled_payload(root, material, source=source)
-    q._check(alias, source=source)
+    alias_path = Path(alias['path'])
+    if alias_path == Path(original['path']):
+        q._check(original, source=source)
+    elif alias_path in {Path(material['source']), c.workspace(root, job['step']) / material['path']}:
+        if source is not None and source.inherited:
+            # Existing retained aliases keep their original byte meaning.
+            # New direct fork packages require their own supported originals.
+            q._check(alias, source=source)
+        else:
+            from . import experiment_client
+            packet = experiment_client.payload_path(config, alias_path)
+            if packet != Path(original['path']):
+                raise q.IntegrityError('Managed source alias differs from its bound compiled packet')
+            q._check(dict(original, path=str(packet)))
+    else:
+        raise q.IntegrityError('Managed source alias is outside its selected producer binding')
     expected_seal = None
     if source is not None:
         from . import originals
@@ -686,7 +710,7 @@ def _accepted_input_subject(root, job, accepted, secret, *, source=None):
     else:
         expected_seal = ref_at(c.host_record(c.workspace(root, subject['producer_step'])) / 'result-identity.json')
     if (subject['producer_seal'] != expected_seal
-            or material not in seal['materials'] or request_value['payload'] != original
+            or request_value['payload'] != original
             or alias['path'] not in {original['path'],material['source'], str(c.workspace(root, job['step']) / material['path'])}
             or any(alias[key] != request_value['payload'][key] for key in ('size_bytes',))):
         raise q.IntegrityError('Managed source payload or exact producer changed')

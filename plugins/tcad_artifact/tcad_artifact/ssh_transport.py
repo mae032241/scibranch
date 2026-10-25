@@ -169,7 +169,10 @@ class SSHRemoteClient:
         # A standard uncompressed tar stream avoids remote archive disk usage.
         # Account for all member headers, padding, manifest and final tar record.
         archive_limit = len(_canonical(records)) + sum(x.size_bytes for x, _ in items) + 1024 * (len(items) + 1) + 10240
-        fd, temporary = tempfile.mkstemp(prefix=".results.", suffix=".tar.download", dir=items[0][1].parent)
+        spool=items[0][1].parent if self.diagnostic_root is None else Path(self.diagnostic_root)
+        if spool.resolve()!=spool or not spool.is_dir():
+            raise ValueError('result transfer spool requires its exact private directory')
+        fd, temporary = tempfile.mkstemp(prefix=".results.", suffix=".tar.download", dir=spool)
         os.close(fd)
         temporary = Path(temporary)
         previous_progress = self.download_progress
@@ -411,7 +414,11 @@ class SSHTCADTransport:
         if operation == "inspect_outputs":
             return self._inspect_outputs(str(payload["run_id"]), payload.get("relative_path"), payload.get("max_bytes", 32*1024*1024))
         if operation == "collect":
-            return self._collect(str(payload["run_id"]), context=context)
+            destination=Path(payload.get('local_result_root',self.local_result_root))
+            if not destination.is_absolute() or destination.resolve()!=destination:
+                raise ValueError('collection requires its exact output directory')
+            return self._collect(str(payload["run_id"]), context=context,
+                output_directory=None if destination==self.local_result_root else destination)
         raise ValueError("unsupported TCAD transport operation")
 
     def _prepare(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -494,21 +501,61 @@ class SSHTCADTransport:
                 os.link(temporary, path)
         return {**value, "file": _local_descriptor("candidate", path, descriptor.media_type).model_dump(mode="json")}
 
-    def _collect(self, run_id: str, *, context=None) -> dict[str, Any]:
+    def _collect(self, run_id: str, *, context=None,output_directory=None) -> dict[str, Any]:
         if not re.fullmatch(r"run_[0-9a-f]{32}", run_id):
             raise ValueError("invalid TCAD run identity")
-        output_directory = self.local_result_root / "runs" / run_id
-        if output_directory.is_symlink():
+        private_directory = self.local_result_root / "runs" / run_id
+        if private_directory.resolve()!=private_directory:
             raise ValueError("collection cache must not contain symlinks")
-        output_directory.mkdir(parents=True, exist_ok=True)
+        private_directory.mkdir(parents=True, exist_ok=True)
+        science_directory=None if output_directory is None else Path(output_directory)
+        if science_directory is not None:
+            if (not science_directory.is_absolute() or science_directory.resolve()!=science_directory
+                    or science_directory==self.local_result_root
+                    or science_directory.is_relative_to(self.local_result_root)):
+                raise ValueError('scientific collection requires its exact separate output directory')
+            if isinstance(self.remote,SSHRemoteClient) and self.remote.diagnostic_root is None:
+                raise ValueError('scientific collection requires the declared private transfer spool')
+            science_directory.mkdir(parents=True,exist_ok=True)
         # The control collection lock owns this execution's single writer. A
         # forced process kill cannot run finally; discard only its private temps.
-        for stale in output_directory.glob(".*.download"):
+        for stale in private_directory.glob(".*.download"):
             if context: context.remaining_seconds()
             stale.unlink()
         if context:
             context.report_progress({"phase": "inspect_manifest"})
         value = self._rpc("tcad_collect", {"run_id": run_id})
+        descriptors=[FileDescriptor.model_validate(item,strict=True) for item in value['outputs']]
+        if len({item.name for item in descriptors})!=len(descriptors):
+            raise RuntimeError('remote result names are not unique')
+        manifest=None
+        manifest_path=None
+        if science_directory is not None:
+            from .project_packager import TCADRuntimeManifest
+            manifests=[item for item in descriptors if item.name=='tcad_manifest']
+            if len(manifests)!=1:
+                raise RuntimeError('scientific collection requires one native manifest')
+            descriptor=manifests[0]
+            transfer_limit=getattr(getattr(self.remote,'config',None),'max_transfer_bytes',None)
+            if transfer_limit is not None and descriptor.size_bytes>transfer_limit:
+                raise ValueError('native manifest exceeds configured transfer bound')
+            manifest_path=private_directory/'tcad_manifest'
+            if manifest_path.is_symlink():
+                raise ValueError('native manifest cache must not be a symlink')
+            temporary=manifest_path.with_name(manifest_path.name+'.download')
+            if temporary.is_symlink():raise ValueError('native manifest temporary must not be a symlink')
+            try:
+                if context:context.remaining_seconds()
+                self.remote.get_to(descriptor.local_path,temporary,descriptor.size_bytes)
+                if not temporary.is_file() or temporary.stat().st_size!=descriptor.size_bytes:
+                    raise RuntimeError('downloaded native manifest differs from remote descriptor')
+                os.replace(temporary,manifest_path)
+            finally:
+                temporary.unlink(missing_ok=True)
+            manifest=TCADRuntimeManifest.model_validate_json(manifest_path.read_bytes(),strict=True)
+            if {item.name for item in descriptors}!={item.name for item in manifest.outputs}|{'tcad_manifest','tcad_log'}:
+                raise RuntimeError('remote results differ from native output inventory')
+            records={item.name:item for item in manifest.outputs}
         outputs: list[dict[str, Any]] = []
         seen: set[str] = set()
         completed_bytes = 0
@@ -531,10 +578,9 @@ class SSHTCADTransport:
                 return False
             return True
 
-        for item in value["outputs"]:
+        for remote_descriptor in descriptors:
             if context is not None:
                 context.remaining_seconds()
-            remote_descriptor = FileDescriptor.model_validate(item, strict=True)
             if remote_descriptor.name in seen:
                 raise RuntimeError("remote result names are not unique")
             seen.add(remote_descriptor.name)
@@ -543,11 +589,20 @@ class SSHTCADTransport:
             if name in local_names:
                 raise RuntimeError("remote result names map to the same cache file")
             local_names.add(name)
-            path = output_directory / name
-            output_directory.mkdir(parents=True, exist_ok=True)
-            if path.is_symlink() or output_directory.is_symlink():
+            parent=private_directory
+            if manifest is not None:
+                record=records.get(remote_descriptor.name)
+                if (record is not None and (record.size_bytes,record.media_type)
+                        !=(remote_descriptor.size_bytes,remote_descriptor.media_type)):
+                    raise RuntimeError('remote result differs from native manifest')
+                if remote_descriptor.name!='tcad_manifest' and (record is None or record.output_class!='transport_derived'):
+                    parent=science_directory
+            path = parent / name
+            if path.is_symlink() or parent.resolve()!=parent:
                 raise ValueError("collection cache must not contain symlinks")
             ordered.append(remote_descriptor.name)
+            if parent==science_directory and path.exists():
+                raise RuntimeError('scientific output already exists without a saved collection')
             if matches(path, remote_descriptor):
                 completed(remote_descriptor, path, reused=True)
             else:
@@ -567,6 +622,8 @@ class SSHTCADTransport:
                     self.remote.get_to(descriptor.local_path, temporary, descriptor.size_bytes)
                     if not matches(temporary, descriptor):
                         raise RuntimeError("downloaded result differs from remote descriptor")
+                    if path.parent==science_directory and path.exists():
+                        raise RuntimeError('scientific output appeared before completed transfer')
                     os.replace(temporary, path)
                 finally:
                     temporary.unlink(missing_ok=True)

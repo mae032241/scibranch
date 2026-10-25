@@ -101,6 +101,91 @@ def wrapper(tmp_path,execution_registry):
     return fixture
 
 
+@pytest.fixture
+def cov_completed(wrapper):
+    """Real receipt/completion publishers; only physical terminal facts are supplied."""
+    from cov_execution.experiments import CovExecution
+    from cov_execution.receipt import envelope
+    from scidiscovery.operations.execution import LocalFileDescriptor
+    from scidiscovery.research_loop import storage_policy as storage
+
+    def create(*, cleanup=True, transport_complete=True, returncode=0):
+        config=json.loads(wrapper.config.read_text())
+        adapter=CovExecution(config)
+        call='fixture-call'
+        directory=adapter.records.root/'calls'/call
+        directory.mkdir(parents=True)
+        source=wrapper.script('receipt-source')
+        snapshot=directory/'source.py';snapshot.write_bytes(source.read_bytes());snapshot.chmod(0o400)
+        descriptor=LocalFileDescriptor(name=call,local_path=str(source),size_bytes=source.stat().st_size,
+            media_type='application/json')
+        accepted=dict(call_id=call,scope=config['scope'],parent=dict(status='declared_root',candidate_id=None,source='none'),
+            change_intent=None,script=experiments.proof(snapshot),source_script=str(source),
+            prepared=descriptor.model_dump(mode='json'),runs_root=str(wrapper.runs),
+            interface=config['execution_interface'])
+        experiments.write(directory/'accepted.json',accepted)
+        adapter.records.publish(call,'process.json',dict(pid=900000001,start_ticks=1,pgid=900000001,sid=900000001,
+            boot_id='receipt-physical-terminal-fixture',task_ref=dict(path=str(directory/'accepted.json'))))
+        for name in ('stdout.raw','stderr.raw'):
+            path=directory/name;path.write_bytes(b'ordinary transport diagnostic\n');path.chmod(0o400)
+        wrapper.runs.mkdir(parents=True)
+        model=wrapper.runs/'model_run1.pkl';model.write_bytes(b'exact receipt model fixture\n')
+        row=dict(run_id=1,script=str(source),ok=True,model_path=str(model),val_score=.5,val_acc=.5)
+        (wrapper.runs/'results.jsonl').write_text(json.dumps(row)+'\n')
+        experiments.write(directory/'receipt.json',envelope(accepted,row))
+        adapter.records.publish(call,'terminal.json',dict(returncode=returncode,cleanup_confirmed=cleanup,
+            transport_complete=transport_complete))
+        adapter.records.bind_external(call,call,'succeeded')
+        result=adapter.completion(directory,accepted,returncode,cleanup,transport_complete,
+            context=storage.Deadline(10))
+        adapter.records.publish(call,'completed.json',result)
+        return dict(adapter=adapter,config=config,accepted=accepted,directory=directory,model=model,
+            completed=adapter.result(call),row=row)
+    return create
+
+
+@pytest.mark.parametrize('terminal',[
+    dict(cleanup=False),dict(transport_complete=False)],ids=['cleanup-unknown','transport-incomplete'])
+def test_receipt_model_requires_exact_same_call_terminal(cov_completed,terminal):
+    row=cov_completed(**terminal)
+    assert row['completed']['status']=='unknown' and row['completed']['model'] is None
+    assert row['model'].stat().st_mode&0o777==0o644
+    assert not (row['directory']/'model.pkl').exists()
+
+
+def test_selected_delivery_objects_are_overlaid_readonly(tmp_path,monkeypatch):
+    from cov_execution import delivery
+    stage=tmp_path/'stage';(stage/'inputs').mkdir(parents=True);(stage/'scratch').mkdir()
+    source=tmp_path/'original.py';source.write_bytes(b'original source\n')
+    data=tmp_path/'train.csv';data.write_bytes(b'value\n1\n')
+    objects={}
+    for label,path in (('source.py',source),('harness/train.csv',data)):
+        point=stage/'inputs'/label;point.parent.mkdir(parents=True,exist_ok=True);point.touch(mode=0o400)
+        objects[label]=dict(path=str(path),size_bytes=path.stat().st_size)
+    python=Path(sys.executable)
+    request=dict(scope=dict(handoff_protocol=CURRENT),phase='replay',stage=str(stage),
+        config=dict(python=str(python)),deadline_boottime=10**12,object_refs=objects,
+        inputs=[dict(path=str(python.resolve()),size_bytes=python.resolve().stat().st_size,
+            invoked_path=str(python),label='runtime-python')])
+    argv=[]
+    class CapturedExec(Exception):pass
+    def capture(binary,args):
+        argv.extend(args)
+        raise CapturedExec()
+    monkeypatch.setattr(delivery.shutil,'which',lambda name:'/qualified/bwrap' if name=='bwrap' else None)
+    monkeypatch.setattr(delivery.os,'execv',capture)
+    with pytest.raises(CapturedExec):delivery.isolate(request,str(Path(delivery.__file__).resolve()))
+    for label,reference in objects.items():
+        assert any(argv[index:index+3]==['--ro-bind',reference['path'],'/inputs/'+label]
+            for index in range(len(argv)-2))
+        assert (stage/'inputs'/label).stat().st_size==0
+        assert (stage/'inputs'/label).stat().st_ino!=Path(reference['path']).stat().st_ino
+    argv.clear()
+    request['object_refs']=dict(objects,**{'../escape':objects['source.py']})
+    with pytest.raises(ValueError,match='object reference'):delivery.isolate(request,str(Path(delivery.__file__).resolve()))
+    assert argv==[]
+
+
 def test_current_frozen_wrapper_configuration_roundtrips_and_rejects_undeclared_fields(wrapper):
     frozen = json.loads(wrapper.config.read_text())
     parsed = cov_lineage._config(wrapper.config)
@@ -184,7 +269,8 @@ def test_unmanaged_public_row_does_not_create_a_selectable_declared_parent(wrapp
 @pytest.mark.parametrize('name', ['model.pkl', 'source.py', 'stdout.raw', 'row.json', 'receipt.json', 'accepted.json'])
 def test_retained_call_asset_tamper_is_hard_error_and_blocks_new_execution(wrapper, name):
     result = wrapper.run('P', 'success', '--new-plan')
-    path = wrapper.directory(result) / name
+    path = (wrapper.runs / f'model_run{result["run_id"]}.pkl' if name=='model.pkl'
+        else wrapper.directory(result) / name)
     path.chmod(0o600)
     if name == 'accepted.json':
         value = json.loads(path.read_text())

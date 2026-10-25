@@ -64,7 +64,7 @@ def test_final_host_material_is_sealed_in_place_without_a_conclusion_copy(
     seal = c.read(record / 'result-identity.json')
     material = next(item for item in seal['materials'] if item['source'] == str(artifact))
     assert material['size_bytes'] == originals[artifact]['size_bytes']
-    assert 'file_stat' not in material
+    assert material['file_stat']==originals[artifact]['file_stat']
     assert seal['raw_ref'] == originals[raw]
     assert set(c.read(record / 'native-outcome.json')['raw_ref']) == {'path', 'size_bytes'}
     assert set(c.file_ref(raw)) == {'path', 'size_bytes'}
@@ -139,3 +139,32 @@ def test_repeated_managed_proof_keeps_saved_original_identity(
             read()
     assert (row['directory'] / 'execution-observation.json').read_bytes() == before
     assert proof['file_stat'] == saved['file_stat']
+
+
+def test_successor_reuses_frozen_history_bodies(tmp_path,monkeypatch):
+    from test_direct_input_bindings import direct_instance, stopped_seals
+    from scidiscovery.research_loop import originals, shared_input_views
+    from test_history_handoff import finish
+    root,_=direct_instance(tmp_path);stopped_seals(monkeypatch)
+    finish(root,1,'H',[],action='experiment',text='An exact bounded conclusion. '*500)
+    second,_,_=finish(root,2,'W',[1])
+    prefix='inputs/history/nodes/001/'
+    bodies=[row for row in second['history']['files'] if row['path'].startswith(prefix)
+        and Path(row['path']).stem.isdecimal()]
+    assert len(bodies)>=2
+    saved={row['path']:Path(row['source']).read_bytes() for row in bodies}
+    written=[];publish=atomic_files.publish_bytes
+    def publishing(path,data,**options):
+        if Path(path).is_relative_to(c.workspace(root,3)/prefix):written.append(Path(path))
+        return publish(path,data,**options)
+    monkeypatch.setattr(atomic_files,'publish_bytes',publishing)
+    third=c.build_job(root,3,'A',[2]);work=c.workspace(root,3)
+    assert c.build_job(root,3,'A',[2])==third
+    reused=[row for row in third['history']['files'] if row['path'] in saved]
+    assert reused==bodies and written==[]
+    argv=shared_input_views.mount_arguments(root,third,work,include_skills=False)
+    for row in reused:
+        assert not (work/row['path']).exists()
+        assert originals.resolve_root_ref(root,row).read_bytes()==saved[row['path']]
+        assert any(argv[index:index+3]==['--ro-bind',row['source'],str(work/row['path'])]
+            for index in range(len(argv)-2))

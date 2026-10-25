@@ -87,14 +87,20 @@ class TCADExecutorAdapter:
         input_metadata=None,
         open_input=None,
     ) -> LocalFileDescriptor:
-        payload_path = Path(payload.local_path).absolute()
-        if payload_path.parent != exchange_directory.absolute():
-            raise ValueError("execution payload is outside its exchange directory")
+        payload_path = Path(payload.local_path)
+        if not payload_path.is_absolute() or payload_path.resolve() != payload_path:
+            raise ValueError("execution payload requires its exact original path")
+        from scidiscovery.archive_io import stat_file
+        original = stat_file(payload_path, context=getattr(self, 'operation_context', None))
+        if original['size_bytes'] != payload.size_bytes:
+            raise ValueError("execution payload differs from its declared size")
         if not self.supports_preparation_profile(preparation_profile):
             raise ValueError(
                 "TCAD execution requires tcad.execution-package.v2"
             )
         raw = payload_path.read_bytes()
+        if len(raw) != payload.size_bytes or stat_file(payload_path) != original:
+            raise ValueError("execution payload changed before preparation")
         self.validate_preparation_payload(raw, preparation_profile=preparation_profile)
         reviewed = validate_execution_package_json(raw, preparation_profile=preparation_profile)
         inputs = (materialize_execution_inputs(reviewed, artifacts, exchange_directory,

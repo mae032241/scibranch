@@ -231,13 +231,13 @@ def _clip(text, capacity):
     return text.encode()[:capacity].decode('utf-8', errors='ignore')
 
 
-def project(root, before_step, *, source_cutoff=None, extra_steps=()):
+def project(root, before_step, *, source_cutoff=None, extra_steps=(), include_details=True):
     """One verified source collection feeds all derived scientific navigation."""
     sources=history.source_sequence(root,before_step,source_cutoff=source_cutoff,extra_steps=extra_steps)
     from . import execution_recovery
     recovery_refs = (originals.frozen_recovery_refs(root, before_step) if (Path(root) / originals.MANIFEST).exists()
         else execution_recovery.prefix(root,before_step))
-    records=execution_recovery.project_records(root,history.records_from_sources(root,sources,write_cache=False),recovery_refs,sources=sources)
+    records=execution_recovery.project_records(root,history.records_from_sources(root,sources,write_cache=False,include_details=include_details),recovery_refs,sources=sources)
     state=search.fold(root,sources,recovery_refs=recovery_refs) if configuration_updates.for_new_job(root,before_step).get('search_policy') is not None else None
     graph=build(root,before_step,sources=sources,search_state=state)
     return dict(sources=sources,records=records,search_state=state,graph=graph,candidates=candidate_view(records),recovery_refs=recovery_refs)
@@ -346,7 +346,8 @@ def public_relations(graph, sources):
     for edge in graph['relations']:
         if edge['kind']=='reuse':
             step=edge['target']['node'];job,seal=originals[step]
-            materials=sorted(seal['materials'],key=lambda row:row['path'])
+            materials=sorted(({key:value for key,value in row.items() if key!='file_stat'}
+                for row in seal['materials']),key=lambda row:row['path'])
             index=next((i for i,row in enumerate(materials,1) if row==edge['target']['material']),None)
             if index is None:raise ValueError('Reuse relationship has no exact sealed implementation')
             rows.append(dict(kind='reuse',node=edge['subject']['node'],implementation_id=f'{job["role"]}{step:03d}-I{index:03d}',
@@ -361,7 +362,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
          audit_projection_version=0, adjacent_audit=None, worker_view_version=0):
     from .protocol import require_current
     require_current(root)
-    projection=project(root,step,source_cutoff=source_cutoff,extra_steps=extra_steps)
+    projection=project(root,step,source_cutoff=source_cutoff,extra_steps=extra_steps,include_details=False)
     records,state=projection['records'],projection['search_state']
     from . import storage_policy as storage
     frozen=configuration_updates.for_new_job(root,step)
@@ -369,7 +370,9 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
     inventory=storage.Inventory(frozen.get('storage_policy'),context=context)
     def bind_original(source,destination,original_reference):
         inventory.entry();inventory.file(source.stat().st_size)
-        c._bind_original(source, destination, root=root, policy=frozen.get('storage_policy'), context=context, size_bytes=(source).stat().st_size, source_kind='mutable')
+        originals._check_identity(source,original_reference,context=context)
+        return dict(path=destination.relative_to(c.workspace(root,step)).as_posix(),
+            source=str(source),size_bytes=original_reference['size_bytes'])
     add,paged,files=history.page_writer(c.workspace(root,step),root=root,policy=frozen.get('storage_policy'),context=context)
     from . import candidate_refs
     references=candidate_refs.references(records) if worker_view_version==1 else {}
@@ -377,23 +380,49 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
         original_add,original_paged=add,paged
         def add(path,value):return original_add(path,candidate_refs.public_fields(value,references))
         def paged(rows,*args):return original_paged(candidate_refs.public_fields(rows,references),*args)
-        for record,source in zip(records,projection['sources']):
-            reported=candidate_refs.public_science_fields(source[1],references)
-            original_path=f'inputs/history/nodes/{record["step"]:03d}/scientific-original.json'
-            public=c.scientific_projection(reported,original_path)
-            if public!=reported:
-                raw=c.regular(c._execution_raw(root,record['step']))
-                destination=c.workspace(root,step)/original_path
-                bind_original(raw,destination,source[2]['raw_ref'])
-                files.append(dict(path=original_path,size_bytes=destination.stat().st_size,
-                    kind='scientific_original'))
-            text=json.dumps(public,ensure_ascii=False,allow_nan=False)
-            record['detail']=[dict(step=record['step'],role=record['role'],
-                source='node:%03d/scientific-output' % record['step'],part=index+1,
-                parts=(len(text)+history.TEXT_CHARS-1)//history.TEXT_CHARS,text=text[start:start+history.TEXT_CHARS])
-                for index,start in enumerate(range(0,len(text),history.TEXT_CHARS))]
-            record['view']['conclusion_pages']=[f'inputs/history/nodes/{record["step"]:03d}/{index+1:04d}.json'
-                for index in range(len(record['detail']))]
+    retained_path=Path(root)/'jobs'/f'{step:03d}.json'
+    retained=c.read(c.regular(retained_path)) if retained_path.exists() else None
+    previous_jobs=([retained] if retained is not None else [])+[row[0] for row in reversed(projection['sources'])]
+    for record,source in zip(records,projection['sources']):
+        prefix=f'inputs/history/nodes/{record["step"]:03d}/'
+        previous=None
+        for prior in previous_jobs:
+            binding=prior.get('history',{})
+            if prior.get('worker_view_version',0)!=worker_view_version:continue
+            if any(references.get(key)!=value for key,value in binding.get('candidate_references',{}).items()):continue
+            body=[row for row in binding.get('files',[]) if row['path'].startswith(prefix)
+                and Path(row['path']).parent.as_posix()==prefix[:-1]
+                and Path(row['path']).suffix=='.json' and Path(row['path']).stem.isdecimal()]
+            if not body:continue
+            if dict(step=record['step'],seal_ref=record['seal_ref']) not in binding.get('nodes',[]):
+                raise ValueError('Historical body differs from its frozen producer')
+            body.sort(key=lambda row:int(Path(row['path']).stem))
+            if [row['path'] for row in body]!=[prefix+f'{index:04d}.json' for index in range(1,len(body)+1)]:
+                raise ValueError('Historical body pages are incomplete')
+            previous=(prior,[*body,*[row for row in binding['files']
+                if row['path']==prefix+'scientific-original.json']])
+            break
+        if previous is not None:
+            prior,body=previous
+            for row in body:
+                descriptor=dict(row)
+                descriptor.setdefault('source',str(c.workspace(root,prior['step'])/row['path']))
+                originals.resolve_root_ref(root,descriptor,context=context)
+                files.append(descriptor)
+            record['view']['conclusion_pages']=[row['path'] for row in body if Path(row['path']).stem.isdecimal()]
+            continue
+        reported=candidate_refs.public_science_fields(source[1],references) if worker_view_version==1 else source[1]
+        original_path=prefix+'scientific-original.json'
+        public=c.scientific_projection(reported,original_path)
+        if public!=reported:
+            raw=c.regular(c._execution_raw(root,record['step']))
+            files.append(dict(bind_original(raw,c.workspace(root,step)/original_path,source[2]['raw_ref']),kind='scientific_original'))
+        text=json.dumps(public,ensure_ascii=False,allow_nan=False)
+        record['detail']=[dict(step=record['step'],role=record['role'],
+            source='node:%03d/scientific-output' % record['step'],part=index+1,
+            parts=(len(text)+history.TEXT_CHARS-1)//history.TEXT_CHARS,text=text[start:start+history.TEXT_CHARS])
+            for index,start in enumerate(range(0,len(text),history.TEXT_CHARS))]
+        record['view']['conclusion_pages']=[prefix+f'{index+1:04d}.json' for index in range(len(record['detail']))]
     implementation_ids={}
     for record,source in zip(records,projection['sources']):
         job,_,seal,_=source
@@ -434,9 +463,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                 source=next(source for source in projection['sources'] if source[0]['step']==disposition['source_a'])
                 raw=c.regular(c._execution_raw(root,disposition['source_a']))
                 destination=c.workspace(root,step)/original
-                bind_original(raw,destination,source[2]['raw_ref'])
-                files.append(dict(path=original,size_bytes=destination.stat().st_size,
-                    kind='scientific_original'))
+                files.append(dict(bind_original(raw,destination,source[2]['raw_ref']),kind='scientific_original'))
             row['disposition']=dict(reason=_clip(reason,160),reason_truncated=len(reason.encode())>160,
                 original=original)
     if state and 'portfolio' in state:
@@ -495,8 +522,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                     if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
                         raise ValueError('Retirement proof materials exceed the original input bound')
                     target=f'{prefix}/{name}'
-                    bind_original(archive_path(item),c.workspace(root,step)/target,item)
-                    recovery_materials.append(dict(path=target,size_bytes=item['size_bytes']))
+                    recovery_materials.append(bind_original(archive_path(item),c.workspace(root,step)/target,item))
                 experiments.append(dict(step=record['step'],call_id=call['call_id'],execution_status='not_submitted',
                     **(dict(retirement_proof=f'{prefix}/retirement.json',native_originals=[f'{prefix}/{name}' for _,name in retained[1:]])
                        if worker_view_version != 1 else {}),
@@ -508,7 +534,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                     limitation='Original accepted execution is pending or unverified; preserve its identity and reservation.'))
                 continue
             details=call.get('execution') or {};result=details.get('result') or {}
-            scientific_outputs=(history.scientific_outputs(root,source_jobs[record['step']],call)
+            scientific_outputs=(history.scientific_outputs(root,source_jobs[record['step']],call,verify_files=False)
                 if worker_view_version==1 else call.get('outputs',[]))
             outputs=[dict(path=f'inputs/parents/{record["step"]:03d}/artifacts/experiments/{call["call_id"]}/artifacts/{item["name"]}',
                           historical=f'history/nodes/{record["step"]:03d}/artifacts/experiments/{call["call_id"]}/artifacts/{item["name"]}',
@@ -520,8 +546,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                     limits=configuration_updates.for_new_job(root,step)
                     if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
                         raise ValueError('Execution recovery materials exceed the original input bound')
-                    bind_original(archive_path(item),c.workspace(root,step)/output['path'],item)
-                    recovery_materials.append(dict(path=output['path'],size_bytes=item['size_bytes']))
+                    recovery_materials.append(bind_original(archive_path(item),c.workspace(root,step)/output['path'],item))
             native_originals=[]
             if call['call_id'] in record.get('recovered_calls',[]):
                 observed=c.read(archive_path(call['observation']))
@@ -534,8 +559,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                     limits=configuration_updates.for_new_job(root,step)
                     if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
                         raise ValueError('Execution recovery originals exceed the original input bound')
-                    bind_original(archive_path(item),c.workspace(root,step)/target,item)
-                    recovery_materials.append(dict(path=target,size_bytes=item['size_bytes']))
+                    recovery_materials.append(bind_original(archive_path(item),c.workspace(root,step)/target,item))
                     native_originals.append(dict(path=target))
             native_pages=paged(native_originals,16,'originals',f'inputs/history/recoveries/{record["step"]:03d}/{call["call_id"]}','recovered-native-originals') if native_originals else []
             metrics=result.get('metrics',[])
@@ -602,6 +626,17 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
         view['candidates']['candidate_facts']=[]
         view['candidates']['candidate_facts_omitted_count']=len(candidate_rows)
         bounded_brief(view)
+    if retained is not None:
+        saved_files={row['path']:row for row in retained.get('history',{}).get('files',[])}
+        for index,row in enumerate(files):
+            saved=saved_files.get(row['path'])
+            if saved is None:continue
+            if {key:value for key,value in row.items() if key!='source'}!={key:value for key,value in saved.items() if key!='source'}:
+                raise ValueError('Frozen history input binding changed')
+            originals.resolve_root_ref(root,dict(saved,path=str(c.workspace(root,step)/saved['path'])))
+            files[index]=dict(saved)
+        order={path:index for index,path in enumerate(saved_files)}
+        files.sort(key=lambda row:order.get(row['path'],len(order)))
     return dict(**(dict(execution_recoveries=projection['recovery_refs'],execution_recovery_materials=recovery_materials) if projection['recovery_refs'] else {}),**(dict(audit_projection_version=1, audit_receipts=audit_refs, adjacent_audit=adjacent_audit) if audit_projection_version == 1 else {}), nodes=[dict(step=row['step'],seal_ref=row['seal_ref']) for row in records],files=files,
                 candidate_ids=[row['id'] for row in candidate_rows],
                 **(dict(candidate_nomination_ids=nomination_ids) if nomination_ids is not None else {}),

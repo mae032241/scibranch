@@ -249,6 +249,7 @@ def wake_packet(root,job,intent):
     context=storage.Deadline(frozen['max_seconds'])
     inventory=storage.Inventory(frozen.get('storage_policy'),context=context)
     for number,proof in enumerate(intent['execution_wake']['observations'],1):
+        if e.proof(proof['path'])!=proof:raise e.IntegrityError('Execution wake observation original changed')
         observed=c.read(Path(proof['path']));directory=Path(proof['path']).parent
         completed=c.read(Path(observed['completed']['path']))
         shared_input_views.dynamic_root(root,work,'execution-results')
@@ -260,27 +261,31 @@ def wake_packet(root,job,intent):
             _,config=_config(root,job,accepted)
             e.verify_observation(observed,lambda item:Path(item['path']),interface=config['execution_interface'])
             result=e.scientific_result(config,accepted,completed,observed)
-            c.write(work/prefix/'result.json',result)
+            destination=work/prefix/'result.json'
+            if destination.exists():
+                if c.read(c.regular(destination))!=result:raise e.IntegrityError('Execution wake public result changed')
+            else:c.write(destination,result)
             outputs=[]
             for item in e.scientific_outputs(config,observed):
                 inventory.entry();inventory.file(item.size_bytes)
                 target=prefix+'/outputs/'+item.name
-                c._bind_original(Path(item.local_path), work/target, context=context, policy=config.get('storage_policy'), root=root, size_bytes=item.size_bytes, source_kind='mutable')
                 outputs.append(dict(name=item.name,path=target))
             rows.append(dict(status=observed['status'],result=prefix+'/result.json',outputs=outputs,
                 **(dict(native_state=observed['native_state']) if 'native_state' in observed else {})))
             continue
-        c._bind_original(Path(observed['completed']['path']), work/prefix/'result.json', root=root, policy=frozen.get('storage_policy'), context=context, size_bytes=observed['completed']['size_bytes'], source_kind='mutable')
+        accepted=c.read(c.regular(Path(observed['accepted']['path'])))
+        _,config=_config(root,job,accepted)
+        e.verify_observation(observed,lambda item:Path(item['path']),interface=config['execution_interface'])
         outputs=[]
         for item in observed['outputs']:
             target=prefix+'/outputs/'+item['name']
             inventory.entry();inventory.file(item['size_bytes'])
-            c._bind_original(Path(item['path']), work/target, root=root, policy=frozen.get('storage_policy'), context=context, size_bytes=item['size_bytes'], source_kind='managed_frozen');outputs.append(dict(name=item['name'],path=target))
+            outputs.append(dict(name=item['name'],path=target))
         originals=[]
         for index,item in enumerate(observed['proofs'],1):
             target=prefix+f'/originals/{index:03d}'
             inventory.entry();inventory.file(item['size_bytes'])
-            c._bind_original(Path(item['path']), work/target, root=root, policy=frozen.get('storage_policy'), context=context, size_bytes=item['size_bytes'], source_kind='managed_frozen');originals.append(target)
+            originals.append(target)
         rows.append(dict(status=observed['status'],original=prefix+'/result.json',outputs=outputs,native_originals=originals,
             **(dict(native_state=observed['native_state']) if 'native_state' in observed else {})))
     c.write(work/'work/execution-results.json',dict(executions=rows,

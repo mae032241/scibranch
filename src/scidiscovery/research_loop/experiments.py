@@ -555,8 +555,19 @@ def scientific_outputs(config, observation, *, adapter=None, include_logs=False,
         declared,_=registration(config['execution_interface']['executor'])
         method=declared.scientific_outputs or getattr(adapter,'scientific_outputs',None)
     if callable(method):
-        selected=tuple(method(descriptors,projection_directory=_scientific_projection_directory(config)))
-    elif config['execution_interface'].get('result_protocol')==LOCAL_RESULT_PROTOCOL:
+        call=observation.get('call_id')
+        if not isinstance(call,str) or not ID.fullmatch(call):raise IntegrityError('Scientific projection has no exact original call')
+        projection=_scientific_projection_directory(config)/'calls'/call
+        if projection.resolve()!=projection:raise IntegrityError('Scientific projection call namespace changed')
+        projection.mkdir(parents=True,exist_ok=True,mode=0o700)
+        options=dict(projection_directory=projection)
+        try:parameters=inspect.signature(method).parameters
+        except (TypeError,ValueError):parameters={}
+        if 'output_directory' in parameters:
+            from . import local_experiments
+            options['output_directory']=local_experiments.artifact_directory(config,call)
+        selected=tuple(method(descriptors,**options))
+    if config['execution_interface'].get('result_protocol')==LOCAL_RESULT_PROTOCOL:
         def original(reference):
             actual=proof(reference['path'],context=context)
             if any(actual[key]!=reference[key] for key in ('size_bytes','file_stat') if key in reference):
@@ -580,8 +591,9 @@ def scientific_outputs(config, observation, *, adapter=None, include_logs=False,
                 matches.append(descriptor)
             if len(matches)!=1:raise IntegrityError('Scientific output has no exact collected original')
             return matches[0]
-        selected=[collected({key:output[key] for key in ('path','size_bytes','file_stat') if key in output}).model_copy(
-            update={'name':output['name']}) for output in completed.get('outputs',[])]
+        selected=(list(selected) if callable(method) else [collected({key:output[key]
+            for key in ('path','size_bytes','file_stat') if key in output}).model_copy(
+                update={'name':output['name']}) for output in completed.get('outputs',[])])
         if include_logs:
             from . import shared_originals, scientific_log_projection, experiment_client
             limits=config.get('storage_policy')
@@ -603,6 +615,9 @@ def scientific_outputs(config, observation, *, adapter=None, include_logs=False,
             replacements=scientific_log_projection.encode_replacements(replacements)
             storage.check(context)
             direct=_local_original_observation(config,observation)
+            references=[item for key in ('proofs','outputs','scientific_outputs') for item in observation.get(key,[])]
+            if observation.get('scientific_source') is not None:references.append(observation['scientific_source'])
+            direct=direct or all(item.get('path')==(item.get('source') or {}).get('path') for item in references)
             root=experiment_client.root_for_configuration(config,allow_standalone=True) or Path(config['record_dir'])
             if direct:
                 from . import local_experiments
@@ -643,7 +658,7 @@ def scientific_outputs(config, observation, *, adapter=None, include_logs=False,
                 selected.append(LocalFileDescriptor(name=log_name+'/'+stream+'.txt',local_path=str(target),
                     size_bytes=item['size_bytes'],media_type='text/plain'))
         selected=tuple(selected)
-    else:selected=descriptors
+    elif not callable(method):selected=descriptors
     return _validated_scientific_outputs(selected,operation_context=context)
 
 
@@ -658,17 +673,56 @@ def _collected_view(config, call_id, observation, adapter, *, operation_context=
     from . import storage_policy as storage
     context=operation_context or storage.Deadline(config['max_seconds'])
     inventory=storage.Inventory(config.get('storage_policy'),context=context)
+    directory=Records(config).directory(call_id)
+    if (observation.get('call_id')!=call_id
+            or observation['accepted']['path']!=str(directory/'accepted.json')
+            or observation['completed']['path']!=str(directory/'completed.json')):
+        raise IntegrityError('Collected scientific output lost its exact call controls')
+    verify_observation(observation,lambda item:Path(item['path']),
+        interface=config['execution_interface'],context=context,verify_files=False)
+    accepted=json.loads(read(directory/'accepted.json'));completed=json.loads(read(directory/'completed.json'))
     direct=_local_original_observation(config,observation)
+    output_root=shared_input_views.dynamic_root(root,work,'retained-experiments')/call_id/'outputs'
+    old_slots=Records(config).directory(call_id)/'observed-originals'
+    legacy=any(Path(item['path']).parent==old_slots
+        and re.fullmatch(r'[0-9]{6}',Path(item['path']).name) is not None
+        for item in observation.get('scientific_outputs',observation['outputs']))
+    legacy=legacy or accepted.get('script',{}).get('path')==str(directory/'source.py')
+    if isinstance(completed.get('model'),dict):legacy=legacy or completed['model']['path']==str(directory/'model.pkl')
     for descriptor in scientific_outputs(config,observation,adapter=adapter,include_logs=True,operation_context=context):
         inventory.entry();inventory.file(descriptor.size_bytes)
-        target = shared_input_views.dynamic_root(root,work,'retained-experiments') / call_id / 'outputs' / descriptor.name
+        target=output_root/descriptor.name
         if direct:
             if Path(descriptor.local_path)!=target or target.resolve()!=target:
                 raise IntegrityError('Local scientific output is outside its declared actual public original')
         else:
-            c._bind_original(Path(descriptor.local_path), target, context=context, policy=config.get('storage_policy'), root=root, size_bytes=descriptor.size_bytes, source_kind='managed_frozen')
-        result.append(dict(name=descriptor.name, path=str(target), media_type=descriptor.media_type,
-            size_bytes=descriptor.size_bytes, retention='retained_original'))
+            actual=Path(descriptor.local_path)
+            if actual.resolve()!=actual:raise IntegrityError('Collected scientific output original changed')
+            public_run=False
+            model=completed.get('model');run_id=completed.get('run_id');runs=accepted.get('runs_root')
+            if (isinstance(model,dict) and isinstance(runs,str) and type(run_id) is int and run_id>0
+                    and actual==Path(model['path'])==Path(runs)/f'model_run{run_id}.pkl'):
+                public=Path(runs)
+                row=json.loads(read(directory/'row.json'))
+                saved=proof(actual,context=context)
+                if (not public.is_absolute() or public.resolve()!=public or not public.is_relative_to(root)
+                        or type(run_id) is not int or run_id<1
+                        or actual!=public/f'model_run{run_id}.pkl' or completed['status']!='known_success'
+                        or row.get('run_id')!=run_id or row.get('model_path')!=str(actual)
+                        or row.get('script')!=accepted['source_script'] or row.get('ok') is not True
+                        or any(saved[key]!=model[key] for key in ('size_bytes','file_stat') if key in model)):
+                    raise IntegrityError('Collected public run model differs from its exact receipt call')
+                public_run=True
+            if actual.is_relative_to(output_root) or public_run:
+                target=actual
+            else:
+                # Existing aliases retain their exact inode meaning. New
+                # results require their producer's declared public source.
+                if (not legacy or not target.exists() or target.is_symlink() or not actual.samefile(target)
+                        or target.stat().st_size!=descriptor.size_bytes):
+                    raise UnsupportedExecution('Scientific output has no readable original in its exact call public output directory')
+        result.append(dict(name=descriptor.name,path=str(target),media_type=descriptor.media_type,
+            size_bytes=descriptor.size_bytes,retention='retained_original'))
     return dict(status='collected', call_id=call_id, outputs=result)
 
 
@@ -971,19 +1025,41 @@ class Records:
         original=proof(descriptor.local_path,context=operation_context)
         if original['size_bytes']!=descriptor.size_bytes:
             raise IntegrityError('Prepared execution input changed')
+        fixed_code='code_version' in metadata
+        destination=self.root/'calls'/descriptor.name
+        bound_package=False
+        if not fixed_code and self.config.get('worker_view_version')==1:
+            tcad=metadata.get('tcad')
+            if isinstance(tcad,dict) and 'prepared' in tcad:
+                prepared=tcad['prepared'];public=descriptor.model_dump(mode='json')
+                if (not isinstance(prepared,dict)
+                        or set(prepared) not in (set(public),set(public)|{'file_stat'})):
+                    raise IntegrityError('Prepared execution binding fields differ')
+                if 'file_stat' in prepared:
+                    saved=prepared['file_stat']
+                    if (not isinstance(saved,list) or len(saved)!=4
+                            or any(type(value) is not int for value in saved)
+                            or saved[2]!=descriptor.size_bytes or saved!=original['file_stat']):
+                        raise IntegrityError('Prepared execution input original changed')
+                if {key:value for key,value in prepared.items() if key!='file_stat'}!=public:
+                    raise IntegrityError('Prepared execution binding differs')
+                bound_package=True
+            elif isinstance(metadata.get('source_script'),str):
+                selected=experiment_client.payload_path(self.config,metadata['source_script'])
+                bound_package=(selected==Path(descriptor.local_path)
+                    and selected!=Path(metadata['source_script']).absolute())
+        direct_input=fixed_code or bound_package
+        source_proof=original if direct_input else dict(path=str(destination/'source.py'),size_bytes=descriptor.size_bytes)
+        accepted = dict(metadata, call_id=descriptor.name, scope=self.config['scope'],
+            source_script=metadata.get('source_script',descriptor.local_path) if direct_input else descriptor.local_path, script=source_proof,native_attempt=self.config.get('native_attempt'),
+            prepared=descriptor.model_dump(mode='json'), interface=interface)
         import shutil,tempfile
         self.root.mkdir(parents=True,exist_ok=True)
         directory=Path(tempfile.mkdtemp(prefix='.prepared-',dir=self.root))
         source = directory / 'source.py'
-        fixed_code='code_version' in metadata
-        destination=self.root/'calls'/descriptor.name
-        source_proof=original if fixed_code else dict(path=str(destination/'source.py'),size_bytes=descriptor.size_bytes)
-        accepted = dict(metadata, call_id=descriptor.name, scope=self.config['scope'],
-            source_script=metadata.get('source_script',descriptor.local_path) if fixed_code else descriptor.local_path, script=source_proof,native_attempt=self.config.get('native_attempt'),
-            prepared=descriptor.model_dump(mode='json'), interface=interface)
         host_preparation=None
         try:
-            if fixed_code:verify_scientific_inputs(accepted,config=self.config,context=operation_context)
+            if direct_input:verify_scientific_inputs(accepted,config=self.config,context=operation_context)
             # Only the live built-in local dispatch knows prepare had no external
             # effect. A missing accepted/process file is never recovery evidence.
             if not _local_preparation:
@@ -994,7 +1070,7 @@ class Records:
             if not files:inventory.file(descriptor.size_bytes)
             for item in files:
                 inventory.entry();inventory.file(item['size_bytes'])
-            if not fixed_code:
+            if not direct_input:
                 c._bind_original(Path(descriptor.local_path), source, context=operation_context, root=self.storage_root(), policy=self.config.get('storage_policy'), size_bytes=descriptor.size_bytes, source_kind='mutable')
             seen = set()
             for item in files:
@@ -1007,7 +1083,7 @@ class Records:
                 if any(original[key]!=item[key] for key in ('size_bytes','file_stat') if key in item):
                     raise IntegrityError('Managed input changed before acceptance')
                 target=directory/'inputs'/relative
-                if fixed_code:
+                if direct_input:
                     saved=experiment_client.input_reference(self.config,item['path'])
                     if any(saved.get(key)!=item.get(key) for key in ('path','size_bytes','file_stat')):
                         raise IntegrityError('Code data inventory differs from its frozen scientific input')
@@ -1017,7 +1093,7 @@ class Records:
                 binding=self.admission_binding(mechanism,expected_calls=expected_calls,
                     recovery_admission=recovery_admission)
                 if binding is not None:accepted['mechanism_binding']=binding
-                if fixed_code:
+                if direct_input:
                     verify_scientific_inputs(accepted,config=self.config,context=operation_context)
                     if proof(descriptor.local_path,context=operation_context)!=accepted['script']:
                         raise IntegrityError('Accepted code export changed during preparation')
@@ -1475,26 +1551,10 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
         original=proof(source,context=operation_context)
         if any(original[key]!=item[key] for key in ('size_bytes','file_stat') if key in item):
             raise IntegrityError('Execution observation original changed during collection')
-        if direct_local:
-            if source.stat().st_mode & 0o777 != 0o400:
-                raise IntegrityError('Local observation original has not been sealed by its stopped writer')
-            retained[key]=original
-            return dict(original,source=item)
-        target=directory/'observed-originals'/f'{len(retained):06d}'
-        # Read-only originals already published inside this private call share
-        # their inode; external adapter outputs freeze independently once.
-        managed = source.is_relative_to(directory) and source.stat().st_mode & 0o777 == 0o400
-        if not target.exists():
-            frozen=shared_originals.retain(storage_root,source,size_bytes=item['size_bytes'],
-                source_kind='managed_frozen' if managed else 'mutable',
-                context=operation_context,policy=config.get('storage_policy'))
-            shared_originals.link(frozen,target,size_bytes=item['size_bytes'],context=operation_context,
-                root=storage_root,policy=config.get('storage_policy'))
-        result=proof(target,context=operation_context)
-        if result['size_bytes']!=item['size_bytes']:
-            raise IntegrityError('Retained observation original exceeds its declared bound')
-        retained[key]=result
-        return dict(result,source=item)
+        if direct_local and source.stat().st_mode & 0o777 != 0o400:
+            raise IntegrityError('Local observation original has not been sealed by its stopped writer')
+        retained[key]=original
+        return dict(original,source=item)
     proofs=[retain(item) for item in proofs]
     outputs=[];names=set()
     if lifecycle_capabilities(adapter).collect:
@@ -2258,7 +2318,8 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False):
         seal=q._read(root,subject['producer_seal']);material=subject['material'];step=subject['producer_step']
         if (type(step) is not int or not 0<step<job['step']
                 or subject['producer_seal']!=q._ref(root,c.host_record(c.workspace(root,step))/'result-identity.json')
-                or material not in seal.get('materials',[])
+                or not any({key:value for key,value in row.items() if key!='file_stat'}==material
+                    for row in seal.get('materials',[]))
                 or material not in [*job.get('direct_materials',[]),*[row['material'] for row in job.get('selected_inputs',[])]]
                 or alias['path'] not in {request['payload']['path'],material['source'],str(c.workspace(root,job['step'])/material['path'])}
                 or alias['size_bytes']!=request['payload']['size_bytes']
@@ -2324,7 +2385,8 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False):
                     producer_seal=producer_seal,material_path=input_material['path'],size_bytes=input_material['size_bytes'])
                 seal=q._read(root,producer_seal)
                 if (json.dumps(original,sort_keys=True)!=json.dumps(expected,sort_keys=True)
-                        or [row for row in seal.get('materials',[]) if row['path']==input_material['path']]!=[input_material]
+                        or [{key:value for key,value in row.items() if key!='file_stat'}
+                            for row in seal.get('materials',[]) if row['path']==input_material['path']]!=[input_material]
                         or (not producer.inherited and seal.get('job_ref')!=c.record_ref(
                             Path(producer.original_root)/'jobs'/f'{input_step:03d}.json'))
                         or slot['alias']!=input_material['path'] or type(slot['size_bytes']) is not int
@@ -2385,6 +2447,9 @@ def verify_scientific_inputs(accepted, *, config=None, context=None):
             code_version=accepted['code_version'],context=context)
         except (OSError,ValueError) as error:
             raise IntegrityError('Accepted code version original changed or is unavailable') from error
+    elif (accepted.get('script',{}).get('path')==accepted.get('prepared',{}).get('local_path')
+            and 'file_stat' in accepted['script']):
+        items=[accepted['script'],*items]
     else:
         # The original non-Git owner consumes its frozen call slots, retaining
         # HEAD's independent-copy identity rather than reopening mutable inputs.

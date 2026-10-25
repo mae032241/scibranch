@@ -222,65 +222,152 @@ def legacy_compilation(source):
     return value
 
 
+def _check_identity(path, ref, *, context=None):
+    """Compare a saved ordinary identity without upgrading legacy references."""
+    saved = ref.get('file_stat')
+    if saved is not None and (type(saved) is not list or len(saved) != 4
+            or any(type(value) is not int for value in saved)
+            or saved[2] != ref.get('size_bytes')):
+        raise ValueError('Original file fingerprint is malformed')
+    actual = files.stat_file(path, context=context)
+    if 'size_bytes' in ref and actual['size_bytes'] != ref['size_bytes']:
+        raise ValueError('Original size changed: ' + str(path))
+    if saved is not None:
+        device, inode, modified, _ = actual['source_stat']
+        if saved != [device, inode, actual['size_bytes'], modified]:
+            raise ValueError('Original file identity changed: ' + str(path))
+    return path
+
+
+def _logical_input(root, path, *, context=None):
+    """Resolve one declared task path without requiring a host-side alias."""
+    parts = PurePosixPath(path).parts
+    if (len(parts)<5 or parts[:2]!=('project','nodes') or not parts[2].isdecimal()
+            or parts[2]!=f'{int(parts[2]):03d}' or parts[3] not in {'inputs','work'}):
+        return None
+    job_path=root/'jobs'/f'{int(parts[2]):03d}.json'
+    if not job_path.exists():return None
+    job=_json(job_path);logical='/'.join(parts[3:])
+    materials=[row for row in [*job.get('direct_materials',[]),
+        *[item['material'] for item in job.get('selected_inputs',[])]] if row['path']==logical]
+    if materials:
+        if any(row!=materials[0] for row in materials):raise ValueError('Logical input has conflicting originals')
+        return material_path(root,materials[0])
+    rows=[row for row in [*job.get('global_materials',[]),*job.get('history',{}).get('files',[]),
+        *job.get('history',{}).get('execution_recovery_materials',[])] if row['path']==logical]
+    if rows:
+        if any(row!=rows[0] for row in rows):raise ValueError('Logical input has conflicting originals')
+        if 'source' not in rows[0]:raise ValueError('Legacy logical input original is unavailable')
+        selected=Path(rows[0]['source'])
+        if root/selected==root/path:raise ValueError('Selected scientific input original is unavailable')
+        return resolve_root_ref(root,rows[0],context=context)
+    direct=[row for row in job.get('direct_refs',[]) if row['path']==logical]
+    if len(direct)==1:
+        owner=node(root,int(PurePosixPath(logical).parts[2]))
+        seal=_json(source_record(owner,'result-identity.json'))
+        raw=resolve_ref(owner,seal['raw_ref'],context=context)
+        from . import contracts as c, candidate_refs
+        original=c.read(raw)
+        public=c.scientific_projection(candidate_refs.public_science_fields(original,
+            candidate_refs.for_job(job)),str(PurePosixPath(logical).parent/'scientific-original.json'))
+        if public!=original:raise ValueError('Selected public scientific projection is unavailable')
+        return _check_identity(raw,direct[0],context=context)
+    return None
+
+
 def resolve_root_ref(root, ref, *, context=None):
     if context is not None:context.remaining_seconds()
     if 'origin_identity' in ref:
         return resolve_ref(for_origin(root, ref['origin_identity']), ref, context=context)
-    reference_path = Path(ref['path'])
+    root = Path(root).absolute()
+    reference_path = Path(ref.get('source', ref['path']))
     if reference_path.is_absolute():
-        if not reference_path.is_relative_to(Path(root).absolute()):
-            raise ValueError('Root original reference escaped its exact instance')
-        path = relative(reference_path.relative_to(Path(root).absolute()).as_posix())
+        if not reference_path.is_relative_to(root):
+            if 'source' not in ref and 'file_stat' not in ref:
+                raise ValueError('External original requires an exact bound source')
+            return _check_identity(files.check_path(reference_path), ref, context=context)
+        path = relative(reference_path.relative_to(root).as_posix())
     else:
-        path = relative(ref['path'])
-    actual = Path(root) / path
+        path = relative(str(reference_path))
+    actual = root / path
+    if not actual.exists():
+        bound=_logical_input(root,path,context=context)
+        if bound is not None:return _check_identity(bound,ref,context=context)
     if actual.exists() or _manifest(root) is None:
-        proof = files.stat_file(actual, context=context)
-        if any(field in ref and proof[field] != ref[field] for field in ('size_bytes',)):
-            raise ValueError('Original bytes changed: ' + path)
-        return actual
+        return _check_identity(actual, ref, context=context)
     parts = PurePosixPath(path).parts
     step = None
     if len(parts) >= 2 and parts[0] in {'native-evidence', 'jobs'}:
         candidate = parts[1].split('.')[0]
-        if candidate.isdecimal():
-            step = int(candidate)
+        if candidate.isdecimal():step = int(candidate)
     elif len(parts) >= 3 and parts[:2] == ('project', 'nodes') and parts[2].isdecimal():
         step = int(parts[2])
     if step is not None:
-        return resolve_ref(node(root, step), ref, context=context)
+        return resolve_ref(node(root, step), dict(ref, path=path), context=context)
     manifest = _manifest(root)
     matches = [row for row in manifest['entries'] if row['path'] == path
-        and all(field not in ref or row[field] == ref[field] for field in ('size_bytes',))]
+        and all(field not in ref or row.get(field) == ref[field] for field in ('size_bytes',))]
     if len(matches) != 1:
         raise ValueError('Original reference requires an explicit origin identity')
-    return resolve_ref(for_origin(root, matches[0]['origin_identity']), matches[0], context=context)
+    return resolve_ref(for_origin(root, matches[0]['origin_identity']), dict(matches[0],
+        **{key: ref[key] for key in ('file_stat',) if key in ref}), context=context)
 
 
 def material_path(root, material):
-    """Resolve storage while retaining the material's original source string."""
-    source = Path(material['source'])
-    if not source.is_absolute():
-        return resolve_root_ref(root, dict(path=relative(material['source']),
-            **{field: material[field] for field in ('size_bytes',) if field in material}))
+    """Resolve the actual bound source and verify its producer's saved identity."""
     root = Path(root).absolute()
-    if source.is_relative_to(root):
-        return resolve_root_ref(root, dict(path=source.relative_to(root).as_posix(),
-            **{field: material[field] for field in ('size_bytes',) if field in material}))
+    saved = material
+    parts = PurePosixPath(material.get('path', '')).parts
+    if ('file_stat' not in material and len(parts) >= 5
+            and parts[:2] == ('inputs', 'parents') and parts[2].isdecimal()
+            and parts[2] == f'{int(parts[2]):03d}' and parts[3] == 'artifacts'):
+        owner = node(root, int(parts[2]))
+        seal_path = owner.storage_root / f'native-evidence/{owner.step:03d}/result-identity.json'
+        if owner.inherited or seal_path.exists():
+            seal = _json(source_record(owner, 'result-identity.json'))
+            matches = [row for row in seal.get('materials', [])
+                if {key: value for key, value in row.items() if key != 'file_stat'} == material]
+            if len(matches) != 1:
+                raise ValueError('Scientific material differs from its exact producer seal')
+            saved = matches[0]
+        else:
+            local=PurePosixPath(*parts[4:])
+            own=owner.logical_workspace/(str(local) if local.parts[0]=='experiments' else 'artifacts/'+str(local))
+            if Path(material['source'])!=own:
+                # A stopped managed writer already saved this exact output in
+                # the existing same-call observation before the node seal.
+                if len(local.parts)<4 or local.parts[0]!='experiments' or local.parts[2]!='artifacts':
+                    raise ValueError('Unsealed material has no exact current producer original')
+                from . import experiment_client, experiments
+                call=local.parts[1]
+                if not experiments.ID.fullmatch(call):raise ValueError('Unsealed managed material call changed')
+                observation=_json(experiment_client.record_directory(root,owner.step)/'calls'/call/'execution-observation.json')
+                experiments.verify_observation(observation,lambda proof:Path(proof['path']),
+                    interface=observation['interface'],verify_files=False)
+                matches=[item for item in observation.get('scientific_outputs',observation['outputs'])
+                    if item['name']=='/'.join(local.parts[3:]) and item['path']==material['source']
+                    and item['size_bytes']==material['size_bytes']]
+                if len(matches)!=1:raise ValueError('Unsealed managed material differs from its saved original')
+                saved=dict(material,**{key:matches[0][key] for key in ('file_stat',) if key in matches[0]})
+    source = Path(saved['source'])
+    ref = dict(path=str(source), **{field: saved[field]
+        for field in ('size_bytes', 'file_stat') if field in saved})
+    if not source.is_absolute() or source.is_relative_to(root):
+        return resolve_root_ref(root, ref)
     manifest = _manifest(root)
     if manifest is None:
-        return source
+        return _check_identity(files.check_path(source), ref)
     matches = []
     for origin in manifest['origins'].values():
         logical = Path(origin['original_root'])
         if source.is_relative_to(logical):
             relative_path = source.relative_to(logical).as_posix()
-            entries = [row for row in manifest['entries'] if row['origin_identity'] == origin['identity']
-                and row['path'] == relative_path and row['size_bytes'] == material['size_bytes']]
-            matches.extend(entries)
+            matches.extend(row for row in manifest['entries'] if row['origin_identity'] == origin['identity']
+                and row['path'] == relative_path and row['size_bytes'] == saved['size_bytes'])
     if len(matches) != 1:
         raise ValueError('Scientific material has no unique exact inherited origin')
-    return resolve_ref(for_origin(root, matches[0]['origin_identity']), matches[0])
+    return resolve_ref(for_origin(root, matches[0]['origin_identity']), dict(matches[0],
+        **{key: saved[key] for key in ('file_stat',) if key in saved}))
 
 
 def material_owner(source, material):
@@ -328,7 +415,10 @@ def resolve_ref(source, ref, *, context=None):
         raise ValueError('Exact original handle and reference required')
     origin = ref.get('origin_identity', source.origin_identity)
     key = identity_key(origin)
-    raw_path = ref['path']
+    raw_path = ref.get('source', ref['path'])
+    if (Path(raw_path).is_absolute() and not Path(raw_path).is_relative_to(Path(source.original_root))
+            and 'file_stat' in ref and source.entries is None):
+        return _check_identity(files.check_path(Path(raw_path)), ref, context=context)
     if Path(raw_path).is_absolute():
         original = Path(raw_path)
         if not original.is_relative_to(Path(source.original_root)):
@@ -352,9 +442,9 @@ def resolve_ref(source, ref, *, context=None):
             raise ValueError('Original reference differs from its frozen binding')
         expected = entry
         actual = files.check_path(source.storage_root / entry['storage_path'])
-    checked = files.stat_file(actual, context=context)
-    if 'size_bytes' in expected and checked['size_bytes'] != expected['size_bytes']:
-        raise ValueError('Original size changed: ' + key + ':' + path)
+    _check_identity(actual, expected, context=context)
+    if expected is not ref and 'file_stat' in ref:
+        _check_identity(actual, ref, context=context)
     return actual
 
 def original_ref(source, path):

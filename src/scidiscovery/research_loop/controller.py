@@ -292,14 +292,20 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
                 (globals_ / 'updates' / f'{index:03d}.md', update)
                 for index, update in enumerate(updates, 1)]]
             settings['global_materials'] = []
-            for source, contents in sources:
-                from . import shared_originals
-                payload = contents.encode('utf-8')
-                original = shared_originals.publish_bytes(root,payload,policy=storage_limits,context=storage_context)
-                shared_originals.link(original,source,size_bytes=len(payload),
-                    root=root,policy=storage_limits,context=storage_context)
-                settings['global_materials'].append(dict(source=source.relative_to(root).as_posix(),size_bytes=len(payload),
-                    path='inputs/global/' + source.relative_to(globals_).as_posix()))
+            for index, (source, contents) in enumerate(sources):
+                generated = objective_text is not None if index == 0 else _user_update_texts is not None
+                if generated:
+                    contracts.atomic_files.publish_bytes(source, contents.encode('utf-8'))
+                    source.chmod(0o400)
+                else:
+                    source = Path(original_globals[index]).absolute()
+                    contracts.record_path(source)
+                    if source.read_text(encoding='utf-8') != contents:
+                        raise ValueError('Original global text changed before preparation')
+                logical = 'objective.md' if index == 0 else f'updates/{index:03d}.md'
+                settings['global_materials'].append(dict(
+                    source=source.relative_to(root).as_posix() if source.is_relative_to(root) else str(source),
+                    size_bytes=source.stat().st_size, path='inputs/global/' + logical))
             if _source_facts_factory is not None:
                 if source_restrictions:
                     raise ValueError('Staged source facts cannot replace external source declarations')

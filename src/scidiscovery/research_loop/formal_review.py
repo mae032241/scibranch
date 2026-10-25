@@ -180,11 +180,11 @@ def _inherited_participants(source, job, seal):
         reason=None if proof['complete'] else 'native_identity_unavailable')
 
 
-def validate_original(source, job, seal, payload):
+def validate_original(source, job, seal, payload, *, controls_only=False):
     """Retain an original review's historical meaning without granting a child call."""
     from . import originals
-    reviewer = _inherited_participants(source, job, seal)
     if not job.get('formal_review'):
+        if not controls_only:_inherited_participants(source, job, seal)
         return
     ref = seal.get('formal_review')
     if ref is None:
@@ -196,10 +196,19 @@ def validate_original(source, job, seal, payload):
     producer = originals.dependency(context, subject['producer_step'],
         seal_ref=subject['producer_seal'])
     original_seal = c.read(originals.resolve_ref(producer, subject['producer_seal']))
-    if subject['material'] not in original_seal['materials']:
-        raise q.IntegrityError('Original formal review lost its exact subject')
+    from . import execution_inputs
+    execution_inputs._sealed_material(root=Path(producer.original_root), seal=original_seal,
+        material=subject['material'], source=producer, controls_only=controls_only)
     if job.get('fork_source'):
         subject = dict(subject, producer_seal=dict(subject['producer_seal'], origin_identity=producer.origin_identity))
+    if controls_only:
+        expected = dict(version=1, review_step=job['step'], subject=subject, request=job['formal_review'],
+            contract=request['contract'], authors=request['authors'], native_authorship=seal.get('native_authorship'),
+            raw_ref=seal['raw_ref'], result_ref=seal['result_ref'], verdict=payload['verdict'])
+        if any(proof.get(key) != value for key, value in expected.items()):
+            raise q.IntegrityError('Original formal review changed its frozen subject or verdict')
+        return
+    reviewer = _inherited_participants(source, job, seal)
     host_root = source.storage_root.parents[1] if source.inherited else source.storage_root
     actual_authors = authors(host_root, subject['producer_step'], source=producer)
     independent = review_rules.independence(
@@ -247,7 +256,7 @@ def authors(root, step, active=None, memo=None, *, source=None):
         compiled_originals = []
         for row in seal.get('compiled_implementations', []):
             compiler = execution_inputs.verify_compilation(root, row['compiler'], material=row['material'],
-                client_binding=row.get('client_binding'), source=context)
+                client_binding=row.get('client_binding'), source=context, controls_only=True)
             compiled_originals.extend(item['original'] for item in compiler['inputs'])
             if compiler.get('author_input') is not None:
                 compiled_originals.append(compiler['author_input'])
@@ -271,13 +280,14 @@ def authors(root, step, active=None, memo=None, *, source=None):
             origin_seal = c.read(originals.resolve_ref(producer, original['producer_seal']))
             contributions.append(dict(origin_step=original['producer_step'],
                 origin_result_ref=origin_seal['result_ref'], material=execution_inputs.resolve_native_original(
-                    root, original, compiler_job=job, source=context), producer_seal=original['producer_seal']))
+                    root, original, compiler_job=job, source=context, controls_only=True), producer_seal=original['producer_seal']))
         for selected in contributions:
             origin = selected['origin_step']
             producer = originals.dependency(owner, origin,
                 seal_ref=selected.get('producer_seal'))
             origin_seal = c.read(originals.source_record(producer, 'result-identity.json'))
-            if selected['material'] not in origin_seal['materials'] or selected['origin_result_ref'] != origin_seal['result_ref']:
+            if (not any({key: value for key, value in row.items() if key != 'file_stat'} == selected['material']
+                    for row in origin_seal['materials']) or selected['origin_result_ref'] != origin_seal['result_ref']):
                 raise q.IntegrityError('Declared author contribution differs from its exact producer')
             contributor = authors(root, origin, {*active, key}, memo, source=producer)
             complete = complete and contributor['complete']
@@ -299,8 +309,10 @@ def _subject(root, selected):
         c.validate(c.workspace(root, step))
     path = originals.source_record(source, 'result-identity.json')
     seal = c.read(path)
-    if item['material'] not in seal['materials'] or item['origin_result_ref'] != seal['result_ref']:
+    if item['origin_result_ref'] != seal['result_ref']:
         raise q.IntegrityError('Formal review subject differs from its exact producer')
+    from . import execution_inputs
+    execution_inputs._sealed_material(root, seal, item['material'], source=source if source.inherited else None)
     ref = (originals.original_ref(source, f'native-evidence/{step:03d}/result-identity.json')
         if source.inherited else q._ref(root, path))
     return dict(producer_step=step, producer_seal=ref, material=item['material'])
@@ -396,6 +408,25 @@ def request_route(root, job, payload, parents):
     return 'A', [value['subject']['producer_step']], value['question'], dict(kind='formal_review', request=ref)
 
 
+def selected_compiler(root, reference, *, controls_only=False):
+    """The exact review subject's compiler, without enumerating other code."""
+    from . import execution_inputs
+    context, request = _request_original(root, reference)
+    subject = request['subject']
+    producer, seal = _seal_original(root, subject['producer_step'], subject['producer_seal'], context)
+    matches = [row for row in seal.get('compiled_implementations', []) if row['material'] == subject['material']]
+    if not matches:return None
+    if len(matches) != 1:
+        raise q.IntegrityError('Reviewed compiler subject is ambiguous')
+    execution_inputs._sealed_material(root, seal, subject['material'],
+        source=producer if producer.inherited else None, controls_only=controls_only)
+    row = matches[0]
+    compiler = execution_inputs.verify_compilation(root, row['compiler'], material=subject['material'],
+        client_binding=row.get('client_binding'), source=producer if producer.inherited else None,
+        controls_only=controls_only)
+    return row['compiler'], compiler
+
+
 def input_binding(root, reference):
     """Exact material and producer metadata, without mounting authored conclusions."""
     from . import originals, history
@@ -404,30 +435,31 @@ def input_binding(root, reference):
     subject = request['subject']
     producer, seal = _seal_original(root, subject['producer_step'], subject['producer_seal'], context)
     expected_contract = originals.source_settings(context).get('formal_review_policy', {}).get('contract')
-    if (request['contract'] != expected_contract or request['question'] != QUESTION
-            or subject['material'] not in seal['materials']):
+    if request['contract'] != expected_contract or request['question'] != QUESTION:
         raise q.IntegrityError('Formal review inputs differ from the exact requested subject')
+    from . import execution_inputs
+    source = producer if producer.inherited else None
+    execution_inputs._sealed_material(root, seal, subject['material'], source=source)
     selected = dict(label='Exact reviewed artifact', origin_step=subject['producer_step'],
         origin_result_ref=seal['result_ref'], material=subject['material'])
     materials=[subject['material']];scientific=[];steps=[]
     compiled=[row for row in seal.get('compiled_implementations',[]) if row['material']==subject['material']]
-    if compiled and compiled[0].get('client_binding') is not None:
+    if compiled:
         if len(compiled)!=1:raise q.IntegrityError('Reviewed compiler subject is ambiguous')
-        from . import execution_inputs
-        source = producer if producer.inherited else None
         compiler=execution_inputs.verify_compilation(root,compiled[0]['compiler'],material=subject['material'],
-            client_binding=compiled[0]['client_binding'],source=source)
-        author=compiler['author']
-        originals.resolve_ref(originals.source_for_ref(producer,author),author)
-        scientific=[dict(source=str(Path(producer.original_root)/author['path']),path='inputs/review/scientific-implementation.json',size_bytes=author['size_bytes'])]
-        materials.extend(scientific)
+            client_binding=compiled[0].get('client_binding'),source=source)
+        if 'code_version' not in compiler and compiled[0].get('client_binding') is not None:
+            author=compiler['author']
+            originals.resolve_ref(originals.source_for_ref(producer,author),author)
+            scientific=[dict(source=str(Path(producer.original_root)/author['path']),path='inputs/review/scientific-implementation.json',size_bytes=author['size_bytes'])]
+            materials.extend(scientific)
         owner=q._read(root,compiler['job'],source=source)
         for item in compiler['inputs']:
             material=execution_inputs.resolve_native_original(root,item['original'],compiler_job=owner,source=source)
             if material not in materials:materials.append(material)
             steps.append(item['original']['producer_step'])
     return dict(materials=materials, selected=[selected],
-        **(dict(compiler_scientific_materials=scientific,scientific_source_steps=sorted(set(steps))) if scientific else {}),
+        **(dict(compiler_scientific_materials=scientific,scientific_source_steps=sorted(set(steps))) if compiled else {}),
         history=dict(nodes=[dict(step=subject['producer_step'], seal_ref=history.source_seal_ref(producer))],
                      files=[], candidate_ids=[], view={}))
 
@@ -593,12 +625,17 @@ def public(root, job):
     material = request['subject']['material']
     binding=input_binding(root,job['formal_review'])
     scientific=binding.get('compiler_scientific_materials',[])
+    implementation = scientific[0]['path'] if scientific else None
+    if implementation is None:
+        selected = selected_compiler(root, job['formal_review'], controls_only=True)
+        if selected is not None and 'code_version' in selected[1]:
+            implementation = 'inputs/review/scientific-implementation.json'
     return dict(role='A', question=request['question'],
         review=dict(subject=material['path'], instruction=_contract()['instruction'],
-                    **(dict(scientific_implementation=scientific[0]['path'],
+                    **(dict(scientific_implementation=implementation,
                         scientific_inputs=[item['path'] for item in binding['materials']
                             if item!=material and item not in scientific],
-                        implementation_relation='The readable implementation and scientific inputs are exact compiler originals for this selected subject; control retains and verifies the native package privately.') if scientific else {}),
+                        implementation_relation='The readable implementation and scientific inputs are exact compiler originals for this selected subject; control retains and verifies the native package privately.') if implementation is not None else {}),
                     scope=_contract()['scope'],
                     claims='Test claims in the exact artifact against the original global objective and constraints; absent claims or evidence remain unknown.',
                     requester_context='Requester rationale and conclusions are not default inputs. Host audit originals remain retained; any on-demand file reads are not completely observed. This is not blinded review or access isolation.'),

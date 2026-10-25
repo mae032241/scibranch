@@ -143,9 +143,26 @@ def isolate(request, adapter):
     for path in dict.fromkeys([str(python), str(python.resolve())]):
         if not any(Path(path).is_relative_to(root) for root in ['/usr', '/bin', '/lib', '/lib64', *roots]):
             args += ['--ro-bind', path, path]
-    args += ['--ro-bind', str(stage / 'inputs'), '/inputs', '--ro-bind', adapter, '/delivery.py',
-        '--bind' if request['phase'] == 'promote' else '--ro-bind', str(target), '/target',
-        '--setenv', 'PATH', os.defpath, '--chdir', '/tmp', '--', str(python), '-I', '/delivery.py', '--leaf']
+    args += ['--ro-bind',str(stage/'inputs'),'/inputs','--ro-bind',adapter,'/delivery.py',
+        '--bind' if request['phase']=='promote' else '--ro-bind',str(target),'/target']
+    objects=request.get('object_refs')
+    if not isinstance(objects,dict):raise ValueError('Selected delivery originals are unavailable')
+    labels=[]
+    for label,reference in objects.items():
+        name=Path(label) if isinstance(label,str) else Path('/')
+        if (not name.parts or name.is_absolute() or '..' in name.parts or '\\' in label
+                or name.as_posix()!=label or any(name.is_relative_to(old) or old.is_relative_to(name) for old in labels)
+                or not isinstance(reference,dict) or set(reference)!={'path','size_bytes'}
+                or type(reference['size_bytes']) is not int or reference['size_bytes']<0):
+            raise ValueError('Selected delivery original binding changed')
+        original=Path(reference['path'])
+        mountpoint=stage/'inputs'/name
+        if (not original.is_absolute() or _file_size(original)!=reference['size_bytes']
+                or _file_size(mountpoint)!=0):
+            raise ValueError('Selected delivery original or mountpoint changed')
+        labels.append(name)
+        args += ['--ro-bind',str(original),str(Path('/inputs')/name)]
+    args += ['--setenv','PATH',os.defpath,'--chdir','/tmp','--',str(python),'-I','/delivery.py','--leaf']
     os.execv(bwrap, args)
 
 

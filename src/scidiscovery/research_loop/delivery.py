@@ -215,7 +215,7 @@ def _catalogue_sources(root, source_nodes, *, job=None):
         if observation is None:
             continue
         fact = history.read_observation(root, source_job, seal)
-        if fact['binding']['source_ref'] != seal['raw_ref']:
+        if fact['binding']['source_ref'] != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}:
             raise ValueError('Delivery observer source binding changed')
         for candidate in fact['candidates']:
             if candidate['id'] in known:
@@ -305,15 +305,11 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
         path = _file(path)
         if not admitted:
             inventory.entry(); inventory.file(path.stat().st_size)
-        if path in cache:
-            return cache[path]
         original = experiments.proof(path, context=io_context)
-        if proof is not None and any(original[key] != proof[key] for key in ('size_bytes',)):
+        if proof is not None and any(original[key] != proof[key] for key in ('size_bytes','file_stat') if key in proof):
             raise ValueError('Delivery source changed before freezing')
-        frozen = shared_originals.retain(root, path,
-            size_bytes=original['size_bytes'], source_kind=source_kind, context=io_context, policy=limits)
-        cache[path] = dict(path=frozen.relative_to(root).as_posix(),
-            size_bytes=original['size_bytes'])
+        if path in cache:return cache[path]
+        cache[path] = dict(path=str(path), size_bytes=original['size_bytes'])
         return cache[path]
     def freeze_bound(proof, *, source):
         inventory.entry(); inventory.file(proof['size_bytes'])
@@ -322,7 +318,9 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
             proof=proof, admitted=True)
     def original_reference(source, proof):
         owner=originals.source_for_ref(source,proof)
-        return dict(path=str(Path(owner.original_root)/proof['path']),size_bytes=proof['size_bytes'])
+        return dict(path=str(_proof_path(root,dict(path=proof.get('snapshot',proof['path']),
+            size_bytes=proof['size_bytes'],**{key:proof[key] for key in ('origin_identity','file_stat') if key in proof}),
+            source=owner,context=io_context)),size_bytes=proof['size_bytes'])
     candidates, known, evidence, contexts, direct = [], set(), {}, {}, []
     evidence_origins = {}; evidence_labels = {}; execution_labels = {}
     candidate_owners={}
@@ -335,7 +333,7 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
         if observation is None:
             continue
         fact = history.read_observation(root, source_job, seal)
-        if fact['binding']['source_ref'] != seal['raw_ref']:
+        if fact['binding']['source_ref'] != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}:
             raise ValueError('Delivery observer source binding changed')
         source = originals.node(root, receipt['step'])
         for context in fact.get('contexts', []):
@@ -362,6 +360,11 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
                 resolved['audit_required'] = 'audit' in spec.get('capabilities', ['audit'])
                 resolved['ledger'] = freeze_bound(resolved['ledger'], source=source)
                 resolved['objects'] = {label: freeze_bound(proof, source=source) for label, proof in resolved['objects'].items()}
+                if resolved['context'].get('source_code_version') is not None:
+                    saved_accepted=next(entry for entry in fact['managed_calls'] if entry['call_id']==call)['accepted']
+                    resolved['context']['accepted']=freeze_bound(dict(path=saved_accepted['snapshot'],
+                        size_bytes=saved_accepted['size_bytes'],
+                        **{key:saved_accepted[key] for key in ('file_stat',) if key in saved_accepted}),source=source)
                 for proof in spec['inputs']:
                     if proof['label']=='runtime-python':continue
                     if proof['label'] in resolved['objects']:raise ValueError('Provider input collides with candidate original')
@@ -373,7 +376,7 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
             for proof in candidate['evidence']:
                 if proof.get('retention') != 'archived':continue
                 bound = dict(path=proof['snapshot'], size_bytes=proof['size_bytes'],
-                    **({'origin_identity':proof['origin_identity']} if 'origin_identity' in proof else {}))
+                    **{key:proof[key] for key in ('origin_identity','file_stat') if key in proof})
                 bound = freeze_bound(bound, source=source)
                 identity=(originals.identity_key(source.origin_identity),proof['path'],proof['snapshot'],proof['size_bytes'])
                 label=evidence_labels.setdefault(identity,f'evidence/{len(evidence_labels)+1:06d}.jsonl')
@@ -386,7 +389,7 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
                      size_bytes=proof['size_bytes'], retention=proof.get('retention'), input_label=None)
         if proof.get('retention') == 'archived':
             bound = dict(path=proof['snapshot'], size_bytes=proof['size_bytes'],
-                **({'origin_identity':proof['origin_identity']} if 'origin_identity' in proof else {}))
+                **{key:proof[key] for key in ('origin_identity','file_stat') if key in proof})
             bound = freeze_bound(bound, source=source)
             identity=(originals.identity_key(source.origin_identity),proof['path'],proof['snapshot'],proof['size_bytes'])
             label=execution_labels.setdefault(identity,f'execution/{len(execution_labels)+1:06d}')
@@ -402,7 +405,8 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
             candidate['execution_contexts'] = [dict(call_id=context['call_id'], status=context['status'],
                 candidate_id=context['candidate_id'],
                 **{key:value for key,value in context.items() if key not in {'call_id','status','candidate_id','scope','parent','change_intent','proofs'}
-                    and (value is None or isinstance(value,(str,int,float,bool)))},
+                    and (value is None or isinstance(value,(str,int,float,bool))
+                        or key=='source_code_version' and isinstance(value,dict))},
                 proofs=[execution_proof(source, proof) for proof in context['proofs']],
                 **{key:execution_proof(source,value) for key,value in context.items()
                     if isinstance(value,dict) and {'path','size_bytes','retention'} <= set(value)})
@@ -412,16 +416,18 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
     with _stage(root, 'scid-resolve-') as directory:
         stage = Path(directory)
         (stage / 'inputs').mkdir();(stage / 'scratch').mkdir()
+        resolve_objects={}
         for label, proof in evidence.items():
-            if time.clock_gettime(time.CLOCK_BOOTTIME) >= deadline:
-                raise DeliveryUnresolved('delivery_source_time_limit')
-            destination = stage / 'inputs' / label
-            shared_originals.link(_proof(root, proof, context=io_context), destination,
-                size_bytes=proof['size_bytes'], root=root, context=io_context, policy=limits)
+            io_context.remaining_seconds()
+            resolve_objects[label]=dict(path=str(_proof(root,proof,context=io_context)),size_bytes=proof['size_bytes'])
         for proof in spec['inputs']:
             if proof['label']=='runtime-python':continue
             frozen = freeze(proof['path'], proof=proof)
-            shared_originals.link(_proof(root, frozen, context=io_context), stage / 'inputs' / proof['label'], size_bytes=frozen['size_bytes'], root=root, context=io_context, policy=limits)
+            resolve_objects[proof['label']]=frozen
+        for label in resolve_objects:
+            destination=stage/'inputs'/label
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            destination.touch(exist_ok=False)
         groups={}
         for candidate in candidates:
             owner=candidate_owners[candidate['candidate_id']]
@@ -440,7 +446,8 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
             request = dict(scope=dict(handoff_protocol=_settings(root, job)['handoff_protocol']),phase='resolve',
                 operation_id=security.request_digest(dict(source_nodes=source_nodes,origin=origin)),
                 candidate_id=None, artifact_ref=None, root=str(root), source_roots=spec['source_roots'],
-                candidates=projected, inputs=spec['inputs'], config=spec['config'], target=spec['target'], stage=str(stage), deadline_boottime=deadline)
+                candidates=projected,inputs=spec['inputs'],object_refs=resolve_objects,
+                config=spec['config'],target=spec['target'],stage=str(stage),deadline_boottime=deadline)
             resolved = _call(spec, request, deadline - time.clock_gettime(time.CLOCK_BOOTTIME), evidence=leaf_output(root))
             if (not isinstance(resolved,dict) or set(resolved)-{'capabilities'}!={'items'}
                     or not isinstance(resolved['items'],list) or not isinstance(resolved.get('capabilities',[]),list)):
@@ -506,8 +513,20 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
             if 'artifact' not in objects or artifact_origin is None:raise DeliveryUnresolved('delivery_artifact_unavailable')
             owner=candidate_owners[item['candidate_id']]
             raw_id=candidate_refs.original_id(owner.origin_identity,item['candidate_id'])
+            selected_context=dict(item['context'])
+            code_contexts=[(owner,context) for owner,context in contexts.get(item['candidate_id'],[])
+                if context.get('source_code_version') is not None]
+            if code_contexts:
+                if len(code_contexts)!=1:raise ValueError('Selected code source has ambiguous original calls')
+                code_owner,code_context=code_contexts[0]
+                accepted=[proof for proof in code_context['proofs'] if Path(proof['path']).name=='accepted.json']
+                if len(accepted)!=1:raise ValueError('Selected code source has no exact accepted control')
+                original=freeze_bound(dict(path=accepted[0]['snapshot'],size_bytes=accepted[0]['size_bytes'],
+                    **{key:accepted[0][key] for key in ('file_stat',) if key in accepted[0]}),source=code_owner)
+                selected_context.update(source_code_version=dict(code_context['source_code_version']),accepted=original)
+                _selected_code(root,selected_context,context=io_context)
             items.append(dict(candidate_id=item['candidate_id'], status='audit_pending',
-                              context=item['context'], ledger=evidence[evidence_label], objects=objects,artifact_origin=artifact_origin,
+                              context=selected_context, ledger=evidence[evidence_label], objects=objects,artifact_origin=artifact_origin,
                               **(dict(origin_identity=owner.origin_identity,original_candidate_id=raw_id) if raw_id!=item['candidate_id'] else {}),
                               **(dict(audit_required='audit' in spec['capabilities']) if 'capabilities' in spec else {})))
         except DeliveryUnresolved as error:
@@ -541,24 +560,87 @@ def public_sources(refs, audits=(), *, nominated_ids=None):
 
 
 def _proof_path(root, proof, *, source=None, context=None):
-    if (not isinstance(proof,dict) or set(proof)-{'origin_identity'}!={'path','size_bytes'}
+    if (not isinstance(proof,dict) or set(proof)-{'origin_identity','file_stat'}!={'path','size_bytes'}
             or not isinstance(proof['path'],str) or type(proof['size_bytes']) is not int or proof['size_bytes']<0):
         raise ValueError('Exact delivery file reference required')
-    name = Path(proof['path'])
-    if name.is_absolute() or '..' in name.parts:
-        raise ValueError('Delivery object is outside its exact instance')
-    path = _file(originals.resolve_ref(source, proof, context=context) if source is not None
-        else originals.resolve_root_ref(root, proof, context=context))
-    return path
+    name=Path(proof['path'])
+    if '..' in name.parts or name.as_posix()!=proof['path']:
+        raise ValueError('Delivery object is outside its exact original binding')
+    if source is not None:
+        return _file(originals.resolve_ref(source,proof,context=context))
+    if name.is_absolute():
+        return originals._check_identity(_file(name),proof,context=context)
+    return _file(originals.resolve_root_ref(root,proof,context=context))
 
 
 def _proof(root, proof, *, source=None, context=None):
-    path = _proof_path(root, proof, source=source, context=context)
-    from . import experiments
-    actual = experiments.proof(path, context=context)
-    if actual['size_bytes'] != proof['size_bytes']:
-        raise ValueError('Frozen delivery original changed')
-    return path
+    return _proof_path(root,proof,source=source,context=context)
+
+
+def _selected_code(root, context_value, *, context=None, materialize=False):
+    """Resolve the existing accepted/compiler pin without making exports permanent."""
+    version=context_value.get('source_code_version')
+    if version is None:return None
+    from . import experiments as e, code_versions, execution_inputs
+    accepted_ref=context_value.get('accepted')
+    if not isinstance(accepted_ref,dict):raise ValueError('Selected code has no original accepted control')
+    accepted_path=_proof_path(root,accepted_ref,context=context)
+    accepted=c.read(accepted_path)
+    directory=Path(accepted['interface']['config_record']['record_dir'])/'calls'/accepted['call_id']
+    if accepted_path!=directory/'accepted.json' or not directory.is_relative_to(Path(root)):
+        raise ValueError('Selected code escaped its exact original call')
+    observation=c.read(c.regular(directory/'execution-observation.json'))
+    config=dict(accepted['interface']['config_record'],execution_interface=accepted['interface'])
+    e.verify_observation(observation,lambda proof:Path(proof['path']),interface=accepted['interface'],
+        context=context,verify_files=False)
+    if observation.get('source_code_version')!=version:
+        raise ValueError('Selected code differs from its saved original version')
+    if 'code_version' in accepted:
+        e._code_version_binding(config,accepted)
+        if accepted['code_version']!=version:raise ValueError('Selected code changed its accepted call')
+        step=accepted['scope']['step'];call=accepted['call_id']
+    else:
+        metadata=e._source_control_metadata(config,accepted)
+        if metadata is None or metadata['code_version']!=version:
+            raise ValueError('Selected code lost its exact compiler binding')
+        step=metadata['subject']['producer_step']
+        call=execution_inputs._compiler_call_id(root,step,metadata['compiled']['compiler'])
+    code_versions.verify(root,step=step,call_id=call,code_version=version,context=context)
+    result=dict(root=Path(root),step=step,call_id=call,code_version=version)
+    if materialize:
+        tree=code_versions.materialize(root,step=step,call_id=call,code_version=version,context=context)
+        result['source']=e.proof(tree/version['entry'],context=context)
+    return result
+
+
+def _verify_selected_originals(root, item, source_nodes, *, context=None):
+    """Compare selected wire2 paths with the saved producer descriptors only."""
+    wanted={proof['path']:proof for proof in item['objects'].values()}
+    for receipt in source_nodes:
+        job,_,seal,seal_ref=history._source(root,receipt['step'])
+        if seal_ref!=receipt['seal_ref']:raise ValueError('Selected delivery producer control changed')
+        for material in seal.get('materials',[]):
+            if material['source'] in wanted:originals.material_path(root,material)
+        fact=history.read_observation(root,job,seal)
+        if fact is None:continue
+        candidate=next((row for row in fact['candidates'] if row['id']==item['candidate_id']),None)
+        if candidate is None:continue
+        proofs=list(candidate.get('evidence',[]))
+        for execution_context in fact.get('contexts',[]):
+            if execution_context.get('candidate_id')==item['candidate_id']:
+                from . import lineage
+                proofs.extend(execution_context['proofs']);proofs.extend(lineage.context_artifacts(execution_context))
+        for call in fact.get('managed_calls',[]):
+            proofs.extend(call.get('outputs',[]));proofs.extend(call.get('originals',[]))
+        owner=originals.node(root,receipt['step'])
+        for proof in proofs:
+            if proof.get('retention')!='archived':continue
+            path=Path(proof['snapshot'])
+            actual=str(path if path.is_absolute() else Path(owner.original_root)/path)
+            if actual not in wanted:continue
+            _proof_path(root,dict(path=proof['snapshot'],size_bytes=proof['size_bytes'],
+                **{key:proof[key] for key in ('file_stat',) if key in proof}),source=owner,context=context)
+    _selected_code(root,item.get('context',{}),context=context)
 
 
 def validate_sources(root, refs, *, job=None):
@@ -574,6 +656,7 @@ def validate_sources(root, refs, *, job=None):
                     or candidate_refs.origin_candidate(item['origin_identity'],item['original_candidate_id'])!=item['candidate_id']):
                 raise ValueError('Adapter candidate differs from its exact original instance')
         if item['status'] == 'audit_pending':
+            _verify_selected_originals(root,item,refs['source_nodes'])
             for proof in [item['ledger'], *item['objects'].values()]:
                 identity = (proof['path'], proof['size_bytes'])
                 if proof['path'] in seen:
@@ -756,6 +839,21 @@ def _call(spec, request, seconds, *, on_process=None, evidence=None):
         now = time.clock_gettime(time.CLOCK_BOOTTIME)
         replay_deadline = min(bound, now + seconds)
         if replay_deadline <= now:return None
+    code=None
+    if request.get('context',{}).get('source_code_version') is not None:
+        accepted=Path(request['context']['accepted']['path'])
+        if not accepted.is_absolute() or len(accepted.parents)<7:
+            raise ValueError('Selected code has no exact instance control path')
+        code=_selected_code(accepted.parents[6],request['context'],materialize=True)
+        label=('inputs/'+code['code_version']['entry'] if request['context'].get('kind')=='managed_local_result' else 'source.py')
+        expected={key:code['source'][key] for key in ('path','size_bytes')}
+        if request.get('object_refs',{}).get(label)!=expected:
+            raise ValueError('Selected code lost its existing readonly input label')
+    def cleanup_code():
+        if code is None:return
+        from . import code_versions
+        try:code_versions.cleanup_export(code['root'],step=code['step'],call_id=code['call_id'])
+        except (OSError,ValueError):keep('code_export_cleanup_failed')
     runtime._subreaper()  # Same actual ownership cleanup used by native runners.
     output, errors, totals = bytearray(), bytearray(), dict(stdout=0, stderr=0)
     def keep(outcome, returncode=None):
@@ -773,6 +871,7 @@ def _call(spec, request, seconds, *, on_process=None, evidence=None):
             process = subprocess.Popen([*spec['launcher_argv'], spec['adapter']], stdin=input_file,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={'PATH': os.defpath}, start_new_session=True)
         except OSError as error:
+            cleanup_code()  # Popen established that this leaf never started.
             if request.get('phase')=='audit':raise DeliveryUnresolved('delivery_audit_process_unavailable') from error
             raise
         identity = runtime.process_identity(process.pid, request['operation_id'])
@@ -823,31 +922,42 @@ def _call(spec, request, seconds, *, on_process=None, evidence=None):
         if replay_deadline is not None and time.clock_gettime(time.CLOCK_BOOTTIME) >= replay_deadline:
             return None
         output_file.seek(0)
-        try:return json.load(output_file)
+        try:value=json.load(output_file)
         except (ValueError,UnicodeDecodeError):return None
+        if isinstance(value,dict) and value.get('status') not in {None,'unknown'}:cleanup_code()
+        return value
 
 
 def _staged(root, spec, source, operation_id, stage, *, job=None, context=None):
-    """Alias exact frozen objects; providers consume inputs readonly and own scratch."""
-    from . import shared_originals, storage_policy as storage
-    limits = _settings(root, job).get('storage_policy')
-    inventory = storage.Inventory(limits, context=context)
-    (stage / 'inputs/harness').mkdir(parents=True)
-    (stage / 'scratch').mkdir()
-    for name, proof in source['objects'].items():
-        _label(name)
-        inventory.entry(); inventory.file(proof['size_bytes'])
-        shared_originals.link(_proof(root, proof, context=context), stage / 'inputs' / name, size_bytes=proof['size_bytes'], root=root, context=context, policy=limits)
+    """Use zero-byte mountpoints for actual selected readonly originals."""
+    from . import storage_policy as storage
+    inventory=storage.Inventory(_settings(root,job).get('storage_policy'),context=context)
+    (stage/'inputs/harness').mkdir(parents=True)
+    (stage/'scratch').mkdir()
+    nodes=(job or {}).get('delivery_sources',{}).get('source_nodes',(job or {}).get('history',{}).get('nodes',[]))
+    _verify_selected_originals(root,source,nodes,context=context)
+    objects={}
+    for name,proof in source['objects'].items():
+        _label(name);inventory.entry();inventory.file(proof['size_bytes'])
+        objects[name]=dict(path=str(_proof(root,proof,context=context)),size_bytes=proof['size_bytes'])
+    code=_selected_code(root,source.get('context',{}),context=context,materialize=True)
+    if code is not None:
+        name=('inputs/'+code['code_version']['entry'] if source['context'].get('kind')=='managed_local_result' else 'source.py')
+        if name in objects:raise ValueError('Selected code collides with another original')
+        objects[name]={key:code['source'][key] for key in ('path','size_bytes')}
+    for name in objects:
+        destination=stage/'inputs'/name
+        destination.parent.mkdir(parents=True,exist_ok=True)
+        destination.touch(exist_ok=False)
     candidate=source['candidate_id']
     if 'original_candidate_id' in source:
         from . import candidate_refs
         if candidate_refs.origin_candidate(source['origin_identity'],source['original_candidate_id'])!=candidate:
             raise ValueError('Adapter candidate differs from its exact original instance')
         candidate=source['original_candidate_id']
-    return dict(scope=dict(handoff_protocol=_settings(root, job)['handoff_protocol']), operation_id=operation_id, candidate_id=candidate,
-                artifact_ref=source['objects']['artifact'],artifact_origin=source['artifact_origin'], context=source['context'],
-                object_refs={name: proof for name, proof in source['objects'].items()},
-                inputs=spec['inputs'], config=spec['config'], stage=str(stage))
+    return dict(scope=dict(handoff_protocol=_settings(root,job)['handoff_protocol']),operation_id=operation_id,
+        candidate_id=candidate,artifact_ref=source['objects']['artifact'],artifact_origin=source['artifact_origin'],
+        context=source['context'],object_refs=objects,inputs=spec['inputs'],config=spec['config'],stage=str(stage))
 
 
 @owner_effect

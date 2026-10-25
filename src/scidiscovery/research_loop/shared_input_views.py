@@ -187,6 +187,138 @@ def _host_aliases(root, work, inventory):
     return aliases
 
 
+def _native_intent(root, job):
+    from . import contracts as c, execution
+    record = execution.record(root, job['step'])
+    intent = record / 'native-intent.json'
+    return c.read(c.regular(intent)) if intent.exists() else {}
+
+
+def _author_context(root, job):
+    from . import author_closeout, contracts as c
+    value = _native_intent(root, job)
+    if value.get('author_context_version') != 1:return None
+    proof = value['author_closeout_science_context']
+    directory = author_closeout.validate_science_context(root, job, proof)
+    return directory, c.read(author_closeout._check(root, proof))
+
+
+def _wake_mappings(root, job, target):
+    from . import contracts as c, execution, experiments as e, originals
+    mappings = []
+    def original(reference):
+        return originals.resolve_root_ref(root, {key: reference[key]
+            for key in ('path', 'size_bytes', 'file_stat') if key in reference})
+    for number, reference in enumerate((_native_intent(root, job).get('execution_wake') or {}).get('observations', []), 1):
+        observed = c.read(originals.resolve_root_ref(root, reference))
+        accepted = c.read(originals.resolve_root_ref(root, observed['accepted']))
+        attempt = accepted.get('native_attempt', {}).get('number', 0)
+        config = c.read(c.regular(execution.record(root, job['step'], attempt) / 'experiment-config.json'))
+        if accepted['scope'] != config['scope'] or accepted['interface'] != config['execution_interface']:
+            raise _unsupported('a selected wake original changed its accepted owner')
+        prefix = target / 'work/execution-results' / f'{number:03d}'
+        if job.get('worker_view_version') == 1:
+            for output in e.scientific_outputs(config, observed):
+                mappings.append((Path(output.local_path), prefix / 'outputs' / output.name))
+        else:
+            for output in observed['outputs']:
+                mappings.append((original(output), prefix / 'outputs' / output['name']))
+            for index, proof in enumerate(observed['proofs'], 1):
+                mappings.append((original(proof), prefix / 'originals' / f'{index:03d}'))
+            mappings.append((originals.resolve_root_ref(root, observed['completed']), prefix / 'result.json'))
+    return mappings
+
+
+def selected_code_mounts(root, job, work, *, target_work=None, context=None, exports=None):
+    """Materialize only exact selected review/context pins for this launch."""
+    from . import code_versions, contracts as c
+    root, work = Path(root), Path(work)
+    target = Path(target_work) if target_work is not None else work
+    selected = []
+    if job.get('formal_review'):
+        from . import formal_review, execution_inputs, qualification as q
+        bound = formal_review.selected_compiler(root, job['formal_review'])
+        if bound is not None and 'code_version' in bound[1]:
+            ref, compiler = bound
+            owner = q._read(root, compiler['job'])
+            call_id = execution_inputs._compiler_call_id(root, owner['step'], ref)
+            selected.append((owner['step'], call_id, compiler['code_version'],
+                target / 'inputs/review/scientific-implementation.json', True))
+    author = _author_context(root, job)
+    if author is not None:
+        from . import author_closeout
+        directory, manifest = author
+        for item in manifest['entries']:
+            if 'code_version' not in item:continue
+            step, call_id = author_closeout._context_code(root, job, item, controls_only=False)
+            destination = root / item['display']['path']
+            selected.append((step, call_id, item['code_version'], target / destination.relative_to(directory),
+                item['kind'] == 'compiler_author' or item['code_version']['selection'] == 'file'))
+    mappings = []
+    for step, call_id, version, destination, file_entry in selected:
+        if exports is not None:exports.append((step, call_id))
+        export = code_versions.materialize(root, step=step, call_id=call_id,
+            code_version=version, context=context)
+        mappings.append((export / version['entry'] if file_entry else export, destination, step, call_id))
+    return mappings
+
+
+def _dynamic_mountpoints(work, target, selected, *, context=None):
+    """Empty mountpoints only; fixed publication roots keep their real inodes."""
+    for destination, source in selected.items():
+        if context is not None:context.remaining_seconds()
+        destination, source = Path(destination), Path(source)
+        if (not destination.is_absolute() or '..' in destination.parts
+                or not destination.is_relative_to(target)):
+            raise _unsupported('a selected scientific view escaped its task')
+        relative = destination.relative_to(target)
+        if len(relative.parts) < 3 or relative.parts[0] != 'work' or relative.parts[1] not in DYNAMIC_ROOTS:
+            continue
+        actual = _exact(work / relative)
+        if actual == source:continue
+        parent = work / 'work' / relative.parts[1]
+        _identity(parent)
+        for component in relative.parts[2:-1]:
+            parent = _exact(parent / component)
+            parent.mkdir(exist_ok=True)
+            _identity(parent)
+        if source.is_dir():
+            actual.mkdir(exist_ok=True)
+            _identity(actual)
+        else:
+            try:
+                descriptor = os.open(actual, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            except FileExistsError:
+                if not stat.S_ISREG(actual.lstat().st_mode):
+                    raise _unsupported('a selected file mountpoint changed type')
+            else:
+                os.close(descriptor)
+
+
+def logical_original(root, job, path):
+    """Host reads of an existing selected view use its source, not a mountpoint."""
+    from . import author_closeout, code_versions, contracts as c
+    work = c.workspace(root, job['step']); path = Path(path)
+    for source, destination in _wake_mappings(root, job, work):
+        if path == destination:return source
+    author = _author_context(root, job)
+    if author is None:return None
+    directory, manifest = author
+    for item in manifest['entries']:
+        destination = work / (Path(root) / item['display']['path']).relative_to(directory)
+        if 'code_version' in item:
+            file_entry = item['kind'] == 'compiler_author' or item['code_version']['selection'] == 'file'
+            if (path != destination if file_entry else not path.is_relative_to(destination)):
+                continue
+            step, call_id = author_closeout._context_code(root, job, item, controls_only=False)
+            export = code_versions.materialize(root, step=step, call_id=call_id, code_version=item['code_version'])
+            return export / (item['code_version']['entry'] if file_entry else path.relative_to(destination))
+        if path == destination:
+            return (author_closeout._check(root, item['display']) if item['kind'] in {'task', 'framework'}
+                else author_closeout._context_source(root, item['source']))
+    return None
+
+
 def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=False, include_skills=True, context=None):
     """Final ro overlays after ALL writable/context mappings.
 
@@ -198,8 +330,6 @@ def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=Fal
     target = Path(target_work) if target_work is not None else work
     dynamic_root(root, work, DYNAMIC_ROOTS[0])
     mappings = {}
-    if (work / 'inputs').exists():
-        mappings[str(target / 'inputs')] = work / 'inputs'
     for name in DYNAMIC_ROOTS:
         mappings[str(target / 'work' / name)] = work / 'work' / name
     skill_mounts = []
@@ -213,8 +343,49 @@ def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=Fal
             mappings[str(destination)] = Path(source)
     protected_sources=list(mappings.values())
     for source, destination in mounts:
-        mappings[str(destination)] = Path(source)
+        if Path(destination) != target / 'inputs':
+            mappings[str(destination)] = Path(source)
         protected_sources.append(Path(source))
+    # Logical task paths need no host file. The frozen job selects their actual
+    # sources; these final overlays follow wider context and backend mappings.
+    from . import contracts as c, experiment_client, originals
+    declared = {}
+    for item in experiment_client._input_rows(job):
+        logical = originals.relative(item['path'])
+        destination = str(target / logical)
+        bound = dict(item, source=item.get('source', str(work / logical)))
+        source = originals.material_path(root, bound)
+        if destination in declared and declared[destination] != source:
+            raise _unsupported('a declared logical input has ambiguous sources')
+        declared[destination] = source
+    if job.get('delivery_sources', {}).get('catalogue'):
+        catalogue = c.regular(work / 'inputs/delivery-candidates.json')
+        declared[str(target / 'inputs/delivery-candidates.json')] = catalogue
+    for source, destination in _wake_mappings(root, job, target):
+        declared[str(destination)] = source
+    author = _author_context(root, job)
+    if author is not None:
+        from . import author_closeout
+        directory, manifest = author
+        for item in manifest['entries']:
+            if 'code_version' in item:continue
+            display = root / item['display']['path']
+            source = (author_closeout._check(root, item['display']) if item['kind'] in {'task', 'framework'}
+                else author_closeout._context_source(root, item['source']))
+            declared[str(target / display.relative_to(directory))] = source
+    for source, destination, _, _ in selected_code_mounts(root, job, work,
+            target_work=target, context=context):
+        declared[str(destination)] = source
+    for destination, source in declared.items():
+        mappings[destination] = source
+        protected_sources.append(source)
+    # Trusted launchers already verify exact accepted source identities. Their
+    # explicit file mappings take priority at this same final overlay seam.
+    for source, destination in mounts:
+        if Path(destination) != target / 'inputs':
+            mappings[str(destination)] = Path(source)
+            if str(destination) in declared:declared[str(destination)] = Path(source)
+    _dynamic_mountpoints(work, target, declared, context=context)
     inventory = _Inventory(context)
     host_aliases=_host_aliases(root,work,inventory) if private else []
     protected = set()
@@ -233,10 +404,13 @@ def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=Fal
             raise _unsupported('workspace alias changed during launch inventory')
         if identity in protected:
             destination = str(target / path.relative_to(work))
+            if Path(destination).is_relative_to(target / 'inputs') and destination not in declared:
+                continue
             if not any(Path(destination).is_relative_to(Path(base)) for base in mappings):
                 mappings[destination] = path
     if private:
-        for path in host_aliases:mappings[str(path)]=path
+        for path in host_aliases:
+            if path != work / 'inputs':mappings[str(path)]=path
         for name in ('host-history/objects', 'project/global', 'source-provenance/originals',
                 'host-runtime/fork','host-control/skills/objects'):
             path = root / name
@@ -244,8 +418,24 @@ def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=Fal
                 mappings[str(path)] = _exact(path)
     dynamic_root(root, work, DYNAMIC_ROOTS[0])
     arguments = []
+    inputs = target / 'inputs'
+    input_mappings = [(Path(destination), source) for destination, source in mappings.items()
+        if Path(destination).is_relative_to(inputs)]
     for destination, source in mappings.items():
+        if Path(destination).is_relative_to(inputs):continue
         arguments.extend(['--ro-bind', str(source), destination])
+    # Build missing logical mountpoints only in this namespace. Freezing this
+    # inputs tree leaves the already-bound dynamic publication roots intact.
+    if input_mappings:
+        _exact(work / 'inputs').mkdir(exist_ok=True)
+        arguments.extend(['--tmpfs', str(inputs)])
+        directories = {parent for destination, _ in input_mappings for parent in destination.parents
+            if parent != inputs and parent.is_relative_to(inputs)}
+        for directory in sorted(directories, key=lambda path: (len(path.parts), str(path))):
+            arguments.extend(['--dir', str(directory)])
+        for destination, source in sorted(input_mappings, key=lambda item: len(item[0].parts)):
+            arguments.extend(['--ro-bind', str(source), str(destination)])
+        arguments.extend(['--remount-ro', str(inputs)])
     if context is not None:context.remaining_seconds()
     return arguments
 

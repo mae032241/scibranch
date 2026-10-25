@@ -165,3 +165,48 @@ def test_author_digest_cache_rejects_generation_change_during_hash(tmp_path,monk
     with pytest.raises(ValueError,match='changed while hashing'):
         author_closeout._ref(tmp_path,path)
     assert author_closeout._generation_digest.cache_info().currsize==0
+
+
+@pytest.mark.parametrize('unknown', [None, 'native', 'bridge', 'backend'])
+def test_context_export_cleanup_follows_native_group_cleanup(tmp_path, monkeypatch, unknown):
+    """Execute the real runner finalizer with only physical process boundaries replaced."""
+    import ast
+    import inspect
+    from types import SimpleNamespace
+    from scidiscovery.research_loop import code_versions, local_experiments, runtime
+    events=[]
+    identity=dict(task_ref=dict(path='original-task'),pgid=900000001)
+    def bridge_close():
+        events.append('bridge_stopped')
+        if unknown=='bridge':raise ValueError('bridge cleanup is unknown')
+    def group_cleaned(*_):
+        events.append('native_group_stopped')
+        return 'cleanup_unknown' if unknown=='native' else 'observed_group_cleaned'
+    def backend_cleaned(*_):
+        events.append('backend_stopped')
+        return 'not_configured' if unknown=='backend' else 'observed_group_cleaned'
+    monkeypatch.setattr(runtime,'process_matches',lambda *_:False)
+    monkeypatch.setattr(runtime,'cleanup_owned_group',group_cleaned)
+    monkeypatch.setattr(local_experiments,'cleanup',backend_cleaned)
+    monkeypatch.setattr(code_versions,'cleanup_export',lambda root,**kw:events.append(('export_removed',kw['step'],kw['call_id'])))
+    process=SimpleNamespace(wait=lambda **kw:events.append('native_reaped'),stdout=None,stdin=None)
+    tree=ast.parse(inspect.getsource(native.run_native))
+    finalizer=next(node for node in tree.body[0].body if isinstance(node,ast.Try)).finalbody
+    code=compile(ast.fix_missing_locations(ast.Module(body=finalizer,type_ignores=[])),'native-finalizer','exec')
+    scope=dict(native.__dict__,root=tmp_path,job=dict(step=3,role='W',experiment_mode='local'),
+        scientific_lifetime=SimpleNamespace(close=bridge_close),process=process,process_id=identity,
+        experiment_config=dict(execution_interface=dict(executor='local_execution:command')),
+        code_exports=[(2,'a'*32)],launch_started=True,bridge_stopped=False,
+        cleanup=None,stop=None,error=None)
+    exec(code,scope)
+    assert events[:4]==['bridge_stopped','native_reaped','native_group_stopped','backend_stopped']
+    if unknown is None:
+        assert events[4:]==[('export_removed',2,'a'*32)]
+        assert scope['stop'] is None
+    else:
+        assert events[4:]==[] and scope['cleanup']=='cleanup_unknown'
+        assert scope['stop']=='cleanup_unknown'
+    events.clear()
+    native._cleanup_code_exports(tmp_path,[(2,'a'*32)],launch_started=True,
+        process=None,cleanup=None,bridge_stopped=True)
+    assert not events, 'An uncertain Popen failure retains the exact export'

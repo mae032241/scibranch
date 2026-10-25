@@ -232,7 +232,7 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
         raise e.UnsupportedExecution('Selected executor has no default scientific subprocess namespace')
     directory=e.Records(config).directory(accepted['call_id'])
     work=Path(value['workspace']);source=Path(accepted['source_script'])
-    command=list(command);bindings=[];code_root=None
+    command=list(command);bindings=[];code_root=None;final_mounts=[]
     if 'code_version' in accepted:
         from . import code_versions
         if e._code_version_binding(config,accepted)!=root:
@@ -264,7 +264,15 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
     else:
         if source.resolve()!=source or not source.is_relative_to(work):
             raise e.UnsupportedExecution('Scientific source is outside its assigned workspace')
-        if 'entry' in accepted:
+        bound_script=('entry' not in accepted and accepted['script']['path']!=str(directory/'source.py'))
+        if bound_script:
+            resolved=experiment_client.payload_path(config,source)
+            if (resolved==source or accepted['script']['path']!=str(resolved)
+                    or any(e.proof(resolved).get(key)!=item for key,item in accepted['script'].items())):
+                raise e.IntegrityError('Scientific bound package differs from its accepted original')
+            final_mounts.append((resolved,source))
+            command[accepted['script_index']]=str(source);cwd=cwd or str(work)
+        elif 'entry' in accepted:
             target=Path(accepted['experiment_directory'])
             if target.resolve()!=target or not target.is_relative_to(work):
                 raise e.UnsupportedExecution('Scientific experiment is outside its assigned workspace')
@@ -327,7 +335,7 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
         if not path.exists():path.mkdir(mode=0o700)
     for mode,source_path,target in bindings:wrapped.extend([mode,str(source_path),str(target)])
     wrapped.extend(input_mounts if input_mounts is not None else
-        shared_input_views.mount_arguments(root,job,work,include_skills=False,context=context))
+        shared_input_views.mount_arguments(root,job,work,mounts=final_mounts,include_skills=False,context=context))
     environment=dict(PATH='/usr/bin:/bin',HOME='/task-tmp',CODEX_HOME=str(backend),
         TMPDIR='/task-tmp',XDG_RUNTIME_DIR='/task-tmp',LANG='C.UTF-8',PYTHONDONTWRITEBYTECODE='1')
     for key,content in environment.items():wrapped.extend(['--setenv',key,content])

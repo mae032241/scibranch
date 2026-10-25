@@ -145,15 +145,37 @@ def managed_objects(candidate, row):
         if path.stat().st_size != proof['size_bytes']:
             raise ValueError('Frozen managed execution original changed')
         return path
-    source, model, receipt = unique('source.py'), unique('model.pkl'), unique('row.json')
-    if context.get('model') != model:
+    model = context.get('model')
+    if not isinstance(model,dict) or context['proofs'].count(model)!=1:
         raise ValueError('Managed model differs from frozen exact context')
+    receipt = unique('row.json')
     original_row = json.loads(bound(receipt).read_text())
     if any(original_row.get(key) != value for key, value in row.items()):
         raise ValueError('Candidate ledger differs from frozen exact call row')
-    bound(source);bound(model)
-    return [dict(label='artifact', proof_label=model['input_label']),
-            dict(label='source.py', proof_label=source['input_label'])]
+    bound(model)
+    objects = [dict(label='artifact', proof_label=model['input_label'])]
+    version = context.get('source_code_version')
+    if version is not None:
+        # Catalogue queries keep only the permanent code binding. The existing
+        # selected stage materializes this call's pinned source when consumed.
+        if (not isinstance(version,dict)
+                or set(version)!={'version','object_format','commit','tree_path','selection','entry','logical_root'}
+                or type(version['version']) is not int or version['version']!=1
+                or version['object_format']!='sha1' or version['tree_path']!='.'
+                or version['selection'] not in {'file','directory'}
+                or not isinstance(version['commit'],str) or not re.fullmatch(r'[0-9a-f]{40}',version['commit'])):
+            raise ValueError('Managed source code version changed')
+        for key in ('entry','logical_root'):
+            name=version[key]
+            if (not isinstance(name,str) or not name or Path(name).is_absolute()
+                    or Path(name).as_posix()!=name or '\\' in name or '\x00' in name
+                    or any(part in {'','.','..'} for part in name.split('/'))):
+                raise ValueError('Managed source code version path changed')
+    else:
+        source = unique('source.py')
+        bound(source)
+        objects.append(dict(label='source.py', proof_label=source['input_label']))
+    return objects
 
 
 def _audit(value, run_id):
@@ -475,12 +497,24 @@ def isolate(request, adapter):
             if Path(path) == Path.home():raise ValueError('Replay runtime must not expose the user home')
         if Path(path).exists():args += ['--ro-bind', path, path]
     args += ['--ro-bind', str(stage / 'inputs'), '/inputs', '--ro-bind', adapter, '/delivery.py']
-    if request['phase'] == 'replay':
-        source = request['object_refs']['source.py']
-        code = _exact(source['path'])
-        if code.stat().st_size != source['size_bytes']:
-            raise ValueError('Frozen replay code original differs')
-        args += ['--ro-bind', str(code), '/inputs/source.py']
+    objects = request.get('object_refs',{})
+    if not isinstance(objects,dict):raise ValueError('Frozen delivery object references changed')
+    if request['phase'] in {'audit','smoke','replay'} and 'source.py' not in objects:
+        raise ValueError('Frozen selected delivery source is missing')
+    for label, reference in objects.items():
+        if (not isinstance(label,str) or not label or Path(label).is_absolute()
+                or Path(label).as_posix()!=label or '\\' in label or '\x00' in label
+                or any(part in {'','.','..'} for part in label.split('/'))
+                or not isinstance(reference,dict) or set(reference)!={'path','size_bytes'}
+                or not isinstance(reference['path'],str) or not Path(reference['path']).is_absolute()
+                or type(reference['size_bytes']) is not int or reference['size_bytes']<0):
+            raise ValueError('Frozen delivery object reference changed')
+        original = _exact(reference['path'])
+        point = stage/'inputs'/label
+        if (point.resolve()!=point or not point.is_file()
+                or original.stat().st_size!=reference['size_bytes']):
+            raise ValueError('Frozen delivery object original differs')
+        args += ['--ro-bind', str(original), '/inputs/'+label]
     phase = request['phase']
     if phase not in {'audit','smoke','replay'}:target(request['target'])
     args += ['--bind' if phase in {'audit', 'resolve', 'smoke', 'replay'} else '--ro-bind', str(stage / 'scratch'), '/scratch']

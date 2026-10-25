@@ -217,27 +217,48 @@ already been removed. Actual code consumption requires the retained commit and
 its original call pin, and materializes that version without falling back to a
 mutable draft. New compiler records use `code_version` without an `author`
 snapshot and retain their original UUID identity; pre-Git records retain their
-saved interpretation. Ordinary execution-local `file_stat` fingerprints supplement
-path/size checks where needed; they do not add fingerprints to global materials
-or qualification references. Original authorization, budgets, deadlines
-and unknown-call reconciliation remain unchanged.
+saved interpretation. Code audit views retain the original compiler reference,
+UUID and seven-field `code_version`; only selected consumption materializes an
+export. After launch, export cleanup waits for confirmed native, bridge and
+applicable backend shutdown; unknown cleanup retains the selected export. Ordinary
+private `file_stat` fingerprints supplement path/size checks, including
+`seal.materials` rows after writers stop. Selected material verification removes only that private
+field when returning the unchanged public material or qualification reference.
+Original authorization, budgets, deadlines and unknown-call reconciliation remain
+unchanged.
 
 New Git-bound Local artifacts are written directly at the existing
 `work/retained-experiments/<call>/outputs` path and read through the existing
 read-only dynamic root. These Local and node-owned raw/artifact originals are sealed in place only after
 actual writers are confirmed stopped. Repeated collection, observation, checkpoint
-and history reads verify saved proof without copying or refreshing it; checkpoints
-do not seal current drafts. Required selected-control checks and saved older records
+and history views preserve first destinations and saved proofs; actual content
+consumption verifies the selected original without copying or refreshing it.
+Checkpoints do not seal current drafts. Required selected-control checks and saved older records
 remain, and output errors do not rewrite a known terminal outcome. Local calls without
 `code_version`, including the old `entry` branch, retain their existing copy behavior.
 
-This covers only the Local/node output slice of G2. Other providers, global and
-cross-node inputs, history-body reuse and code audit/delivery views remain pending;
-G3 recovery, fork/archive/delete consumers are not implemented. Existing archive/fork
-sections do not establish complete lifecycle support for new Git-backed runs. Real
-default native, registered Cov, Codex/namespace and replay leaf validation is deferred
-until G3 and an independent user CLI run. Source changes establish neither scientific
-qualification nor a real sandbox guarantee.
+External global/declaration inputs and cross-node inputs resolve their exact actual
+originals and are mapped read-only at existing logical task paths, without node body
+copies or chmod of external sources. A logical public path need not have a host file
+alias. History bodies reuse their first existing destinations. Ordinary catalogue,
+status and provenance reads validate retained control relationships without reopening
+unselected scientific bodies or Git pins; actual selected consumption remains strict.
+Delivery retains wire version 2 and `object_refs`, with zero-byte mountpoints overlaid
+by read-only binds to selected originals.
+
+Cov retains its existing `runs_root/model_run<run_id>.pkl` original after exact
+call/run/receipt checks and keeps its single-script entry contract. New TCAD command
+collection first writes native scientific outputs, the existing scientific `tcad_log`
+and facts into the existing node/call output directory. Manifest, transport-derived
+files, bindings and transfer spool remain private. New socket-backed preparation is
+unsupported before admission or submission; exact old-call queries remain supported.
+
+G3 recovery and fork/archive/delete consumers for the new references and Git code
+remain pending. Existing archive/fork sections do not establish complete lifecycle
+support for new Git-backed runs. Real default native, registered Cov, Codex/namespace,
+replay/model, solver and SSH validation is deferred until G3 and an independent user
+CLI run. Source changes establish neither scientific qualification nor a real sandbox
+guarantee.
 
 The default local command backend resolves the selected Codex installation's native
 binary and uses its sandbox with a restricted scientific subprocess file view. The
@@ -260,15 +281,12 @@ permissions are not replaced to make them run. The internal permission profile a
 no operator setting. These file views do not establish hostile same-user process
 isolation or a blanket guarantee for generic native execution.
 
-Outside the Local/node output path above, existing retention semantics continue
-to use the instance's `host-history/objects/<uuid>` archive. Each independent freeze gets a
-new object path; equal bytes are not deduplicated. Host-only aliases of a managed
-frozen original may share its inode across calls without merging original calls,
-origins or scientific paths. Mutable external bytes are first copied independently;
-accepted input snapshots, Worker inputs, collection and wake views then share
-read-only originals through owning hardlinks. Editing requires an explicit,
-file-scoped working copy under `work/`, never a pre-copied input tree. Sharing
-requires the same filesystem and fails explicitly without a copy fallback.
+Existing legacy retention records keep their saved `host-history/objects/<uuid>`
+paths and owning-hardlink interpretation. Each independent freeze has its own
+identity; equal bytes do not merge original calls, origins or scientific paths.
+Current task, wake, code audit and delivery views resolve their selected originals
+through existing bindings and expose them through read-only mounts. Editing requires
+an explicit, file-scoped working copy under `work/`, never a pre-copied input tree.
 Source ownership is supplied by its lifecycle, not inferred from mode or link
 count. Mode 0400 alone is not hostile same-user write isolation.
 
