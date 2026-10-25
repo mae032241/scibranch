@@ -296,16 +296,18 @@ isolation or a blanket guarantee for generic native execution.
 **Declared project views.** `project_layout.py` owns strict project declarations,
 frozen base Git identity and bounded tracked-file/worktree validation. The
 [project configuration contract](RESEARCH_CONFIGURATION.md#declared-projects--声明工程)
-owns its supported fields and permission limits. The original base path exposes
-only verified HEAD ordinary files read-only, without `.git`, untracked/ignored
-files, a base-data copy or an overlay filesystem. Its SHA-1/SHA-256 HEAD identity
-is immutable across configuration revisions and forks. HEAD/index consistency is
-checked globally; ordinary Git dirty checks and source/parent stat race checks
-apply to visible base sources. Git filters and index optimization flags retain
-their normal semantics. W and runs exclude editable/scratch/output roots from
-those source checks; read-only roles exclude scratch/output roots. Missing or
-dirty visible sources affect only later consumption that needs them, not known
-terminal records or metadata-only queries.
+owns its supported fields and permission limits. The whole base directory is
+mounted read-only at its original path, including untracked/ignored files, with
+its root `.git` masked. There is no base-data copy or overlay filesystem. Its
+SHA-1/SHA-256 HEAD identity is immutable across configuration revisions and forks;
+untracked/ignored contents remain the host's current files. HEAD/index consistency
+is checked globally, with ordinary Git dirty checks and stable Git control paths.
+Namespace launch does not inspect each base-file source or construct per-file
+mounts; Git metadata checks still scale with tracked entries. Git filters and index
+optimization flags retain their normal semantics. W and runs exclude
+editable/scratch/output roots from dirty checks; read-only roles exclude
+scratch/output roots. Missing or dirty required sources affect only later
+consumption that needs them, not known terminal records or metadata-only queries.
 
 Project draft exposure is limited to declared editable code. Initial tracked-code seed and a
 uniquely selected retained parent commit use existing shared code limits;
@@ -316,7 +318,9 @@ read-only; empty roots use read-only tmpfs. Scratch roots are temporary tmpfs an
 output roots map to the original call's artifacts with full relative paths.
 W may write only its exact editable/scratch/node-output targets in the base view;
 other roles receive only the read-only base, without W drafts. Scientific input
-protection is applied last.
+protection is applied last. Missing declared mountpoints and necessary parents
+are created as empty host directories before launch; a non-writable host base
+requires those directories to exist already.
 
 Run cwd may be the exact base root; the backend's internal permission policy
 retains the task-work cwd and adds only declared scratch/output writable targets.

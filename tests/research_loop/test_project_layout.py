@@ -1,4 +1,4 @@
-"""Project views use exact Git names and normal worktree checks without discovery."""
+"""Project checks use normal Git semantics; initial seed rows use tracked names."""
 import copy
 import hashlib
 import os
@@ -161,7 +161,8 @@ def test_filtered_worktree_uses_normal_git_semantics(tmp_path):
 
 
 @pytest.mark.process_e2e
-def test_repeated_views_do_not_open_read_or_hash_base_files(tmp_path, monkeypatch):
+@pytest.mark.parametrize('operation', ['files', 'verify_base'])
+def test_repeated_views_do_not_open_read_or_hash_base_files(tmp_path, monkeypatch, operation):
     declaration = project(tmp_path)
     root = Path(declaration['base_root'])
     frozen = layout.prepare(declaration, protected=[])
@@ -187,19 +188,33 @@ def test_repeated_views_do_not_open_read_or_hash_base_files(tmp_path, monkeypatc
     def no_hash(*args, **kwargs):
         raise AssertionError('Project checks must not hash base file bytes in Python')
 
+    def no_source(*args, **kwargs):
+        raise AssertionError('Base verification must not inspect each source')
+
+    def no_manifest(*args, **kwargs):
+        raise AssertionError('Project checks must not create a manifest')
+
     monkeypatch.setattr(os, 'open', no_source_open)
     monkeypatch.setattr(os, 'read', no_source_read)
     monkeypatch.setattr(Path, 'open', no_source_path_open)
+    monkeypatch.setattr(Path, 'write_bytes', no_manifest)
+    monkeypatch.setattr(Path, 'write_text', no_manifest)
     monkeypatch.setattr(hashlib, 'new', no_hash)
+    if operation == 'verify_base':
+        monkeypatch.setattr(layout, '_source', no_source)
     # Real Git subprocesses may read/hash stat-changed files themselves. Python
     # only consumes bounded Git pipe output and checks exact source metadata.
     for _ in range(3):
-        assert {row['relative'] for row in layout.files(frozen)} == {
-            'data.txt', 'src/main.py', 'tools/helper.py'}
+        result = getattr(layout, operation)(frozen)
+        if operation == 'verify_base':
+            assert result is None
+        else:
+            assert {row['relative'] for row in result} == {
+                'data.txt', 'src/main.py', 'tools/helper.py'}
 
 
 @pytest.mark.process_e2e
-def test_untracked_and_ignored_not_visible(tmp_path, monkeypatch):
+def test_untracked_and_ignored_not_in_seed_rows(tmp_path, monkeypatch):
     declaration = project(tmp_path)
     root = Path(declaration['base_root'])
     (root / '.git/info').mkdir(exist_ok=True)

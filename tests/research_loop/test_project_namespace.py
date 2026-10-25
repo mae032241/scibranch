@@ -14,9 +14,11 @@ from scidiscovery.research_loop.experiments import UnsupportedExecution
 def project_view(tmp_path, monkeypatch):
     base = tmp_path / 'base'
     base.mkdir()
-    for name, content in [('config.txt', 'base'), ('hidden.txt', 'untracked')]:
+    for name, content in [('config.txt', 'base'), ('hidden.txt', 'untracked'),
+            ('ignored.txt', 'ignored'), ('.gitignore', 'ignored.txt\n')]:
         (base / name).write_text(content)
     (base / '.git').mkdir()
+    (base / '.git/config').write_text('private repository metadata')
     (base / 'src').mkdir()
     (base / 'src/main.py').write_text('old base code')
     work = tmp_path / 'instance/project/nodes/001'
@@ -26,21 +28,21 @@ def project_view(tmp_path, monkeypatch):
     project = dict(base_root=str(base), editable=['src', 'empty'], scratch=['build'], outputs=['out'],
         base_identity=dict(object_format='sha1', commit='0'*40))
     calls = []
-    def files(declaration, *, context=None, exclude=()):
-        calls.append(list(exclude))
-        return [dict(source=base / 'config.txt', relative='config.txt')]
+    def files(*args, **kwargs):
+        pytest.fail('Whole-base mount planning must not build a per-file input inventory')
     monkeypatch.setattr(project_layout, 'files', files)
+    monkeypatch.setattr(project_layout, 'verify_base', lambda *args, **kwargs: None)
     return project, base, work, calls
 
 
-def test_worker_plan_masks_untracked_and_grants_only_declared_directories(project_view):
+def test_worker_plan_binds_whole_base_and_grants_only_declared_directories(project_view):
     project, base, work, calls = project_view
     args = views.project_arguments(project, work, artifacts=work/'artifacts', writable=True)
-    assert args[:2] == ['--tmpfs', str(base)]
-    assert ['src', 'empty', 'build', 'out'] == calls[0]
+    assert args[:3] == ['--ro-bind', str(base), str(base)]
+    assert calls == []
     assert str(base/'hidden.txt') not in args
-    assert str(base/'.git') not in args
-    assert ['--ro-bind', str(base/'config.txt'), str(base/'config.txt')] == args[args.index('--ro-bind'):args.index('--ro-bind')+3]
+    assert ['--tmpfs', str(base/'.git'), '--remount-ro', str(base/'.git')] == args[3:7]
+    assert str(base/'config.txt') not in args
     assert ['--bind', str(work/'project/src'), str(base/'src')] in [args[i:i+3] for i in range(len(args)-2)]
     assert base not in views.project_targets(project, writable=True)
 
@@ -184,9 +186,12 @@ def test_project_kernel_mount_writes_and_original_call_outputs(project_view, tmp
         code_tree=None if worker else export, writable=worker)
     payload = '''import pathlib,sys
 p=pathlib.Path(sys.argv[1]);worker=sys.argv[2]=='yes'
-assert not (p/'hidden.txt').exists() and not (p/'.git').exists()
+assert (p/'hidden.txt').read_text() == 'untracked'
+assert (p/'ignored.txt').read_text() == 'ignored'
+assert list((p/'.git').iterdir()) == []
+assert not (p/'.git/config').exists()
 assert (p/'src/main.py').read_text()==('draft code' if worker else 'pinned code')
-for name,allowed in [('config.txt',False),('undeclared',False),('src/main.py',worker),('empty/new',worker),('build/temporary',True),('out/result',True)]:
+for name,allowed in [('config.txt',False),('hidden.txt',False),('ignored.txt',False),('.git/new',False),('undeclared',False),('src/main.py',worker),('empty/new',worker),('build/temporary',True),('out/result',True)]:
  try:(p/name).write_text('written')
  except OSError:
   assert not allowed,name
@@ -197,7 +202,8 @@ for name,allowed in [('config.txt',False),('undeclared',False),('src/main.py',wo
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
     assert completed.returncode == 0, completed.stderr.decode(errors='replace')
     assert (artifacts/'project/out/result').read_text() == 'written'
-    assert not (base/'build').exists()
+    assert (base/'build').is_dir() and list((base/'build').iterdir()) == []
+    assert (base/'out').is_dir() and list((base/'out').iterdir()) == []
     assert (base/'config.txt').read_text() == 'base'
     assert (base/'src/main.py').read_text() == 'old base code'
 
@@ -263,4 +269,4 @@ for name,allowed in [('config.txt',False),('undeclared',False),('src/main.py',Fa
     assert completed.returncode == 0, completed.stderr.decode(errors='replace')
     assert (artifacts/'project/out/result').read_text() == 'written'
     assert (export/'src/main.py').read_text() == 'pinned code'
-    assert not (base/'build').exists()
+    assert (base/'build').is_dir() and list((base/'build').iterdir()) == []

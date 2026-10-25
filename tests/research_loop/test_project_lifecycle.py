@@ -23,8 +23,10 @@ _PAYLOAD = b'''from pathlib import Path
 base=Path(__file__).parent.parent
 assert Path.cwd()==base
 assert (base/'config.txt').read_text()=='readonly base\\n'
-assert not (base/'untracked.txt').exists()
-for relative in ('config.txt','src/main.py','tools/helper.py','empty/new','undeclared'):
+assert (base/'untracked.txt').read_bytes()==b'never expose or copy\\n'
+assert (base/'ignored.txt').read_bytes()==b'ignored base bytes\\n'
+assert not (base/'.git/HEAD').exists()
+for relative in ('config.txt','untracked.txt','ignored.txt','.git/new','src/main.py','tools/helper.py','empty/new','undeclared'):
  try:(base/relative).write_text('forbidden')
  except OSError:pass
  else:raise AssertionError(relative)
@@ -58,6 +60,8 @@ def _base(tmp_path):
         subprocess.run([git,'-c','core.hooksPath='+os.devnull,*arguments],cwd=base,env=environment,
             check=True,capture_output=True,timeout=5)
     (base/'untracked.txt').write_bytes(b'never expose or copy\n')
+    (base/'.gitignore').write_bytes(b'ignored.txt\n')
+    (base/'ignored.txt').write_bytes(b'ignored base bytes\n')
     return dict(base_root=str(base),editable=['src','tools','empty'],scratch=['build'],outputs=['out'])
 
 
@@ -198,7 +202,8 @@ def test_project_local_original_call_launches_real_sandbox_and_seals_same_output
     completed=c.read(e.Records(config).directory(call)/'completed.json')
     assert [row['path'] for row in completed['outputs']]==[str(original)]
     assert completed['outputs'][0]['file_stat']==e.proof(original)['file_stat']
-    assert not (Path(project['base_root'])/'build').exists()
+    assert list((Path(project['base_root'])/'build').iterdir())==[]
+    assert list((Path(project['base_root'])/'out').iterdir())==[]
     assert (Path(project['base_root'])/'config.txt').read_bytes()==b'readonly base\n'
     finish(root,2,'W',[1])
     seal=c.read(record/'result-identity.json')

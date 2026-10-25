@@ -684,7 +684,7 @@ def science_view(job, root=None):
         'public_root': job['public_root'],
         **(dict(project=dict(base_root=job['project']['base_root'],
             editable=job['project']['editable'], scratch=job['project']['scratch'], outputs=job['project']['outputs'],
-            base_view='Frozen Git HEAD tracked files only; untracked and ignored files are unavailable.',
+            base_view='Whole base directory is readonly, including untracked and ignored files; root .git is masked. Declared editable, scratch and output directories receive explicit task mounts.',
             code='Author only within declared editable directories. Managed runs use one retained code version.',
             seed={'selected_commit':'Draft initialized from the exact selected original code version.',
                   'frozen_base':'Draft initialized from frozen base editable files because no unique original code version was selected.',

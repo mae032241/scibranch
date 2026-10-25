@@ -187,29 +187,30 @@ mounts cannot overlap exact bound scientific inputs.
 
 Preparation freezes these declarations and the base's object format and HEAD
 commit. SHA-1 and SHA-256 bases are supported. Existing-instance edits and forks
-retain that exact identity. The base view contains only HEAD-tracked ordinary
-files, read-only at their original paths; `.git`, untracked and ignored files are
-absent. Dependencies must therefore be tracked. Bounded Git index/tree enumeration
+retain that exact identity. The whole base directory is mounted read-only at its
+original path, including untracked and ignored files; its root `.git` directory
+is masked. The frozen Git identity covers tracked state, while the remaining
+base contents are the host's current files. Bounded Git index/tree enumeration
 rejects staged changes and tracked symlinks/gitlinks. Ordinary Git worktree checks
-reject dirty visible sources; Git's normal filters, assume-unchanged and
-skip-worktree flags apply. Control does not open or hash every base file.
-Only visible mount sources receive file/type, executable-mode and parent-directory
-stat race checks. W and runs exclude editable, scratch and output roots from the
-base check; read-only roles exclude scratch and output roots. Changes to these
+reject dirty tracked sources; Git's normal filters, assume-unchanged and
+skip-worktree flags apply. Control does not open, hash or stat every base file
+for a namespace launch. Git metadata verification still scales with tracked
+entries. W and runs exclude editable, scratch and output roots from the dirty
+check; read-only roles exclude scratch and output roots. Changes to these
 hidden sources do not invalidate their view. Implicit fetch and remote helpers
 are disabled. Base files are not copied into the instance and no second file
-manifest is retained. Missing or dirty visible base sources prevent a later use that needs them; they do not
+manifest is retained. Missing or dirty required sources prevent a later use that needs them; they do not
 rewrite known terminal outcomes or block metadata-only historical queries.
 
 准备时冻结上述声明、基础仓库对象格式与 HEAD commit；支持 SHA-1 和 SHA-256 基础仓库。
-已有实例的配置修改及 fork 均保留原身份。基础视图只在原路径只读暴露 HEAD 追踪的普通
-文件，不暴露 `.git`、untracked 或 ignored 文件，因此依赖须明确纳入 Git。有界 Git
-索引/树枚举拒绝 staged 修改与追踪 symlink/gitlink；普通 Git 工作树检查拒绝可见来源的
-dirty 状态，采用 Git 通常的 filter、assume-unchanged 和 skip-worktree 语义。控制程序
-不逐个打开或 hash 基础文件，只对可见挂载来源做文件类型、执行位及父目录 stat race 检查。
-W 与 run 的基础检查排除 editable、scratch 和 outputs；只读角色排除 scratch 和 outputs，
+已有实例的配置修改及 fork 均保留原身份。整个基础目录在原路径只读挂载，包含 untracked
+和 ignored 文件；只遮蔽根 `.git` 目录。冻结 Git 身份覆盖追踪状态，其余基础内容采用
+宿主当前文件。有界 Git 索引/树枚举拒绝 staged 修改与追踪 symlink/gitlink；普通 Git
+工作树检查拒绝追踪来源的 dirty 状态，采用 Git 通常的 filter、assume-unchanged 和
+skip-worktree 语义。命名空间启动不逐个打开、hash 或 stat 基础文件；Git 元数据校验
+仍随追踪条目数量增长。W 与 run 的 dirty 检查排除 editable、scratch 和 outputs；只读角色排除 scratch 和 outputs，
 这些隐藏来源的变化不使该视图失效。隐式 fetch 和 remote helper 均禁用。基础文件不复制
-进实例，也不持久保留第二份文件清单。可见来源缺失或 dirty 只阻止后续真正需要这些来源的
+进实例，也不持久保留第二份文件清单。所需来源缺失或 dirty 只阻止后续真正需要这些来源的
 消费，不改写已知终态，也不阻断只读历史元数据查询。
 
 W edits explicit `project/<editable>` drafts mapped to the original base paths.
@@ -239,6 +240,9 @@ call's artifact directory and use the existing stop-writer/seal/collect lifecycl
 W's node outputs are drafts, not future call originals. Writes elsewhere fail;
 declare the exact needed scratch/output directory rather than making the base
 writable. Existing scientific input mounts remain read-only.
+Missing declared mountpoints and their necessary parents are created as empty
+host directories before launch; this changes directory metadata without copying
+base contents. Pre-create those directories when the host base is not writable.
 
 不使用 overlay 文件系统。W 在基础视图中只可写声明的 editable、scratch 与节点输出目标；
 其他角色看到只读基础工程，不读取 W 草稿。run 将准确代码版本只读挂载，空 editable 根
@@ -246,6 +250,8 @@ writable. Existing scientific input mounts remain read-only.
 原调用 artifact 目录下保留完整相对路径，沿用原停写、封存与采集生命周期。W 节点输出
 仍是草稿，不是未来调用原件。其他位置写入失败；需要工作目录或输出时，应声明准确
 scratch/output 目录。科学输入挂载仍只读。
+声明挂载点缺失时，启动前会在宿主创建空目录及必要父目录，只改变目录元数据，不复制
+基础内容；宿主基础目录不可写时，应预先建好这些目录。
 
 Project projection requires Linux namespace support and an explicitly configured
 standard Codex `workspace-write` policy. Inherited or unspecified native workspace

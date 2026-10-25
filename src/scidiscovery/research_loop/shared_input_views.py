@@ -176,10 +176,12 @@ def _project_directory(path):
 
 
 def project_arguments(project, work, *, code_tree=None, artifacts, writable, context=None):
-    """Tracked-only base at its original path, with declared directory mounts.
+    """Whole readonly base, hidden root .git, and declared directory overlays.
 
     A run consumes an exact materialized commit, including absent empty roots;
-    it never reads the current editable directories in the physical base.
+    it never reads the current editable directories in the physical base. Host
+    preparation may create missing empty directories for declared mountpoints;
+    readonly host bases must already contain those directories.
     """
     if project is None:return []
     from . import project_layout
@@ -190,23 +192,22 @@ def project_arguments(project, work, *, code_tree=None, artifacts, writable, con
     layout = project_layout.code_roots(project, work)
     code_view = writable or code_tree is not None
     excluded = [*(project['editable'] if code_view else []), *project['scratch'], *project['outputs']]
-    originals = project_layout.files(project, context=context, exclude=excluded)
+    project_layout.verify_base(project, context=context, exclude=excluded)
     targets = [base / name for name in excluded]
     for protected in (work, artifacts, *([Path(code_tree)] if code_tree is not None else [])):
         if protected.is_relative_to(base) or base.is_relative_to(protected):
             raise _unsupported('project base overlaps its private backing directories')
-    arguments = ['--tmpfs', str(base)]
-    directories = set(targets)
-    for item in originals:
-        destination = base / item['relative']
-        directories.update(parent for parent in destination.parents if parent.is_relative_to(base) and parent != base)
     for target in targets:
-        directories.update(parent for parent in target.parents if parent.is_relative_to(base) and parent != base)
-    for path in sorted(directories, key=lambda item: (len(item.parts), str(item))):
-        arguments.extend(['--dir', str(path)])
-    for item in originals:
-        arguments.extend(['--ro-bind', str(item['source']), str(base / item['relative'])])
-    arguments.extend(['--remount-ro', str(base)])
+        if context is not None:context.remaining_seconds()
+        try:
+            _project_directory(target)
+        except OSError as error:
+            raise _unsupported('readonly host project bases require precreated declared mountpoint directories') from error
+    repository = _exact(base / '.git')
+    if not repository.is_dir():
+        raise _unsupported('project Git control requires an ordinary directory')
+    arguments = ['--ro-bind', str(base), str(base),
+        '--tmpfs', str(repository), '--remount-ro', str(repository)]
     for entry in layout['editable'] if code_view else []:
         source = Path(code_tree) / entry['relative'] if code_tree is not None else entry['source']
         destination = entry['target']

@@ -6,6 +6,7 @@ ordinary replacement races; same-user concurrent writers remain trusted.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -252,13 +253,9 @@ def _source(root, name, mode, object_id):
                 signature=signature, ancestors=ancestors)
 
 
-def files(project, *, context=None, exclude=()):
-    """Verify HEAD/index and ordinary Git worktree state for this view's files.
-
-    ``exclude`` may hide declared mount roots at actual consumption, so their
-    current physical bytes cannot substitute for the selected code commit.
-    Git's normal filters and index flags apply; same-user writers are trusted.
-    """
+@contextmanager
+def _base_view(project, *, context, exclude):
+    """Share bounded Git verification between base mounts and code seeds."""
     project = _frozen(project)
     context = Deadline(SECONDS, upstream=context)
     declared = project['editable'] + project['scratch'] + project['outputs']
@@ -284,23 +281,40 @@ def files(project, *, context=None, exclude=()):
                     object_format=identity['object_format'], context=context)
     if index != tree:
         raise ValueError('Project Git index differs from frozen HEAD; staged changes are unsupported')
-    result = []
-    for name, (mode, object_id) in tree.items():
-        context.remaining_seconds()
-        if any(name == item or name.startswith(item + '/') for item in exclude):
-            continue
-        result.append(_source(root, name, mode, object_id))
+    yield root, tree, context
     if dirty:
         raise ValueError('Project worktree differs from frozen HEAD')
-    # Catch ordinary source/parent replacements while building this mount view.
-    for row in result:
-        context.remaining_seconds()
-        _unchanged(row['ancestors'])
-        if _signature(row['source'].lstat()) != row['signature']:
-            raise ValueError('Project tracked file changed during verification: ' + row['relative'])
     _controls_unchanged(anchors, controls)
     if _identity(root, context) != identity:
         raise ValueError('Project HEAD changed during verification')
+
+
+def verify_base(project, *, context=None, exclude=()):
+    """Verify frozen Git state without inspecting each base-file source.
+
+    Declared mount roots may be excluded from ordinary worktree dirty checks.
+    Git's normal filters and index flags apply; same-user writers are trusted.
+    """
+    with _base_view(project, context=context, exclude=exclude):
+        pass
+
+
+def files(project, *, context=None, exclude=()):
+    """Return exact tracked source rows for initial code seeds, without hashing."""
+    exclude = tuple(exclude)
+    result = []
+    with _base_view(project, context=context, exclude=exclude) as (root, tree, deadline):
+        for name, (mode, object_id) in tree.items():
+            deadline.remaining_seconds()
+            if any(name == item or name.startswith(item + '/') for item in exclude):
+                continue
+            result.append(_source(root, name, mode, object_id))
+        # Catch ordinary source/parent replacements while building this seed view.
+        for row in result:
+            deadline.remaining_seconds()
+            _unchanged(row['ancestors'])
+            if _signature(row['source'].lstat()) != row['signature']:
+                raise ValueError('Project tracked file changed during verification: ' + row['relative'])
     return result
 
 
@@ -338,7 +352,7 @@ def prepare(value, *, protected, existing=None, context=None):
                 if parent.exists() or parent.is_symlink():
                     _lineage(parent)
                     break
-    files(frozen, context=context)
+    verify_base(frozen, context=context)
     return frozen
 
 

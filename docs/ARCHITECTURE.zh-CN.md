@@ -192,20 +192,22 @@ managed policy、额外可写根以及无法忠实投影后端权限的自定义
 
 **声明工程视图。** `project_layout.py` 拥有严格工程声明、冻结基础 Git 身份和有界追踪文件/
 工作树检查；支持字段与权限限制由[工程配置主合同](RESEARCH_CONFIGURATION.md#declared-projects--声明工程)
-统一说明。基础工程原路径只读暴露核验后的 HEAD 普通文件，不含 `.git`、untracked/ignored
-文件，不复制基础数据，也不使用 overlay 文件系统。SHA-1/SHA-256 HEAD 身份在配置修订与
-fork 中保持不变。HEAD/index 一致性仍全局检查；普通 Git dirty 检查与来源文件/父目录
-stat race 检查只作用于可见基础来源，采用 Git 通常的 filter 与索引优化标志语义。
-W 与 run 排除 editable/scratch/outputs，只读角色排除 scratch/outputs；隐藏来源变化不使
-对应视图失效。可见来源缺失或 dirty 只影响后续需要它们的消费，不改变已知终态记录或
-只读元数据查询。
+统一说明。整个基础目录在原路径只读挂载，包含 untracked/ignored 文件，只遮蔽根 `.git`，
+不复制基础数据，也不使用 overlay 文件系统。SHA-1/SHA-256 HEAD 身份在配置修订与 fork 中
+保持不变；untracked/ignored 内容采用宿主当前文件。HEAD/index 一致性仍全局检查，并做
+普通 Git dirty 与 Git 控制路径稳定性检查。命名空间启动不逐文件检查基础来源或构造挂载项；
+Git 元数据检查仍随追踪条目数量增长，采用 Git 通常的 filter 与索引优化标志语义。
+W 与 run 的 dirty 检查排除 editable/scratch/outputs，只读角色排除 scratch/outputs；隐藏
+来源变化不使对应视图失效。所需来源缺失或 dirty 只影响后续需要它们的消费，不改变已知
+终态记录或只读元数据查询。
 
 工程草稿只暴露声明的 editable 代码。初始追踪代码 seed 与唯一选中的留存父 commit 沿用现有
 共享代码额度；父选择有歧义或缺失时，说明回退到冻结基础代码。已有 job 保留当前草稿。
 本地 project run 将全部 editable 根聚合为一个以 `project` 为根的 `code_version`，准确导出
 随后只读挂载，空根使用只读 tmpfs。scratch 根为临时 tmpfs；output 根按完整相对路径映射
 到原调用 artifacts。W 在基础视图中只可写准确 editable/scratch/节点输出目标；其他角色
-只读基础工程，不读取 W 草稿。科学输入只读保护最后叠加。
+只读基础工程，不读取 W 草稿。科学输入只读保护最后叠加。声明挂载点缺失时，启动前在
+宿主创建空目录及必要父目录；宿主基础目录不可写时，这些目录须预先存在。
 
 run cwd 可为准确 base 根；后端内部权限策略仍以 task-work cwd 为基准，只增加声明的
 scratch/output 可写目标。原生 Worker 保留冻结的 Codex `workspace-write` 策略，并投影准确
