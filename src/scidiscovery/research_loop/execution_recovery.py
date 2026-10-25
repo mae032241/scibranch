@@ -59,7 +59,7 @@ def validate(root,refs,*,originals=True):
                 or row.get('mechanism_binding')!=matches[0].get('mechanism_binding')
                 or row['status'] not in {'known_success','known_failed','not_submitted'}):
             raise history.ObserverIntegrityError('Execution recovery changed original reservation')
-        history.validate_managed(root,job,[row]);values.append(value)
+        history.validate_managed(root,job,[row],verify_files=False);values.append(value)
     return values
 
 
@@ -97,7 +97,7 @@ def _validate_inherited(root, context, ref, value, chains, *, originals=True):
             raise history.ObserverIntegrityError('Inherited recovery changed its original reservation')
         chains[key] = dict(ref=ref, number=1, phase='terminal', value=value)
     if originals and row is not None:
-        history.validate_managed_original(source, job, [row])
+        history.validate_managed_original(source, job, [row], controls_only=True)
 
 
 def resolved(root,refs):
@@ -110,11 +110,6 @@ def _validate_event(root,ref,value,chains,*,originals=True,sources=None,pending=
     from .execution_resume import verify_pending_set, _source_path
     logical_root=Path(source.original_root) if source is not None else Path(root)
     read = (lambda proof: q._read(root, proof)) if source is None else (lambda proof: c.read(_source_path(source, proof)))
-    def proof_file(path, expected):
-        if source is None:return e.proof(path, context=context)
-        actual = _source_path(source, dict(path=str(path),
-            **{field: expected[field] for field in ('size_bytes',)}))
-        return dict(path=str(path), size_bytes=actual.stat().st_size)
     step=value['source_step'];call=value['call_id'];key=(step,call)
     prior=chains.get(key)
     number=1 if prior is None else prior['number']+1
@@ -151,22 +146,11 @@ def _validate_event(root,ref,value,chains,*,originals=True,sources=None,pending=
     if originals:
         sources={} if sources is None else sources;pending={} if pending is None else pending
         if step not in sources:
-            if source is not None:
-                from . import originals as source_originals
-                seal_path=source_originals.source_record(source, 'result-identity.json')
-                sources[step]=(source_originals.source_job(source),None,c.read(seal_path),history.source_seal_ref(source))
-            elif context is None:sources[step]=history._source(root,step)
-            else:
-                # Current publication verifies its exact source, not every old call's logs.
-                from . import execution
-                job_path=Path(root)/'jobs'/f'{step:03d}.json'
-                seal_path=c.host_record(c.workspace(root,step))/'result-identity.json'
-                job=c.read(c.regular(job_path));seal=c.read(c.regular(seal_path))
-                if (c.record_ref(job_path)!=seal['job_ref']
-                        or e.proof(execution.raw(root,step),context=context)!=seal['raw_ref']
-                        or e.proof(seal_path.parent/'result.json',context=context)!=seal['result_ref']):
-                    raise history.ObserverIntegrityError('Current recovery source originals changed')
-                sources[step]=(job,None,seal,c.record_ref(seal_path))
+            from . import originals as source_originals
+            selected=source if source is not None else source_originals.node(root,step)
+            c.validate_original(selected,controls_only=True)
+            seal_path=source_originals.source_record(selected,'result-identity.json')
+            sources[step]=(source_originals.source_job(selected),None,c.read(seal_path),history.source_seal_ref(selected))
         job,_,seal,sha=sources[step]
         if sha!=value['seal_ref'] or value['pending_set']!=seal.get('pending_executions'):
             raise history.ObserverIntegrityError('Execution recovery source seal changed')
@@ -179,8 +163,8 @@ def _validate_event(root,ref,value,chains,*,originals=True,sources=None,pending=
         if allocation['call_id']!=call or allocation['binding']['scope']!=value['scope']:
             raise history.ObserverIntegrityError('Execution recovery allocation changed')
         if row is not None:
-            if source is None:history.validate_managed(root,job,[row],context=context)
-            else:history.validate_managed_original(source,job,[row])
+            if source is None:history.validate_managed(root,job,[row],context=context,verify_files=False)
+            else:history.validate_managed_original(source,job,[row],controls_only=True)
             if row.get('mechanism_binding')!=allocation['binding'].get('mechanism_binding'):
                 raise history.ObserverIntegrityError('Recovered execution changed original scientific opportunity')
             accepted=(c.read(Path(root)/row['accepted']['snapshot']) if source is None else
@@ -194,16 +178,43 @@ def _validate_event(root,ref,value,chains,*,originals=True,sources=None,pending=
                 logical_root=Path(source.original_root)
                 records=(logical_root/'host-runtime/experiment-control'/f'{value["scope"]["step"]:03d}'/'records'
                     if job.get('worker_view_version')==experiment_client.VERSION else source.logical_workspace/'work/lineage')
+            script=accepted['script']
+            script_bound=(isinstance(script,dict) and set(script) in (
+                    {'path','size_bytes'},{'path','size_bytes','file_stat'})
+                and isinstance(script.get('path'),str) and Path(script['path']).is_absolute()
+                and type(script.get('size_bytes')) is int and script['size_bytes']>=0
+                and isinstance(prepared.get('local_path'),str) and Path(prepared['local_path']).is_absolute()
+                and type(prepared.get('size_bytes')) is int
+                and script['size_bytes']==prepared['size_bytes'])
+            if script_bound and 'file_stat' in script:
+                script_bound=(isinstance(script['file_stat'],list) and len(script['file_stat'])==4
+                    and all(type(part) is int for part in script['file_stat'])
+                    and script['file_stat'][2]==script['size_bytes'])
+            if 'code_version' in accepted:
+                from . import code_versions
+                try:
+                    version=code_versions._version(accepted['code_version'])
+                    logical=Path(version['logical_root']);entry=Path(version['entry'])
+                    selected_code=(logical==Path('code') and accepted['interface'].get('executor')=='local_execution:command'
+                        if version['selection']=='directory' else logical.parts[0]=='code' and len(entry.parts)==1)
+                    source_bound=(selected_code and accepted.get('source_script')==str(c.workspace(logical_root,step)/logical/entry)
+                        and not any(key in accepted for key in ('entry','source_reference','source_input')))
+                    # These are accepted metadata, including transformed packets.
+                    # Lookup/submission owns any later actual prepared-file read.
+                    fixed_entry=e._code_export_entry(logical_root,accepted)
+                    code_bound=(script_bound and 'file_stat' in script and source_bound
+                        and (fixed_entry is not None or script['path']==prepared['local_path']))
+                except (OSError,ValueError,KeyError,TypeError,AttributeError):
+                    code_bound=False
+            else:
+                code_bound=(script_bound and (script['path']==str(records/'calls'/call/'source.py')
+                    or 'file_stat' in script and script['path']==prepared['local_path']))
             if (accepted.get('native_attempt')!=selected['native_attempt'] or accepted.get('interface')!=selected['interface']
                     or authority['allocation']!=value['allocation'] or authority['request']!=value['request']
                     or authority['decision']!=value['decision'] or authority['scope']!=value['scope']
                     or authority['native_attempt']!=selected['native_attempt'] or authority['interface']!=selected['interface']
                     or authority['payload_alias']!=selected['payload_alias'] or accepted['execution_target']!=request['target']
-                    or authority['target']!=request['target'] or prepared['name']!=call
-                    or accepted['script']['path']!=str(records/'calls'/call/'source.py')
-                    or accepted['script']['size_bytes']!=prepared['size_bytes']
-                    or proof_file(accepted['script']['path'],accepted['script'])!=accepted['script']
-                    or proof_file(prepared['local_path'],prepared)!=dict(path=prepared['local_path'],size_bytes=prepared['size_bytes'])):
+                    or authority['target']!=request['target'] or prepared['name']!=call or not code_bound):
                 raise history.ObserverIntegrityError('Recovered accepted/prepared authority lost its exact original allocation')
         if value.get('query') is not None:
             query=read(value['query'])
@@ -339,12 +350,15 @@ def create(root,step):
     for row in old.get('managed_calls',[]):
         if row['status']!='unknown':continue
         path=root/DIRECTORY/f'{step:03d}'/(row['call_id']+'.json')
-        if path.exists():
-            ref=dict(path=path.relative_to(root).as_posix());validate(root,[ref]);created.append(ref);continue
         accepted=c.read(root/row['accepted']['snapshot'])
         from . import managed_wait
         _,config=managed_wait._config(root,job,accepted)
         directory=e.Records(config).directory(row['call_id'])
+        if path.exists():
+            ref=dict(path=path.relative_to(root).as_posix());validate(root,[ref]);created.append(ref)
+            observed=directory/'execution-observation.json'
+            if observed.exists():e._cleanup_terminal_code_export(config,row['call_id'],c.read(observed))
+            continue
         retired=e.retirement(config,row['call_id'])
         if retired is None and not (directory/'execution-observation.json').exists():
             if not config['execution_interface']['capabilities']['query']:
@@ -356,6 +370,8 @@ def create(root,step):
         value=dict(source_step=step,seal_ref=sha,old_row=row,row=current[0])
         c.write(path,value);path.chmod(0o400)
         ref=dict(path=path.relative_to(root).as_posix());validate(root,[ref]);created.append(ref)
+        observed=directory/'execution-observation.json'
+        if observed.exists():e._cleanup_terminal_code_export(config,row['call_id'],c.read(observed))
     return dict(status='execution_recovered' if created and not unresolved else 'execution_recovery_pending',
         recovered=len(created),unresolved=len(unresolved),qualification='Original execution or permanent non-submission facts only; old scientific conclusions and reservation counts are unchanged.')
 

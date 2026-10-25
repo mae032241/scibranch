@@ -10,6 +10,7 @@ import pytest
 
 from execution_fixtures import execution_registry, remote_registry
 from test_nonlocal_execution_observation import case
+from test_mutable_run_inputs import fixed_code, fragment, terminal_code
 from scidiscovery.research_loop import contracts as c, controller, execution, experiments as e
 from scidiscovery.research_loop import execution_recovery, execution_resume, runtime
 from scidiscovery.research_loop import candidate_audit, worker_execution_bridge as bridge
@@ -174,3 +175,245 @@ def test_transferred_controller_descriptor_retains_exact_pid_writer_scope(tmp_pa
         os.fstat(descriptor)  # The detached owner still owns and closes this fd.
         with pytest.raises(RuntimeError,match='writer'):controller.require_writer(root)
     finally:os.close(descriptor)
+
+
+@pytest.fixture
+def recovery_metadata(tmp_path,monkeypatch):
+    """Only control records; code, prepared bytes and scientific outputs are absent."""
+    from scidiscovery.research_loop import history,qualification as q,code_versions
+    root=tmp_path.resolve();step=2;call='original'
+    job=dict(step=step,role='W',worker_view_version=1)
+    c.write(root/'jobs/002.json',job)
+    scope=dict(step=step,role='W',job_ref=dict(path=str(root/'jobs/002.json')))
+    interface=dict(executor='local_execution:command')
+    attempt=dict(number=0);alias=dict(path='opaque-original-payload',size_bytes=19)
+    pending=dict(path='pending.json');seal_ref=dict(path='native-evidence/002/result-identity.json')
+    def save(name,value):
+        path=root/name;c.write(path,value)
+        return dict(path=name,size_bytes=path.stat().st_size)
+    allocation=save('allocation.json',dict(call_id=call,binding=dict(scope=scope,
+        native_attempt=attempt,interface=interface,payload_alias=alias)))
+    request=save('request.json',dict(call_id=call,job=dict(path='jobs/002.json'),target='fixture'))
+    decision=save('decision.json',dict(request=request))
+    admission=save('admission.json',dict(allocation=allocation,pending_set=pending))
+    authority=save('authority.json',dict(allocation=allocation,request=request,decision=decision,
+        scope=scope,native_attempt=attempt,interface=interface,payload_alias=alias,target='fixture'))
+    authority['path']=str(root/authority['path'])
+    version=dict(version=1,object_format='sha1',commit='a'*40,tree_path='.',
+        selection='directory',entry='main.py',logical_root='code')
+    prepared=dict(name=call,local_path=str(root/'host-runtime/code-versions/exports/002/original/tree/main.py'),size_bytes=19)
+    accepted=dict(call_id=call,scope=scope,native_attempt=attempt,interface=interface,
+        source_script=str(c.workspace(root,step)/'code/main.py'),code_version=version,
+        script=dict(path=prepared['local_path'],size_bytes=19,file_stat=[1,2,19,3]),
+        prepared=prepared,execution_authority=authority,execution_target='fixture')
+    records=root/'host-runtime/experiment-control/002/records'
+    accepted_path=records/'calls'/call/'accepted.json';c.write(accepted_path,accepted)
+    row=dict(call_id=call,scope=scope,status='unknown',
+        accepted=dict(snapshot=accepted_path.relative_to(root).as_posix()))
+    value=dict(version=2,source_step=step,call_id=call,scope=scope,seal_ref=seal_ref,
+        pending_set=pending,allocation=allocation,request=request,decision=decision,admission=admission,
+        origin='sealed_preparation_unknown',phase='accepted',previous=None,row=row)
+    seal=dict(pending_executions=pending)
+    validations=[]
+    def managed(*args,**options):
+        validations.append(options)
+        assert options.get('verify_files') is False
+    monkeypatch.setattr(history,'validate_managed',managed)
+    monkeypatch.setattr(execution_resume,'verify_pending_set',lambda *args,**options:dict(disposition='possibly_prepared'))
+    def forbidden(*args,**options):pytest.fail('Metadata recovery consumed a code pin, export or new execution')
+    for name in ('capture','verify','materialize','cleanup_export'):monkeypatch.setattr(code_versions,name,forbidden)
+    ref=dict(path=f'{execution_recovery.DIRECTORY}/002/{call}/000001.json')
+    return dict(root=root,job=job,accepted=accepted,accepted_path=accepted_path,ref=ref,value=value,
+        sources={step:(job,None,seal,seal_ref)},seal=seal,validations=validations)
+
+
+def test_git_recovery_metadata_survives_missing_export_draft_and_science(recovery_metadata):
+    row=recovery_metadata;chains={}
+    assert not Path(row['accepted']['prepared']['local_path']).exists()
+    assert not Path(row['accepted']['source_script']).exists()
+    execution_recovery._validate_event(row['root'],row['ref'],row['value'],chains,sources=row['sources'])
+    assert chains[(2,'original')]['value']==row['value']
+    assert row['validations']==[dict(context=None,verify_files=False)]
+
+
+@pytest.mark.parametrize('damage',['schema','source','size','fingerprint','prepared'])
+def test_git_recovery_metadata_rejects_changed_original_bindings(recovery_metadata,damage):
+    from scidiscovery.research_loop import history
+    row=recovery_metadata;accepted=row['accepted']
+    if damage=='schema':accepted['code_version']['extra']='unapproved'
+    elif damage=='source':accepted['source_script']=str(row['root']/'current-draft.py')
+    elif damage=='size':accepted['script']['size_bytes']+=1
+    elif damage=='fingerprint':accepted['script']['file_stat'][2]+=1
+    else:accepted['prepared']['local_path']=str(row['root']/'other-prepared')
+    c.write(row['accepted_path'],accepted)
+    with pytest.raises(history.ObserverIntegrityError,match='exact original allocation'):
+        execution_recovery._validate_event(row['root'],row['ref'],row['value'],{},sources=row['sources'])
+
+
+@pytest.mark.parametrize('kind',['legacy','direct_packet','git_packet'])
+def test_recovery_metadata_keeps_legacy_and_prepared_packet_identity_without_bytes(recovery_metadata,kind):
+    row=recovery_metadata;accepted=row['accepted']
+    if kind!='git_packet':accepted.pop('code_version')
+    if kind=='legacy':
+        accepted['script']=dict(path=str(row['accepted_path'].with_name('source.py')),size_bytes=19)
+        accepted['prepared']['local_path']=str(row['root']/'missing-original-payload')
+    else:
+        accepted['prepared']['local_path']=str(row['root']/'missing-prepared-packet')
+        accepted['script']['path']=accepted['prepared']['local_path']
+    c.write(row['accepted_path'],accepted)
+    execution_recovery._validate_event(row['root'],row['ref'],row['value'],{},sources=row['sources'])
+
+
+def test_recovery_source_validation_uses_existing_controls_only_without_raw(recovery_metadata,monkeypatch):
+    from scidiscovery.research_loop import history,originals
+    row=recovery_metadata;source=object();checked=[]
+    seal_path=row['root']/'native-evidence/002/result-identity.json';c.write(seal_path,row['seal'])
+    monkeypatch.setattr(originals,'node',lambda root,step:source)
+    monkeypatch.setattr(originals,'source_job',lambda selected:row['job'])
+    monkeypatch.setattr(originals,'source_record',lambda selected,name:seal_path)
+    monkeypatch.setattr(history,'source_seal_ref',lambda selected:row['value']['seal_ref'])
+    def validate(selected,**options):
+        assert selected is source and options==dict(controls_only=True);checked.append(selected)
+    monkeypatch.setattr(c,'validate_original',validate)
+    monkeypatch.setattr(history,'_source',lambda *args:pytest.fail('Recovery reopened raw science'))
+    execution_recovery._validate_event(row['root'],row['ref'],row['value'],{})
+    assert checked==[source]
+
+
+def test_inherited_git_recovery_uses_logical_original_without_export_or_repository(recovery_metadata,monkeypatch):
+    from types import SimpleNamespace
+    from scidiscovery.research_loop import history
+    row=recovery_metadata;logical=row['root']/'absent-original-instance';accepted=row['accepted']
+    scope=row['value']['scope'];scope['job_ref']['path']=str(logical/'jobs/002.json')
+    accepted['source_script']=str(c.workspace(logical,2)/'code/main.py')
+    accepted['script']['path']=str(logical/'host-runtime/code-versions/exports/002/original/tree/main.py')
+    accepted['prepared']['local_path']=accepted['script']['path']
+    accepted['execution_authority']['path']=str(logical/'authority.json')
+    c.write(row['accepted_path'],accepted)
+    for name in ('allocation.json','authority.json'):
+        path=row['root']/name;value=c.read(path)
+        if name=='allocation.json':value['binding']['scope']=scope
+        else:value['scope']=scope
+        c.write(path,value)
+    source=SimpleNamespace(original_root=str(logical),logical_workspace=c.workspace(logical,2))
+    def source_path(selected,proof):
+        assert selected is source
+        path=Path(proof['path']);relative=path.relative_to(logical) if path.is_absolute() else path
+        return row['root']/relative
+    monkeypatch.setattr(execution_resume,'_source_path',source_path)
+    checked=[]
+    def validate(selected,job,rows,**options):
+        assert selected is source and options==dict(controls_only=True);checked.append(rows)
+    monkeypatch.setattr(history,'validate_managed_original',validate)
+    execution_recovery._validate_event(row['root'],row['ref'],row['value'],{},sources=row['sources'],source=source)
+    assert checked==[[row['value']['row']]] and not logical.exists()
+
+
+def _terminal_recovery_subject(row,monkeypatch,*,existing):
+    """A saved local observation and a sealed unknown row; no provider is loaded."""
+    from scidiscovery.research_loop import history,code_versions
+    config=row['config'];call=row['accepted']['call_id'];root=row['root'];step=row['job']['step']
+    observed=e.record_observation(config,row['adapter'],call)
+    tree=code_versions.materialize(root,step=step,call_id=call,code_version=row['accepted']['code_version'])
+    accepted=dict(snapshot=(row['directory']/'accepted.json').relative_to(root).as_posix())
+    old=dict(call_id=call,scope=row['accepted']['scope'],status='unknown',accepted=accepted)
+    current=dict(old,status=observed['status'])
+    old_path=root/'sealed-unknown-observation.json';c.write(old_path,dict(managed_calls=[old]))
+    seal=dict(observations=dict(path=old_path.relative_to(root).as_posix()))
+    seal_ref=dict(path='original-seal.json')
+    monkeypatch.setattr(history,'_source',lambda *args:(row['job'],None,seal,seal_ref))
+    monkeypatch.setattr(history,'managed_calls',lambda *args,**options:[current])
+    monkeypatch.setattr(execution_recovery,'validate',lambda *args,**options:[])
+    monkeypatch.setattr(e,'load',lambda *args,**options:pytest.fail('Terminal recovery loaded an execution provider'))
+    recovery_path=root/execution_recovery.DIRECTORY/f'{step:03d}'/(call+'.json')
+    if existing:c.write(recovery_path,dict(source_step=step,seal_ref=seal_ref,old_row=old,row=current))
+    return observed,tree,recovery_path
+
+
+@pytest.mark.parametrize('existing',[False,True])
+def test_original_terminal_recovery_retries_exact_export_cleanup(terminal_code,fixed_code,monkeypatch,existing):
+    row=terminal_code();observed,tree,path=_terminal_recovery_subject(row,monkeypatch,existing=existing)
+    originals={name:(row['directory']/name).read_bytes() for name in
+        ('accepted.json','completed.json','submission.json','terminal.json','execution-observation.json')}
+    row['output'].unlink()
+    fixed_code['cleaned'].clear()
+    assert execution_recovery.create(row['root'],row['job']['step'])['status']=='execution_recovered'
+    assert not tree.exists() and fixed_code['cleaned']==[row['key']]
+    saved=path.read_bytes()
+    assert execution_recovery.create(row['root'],row['job']['step'])['status']=='execution_recovered'
+    assert path.read_bytes()==saved
+    assert all((row['directory']/name).read_bytes()==raw for name,raw in originals.items())
+
+
+def test_original_terminal_recovery_cleanup_failure_keeps_fact_and_retries(terminal_code,fixed_code,monkeypatch):
+    from scidiscovery.research_loop import code_versions
+    row=terminal_code();_,tree,path=_terminal_recovery_subject(row,monkeypatch,existing=True)
+    before=path.read_bytes();cleanup=code_versions.cleanup_export
+    def denied(*args,**options):raise OSError('fixture cleanup denied')
+    monkeypatch.setattr(code_versions,'cleanup_export',denied)
+    assert execution_recovery.create(row['root'],row['job']['step'])['status']=='execution_recovered'
+    assert tree.exists() and path.read_bytes()==before
+    diagnostic,=(Path(row['config']['record_dir']).parent/'execution-diagnostics').iterdir()
+    note=c.read(diagnostic)['note']
+    assert str(tree) in note and row['accepted']['call_id'] in note and 'fixture cleanup denied' in note
+    monkeypatch.setattr(code_versions,'cleanup_export',cleanup)
+    assert execution_recovery.create(row['root'],row['job']['step'])['status']=='execution_recovered'
+    assert not tree.exists() and path.read_bytes()==before
+
+
+def test_original_terminal_recovery_retains_export_without_replay_stop(terminal_code,fixed_code,monkeypatch):
+    from scidiscovery.research_loop import replay_check
+    row=terminal_code(replay=True);_,tree,_=_terminal_recovery_subject(row,monkeypatch,existing=True)
+    outcome=row['directory']/replay_check.OUTCOME;value=c.read(outcome)
+    value['result']['cleanup_confirmed']=False;c.write(outcome,value);fixed_code['cleaned'].clear()
+    assert execution_recovery.create(row['root'],row['job']['step'])['status']=='execution_recovered'
+    assert tree.exists() and fixed_code['cleaned']==[]
+
+
+def test_original_unknown_recovery_retains_export_without_repeating_submission(terminal_code,fixed_code,monkeypatch):
+    row=terminal_code();_,tree,_=_terminal_recovery_subject(row,monkeypatch,existing=False)
+    (row['directory']/'execution-observation.json').unlink();fixed_code['cleaned'].clear()
+    monkeypatch.setattr(e,'load',lambda *args,**options:object())
+    monkeypatch.setattr(e,'record_observation',lambda *args,**options:None)
+    result=execution_recovery.create(row['root'],row['job']['step'])
+    assert result['status']=='execution_recovery_pending' and result['unresolved']==1
+    assert tree.exists() and fixed_code['cleaned']==[]
+
+
+@pytest.mark.parametrize('phase,saved_observation,removed',[
+    ('terminal',True,True),('terminal',False,False),('not_submitted',True,False)])
+def test_recorded_resume_only_cleans_saved_original_terminal_export(terminal_code,fixed_code,monkeypatch,
+        phase,saved_observation,removed):
+    from scidiscovery.research_loop import budget,execution_authority as authority
+    row=terminal_code();_,tree,recovery_path=_terminal_recovery_subject(row,monkeypatch,existing=True)
+    root=row['root'];step=row['job']['step'];call=row['accepted']['call_id']
+    c.write(root/'execution-authority/calls'/call/'allocation.json',dict(call_id=call,
+        binding=dict(native_attempt=row['config']['native_attempt'],
+            interface=row['config']['execution_interface'],scope=row['config']['scope'])))
+    monkeypatch.setattr(execution_resume,'verify_pending_set',lambda *args,**options:dict(disposition='possibly_prepared'))
+    monkeypatch.setattr(authority,'_host_context',lambda config:(root,row['job'],None))
+    monkeypatch.setattr(budget,'historical_step_limit',lambda root:step)
+    monkeypatch.setattr(execution_recovery,'prefix',lambda *args:[])
+    monkeypatch.setattr(execution_recovery,'call_view',lambda *args:{(step,call):dict(phase=phase)})
+    def forbidden(*args,**options):pytest.fail('Recorded terminal resume changed execution or resource authority')
+    monkeypatch.setattr(execution_resume,'_RecoveryAdmission',forbidden)
+    for name in ('snapshot','execution_available','execution_accounting','authorization_revision',
+            'execution_blocked','transition','reserve_execution','release_execution'):
+        monkeypatch.setattr(budget,name,forbidden)
+    if not saved_observation:(row['directory']/'execution-observation.json').unlink()
+    controls=[recovery_path,*(row['directory']/name for name in
+        ('accepted.json','completed.json','submission.json','terminal.json','execution-observation.json')),
+        root/'settings.json',root/'host-started.json']
+    ledger=root/'control-ledger'
+    if ledger.exists():controls.extend(ledger.iterdir())
+    originals={path:path.read_bytes() for path in controls if path.exists()}
+    operations=root/'execution-authority/calls'/call/'recovery-operations'
+    assert not operations.exists()
+    fixed_code['cleaned'].clear()
+    result=execution_resume.resume(root,step,call,max_seconds=10,authorization_note='Exact recorded original only')
+    assert result['status']=='execution_resume_recorded'
+    assert tree.exists() is not removed
+    assert fixed_code['cleaned']==([row['key']] if removed else [])
+    assert all(path.read_bytes()==raw for path,raw in originals.items())
+    assert not operations.exists()
+    if ledger.exists():assert set(ledger.iterdir())=={path for path in originals if path.parent==ledger}

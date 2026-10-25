@@ -611,11 +611,14 @@ def resume(root,step,call_id,*,max_seconds,authorization_note,request_valid_seco
     authority._host_context(config)
     if original['binding']['interface']!=config['execution_interface'] or original['binding']['scope']!=config['scope']:
         raise q.IntegrityError('Recovery implementation differs from original allocation')
-    operation=_RecoveryAdmission(root,job,seal,sha,allocation,config,max_seconds=max_seconds,note=authorization_note,valid_seconds=request_valid_seconds)
     refs=recovery.prefix(root,budget.historical_step_limit(root)+1)
     prior=recovery.call_view(root,[],refs).get((step,call_id))
     if prior is not None and prior['phase'] in {'terminal','not_submitted'}:
+        if prior['phase']=='terminal':
+            observed=e.Records(config).directory(call_id)/'execution-observation.json'
+            if observed.exists():e._cleanup_terminal_code_export(config,call_id,c.read(observed))
         return dict(status='execution_resume_recorded',call_id=call_id,note='Verified original terminal fact is already retained; no dispatch occurred.')
+    operation=_RecoveryAdmission(root,job,seal,sha,allocation,config,max_seconds=max_seconds,note=authorization_note,valid_seconds=request_valid_seconds)
     if budget.execution_blocked(root,include_managed=False,ignore_recovery=(step,call_id)):
         raise ValueError('Another live or unknown original owner blocks host recovery')
     records=e.Records(config)
