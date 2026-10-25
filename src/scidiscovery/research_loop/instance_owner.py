@@ -282,8 +282,10 @@ def disposal(root, tombstone, identity, *, binding=None, retired=False):
     if root.parent != tombstone.parent or root == tombstone:
         raise files.ArchiveError('Delete tombstone must be an exact separate sibling')
     value = _Disposal(root, tombstone, identity, retired=retired)
-    with (_host_gate(root, exclusive=True, _disposal=value),
-            _host_gate(tombstone, exclusive=True, _disposal=value)):
+    # The host gate is keyed by the original directory inode, so this one
+    # acquisition also fences its tombstone after rename. Opening the same gate
+    # again through the sibling pathname would conflict with our own flock.
+    with _host_gate(root, exclusive=True, _disposal=value):
         previous = _disposing.get()
         token = _disposing.set({**previous, str(root): value})
         try:

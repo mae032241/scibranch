@@ -281,10 +281,10 @@ def _quiescent(root):
             accepted = _read(call / 'accepted.json'); interface = accepted['interface']
             if (call / 'submission-retirement.json').exists():
                 verified = e.verify_retirement(_read(call / 'submission-retirement.json'),
-                    lambda item: Path(item['path']), interface=interface)
+                    lambda item: Path(item['path']), interface=interface, verify_files=False)
             elif (call / 'execution-observation.json').exists():
                 verified = _read(call / 'execution-observation.json')
-                e.verify_observation(verified, lambda item: Path(item['path']), interface=interface)
+                e.verify_observation(verified, lambda item: Path(item['path']), interface=interface, verify_files=False)
             else:
                 raise files.ArchiveError('Managed execution has no verified terminal or permanent retirement original')
             if (verified.get('call_id') != call.name or verified.get('scope') != accepted.get('scope')

@@ -1,6 +1,5 @@
 """Explicit local disposal on temporary fixtures; no model, solver or cancellation."""
-from contextlib import contextmanager
-import hashlib
+from contextlib import ExitStack, contextmanager
 import json
 import os
 from pathlib import Path
@@ -12,7 +11,7 @@ import pytest
 
 from scidiscovery.research_loop import (budget, contracts as c, controller,
     fork_service, fork_sources, instance_archive as archive, instance_delete as deletion,
-    instance_owner as owner, originals, protocol, runtime)
+    instance_owner as owner, protocol, runtime)
 from test_history_handoff import finish
 
 
@@ -65,8 +64,72 @@ def _finish(monkeypatch, root, step, role, parents, **options):
 
 
 def _record_path(root, operation):
-    key = hashlib.sha256(operation.encode()).hexdigest()
-    return root.parent / '.scid-delete-operations' / (key + '.json')
+    return root.parent / '.scid-delete-operations' / (archive.files.safe_id(operation) + '.json')
+
+
+def _enroll_legacy_owner(root, tmp_path):
+    """Retained enrolled owners still fence effects after cold APIs retire."""
+    anchors = tmp_path / 'legacy-owner-anchors'
+    anchors.mkdir()
+    with owner.source_lease(root), ExitStack() as locks:
+        archive._owner_locks(locks, root)
+        return owner.enroll(root, anchors)
+
+
+def _stopped_managed_call(root, *, retired=False):
+    """Finite retained native controls, checked by the actual lifecycle verifiers."""
+    from scidiscovery.research_loop import experiments as e
+    c.build_job(root, 1, 'H', [])
+    call = '0001-' + 'a' * 32
+    directory = root / 'project/nodes/001/work/lineage/calls' / call
+    directory.mkdir(parents=True)
+    scope = dict(step=1, role='H', job_ref=c.record_ref(root / 'jobs/001.json'))
+    common = dict(call_id=call, scope=scope, mechanism_binding=None)
+    script = directory / 'source.py'
+    script.write_bytes(b'print("retained historical code")\n')
+    prepared = dict(name=call, local_path=str(script), size_bytes=script.stat().st_size, media_type='text/x-python')
+    interface = dict(version=e.VERSION, executor='local', terminal_evidence='local_process')
+    accepted = dict(common, interface=interface, prepared=prepared, script=e.proof(script), native_attempt=dict(number=0))
+    if retired:
+        contract = dict(e.RETIREMENT_CONTRACT, backend_protocol=dict(version=1, fixture='retained-not-submitted'))
+        capability = dict(key=e.RETIREMENT_KEY, schema_id=e.RETIREMENT_SCHEMA,
+            payload_schema_version=1, kind='execution_recovery', media_type='application/json', size_bytes=len(e.encoded(contract)))
+        interface['public_capabilities'] = [capability]
+        authority = directory / 'authority.json'
+        c.write(authority, dict(call_id=call, scope=scope, outcome='not_submitted'))
+        accepted['execution_authority'] = e.proof(authority)
+        c.write(directory / 'accepted.json', accepted)
+        native = directory / 'native-not-submitted.json'
+        c.write(native, dict(call_id=call, scope=scope, submitted=False))
+        fields = dict(common, accepted=e.proof(directory / 'accepted.json'), prepared=prepared,
+            authority=e.proof(authority), native_originals=[e.proof(native)])
+        assertion = directory / 'not-submitted-assertion.json'
+        c.write(assertion, dict(version=1, kind='permanent_not_submitted',
+            **{key:fields[key] for key in ('call_id', 'scope', 'accepted', 'prepared', 'authority', 'native_originals')}))
+        value = dict(fields, version=2, kind='permanent_not_submitted', interface=interface,
+            native_attempt=accepted['native_attempt'], capability=capability, contract=contract, assertion=e.proof(assertion))
+        c.write(directory / 'submission-retirement.json', value)
+        controls = dict(native=native, assertion=assertion)
+    else:
+        c.write(directory / 'accepted.json', accepted)
+        c.write(directory / 'completed.json', dict(common, status='known_success', proofs=[], outputs=[]))
+        c.write(directory / 'submission.json', dict(common, external_run_id='retained-original-run'))
+        terminal = directory / 'terminal.json'
+        c.write(terminal, dict(common, cleanup_confirmed=True, transport_complete=True, returncode=0))
+        science = root.parent / 'missing-native-science.bin'
+        science.write_bytes(b'Former scientific output is not a writer-stop receipt.\n')
+        output = dict(e.proof(science), name='science.bin', source=e.proof(science), descriptor=dict(
+            name='science.bin', local_path=str(science), size_bytes=science.stat().st_size, media_type='application/octet-stream'))
+        value = dict(common, version=e.OBSERVATION_VERSION, interface=interface,
+            accepted=e.proof(directory / 'accepted.json'), completed=e.proof(directory / 'completed.json'),
+            submission=e.proof(directory / 'submission.json'), native_terminal=e.proof(terminal),
+            status='known_success', external_run_id='retained-original-run', proofs=[], outputs=[],
+            scientific_outputs=[output], scientific_source=dict(e.proof(script), source=e.proof(script)))
+        c.write(directory / 'execution-observation.json', value)
+        science.unlink()
+        controls = dict(terminal=terminal, observation=directory / 'execution-observation.json')
+    script.unlink()
+    return controls
 
 
 def _prepare_nested(root, tmp_path):
@@ -329,111 +392,36 @@ def test_fork_creation_and_outer_disposal_are_mutually_fenced(instance, tmp_path
         assert observed == [True]
 
 
-def _cold_checkpoint_at(root, tmp_path):
-    public = tmp_path / 'public'
-    controller.prepare(root, public / 'objective.md', public, [sys.executable],
-        max_tokens=4000, max_seconds=60, max_steps=7, model='fixture-never-called',
-        reasoning_effort='high', search_policy=None, experiment_mode='external')
-    c.write(root / 'host-started.json', budget.clock_stamp())
-    budget.transition(root, 'paused', 'Fixture inactive checkpoint, no scientific dispatch')
-    anchors = tmp_path / 'nested-anchors'
-    anchors.mkdir()
-    archive.checkpoint_enroll(root, anchors)
-    anchor = Path(c.read(root / owner.BINDING)['anchor']) / 'owner.json'
-    package = tmp_path / 'nested-checkpoint'
-    archive.checkpoint_export(root, package)
-    previous = root.rename(tmp_path / 'previous-nested-instance')
-    return package, previous, anchor
+def test_enrolled_legacy_writer_fences_delete_without_a_host_gate(instance, tmp_path):
+    binding = _enroll_legacy_owner(instance, tmp_path)
+    directory, anchor = owner._anchor(binding)
+    before = _retained(instance)
+    # Older registered writers hold this existing anchor lock even when they
+    # do not participate in the newer host inode gate.
+    with owner._owner_lease(instance):
+        with pytest.raises(archive.files.ArchiveError, match='enrolled effect'):
+            deletion.delete_instance(instance, **_request(instance))
+    _assert_retained(instance, before)
+    assert c.read(directory / 'owner.json') == anchor
+    assert not (instance / owner.RETIREMENT).exists()
+    assert deletion.delete_instance(instance, **_request(instance))['status'] == 'instance_deleted'
 
 
-def test_checkpoint_restore_cannot_publish_after_final_tombstone_preflight(instance, tmp_path, monkeypatch):
-    request = _request(instance)
-    key = hashlib.sha256(request['operation_id'].encode()).hexdigest()
-    tombstone = instance.parent / ('.scid-delete-' + key[:24])
-    inner = tombstone / 'independent-instance'
-    # This is an exact supported historical original, not a changed restore
-    # destination: the ordinary outer will later retire into this pathname.
-    package, previous, anchor = _cold_checkpoint_at(inner, tmp_path)
-    tombstone.rmdir()
-    originals = _retained(previous)
-    anchor_before = anchor.read_bytes()
-    preflight = deletion._preflight_tree
-    observed = []
-
-    def restore_after_preflight(root, identity):
-        result = preflight(root, identity)
-        if root == tombstone:
-            before = _retained(root)
-            entries = set(root.iterdir())
-            with pytest.raises(archive.files.ArchiveError):
-                archive.checkpoint_restore(inner, package)
-            assert not inner.exists()
-            assert set(root.iterdir()) == entries
-            _assert_retained(root, before)
-            assert anchor.read_bytes() == anchor_before
-            observed.append(root)
-        return result
-
-    monkeypatch.setattr(deletion, '_preflight_tree', restore_after_preflight)
-    assert deletion.delete_instance(instance, **request)['status'] == 'instance_deleted'
-    assert observed == [tombstone]
-    assert not tombstone.exists()
-    _assert_retained(previous, originals)
-    assert c.read(anchor)['state'] == 'frozen'
-
-
-@pytest.mark.parametrize('pending_retry', [False, True])
-def test_checkpoint_restore_fences_outer_delete_through_publication(instance, tmp_path, monkeypatch, pending_retry):
-    request = _request(instance)
-    inner = instance / 'independent-instance'
-    package, previous, anchor = _cold_checkpoint_at(inner, tmp_path)
-    originals = _retained(previous)
-    publish = archive._publish
-    observed = []
-
-    def delete_before_publication(stage, target):
-        if target == inner:
-            before = _retained(instance)
-            with pytest.raises(archive.files.ArchiveError):
-                deletion.delete_instance(instance, **request)
-            _assert_retained(instance, before)
-            assert not (instance / owner.RETIREMENT).exists()
-            observed.append(stage)
-        return publish(stage, target)
-
-    monkeypatch.setattr(archive, '_publish', delete_before_publication)
-    if pending_retry:
-        with monkeypatch.context() as patch:
-            def missing(settings):
-                raise archive.files.ArchiveError('Fixture pending restore dependency')
-            patch.setattr(archive, '_restore_dependencies', missing)
-            with pytest.raises(archive.files.ArchiveError, match='Fixture pending restore dependency'):
-                archive.checkpoint_restore(inner, package)
-        assert c.read(anchor)['state'] == 'restore_pending'
-        assert c.read(anchor)['generation'] == 2
-    result = archive.checkpoint_restore(inner, package)
-    assert result['status'] == 'checkpoint_restored'
-    assert result['generation'] == 2 and result['paused'] is True
-    assert len(observed) == 1
-    _assert_retained(previous, originals)
-    with owner.lease(inner):
-        with pytest.raises(deletion.DeleteError) as error:
-            deletion.delete_instance(instance, **request)
-        assert error.value.code == 'delete_nested_instance'
-
-    # A completed restore is still a pure acknowledgment after control advances;
-    # it does not repeat creator admission or restore an old pause/generation.
-    with controller._writer(inner):
-        (inner / 'pause.request').unlink()
-        budget.transition(inner, 'advance', 'Fixture control advancement, no native launch')
-    before = _retained(inner)
-    def forbidden(*args):
-        pytest.fail('An exact completed restore must not repeat creation admission')
-    monkeypatch.setattr(owner, 'creation', forbidden)
-    again = archive.checkpoint_restore(inner, package)
-    assert again['status'] == 'checkpoint_restore_already_completed'
-    assert again['generation'] == 2 and again['paused'] is False
-    _assert_retained(inner, before)
+@pytest.mark.parametrize('state', ['frozen', 'superseded'])
+def test_frozen_or_superseded_legacy_owner_is_not_reactivated(instance, tmp_path, state):
+    binding = _enroll_legacy_owner(instance, tmp_path)
+    directory, anchor = owner._anchor(binding)
+    changed = dict(anchor, state='frozen') if state == 'frozen' else dict(anchor, generation=anchor['generation'] + 1)
+    archive.files.durable_json(directory / 'owner.json', changed)
+    before = _retained(instance)
+    with pytest.raises(archive.files.ArchiveError, match='frozen or superseded'):
+        with owner.lease(instance):
+            pytest.fail('A retained inactive owner admitted an ordinary writer')
+    with pytest.raises(deletion.DeleteError, match='Owner is frozen|generation'):
+        deletion.delete_instance(instance, **_request(instance))
+    _assert_retained(instance, before)
+    assert c.read(directory / 'owner.json') == changed
+    assert not (instance / owner.RETIREMENT).exists()
 
 
 @pytest.mark.parametrize('state', ['prepared', 'paused', 'completed'])
@@ -561,6 +549,45 @@ def test_unknown_or_live_originals_never_cancel_or_reset_budget(instance, monkey
         deletion.delete_instance(root, **request)
     _assert_retained(root, before)
     assert not (root / owner.RETIREMENT).exists()
+
+
+@pytest.mark.parametrize('damage', ['science_missing', 'terminal_missing', 'cleanup_unknown'])
+def test_delete_uses_terminal_controls_without_requiring_missing_science(instance, damage):
+    from scidiscovery.research_loop import experiments as e
+    controls = _stopped_managed_call(instance)
+    if damage == 'terminal_missing':
+        controls['terminal'].unlink()
+    elif damage == 'cleanup_unknown':
+        terminal = c.read(controls['terminal'])
+        c.write(controls['terminal'], dict(terminal, cleanup_confirmed=False))
+        observation = c.read(controls['observation'])
+        c.write(controls['observation'], dict(observation, native_terminal=e.proof(controls['terminal'])))
+    request = _request(instance)
+    if damage == 'science_missing':
+        assert deletion.delete_instance(instance, **request)['status'] == 'instance_deleted'
+    else:
+        before = _retained(instance)
+        with pytest.raises((e.IntegrityError, OSError, ValueError)):
+            deletion.delete_instance(instance, **request)
+        _assert_retained(instance, before)
+        assert not (instance / owner.RETIREMENT).exists()
+
+
+@pytest.mark.parametrize('damage', ['science_missing', 'native_missing', 'assertion_missing'])
+def test_delete_keeps_exact_retirement_controls_when_scientific_source_is_missing(instance, damage):
+    from scidiscovery.research_loop import experiments as e
+    controls = _stopped_managed_call(instance, retired=True)
+    if damage != 'science_missing':
+        controls[damage.removesuffix('_missing')].unlink()
+    request = _request(instance)
+    if damage == 'science_missing':
+        assert deletion.delete_instance(instance, **request)['status'] == 'instance_deleted'
+    else:
+        before = _retained(instance)
+        with pytest.raises((e.IntegrityError, OSError, ValueError)):
+            deletion.delete_instance(instance, **request)
+        _assert_retained(instance, before)
+        assert not (instance / owner.RETIREMENT).exists()
 
 
 def test_interior_symlink_is_unlinked_without_touching_external_original(instance, tmp_path):
@@ -936,90 +963,121 @@ def test_operation_id_conflict_never_retargets_replacement(instance):
     assert deletion.delete_instance(root, **request) == result
 
 
-def test_deleting_source_sibling_and_child_preserves_exact_shared_forks(instance, tmp_path, monkeypatch):
-    payload = 'Opaque original shared through independent exact fork manifests.\n' * 128
-    # Its hash bucket also holds the original settings.json beside project/nodes;
-    # immutable inherited payload must not be mistaken for a nested instance.
-    _finish(monkeypatch, instance, 1, 'H', [], action='analyze',
-        files={'shared.bin': payload, 'settings-copy.json': (instance / 'settings.json').read_text()})
-    c.build_job(instance, 2, 'A', [1], c.validate(c.workspace(instance, 1))['route_reason'])
-    _finish(monkeypatch, instance, 2, 'A', [1], action='finish')
-    with controller._writer(instance):
-        pass
-    # The mutable producer must normalize into a shared snapshot cache inode.
-    (instance / 'project/nodes/001/artifacts/shared.bin').chmod(0o600)
-    limits = dict(max_tokens=200, max_seconds=30, max_steps=2)
+@pytest.mark.parametrize('missing_input', [False, True])
+def test_delete_removes_own_git_and_exports_without_reading_external_inputs_or_neighbors(instance, tmp_path, monkeypatch, missing_input):
+    owned = [instance / 'host-runtime/code-versions/repository.git/objects/ab/fixture-object',
+        instance / 'host-runtime/code-versions/exports/001/fixture-call/tree/run.py']
+    for path in owned:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'Finite owned code fixture; no Git process.\n')
+    source = tmp_path / 'public/objective.md'
+    source.chmod(0o400)
+    before = source.stat()
+    body = source.read_bytes()
+    neighbor = tmp_path / 'neighbor-instance'
+    neighbor.mkdir()
+    sentinel = neighbor / 'retained-data.bin'
+    sentinel.write_bytes(b'Another explicit instance is never inventoried for deletion.\n')
+    if missing_input:
+        source.unlink()
+    request = _request(instance)
+    open_file, scandir = Path.open, os.scandir
+    chmod, fchmod = os.chmod, os.fchmod
 
-    def create(parent, child, operation):
-        preview = fork_service.preview(parent, 2, child, budget=limits)
-        assert preview['status'] == 'fork_preview_ready'
-        fork_service.create(parent, 2, child, budget=limits,
-            expected_preview_id=preview['preview_id'], operation_id=operation)
+    def guarded_open(path, *args, **options):
+        assert path not in {source, sentinel}, 'Deletion read an external scientific body'
+        return open_file(path, *args, **options)
 
-    first, second, grandchild = (tmp_path / name for name in ('first', 'second', 'grandchild'))
-    create(instance, first, 'delete-link-first')
-    create(instance, second, 'delete-link-second')
-    _finish(monkeypatch, first, 2, 'A', [1], action='finish')
-    with controller._writer(first):
-        pass
-    create(first, grandchild, 'delete-link-grandchild')
+    def guarded_scandir(path):
+        if not isinstance(path, int):
+            assert Path(path) not in {tmp_path, neighbor}, 'Deletion searched outside its selected instance'
+        return scandir(path)
 
-    def payload_paths(root):
-        manifest = c.read(root / originals.FORK_DIRECTORY / 'manifest.json')
-        return {(originals.identity_key(row['origin_identity']), row['path'],
-            row['size_bytes']): root / originals.FORK_DIRECTORY / row['storage_path']
-            for row in manifest['entries'] if row['path'].endswith('/shared.bin')}
+    def directory_chmod(path, mode, **options):
+        assert stat.S_ISDIR(os.stat(path, dir_fd=options.get('dir_fd'), follow_symlinks=False).st_mode)
+        return chmod(path, mode, **options)
 
-    original = instance / 'project/nodes/001/artifacts/shared.bin'
-    key = (originals.identity_key(originals.local_identity(instance)),
-        original.relative_to(instance).as_posix(), original.stat().st_size)
-    first_paths, second_paths, grandchild_paths = (payload_paths(root)
-        for root in (first, second, grandchild))
-    assert key in first_paths and key in second_paths and key in grandchild_paths
-    # Different logical input snapshots may hold the same bytes in distinct
-    # inodes. Only the exact original identity is required to share across forks.
-    paths = [second_paths[key], grandchild_paths[key]]
-    pinned = paths[0].stat()
-    inode = pinned.st_dev, pinned.st_ino
-    assert all((path.stat().st_dev, path.stat().st_ino) == inode for path in paths)
-    assert (first_paths[key].stat().st_dev, first_paths[key].stat().st_ino) == inode
-    assert all(stat.S_IMODE(path.stat().st_mode) == 0o400 for path in paths)
+    def directory_fchmod(descriptor, mode):
+        assert stat.S_ISDIR(os.fstat(descriptor).st_mode)
+        return fchmod(descriptor, mode)
 
-    for number, removed in enumerate((instance, first, second), 1):
-        surviving = [path for path in paths if not path.is_relative_to(removed)]
-        before_links = surviving[0].stat().st_nlink
-        removed_links = sum((path.stat().st_dev, path.stat().st_ino) == inode
-            for path in removed.rglob('*') if path.is_file() and not path.is_symlink())
-        assert removed_links > 0
-        deletion.delete_instance(removed, **_request(removed, f'delete-shared-{number}'))
-        for path in surviving:
-            info = path.stat()
-            assert (info.st_dev, info.st_ino) == inode
-            assert stat.S_IMODE(info.st_mode) == 0o400
-            assert info.st_nlink == before_links - removed_links
-            assert path.read_text() == payload
-        for branch in (second, grandchild):
-            if branch.exists():
-                fork_sources.validate_manifest(branch, full=True)
-        paths = surviving
-    deletion.delete_instance(grandchild, **_request(grandchild, 'delete-shared-final'))
-    assert not grandchild.exists()
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'open', guarded_open)
+        patch.setattr(os, 'scandir', guarded_scandir)
+        patch.setattr(os, 'chmod', directory_chmod)
+        patch.setattr(os, 'fchmod', directory_fchmod)
+        result = deletion.delete_instance(instance, **request)
+        assert deletion.delete_instance(instance, **request) == result
+    assert result['status'] == 'instance_deleted'
+    assert not instance.exists() and all(not path.exists() for path in owned)
+    assert sentinel.read_bytes() == b'Another explicit instance is never inventoried for deletion.\n'
+    if missing_input:
+        assert not source.exists()
+    else:
+        after = source.stat()
+        assert (after.st_dev, after.st_ino, after.st_mode) == (before.st_dev, before.st_ino, before.st_mode)
+        assert source.read_bytes() == body
+
+
+def test_expired_io_context_leaves_original_tombstone_for_same_operation_retry(instance, monkeypatch):
+    c.write(instance / 'host-started.json', budget.clock_stamp())
+    budget.transition(instance, 'paused', 'Fixture consumed budget is not maintenance authority')
+    request = _request(instance, 'finite-io-retry')
+    remove, unlink = deletion._remove_tree, os.unlink
+
+    class Window:
+        expired = False
+        checks = 0
+
+        def remaining_seconds(self):
+            self.checks += 1
+            if self.expired:
+                raise TimeoutError('fixture current IO deadline expired')
+            return 1
+
+    window = Window()
+
+    def interrupt_after_unlink(path, *args, **options):
+        result = unlink(path, *args, **options)
+        if options.get('dir_fd') is not None:
+            window.expired = True
+        return result
+
+    def finite_remove(root, identity):
+        return remove(root, identity, context=window)
+
+    def forbidden(*args, **options):
+        pytest.fail('Maintenance changed the scientific budget or started execution')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(deletion, '_remove_tree', finite_remove)
+        patch.setattr(os, 'unlink', interrupt_after_unlink)
+        patch.setattr(budget, 'transition', forbidden)
+        with pytest.raises(TimeoutError, match='current IO deadline'):
+            deletion.delete_instance(instance, **request)
+    record = c.read(_record_path(instance, request['operation_id']))
+    assert window.expired and window.checks > 0
+    assert record['phase'] == 'retired' and record['request']['operation_id'] == request['operation_id']
+    assert not instance.exists()
+    tombstone = Path(record['tombstone'])
+    assert owner._identity(tombstone) == record['root_identity']
+    with monkeypatch.context() as patch:
+        patch.setattr(budget, 'transition', forbidden)
+        receipt = deletion.delete_instance(instance, **request)
+        assert deletion.delete_instance(instance, **request) == receipt
+    assert not tombstone.exists()
 
 
 @pytest.mark.parametrize('interruption', ['before_rename', 'after_tree_removed', 'after_anchor_deleted'])
-def test_enrolled_anchor_retirement_survives_crashes_and_fences_old_checkpoint(instance, tmp_path, monkeypatch, interruption):
+def test_enrolled_anchor_retirement_survives_crashes_and_fences_legacy_owner(instance, tmp_path, monkeypatch, interruption):
     root = instance
     c.write(root / 'host-started.json', budget.clock_stamp())
-    budget.transition(root, 'paused', 'Quiescent checkpoint fixture, no scientific dispatch')
-    anchors = tmp_path / 'anchors'
-    anchors.mkdir()
-    archive.checkpoint_enroll(root, anchors)
-    package = tmp_path / 'checkpoint'
-    archive.checkpoint_export(root, package)
-    root.rename(tmp_path / 'previous-generation')
-    assert archive.checkpoint_restore(root, package)['status'] == 'checkpoint_restored'
-    binding = c.read(root / owner.BINDING)
+    budget.transition(root, 'paused', 'Quiescent legacy-owner fixture, no scientific dispatch')
+    binding = _enroll_legacy_owner(root, tmp_path)
     anchor_path = Path(binding['anchor']) / 'owner.json'
+    historical = tmp_path / 'historical-checkpoint-evidence.json'
+    historical.write_bytes(b'{"fixture":"old cold evidence remains inert"}\n')
+    retained_evidence = historical.read_bytes()
     assert c.read(anchor_path)['state'] == 'active'
     request = _request(root)
 
@@ -1049,8 +1107,8 @@ def test_enrolled_anchor_retirement_survives_crashes_and_fences_old_checkpoint(i
         with pytest.raises(archive.files.ArchiveError):
             with owner.lease(root):
                 pytest.fail('Enrolled deletion marker admitted an ordinary lease')
-    with pytest.raises(archive.files.ArchiveError):
-        archive.checkpoint_restore(root, package)
+    with pytest.raises(archive.files.ArchiveError, match='frozen or superseded'):
+        owner._active(root, binding)
     result = deletion.delete_instance(root, **request)
     assert result['status'] == 'instance_deleted'
     assert not root.exists()
@@ -1058,6 +1116,7 @@ def test_enrolled_anchor_retirement_survives_crashes_and_fences_old_checkpoint(i
     assert anchor['state'] == 'deleted' and anchor['generation'] == binding['generation']
     assert c.read(_record_path(root, request['operation_id']))['phase'] == 'deleted'
     assert deletion.delete_instance(root, **request) == result
-    with pytest.raises(archive.files.ArchiveError):
-        archive.checkpoint_restore(root, package)
+    with pytest.raises(archive.files.ArchiveError, match='frozen or superseded'):
+        owner._active(root, binding)
     assert not root.exists()
+    assert historical.read_bytes() == retained_evidence
