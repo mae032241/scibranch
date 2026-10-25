@@ -53,4 +53,25 @@ Cov 独立插件使用同一目标和 `--installation-cohort cov`。日志属于
 `tests/operations/` 仅保留真实执行、传输、预算和恢复负控；确定性算法检查在 `tests/skills/`，
 使用随资产保留的功能 fixture，不需要旧宿主。Skill 选择、冻结与生命周期检查在 `test_skill_supply.py`。未运行的源码、安装、真实平台资格分别记为未验证，不将静态审查写成动态通过。
 
-G1/G3 延后 CLI 诊断由用户在 G3 后独立运行：`python scripts/verify_g1_g3.py --list` 静态列出精确节点，`python scripts/verify_g1_g3.py --output .trial/<新目录>` 串行复用现有 guard，首个失败即停止，不重试。显式文件 `tests/research_loop/check_g1_g3_cli_validation.py` 不参与默认发现；本轮协调者只可选择六个合成字典 source 节点，进程节点保留给用户。`--case sandbox-startup` 仅探测已安装的选定 native sandbox、惰性载荷和极小 Git fixture；真实生产 launcher、Worker tool、注册 Cov 和完整 G1/G3 均为 `not_run`。本地报告保留 guard/log、有限 stdout/stderr、未达检查及独立的 fixture export/guard 清理状态；socket 目录未定位时为 unresolved，不推测路径。报告不供运行时消费或授予权限。
+G1/G3 延后 CLI 检查由用户在 G3 后独立运行。`python scripts/verify_g1_g3.py --list` 只静态列出精确节点，不导入 pytest/产品或启动子进程。显式文件 `tests/research_loop/check_g1_g3_cli_validation.py` 不参与默认发现；本轮协调者只可选择脚本 `SOURCE_NODES` 列出的九个纯 source 节点。进程、组件批次及真实模型入口留给用户独立执行。所有动态选择串行复用现有 `run_tests.py` 默认资源限制，首个失败即停，不自动重试；没有安装、全量或 stress 扩张。
+
+`python scripts/verify_g1_g3.py --output .trial/<新目录>` 的默认 `all` 仍只有 source 报告逻辑和 sandbox 启动依赖检查，不调用模型。`--case sandbox-startup` 自行构造 bwrap 与惰性 payload，只证明依赖层；不能覆盖完整 production namespace 或真实 W。`--case components` 依次选择五个限定批次，也可单选 `git-component`、`cleanup-component`、`fork-component`、`retirement-component`、`delete-component`。这些批次引用现有精确节点，报告写明真实 Git、argv 或合成控制记录的层级：同进程捕获变稿不等于 V2 两进程屏障，模拟 replay 不等于真实工程检查，CLI/API 六入口退役不等于 HTTP/UI 动态验收。
+
+真实 W/受管工具入口必须显式选择 `--case worker-managed`，并给出原有 codex executable、模型、reasoning effort、完整原生权限声明与有限预算。它只支持原生产入口已支持的单 executable Codex、workspace-write、无额外 writable roots；不支持的原声明会拒绝，不降 sandbox 或绕审批。`--native-options` 是现有公开声明的 JSON，必须明确包含 `workspace`、`network`、`web`、`subagents`、`sandbox_workspace_write`；后者明确包含 `writable_roots`、`network_access`、`exclude_tmpdir_env_var`、`exclude_slash_tmp`，network 两处一致。不得把 auth、session、token 或整份环境放进 JSON。下例各变量由操作员明确选择，不从当前实例、最近文件或 HOME 猜测：
+
+```bash
+python scripts/verify_g1_g3.py --case worker-managed \
+  --output "$SCID_G3_NEW_OUTPUT" \
+  --native-launcher "$SCID_G3_ORIGINAL_CODEX" \
+  --model "$SCID_G3_ORIGINAL_MODEL" \
+  --reasoning-effort "$SCID_G3_ORIGINAL_REASONING" \
+  --native-options "$SCID_G3_ORIGINAL_NATIVE_OPTIONS" \
+  --max-tokens "$SCID_G3_CHOSEN_MAX_TOKENS" \
+  --max-seconds "$SCID_G3_CHOSEN_MAX_SECONDS"
+```
+
+预算输入无默认值：token target 为 1..50000，active seconds 为 30..180，每个 Local 调用最多 35 秒；原 guard 的 300 秒批次限制保持。token 是原有 observed soft target，不承诺请求级硬上限。原 HOME 认证由 native 继承，不复制认证/config、不更改用户权限或已有科学角色 profile。探针在这次明确新 output 内创建并保留工程实例，运行一个真实 W turn；W 的固定 helper 使用原 bridge CLI，两个调用由原 Local namespace 执行。v1 到达 backend 屏障后才把草稿改 v2/新增模块；它检查固定 v1、下一调用 v2、helper/resource/执行位、未捕获模块负控、Git 对象/ref/index/config 及实例内部父目录 rename 拒绝、合法写入正控、同 submission 缓存、query/collect、原件/产物实体和终态清理。它不执行真实用户数据、H/A、训练、solver、SSH，也不重新提交任何 unknown。
+
+缓存探针先保存已知成功原 run 的准确 ref/bytes，完成该原 call 的只读 query 后，再回放原 ref；不把 watcher 对连续相同 bytes 的忽略当成缓存响应，也不重提 unknown。`execute_native` 返回的已封存科学结果保持原协议；启动、usage、权限和 cleanup 只取准确原 `native-outcome.json`，不从科学结果推断宿主事实。
+
+每批保留 `runner.log`、guard 原件和结果报告；真实 W fixture 留在 `guard/batch-001/fixture-logs/worker-managed-fixture`，失败/unknown 也保留。报告只 allowlist 原 launcher/backend argv、原权限、call/step/commit/逻辑入口和直接可观察事实，原 native stdout/stderr 由既有 guard 限量计入；不回显 auth/session/env。源码身份只记录准确 HEAD 和明确列出的相关文件 SHA-256/有界 tracked 差异，不扫描工作区或未追踪文件；dirty 是报告限制，不是运行准入门槛。只有全部必需断言、实际到达层、退出码及 guard cleanup 均完整才可得到 `engineering_passed`。这不是完整 G1/G3 验收；完整注册 Cov、H→W→A、V2 捕获两进程屏障、取消/延迟 replay/崩溃注入和 V12 跨文件系统仍为 `not_run`。报告不供运行时消费，不授科学资格、预算或执行权限。
