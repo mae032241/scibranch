@@ -401,16 +401,39 @@ def capture(root, *, step, call_id, code_root, entry, selection, logical_root,
     private = _private(root, step, call_id, create=True, context=context)
     actual = Inventory(policy, context=context)
     with _index(private) as index:
-        records = bytearray()
-        for name, info in sorted(before[0].items(), key=lambda item: os.fsencode(item[0])):
+        selected = sorted(before[0].items(), key=lambda item: os.fsencode(item[0]))
+        # Length-delimited raw blobs use in-memory marks; no paths or refs enter this stream.
+        framing = [
+            (f'blob\nmark :{number}\ndata {info[3]}\n'.encode('ascii'),
+             f'\nget-mark :{number}\n'.encode('ascii'))
+            for number, (_, info) in enumerate(selected, 1)
+        ]
+        payload_size = len(b'done\n') + sum(
+            info[3] + len(prefix) + len(suffix)
+            for (_, info), (prefix, suffix) in zip(selected, framing))
+        payload = bytearray(payload_size)
+        offset = 0
+        for (name, info), (prefix, suffix) in zip(selected, framing):
             _unchanged(source_anchors)
             _source_parents(code_root, name, before[1])
-            content = _read_file(code_root / name, info, actual)
-            blob = _oid(_git(private, ('hash-object', '--no-filters', '-w', '--stdin'),
-                             data=content, input_limit=policy['max_file_bytes'],
-                             index=index, context=context))
+            payload[offset:offset + len(prefix)] = prefix
+            offset += len(prefix)
+            payload[offset:offset + info[3]] = _read_file(code_root / name, info, actual)
+            offset += info[3]
+            payload[offset:offset + len(suffix)] = suffix
+            offset += len(suffix)
+        payload[offset:] = b'done\n'
+        output = _git(private, ('fast-import', '--quiet', '--done'), data=payload,
+                      input_limit=payload_size, output_limit=41 * len(selected),
+                      index=index, context=context)
+        if (len(output) != 41 * len(selected)
+                or not re.fullmatch(rb'(?:[0-9a-f]{40}\n)+', output)):
+            raise ValueError('Invalid private Git blob identities')
+        del payload, framing
+        records = bytearray()
+        for (name, info), blob in zip(selected, output.splitlines()):
             mode = b'100755' if info[2] & 0o111 else b'100644'
-            records.extend(mode + b' ' + blob.encode('ascii') + b'\t' + os.fsencode(name) + b'\0')
+            records.extend(mode + b' ' + blob + b'\t' + os.fsencode(name) + b'\0')
         _git(private, ('update-index', '-z', '--index-info'), data=records,
              input_limit=len(records), index=index, context=context)
         tree = _oid(_git(private, ('write-tree',), index=index, context=context))

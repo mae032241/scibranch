@@ -51,6 +51,15 @@ def test_capture_exports_raw_bytes_modes_despite_poisoned_git_environment(tmp_pa
         '.gitattributes': b'* text eol=lf filter=forbidden\nmain.py export-ignore\n',
         'ignored.txt': b'$Format:%H$\r\n',
         'nested/helper.sh': b'#!/bin/sh\nprintf raw\\n\n',
+        'empty': b'',
+        'binary.bin': b'\0\xff\x80binary\0',
+        'no-final-newline': b'raw without a trailing newline',
+        'nested/space tab\tline\n"quoted".bin': (
+            b'blob\nmark :1\ndata 0\n\nget-mark :1\ndone\n'
+            b'commit refs/heads/injected\nreset refs/heads/injected\n'
+            b'M 100644 inline injected\n\0\xff'),
+        'duplicate.bin': b'$Format:%H$\r\n',
+        '--leading-dash': b'-option\n',
     }
     (code / 'nested').mkdir()
     for name, content in original.items():
@@ -84,6 +93,75 @@ def test_capture_exports_raw_bytes_modes_despite_poisoned_git_environment(tmp_pa
     assert not (poison / 'index').exists()
     assert not (root / 'host-runtime/code-versions/repository.git/index').exists()
     assert helper.materialize(root, step=7, call_id='call-1', code_version=version) == export
+
+
+@pytest.mark.process_e2e
+def test_capture_git_process_count_is_constant_for_one_and_eight_files(tmp_path, monkeypatch, helper):
+    original_popen = helper.subprocess.Popen
+    commands = []
+
+    def popen(command, *args, **kwargs):
+        commands.append(tuple(command))
+        return original_popen(command, *args, **kwargs)
+
+    monkeypatch.setattr(helper.subprocess, 'Popen', popen)
+    captures = []
+    for count in (1, 8):
+        case = tmp_path / f'{count}-files'
+        case.mkdir()
+        root, code = _source(case)
+        for number in range(1, count):
+            (code / f'file-{number}.py').write_bytes(f'raw {number}\n'.encode('ascii'))
+        start = len(commands)
+        _capture(helper, root, code)
+        captures.append(commands[start:])
+
+    assert len(captures[0]) == len(captures[1])
+    for capture_commands in captures:
+        assert sum('fast-import' in command for command in capture_commands) == 1
+        assert not any('hash-object' in command for command in capture_commands)
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('response', ['missing', 'extra', 'uppercase', 'command_error'])
+def test_capture_rejects_blob_import_failure_before_index_and_pin(tmp_path, monkeypatch, helper, response):
+    root, code = _source(tmp_path)
+    original_git = helper._git
+    commands, temporary_paths = [], []
+
+    def git(private, arguments, **kwargs):
+        commands.append(arguments[0])
+        if arguments[0] != 'fast-import':
+            return original_git(private, arguments, **kwargs)
+        assert arguments == ('fast-import', '--quiet', '--done')
+        assert isinstance(kwargs['data'], bytearray)
+        assert kwargs['input_limit'] == len(kwargs['data'])
+        assert kwargs['output_limit'] == 41
+        index = kwargs['index']
+        lock = index.with_name(index.name + '.lock')
+        for path in (index, lock):
+            path.write_bytes(b'partial index\n')
+            temporary_paths.append(path)
+        if response == 'command_error':
+            kwargs['data'] = b'unsupported\n'
+            kwargs['input_limit'] = len(kwargs['data'])
+            return original_git(private, arguments, **kwargs)
+        output = original_git(private, arguments, **kwargs)
+        if response == 'missing':
+            return output[:-1]
+        if response == 'extra':
+            return output + output
+        return b'A' * 40 + b'\n'
+
+    monkeypatch.setattr(helper, '_git', git)
+    with pytest.raises(ValueError):
+        _capture(helper, root, code)
+    assert len(temporary_paths) == 2
+    assert all(not path.exists() for path in temporary_paths)
+    assert 'update-index' not in commands
+    assert 'update-ref' not in commands
+    ref = root / 'host-runtime/code-versions/repository.git/refs/scidiscovery/steps/007/calls/call-1'
+    assert not ref.exists()
 
 
 @pytest.mark.process_e2e
