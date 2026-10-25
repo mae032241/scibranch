@@ -140,13 +140,20 @@ Local 的 `--experiment-dir experiments/<name>` 只选独立运行工作目录�
 同一调用的 query、result、collect 和 cleanup 不依赖已删除的导出；实际消费代码须保留原
 commit 和准确调用 pin，按该版本重新物化，不回退可变草稿。新 compiler 记录使用
 `code_version`，不依赖 `author` 快照，原 UUID 身份仍保留；旧记录沿用原解释。执行局部的
-普通 `file_stat` 指纹按需补充路径/大小检查，不向全局材料、history 或 qualification 引用
+普通 `file_stat` 指纹按需补充路径/大小检查，不向全局材料或 qualification 引用
 添加指纹。原授权、预算、期限及未知原调用核对规则不变。
 
-G1 仅增加这条代码路径，下述科学 data/output 留存语义保持。G2 数据引用与 G3 archive/fork
-消费方改动尚未实现；既有归档/分支章节不证明新 Git 调用已有完整生命周期支持。
-真实 production、default native、registered Cov 与 Codex sandbox 命名空间验收留到 G3 后，
-由用户独立 CLI 运行；源码改动不构成真实 sandbox 保证。
+新 Git 绑定的 Local 成果直接写入已有 `work/retained-experiments/<call>/outputs`，沿既有只读动态根
+读取同一原件。这类 Local 成果与节点所属 raw/artifacts 原件均须确认实际写者停写后才原地封存。重复 collect、观察、
+checkpoint 和历史读取只核对已保存 proof，不再复制或刷新；checkpoint 不封存当前草稿。
+必需的已选控制检查及旧记录解释保持，输出处理错误不改写已知终态。没有 `code_version` 的
+Local 调用（包括旧 `entry` 分支）保留既有复制语义。
+
+这只完成 G2 的 Local/节点输出切片；其他 provider、全局及跨节点输入、历史正文复用和代码
+审阅/交付视图仍待完成，G3 恢复及 fork/archive/delete 消费方尚未实现。既有归档/分支章节
+不证明新 Git 调用已有完整生命周期支持。真实 default native、registered Cov、Codex/
+命名空间及 replay leaf 验收留到 G3 后由用户独立 CLI 运行；源码改动不授科学资格，
+也不构成真实 sandbox 保证。
 
 默认本地命令后端解析所选 Codex 安装的原生二进制，使用其 sandbox 和受限的科学子进程
 文件视图。已接受的 Git 代码导出只读映回逻辑科学代码目录；旧调用沿用原目录/脚本快照
@@ -160,7 +167,7 @@ managed policy、额外可写根以及无法忠实投影后端权限的自定义
 明确返回不支持，不为执行而替换其原生权限。内部权限 profile 不增加操作者配置项。
 这些文件视图不构成防同用户恶意进程的隔离，也不对泛原生执行提供统一隔离保证。
 
-受管执行输出、观察原件和历史保留使用实例的 `host-history/objects/<uuid>`。
+上述 Local/节点输出路径以外的既有留存语义继续使用实例的 `host-history/objects/<uuid>`。
 每次独立冻结生成新对象路径，不按相同字节去重；受管冻结原件的宿主私有 alias 可跨 call
 共享 inode，但不合并原 call、origin 或科学路径。可变外部内容首次独立复制冻结；已接受输入快照、Worker 输入及 collect/wake 视图通过硬链接
 共享只读原件。需要编辑时把具体文件另存 `work/`，不预复制整棵输入树。共享要求同一文件系统，

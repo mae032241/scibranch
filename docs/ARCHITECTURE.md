@@ -218,16 +218,26 @@ its original call pin, and materializes that version without falling back to a
 mutable draft. New compiler records use `code_version` without an `author`
 snapshot and retain their original UUID identity; pre-Git records retain their
 saved interpretation. Ordinary execution-local `file_stat` fingerprints supplement
-path/size checks where needed; they do not add fingerprints to global materials,
-history or qualification references. Original authorization, budgets, deadlines
+path/size checks where needed; they do not add fingerprints to global materials
+or qualification references. Original authorization, budgets, deadlines
 and unknown-call reconciliation remain unchanged.
 
-This G1 code path retains the existing scientific data/output retention below.
-G2 data-reference changes and G3 archive/fork consumer changes are not implemented;
-the existing archive/fork sections do not establish complete lifecycle support for
-new Git-backed runs. Real production validation of default native, registered Cov
-and Codex sandbox namespaces is deferred until after G3 through an independent
-user CLI run. Source changes do not establish a real sandbox guarantee.
+New Git-bound Local artifacts are written directly at the existing
+`work/retained-experiments/<call>/outputs` path and read through the existing
+read-only dynamic root. These Local and node-owned raw/artifact originals are sealed in place only after
+actual writers are confirmed stopped. Repeated collection, observation, checkpoint
+and history reads verify saved proof without copying or refreshing it; checkpoints
+do not seal current drafts. Required selected-control checks and saved older records
+remain, and output errors do not rewrite a known terminal outcome. Local calls without
+`code_version`, including the old `entry` branch, retain their existing copy behavior.
+
+This covers only the Local/node output slice of G2. Other providers, global and
+cross-node inputs, history-body reuse and code audit/delivery views remain pending;
+G3 recovery, fork/archive/delete consumers are not implemented. Existing archive/fork
+sections do not establish complete lifecycle support for new Git-backed runs. Real
+default native, registered Cov, Codex/namespace and replay leaf validation is deferred
+until G3 and an independent user CLI run. Source changes establish neither scientific
+qualification nor a real sandbox guarantee.
 
 The default local command backend resolves the selected Codex installation's native
 binary and uses its sandbox with a restricted scientific subprocess file view. The
@@ -250,8 +260,8 @@ permissions are not replaced to make them run. The internal permission profile a
 no operator setting. These file views do not establish hostile same-user process
 isolation or a blanket guarantee for generic native execution.
 
-Managed execution outputs, observation originals and history retention reuse the
-instance's `host-history/objects/<uuid>` archive. Each independent freeze gets a
+Outside the Local/node output path above, existing retention semantics continue
+to use the instance's `host-history/objects/<uuid>` archive. Each independent freeze gets a
 new object path; equal bytes are not deduplicated. Host-only aliases of a managed
 frozen original may share its inode across calls without merging original calls,
 origins or scientific paths. Mutable external bytes are first copied independently;

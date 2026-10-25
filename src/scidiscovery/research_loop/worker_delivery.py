@@ -45,19 +45,45 @@ def _candidate(root,accepted,completed,terminal,observation=None):
 
 
 def writers_stopped(root,job,record):
+    """Require this attempt's existing native, bridge and process stop facts."""
     from . import runtime
+    root,record=Path(root),Path(record)
     number=execution.records(root,job['step']).index(record)
     identity=execution.identity(root,job['step'],number)
+    task=c.record_ref(c.regular(root/'jobs'/f'{job["step"]:03d}.json'))
+    intent=c.read(c.regular(record/'native-intent.json'))
+    outcome=c.read(c.regular(record/'native-outcome.json'))
+    if c.read(Path(task['path']))!=job or intent.get('task_ref')!=task:
+        raise ValueError('Original native writer lost its exact scientific task')
+    started=outcome.get('native_started')
+    if type(started) is not bool or started and outcome.get('cleanup')!='observed_group_cleaned':
+        raise ValueError('Original native writer cleanup is unconfirmed')
+    if started and not (record/'native-process.json').exists():
+        raise ValueError('Original native writer process identity is unavailable')
+    if not started and ((record/'native-process.json').exists() or (record/'native-process.json').is_symlink()):
+        raise ValueError('Unstarted native outcome contradicts its original process')
+    processes=outcome.get('execution_processes')
+    if processes is not None and (not isinstance(processes,dict)
+            or set(processes)!={'runner-process.json','native-process.json'}
+            or any(processes[name]!=c.record_ref(c.regular(record/name)) for name in processes)):
+        raise ValueError('Original native outcome changed its process bindings')
     from . import worker_execution_bridge
     worker_execution_bridge.stopped(record,identity)
     for name in ('runner-process.json','native-process.json'):
         path=record/name
-        if path.exists():
+        if path.exists() or path.is_symlink():
             receipt=c.read(c.regular(path))
-            if name=='runner-process.json' and receipt.get('pid')==os.getpid():
-                outcome=c.read(c.regular(record/'native-outcome.json'))
-                if c.record_ref(path)==outcome.get('execution_processes',{}).get(name) and receipt.get('task_ref')==identity:
-                    continue  # The original leased owner is publishing its final checkpoint.
+            saved=outcome.get('execution_processes',{}).get(name)
+            if (receipt.get('task_ref')!=identity or saved is not None and saved!=c.record_ref(path)
+                    or not isinstance(receipt.get('boot_id'),str) or not receipt['boot_id']
+                    or any(type(receipt.get(key)) is not int or receipt[key]<=0
+                        for key in ('pid','start_ticks','pgid','sid'))
+                    or receipt['pgid']!=receipt['pid'] or receipt['sid']!=receipt['pid']):
+                raise ValueError('Original native writer process identity changed')
+            if name=='runner-process.json' and receipt['pid']==os.getpid():
+                # The original runner publishes its checkpoint after run_native
+                # has closed its writers and recorded the actual cleanup facts.
+                if runtime.process_matches(receipt,identity):continue
             if not runtime.process_matches(receipt,identity):continue
             raise ValueError('Original native writer still owns this attempt; no delivery snapshot can be captured')
 

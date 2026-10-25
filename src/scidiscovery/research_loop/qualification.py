@@ -285,9 +285,15 @@ def _restriction(root, document, active, memo, sources):
             step = edge['step']
             job_path = root / 'jobs' / f'{step:03d}.json'
             record = c.host_record(c.workspace(root, step))
+            raw = c.regular(c._execution_raw(root, step))
+            raw_ref = dict(seal['raw_ref'])
+            if 'file_stat' in raw_ref:
+                from . import experiments
+                if raw_ref.pop('file_stat') != experiments.proof(raw)['file_stat']:
+                    raise IntegrityError('Source producer differs from its exact scientific seal')
             if (seal['job_ref'] != c.record_ref(c.regular(job_path))
                     or seal['result_ref'] != c.file_ref(c.regular(record / 'result.json'))
-                    or seal['raw_ref'] != c.file_ref(c.regular(c._execution_raw(root, step)))):
+                    or raw_ref != c.file_ref(raw)):
                 raise IntegrityError('Source producer differs from its exact scientific seal')
             parent = c.read(job_path)
             ref = seal.get('source_provenance')
@@ -492,7 +498,7 @@ def _output(root, job, seal, *, managed_coverage=None, source=None):
     elif managed_coverage is not None:
         raise IntegrityError('Managed input coverage has no original observation')
     return dict(version=1, step=job['step'], job_ref=seal['job_ref'],
-                result_ref=seal['result_ref'], raw_ref=seal['raw_ref'],
+                result_ref=seal['result_ref'], raw_ref={key:seal['raw_ref'][key] for key in ('path','size_bytes')},
                 materials=copy.deepcopy(seal['materials']),
                 inputs=job.get('source_provenance'), derivation='all_frozen_task_inputs',
                 observations=seal.get('observations'),

@@ -109,10 +109,18 @@ read-only, and grants the corresponding native file reads. The private manifest,
 unselected objects and other host-control paths are not mounted. Scientific backend
 subprocesses receive no Skill-object mounts. Native permission settings retain
 their declared semantics; selection is not a same-user security sandbox.
-The G1 Git code branch does not implement G2 data-reference or G3 archive/fork
-consumer changes. Real production validation of default native, registered Cov
-and Codex sandbox namespaces remains deferred until after G3 through an independent
-user CLI run; source support alone establishes no real sandbox guarantee.
+The G1 Git code branch now has a Local/node output slice: Git-bound Local artifacts publish
+directly at existing `work/retained-experiments/<call>/outputs`, with in-place sealing
+only after actual writers stop and read access through the existing read-only dynamic
+root. Repeated collection, observation, checkpoint and history reads verify saved proof
+without copying or refreshing it; checkpoints do not seal current drafts. Required
+selected-control checks and old saved records remain, and output errors preserve known
+terminal status. Local calls without `code_version`, including old `entry` calls, keep
+their existing copy branch. Other providers, global/cross-node inputs, history-body reuse and code
+audit/delivery views remain pending G2; G3 recovery/fork/archive/delete are not implemented.
+Real default native, registered Cov, Codex/namespace and replay leaf validation remains
+deferred until G3 and an independent user CLI run; source support alone establishes
+neither scientific qualification nor a real sandbox guarantee.
 
 ## Deterministic scientific assets
 

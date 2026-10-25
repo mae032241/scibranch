@@ -513,6 +513,24 @@ def _validated_scientific_outputs(selected, *, operation_context=None):
     return selected
 
 
+def _local_original_observation(config, observation):
+    """The Local producer's saved paths already name their actual originals."""
+    if config['execution_interface'].get('executor')!='local_execution:command':return False
+    rows=[item for name in ('proofs','outputs','scientific_outputs') for item in observation.get(name,[])]
+    if observation.get('scientific_source') is not None:rows.append(observation['scientific_source'])
+    if all(isinstance(item.get('path'),str) and item['path']==(item.get('source') or {}).get('path') for item in rows):
+        return True
+    # Existing observations have exact saved private slots. A changed new
+    # descriptor must not select that compatibility branch and publish an alias.
+    record_dir=config.get('record_dir') or config['execution_interface'].get('config_record',{}).get('record_dir')
+    if not isinstance(record_dir,str):raise IntegrityError('Local saved observation lost its exact record directory')
+    directory=Records(dict(config,record_dir=record_dir)).directory(observation['call_id'])/'observed-originals'
+    if any(Path(item.get('path','')).parent!=directory
+            or re.fullmatch(r'[0-9]{6}',Path(item.get('path','')).name) is None for item in rows):
+        raise IntegrityError('Local observation lost its actual or saved original path')
+    return False
+
+
 def scientific_outputs(config, observation, *, adapter=None, include_logs=False, operation_context=None):
     """Producer-owned science files from an already verified full observation."""
     from . import storage_policy as storage
@@ -584,14 +602,22 @@ def scientific_outputs(config, observation, *, adapter=None, include_logs=False,
                 replacements[str(directory/'outputs')]=str(Path(accepted['experiment_directory'])/'artifacts')
             replacements=scientific_log_projection.encode_replacements(replacements)
             storage.check(context)
-            target_directory=_scientific_projection_directory(config)/'local-logs'/observation['call_id']
+            direct=_local_original_observation(config,observation)
+            root=experiment_client.root_for_configuration(config,allow_standalone=True) or Path(config['record_dir'])
+            if direct:
+                from . import local_experiments
+                target_directory=local_experiments.artifact_directory(config,observation['call_id'])
+            else:
+                target_directory=_scientific_projection_directory(config)/'local-logs'/observation['call_id']
             if target_directory.resolve()!=target_directory:
                 raise IntegrityError('Scientific log projection changed its host namespace')
             target_directory.mkdir(parents=True,exist_ok=True,mode=0o700)
             log_name='execution-logs';suffix=1
             while any(item.name in {log_name+'/stdout.txt',log_name+'/stderr.txt'} for item in selected):
                 suffix+=1;log_name=f'execution-logs-{suffix}'
-            root=experiment_client.root_for_configuration(config,allow_standalone=True) or Path(config['record_dir'])
+            if direct:
+                target_directory=target_directory/log_name
+                target_directory.mkdir(parents=True,exist_ok=True,mode=0o700)
             for stream in ('stdout','stderr'):
                 matches=[item for item in completed['proofs'] if item['path']==str(directory/(stream+'.raw'))]
                 if len(matches)!=1:raise IntegrityError('Scientific log has no exact retained transport original')
@@ -602,9 +628,17 @@ def scientific_outputs(config, observation, *, adapter=None, include_logs=False,
                 target=target_directory/(stream+'.txt')
                 if target.is_symlink():raise IntegrityError('Scientific log projection must be an original file')
                 if not target.exists():
-                    original=shared_originals.publish_stream(root,blocks,policy=limits,context=context)
-                    shared_originals.link(original,target,size_bytes=original.stat().st_size,
-                        root=root,policy=limits,context=context)
+                    if direct:
+                        from . import atomic_files
+                        def projected_blocks():
+                            for block in blocks():
+                                with storage.mutation(root,len(block),policy=limits,context=context):
+                                    yield block
+                        atomic_files.publish_stream(target,projected_blocks(),context=context,inventory=inventory)
+                    else:
+                        original=shared_originals.publish_stream(root,blocks,policy=limits,context=context)
+                        shared_originals.link(original,target,size_bytes=original.stat().st_size,
+                            root=root,policy=limits,context=context)
                 item=proof(target,context=context)
                 selected.append(LocalFileDescriptor(name=log_name+'/'+stream+'.txt',local_path=str(target),
                     size_bytes=item['size_bytes'],media_type='text/plain'))
@@ -624,10 +658,15 @@ def _collected_view(config, call_id, observation, adapter, *, operation_context=
     from . import storage_policy as storage
     context=operation_context or storage.Deadline(config['max_seconds'])
     inventory=storage.Inventory(config.get('storage_policy'),context=context)
+    direct=_local_original_observation(config,observation)
     for descriptor in scientific_outputs(config,observation,adapter=adapter,include_logs=True,operation_context=context):
         inventory.entry();inventory.file(descriptor.size_bytes)
         target = shared_input_views.dynamic_root(root,work,'retained-experiments') / call_id / 'outputs' / descriptor.name
-        c._bind_original(Path(descriptor.local_path), target, context=context, policy=config.get('storage_policy'), root=root, size_bytes=descriptor.size_bytes, source_kind='managed_frozen')
+        if direct:
+            if Path(descriptor.local_path)!=target or target.resolve()!=target:
+                raise IntegrityError('Local scientific output is outside its declared actual public original')
+        else:
+            c._bind_original(Path(descriptor.local_path), target, context=context, policy=config.get('storage_policy'), root=root, size_bytes=descriptor.size_bytes, source_kind='managed_frozen')
         result.append(dict(name=descriptor.name, path=str(target), media_type=descriptor.media_type,
             size_bytes=descriptor.size_bytes, retention='retained_original'))
     return dict(status='collected', call_id=call_id, outputs=result)
@@ -1407,6 +1446,8 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
     accepted=records.accepted(call_id)
     if accepted['interface']!=config['execution_interface']:
         raise IntegrityError('Observation interface differs from accepted execution')
+    direct_local=(config['execution_interface'].get('executor')=='local_execution:command'
+        and 'code_version' in accepted)
     external=records.external(call_id)
     if external is None:return None
     details=adapter.status_details(call_id);state=details.get('state')
@@ -1434,6 +1475,11 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
         original=proof(source,context=operation_context)
         if any(original[key]!=item[key] for key in ('size_bytes','file_stat') if key in item):
             raise IntegrityError('Execution observation original changed during collection')
+        if direct_local:
+            if source.stat().st_mode & 0o777 != 0o400:
+                raise IntegrityError('Local observation original has not been sealed by its stopped writer')
+            retained[key]=original
+            return dict(original,source=item)
         target=directory/'observed-originals'/f'{len(retained):06d}'
         # Read-only originals already published inside this private call share
         # their inode; external adapter outputs freeze independently once.

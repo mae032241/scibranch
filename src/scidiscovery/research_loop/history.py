@@ -126,18 +126,33 @@ def resolve(root, target, receipts, *, current=None):
 def _proof(root, source, *, context=None, source_kind='mutable'):
     from .protocol import require_current
     require_current(root)
-    if not isinstance(source, str):
-        raise ValueError('Observer evidence path is not a string')
-    path = root / source
-    if Path(source).is_absolute() or '..' in Path(source).parts or path.resolve() != path:
+    saved=source if isinstance(source,dict) else None
+    relative=saved['path'] if saved is not None else source
+    if not isinstance(relative,str):raise ValueError('Observer evidence path is not a string')
+    snapshot=saved.get('snapshot',relative) if saved is not None else relative
+    path = root / snapshot
+    if (Path(relative).is_absolute() or '..' in Path(relative).parts
+            or Path(snapshot).is_absolute() or '..' in Path(snapshot).parts or path.resolve() != path):
         raise ObserverIntegrityError('Observer evidence must be an exact instance original')
     c.regular(path)
     size = path.stat().st_size
     from . import experiments
+    if saved is not None:
+        actual=experiments.proof(path,context=context)
+        if any(actual[key]!=saved[key] for key in ('size_bytes','file_stat') if key in saved):
+            raise ObserverIntegrityError('Saved observer original changed')
+        return dict(path=relative,**{key:saved[key] for key in ('size_bytes','file_stat') if key in saved},
+            retention='archived',snapshot=snapshot)
+    if source_kind=='managed_frozen':
+        if path.stat().st_mode & 0o777 != 0o400:
+            raise ObserverIntegrityError('Managed original has not been sealed by its stopped writer')
+        original=experiments.proof(path,context=context)
+        return dict(path=relative,**{key:original[key] for key in ('size_bytes','file_stat')},
+            retention='archived',snapshot=relative)
     from . import shared_originals, storage_policy as storage
     limits=storage.for_path(root,path)
     snapshot=shared_originals.retain(root,path,size_bytes=size,source_kind=source_kind,context=context,policy=limits)
-    return dict(path=source, size_bytes=size, retention='archived',
+    return dict(path=relative, size_bytes=size, retention='archived',
                 snapshot=snapshot.relative_to(root).as_posix())
 
 
@@ -153,7 +168,9 @@ def source_seal_ref(source):
 
 def _same_original(root, original, retained):
     return (Path(root) / original['path'] == Path(root) / retained['path']
-        and original.get('size_bytes') == retained.get('size_bytes'))
+        and original.get('size_bytes') == retained.get('size_bytes')
+        and ('file_stat' not in original or 'file_stat' not in retained
+            or original['file_stat']==retained['file_stat']))
 
 
 def _retained_original(root, row, proof):
@@ -207,7 +224,13 @@ def _managed_config(job,root=None):
     return dict(adapter_ref='registered-originals-v1') if configured else None
 
 
-def _managed_proof(root,path,original,*,context=None):
+def _managed_proof(root,path,original,*,context=None,verify=True):
+    path=Path(path)
+    if Path(original['path'])==path:
+        relative=path.relative_to(root).as_posix()
+        saved=dict(path=relative,**{key:original[key] for key in ('size_bytes','file_stat') if key in original})
+        if not verify:return dict(saved,retention='archived',snapshot=relative)
+        return _proof(root,saved,context=context,source_kind='managed_frozen')
     proof=_proof(root,Path(path).relative_to(root).as_posix(),context=context,source_kind='managed_frozen')
     if any(proof[key]!=original[key] for key in ('size_bytes',)):
         raise ObserverIntegrityError('Managed file differs from completed original')
@@ -243,6 +266,8 @@ def managed_status(root, row, *, context=None):
         source = originals.node(root, step)
         validate_managed_original(source, originals.source_job(source), [row])
         return row['status']
+    for name in ('accepted','completed','terminal','observation','retirement'):
+        if row.get(name) is not None:_validate_proof(root,row[name],context=context)
     if row.get('retirement') is not None:
         if any(row.get(key) is not None for key in ('completed','terminal','observation')) or 'execution' in row or row.get('outputs'):
             raise ObserverIntegrityError('Non-submission cannot contain executed terminal evidence')
@@ -267,7 +292,9 @@ def managed_status(root, row, *, context=None):
             raise ObserverIntegrityError('Managed observation differs from archived call originals')
         try:
             return experiments.verify_observation(value,lambda proof:
-                root/_retained_original(root,row,proof)['snapshot'],interface=interface,context=context)
+                root/_retained_original(root,row,proof)['snapshot'],interface=interface,context=context,
+                verify_files=not ('code_version' in accepted and experiments._local_original_observation(
+                    dict(execution_interface=interface),value)))
         except (ValueError,OSError,KeyError,TypeError) as error:
             raise ObserverIntegrityError('Managed execution observation original changed') from error
     if interface.get('observation_version') is not None:return 'unknown'
@@ -333,7 +360,11 @@ def scientific_outputs(root, job, call):
             for item in observed['scientific_outputs']]) if 'scientific_outputs' in observed else {}))
     result=[]
     for descriptor in experiments.scientific_outputs(config,archived):
-        proof=_proof(root,Path(descriptor.local_path).relative_to(root).as_posix(),source_kind='managed_frozen')
+        matches=[item for item in call.get('outputs',[]) if item['name']==descriptor.name
+            and root/item['snapshot']==Path(descriptor.local_path)]
+        if len(matches)!=1:raise ObserverIntegrityError('Selected scientific output lost its saved original')
+        _validate_proof(root,matches[0])
+        proof=matches[0]
         if proof['size_bytes']!=descriptor.size_bytes:
             raise ObserverIntegrityError('Selected scientific output original changed')
         result.append(dict(proof,path=proof['snapshot'],name=descriptor.name))
@@ -341,25 +372,28 @@ def scientific_outputs(root, job, call):
 
 
 @_job_storage
-def managed_calls(root, job, *, context=None):
+def managed_calls(root, job, *, context=None, call_ids=None):
     """Capture small common receipts, independent of domain candidates or observers."""
     from . import experiments, breadth, generic_results
     from .experiment_client import record_directory
     records=experiments.Records(dict(record_dir=str(record_directory(root,job['step']))))
     from .protocol import stage_scope
     scope=stage_scope(root,job);result=[]
-    for directory in records.calls():
+    if call_ids is not None and (not isinstance(call_ids,(list,tuple))
+            or any(not isinstance(item,str) for item in call_ids) or len(set(call_ids))!=len(call_ids)):
+        raise ObserverIntegrityError('Managed selection requires distinct exact original call IDs')
+    directories=records.calls() if call_ids is None else [records.directory(item) for item in call_ids]
+    for directory in directories:
         accepted_path=directory/'accepted.json'
         accepted=c.read(c.regular(accepted_path))
         if accepted.get('scope')!=scope or accepted.get('call_id')!=directory.name:
             raise ObserverIntegrityError('Managed original escaped its stage owner')
         binding=breadth.check_binding((job.get('search') or {}).get('breadth'),accepted.get('mechanism_binding'),scope)
-        completion=directory/'completed.json';state='unknown';terminal=None;value={}
+        completion=directory/'completed.json';terminal_path=directory/'terminal.json';state='unknown';terminal=None;value={}
         if completion.exists():
             value=c.read(c.regular(completion))
             if value.get('call_id')!=directory.name or value.get('scope')!=scope or value.get('mechanism_binding')!=binding:
                 raise ObserverIntegrityError('Managed completion changed accepted mechanism')
-            terminal_path=directory/'terminal.json'
             if terminal_path.exists():
                 terminal=_proof(root,terminal_path.relative_to(root).as_posix(),context=context,source_kind='managed_frozen')
         observed_path=directory/'execution-observation.json';observed=None;extra=[]
@@ -370,6 +404,14 @@ def managed_calls(root, job, *, context=None):
             extra.extend(observed.get('scientific_outputs',[]))
             if observed.get('scientific_source') is not None:extra.append(observed['scientific_source'])
         interface=_execution_interface(root,accepted)
+        direct=('code_version' in accepted and observed is not None
+            and experiments._local_original_observation(dict(execution_interface=interface),observed))
+        if direct:
+            # Preserve the producer's saved identities. Historical output reads
+            # need the call's controls, not an expired code export or old data.
+            experiments.verify_observation(observed,lambda item:Path(item['path']),
+                interface=interface,context=context,verify_files=False)
+            terminal=_managed_proof(root,terminal_path,observed['native_terminal'],context=context)
         retired_path=directory/'submission-retirement.json'
         if retired_path.exists() or retired_path.is_symlink():
             value=experiments.retirement(dict(record_dir=str(records.root),scope=scope,execution_interface=interface,breadth=(job.get('search') or {}).get('breadth')),directory.name)
@@ -383,10 +425,13 @@ def managed_calls(root, job, *, context=None):
         outputs=_managed_outputs(interface,value,observed)
         row=dict(call_id=directory.name,scope=scope,mechanism_binding=binding,status=state,
             result_protocol=generic_results.protocol(interface),
-            accepted=_proof(root,accepted_path.relative_to(root).as_posix(),context=context,source_kind='managed_frozen'),
-            completed=_proof(root,completion.relative_to(root).as_posix(),context=context,source_kind='managed_frozen') if completion.exists() else None,terminal=terminal,
+            accepted=(_managed_proof(root,accepted_path,observed['accepted'],context=context) if direct else
+                _proof(root,accepted_path.relative_to(root).as_posix(),context=context,source_kind='managed_frozen')),
+            completed=(_managed_proof(root,completion,observed['completed'],context=context) if direct else
+                _proof(root,completion.relative_to(root).as_posix(),context=context,source_kind='managed_frozen')) if completion.exists() else None,terminal=terminal,
             **(dict(observation=_proof(root,observed_path.relative_to(root).as_posix(),context=context,source_kind='managed_frozen')) if observed is not None else {}),
-            **(dict(originals=[_managed_proof(root,directory/'inputs'/item['name'],item,context=context) for item in accepted.get('snapshot_files',[])]
+            **(dict(originals=[_managed_proof(root,Path(item['path']) if 'code_version' in accepted else directory/'inputs'/item['name'],
+                    item,context=context,verify=not direct) for item in accepted.get('snapshot_files',[])]
                     +[_managed_proof(root,item['path'],item,context=context) for item in (extra if observed is not None else value.get('proofs',[]))],
                 outputs=[dict(name=item['name'],**_managed_proof(root,item['path'],item,context=context)) for item in outputs],
                 execution=dict(returncode=value.get('returncode'),wall_seconds=value.get('wall_seconds'),result=value.get('result'),
@@ -427,7 +472,17 @@ def validate_managed(root, job, rows, *, context=None):
         if 'result_protocol' in row and row['result_protocol']!=generic_results.protocol(_execution_interface(root,accepted)):
             raise ObserverIntegrityError('Managed result protocol differs from frozen host interface')
         breadth.check_binding((job.get('search') or {}).get('breadth'),row['mechanism_binding'],scope)
-        for proof in [*row.get('originals',[]),*row.get('outputs',[])]:_validate_proof(root,proof,context=context)
+        observed=c.read(root/row['observation']['snapshot']) if row.get('observation') is not None else None
+        from . import experiments
+        direct=('code_version' in accepted and observed is not None
+            and experiments._local_original_observation(dict(execution_interface=accepted['interface']),observed))
+        unused=set()
+        if direct:
+            _,controls=experiments._observation_file_roles(observed,accepted,c.read(root/row['completed']['snapshot']))
+            unused={item['path'] for item in accepted.get('snapshot_files',[])}-controls
+        for proof in row.get('originals',[]):
+            if str(root/proof['path']) not in unused:_validate_proof(root,proof,context=context)
+        for proof in row.get('outputs',[]):_validate_proof(root,proof,context=context)
         if 'execution' in row:
             completed=c.read(root/row['completed']['snapshot'])
             observed=c.read(root/row['observation']['snapshot']) if row.get('observation') is not None else {}
@@ -849,8 +904,9 @@ def _source(root, step, *, resolve_choices=True):
     seal_path = c.regular(record / 'result-identity.json')
     seal = c.read(seal_path)
     raw = c.regular(execution.raw(root, step))
+    raw_ref = _sealed_raw_ref(raw, seal)
     job_path = c.regular(root / 'jobs' / f'{step:03d}.json')
-    if (c.file_ref(raw) != seal['raw_ref'] or c.record_ref(job_path) != seal['job_ref']
+    if (c.file_ref(raw) != raw_ref or c.record_ref(job_path) != seal['job_ref']
             or c.file_ref(c.regular(record / 'result.json')) != seal['result_ref']):
         raise ValueError('Historical scientific source changed')
     job = c.read(job_path)
@@ -886,7 +942,7 @@ def direct_sources(root, job):
                 or c.read(originals.source_record(original, 'native-intent.json'))['task_ref'] != seal['job_ref']
                 or type(outcome.get('returncode')) is not int or outcome['returncode'] != 0 or outcome.get('stop_reason')
                 or outcome.get('usage', {}).get('unknown_steps') != [] and not budget.native_completion_known(outcome, originals.source_settings(original))
-                or outcome.get('raw_ref') != seal['raw_ref']
+                or outcome.get('raw_ref') != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}
                 or c.read(originals.source_record(original, 'result.json')) != c.result_projection(source, payload)):
             raise ValueError('Direct scientific original or terminal identity changed')
         sources.append((source, payload, seal))
@@ -1031,7 +1087,9 @@ def records_from_sources(root, sources, *, write_cache=True):
             conclusion_pages=[])
         # Source authors retain the complete original scientific fields.
         # Only the index excerpt is shortened; current roles can read text pages.
-        text = c.regular(c._execution_raw(root,step)).read_text(encoding='utf-8')
+        raw = c.regular(c._execution_raw(root,step))
+        raw_ref = _sealed_raw_ref(raw,seal)
+        text = raw.read_text(encoding='utf-8')
         detail = [dict(step=step, role=job['role'], source='node:%03d/scientific-output' % step,
                        part=index + 1, parts=(len(text) + TEXT_CHARS - 1) // TEXT_CHARS,
                        text=text[start:start + TEXT_CHARS])
@@ -1041,7 +1099,7 @@ def records_from_sources(root, sources, *, write_cache=True):
         observation = None
         if seal.get('observations'):
             observation = read_observation(root, job, seal)
-            if observation['binding']['source_ref'] != seal['raw_ref']:
+            if observation['binding']['source_ref'] != raw_ref:
                 raise ValueError('Observer snapshot differs from scientific source')
         row = dict(step=step, role=job['role'], seal_ref=seal_sha, view=view, detail=detail,
                    recommendation=payload.get('candidate_recommendation') if job['role'] == 'A' and payload.get('next_action') != 'audit'
@@ -1187,7 +1245,7 @@ def read_observation(root, job, seal):
             raise ObserverIntegrityError('Inherited observation escaped its exact producer')
         value = c.read(originals.resolve_ref(source, receipt))
         config = originals.source_settings(source).get('history_observer') or _managed_config(job, root)
-        if config is None or value['binding'] != _observer_binding(seal['raw_ref'], config):
+        if config is None or value['binding'] != _observer_binding(_sealed_raw_ref(originals.source_raw(source),seal), config):
             raise ObserverIntegrityError('Inherited observation lost its exact source binding')
         from . import candidate_refs
         return candidate_refs.source_observation(source, originals.source_job(source), value)
@@ -1207,7 +1265,8 @@ def read_observation(root, job, seal):
     if path != expected or c.regular(path).stat().st_size != receipt.get('size_bytes',path.stat().st_size):
         raise ObserverIntegrityError('Sealed observer snapshot changed')
     value = c.read(path)
-    if value['binding'] != _observer_binding(seal['raw_ref'], config):
+    raw_ref = _sealed_raw_ref(c._execution_raw(root,job['step']),seal)
+    if value['binding'] != _observer_binding(raw_ref, config):
         raise ValueError('Observer snapshot source binding changed')
     return value
 
@@ -1263,7 +1322,8 @@ def validate_observation_original(source, job, seal):
     if receipt is None or receipt.get('path',) != f'host-history/observations/{source.step:03d}.json':
         raise ObserverIntegrityError('Original observer snapshot lost its exact producer')
     value = c.read(o.resolve_ref(source, receipt))
-    if value.get('binding') != _observer_binding(seal['raw_ref'], config):
+    raw_ref = _sealed_raw_ref(o.source_raw(source),seal)
+    if value.get('binding') != _observer_binding(raw_ref, config):
         raise ObserverIntegrityError('Original observer snapshot binding changed')
     observer_input_sources(source.storage_root, job, value, source=source)
     if managed is not None:
@@ -1295,8 +1355,8 @@ def _validate_proof(root, proof, *, context=None):
     from . import experiments
     from . import originals
     path = originals.resolve_root_ref(root, dict(proof, path=expected)) if (Path(root) / originals.MANIFEST).exists() else root / expected
-    actual=c.file_ref(c.regular(path)) if context is None else experiments.proof(path,context=context)
-    if actual['size_bytes']!=proof['size_bytes']:
+    actual=experiments.proof(path,context=context)
+    if any(actual[key]!=proof[key] for key in ('size_bytes','file_stat') if key in proof):
         raise ObserverIntegrityError('Archived observer original changed')
 
 
@@ -1317,8 +1377,17 @@ def refresh(root, before_step):
     c.write(root / 'host-history/overview.json', overview)
 
 
+def _sealed_raw_ref(raw, seal):
+    """Verify the saved private proof before using its existing owner locator."""
+    from . import experiments
+    saved=seal['raw_ref'];actual=experiments.proof(raw)
+    if any(actual[key]!=saved[key] for key in ('size_bytes','file_stat') if key in saved):
+        raise ObserverIntegrityError('Sealed historical scientific original changed')
+    return {key:saved[key] for key in ('path','size_bytes')}
+
+
 def _observer_binding(source_sha, config):
-    return dict(source_ref=source_sha,adapter_ref=config.get('adapter_ref'),
+    return dict(source_ref={key:source_sha[key] for key in ('path','size_bytes')},adapter_ref=config.get('adapter_ref'),
                 **(dict(contract_version=2) if config.get('contract_version') == 2 else {}),
                 **(dict(source_contract=config['source_contract'])
                    if config.get('source_contract') is not None else {}))

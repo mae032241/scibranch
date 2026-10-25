@@ -104,14 +104,24 @@ class LocalExecution:
             metadata['command'][metadata['script_index']]=str(source)
             if e.proof(payload.local_path)['size_bytes']!=payload.size_bytes:
                 raise e.IntegrityError('Local code export differs from its prepared descriptor')
+            instance=experiment_client.root_for_configuration(self.config)
+            work=c.workspace(instance,self.config['scope']['step'])
+            job=c.read(c.regular(instance/'jobs'/f'{self.config["scope"]["step"]:03d}.json'))
+            runtime=Path(options.get('experiment_directory') or self.config.get('cwd') or work).absolute()
+            # The final readonly overlays follow the backend's artifacts
+            # exception, so an overlapping runtime target cannot be writable.
+            from . import shared_input_views
+            output=runtime/'artifacts'
+            readonly=[work/'work'/name for name in shared_input_views.DYNAMIC_ROOTS]
+            if (work/'inputs').exists():readonly.append(work/'inputs')
+            readonly.extend(work/material['path'] for material in experiment_client._input_rows(job))
+            if any(output.is_relative_to(path) or path.is_relative_to(output) for path in readonly):
+                raise ValueError('Local artifacts overlap an existing readonly scientific input')
             if options.get('experiment_directory') is not None:
                 directory=Path(options['experiment_directory']).absolute()
-                instance=experiment_client.root_for_configuration(self.config)
-                work=c.workspace(instance,self.config['scope']['step'])
                 if (directory.resolve()!=directory or not directory.is_dir()
                         or not directory.is_relative_to(work) or source.is_relative_to(directory)):
                     raise ValueError('Local code requires an independent ordinary runtime directory')
-                job=c.read(c.regular(instance/'jobs'/f'{self.config["scope"]["step"]:03d}.json'))
                 files={}
                 for material in experiment_client._input_rows(job):
                     logical=work/material['path']
@@ -332,20 +342,29 @@ class LocalExecution:
             transport_complete=transport_complete,wall_seconds=time.monotonic()-started,
             **(dict(storage_limit_reached=True) if log_limited else {})))
         completion_context=storage.Deadline(max(.001,deadline-time.monotonic()))
-        try:
-            for stream in ('stdout.raw','stderr.raw'):
-                source=directory/stream
-                identity=e.proof(source,context=completion_context)
-                shared_originals.retain(storage_root,source,size_bytes=identity['size_bytes'],
-                    source_kind='managed_frozen',context=completion_context,policy=limits)
-        except (TimeoutError,storage.StorageQuotaExceeded):
-            # Preserve original terminal/cleanup facts when retained-content
-            # admission is exhausted; never repeat the command to recover logs.
-            pass
+        if 'code_version' not in accepted:
+            try:
+                for stream in ('stdout.raw','stderr.raw'):
+                    source=directory/stream
+                    identity=e.proof(source,context=completion_context)
+                    shared_originals.retain(storage_root,source,size_bytes=identity['size_bytes'],
+                        source_kind='managed_frozen',context=completion_context,policy=limits)
+            except (TimeoutError,storage.StorageQuotaExceeded):
+                # Old calls keep their saved retention contract. Neither path
+                # repeats a command to recover unavailable output processing.
+                pass
         self.records.publish(call_id,'completed.json',self.completion(directory,accepted,returncode,cleanup,transport_complete,
             context=completion_context))
 
     def completion(self,directory,accepted,returncode,cleanup,transport_complete,*,context=None):
+        if 'code_version' in accepted and ((directory/'completed.json').exists() or (directory/'completed.json').is_symlink()):
+            if (directory!=self.records.directory(accepted['call_id'])
+                    or self.records.accepted(accepted['call_id'])!=accepted):
+                raise e.IntegrityError('Saved Local completion lost its exact accepted owner')
+            # Public log projections may have been published after completion.
+            # The original completion, rather than a new output inventory, owns
+            # the backend result and its saved ordinary file identities.
+            return self.result(accepted['call_id'])
         known=cleanup and transport_complete and type(returncode) is int
         script=[accepted['script']]
         if 'code_version' in accepted:
@@ -369,14 +388,23 @@ class LocalExecution:
                     artifacts=(artifact_directory(self.config,accepted['call_id']) if 'code_version' in accepted
                         else directory/'inputs/artifacts')
                     for item in self.files(artifacts,policy=self.config.get('storage_policy'),context=context):
-                        source=Path(item['path']);target=directory/'outputs'/item['name']
-                        frozen_original=shared_originals.retain(root,source,size_bytes=item['size_bytes'],source_kind='mutable',
-                            context=context,policy=self.config.get('storage_policy'))
-                        shared_originals.link(frozen_original,target,size_bytes=item['size_bytes'],context=context,
-                            root=root,policy=self.config.get('storage_policy'))
+                        source=Path(item['path'])
+                        if 'code_version' in accepted:
+                            # The original backend wrote this already-bound
+                            # public entity. Cleanup precedes its only seal.
+                            if source.stat().st_mode & 0o777 != 0o400:source.chmod(0o400)
+                            target=source
+                        else:
+                            target=directory/'outputs'/item['name']
+                            frozen_original=shared_originals.retain(root,source,size_bytes=item['size_bytes'],source_kind='mutable',
+                                context=context,policy=self.config.get('storage_policy'))
+                            shared_originals.link(frozen_original,target,size_bytes=item['size_bytes'],context=context,
+                                root=root,policy=self.config.get('storage_policy'))
                         frozen=e.proof(target,context=context)
+                        if any(frozen[key]!=item[key] for key in ('size_bytes','file_stat')) and target==source:
+                            raise e.IntegrityError('Local output changed during its terminal seal')
                         outputs.append(dict(frozen,name=item['name']))
-                    result=self.read_result(directory/'outputs',outputs)
+                    result=self.read_result(artifacts if 'code_version' in accepted else directory/'outputs',outputs)
                 except storage.StorageQuotaExceeded:
                     result=dict(status='unavailable',metrics=[],outputs=[],diagnostic='managed_output_storage_limit')
                 except (OSError,ValueError) as error:
@@ -474,10 +502,11 @@ class LocalExecution:
         for item in result.get('outputs',[]):
             if any(e.proof(item['path'])[key]!=item[key] for key in ('path','size_bytes','file_stat') if key in item):
                 raise e.IntegrityError('Completed output original changed')
-        for item in accepted.get('snapshot_files',[]):
-            original=e.proof(item['path'] if 'code_version' in accepted else directory/'inputs'/item['name'])
-            if any(original[key]!=item[key] for key in ('size_bytes',)):
-                raise e.IntegrityError('Accepted input snapshot changed')
+        if 'code_version' not in accepted:
+            for item in accepted.get('snapshot_files',[]):
+                original=e.proof(directory/'inputs'/item['name'])
+                if any(original[key]!=item[key] for key in ('size_bytes',)):
+                    raise e.IntegrityError('Accepted input snapshot changed')
         return result
 
     @e.record_effect
@@ -602,5 +631,12 @@ def cleanup(root,job,*,watchdog=False):
 
 
 def artifact_directory(config,call_id):
-    """The call's writable runtime output area; completion uses HEAD retention."""
-    return e.Records(config).directory(call_id)/'runtime-artifacts'
+    """One backend-owned output entity in the already-bound public root."""
+    from . import contracts as c, experiment_client, shared_input_views
+    records=e.Records(config)
+    records.directory(call_id)  # Validate the existing exact call identity.
+    root=experiment_client.root_for_configuration(config,allow_standalone=True)
+    if root is None:
+        return records.directory(call_id)/'outputs'
+    return (shared_input_views.dynamic_root(root,c.workspace(root,config['scope']['step']),
+        'retained-experiments')/call_id/'outputs')

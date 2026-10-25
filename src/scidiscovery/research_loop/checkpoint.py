@@ -1,4 +1,4 @@
-"""Immutable W fragment originals and a bounded resume brief; no execution grants.
+"""Stopped W fragment originals and a bounded resume brief; no execution grants.
 
 The scientific stage remains the original job. This module neither seals that
 stage nor starts a native turn, queries adapters, or updates scientific counters.
@@ -76,25 +76,26 @@ def _science(root, job, originals):
 
 
 def capture(root, job, record):
-    """Freeze only this attempt and current direct deliverables, even without prose.
+    """Reference this stopped attempt and already-sealed terminal outputs.
 
     The caller must first establish that this attempt's native originals have
     stopped being written. Unknown usage or cleanup can be preserved after that
     boundary; an unknown outcome alone never establishes it. This reference API
     must not capture a live runner. Live observations remain in feedback instead.
 
-    Repeated capture returns the prior verified checkpoint. Direct files can be
-    changed by later fragments; their archived bytes remain the checkpoint truth.
+    Repeated capture returns the prior verified checkpoint. Mutable drafts remain
+    owned by later fragments and are never turned into a checkpoint snapshot.
     Managed call identity and candidate facts stay in their existing receipts.
     """
     from .protocol import require_current
     require_current(root,job)
     root, record = Path(root), Path(record)
     binding = _binding(root, job, record)
+    from . import worker_delivery, experiments
+    worker_delivery.writers_stopped(root,job,record)
     destination = record / 'checkpoint.json'
     if destination.exists() or destination.is_symlink():
         return validate(root, job, record)
-    from . import worker_delivery
     if worker_delivery.applicable(job) and (record/'science-output.json').exists():worker_delivery.capture(root,job,record)
     originals, missing = [], []
     for name in NATIVE_ORIGINALS:
@@ -103,43 +104,59 @@ def capture(root, job, record):
             missing.append(name)
             continue
         original = c.regular(path)
-        originals.append(dict(path=original.relative_to(root).as_posix(), size_bytes=original.stat().st_size))
+        if original.stat().st_mode & 0o777 != 0o400:original.chmod(0o400)
+        originals.append(dict(experiments.proof(original),path=original.relative_to(root).as_posix()))
     science, _ = _science(root, job, originals)
-    try:
-        direct = c.collect_materials(root, job['step'])
-        material_status, material_diagnostic = 'observed', None
-    except ValueError as error:
-        # Output capacity or unsafe deliverables cannot erase native originals.
-        # No missing/unsafe file is presented as a successfully retained result.
-        direct = []
-        material_status, material_diagnostic = 'unavailable', str(error)[:256]
     work = c.workspace(root, job['step'])
     materials = []
-    for row in direct:
-        source = Path(row['source'])
-        snapshot = history._proof(root, source.relative_to(root).as_posix(), source_kind='managed_frozen')
-        materials.append(dict(name=c.material_name(work,row), original=snapshot))
+    try:
+        for call in history.managed_calls(root,job):
+            accepted=c.read(root/call['accepted']['snapshot'])
+            attempt=accepted.get('native_attempt')
+            if not isinstance(attempt,dict) or type(attempt.get('number')) is not int:
+                raise history.ObserverIntegrityError('Checkpoint output has no exact accepted native attempt')
+            if attempt['number']>binding['attempt'] or call['status'] not in {'known_success','known_failed'}:continue
+            outputs=(history.scientific_outputs(root,job,call)
+                if job.get('worker_view_version')==1 else call.get('outputs',[]))
+            for output in outputs:
+                history._validate_proof(root,output)
+                row=dict(source=str(root/output['snapshot']),
+                    path=f'inputs/parents/{job["step"]:03d}/artifacts/experiments/{call["call_id"]}/artifacts/{output["name"]}',
+                    size_bytes=output['size_bytes'])
+                materials.append(dict(name=c.material_name(work,row),
+                    original={key:value for key,value in output.items() if key!='name'}))
+        material_status, material_diagnostic = 'observed', None
+    except (history.ObserverIntegrityError,experiments.IntegrityError):
+        raise
+    except (OSError,ValueError) as error:
+        # Output capacity or unsafe deliverables cannot erase native originals.
+        # No missing/unsafe file is presented as a successfully retained result.
+        materials = []
+        material_status, material_diagnostic = 'unavailable', str(error)[:256]
     value = dict(version=VERSION, binding=binding, originals=originals,
                  missing_native_originals=missing, science=science, materials=materials,
                  material_status=material_status, material_diagnostic=material_diagnostic,
-                 omitted_materials=max(0, len(direct) - len(materials)),
-                 scope='Checkpoint originals only; not a stage seal, scientific qualification or restart permission.')
+                 omitted_materials=0,
+                 scope='Stopped native originals and sealed terminal outputs only; mutable drafts are not retained. Not a stage seal, scientific qualification or restart permission.')
     c.write(destination, value)
     destination.chmod(0o400)
     return validate(root, job, record)
 
 
 def validate(root, job, record):
-    """Verify this attempt and its immutable snapshots without reading later work."""
+    """Verify this stopped attempt and saved originals without reading drafts."""
     root, record = Path(root), Path(record)
+    from . import worker_delivery,experiments
+    worker_delivery.writers_stopped(root,job,record)
     value = c.read(c.regular(record / 'checkpoint.json'))
     if value.get('version') != VERSION or value.get('binding') != _binding(root, job, record):
         raise ValueError('Fragment checkpoint binding changed')
     for row in value['originals']:
         path = root / row['path']
-        if (path.parent != record or path.name not in NATIVE_ORIGINALS
-                or c.regular(path).resolve()!=path
-                or path.stat().st_size != row['size_bytes']):
+        if path.parent != record or path.name not in NATIVE_ORIGINALS:
+            raise ValueError('Fragment native original changed')
+        actual=experiments.proof(c.regular(path))
+        if any(actual.get(key)!=row[key] for key in ('size_bytes','file_stat') if key in row):
             raise ValueError('Fragment native original changed')
     expected, _ = _science(root, job, value['originals'])
     if value['science'] != expected:
@@ -147,11 +164,35 @@ def validate(root, job, record):
     for row in value['materials']:
         original = row['original']
         if original['retention'] == 'archived':
-            path = root / original['snapshot']
-            if (path.resolve() != path or not path.is_relative_to(root)
-                    or c.regular(path).resolve()!=path
-                    or path.stat().st_size != original['size_bytes']):
-                raise ValueError('Fragment direct-deliverable snapshot changed')
+            history._validate_proof(root,original)
+    # The existing scientific name carries the exact original call selection.
+    # Validate only those calls; a later or unrelated call cannot rewrite this
+    # checkpoint's necessary terminal controls or become a new execution.
+    selected={}
+    for row in value['materials']:
+        name=Path(row['name']);parts=name.parts
+        if (len(parts)>=4 and parts[0]=='experiments' and parts[2]=='artifacts'
+                and '..' not in parts and name.as_posix()==row['name']):
+            selected.setdefault(parts[1],[]).append(row)
+    calls=history.managed_calls(root,job,call_ids=list(selected)) if selected else []
+    for call in calls:
+        accepted=c.read(root/call['accepted']['snapshot'])
+        attempt=accepted.get('native_attempt')
+        if (not isinstance(attempt,dict) or type(attempt.get('number')) is not int
+                or attempt['number']>value['binding']['attempt'] or call['status'] not in {'known_success','known_failed'}):
+            raise ValueError('Fragment terminal output lost its original native attempt')
+        outputs=(history.scientific_outputs(root,job,call)
+            if job.get('worker_view_version')==1 else call.get('outputs',[]))
+        for row in selected[call['call_id']]:
+            name=row['name'].split('/',3)[3]
+            matches=[output for output in outputs if output['name']==name]
+            if len(matches)!=1:
+                raise ValueError('Fragment terminal output differs from its saved original')
+            current={key:item for key,item in matches[0].items() if key!='name'}
+            saved=row['original']
+            changed=(current!=saved if 'file_stat' in saved else current['size_bytes']!=saved['size_bytes'])
+            if changed:
+                raise ValueError('Fragment terminal output differs from its saved original')
     return value
 
 

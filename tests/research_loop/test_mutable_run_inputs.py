@@ -359,17 +359,19 @@ def terminal_code(fragment,monkeypatch,execution_registry,fixed_code):
         _,accepted=_prepare(config,source,directory=runtime,adapter=adapter)
         call_id=accepted['call_id'];records=e.Records(config);directory=records.directory(call_id)
         owner=dict(call_id=call_id,scope=accepted['scope'])
-        c.write(directory/'process.json',dict(owner,task_ref=dict(path=str(directory/'accepted.json')),
+        records.publish(call_id,'process.json',dict(owner,task_ref=dict(path=str(directory/'accepted.json')),
             pid=999999999,start_ticks=1,pgid=999999999,sid=999999999))
         (directory/'stdout.raw').write_bytes(b'fixture stdout\n');(directory/'stderr.raw').write_bytes(b'')
-        c.write(directory/'terminal.json',dict(owner,returncode=returncode,cleanup_confirmed=True,
+        # The synthetic process has stopped and its transport writers closed.
+        for stream in ('stdout.raw','stderr.raw'):(directory/stream).chmod(0o400)
+        records.publish(call_id,'terminal.json',dict(owner,returncode=returncode,cleanup_confirmed=True,
             transport_complete=True,wall_seconds=.01))
         output=local_experiments.artifact_directory(config,call_id)/'result.txt'
         output.parent.mkdir(parents=True,exist_ok=True);output.write_bytes(b'retained scientific output')
         completed=adapter.completion(directory,accepted,returncode,True,True)
-        assert completed['outputs']==[dict(e.proof(directory/'outputs/result.txt'),name='result.txt')]
-        assert completed['outputs'][0]['path']!=str(output)
-        c.write(directory/'completed.json',completed)
+        assert completed['outputs']==[dict(e.proof(output),name='result.txt')]
+        assert completed['outputs'][0]['path']==str(output)
+        records.publish(call_id,'completed.json',completed)
         records.bind_external(call_id,call_id,'succeeded' if returncode==0 else 'failed')
         public=adapter.public_result
         def project(value):

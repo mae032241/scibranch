@@ -384,6 +384,20 @@ def material_name(work, row):
     owner=originals.node(root,step) if originals.inherited(root,step) else None
     logical_root=Path(owner.original_root) if owner is not None else root
     logical_work=owner.logical_workspace if owner is not None else work
+    public=logical_work/'work/retained-experiments'
+    if source.is_relative_to(public):
+        relative=source.relative_to(public)
+        if (source.resolve()!=source or '..' in relative.parts
+                or len(relative.parts)<3 or relative.parts[1]!='outputs'):
+            raise ValueError('Scientific entry point has no exact public output binding')
+        local='experiments/'+relative.parts[0]+'/artifacts/'+'/'.join(relative.parts[2:])
+        expected=f'inputs/parents/{step:03d}/artifacts/'+local
+        if row['path']!=expected or '\\' in local or PurePosixPath(local).as_posix()!=local:
+            raise ValueError('Scientific entry point lost its exact public output name')
+        actual=originals.material_path(root,row) if owner is not None else regular(source)
+        if actual.stat().st_size!=row['size_bytes']:
+            raise ValueError('Scientific entry point has no exact retained output binding')
+        return local
     if source.is_relative_to(logical_work):
         return source.relative_to(logical_work).as_posix()
     prefix=f'inputs/parents/{step:03d}/artifacts/'
@@ -723,13 +737,16 @@ def science_view(job, root=None):
 
 
 def collect_materials(root: Path, step: int):
-    """Collect selected deliverables; scratch and input trees never enter a seal."""
-    policy = settings(root, read(regular(root / 'jobs' / f'{step:03d}.json')))
+    """Seal this stopped node's own deliverables at their actual output paths."""
+    job=read(regular(root/'jobs'/f'{step:03d}.json'))
+    policy = settings(root, job)
     work = workspace(root, step)
     rows, total = [], 0
     private_packages=set()
     from . import execution
     record=execution.record(root,step)
+    from . import worker_delivery
+    worker_delivery.writers_stopped(root,job,record)
     if (record/'native-intent.json').exists():
         intent=read(regular(record/'native-intent.json'))
         if intent.get('author_context_version')==1:
@@ -752,10 +769,13 @@ def collect_materials(root: Path, step: int):
         if policy.get('max_output_total_bytes') is not None and total > policy['max_output_total_bytes']:
             raise ValueError(f'Deliverable {relative!r} exhausts total byte budget '
                              f'({total} > {policy["max_output_total_bytes"]})')
-        from . import shared_originals, storage_policy as storage
-        frozen=shared_originals.retain(root,path,size_bytes=size,source_kind=source_kind,
-            policy=policy.get('storage_policy'),context=storage.Deadline(policy['max_seconds']))
-        rows.append(dict(source=str(frozen), original_source=str(path),
+        if source_kind=='mutable':
+            if path.resolve()!=path or not path.is_relative_to(work):
+                raise ValueError('Node deliverables must remain in their original owned workspace')
+            if path.stat().st_mode & 0o777 != 0o400:path.chmod(0o400)
+        elif path.stat().st_mode & 0o777 != 0o400:
+            raise ValueError('Managed output has not been sealed by its stopped writer')
+        rows.append(dict(source=str(path), original_source=str(path),
                          path=f'inputs/parents/{step:03d}/artifacts/{relative}', size_bytes=size))
 
     def artifacts(base, prefix=''):
@@ -793,6 +813,7 @@ def collect_materials(root: Path, step: int):
     if job['role']=='W':
         from . import history
         for call in history.managed_calls(root,job):
+            if call['status'] not in {'known_success','known_failed'}:continue
             outputs=history.scientific_outputs(root,job,call) if job.get('worker_view_version')==1 else call.get('outputs',[])
             for item in outputs:
                 if item.get('retention')!='archived':raise ValueError('Managed deliverable original unavailable')
@@ -1174,6 +1195,10 @@ def _sealed_science(job, seal, raw, result, *, root=None, source=None):
     from . import candidate_refs
     if regular(raw).stat().st_size != seal['raw_ref']['size_bytes'] or regular(result).stat().st_size != seal['result_ref']['size_bytes']:
         raise ValueError('Sealed scientific bytes changed')
+    if 'file_stat' in seal['raw_ref']:
+        from . import experiments
+        if experiments.proof(raw)['file_stat']!=seal['raw_ref']['file_stat']:
+            raise ValueError('Sealed scientific original changed')
     payload = candidate_refs.control_payload(job, science_payload(raw, job['role'],
         job.get('handoff_protocol', 1), 'selection' in job, **response_options(job)), root=root, source=source)
     if read(result) != result_projection(job, payload):
@@ -1207,7 +1232,7 @@ def validate_original(source, *, _active=None, _memo=None):
     raw = originals.source_raw(source)
     result = originals.source_record(source, 'result.json')
     if (intent.get('task_ref') != seal['job_ref'] or outcome.get('returncode') != 0
-            or outcome.get('raw_ref') != seal['raw_ref']):
+            or outcome.get('raw_ref') != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}):
         raise ValueError('Source terminal lost its exact original task/output')
     payload = _sealed_science(job, seal, raw, result, source=source)
     if job.get('scientific_response_fields') != response_fields(job, policy):
@@ -1254,7 +1279,7 @@ def validate(work: Path):
     outcome = read(regular(native_record / 'native-outcome.json'))
     raw = regular(native_record / 'science-output.json')
     result = regular(record / 'result.json')
-    conclusion = regular(work / 'conclusion.json')
+    conclusion = work / 'conclusion.json'
     native_raw_ref,accepted=_native_output_identity(root,job['step'],native_record,intent,outcome)
     if seal.get('final_a_completion') != _final_a_seal(native_record, outcome):
         raise ValueError('Final A completion receipt identity changed')
@@ -1263,10 +1288,12 @@ def validate(work: Path):
             or seal.get('completed_output_limitation')!=(accepted['facts'] if accepted is not None else None)):
         raise ValueError('Completed-output acceptance seal identity changed')
     if (seal['job_ref'] != record_ref(job_path) or intent['task_ref'] != record_ref(job_path)
-            or seal['raw_ref'] != file_ref(raw) or seal['result_ref'] != file_ref(result)
-            or seal['raw_ref']['size_bytes'] != conclusion.stat().st_size or native_raw_ref != seal['raw_ref']
+            or {key:seal['raw_ref'][key] for key in ('path','size_bytes')} != file_ref(raw) or seal['result_ref'] != file_ref(result)
+            or native_raw_ref != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}
             or read(regular(work / 'science-task.json')) != science_view(job, root)):
         raise ValueError('Scientific node identity changed')
+    if (conclusion.exists() or conclusion.is_symlink()) and regular(conclusion).stat().st_size!=seal['raw_ref']['size_bytes']:
+        raise ValueError('Saved scientific conclusion projection changed')
     from . import candidate_refs
     payload = _sealed_science(job, seal, raw, result, root=root)
     if seal.get('control_outcome') is not None:
@@ -1477,6 +1504,8 @@ def seal_result(root: Path, step: int):
         raise ValueError('Native launch task changed')
     _validate_inputs(root, work, job)
     outcome = read(regular(native_record / 'native-outcome.json'))
+    from . import worker_delivery
+    worker_delivery.writers_stopped(root,job,native_record)
     native_raw_ref,accepted=_native_output_identity(root,step,native_record,intent,outcome)
     from . import budget
     final = budget.final_a_return(root, job, intent)
@@ -1513,8 +1542,6 @@ def seal_result(root: Path, step: int):
         from .output_repair import OutputRepairRequired
         raise OutputRepairRequired('invalid_final_action','Return the final conclusion with deliver or an explicit unsubmitted finish; no new scientific turn is authorized.')
     if job['role']=='W':
-        from . import worker_delivery
-        worker_delivery.writers_stopped(root,job,native_record)
         from . import managed_wait
         managed_wait.before_seal(root,job,native_record)
         if worker_delivery.applicable(job):
@@ -1542,10 +1569,11 @@ def seal_result(root: Path, step: int):
     # result snapshots or conclusions. A busy namespace leaves these untouched.
     pending_executions = capture_pending(root, job)
     observations = history.capture(root, job, value, materials)
-    from . import storage_policy as storage
-    _bind_original(raw, work / 'conclusion.json', policy=settings(root,job).get('storage_policy'), context=storage.Deadline(settings(root,job)['max_seconds']), root=root, size_bytes=(raw).stat().st_size, source_kind='mutable')
+    if raw.stat().st_mode & 0o777 != 0o400:raw.chmod(0o400)
+    from . import experiments
+    raw_ref=experiments.proof(raw)
     write(record / 'result.json', scientific_projection(value,'node:%03d/scientific-output' % job['step']))
-    seal = dict(result_ref=file_ref(record / 'result.json'), raw_ref=file_ref(raw),
+    seal = dict(result_ref=file_ref(record / 'result.json'), raw_ref=raw_ref,
           job_ref=record_ref(job_path), materials=materials, entry_points=entry_points,
           scope='Exact bytes and direct lineage; not scientific qualification',
           **(dict(completed_output_acceptance=accepted['receipt'],completed_output_limitation=accepted['facts']) if accepted is not None else {}),
