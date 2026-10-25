@@ -35,7 +35,6 @@ the claims established by its exact inputs, experiment and validation contract.
 | `scid-research fork-preview` / `fork-create` | Preview and create a paused branch from one exact historical logical task. |
 | `scid-research instance-delete` | Permanently remove an exact quiescent instance; reconcile retries through its retained deletion receipt. |
 | `scid-research serve-ui` | Optional webpage for the same instance controls and paginated sealed results. |
-| `scid-research archive-*` / `checkpoint-*` | Export and inspect originals, restore selected material, or perform a bounded same-host cold transfer. |
 | `scid-experiment` | Use managed local experiments or a declared domain execution interface. |
 
 The core installs the local execution interface. Cov execution, receipt handling,
@@ -85,18 +84,25 @@ cases. External execution remains owned by its declared launcher.
 Execution requires its own frozen configuration and authorization. Research
 budgets, independent review and user statements do not grant execution permission.
 
-A completed, quiescent current-protocol instance can be forked at an exact logical
-step N. The child reruns that task from its original first-invocation inputs in a fresh
-session, with explicit finite new budgets and independent references to shared
-read-only scientific originals on the same filesystem. A private snapshot of the
-quiescent source directory preserves storage completeness; the selected task's
-original input cut still determines scientific visibility. Writable legacy originals
-are snapshotted once before sharing; deleting the parent does not remove the child
-references. Creation leaves it paused; explicitly use `start --continue`
-to launch it. Historical scientific investment, source restrictions and unknown
-costs remain visible; prior review or execution permission does not authorize new
-subjects. See [fork semantics](docs/ARCHITECTURE.md#historical-task-forks) and the
-[CLI workflow](docs/ROOTLESS_CLI.zh-CN.md#从历史任务创建分支).
+A quiescent current-protocol instance can be forked at an exact logical step N;
+its latest A need not have finished the research. The child reruns that task from
+its frozen first-invocation inputs in a fresh session with explicit finite new
+budgets. Exact selected code versions transfer into the child's own private Git;
+current dirty/untracked code is copied as a writable draft. Unsealed handoff drafts
+remain readable private entries, without becoming child execution facts or scientific
+inputs. Scientific data and outputs remain direct references to their actual originals.
+Removing the source Git does not remove transferred code; removing scientific originals
+can make dependent uses unavailable. Creation leaves the child paused; explicitly use
+`start --continue` to launch it. Unknown effects, frozen task boundaries, historical
+investment and source restrictions remain binding; prior review or execution permission
+does not authorize new subjects. See [fork semantics](docs/ARCHITECTURE.md#historical-task-forks)
+and the [CLI workflow](docs/ROOTLESS_CLI.zh-CN.md#从历史任务创建分支).
+
+Sealed nodes and their outputs stay at their existing locations for result viewing and
+references. Independent archive packages and whole-instance cold checkpoint transfer
+commands are retired. Historical packages remain read-only; they are not automatically
+migrated, restored or reactivated. Ordinary execution checkpoints and original-call
+recovery remain supported; checkpoints do not retain or restore lost drafts.
 
 All H/W/A/E node token budgets and W stage targets are advisory: reaching a target requests a bounded conclusion without rejecting new managed experiments or forcing A review. Actual input plus output is fully accounted; no whole-node token allocation is prepaid. Current protocol 26 accepts only soft node settings; older instances remain read-only without rewriting their frozen settings. Shared budget checks for new nodes, finite execution time, permissions and cleanup limits remain enforced.
 

@@ -8,9 +8,10 @@
 可以按自己的算法处理选定证据，这不属于控制身份计算。协议 26 使用
 `record_ref = {"path": "/absolute/original"}` 与
 `file_ref = {"path": "/absolute/original", "size_bytes": N}`，控制绑定采用 `*_ref` 字段，
-以路径、producer 和生命周期身份取代内容摘要。科学归档对象采用 UUID 路径，不按内容去重，
-也不保留哈希缓存。archive v4、checkpoint v3 与 fork manifest v2 遵循此合同。
-旧协议和旧包不兼容当前推进与恢复，保留原件但不迁移。Linux 只读挂载保护科学命名空间中的
+以路径、producer 和生命周期身份取代内容摘要。旧留存对象采用 UUID 路径，不按内容去重，
+也不保留哈希缓存。fork manifest v2 沿用此引用合同。独立归档与整实例 cold checkpoint 包
+已退役；历史包保持只读，不自动迁移、恢复或重新激活 owner。旧协议原件保留但不迁移。
+Linux 只读挂载保护科学命名空间中的
 选定输入；可信同 UID 进程仍是软边界，不承诺防止主动改写或检测内容篡改。
 
 新实例由 `scid-research` 管理，实验工具为 `scid-experiment`。没有 LLM Root、MCP 调度服务或后台 Root daemon。
@@ -39,7 +40,7 @@ CLI 是应用核心，网页复用相同公共控制和读取逻辑。`control_o
 W -> scid-experiment -> 冻结执行接口 -> local / 领域 adapter
                               -> 原调用 query / cancel / collect
 CLI serve-ui -> 同一实例的只读视图与控制命令
-CLI archive / checkpoint -> 原件核验与限定恢复
+CLI 原调用恢复 -> 同一调用核对与有限维护
 ```
 
 H 负责机制与假设；W 负责有界实验设计、实现与观察；A 负责贡献、证据缺口、后继方向和交付选择；E 负责所请求的证据工作。
@@ -165,10 +166,15 @@ Cov 在准确 call/run/receipt 核对后保留既有 `runs_root/model_run<run_id
 既有节点/call 输出目录；manifest、transport-derived 文件、bindings 和传输 spool 保持私有。
 新 socket preparation 在准入或提交前明确不支持，准确旧 call 的查询仍受支持。
 
-新引用及 Git 代码的 G3 恢复和 fork/archive/delete 消费方仍待完成。既有归档/分支章节
-不证明新 Git 调用已有完整生命周期支持。真实 default native、registered Cov、Codex/
-命名空间、replay/model、solver 及 SSH 验收留到 G3 后由用户独立 CLI 运行；源码改动
-不授科学资格，也不构成真实 sandbox 保证。
+原调用恢复只核对留存控制关系，不重开未选科学正文、临时代码导出或当前代码草稿；真正
+消费代码时仍核对原 Git 版本。已有或新补记的终态恢复按同一 call 的已保存 observation，
+在原停写检查后幂等清理准确导出；不重新派发、不新分配科学额度、不重置已耗预算。native、
+bridge、backend 或 replay 效果未知时仍须核对原调用。若捕获/导出后在任何 preparation 绑定
+或 accepted 形成前中断，则保留原导出；不能从缺记录或空目录推出可安全清理。
+
+下述分支与删除规则描述源码行为。真实 default native、registered Cov、Codex/命名空间、
+replay/model、solver 及 SSH 验收留到 G3 后由用户独立 CLI 运行；源码改动不授科学资格，
+也不构成真实 sandbox 保证。
 
 默认本地命令后端解析所选 Codex 安装的原生二进制，使用其 sandbox 和受限的科学子进程
 文件视图。已接受的 Git 代码导出只读映回逻辑科学代码目录；旧调用沿用原目录/脚本快照
@@ -249,7 +255,7 @@ workspace 与框架已知路径的元数据。同用户外部宿主进程、既�
 | 来源、正式独审和执行批准 | `qualification.py`、`formal_review.py`、`execution_inputs.py`、`execution_authority.py` |
 | 预算与累计资源 | `budget.py` 的原 control ledger |
 | 实例 UI | `instance_ui.py`、`instance_render.py`；不建立第二份状态 |
-| 归档与同宿主冷恢复 | `instance_archive.py`、`instance_owner.py`、共享 `archive_io.py` |
+| 分支、静止检查与准确实例删除 | `fork_service.py`、`fork_sources.py`、`fork_runtime.py`、`originals.py`、`instance_delete.py`、`instance_owner.py`；`instance_archive.py` 保留的辅助函数与共享 `archive_io.py` |
 
 上述文件均位于 `src/scidiscovery/research_loop/`，另有说明者除外。
 `scidiscovery.execution_interfaces` 发现执行接口，薄实例冻结所选执行器、操作者配置及执行合同。
@@ -359,9 +365,10 @@ producer，编译 V3 输入保持原 compiler 链。明确不完整的声明不�
 
 ## 历史任务分支
 
-`fork_service.py` 为 CLI 与 UI 提供共同的预览和创建路径。父实例须冻结协议 26、已完成且静止，
-并保留所选精确逻辑任务 N 及其声明依赖的原件。不支持的协议、缺失历史 cut、歧义身份或缺失
-原件均明确拒绝。未知 native、受管执行或交付效果须先按原调用对账；分支不自动重提这些调用。
+`fork_service.py` 为 CLI 与 UI 提供共同的预览和创建路径。父实例须冻结协议 26、严格静止，
+并保留所选精确逻辑任务 N、原输入 cut 和必要控制记录；不要求最近 A 已返回 `finish` 或整个
+研究已完成。不支持的协议、缺失 cut、歧义或损坏的控制身份均明确拒绝。未知 native、受管
+执行、准备或交付效果须先按原调用对账；分支不自动重提。科学原件由实际依赖它的消费入口校验。
 
 新分支拥有新实例身份，首任务保留逻辑编号 N，在新 native session 中从 N 的冻结首次科学输入
 重跑。N 的输出、后续任务、工具反馈及 continuation/repair attempt 上下文不作为该任务输入继承。
@@ -370,30 +377,31 @@ FINAL 与 closeout 任务保留阶段和来源 cutoff，新预算本身不把它
 中立的精确 subject 合同与独立性门槛；工程修复保留有界 repair 合同。有 continuation 或输出修复
 的任务也从首次输入重跑，不续接这些 attempt。
 
-`fork_sources.py` 复用通用目录 inventory，通过已验证硬链接完整保留静止源目录的私有快照。
-它是当前目录的保留超集，不伪称任务 N 时刻已有完整历史目录快照；科学可见范围另由所选 job
-和准确原输入 cut 限定。`visibility=private_snapshot` 条目不进入普通节点视图，内部精确路径
-引用仍可解析，但不因此成为科学输入或资格。fork/cache 实现存储排除，已有原件 object 存储
-仍完整保留；目录清单不遍历领域 JSON 或依赖领域文件名。`originals.py` 按原身份、路径与
-声明大小解析来源。生命周期证明为受管冻结原件时可直接共享，0400 本身不证明归属；
-可变原件先在父实例私有 `host-history/fork-cache` 中独立冻结，再共享。原文件内容和权限
-不变。public 视图只链接明确选定的已留存公开原件，不暴露私有控制元数据。嵌套分支共享这些
-不可变 inode，同时保留各自的原身份与本地路径。
-已明确绑定在实例内的主机密钥按已验证的私有来源定位排除；未知文件仅凭名称像凭证，
-不获得排除许可，无法识别的存储归属仍标为 inventory gap 并阻止 fork。
+`fork_sources.py` 只收集所选任务的必要 typed 控制、准确引用的代码版本与当前草稿，不对
+父实例全目录作 inventory 或完整保留。已选 run 的原七字段 `code_version` 绑定有界的
+commit/tree/blob 对象，传入子实例自有私有 Git；不依赖父仓库 alternates、对象硬链接或
+持久交接 bundle。父私有 Git 删除后，已经转移的代码版本仍由 child 持有。
 
-每个留存目录项都是持有引用，文件系统链接数是引用状态的权威，不另建可变引用计数数据库。
-删除父或兄弟实例仅移除其引用，子实例仍可使用原件；父实例的快照缓存随父实例存储保留，
-最后一个链接删除后才释放数据。全部共享源与目标必须位于同一文件系统；不支持链接时明确
-拒绝，不回退全量复制。需要新建快照的父实例必须允许私有存储写入。当前 fork manifest v2
-记录精确路径与大小。后续任务执行通过节点本地硬链接共享冻结输入；可变原件首次冻结和
-显式编辑副本仍需独立写入。读取器按留存身份、路径与声明大小解析，不缓存或重新计算内容
-指纹。发布与恢复仍核对原事务及 inode，不重试外部执行。
+当前 dirty/untracked 代码 B 与历史代码 A 分别传递；构建所选 child job 时，B 复制到既有
+可写 `code/`。未封存交接草稿保留在现有 `visibility=private_snapshot` 条目中，作为可读的
+惰性私有状态，不写入 child 的 native 执行命名空间，不生成 native intent、commit、seal、
+科学资格或执行许可。已经由 seal 绑定 completed-output acceptance 的 pending 是科学引用，
+不再作为当前交接草稿。科学可见范围仍由原任务准确输入 cut 限定。
+
+必要 job、seal、accepted、compiler、authority、history 与 recovery 控制复制到 child 的
+既有私有存储；原逻辑身份保持，继承读取器使用这些声明的副本，不要求父 jobs/control 中
+已复制的文件继续存在。`originals.py` 沿声明的 origin、路径、大小及已保存指纹，在实际消费
+时解析并核对科学原件。科学数据、global/declaration 输入及节点产物直接引用其实际原件；
+fork 不复制或硬链接其正文，不新建源冻结缓存，也不打包输入。原件删除后，对应消费可以
+不可用；manifest 与所选任务元数据检查不重开未选科学正文。发布与恢复仍核对原事务及
+inode，不重试外部执行。
+
 native home、认证、模型 session、工具、solver、许可证及执行环境不复制。
 冻结的模型、权限和 launcher 声明仍只是声明；任意未冻结 native 外读不保证可移植。声明的外部
 runtime/adapter 读取范围、命名空间映射和交付目标保持冻结；分支不复制、重建或扩大它们，
-子实例继续时仍须合法可用。当前闭包
-上限为 65,536 项、4 GiB、16 层祖先，每份需解析的控制 JSON 上限为 32 MiB。
+子实例继续时仍须合法可用。当前闭包上限为 65,536 项、复制控制/草稿 4 GiB、16 层祖先，
+每份需解析的控制 JSON 上限为 32 MiB；科学 locator 不按其正文大小计入复制量，已选代码
+另守上述有界 Git 规则。
 
 操作者须声明正的有限新 token、活动时间及控制动作上限。子实例记账衡量新工作，逻辑编号 N
 不等于新消费 N 次动作；继承的科学投入与比较机会仍进入科学历史。历史成本单列：计量不完整
@@ -417,33 +425,35 @@ runtime/adapter 读取范围、命名空间映射和交付目标保持冻结；�
 同一 UI host/browser session 内可对已尝试的原操作
 按同请求核对 receipt。跨 host 重启的通用 Web 操作恢复尚未建立；CLI/service 回执持久化。
 
-适配器记录写者持有通用 `record-writer.lock` 共享 lease，pending inventory 使用独占非阻塞
+适配器记录写者持有通用 `record-writer.lock` 共享 lease，未决调用检查使用独占非阻塞
 lease。生命周期静止检查对现有记录目录内全部直接 `*.lock` 取独占非阻塞锁，作为旧记录的
 保守兼容，不依赖领域前缀或已安装插件。写者顺序为 owner gate、record writer 共享锁、
 node/admission、适配器私有锁；生命周期先取 owner gate 独占非阻塞锁，再取 node/admission
-及直接记录锁，gate 互斥这两种顺序；普通归档导出同样持有独占 source gate。
-活动写者阻止 fork/archive/delete，未知原调用仍须先对账。
+及直接记录锁，gate 互斥这两种顺序。活动写者阻止 fork/delete，未知原调用仍须先对账。
 
 全部合作宿主进程必须看见同一稳定的 `/tmp/scidiscovery-owner-gates-<euid>` 目录及锁 inode，
 并共享相同的实例挂载；进程存活期间不得删除或轮换 gate。PrivateTmp、容器等私有 `/tmp`
 命名空间须由部署显式提供共同挂载；互不相见的私有 gate 不建立协调。改 TMPDIR 或 XDG
 运行目录本身不能证明双方共享同一挂载。
 
-只读原件与宿主统一协作 source lease 在配合协议的当前版本 writer 间保护共享边界，仍是
-同用户软边界：同用户进程主动修改权限并原地写入共享 inode 可损坏所有引用，引用检查
-不检测这些内容变化。分支时不得混用升级前仍活动的旧 writer：新 lease 不追溯 fence 旧进程。
+只读原件视图与宿主统一协作 source lease 在配合协议的当前版本 writer 间保护引用边界，
+仍是同用户软边界：同用户进程主动修改权限并原地写入原件 inode 可损坏其消费者；引用
+元数据不是内容篡改检测器，实际选中科学消费仍须核对保存指纹。分支时不得混用升级前仍
+活动的旧 writer：新 lease 不追溯 fence 旧进程。
 这些控制不建立真实模型、solver 或科学资格。
 
 ## 明确实例删除
 
 `instance_delete.py` 只删除明确指定的当前协议实例，请求绑定 goal ID、冻结 settings 引用和
-操作 ID。未使用的已准备实例、暂停实例和已完成实例均须通过现有归档静止检查。活动的
-owner/source-reader 锁、未知执行或交付效果、清理状态不明均阻止删除，不取消或重放工作。
+操作 ID。未使用的已准备实例、暂停实例和已完成实例均须通过既有生命周期静止检查。
+必要 accepted、submission、terminal、authority 与 retirement 控制仍须证明停写和身份；
+不要求未选科学正文、旧代码草稿或已清导出仍存在。活动的 owner/source-reader 锁、未知执行
+或交付效果、清理状态不明均阻止删除，不取消或重放工作。
 canonical 路径和挂载子树检查限制清理范围；静止检查遍历的控制命名空间拒绝符号链接，
 其他内部符号链接只解除链接，不遍历外部目标。清理可恢复准确固定目录的 owner 写权限，
 绝不修改共享普通文件的权限。目标内的独立嵌套实例（包括仍可识别的损坏身份）阻止删除及清理重试。
-prepare、fork 发布与冷恢复持有所在目录链的 gate；删除同时锁定原路径和待删除路径，
-避免清理期间在其中创建新实例。
+prepare 与 fork 发布持有所在目录链的 gate；删除只获取一个按原目录 inode 绑定的物理
+宿主 gate，跨 rename 同时保护原路径和待删除路径，避免清理期间在树内创建新实例。
 
 实例外的私有持久操作记录固定目录 inode 和准确待删除路径。退役标记阻止普通效果入口，
 包括未登记 owner 的实例。服务持有原宿主 gate 和本地 owner 锁，退役已登记的 anchor，
@@ -451,8 +461,11 @@ prepare、fork 发布与冷恢复持有所在目录链的 gate；删除同时锁
 身份，普通 lease 不能关闭检查；外部 anchor 持久成为 deleted 后才发布完成回执。
 
 完全相同的请求恢复原退役/清理事务并返回原回执，不接纳原路径下后来新建的实例。删除服务
-不恢复已删证据，旧冷 checkpoint 不重新激活已删除 owner 代际。共享文件通过普通 inode
-引用留存，删除一个实例不移除其他分支原件，不引入手工引用计数数据库或新垃圾回收权限。
+不恢复已删证据，旧冷 checkpoint 不重新激活已删除 owner 代际。清理只删除本实例自有 Git、
+临时代码导出与目录，不 chmod 或删除外部原件，不扫描邻实例求引用计数，不增加垃圾回收
+权限。若 child 直接引用本次被删实例拥有的科学原件，对应科学消费可失效；已转移的 child
+Git 和已复制控制仍由 child 持有。清理中断按同一 operation、原身份与回执续做，IO 期限
+不重置科学预算。
 
 ## 扩展规则
 
@@ -464,12 +477,17 @@ CLI result/materials/artifact 与网页通过同一精确原件 API 读取，下
 
 ## 支持与资格
 
-本地受管实验、候选交付、实例 UI、声明来源、执行 gate、原调用维护与同宿主原路径冷 checkpoint 已实现。
-`/results?after=N` 分页显示封存节点，`/results/<step>` 显示精确结果；候选事实展示来自该节点输入时冻结的摘要。
-归档清单只记录路径、大小、blob 与 inode 别名，不计算内容校验和或按字节去重。默认包共享冻结
-inode，不是独立备份；显式 `--independent` 将各原 blob 独立写入，保持包内别名。恢复重试必须
-匹配原发布事务及目标 inode，同大小或相同字节的其他目标不构成幂等。旧包不兼容当前恢复，
-不自动迁移。普通只读包不能自动恢复为可推进实例；跨宿主、anchor 丢失和任意原生外读不在保证范围。
+本地受管实验、候选交付、实例 UI、声明来源、执行 gate 与原调用维护已实现。
+`/results?after=N` 分页显示封存节点，`/results/<step>` 显示精确结果；候选事实展示来自该节点
+输入时冻结的摘要。封存 node 和产物原地保留，用于查看结果、交接和引用；保留成果不收集
+输入正文，也不新建包或再次 seal。
+
+`archive-export`、`archive-inspect`、`archive-restore-material`、`checkpoint-enroll`、
+`checkpoint-export`、`checkpoint-restore` 及对应包 API 已退役。历史包与审计记录保持只读，
+不自动导入、迁移、删除或重新激活。普通 `checkpoint.capture/validate`、节点自身训练
+checkpoint 产物与原调用 query/核对/恢复保持各自职责。普通 checkpoint 不保存或恢复丢失
+草稿；删除 node 产物或其来源后，不能由引用或代码 commit 还原科学正文。
+历史只读包不授推进、恢复或 owner 重新激活权限；跨宿主、anchor 丢失和任意原生外读不在保证范围。
 源码/HTTP/合成进程检查不替代真实浏览器、Codex 原线程、TCAD solver 或真实掉电资格。
 旧入口退役不授予新链这些资格，也不自动操作已有主机服务、数据库或外部作业。
 
@@ -484,8 +502,9 @@ TCAD 专项提升资格所需证据见[资格状态](TCAD_QUALIFICATION_STATUS.z
 共享不支持时明确拒绝，不退回复制。角色/Worker 选择绑定到任务与 native intent，
 删除安装来源或兄弟实例不影响本实例持有的原件引用。
 `.agents/skills` 是已验证、可重建的发现投影。来源更新不刷新冻结字节，
-修订只能改选已冻结集合，新 ID/版本要求新实例。归档、fork 和冷恢复保留普通对象，
-在接收根重建投影，不依赖安装来源或父实例继续存在。原生用户/系统/插件 Skill 继续继承，
+修订只能改选已冻结集合，新 ID/版本要求新实例。fork 保留所选普通 Skill 对象，在 child
+重建投影；child 持有的对象不依赖安装来源或父实例继续存在。已退役归档/cold 包操作
+不提供 Skill 恢复路径。原生用户/系统/插件 Skill 继续继承，
 原生权限 profile 保持原语义；具体配置见[配置参考](RESEARCH_CONFIGURATION.md)。
 
 ## 未发布准备快照的准确恢复
@@ -499,10 +518,9 @@ TCAD 专项提升资格所需证据见[资格状态](TCAD_QUALIFICATION_STATUS.z
 补发布原准入后已完整持久写出的 accepted，或按原目录 inode 清理残缺快照；不重做 prepare、
 准入或提交，不改原审批、reservation
 与已消耗预算。清理后的未决绑定仍为 unknown，配置即使没有 execution authority，也不能借目录
-消失重新准备；pending、后继 Worker、fork 和归档继续保留这一阻断。
+消失重新准备；pending、后继 Worker 与 fork 继续保留这一阻断。
 
-已发布历史绑定的原件在首次 enrollment 与冷恢复后仍可验证；冷恢复保留原归档元数据作为来源
-证据，无需备份包持续在线。历史可读不授予对新目录代际的现场维护权限。
+已发布历史绑定保留原字节和来源。历史可读不授予对新目录代际的现场维护权限。
 无绑定临时目录只可通过既有维护命令的 `--unbound-local` 分支，明确选择 root、step 和准确
 snapshot token。取得源实例、控制器及准确 records 写者锁后，要求该 step 所有保留 attempt 的
 配置原件与 interface 投影完整一致，均证明内置本地执行且无 execution authority。缺原件、

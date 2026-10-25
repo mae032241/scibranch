@@ -11,10 +11,11 @@ on selected evidence; that is separate from control identity. Protocol 26 uses
 `record_ref = {"path": "/absolute/original"}` and
 `file_ref = {"path": "/absolute/original", "size_bytes": N}`. Control bindings use
 `*_ref` fields; paths, producers and lifecycle identities replace content digests.
-Scientific archive object paths use UUIDs, without content deduplication or hash caches.
-Archive v4, checkpoint v3 and fork manifest v2 follow this contract. Earlier
-protocols and packages are incompatible with current advancement/restoration;
-originals are preserved without migration. Read-only Linux mounts protect selected
+Legacy retained object paths use UUIDs, without content deduplication or hash caches.
+Fork manifest v2 retains this reference contract. Independent archive and whole-instance
+cold checkpoint packages are retired; historical packages remain read-only without
+automatic migration, restoration or owner reactivation. Earlier protocol originals
+are preserved without migration. Read-only Linux mounts protect selected
 inputs in the scientific namespace; trusted same-UID code remains a soft boundary,
 without protection against deliberate same-UID rewrites or content-tamper detection.
 
@@ -46,7 +47,7 @@ Operator objective + inputs + configuration + finite budgets
 W -> scid-experiment -> frozen interface -> local / domain adapter
                                     -> original-call query / cancel / collect
 CLI serve-ui -> same instance read views and control commands
-CLI archive / checkpoint -> original verification and bounded restoration
+CLI original-call recovery -> same-call reconciliation and bounded maintenance
 ```
 
 H owns hypotheses and mechanisms; W owns bounded experimental design, implementation
@@ -255,12 +256,20 @@ and facts into the existing node/call output directory. Manifest, transport-deri
 files, bindings and transfer spool remain private. New socket-backed preparation is
 unsupported before admission or submission; exact old-call queries remain supported.
 
-G3 recovery and fork/archive/delete consumers for the new references and Git code
-remain pending. Existing archive/fork sections do not establish complete lifecycle
-support for new Git-backed runs. Real default native, registered Cov, Codex/namespace,
-replay/model, solver and SSH validation is deferred until G3 and an independent user
-CLI run. Source changes establish neither scientific qualification nor a real sandbox
-guarantee.
+Original-call recovery checks retained control relationships without reopening
+unselected scientific bodies, temporary exports or current code drafts. Actual code
+consumption still verifies the original retained Git version. Existing or newly
+recorded terminal recovery uses the same call's saved observation for idempotent
+export cleanup after the original shutdown checks. This does not dispatch work,
+allocate a new scientific allowance or reset consumed budgets. Unknown native,
+bridge, backend or replay effects preserve the original reconciliation boundary.
+A capture/export interrupted before any preparation binding or accepted record is
+preserved: absent records or empty directories do not prove safe cleanup.
+
+The fork and deletion rules below describe their source behavior. Real default native,
+registered Cov, Codex/namespace, replay/model, solver and SSH validation is deferred
+until G3 and an independent user CLI run. Source changes establish neither scientific
+qualification nor a real sandbox guarantee.
 
 The default local command backend resolves the selected Codex installation's native
 binary and uses its sandbox with a restricted scientific subprocess file view. The
@@ -387,7 +396,7 @@ All listed files are in `src/scidiscovery/research_loop/` unless stated otherwis
 | Provenance, independent review, approval | `qualification.py`, `formal_review.py`, `execution_inputs.py`, `execution_authority.py` |
 | Budget and execution resources | Original control ledger in `budget.py` |
 | Instance UI | `instance_ui.py`, `instance_render.py`; no second state authority |
-| Archive and same-host cold restore | `instance_archive.py`, `instance_owner.py`, shared `archive_io.py` |
+| Fork, quiescence and exact instance deletion | `fork_service.py`, `fork_sources.py`, `fork_runtime.py`, `originals.py`, `instance_delete.py`, `instance_owner.py`; retained helpers in `instance_archive.py` and shared `archive_io.py` |
 
 `scidiscovery.execution_interfaces` discovers execution implementations; instances freeze
 the selected executor, operator configuration and execution contract. Implementation upgrades use a fresh prefix and an explicit wrapper switch after
@@ -588,11 +597,13 @@ surfaces, not arbitrary native reads or scientific correctness.
 ## Historical-task forks
 
 `fork_service.py` provides the shared CLI/UI preview and create path. A parent must
-use the supported current frozen protocol, be completed and quiescent, and retain the exact selected
-logical task N and its declared dependency originals. Unsupported protocols,
-missing historical cuts, ambiguous identities and missing originals are refused.
-Unknown native, managed-execution or delivery effects must first be reconciled
-against their original calls; a fork never automatically resubmits them.
+use the supported current frozen protocol, be quiescent, and retain the exact selected
+logical task N, its historical input cut and necessary control records. The latest A
+need not have returned `finish` or completed the research. Unsupported protocols,
+missing cuts and ambiguous or damaged control identities are refused. Unknown native,
+managed-execution, preparation or delivery effects must first be reconciled against
+their original calls; a fork never automatically resubmits them. Scientific originals
+are checked by the consumers that actually use them.
 
 The child has a new instance identity. Its first task keeps logical label N and
 reruns N's frozen first-invocation scientific inputs in a fresh native session. N's
@@ -606,47 +617,43 @@ gates. Engineering-repair tasks retain their bounded repair contract. A task wit
 continuations or output repairs restarts from its first input, rather than
 resuming those attempts.
 
-`fork_sources.py` reuses the generic directory inventory to preserve the complete
-quiescent source storage as a private snapshot using verified hardlinks. This is a
-current-directory superset, not a reconstruction of a complete historical directory
-at task N. The selected job and its exact original input cut separately determine
-scientific visibility. `visibility=private_snapshot` entries are omitted from ordinary
-node views; internal exact-path references can still resolve them without making
-them scientific inputs or qualifications. Fork/cache implementation storage is
-excluded; existing original object storage is retained. No domain filenames or
-plugin JSON traversal define this inventory. `originals.py` resolves originals by
-original identity, path and declared size. Lifecycle-proven managed frozen originals
-are shared directly; mode 0400 alone does not prove ownership. Mutable originals
-are first independently frozen into the
-source's private `host-history/fork-cache` store, then shared. Source bytes
-and permissions are not changed. Public views link only their selected retained
-originals, never private control metadata. Nested branches share these same
-immutable inodes while keeping distinct original identities and local paths.
-Declared in-instance host keys are excluded using their verified private source
-locator. An unknown credential-looking filename does not grant an exclusion;
-unrecognized ownership remains an inventory gap and blocks a fork.
+`fork_sources.py` collects the selected task's necessary typed controls, exact
+referenced code versions and current drafts. It does not inventory or preserve the
+whole parent directory. Each selected run's original seven-field `code_version`
+binds the bounded commit/tree/blob objects transferred into child-owned private Git.
+The child uses no parent alternates, object hardlinks or persistent transfer bundle;
+removing the source private Git does not remove those transferred versions.
 
-Each retained directory entry is an owning reference; the filesystem's link count
-is authoritative. Deleting a parent or sibling removes only its references, so
-children remain usable. Source-owned cached snapshots remain until that source's
-storage is removed; data is reclaimed when its last link disappears. There is no
-separate mutable reference-count database. All shared sources and the target must
-be on the same filesystem; unsupported links fail explicitly without copying as
-a fallback. A source requiring new snapshots must permit private-store writes.
-Current fork manifest v2 records exact paths and sizes. Later task execution prepares
-read-only node-local aliases to the selected originals. Writable scratch remains
-independent and is created only when needed.
-Readers resolve the retained identity, path and declared size; they do not cache
-or recompute content fingerprints. Publication and recovery keep their original
-transaction and inode checks without retrying external execution.
+Current dirty/untracked code B is copied separately from historical code A and restored
+to the child's writable `code/` directory when its selected job is built. The existing
+`visibility=private_snapshot` entries retain unsealed handoff drafts as readable,
+inert private state. They do not populate the child's native execution namespace,
+create a native intent, commit or seal, or grant scientific qualification or execution
+permission. Completed-output acceptance already bound by a seal remains a scientific
+reference, not a current handoff draft. The original selected input cut still defines
+scientific visibility.
+
+Necessary job, seal, accepted, compiler, authority, history and recovery controls are
+copied into the child's existing private store. Original logical identities remain
+unchanged; inherited readers use those declared copies rather than requiring the
+parent's copied jobs/control files to survive. `originals.py` resolves scientific
+entries through their declared origin, path, size and saved fingerprints at actual
+consumption. Scientific data, global/declaration inputs and node-produced outputs
+remain direct references to their actual originals; fork does not copy or hardlink
+their bodies, freeze a new source cache or package inputs. Removing an original can
+make its dependent use unavailable. Manifest and selected-task metadata checks do
+not reopen unselected scientific bodies. Publication and recovery retain their
+original transaction and inode checks without retrying external execution.
 
 Native homes, credentials, model sessions, tools, solvers, licenses and the
 execution environment are not copied. Frozen model, permission and launcher declarations remain declarations;
 arbitrary unfrozen native reads are not portable. Declared external runtime/adapter
 read scopes, namespace mappings and delivery targets remain frozen; forking does
 not copy, recreate or expand them, and they must remain valid and available when
-the child continues. The current closure bounds are
-65,536 entries, 4 GiB, 16 ancestry levels and 32 MiB per parsed control JSON.
+the child continues. The current closure bounds are 65,536 entries, 4 GiB of copied
+controls/drafts, 16 ancestry levels and 32 MiB per parsed control JSON. Direct scientific
+locators do not add their body sizes to copied-byte accounting; selected code keeps
+the separate bounded Git rules above.
 
 The operator declares positive finite new token, active-time and control-action
 limits. Child accounting measures new work; logical step N is not N newly
@@ -687,15 +694,14 @@ reconciliation for the attempted operation in the same UI host/browser session.
 General Web operation recovery across host restarts is not established; the
 CLI/service receipt is durable.
 
-Adapter record writers hold the generic shared `record-writer.lock`; pending
-inventory takes its exclusive nonblocking lease. Lifecycle quiescence checks take
+Adapter record writers hold the generic shared `record-writer.lock`; pending-call
+inspection takes its exclusive nonblocking lease. Lifecycle quiescence checks take
 all existing direct record `*.lock` leases exclusively without domain prefixes or
 loading installed providers, preserving conservative handling of old records.
 Writers acquire owner gate, shared record writer, node/admission, then
 adapter-private locks. Lifecycle checks acquire the owner gate exclusively and
 nonblocking before node/admission and direct record locks; that gate serializes
-the two orders. Ordinary archive export also holds this exclusive source gate.
-A held writer blocks fork/archive/delete; an unknown original call still
+the two orders. A held writer blocks fork/delete; an unknown original call still
 requires reconciliation.
 
 All cooperating host processes must see the same stable
@@ -705,11 +711,12 @@ Private `/tmp` namespaces, including PrivateTmp or separate containers, require
 an explicit common deployment mount; independent private gates do not coordinate.
 Changing TMPDIR or an XDG runtime directory does not establish that shared mount.
 
-Read-only originals and the host's cooperative source lease protect the declared
-sharing boundary among cooperating current-version writers. They remain a same-user
+Read-only original views and the host's cooperative source lease protect the declared
+reference boundary among cooperating current-version writers. They remain a same-user
 soft boundary: a same-user process that deliberately changes permissions and writes
-a shared inode can damage all its references. Content changes are not detected by
-reference checks. Do not combine forking with active pre-upgrade writers: the lease
+an original inode can damage its consumers. Reference metadata is not a content-tamper
+detector; saved fingerprints remain required for selected scientific consumption.
+Do not combine forking with active pre-upgrade writers: the lease
 does not retroactively fence older processes. These controls do not establish
 real-model, solver or scientific qualification.
 
@@ -717,17 +724,21 @@ real-model, solver or scientific qualification.
 
 `instance_delete.py` removes only an explicitly named current-protocol instance,
 bound to its goal ID, frozen settings reference and operation ID. Unused prepared,
-paused and completed roots must pass the existing archive quiescence checks.
-Active owner/source-reader locks, unknown execution or delivery effects, and
-unknown cleanup block deletion without canceling or replaying work. Canonical
-paths and mounted-subtree checks constrain cleanup to the selected tree. Symlinks
+paused and completed roots must pass the existing lifecycle quiescence checks.
+Necessary accepted, submission, terminal, authority and retirement controls still
+prove stopping and identity; missing unselected science, old code drafts or removed
+exports are not deletion prerequisites. Active owner/source-reader locks, unknown
+execution or delivery effects, and unknown cleanup block deletion without canceling
+or replaying work. Canonical paths and mounted-subtree checks constrain cleanup to
+the selected tree. Symlinks
 in control namespaces traversed by quiescence checks are rejected before traversal;
 other interior symlinks are unlinked without traversing their targets. Cleanup may
 restore owner write access to pinned directories, never to shared regular files.
 Nested independent instances, including recognizable damaged identities, block
-deletion and cleanup retries. Preparation, fork publication and cold restoration hold containing
-directory gates; deletion fences both the original and tombstone paths so a new
-instance cannot be created inside a tree during its disposal.
+deletion and cleanup retries. Preparation and fork publication hold containing
+directory gates. One physical host gate keyed by the original directory inode fences
+both its original and tombstone paths across rename, so a new instance cannot be
+created inside the tree during disposal.
 
 A private durable operation record outside the root pins its directory inode and
 exact tombstone. A retirement marker fences ordinary effects, including
@@ -740,9 +751,13 @@ reaches its deleted state before the completed receipt is published.
 Exact-request retries recover recorded retirement/cleanup and return the original
 receipt. They never adopt a replacement root at the former path. Deleted evidence
 cannot be restored by the delete service; old cold checkpoints do not reactivate
-a deleted owner generation. Shared payloads use ordinary inode references:
-unlinking one instance does not remove another branch's originals, and no manual
-reference-count database or garbage-collection authority is introduced.
+a deleted owner generation. Cleanup removes only this instance's own Git, temporary
+exports and directory; it does not chmod or remove external originals, inspect
+neighboring instances for references, or add garbage-collection authority. A child
+that directly references science owned by this deleted instance can lose that
+science; already transferred child Git and copied controls remain child-owned.
+An interrupted cleanup continues under the same operation, identities and receipt;
+its IO deadline does not reset scientific budgets.
 
 ## Extension rules
 
@@ -756,24 +771,22 @@ CLI result/materials/artifact and the webpage use the same exact-original API; d
 
 ## Support and qualification
 
-Managed local experiments, candidate delivery, UI, declared provenance, execution gates,
-original-call maintenance and same-host original-path cold checkpoints are implemented.
-`/results?after=N` lists sealed nodes; `/results/<step>` shows an exact result.
-Observed candidate facts and authored choices are frozen at that node's input boundary.
-Archive and checkpoint exports share frozen blobs by default and require the same
-filesystem. Such a package is not an independent backup. Explicit `--independent`
-export writes each unique blob once into a separate inode. Independent packages
-also restore independently; `--independent` can request this for a shared package.
-Restored immutable aliases share the first restored target, while mutable files
-remain separate. Existing targets that still share a package inode conflict under
-either effective independent mode. Checkpoint export and restore freeze the mode
-in the original transaction; retries cannot switch it. New packages use archive
-format 4 and checkpoint format 3; older packages are incompatible with current
-restore and are not migrated. Package inventories record paths, sizes, blobs and
-inode aliases, without content checksums or equality-based deduplication. A restore
-retry must match its original publication transaction and target inode; equal size
-or bytes at another target cannot establish idempotency. Derived workspace mount
-identities are excluded and rebuilt before a new native launch.
+Managed local experiments, candidate delivery, UI, declared provenance, execution gates
+and original-call maintenance are implemented. `/results?after=N` lists sealed nodes;
+`/results/<step>` shows an exact result. Observed candidate facts and authored choices
+are frozen at that node's input boundary. Sealed nodes and their outputs remain in
+place for result viewing, handoff and references; retaining a result does not collect
+its input bodies or create another package or seal.
+
+`archive-export`, `archive-inspect`, `archive-restore-material`, `checkpoint-enroll`,
+`checkpoint-export` and `checkpoint-restore` are retired, along with their package APIs.
+Historical packages and audit records remain read-only, without automatic import,
+migration, deletion or reactivation. Ordinary `checkpoint.capture/validate`, node-owned
+training checkpoints and original-call query/reconciliation/recovery retain their
+distinct roles. Ordinary checkpoints do not preserve or restore lost drafts; deleting
+node outputs or their source originals cannot reconstruct their scientific bodies
+from references or code commits.
+
 New dispatches check known review/breadth admission before prepare and execution
 resource allocation, then recheck the accepted-call set and admission under the
 existing short locks. In the exact built-in local adapter's current pre-submit
@@ -788,13 +801,11 @@ can publish an already durable, admitted accepted record, or discard only a
 partial snapshot with the original
 directory identity. Neither action reruns prepare, admission or submission. A
 discarded unresolved binding remains unknown in pending recovery and later Worker
-views, and blocks new preparation, fork and archive paths, including configurations
+views, and blocks new preparation and fork paths, including configurations
 without execution authority. Original permissions, reservations and consumption remain unchanged.
-Historical published bindings retain their original bytes across enrollment and
-cold restoration; restored archive metadata proves their provenance without the
-backup package remaining online. Reading that history grants no live maintenance
-authority over a different directory generation. Recovery of unbound temporary
-directories remains explicit and targeted: the existing maintenance command's
+Historical published bindings retain their original bytes and provenance. Reading
+that history grants no live maintenance authority over a different directory generation.
+Recovery of unbound temporary directories remains explicit and targeted: the existing maintenance command's
 `--unbound-local` branch selects only root, step and the exact snapshot token.
 Under the source, controller and exact record-writer locks, it requires all
 retained attempt configuration originals and interface projections for that step
@@ -805,8 +816,8 @@ with finite symlink-safe tree removal, writes no new recovery receipt, and chang
 no execution state, budget or retry permission. An absent target cannot establish
 a prior successful cleanup. Other unbound directories remain preserved.
 
-Ordinary read-only archives grant no advancing restore permission. Cross-host recovery,
-lost anchors and arbitrary native external reads remain outside support.
+Historical read-only packages grant no advancement, restoration or owner reactivation.
+Cross-host recovery, lost anchors and arbitrary native external reads remain outside support.
 Source/HTTP/synthetic-process checks do not qualify real browsers, native Codex continuation,
 TCAD solvers or power-loss recovery. Retirement grants none of these qualifications and does
 not operate existing host services, databases or external jobs.
@@ -828,7 +839,8 @@ references survive installation or sibling-instance removal;
 `.agents/skills` is a validated, rebuildable discovery projection. Source
 installation updates do not refresh frozen bytes. Revisions
 select existing frozen sets only; new IDs/versions require a new instance.
-Archive/fork/cold restore retain ordinary objects and rebuild projections under
-the receiving root. They cannot depend on a surviving installation or parent.
+Fork retains the selected ordinary Skill objects and rebuilds projections under
+the receiving root; these child-owned objects do not depend on a surviving installation
+or parent. Retired archive/cold package operations grant no Skill restoration path.
 Native user/system/plugin sources remain inherited, and existing native permission
 profiles remain unchanged. See [configuration](RESEARCH_CONFIGURATION.md#selected-framework-skills--按角色选择框架-skill).

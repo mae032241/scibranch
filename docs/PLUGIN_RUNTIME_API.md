@@ -134,11 +134,30 @@ and facts at the existing node/call output directory. Manifest, transport-derive
 files, bindings and transfer spool stay private. New socket-backed preparation is
 unsupported before admission or submission; exact old-call queries remain supported.
 
-G3 recovery and fork/archive/delete consumers for the new references and Git code
-remain pending. Real default native, registered Cov, Codex/namespace, replay/model,
-solver and SSH validation remains deferred until G3 and an independent user CLI run;
-source support alone establishes
-neither scientific qualification nor a real sandbox guarantee.
+Original-call recovery validates retained control relationships without reopening
+unselected scientific bodies or requiring a removed export. A retained terminal
+observation permits idempotent cleanup of that exact call's export after the existing
+shutdown checks; cleanup does not dispatch work or reset consumed budgets. Unknown
+native, bridge, backend or replay effects retain their original reconciliation boundary.
+A Git capture/export interrupted before any preparation binding or accepted record
+remains preserved; missing records do not prove that cleanup is safe.
+
+Fork transfers exact selected code objects into child-owned private Git and copies
+necessary typed controls and current code drafts. Unsealed handoff drafts remain inert
+private entries, without child native facts, seals or grants. Scientific bodies keep
+their declared original references and are checked at actual consumption. Deletion
+checks stopping evidence from necessary controls, then removes only the exact instance's
+own Git, exports and directory through the original deletion operation.
+
+Sealed nodes remain the result/reference source. Independent archive and whole-instance
+cold checkpoint package APIs are retired; historical packages stay read-only without
+automatic migration, restoration or owner reactivation. Ordinary checkpoint capture,
+validation and original-call recovery remain; checkpoints do not retain or restore
+lost drafts.
+
+Real default native, registered Cov, Codex/namespace, replay/model, solver and SSH
+validation remains deferred until G3 and an independent user CLI run. Source support
+alone establishes neither scientific qualification nor a real sandbox guarantee.
 
 ## Deterministic scientific assets
 

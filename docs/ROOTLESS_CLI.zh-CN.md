@@ -90,11 +90,12 @@ scid-research guidance-revoke --root /absolute/instance --guidance-id ID --expec
 
 ## 从历史任务创建分支
 
-`fork-preview` 与 `fork-create` 只接受已完成且静止、冻结协议 26 的明确父实例，以及精确逻辑
-步骤 N。新分支从 N 首次科学输入在新 session 重跑，N 输出和后缀不继承；不能选择任意 attempt
-断点。普通、FINAL、正式审查、工程修复及已有 continuation 的任务边界见
-[架构中的分支语义](ARCHITECTURE.zh-CN.md#历史任务分支)。缺真实原件、历史 cut 不足或协议不支持
-时明确拒绝；unknown 外部效果须回原调用对账，禁止换身份自动重提。
+`fork-preview` 与 `fork-create` 接受严格静止、冻结协议 26 的明确父实例，以及精确逻辑步骤 N；
+不要求最近 A 已返回 `finish` 或研究已完成。新分支从 N 首次冻结科学输入在新 session 重跑，
+N 输出和后缀不作为输入继承，不能选择任意 attempt 断点。普通、FINAL、正式审查、工程修复
+及已有 continuation 的任务边界见[架构中的分支语义](ARCHITECTURE.zh-CN.md#历史任务分支)。
+缺必要控制、历史 cut 不足、身份歧义或协议不支持时明确拒绝；unknown native、受管执行、
+准备或交付效果须回原调用对账，禁止换身份自动重提。真正消费科学原件时仍严格核对相关来源。
 
 以下路径、步骤和预算仅为命令示例；操作者须自行选择准确原件与有限新额度，本文不构成科学
 运行授权。目标根须为独立 canonical 绝对路径，其父目录已存在，且不能位于父实例内或包含父实例。
@@ -129,15 +130,17 @@ scid-research start --continue --root /absolute/project/branch
 
 新有限预算只供子实例新工作使用，历史科学投入与机会不清零，未知历史成本不填零；旧审查和
 执行许可不授权新 subject 或调用。指引按原文作为可不采纳的 advice；正式审查仍用中立输入，
-通用指引延后到合法后继。创建通过硬链接共享只读原件，保留原身份并支持嵌套分支。
-静止源目录的完整私有快照保留当前存储超集，不构成历史任务 N 的完整目录快照；
-私有保留条目不会自动进入科学视图，科学可见范围仍由原任务准确输入 cut 限定；
-仍可写的旧原件先在父实例私有快照存储中封存一次，后续分支复用。不会修改原文件权限。
-各分支目录项持有引用，文件系统维护链接数；删除父实例不影响子实例。父实例快照缓存随其
-存储保留，最后一个链接移除后释放数据，不需要手工维护引用计数。
-源文件与目标必须在同一文件系统，不支持硬链接时明确报错，不回退全量复制；需要新快照时
-父实例私有存储须可写。后续任务继续用自有硬链接共享所选只读输入，需要编辑的具体文件另存 `work/`。工具、认证、模型 session、
-solver 和运行环境仍须满足自身声明与准入条件。
+通用指引延后到合法后继。已选 run 的准确代码 A 经有界 Git 对象传输进入 child 自有私有 Git，
+不依赖父 alternates、对象硬链接或持久 bundle；父私有 Git 删除后仍可消费已转移的代码。
+当前 dirty/untracked 代码 B 另行复制，构建所选 child job 时恢复到可写 `code/`；未封存交接
+草稿留在已有 `private_snapshot` 条目中可读，不回填 child 的 native 执行命名空间，不自动
+commit、seal、启动调用或继承科学资格与许可。科学可见范围仍由原任务准确输入 cut 限定。
+必要 typed 控制由 child 持有，读取已复制控制不依赖父 jobs/control 继续存在。
+
+科学数据、全局输入和节点产物直接引用其准确实际原件，不复制、硬链接正文或新建源冻结
+缓存/归档包。源科学原件被删时，相应消费可以不可用；manifest/任务元数据读取不重开未选
+科学正文。需要编辑的具体输入另存 `work/`。fork 不作全父目录 inventory，不以文件链接数
+维护科学引用。工具、认证、模型 session、solver 和运行环境仍须满足自身声明与准入条件。
 分支不会复制、重建或扩大已声明的外部文件读取范围、运行路径映射或交付目标；继续子实例前，
 这些路径及目标仍须在原声明范围内有效可用。
 
@@ -176,19 +179,23 @@ scid-research instance-delete --root /absolute/instance \
 存在未知 native/受管执行或交付效果、清理状态不明的实例会被拒绝；删除不会取消、查询或重提
 外部执行，也不会补写完成证据。挂载子树和不安全目标路径会拒绝；静止检查需要读取的控制记录命名空间不接受符号链接，
 其他内部符号链接只删除链接本身，不访问外部目标。目标内若包含独立实例，包含仍可识别的损坏实例，
-删除和清理重试均会拒绝；应先分别处理这些内层实例。prepare/fork 创建、冷恢复与删除通过目录链锁互斥。
+删除和清理重试均会拒绝；应先分别处理这些内层实例。prepare/fork 创建与删除通过目录链 gate
+互斥；删除持有一个按原目录 inode 绑定的物理 gate，跨 rename 保护原路径与待删除路径。
 
+静止检查核对必要 accepted、submission、terminal、authority 与 retirement 控制及原进程/
+replay/交付停写证据，不要求未选科学正文、旧代码草稿或已清导出存在；必要控制损坏仍拒绝。
 准入后先持久记录退役状态，阻止新写入，再把准确目录移入同一父目录下的待删除位置后清理。
-共享原件只解除本实例持有的硬链接；父、子和兄弟分支的其他引用仍有效，最后一个文件引用
-和打开的文件描述符释放后才可回收数据。外部凭据、工具及原声明的实例外输入不随之删除。
+只清理本实例自有 Git、临时代码导出与目录，不 chmod 或删除外部原件，不扫描邻实例求引用
+计数。外部凭据、工具及原声明的实例外输入不随之删除。child 若引用本实例拥有的科学产物，
+删除这些原件后对应消费可失效；child 已转移的 Git 与已复制控制仍独立持有。
 
-成功返回 `instance_deleted`。少量删除回执保留在实例父目录的私有操作存储中；已登记冷迁移
-owner 的外部 anchor 也保留删除状态，不会通过旧 checkpoint 自动复活。冷迁移已冻结或未完成
-的实例须先按原迁移流程处理，删除不会绕过其所有权。
+成功返回 `instance_deleted`。少量删除回执保留在实例父目录的私有操作存储中；已有 legacy
+owner 的外部 anchor 保留删除状态，旧 checkpoint 不重新激活 owner 代际。已有 frozen、
+superseded、未知或未完成 owner 状态仍受原守卫约束，退役包命令不能绕过这些状态。
 
 若中断、清理失败或响应丢失，保留并重放完全相同的请求和 `operation_id`，继续核对或清理原
 待删除目录。不得换 ID 猜测结果，也不要手工删掉操作回执。原路径后来新建了另一个实例时，
-原删除请求不会把它当成目标。共享文件与同用户进程仍属于协作软边界。
+原删除请求不会把它当成目标；清理期限不重置或退还科学预算。共享文件与同用户进程仍属于协作软边界。
 
 ## 当前进度与封存结果
 
@@ -292,29 +299,24 @@ protocol/自定义 launcher 权限为 hint_only、实际访问未知；详见[�
 
 TCAD 支持可选编译、精确封存、正式审查与后继执行的非空输入绑定。工程接缝存在不证明真实 solver 已取得资格；所需证据见[TCAD 资格](TCAD_QUALIFICATION_STATUS.zh-CN.md)。旧实例不会静默升级或复制预算，本机 HTTP 与浏览器检查不能替代远端资格。
 
-### 原调用恢复与只读归档
+### 原调用恢复与节点保留
 
 `execution-resume --root ... --step N --call-id ... --max-seconds N --authorization-note ...` 显式推进一个原 W 调用；操作窗口不增加原科学或 solver 额度。只有原封存已记录完整的未准备证据，才能首次准备；可能提交过的调用只查询/核验，不能重放。仍有效的精确决定复用；过期时可显式给 `--request-valid-seconds N` 创建有限的新请求，再由原审批入口决定，不能借续接绕过批准。旧封存缺证据、清理不完整或余额不足不自动补造/续额。
 
-`archive-export --root ... --output ...` 仅在可证明静止时导出到新的只读目录包；不会取消活动作业或创建可推进副本。`archive-inspect --package ... --after N --limit N` 检查包的路径/大小清单并分页展示，也可用 `--section dependencies` 查看范围缺口；不扫描科学内容来校验哈希。原件流式保留，`native-homes` 与审批密钥/私有定位文件按范围排除，缺外部依赖明确标注。这两个入口不提供可写恢复资格。
+`execution-recover` 与已有终态的 `execution-resume` 核对原控制关系，不因未选科学正文、
+当前代码草稿或临时代码导出缺失而重新执行。已有或新补记的终态恢复，在原 native、bridge、
+backend 与 replay 停写门满足后，按同一 call 的已保存 observation 幂等清理其准确导出。
+已有终态的这一清理不进入新的科学准入，也不新建恢复操作；失败保留准确路径与诊断供
+原调用重试。unknown 或缺 observation 时不推断可删，不重 submit、不退已耗预算。
 
-新包只登记逻辑路径、权限、大小、blob 与原 inode 的别名关系，不计算内容指纹或按相同字节去重。
-同文件系统、生命周期已证明为受管冻结的原件通过硬链接共享；可变来源先独立复制冻结。
-同一冻结 inode 的多个逻辑别名共享一个 blob，独立来源即使字节相同也保留各自身份。
-默认不支持跨文件系统共享，明确失败，不退回逐文件复制。包和实例各自持有链接，删除其中一方
-不移除另一方的原件。冷恢复共享只读内容，真正可变的运行状态独立物化，不能改写包内共享 inode。
-旧包不兼容当前恢复入口；旧原件保留，不迁移或授予新协议推进权限。
+封存 node 的交接、结论及调用产物留在原位置，通过既有 `result`、`materials`、`artifact`
+入口查看和引用；保留成果不收集输入正文、不再 seal 或生成独立包。节点自己产生的训练
+checkpoint 也是原节点产物，后继只引用同一原件。删除 node 产物或来源后，不能凭输入引用、
+结果索引或代码 commit 还原科学正文。
 
-默认共享包不是独立备份。`archive-export`、`checkpoint-export` 可显式加 `--independent`，
-按唯一 blob 独立写入一次，包内逻辑别名不重复复制。独立包恢复自动保持与实例的 inode 隔离；
-`archive-restore-material`、`checkpoint-restore` 也可用 `--independent` 对共享包选择独立恢复。
-恢复的不可变别名链接到首个已恢复目标，可变文件各自独立。有效独立模式下，已有目标若仍与包
-共享 inode 则拒绝，不能因字节相同而跳过。checkpoint 的导出和恢复模式随原事务冻结，重试
-不得更换。独立模式允许源与目标跨文件系统，但目标仍须支持原子硬链接发布及内部别名共享；
-不支持时明确失败。新包采用 archive v4/checkpoint v3；独立模式不改变原宿主、原路径、anchor 与预算
-门槛，不增加任意迁移资格。宿主动态挂载目录的临时 inode 绑定不进入包，在新原生启动前重建。
-
-`archive-restore-material --root ... --package ... --step N --index N` 只把一个缺失的普通封存成果恢复到原实例的原位置；index 取该节点科学资料页的封存成员序号。须保留当前 settings、job/科学原文/result/seal、ledger、审批与调用证据，且所有原 owner 静止；包须包含同一当前 producer seal 与精确路径/大小的成果。仅支持普通 artifacts 和 nested experiment 成果；重试须核对原发布事务绑定的目标 inode，不把同大小、相同字节或其他目标视为已恢复，不同文件或链接拒绝；不修 call/control/managed 证据，不新建实例、不覆盖旧消费、不自动继续或续权，也不替代后续预算/资格准入。该命令本身不提供完整灾备或可推进恢复；跨 boot 补回字节也不解除原 clock 或 unknown 限制。
+独立包命令 `archive-export`、`archive-inspect`、`archive-restore-material`、`checkpoint-enroll`、
+`checkpoint-export`、`checkpoint-restore` 及对应 API 已退役。历史包与审计记录保持只读，
+不自动导入、迁移、删除、恢复或重新激活 owner，也不作为补齐缺原件或新实例推进的依据。
 
 `execution-resume ... --maintenance query|collect|cancel` 为已经 accepted 的原调用提供有限的宿主维护窗口，须给 `--max-seconds` 和 `--authorization-note`。即使原科学时钟跨 boot 无法继续，也可查询、取消或收集同一调用；此模式不能准备、提交、新建授权请求或增加额度，不能与 `--request-valid-seconds` 合用。精确终态由既有资源账本结算；暂不能结算时不生成退款或新额度。
 
@@ -331,7 +333,7 @@ TCAD 支持可选编译、精确封存、正式审查与后继执行的非空输
   补完成原来的不覆盖发布。原调用身份与已消耗额度保持；外部状态仍须用原 query/collect/cancel 核对。
 - `discard-partial` 只清理同一绑定 inode 的残缺快照，保留绑定、清理记录和可能已发生外部 prepare 的
   unknown。完整 accepted 必须走发布；损坏的 accepted 不当作可删的残缺文件。清理成功不授权重提，
-  未决记录仍阻断新 prepare、fork 和归档，不把目录消失解释成从未准备。
+  未决记录仍阻断新 prepare 和 fork，不把目录消失解释成从未准备。
 
 内置本地执行在复制输入时被终止，或现场清理失败后，可能留下尚无调用绑定的准确目录。
 此时须显式选择同一入口的本地分支，不传 `--call-id`：
@@ -349,23 +351,20 @@ scid-research execution-preparation-maintain --root /absolute/instance --step N 
 不增加持久记录、不推断执行状态、不改预算，也不授权重试。目标不存在时拒绝，不能据此补造
 上次清理已完成的结论。其他无绑定 `.prepared-*` 不自动清理或补造来源；入口不接受任意 records
 路径或批量删除。
-已发布的历史绑定随原件保留；冷恢复使用保留的原清单证明其来源，不要求旧目录 inode 继续存在。
-现场维护仍核对原宿主、owner 和目录身份，不由历史可读性授予新维护权限。
+已发布历史绑定保留原字节和来源；现场维护仍核对原宿主、owner 和目录身份，历史可读性
+不授予新维护权限。捕获/导出后、prepare 前若尚无 host-preparation 绑定或 accepted，既有
+维护入口不能凭缺记录证明可安全清理；保留原 call/export，不扫描 refs/exports 或重提调用。
 
-### 显式同宿主冷 checkpoint
+### 普通 checkpoint 的边界
 
-仅用于原实例完全静止、active 时间预算已暂停的情况：
+普通 `checkpoint.capture/validate` 保留既有任务、停写事实与小控制恢复点，原调用的 query、
+核对和续接仍使用原身份、权限及已耗预算。checkpoint 不封存当前草稿，不保存草稿内容，
+也不还原删除或丢失的草稿；接续依赖既有工作区仍存在的草稿。它不替代已退役的整实例
+cold 包，也不从当前草稿或另一 run 猜造历史科学原件。
 
-```bash
-scid-research checkpoint-enroll --root /absolute/instance --anchor-directory /absolute/owner-anchors
-scid-research checkpoint-export --root /absolute/instance --output /absolute/checkpoint
-# 保管外部 owner anchor；明确移动旧根到备份位置后，才恢复到原绝对路径。
-scid-research checkpoint-restore --root /absolute/instance --package /absolute/checkpoint
-```
-
-anchor 目录须已存在、独立于实例。export 冻结旧写者；restore 不覆盖/删除旧根，不复制密钥或 native sessions，不自动继续。恢复保留原 settings、账本和资源消耗，新 generation 成为唯一写者并保持暂停；跨 boot 已证实的暂停间隔标为未测量，不伪造墙钟耗时。成功恢复后的重复命令只确认原事务，不再次暂停已经继续运行的实例。恢复中断保持 fenced，可重试同一事务。
-
-普通只读包不能追认恢复权限；跨宿主、外部 anchor 丢失、缺少必要实现依赖、未知执行或未清理的 native 进程不能自动变成可推进恢复。这里提供同宿主冷恢复，不承诺任意灾备。支持边界见[当前架构](ARCHITECTURE.zh-CN.md)；本地过程测试不证明真实掉电或远端 solver。
+跨宿主、外部 anchor 丢失、缺少必要实现依赖、未知执行或未清理 native 进程不自动获得
+推进或恢复权限。支持边界见[当前架构](ARCHITECTURE.zh-CN.md)；源码与本地过程检查不证明
+真实掉电、真实 Codex/namespace 或远端 solver 已通过验收。
 
 ## 受管本地实验
 
@@ -452,10 +451,9 @@ chmod 外部来源；公开逻辑路径在宿主上未必有文件 alias。历�
 `tcad_log` 及 facts 首写到既有节点/call 输出目录，manifest、transport-derived 文件、bindings
 和传输 spool 保持私有。新 socket preparation 在准入或提交前明确不支持，准确旧 call 查询仍受支持。
 
-新引用及 Git 代码的 G3 恢复和 fork/archive/delete 消费方仍待完成。
-现有归档/分支规则不能证明新 Git 调用具备完整生命周期。真实 default native、registered Cov、
-Codex/命名空间、replay/model、solver 及 SSH 验收留到 G3 后由用户独立 CLI 进行；当前源码改动不授科学资格，
-也不构成真实 sandbox 保证。
+上述恢复、分支、退役与删除规则描述源码行为；真实 default native、registered Cov、
+Codex/命名空间、replay/model、solver 及 SSH 验收留到 G3 后由用户独立 CLI 进行。
+当前源码改动不授科学资格，也不构成真实 sandbox 保证。
 
 科学代码可生成可选的 `artifacts/result.json`：
 
@@ -746,7 +744,7 @@ launcher 使用 argv，不拼接 shell。可复用经过验证的外部隔离启
 Codex 后端是软边界：关闭项目 AGENTS 自动加载，默认关闭 native 子 Agent 和 fast，按冻结声明投影模型与权限。可显式声明 subagents 或 fast，但不因此取得完整作者、用量或正式独审资格。认证保留在原 home，无需手改用户配置；显式运行设置忽略用户配置覆盖。框架不注入退役 MCP 配置。protocol 后端由 launcher 实施权限，不强制套用 Codex 目录 sandbox；不支持原线程恢复或完整作者证明。
 当前执行审批信任 Worker 及其本地进程：HMAC、精确调用绑定、有效期和预算用于防误操作与状态混淆，不阻止同权限进程读取密钥或伪造批准。密钥路径不显示、0600或另起同用户进程均不构成强隔离。需要防恶意 Worker 的部署仍须单独建立真实权限边界。
 其他配置仍可能继承本机环境；涉及隐藏基准资料应使用已经验证的隔离启动器。
-注册功能插件与 CLI 实例 UI/端口已接入，旧入口已退役。支持上文限定的同宿主冷 checkpoint 恢复；跨宿主完整灾备仍不支持。未知原生结果须核对原调用，不能自动重放。
+注册功能插件与 CLI 实例 UI/端口已接入，旧入口已退役。普通 checkpoint 与原调用核对、恢复仍保留；独立冷包恢复已退役，跨宿主完整灾备仍不支持。未知原生结果须核对原调用，不能自动重放。
 
 ## 可选候选事实观察
 
