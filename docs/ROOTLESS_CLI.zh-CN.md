@@ -392,19 +392,31 @@ Cov launcher 需要在其选定 runtime 显式安装 `scidiscovery-cov-execution
 模式在 settings/job 中冻结，恢复沿用原选择；已有实例缺少此字段时保持原配置路径。
 原生 shell 和权限照常可用，临时分析无需逐项受管。
 
-W 可在 `experiments/<name>/` 编写脚本及输入，通过已有执行 CLI 正式运行：
+W 新编写的执行代码须位于当前科学工作区的 `code/`，数据、日志和输出放在该目录之外。
+Local 的 `--experiment-dir` 选择独立的 `experiments/<name>` 运行工作目录；它固定整个
+`code/` 树，脚本由 `--script` 指定。例如先编写 `code/check-one/run.py` 及其代码模块，
+再使用独立 cwd：
 
 ```sh
+mkdir -p experiments/check-one
 scid-experiment --config work/experiment-config.json run \
-  --experiment-dir experiments/check-one --script experiments/check-one/run.py -- --seed 7
+  --experiment-dir experiments/check-one --script code/check-one/run.py -- --seed 7
 ```
 
-控制层只快照明确选择的目录，排除该目录原有的 `artifacts/`，在接受执行前验证文件原件并原子保留。
-默认完整输入快照不设框架固定文件数、单件或累计字节上限；仍拒绝符号链接和路径逃逸，不扫描整个工作区寻找依赖。
-默认原生宿主将已接受快照只读映回所选目录的原科学路径，以该路径为工作目录运行；`artifacts/` 单独映到受管输出目录，脚本将输出写在其中。仅 `--script` 时，封存脚本只读映回原科学源码路径，保留原科学工作目录。
-默认原生宿主还把原任务冻结的 `public_root` 目录以同一绝对路径只读映入科学子进程；只映该目录，不映公共父目录或相邻私有文件。与实例控制、原生 home、运行时或科学快照等命名空间挂载重叠的公共根在启动前明确返回 unsupported。公共目录仍是 live 读取，不属于所选实验输入快照，不证明全部动态读取已冻结；需要精确输入原件时应显式放入所选实验目录。
-科学子进程只获得运行时文件、科学工作区、上述公共根和安全权限投影，`CODEX_HOME=/task-native` 不包含认证或 provider 配置；原 job、控制账本和提交槽不在该文件视图中。这是受管子进程的视图合同，不改变对原生 Worker 及同用户进程的信任边界。`experiments/<name>/work` 用于原生编写时的 scratch；目录受管执行时其快照只读，运行输出写 `artifacts/`。
-命令参数按 argv 原样传入；原目录不接收目录调用的运行输出。控制记录命令、参数、退出码、耗时和日志，保留输入及输出快照。
+提交前停止修改选定代码，捕获期间的目录/文件变化会被拒绝。宿主在 `adapter.prepare` 前
+将代码原始字节固定到实例私有 Git；默认每文件 1 MiB、每树 50 MiB、4,096 个文件，拒绝
+符号链接、特殊文件和路径逃逸，不扫描整个工作区寻找依赖。实验 cwd、科学数据、日志和输出
+不进入 Git；已有科学输入与输出仍走原冻结/留存合同，复制到 cwd 不自动取得原件身份。
+默认原生宿主以固定导出只读覆盖整个逻辑 `code/`，隐藏可变草稿；独立 cwd 可写，
+`experiments/check-one/artifacts/` 映到本调用受管输出目录。脚本将输出写入 `artifacts/`。
+仅 `--script code/check-one/run.py` 时只固定该脚本，并覆盖其整个逻辑父目录以屏蔽未捕获的
+兄弟模块；保留原科学 cwd，不能据此宣称多文件依赖已固定。
+默认原生宿主还把原任务冻结的 `public_root` 目录以同一绝对路径只读映入科学子进程；只映该目录，不映公共父目录或相邻私有文件。与实例控制、原生 home、运行时或科学快照等命名空间挂载重叠的公共根在启动前明确返回 unsupported。公共目录仍是 live 读取，不证明全部动态读取已冻结；需要精确输入原件时使用本任务已有冻结绑定，不能把 cwd 当作新的数据封存入口。
+科学子进程只获得运行时文件、科学工作区、上述公共根和安全权限投影，`CODEX_HOME=/task-native` 不包含认证或 provider 配置；原 job、控制账本和提交槽不在该文件视图中。这是受管子进程的视图合同，不改变对原生 Worker 及同用户进程的信任边界。`experiments/<name>/work` 可作运行 scratch，成果写 `artifacts/`。
+命令参数按 argv 原样传入。控制记录命令、参数、退出码、耗时和日志，保留已有科学输入与输出原件。
+Git 导出是临时视图；同一调用的 query/result/collect/cleanup 不依赖已删除的导出，实际消费代码
+仍须原 commit 与调用 pin 可用，并从原版本物化，不读回草稿。控制维护 `code_version`，W 无需
+计算哈希或操作私有 Git。原授权、预算、期限和 unknown 原调用核对要求保持。
 命令默认最多65秒且不超过实例原秒数上限，完整执行日志不按紧凑视图容量截断；任务和共享预算仍适用。
 可在研究 TOML 的 `[budget.storage]` 明确配置 `version=1`、`enabled=true`，以及至少一项
 正整数 `max_scan_entries`（含空目录条目）、`max_files`、`max_file_bytes`、`max_total_bytes`
@@ -424,9 +436,14 @@ scid-experiment --config work/experiment-config.json run \
 不悄悄回退全量复制。原件逻辑来源和科学路径保持精确，相同字节不合并科学身份。
 未在所选目录中的导入、环境及外部文件没有被快照，不据此承诺完整环境复现。
 脚本应使用相对路径读取受管输入；argv 不推断文件含义或改写绝对路径，原生访问本身不构成读取快照的证明。
-仅 `--script` 的原单文件入口仍可用；需要输入、成果自动快照时使用 `--experiment-dir`。
+仅 `--script` 的单文件入口仍可用；需要兄弟代码模块和受管成果时使用独立 `--experiment-dir`。
 
-上述目录和 argv 能力属于通用 Local executor。Cov launcher 的 `exp run` 仅接受单个 `--script`，封存为 `source.py`；不支持 `--experiment-dir` 或 `--` 后的脚本参数，也不递归封存兄弟模块。可通过 `capabilities` 和 `describe --key cov_single_source --output <新文件>` 读取所选接口的完整合同。不支持的命令选项在准备、准入和提交前返回 `known_not_started`、`accepted: false` 和 `caller_error`；修正命令后仍须遵守原预算与调用身份。此合同随新实例和新执行身份冻结，不能热改旧冻结实例。
+上述目录和 argv 能力属于通用 Local executor。Cov launcher 的 `exp run` 仅接受单个 `--script code/<name>/run.py`，由宿主 Git 固定该脚本；不支持 `--experiment-dir` 或 `--` 后的脚本参数，也不递归封存兄弟模块。旧调用保留其原 `source.py` 解释。可通过 `capabilities` 和 `describe --key cov_single_source --output <新文件>` 读取所选接口的完整合同。不支持的命令选项在准备、准入和提交前返回 `known_not_started`、`accepted: false` 和 `caller_error`；修正命令后仍须遵守原预算与调用身份。此合同随新实例和新执行身份冻结，不能热改旧冻结实例。
+
+这里仅实现 G1 代码绑定，G2 数据引用和 G3 archive/fork 消费方改动尚未实现；现有科学数据、
+输出及归档/分支规则保留，不能据此认定新 Git 调用具备完整生命周期。真实 production、
+default native、registered Cov 和 Codex sandbox 命名空间验收留到 G3 后由用户独立 CLI 进行，
+当前源码改动不构成真实 sandbox 保证。
 
 科学代码可生成可选的 `artifacts/result.json`：
 
@@ -503,10 +520,11 @@ project/
     inputs/parents/<node>/
       conclusion.json            # 直接前驱的科学结论
       artifacts/                 # 直接前驱的成果
+    code/                        # W 新执行代码；由宿主固定选定版本
     work/                        # 本节点临时材料，不交接
     artifacts/                   # 必要交付成果
     experiments/<name>/
-      work/                      # 子实验临时文件，不交接
+      work/                      # 独立运行 cwd 内的临时文件，不交接
       artifacts/                 # 子实验必要成果
       conclusion.md              # 可选的简短科学观察
     conclusion.json              # 控制层保存的最终科学回答
@@ -786,7 +804,11 @@ scid-research closeout --root /绝对路径/实例 --export-only
 
 当前写协议为 **26**。协议 25 及更早的真实场和证据保持归档只读，不能用新代码续接、重解释或原地迁移；新场必须重新 `prepare`。此变更不增加预算，不对冻结旧场执行任何恢复。
 
-适配器只冻结声明的脚本 `source.py`、模型和静态输入。受管 call 的封存脚本可来自旧 W scratch；审计台账局部改写为 `/inputs/source.py` 与 `/inputs/artifact`，旧 W workspace 不挂载到审计命名空间。脚本的任意本地兄弟模块或未声明依赖不会递归捕获；缺依赖属于工程故障，不能据此声明审计已完成或所有脚本都可交付。
+旧 `source.py` 受管调用的审计沿用声明脚本、模型和静态输入原件；审计台账局部改写为
+`/inputs/source.py` 与 `/inputs/artifact`，旧 W workspace 不挂载到审计命名空间。
+兄弟模块或未声明依赖不递归捕获；缺依赖属于工程故障，不能据此声明审计已完成或所有脚本都可交付。
+新 Git `code_version` 调用的审计与交付消费者尚未适配，G1 对这些入口安全拒绝；
+G1 replay 工程检查中的代码物化属于另一入口，不提供审计或交付支持。
 
 ### 审计工程故障与科学拒绝
 

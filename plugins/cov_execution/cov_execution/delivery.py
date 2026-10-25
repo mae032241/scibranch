@@ -475,6 +475,12 @@ def isolate(request, adapter):
             if Path(path) == Path.home():raise ValueError('Replay runtime must not expose the user home')
         if Path(path).exists():args += ['--ro-bind', path, path]
     args += ['--ro-bind', str(stage / 'inputs'), '/inputs', '--ro-bind', adapter, '/delivery.py']
+    if request['phase'] == 'replay':
+        source = request['object_refs']['source.py']
+        code = _exact(source['path'])
+        if code.stat().st_size != source['size_bytes']:
+            raise ValueError('Frozen replay code original differs')
+        args += ['--ro-bind', str(code), '/inputs/source.py']
     phase = request['phase']
     if phase not in {'audit','smoke','replay'}:target(request['target'])
     args += ['--bind' if phase in {'audit', 'resolve', 'smoke', 'replay'} else '--ro-bind', str(stage / 'scratch'), '/scratch']

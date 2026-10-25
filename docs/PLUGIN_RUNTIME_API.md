@@ -52,6 +52,23 @@ Known process success is an engineering fact. A cancelled native state remains a
 known engineering failure; neither state establishes scientific qualification.
 Pending native states remain pending; uncertain submission is unknown.
 
+For new W code, the host captures the selected `code/` bytes in instance-private
+Git before `prepare` and binds the original call to a seven-field `code_version`
+(`version`, `object_format`, `commit`, `tree_path`, `selection`, `entry`,
+`logical_root`). This binding is host-owned: adapter configuration, preparation
+results and acceptance metadata cannot supply or alter it. An adapter consumes the
+fixed export descriptor; the export is temporary and must not be promoted to a
+permanent scientific original. Supported launchers overlay the whole selected
+logical code directory, including for a single-file selection, so draft siblings
+cannot supply uncaptured code. Local's independent experiment cwd and outputs do
+not enter Git. Same-call query/result/collect/cleanup do not require a deleted
+export; actual code consumption still requires the retained commit and original
+call pin. New compiler records use `code_version` without an `author` snapshot,
+while retaining their original UUID identity; older records keep their saved
+interpretation. Ordinary host execution fingerprints do not change
+`LocalFileDescriptor`, global scientific references or qualification contracts.
+Authorization, consumed budgets, deadlines and recovery authority remain unchanged.
+
 Control retains the original call identity, consumed budgets, prepared submission,
 external binding, terminal facts and exact collection. Lookup or reconciliation
 must reuse that identity. Unknown submissions must never be automatically renamed
@@ -92,6 +109,10 @@ read-only, and grants the corresponding native file reads. The private manifest,
 unselected objects and other host-control paths are not mounted. Scientific backend
 subprocesses receive no Skill-object mounts. Native permission settings retain
 their declared semantics; selection is not a same-user security sandbox.
+The G1 Git code branch does not implement G2 data-reference or G3 archive/fork
+consumer changes. Real production validation of default native, registered Cov
+and Codex sandbox namespaces remains deferred until after G3 through an independent
+user CLI run; source support alone establishes no real sandbox guarantee.
 
 ## Deterministic scientific assets
 

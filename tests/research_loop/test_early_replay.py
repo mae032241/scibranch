@@ -250,3 +250,176 @@ def test_reserved_window_expires_after_acceptance_without_launch_or_repeated_sub
     assert adapter.status_details(call)['state'] == 'unknown'
     assert replay_check.public(config, call)['status'] == 'not_run'
     assert not (directories[0]/replay_check.INTENT).exists()
+
+
+# These exact nodes inherit process_e2e, but inspect inert requests/argv only;
+# Git, delivery leaves, namespace probes and process execution are mocked.
+def _fixed_replay_original(tmp_path,monkeypatch,*,legacy_source=False):
+    """Source/request fixture: mocked Git and delivery, no replay leaf/process."""
+    from test_cov_command_contract import _fixed_cov_launcher, _fixed_cov_harness_roles
+    from scidiscovery.research_loop import delivery
+    case=_fixed_cov_launcher(tmp_path,monkeypatch)
+    _fixed_cov_harness_roles(case)
+    if legacy_source:
+        case.accepted.pop('code_version')
+        source=case.source
+    else:
+        source=case.export/'run.py'
+        # Retain an unavailable original inode while the same call's exporter
+        # supplies a new ordinary view of the frozen bytes.
+        case.accepted['script']=e.proof(source)
+        old=case.root/'old-export-entry.py';source.rename(old)
+        source.write_bytes(old.read_bytes());old.unlink();case.source.unlink()
+    if legacy_source:case.accepted['script']=e.proof(source)
+    saved=case.accepted['script']
+    case.accepted['prepared']=dict(local_path=saved['path'],size_bytes=saved['size_bytes'])
+    (case.record/'accepted.json').write_bytes(e.encoded(case.accepted))
+    artifact=dict(path=str(case.root/'runs/model_run1.pkl'),size_bytes=1,file_stat=[1,2,1,3])
+    completed=dict(candidate_id='run-1',model=artifact)
+    (case.record/'completed.json').write_bytes(e.encoded(completed))
+    adapter=object.__new__(cov_experiments.CovExecution);adapter.config=case.config;adapter.records=e.Records(case.config)
+    calls=[]
+    def capture(spec,request,remaining,**options):
+        calls.append((spec,request,remaining,options))
+        return dict(operation_id=request['operation_id'],candidate_id=request['candidate_id'],
+            artifact_ref=request['artifact_ref'],status='sample_replay_ok',note='inert request inspected',
+            diagnostic='',diagnostic_omitted_bytes=0,samples={},stage='sample_predict')
+    monkeypatch.setattr(delivery,'_call',capture)
+    monkeypatch.setattr(cov_experiments.time,'clock_gettime',lambda which:100.)
+    case.adapter=adapter;case.replay_calls=calls;case.completed=completed;case.replay_source=source
+    return case
+
+
+def _run_fixed_replay(case):
+    return cov_experiments.CovExecution.replay_check.__wrapped__(case.adapter,case.accepted['call_id'],
+        deadline_boottime=110.,on_process=lambda *args:pytest.fail('No replay leaf may start'))
+
+
+def test_cov_git_replay_uses_current_pin_with_head_stage_roles_and_wire_without_leaf(tmp_path,monkeypatch):
+    case=_fixed_replay_original(tmp_path,monkeypatch);original=(case.record/'accepted.json').read_bytes()
+    result=_run_fixed_replay(case)
+    assert result['status']=='sample_replay_ok' and len(case.replay_calls)==1
+    spec,request,remaining,options=case.replay_calls[0]
+    expected=(case.root,dict(step=1,call_id=case.accepted['call_id'],code_version=case.version))
+    assert case.verified==case.materialized==[expected]
+    source=request['object_refs']['source.py']
+    assert source=={key:e.proof(case.replay_source)[key] for key in ('path','size_bytes')}
+    assert e.proof(case.replay_source)['file_stat']!=case.accepted['script']['file_stat']
+    assert request['scope']==case.accepted['scope'] and request['operation_id']==case.accepted['call_id']
+    assert request['candidate_id']==case.completed['candidate_id'] and request['artifact_ref']==case.completed['model']
+    assert request['deadline_boottime']==110. and remaining==10.
+    labels=['source.py','harness/runner.py','harness/train.csv','harness/val.csv','harness/meta.json','scid-current-protocol']
+    assert list(request['object_refs'])==labels
+    assert [item['label'] for item in request['inputs']]==['runtime-python',*labels[1:]]
+    assert all(set(item)=={'path','size_bytes'} for item in request['object_refs'].values())
+    assert 'inputs' not in request['inputs'][0] and all('file_stat' not in item for item in request['inputs'])
+    stage=Path(request['stage'])
+    assert (stage/'inputs/source.py').read_bytes()==b''
+    assert not (stage/'inputs/source.py').samefile(case.replay_source)
+    for item in request['inputs'][1:]:
+        assert request['object_refs'][item['label']]=={key:item[key] for key in ('path','size_bytes')}
+        assert (stage/'inputs'/item['label']).samefile(item['path'])
+    assert options['evidence']==case.record/'engineering-diagnostics' and spec['launcher_argv'][-1]=='--isolate'
+    assert (case.record/'accepted.json').read_bytes()==original
+    assert not (stage/'scratch/replay.json').exists() and case.replay_source.exists()
+
+
+@pytest.mark.parametrize('failure',['pin-missing','preparation-deadline'])
+def test_cov_git_replay_refusal_keeps_original_deadline_and_never_calls_delivery(tmp_path,monkeypatch,failure):
+    from scidiscovery.research_loop import code_versions
+    valid=_fixed_replay_original(tmp_path/'valid',monkeypatch);assert _run_fixed_replay(valid)['status']=='sample_replay_ok'
+    case=_fixed_replay_original(tmp_path/'broken',monkeypatch);original=(case.record/'accepted.json').read_bytes()
+    def unavailable(*args,**kwargs):
+        if failure=='preparation-deadline':raise TimeoutError('Original preparation window ended')
+        raise ValueError('Original call pin is missing')
+    monkeypatch.setattr(code_versions,'verify',unavailable)
+    if failure=='preparation-deadline':
+        assert _run_fixed_replay(case)==dict(status='not_run',note='original_engineering_preparation_deadline_reached',cleanup_confirmed=True)
+    else:
+        with pytest.raises(e.IntegrityError,match='replay code version changed or is unavailable'):_run_fixed_replay(case)
+    assert case.replay_calls==case.materialized==[] and (case.record/'accepted.json').read_bytes()==original
+
+
+@pytest.mark.parametrize('changed',['runner','train','protocol'])
+def test_cov_git_replay_checks_only_consumed_original_roles_before_delivery(tmp_path,monkeypatch,changed):
+    valid=_fixed_replay_original(tmp_path/'valid',monkeypatch);assert _run_fixed_replay(valid)['status']=='sample_replay_ok'
+    case=_fixed_replay_original(tmp_path/'broken',monkeypatch);original=(case.record/'accepted.json').read_bytes()
+    roles=cov_experiments._replay_roles(case.accepted)
+    name={'runner':'replay/harness/runner.py','train':'replay/harness/train.csv','protocol':'replay/scid-current-protocol'}[changed]
+    path=Path(next(item for item in roles if item['name']==name)['path'])
+    replacement=path.with_name(path.name+'.replacement')
+    replacement.write_bytes(path.read_bytes()+(b'changed' if changed=='runner' else b''));replacement.replace(path)
+    with pytest.raises(e.IntegrityError,match='Accepted replay original changed'):_run_fixed_replay(case)
+    assert case.replay_calls==[] and (case.record/'accepted.json').read_bytes()==original
+
+
+def _replay_isolate_argv(tmp_path,monkeypatch):
+    from cov_execution import delivery as cov_delivery
+    root=tmp_path/'argv';stage=root/'stage';(stage/'inputs').mkdir(parents=True);(stage/'scratch').mkdir()
+    (stage/'inputs/source.py').write_bytes(b'')
+    source=root/'current-export/source.py';source.parent.mkdir();source.write_bytes(b'fixed Git code view')
+    adapter=root/'delivery.py';adapter.write_text('# inert adapter, never executed\n')
+    python=Path(sys.executable).absolute();runtime=Path(sys.executable).resolve()
+    scope=dict(handoff_protocol=CURRENT,step=1,role='W',job_ref=dict(path=str(root/'jobs/001.json')),
+        execution_key=dict(path=str(root/'native-intent.json')),mechanism_ref=None)
+    request=dict(phase='replay',scope=scope,stage=str(stage),deadline_boottime=110.,
+        config=dict(python=str(python)),inputs=[dict(path=str(runtime),size_bytes=runtime.stat().st_size,
+            invoked_path=str(python),label='runtime-python')],
+        object_refs={'source.py':dict(path=str(source),size_bytes=source.stat().st_size)})
+    calls=[]
+    monkeypatch.setattr(cov_delivery.shutil,'which',lambda name:'/argv-only/bwrap')
+    monkeypatch.setattr(cov_delivery.os,'execv',lambda binary,argv:calls.append((binary,list(argv))))
+    def forbidden(*args,**kwargs):pytest.fail('Replay isolate argv test reached a subprocess')
+    for name in ('Popen','run','call'):monkeypatch.setattr(cov_delivery.subprocess,name,forbidden)
+    return cov_delivery,request,adapter,source,calls
+
+
+def test_cov_git_replay_isolate_overlays_current_code_read_view_after_empty_stage(tmp_path,monkeypatch):
+    module,request,adapter,source,calls=_replay_isolate_argv(tmp_path,monkeypatch)
+    module.isolate(request,str(adapter));assert len(calls)==1
+    binary,argv=calls[0];stage=Path(request['stage'])
+    assert binary=='/argv-only/bwrap'
+    bindings=[argv[index:index+3] for index,arg in enumerate(argv) if arg in ('--bind','--ro-bind')]
+    stage_binding=['--ro-bind',str(stage/'inputs'),'/inputs'];code_binding=['--ro-bind',str(source),'/inputs/source.py']
+    assert stage_binding in bindings and code_binding in bindings
+    assert argv.index(str(source))>argv.index(str(stage/'inputs'))
+    assert (stage/'inputs/source.py').read_bytes()==b'' and source.read_bytes()==b'fixed Git code view'
+    assert argv[-5:]==[str(Path(sys.executable).absolute()),'-B','-I','/delivery.py','--leaf']
+
+
+@pytest.mark.parametrize('damage',['size','missing','symlink'])
+def test_cov_git_replay_isolate_refuses_nonexact_source_before_exec(tmp_path,monkeypatch,damage):
+    module,request,adapter,source,calls=_replay_isolate_argv(tmp_path,monkeypatch)
+    module.isolate(request,str(adapter));assert len(calls)==1;calls.clear()
+    if damage=='size':request['object_refs']['source.py']['size_bytes']+=1
+    elif damage=='missing':source.unlink()
+    else:
+        original=source.with_name('original.py');source.rename(original);source.symlink_to(original)
+    with pytest.raises(ValueError):module.isolate(request,str(adapter))
+    assert calls==[] and (Path(request['stage'])/'inputs/source.py').read_bytes()==b''
+
+
+@pytest.mark.parametrize('public_change',['same-size-replacement','deleted'])
+def test_cov_legacy_replay_consumes_frozen_call_slots_after_public_original_changes(tmp_path,monkeypatch,public_change):
+    from test_cov_command_contract import _legacy_cov_inputs
+    case=_fixed_replay_original(tmp_path,monkeypatch,legacy_source=True);originals=_legacy_cov_inputs(case)
+    accepted=(case.record/'accepted.json').read_bytes();source=Path(case.accepted['script']['path'])
+    original_source=source.read_bytes();changed=originals['replay/harness/train.csv']['public']
+    if public_change=='deleted':changed.unlink()
+    else:
+        replacement=changed.with_name('same-size-train.csv')
+        replacement.write_bytes(b'X'*changed.stat().st_size);replacement.replace(changed)
+    result=_run_fixed_replay(case)
+    assert result['status']=='sample_replay_ok' and len(case.replay_calls)==1
+    _,request,remaining,_=case.replay_calls[0];stage=Path(request['stage'])
+    assert request['deadline_boottime']==110. and remaining==10.
+    assert request['object_refs']['source.py']==case.accepted['script']
+    assert (stage/'inputs/source.py').samefile(source) and source.read_bytes()==original_source
+    for item in case.accepted['snapshot_files']:
+        label=item['name'].removeprefix('replay/');frozen=originals[item['name']]
+        assert request['object_refs'][label]=={key:item[key] for key in ('path','size_bytes')}
+        assert (stage/'inputs'/label).samefile(frozen['retained'])
+        assert (stage/'inputs'/label).read_bytes()==frozen['raw']
+    assert all('file_stat' not in item for item in request['inputs'])
+    assert case.materialized==case.verified==[] and (case.record/'accepted.json').read_bytes()==accepted
+    assert not (stage/'scratch/replay.json').exists()

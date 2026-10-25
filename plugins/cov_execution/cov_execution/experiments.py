@@ -21,8 +21,8 @@ class CovExecution(LocalExecution):
     def capabilities(self):
         original = tuple(item for item in super().capabilities() if item.key != e.INPUT_SOURCES_KEY)
         command = dict(version=1, invocation='run --script <single source file>',
-            accepted_source='exact source.py snapshot', experiment_directory=False, script_arguments=False,
-            dependencies='Declared public harness inputs and installed runtime only; sibling modules and arbitrary local dependencies are not snapshotted.',
+            accepted_source='exact accepted source original', experiment_directory=False, script_arguments=False,
+            dependencies='Declared public harness inputs and installed runtime only; sibling modules and arbitrary local dependencies are not retained.',
             candidate_options=['--parent-plan', '--new-plan', '--change-intent', '--mechanism'])
         original = (*original, AdapterCapability('cov_single_source', 'execution', 'scidiscovery.cov-single-source.v1', 1,
             'application/json', e.encoded(command), command))
@@ -30,7 +30,7 @@ class CovExecution(LocalExecution):
             return original
         from scidiscovery.research_loop import replay_check
         policy = dict(max_seconds=10, feedback_seconds=2, supports_time_reservation=True,
-            check_scope=dict(source='exact accepted source.py',
+            check_scope=dict(source='exact accepted source original',
                 inputs='exact accepted public runner/train.csv/val.csv/meta.json and task runtime',
                 selection='first rows in frozen CSV order', train_rows_max=32, validation_rows_max=8,
                 coverage='source import, one sampled train() call and sampled predict; installed runtime dependencies only',
@@ -54,7 +54,7 @@ class CovExecution(LocalExecution):
         return monotonic + remaining
 
     def _replay_inputs(self, transport):
-        """Freeze only the known public harness layout before the original call."""
+        """Bind only the known public harness originals before the original call."""
         from scidiscovery.research_loop import protocol
         parent = Path(transport['runner']['path']).parent
         files = []
@@ -64,14 +64,19 @@ class CovExecution(LocalExecution):
                 'val.csv':'EXP_VAL', 'meta.json':'EXP_META'}[name]
             if Path(os.environ.get(environment, str(path))).absolute() != path:
                 raise ValueError('Public replay input mapping is not the declared harness layout')
-            item = cov_receipt.original(path)
-            if name == 'runner.py' and any(item[key] != transport['runner'][key] for key in item):
+            item = e.proof(path)
+            if name == 'runner.py' and any(item[key] != transport['runner'][key] for key in ('path','size_bytes')):
                 raise e.IntegrityError('Public replay runner differs from accepted receipt producer')
-            files.append(dict(item, name='replay/harness/' + name))
-        files.append(dict(cov_receipt.original(Path(protocol.__file__).resolve()), name='replay/scid-current-protocol'))
+            if name != 'runner.py':
+                files.append(dict(item, name='replay/harness/' + name))
+        # Optional engineering inputs must not erase the science data binding.
+        try:files.append(dict(e.proof(Path(protocol.__file__).resolve()),name='replay/scid-current-protocol'))
+        except (OSError,ValueError):pass
+        runtime=dict(inputs=files)
         invoked = Path(self.config['run_argv'][0]).absolute()
-        runtime = dict(cov_receipt.original(invoked.resolve()), invoked_path=str(invoked))
-        return files, runtime
+        try:runtime.update(e.proof(invoked.resolve()),invoked_path=str(invoked))
+        except (OSError,ValueError):pass
+        return [], runtime
 
     def acceptance_metadata(self,payload,*,parent=None,new=False,change=None):
         channel=self.config.get('receipt_channel')
@@ -82,12 +87,17 @@ class CovExecution(LocalExecution):
         selected,binding=cov._parent(self.config,parent,new)
         transport = cov_receipt.profile(self.config['run_argv'],channel)
         metadata = dict(parent=selected,parent_binding=binding,change_intent=change,runs_root=self.config['runs_root'],
-            evaluation_key=self.config['evaluation_key'],
-            command=[*self.config['run_argv'],'run','--script',payload.local_path],cwd=None,
-            receipt_transport=transport, config_record=self.config)
+            evaluation_key=self.config['evaluation_key'],source_script=payload.local_path,
+            command=[*self.config['run_argv'],'run','--script',payload.local_path],
+            script_index=len(self.config['run_argv'])+2,cwd=None,
+            receipt_transport=transport, config_record=self.config, snapshot_files=[])
         if channel == 'public_runner_main':
             try:
                 metadata['snapshot_files'], metadata['replay_runtime'] = self._replay_inputs(transport)
+                runtime=metadata['replay_runtime']
+                if (not {'path','size_bytes','file_stat','invoked_path'}<=set(runtime)
+                        or len(runtime['inputs'])!=4):
+                    metadata['replay_inputs_unavailable']=True
             except (OSError, ValueError):
                 metadata['replay_inputs_unavailable'] = True
         return metadata
@@ -95,7 +105,7 @@ class CovExecution(LocalExecution):
     @e.record_effect
     def replay_check(self, call_id, *, deadline_boottime, on_process):
         """No new time grant: preparation and execution share one absolute bound."""
-        from scidiscovery.research_loop import contracts as c, delivery
+        from scidiscovery.research_loop import contracts as c, delivery, storage_policy as storage
         from . import delivery as cov_delivery
         directory = self.records.directory(call_id)
         accepted = self.records.accepted(call_id)
@@ -106,18 +116,29 @@ class CovExecution(LocalExecution):
             if time.clock_gettime(time.CLOCK_BOOTTIME) >= deadline_boottime:
                 raise TimeoutError('Original engineering preparation deadline reached')
 
-        def link(source, destination, proof):
-            # Both sources are existing accepted call snapshots shared read-only.
+        def reference(item):
             check()
-            if source.resolve() != source:raise e.IntegrityError('Replay snapshot path changed')
-            original = c.regular(source).stat()
-            if original.st_size != proof['size_bytes']:raise e.IntegrityError('Replay snapshot size changed')
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            os.link(source, destination, follow_symlinks=False)
-            linked = destination.lstat()
-            if destination.is_symlink() or (linked.st_dev, linked.st_ino) != (original.st_dev, original.st_ino):
-                raise e.IntegrityError('Replay snapshot link changed')
+            bound = {key:item[key] for key in ('path','size_bytes','file_stat') if key in item}
+            actual=e.proof(bound['path'])
+            if any(actual.get(key)!=value for key,value in bound.items()):
+                raise e.IntegrityError('Accepted replay original changed')
             check()
+            return actual
+
+        def link(original, destination):
+            check()
+            if e.proof(original['path'])!=original:
+                raise e.IntegrityError('Accepted replay original changed before its view')
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            os.link(original['path'],destination,follow_symlinks=False)
+            linked=e.proof(destination)
+            if (linked['file_stat']!=original['file_stat']
+                    or e.proof(original['path'])!=original):
+                raise e.IntegrityError('Accepted replay view changed its exact original')
+            check()
+
+        def wire(original):
+            return {key:original[key] for key in ('path','size_bytes')}
 
         try:
             check()
@@ -125,21 +146,54 @@ class CovExecution(LocalExecution):
             # small bindings; do not hash every model/log a second time here.
             completed = json.loads(e.read(directory / 'completed.json'))
             runtime = accepted['replay_runtime']
+            reference(runtime)
+            if Path(runtime['invoked_path']).resolve() != Path(runtime['path']):
+                raise e.IntegrityError('Accepted replay runtime invocation changed')
             operation = call_id
             spec = dict(adapter=str(Path(cov_delivery.__file__).resolve()),
                 launcher_argv=[runtime['invoked_path'], str(Path(cov_delivery.__file__).resolve()), '--isolate'])
             stage = directory / 'engineering-replay'
             stage.mkdir()
-            (stage / 'inputs/harness').mkdir(parents=True)
             (stage / 'scratch').mkdir()
-            objects = {'source.py': accepted['script']}
-            link(directory / 'source.py', stage / 'inputs/source.py', accepted['script'])
-            inputs = [dict(runtime, label='runtime-python')]
-            for item in accepted['snapshot_files']:
+            if 'code_version' in accepted:
+                from scidiscovery.research_loop import code_versions
+                root = e._code_version_binding(self.config, accepted)
+                check()
+                preparation = storage.Deadline(deadline_boottime - time.clock_gettime(time.CLOCK_BOOTTIME))
+                try:
+                    code_versions.verify(root, step=accepted['scope']['step'], call_id=call_id,
+                        code_version=accepted['code_version'], context=preparation)
+                    tree = code_versions.materialize(root, step=accepted['scope']['step'], call_id=call_id,
+                        code_version=accepted['code_version'], context=preparation)
+                except TimeoutError:
+                    raise
+                except (OSError, ValueError) as error:
+                    raise e.IntegrityError('Accepted replay code version changed or is unavailable') from error
+                source = e.proof(tree / accepted['code_version']['entry'], context=preparation)
+                check()
+            else:
+                source = reference(accepted['script'])
+            # Reuse the existing delivery view and wire fields. Pin and ordinary
+            # fingerprints are consumed here, before the isolated leaf sees it.
+            if 'code_version' in accepted:
+                # The existing replay namespace binds object_refs['source.py']
+                # over this empty mountpoint; no permanent code alias is kept.
+                (stage/'inputs').mkdir(parents=True)
+                (stage/'inputs/source.py').touch(mode=0o400)
+            else:link(source,stage/'inputs/source.py')
+            objects = {'source.py': wire(source)}
+            inputs = [dict(wire(runtime),invoked_path=runtime['invoked_path'],label='runtime-python')]
+            for item in _replay_roles(accepted):
                 label = item['name'].removeprefix('replay/')
-                link(directory / 'inputs' / item['name'], stage / 'inputs' / label, item)
-                objects[label] = {key:item[key] for key in ('path','size_bytes')}
-                inputs.append(dict(item, label=label))
+                current=isinstance(accepted.get('replay_runtime'),dict) and 'inputs' in accepted['replay_runtime']
+                if current:original=reference(item)
+                else:
+                    # Legacy metadata names the public source; HEAD consumed an
+                    # independent frozen call slot, whose contract stores size.
+                    original=reference(dict(path=str(directory/'inputs'/item['name']),size_bytes=item['size_bytes']))
+                link(original,stage/'inputs'/label)
+                objects[label] = wire(original if current else item)
+                inputs.append(dict(wire(original if current else item),name=item['name'],label=label))
             request = dict(phase='replay', scope=accepted['scope'], operation_id=operation,
                 candidate_id=completed['candidate_id'], artifact_ref=completed['model'],
                 deadline_boottime=deadline_boottime, object_refs=objects, inputs=inputs,
@@ -172,8 +226,7 @@ class CovExecution(LocalExecution):
             path = stage / 'scratch' / name
             if path.exists():
                 c.regular(path).chmod(0o400)
-                proof = dict(path=str(path), size_bytes=path.stat().st_size)
-                diagnostics.append(proof)
+                diagnostics.append(e.proof(path))
         if value is None:
             return dict(status='inconclusive' if started else 'not_run', note='check_did_not_complete', cleanup_confirmed=True,
                 samples=leaf_record.get('samples'), stage=leaf_record.get('stage'), diagnostic_originals=diagnostics,
@@ -191,15 +244,26 @@ class CovExecution(LocalExecution):
             storage_root=self.records.storage_root(), policy=self.config.get('storage_policy'), context=context)
         if result is None:
             result=super().completion(directory,accepted,returncode,cleanup,False,context=context)
+            source=[accepted['script']]
+            if 'code_version' in accepted:
+                root=e._code_version_binding(self.config,accepted)
+                if e._code_export_entry(root,accepted) is not None:source=[]
             result.update(change_intent=accepted['change_intent'],
-                proofs=[e.proof(directory/name) for name in ('accepted.json','source.py','stdout.raw','terminal.json')],
+                proofs=[e.proof(directory/name) for name in ('accepted.json','stdout.raw','stderr.raw','terminal.json')]
+                    +source,
                 note='No exact completed public receipt; preserve without replay')
         return result
 
     def command(self,accepted):
         # exp records the source's original path. Preserve that contract and
         # verify exact prepared bytes both before execution and in its receipt.
-        if e.proof(accepted['source_script'])!=dict(path=accepted['prepared']['local_path'],size_bytes=accepted['prepared']['size_bytes']):
+        if 'code_version' in accepted:
+            e._code_version_binding(self.config,accepted)
+            if (accepted['script']['path']!=accepted['prepared']['local_path']
+                    or accepted['script']['size_bytes']!=accepted['prepared']['size_bytes']):
+                raise e.IntegrityError('Original cov execution source changed')
+        elif any(e.proof(accepted['source_script'])[key]!=value for key,value in
+                dict(path=accepted['prepared']['local_path'],size_bytes=accepted['prepared']['size_bytes']).items()):
             raise e.IntegrityError('Original cov execution source changed')
         # The task interpreter retains its scientific libraries and permissions.
         # Only cov's stdout/receipt separation changes; generic execution is shared.
@@ -208,7 +272,7 @@ class CovExecution(LocalExecution):
 
     @e.record_effect
     def result(self,call_id):
-        result=cov._completed(self.records.directory(call_id))
+        result=cov._completed(self.records.directory(call_id),verify_source='code_version' not in self.records.accepted(call_id))
         return result if result is not None else dict(status='unknown',call_id=call_id,note='Original call has no completion')
 
     @e.record_effect
@@ -276,3 +340,27 @@ REGISTRATION=ExecutionInterfaceRegistration('cov_execution','1',RuntimePluginFac
     scientific_source=LocalExecution.scientific_source,
     context_validator=validate_context,research_defaults=research_defaults,engineering_feedback=engineering_feedback,
     projection_contract='cov.public-projections.v1', native_launcher_module='cov_execution.launcher')
+
+
+def _replay_roles(accepted):
+    """Decode only Cov's existing runner and four public replay roles."""
+    names = ('replay/harness/runner.py', 'replay/harness/train.csv',
+        'replay/harness/val.csv', 'replay/harness/meta.json', 'replay/scid-current-protocol')
+    runtime = accepted.get('replay_runtime')
+    current = isinstance(runtime, dict) and 'inputs' in runtime
+    files = runtime['inputs'] if current else accepted.get('snapshot_files')
+    expected = names[1:] if current else names
+    fields=[{'name','path','size_bytes','file_stat'}]
+    if not current:fields.append({'name','path','size_bytes'})
+    partial=current and accepted.get('replay_inputs_unavailable') is True
+    if (not isinstance(files, list) or not partial and len(files) != len(expected)
+            or any(not isinstance(item, dict) or set(item) not in fields
+                or item.get('name') not in expected for item in files)
+            or len({item['name'] for item in files})!=len(files)
+            or not partial and {item['name'] for item in files} != set(expected)):
+        raise e.IntegrityError('Accepted public replay roles are malformed')
+    by_name = {item['name']: item for item in files}
+    if current:
+        runner = accepted['receipt_transport']['runner']
+        by_name[names[0]] = dict({key: runner[key] for key in ('path','size_bytes','file_stat') if key in runner}, name=names[0])
+    return [by_name[name] for name in names if name in by_name]

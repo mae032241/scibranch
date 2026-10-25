@@ -424,8 +424,14 @@ def bind_execution(root, *, reservation, accepted, prepared, operation_context=N
             if row['bound'] != original:
                 raise ValueError('Original reservation already bound another preparation')
             return row['ref']
-        q._check(dict(path=prepared['local_path'], size_bytes=prepared['size_bytes']))
-        q._check(value['script'])
+        # Binding/reconciliation retains consumed ownership after a Git export
+        # is retired; actual input consumption is checked by its execution owner.
+        if 'code_version' not in value:
+            q._check(dict(path=prepared['local_path'], size_bytes=prepared['size_bytes']))
+            q._check(value['script'])
+        elif (value['script']['path']!=prepared['local_path']
+                or value['script']['size_bytes']!=prepared['size_bytes']):
+            raise ValueError('Accepted code differs from its original preparation')
         _append(root, settings, events, parent, kind='resource_bind', owner=row['owner'],
             reservation_id=identity, reservation=reservation, accepted_binding=original)
         return row['ref']
@@ -435,14 +441,15 @@ def settle_execution(root, *, reservation, observation, consumed):
     from . import experiments, qualification as q
     root = Path(root).resolve(); settings = contracts.settings(root)
     value = q._read(root, observation)
-    experiments.verify_observation(value, lambda item: Path(item['path']))
+    experiments.verify_observation(value, lambda item: Path(item['path']),verify_files=False)
     consumed = _resource_dimensions(consumed, partial=True, zero=True)
     with _ledger_writer(root):
         events, parent, state = _events(root, settings, resources=True); identity, row = _reserved(state, reservation)
         bound = row['bound']
         if (bound is None or row['released'] or value.get('call_id') != row['binding']['call_id']
                 or value.get('scope') != row['binding']['scope']
-                or q._identity(root / bound['accepted']['path']) != value.get('accepted')):
+                or any(experiments.proof(root/bound['accepted']['path']).get(key)!=item
+                    for key,item in value.get('accepted',{}).items())):
             raise ValueError('Terminal observation does not bind the reserved execution')
         if any(key in row['actual'] and row['actual'][key] != amount for key, amount in consumed.items()):
             raise ValueError('Terminal resource usage conflicts with its original observation')
@@ -457,14 +464,15 @@ def release_execution(root, *, reservation, retirement):
     from . import experiments, qualification as q
     root = Path(root).resolve(); settings = contracts.settings(root)
     value = q._read(root, retirement)
-    verified = experiments.verify_retirement(value, lambda item: Path(item['path']))
+    verified = experiments.verify_retirement(value, lambda item: Path(item['path']),verify_files=False)
     with _ledger_writer(root):
         events, parent, state = _events(root, settings, resources=True); identity, row = _reserved(state, reservation)
         bound = row['bound']; binding = row['binding']
         if (bound is None or row['actual'] or verified.get('call_id') != binding['call_id']
                 or verified.get('scope') != binding['scope'] or verified.get('authority') != binding['authority']
                 or verified.get('prepared') != bound['prepared']
-                or verified.get('accepted') != {**bound['accepted'], 'path': str(root / bound['accepted']['path'])}):
+                or any(experiments.proof(root/bound['accepted']['path']).get(key)!=item
+                    for key,item in verified.get('accepted',{}).items())):
             raise ValueError('Permanent retirement does not bind the original reserved preparation')
         if row['released']:
             return row['ref']

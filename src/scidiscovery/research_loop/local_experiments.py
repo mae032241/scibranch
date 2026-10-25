@@ -48,7 +48,7 @@ class LocalExecution:
         if not isinstance(argv,list) or not argv or not all(isinstance(item,str) and item for item in argv):
             raise ValueError('Explicit local command argv required')
         self.config=config
-        self.records=e.Records(config)
+        self.records=e.Records(dict(config,execution_interface=frozen_interface) if frozen_interface is not None else config)
         self.frozen_interface=frozen_interface
         self._lease=None
 
@@ -85,11 +85,11 @@ class LocalExecution:
             raise ValueError('Finite original execution time limit required')
         return payload
 
-    def acceptance_metadata(self,payload,*,parent=None,new=False,change=None,command_options=None):
+    def acceptance_metadata(self,payload,*,parent=None,new=False,change=None,command_options=None,_code_version=None):
         if parent is not None or change is not None:
             raise ValueError('This implementation does not declare candidate parent semantics')
         options=command_options or {}; arguments=options.get('arguments',[])
-        if (set(options)-{'arguments','experiment_directory'} or not isinstance(arguments,list)
+        if (set(options)-{'arguments','experiment_directory','source_script'} or not isinstance(arguments,list)
                 or len(arguments)>128 or any(not isinstance(item,str) or '\0' in item for item in arguments)
                 or sum(len(item.encode()) for item in arguments)>16_000):
             raise ValueError('Bounded command argv required')
@@ -97,6 +97,30 @@ class LocalExecution:
             local_observation_version=1,
             command=[*self.config['run_argv'],payload.local_path,*arguments],script_index=len(self.config['run_argv']),cwd=self.config.get('cwd'),
             config_record=self.config)
+        if _code_version is not None:
+            from . import experiment_client, contracts as c
+            source=Path(options.get('source_script',payload.local_path)).absolute()
+            metadata.update(source_script=str(source),script=e.proof(payload.local_path))
+            metadata['command'][metadata['script_index']]=str(source)
+            if e.proof(payload.local_path)['size_bytes']!=payload.size_bytes:
+                raise e.IntegrityError('Local code export differs from its prepared descriptor')
+            if options.get('experiment_directory') is not None:
+                directory=Path(options['experiment_directory']).absolute()
+                instance=experiment_client.root_for_configuration(self.config)
+                work=c.workspace(instance,self.config['scope']['step'])
+                if (directory.resolve()!=directory or not directory.is_dir()
+                        or not directory.is_relative_to(work) or source.is_relative_to(directory)):
+                    raise ValueError('Local code requires an independent ordinary runtime directory')
+                job=c.read(c.regular(instance/'jobs'/f'{self.config["scope"]["step"]:03d}.json'))
+                files={}
+                for material in experiment_client._input_rows(job):
+                    logical=work/material['path']
+                    if logical.is_relative_to(directory) and not logical.is_relative_to(directory/'artifacts'):
+                        name=logical.relative_to(directory).as_posix()
+                        files[name]=dict(experiment_client.input_reference(self.config,logical),name=name)
+                metadata.update(experiment_directory=str(directory),cwd=str(directory),
+                    snapshot_files=[files[name] for name in sorted(files)])
+            return metadata
         if options.get('experiment_directory') is not None:
             root=Path(options['experiment_directory']).absolute()
             if root.resolve()!=root or not root.is_dir() or self.records.root.is_relative_to(root):
@@ -174,6 +198,7 @@ class LocalExecution:
         return submission.name,self._state(submission.name)
 
     def command(self,accepted):
+        if 'code_version' in accepted:return list(accepted['command'])
         # Execute the exact control snapshot. cwd is separately configured;
         # imports/environment beyond this one payload are not frozen evidence.
         command=list(accepted['command']);directory=self.records.directory(accepted['call_id'])
@@ -193,11 +218,21 @@ class LocalExecution:
                            for field in ('pid','start_ticks','pgid','sid'))):
                 raise e.IntegrityError('Original local process identity is malformed or changed')
         if (directory/'completed.json').exists():
+            observation=directory/'execution-observation.json'
+            if observation.exists():
+                e.verify_observation(json.loads(e.read(observation)),lambda item:Path(item['path']),
+                    interface=accepted.get('interface'),verify_files=False)
             state=self.records.state(call_id)
             if state=='unknown':return state
             terminal=json.loads(e.read(directory/'terminal.json'))
-            if (not isinstance(terminal,dict) or terminal.get('cleanup_confirmed') is not True
-                    or terminal.get('transport_complete') is not True or type(terminal.get('returncode')) is not int):
+            completed=json.loads(e.read(directory/'completed.json'))
+            controls={str(directory/name) for name in ('accepted.json','process.json','terminal.json')}
+            for item in completed.get('proofs',[]):
+                if item['path'] in controls:
+                    actual=e.proof(item['path'])
+                    if any(actual.get(key)!=saved for key,saved in item.items()):
+                        raise e.IntegrityError('Completed execution control original changed')
+            if e.local_terminal_status(accepted,completed,terminal)=='unknown':
                 return 'unknown'
             if state!=('succeeded' if terminal['returncode']==0 else 'failed'):
                 raise e.IntegrityError('Completed local execution differs from its transport')
@@ -210,6 +245,9 @@ class LocalExecution:
 
     def _execute(self,call_id,accepted):
         from . import runtime
+        config=(dict(self.config,execution_interface=self.frozen_interface)
+            if self.frozen_interface is not None else self.config)
+        e.verify_scientific_inputs(accepted,config=config)
         directory=self.records.directory(call_id)
         runtime._subreaper()
         started=time.monotonic()
@@ -217,6 +255,8 @@ class LocalExecution:
         cwd=accepted.get('cwd')
         if 'entry' in accepted:
             cwd=str(directory/'inputs');(Path(cwd)/'artifacts').mkdir()
+        elif 'code_version' in accepted and accepted.get('experiment_directory') is not None:
+            artifact_directory(self.config,call_id).mkdir(parents=True)
         deadline=self._execution_deadline(accepted)
         if deadline is None:deadline=started+self.config['max_seconds']
         from . import experiment_client
@@ -307,13 +347,18 @@ class LocalExecution:
 
     def completion(self,directory,accepted,returncode,cleanup,transport_complete,*,context=None):
         known=cleanup and transport_complete and type(returncode) is int
+        script=[accepted['script']]
+        if 'code_version' in accepted:
+            root=e._code_version_binding(dict(self.config,execution_interface=self.frozen_interface)
+                if getattr(self,'frozen_interface',None) is not None else self.config,accepted)
+            if e._code_export_entry(root,accepted) is not None:script=[]
         original=dict(call_id=accepted['call_id'],status=('known_success' if returncode==0 else 'known_failed') if known else 'unknown',
             candidate_id=None,run_id=None,model=None,parent=accepted['parent'],change_intent=None,scope=accepted['scope'],
-            proofs=[e.proof(directory/name) for name in ('accepted.json','source.py','process.json','stdout.raw','stderr.raw','terminal.json')],
+            proofs=[e.proof(directory/name) for name in ('accepted.json','process.json','stdout.raw','stderr.raw','terminal.json')]+script,
             note='Original local command outcome; no domain metric or candidate qualification')
         if accepted.get('local_observation_version')!=1:return original
         outputs=[];result=dict(status='not_requested',metrics=[],outputs=[])
-        if 'entry' in accepted:
+        if 'entry' in accepted or 'code_version' in accepted and accepted.get('experiment_directory') is not None:
             if not cleanup:
                 result=dict(status='unavailable',metrics=[],outputs=[],diagnostic='execution_cleanup_unknown')
             else:
@@ -321,13 +366,15 @@ class LocalExecution:
                     from . import experiment_client
                     root = experiment_client.root_for_configuration(self.config, allow_standalone=True) or self.records.root
                     context=context or storage.Deadline(self.config['max_seconds'])
-                    for item in self.files(directory/'inputs/artifacts',policy=self.config.get('storage_policy'),context=context):
+                    artifacts=(artifact_directory(self.config,accepted['call_id']) if 'code_version' in accepted
+                        else directory/'inputs/artifacts')
+                    for item in self.files(artifacts,policy=self.config.get('storage_policy'),context=context):
                         source=Path(item['path']);target=directory/'outputs'/item['name']
                         frozen_original=shared_originals.retain(root,source,size_bytes=item['size_bytes'],source_kind='mutable',
                             context=context,policy=self.config.get('storage_policy'))
                         shared_originals.link(frozen_original,target,size_bytes=item['size_bytes'],context=context,
                             root=root,policy=self.config.get('storage_policy'))
-                        frozen=dict(path=str(target),size_bytes=item['size_bytes'])
+                        frozen=e.proof(target,context=context)
                         outputs.append(dict(frozen,name=item['name']))
                     result=self.read_result(directory/'outputs',outputs)
                 except storage.StorageQuotaExceeded:
@@ -423,12 +470,12 @@ class LocalExecution:
         if result.get('mechanism_binding')!=accepted.get('mechanism_binding'):
             raise e.IntegrityError('Completed scientific mechanism binding changed')
         for item in result['proofs']:
-            if e.proof(item['path'])!=item:raise e.IntegrityError('Completed execution original changed')
+            if any(e.proof(item['path']).get(key)!=saved for key,saved in item.items()):raise e.IntegrityError('Completed execution original changed')
         for item in result.get('outputs',[]):
-            if e.proof(item['path'])!={key:item[key] for key in ('path','size_bytes')}:
+            if any(e.proof(item['path'])[key]!=item[key] for key in ('path','size_bytes','file_stat') if key in item):
                 raise e.IntegrityError('Completed output original changed')
         for item in accepted.get('snapshot_files',[]):
-            original=e.proof(directory/'inputs'/item['name'])
+            original=e.proof(item['path'] if 'code_version' in accepted else directory/'inputs'/item['name'])
             if any(original[key]!=item[key] for key in ('size_bytes',)):
                 raise e.IntegrityError('Accepted input snapshot changed')
         return result
@@ -442,7 +489,7 @@ class LocalExecution:
         state=self._state(external_run_id)
         result={}
         if state in {'succeeded','failed'}:
-            result=self.result(external_run_id)
+            result=json.loads(e.read(self.records.directory(external_run_id)/'completed.json'))
             if result['status']=='unknown':state='unknown'
         return dict(state=state,call_id=external_run_id,candidate_id=None,evaluation_key=None,metric=None,
             direction=None,wall_seconds=result.get('wall_seconds'),returncode=result.get('returncode'),
@@ -552,3 +599,8 @@ def cleanup(root,job,*,watchdog=False):
         status=runtime.signal_observed_group(identity) if watchdog else runtime.cleanup_owned_group(identity)
         if status!='observed_group_cleaned':result='cleanup_unknown'
     return result
+
+
+def artifact_directory(config,call_id):
+    """The call's writable runtime output area; completion uses HEAD retention."""
+    return e.Records(config).directory(call_id)/'runtime-artifacts'

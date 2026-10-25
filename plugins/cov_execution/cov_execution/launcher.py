@@ -355,11 +355,21 @@ def outer(s,w,h,command,materials=()):
     if control.exists() and not s.get('_worker_science_view'):c.extend(['--ro-bind',str(control),str(control)])
     for source,target,mode in s.get('_backend_materials',()):
         c.extend([mode,source,target])
-        if mode=='--ro-bind':readonly_mounts.append((source,target))
+        if mode=='--ro-bind' and (source,target)!=s.get('_backend_code_mount'):
+            readonly_mounts.append((source,target))
     # Every wider writable mapping is installed first. This is the final
     # logical scientific view; canonical stores and manifests remain private.
-    c.extend(shared_input_views.mount_arguments(root,job,w,mounts=readonly_mounts,
-        include_skills=not s.get('_backend'),context=operation_context))
+    input_mounts=shared_input_views.mount_arguments(root,job,w,mounts=readonly_mounts,
+        include_skills=not s.get('_backend'),context=operation_context)
+    if s.get('_backend_code_mount'):
+        from scidiscovery.research_loop import experiments as e
+        code_root=Path(s['_backend_code_mount'][1])
+        targets=[Path(target) for source,target in readonly_mounts]
+        targets.extend(Path(input_mounts[index+2]) for index,argument in enumerate(input_mounts)
+            if argument in ('--bind','--ro-bind'))
+        if any(target.is_relative_to(code_root) or code_root.is_relative_to(target) for target in targets):
+            raise e.UnsupportedExecution('Scientific input mount overlaps the selected code directory')
+    c.extend(input_mounts)
     if s.get('_accepted_artifacts'):
         source,target=s['_accepted_artifacts']
         c.extend(['--bind',source,target])
@@ -370,37 +380,72 @@ def outer(s,w,h,command,materials=()):
 def backend_launcher(s,w,h,materials):
     """Host-selected scientific child mounts; callers cannot supply this plan."""
     def launch(config,accepted,command,cwd):
-        from scidiscovery.research_loop import contracts as c, experiments as e
+        from scidiscovery.research_loop import contracts as c, experiments as e, experiment_client, worker_execution_bridge
         from cov_execution import receipt as cov_receipt
         directory=e.Records(config).directory(accepted['call_id'])
         if e.Records(config).accepted(accepted['call_id'])!=accepted:
             raise e.IntegrityError('Scientific launch differs from its original accepted call')
         settings=dict(s,_backend=True,_read_only_closeout=False,_author_closeout=False)
-        bindings=[];finish=None
+        bindings=[];finish=None;code_root=None
         source=Path(accepted['source_script'])
-        if source.resolve()!=source or not source.is_relative_to(w):
-            raise e.UnsupportedExecution('Scientific source is outside the declared task namespace')
+        if 'code_version' in accepted:
+            from scidiscovery.research_loop import code_versions
+            root=e._code_version_binding(config,accepted)
+            if root!=Path(s['scene_root']).absolute() or w!=c.workspace(root,config['scope']['step']):
+                raise e.IntegrityError('Scientific code belongs to another exact task namespace')
+            version=accepted['code_version'];code_root=w/version['logical_root']
+            if code_root.resolve()!=code_root or not code_root.is_dir():
+                raise e.UnsupportedExecution('Scientific code requires its ordinary declared directory')
+            cwd=str(w) if config['execution_interface']['executor']=='cov_execution:experiment' else cwd or str(w)
+            if (Path(cwd).resolve()!=Path(cwd) or not Path(cwd).is_dir() or not Path(cwd).is_relative_to(w)
+                    or Path(cwd).is_relative_to(code_root)):
+                raise e.UnsupportedExecution('Scientific working directory must remain outside the ordinary code directory')
+        else:
+            if source.resolve()!=source or not source.is_relative_to(w):
+                raise e.UnsupportedExecution('Scientific source is outside the declared task namespace')
+            script=Path(accepted['script']['path'])
+            if (any(e.proof(script).get(key)!=item for key,item in accepted['script'].items())
+                    or any(e.proof(source)[key]!=value for key,value in
+                        dict(path=accepted['prepared']['local_path'],size_bytes=accepted['prepared']['size_bytes']).items())):
+                raise e.IntegrityError('Scientific source differs from its saved original')
         if config['execution_interface']['executor']=='cov_execution:experiment':
             transport=accepted['receipt_transport']
             if transport.get('channel')!='public_runner_main':
                 raise e.UnsupportedExecution('This retained receipt channel has no science-only backend transport')
             if cov_receipt.runner_profile(transport['runner']['path'])!=transport['runner']:
                 raise e.IntegrityError('Scientific runner differs from its frozen original')
+            def public_inputs():
+                if 'replay_runtime' not in accepted and not accepted.get('snapshot_files'):return
+                from cov_execution.experiments import _replay_roles
+                for item in _replay_roles(accepted):
+                    name=item['name'].removeprefix('replay/harness/')
+                    if name not in {'train.csv','val.csv','meta.json'}:continue
+                    actual=e.proof(Path(s['public_root'])/'environment/harness'/name)
+                    if any(actual[key]!=item[key] for key in ('path','size_bytes','file_stat') if key in item):
+                        raise e.IntegrityError('Scientific public harness input differs from its saved original')
+            public_inputs()
             stage=directory/'backend-science';inputs=stage/'inputs';outputs=stage/'outputs'
             inputs.mkdir(parents=True);outputs.mkdir()
             invocation=inputs/'invocation.json'
             e.write(invocation,dict(runner=transport['runner']['path'],source=str(source),
                 output_line=transport['runner']['output_line'],output='/task-tmp/scid-receipt/row.json'))
             bindings.extend([(str(invocation),'/opt/exp/scid-invocation.json','--ro-bind'),
-                (str(outputs),'/task-tmp/scid-receipt','--bind'),
-                (str(directory/'source.py'),str(source),'--ro-bind')])
+                (str(outputs),'/task-tmp/scid-receipt','--bind')])
+            if code_root is None:bindings.append((str(script),str(source),'--ro-bind'))
             command=[config['run_argv'][0],'-B','-I',str(Path(cov_receipt.__file__).resolve()),'--science-runner','/opt/exp/scid-invocation.json']
             cwd=str(w)
             def finish(returncode,cleanup,transport_complete):
+                public_inputs()
                 row_path=outputs/'row.json'
                 if not row_path.exists():return
-                if (e.proof(directory/'source.py')!=accepted['script']
-                        or e.proof(source)!=dict(path=accepted['prepared']['local_path'],size_bytes=accepted['prepared']['size_bytes'])):
+                if code_root is not None:
+                    e._code_version_binding(config,accepted)
+                    try:
+                        code_versions.verify(root,step=config['scope']['step'],call_id=accepted['call_id'],
+                            code_version=version,context=worker_execution_bridge.operation_context())
+                    except (OSError,ValueError) as error:
+                        raise e.IntegrityError('Accepted code version original changed or is unavailable') from error
+                elif any(e.proof(script).get(key)!=item for key,item in accepted['script'].items()):
                     raise e.IntegrityError('Scientific source changed during original execution')
                 row=json.loads(e.read(row_path,cov_receipt.MAX_BYTES))
                 # The existing completion owner still checks aggregate row,
@@ -410,7 +455,32 @@ def backend_launcher(s,w,h,materials):
                 e.write(directory/'receipt.json',cov_receipt.envelope(accepted,row))
         elif config['execution_interface']['executor']=='local_execution:command':
             command=list(command)
-            if 'entry' in accepted:
+            if code_root is not None:
+                cwd=cwd or str(w)
+                if accepted.get('experiment_directory') is not None:
+                    target=Path(accepted['experiment_directory'])
+                    if (target.resolve()!=target or not target.is_dir() or not target.is_relative_to(w)
+                            or str(target)!=cwd):
+                        raise e.UnsupportedExecution('Scientific experiment is outside its accepted working directory')
+                    for item in accepted['snapshot_files']:
+                        actual=Path(item['path'])
+                        expected={key:item[key] for key in ('path','size_bytes','file_stat')}
+                        if (e.proof(actual)!=expected
+                                or experiment_client.input_reference(config,target/item['name'])!=expected):
+                            raise e.IntegrityError('Scientific input differs from its saved original')
+                        bindings.append((str(actual),str(target/item['name']),'--ro-bind'))
+                    output=target/'artifacts'
+                    if output.resolve()!=output or output.exists() and not output.is_dir():
+                        raise e.UnsupportedExecution('Scientific artifacts require an ordinary output directory')
+                    from scidiscovery.research_loop import local_experiments
+                    artifacts=local_experiments.artifact_directory(config,accepted['call_id'])
+                    artifacts.mkdir(parents=True,exist_ok=True)
+                    bindings.append((str(artifacts),str(output),'--bind'))
+                    settings['_accepted_artifacts']=(str(artifacts),str(output))
+                elif accepted.get('snapshot_files'):
+                    raise e.IntegrityError('Scientific code snapshots require their accepted experiment directory')
+                command[accepted['script_index']]=str(source)
+            elif 'entry' in accepted:
                 target=Path(accepted['experiment_directory'])
                 if target.resolve()!=target or not target.is_relative_to(w):
                     raise e.UnsupportedExecution('Scientific experiment is outside its task namespace')
@@ -419,12 +489,22 @@ def backend_launcher(s,w,h,materials):
                 settings['_accepted_artifacts']=(str(directory/'inputs/artifacts'),str(target/'artifacts'))
                 command[accepted['script_index']]=str(target/accepted['entry']);cwd=str(target)
             else:
-                bindings.append((str(directory/'source.py'),str(source),'--ro-bind'))
+                bindings.append((str(script),str(source),'--ro-bind'))
                 command[accepted['script_index']]=str(source)
                 if cwd is not None and (Path(cwd).resolve()!=Path(cwd) or not Path(cwd).is_relative_to(w)):
                     raise e.UnsupportedExecution('Scientific working directory is outside its task namespace')
         else:
             raise e.UnsupportedExecution('Selected local backend has no qualified scientific namespace launcher')
+        if code_root is not None:
+            try:
+                export=code_versions.materialize(root,step=config['scope']['step'],call_id=accepted['call_id'],
+                    code_version=version,context=worker_execution_bridge.operation_context())
+            except (OSError,ValueError) as error:
+                raise e.IntegrityError('Accepted code version original changed or is unavailable') from error
+            settings['_backend_code_mount']=(str(export),str(code_root))
+            bindings.insert(0,(str(export),str(code_root),'--ro-bind'))
+            if settings.get('_accepted_artifacts'):
+                Path(settings['_accepted_artifacts'][1]).mkdir(exist_ok=True)
         settings['_backend_materials']=bindings
         helper=Path(s['scene_root'])/'host-runtime/native-bin/codex-linux-sandbox'
         native=helper.resolve(strict=True)

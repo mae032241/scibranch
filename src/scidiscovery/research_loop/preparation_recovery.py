@@ -64,12 +64,19 @@ def _json(path, context=None):
 
 
 def _verify_ref(root, ref, context=None):
-    if not isinstance(ref, dict) or set(ref) != {'path', 'size_bytes'}:
+    if (not isinstance(ref, dict) or set(ref) not in (
+            {'path', 'size_bytes'}, {'path', 'size_bytes', 'file_stat'})
+            or not isinstance(ref.get('path'), str) or not ref['path']
+            or type(ref.get('size_bytes')) is not int or ref['size_bytes'] < 0):
         _fail('Host preparation original reference changed')
+    if 'file_stat' in ref and (not isinstance(ref['file_stat'], list) or len(ref['file_stat']) != 4
+            or any(type(part) is not int for part in ref['file_stat'])
+            or ref['file_stat'][2] != ref['size_bytes']):
+        _fail('Host preparation original fingerprint changed')
     path = Path(ref['path'])
     path = path if path.is_absolute() else root / path
     actual = e.proof(path, context=context)
-    if any(actual[key] != ref[key] for key in ('size_bytes',)):
+    if any(actual[key] != ref[key] for key in ('size_bytes', 'file_stat') if key in ref):
         _fail('Host preparation original bytes changed')
     return path
 
@@ -177,11 +184,14 @@ def _binding(root, records, path, context=None):
             or value.get('instance', {}).get('root') != str(root)):
         _fail('Host preparation binding escaped its exact namespace')
     config = _json(_verify_ref(root, value['configuration'], context), context)
+    saved={key:value[key] for key in ('job','configuration','projection','native_intent')}
+    for reference in saved.values():_verify_ref(root,reference,context)
+    actual=_configuration(root,config,context)
     if (experiment_client.root_for_configuration(config) != root or config['record_dir'] != str(records)
             or config['scope'] != value.get('scope') or config.get('native_attempt') != value.get('native_attempt')
             or config['execution_interface'] != value.get('interface')
-            or _configuration(root, config, context) != {key: value[key]
-                for key in ('job', 'configuration', 'projection', 'native_intent')}):
+            or any(actual[key].get(field)!=item for key,reference in saved.items()
+                for field,item in reference.items())):
         _fail('Host preparation binding lost its exact original configuration')
     _verify_ref(root, value['instance']['settings'], context)
     _inventory(value['input_inventory'])
@@ -200,8 +210,10 @@ def _tree(directory, value, *, complete, context=None):
     from . import instance_delete as deletion
     deletion._same(directory, value['directory_identity'])
     deletion._check_mounts(directory)
-    expected = {'source.py': value['prepared']}
-    expected.update({'inputs/' + item['name']: item for item in value['input_inventory']})
+    expected = {}
+    if 'code_version' not in value['acceptance_base']:
+        expected['source.py'] = value['prepared']
+        expected.update({'inputs/' + item['name']: item for item in value['input_inventory']})
     allowed_dirs = {'.'}
     for name in expected:
         allowed_dirs.update(parent.as_posix() for parent in Path(name).parents)
@@ -242,13 +254,34 @@ def _accepted(directory, value, config, ref, context=None, *, historical=False):
     accepted = _json(directory / 'accepted.json', context)
     destination = Path(value['records']) / 'calls' / value['call_id']
     prepared = value['prepared']
-    if (accepted.get('host_preparation') != ref or _acceptance_base(accepted) != value['acceptance_base']
+    if (not isinstance(accepted.get('host_preparation'),dict)
+            or set(accepted['host_preparation']) not in ({'path','size_bytes'},{'path','size_bytes','file_stat'})
+            or any(ref.get(key)!=item for key,item in accepted['host_preparation'].items()) or _acceptance_base(accepted) != value['acceptance_base']
             or accepted.get('scope') != value['scope'] or accepted.get('call_id') != value['call_id']
             or accepted.get('native_attempt') != value['native_attempt'] or accepted.get('interface') != value['interface']
             or accepted.get('prepared') != prepared
-            or accepted.get('source_script') != prepared['local_path']
-            or accepted.get('script') != dict(path=str(destination / 'source.py'), size_bytes=prepared['size_bytes'])
             or accepted.get('snapshot_files', []) != value['input_inventory']):
+        _fail('Durable accepted original differs from its host snapshot binding')
+    fixed_code='code_version' in accepted
+    if fixed_code:
+        try:
+            root=e._code_version_binding(config,accepted)
+            script=accepted['script']
+            if (not isinstance(script,dict) or set(script)!={'path','size_bytes','file_stat'}
+                    or script['path']!=prepared['local_path'] or script['size_bytes']!=prepared['size_bytes']
+                    or type(script['size_bytes']) is not int or script['size_bytes']<0
+                    or not isinstance(script['file_stat'],list) or len(script['file_stat'])!=4
+                    or any(type(part) is not int for part in script['file_stat'])
+                    or script['file_stat'][2]!=script['size_bytes']):
+                _fail('Durable accepted code changed its exact prepared binding')
+            # A legitimate transformed packet remains an actual control. Only
+            # the exact temporary Git entry is metadata-only at this boundary.
+            if e._code_export_entry(root,accepted) is None:
+                _verify_ref(root,script,context)
+        except (OSError,ValueError,KeyError,TypeError,AttributeError) as error:
+            _fail('Durable accepted code lost its host preparation binding')
+    elif (accepted.get('source_script')!=prepared['local_path']
+            or accepted.get('script')!=dict(path=str(destination/'source.py'),size_bytes=prepared['size_bytes'])):
         _fail('Durable accepted original differs from its host snapshot binding')
     from . import breadth
     breadth.check_binding(config.get('breadth'), accepted.get('mechanism_binding'), value['scope'])
@@ -256,7 +289,8 @@ def _accepted(directory, value, config, ref, context=None, *, historical=False):
     if not isinstance(parent, dict) or 'candidate_id' not in parent:
         _fail('Durable accepted original has no exact parent')
     if historical:
-        originals = [('source.py', prepared), *(('inputs/' + item['name'], item) for item in value['input_inventory'])]
+        originals = ([] if fixed_code else [('source.py', prepared),
+            *(('inputs/' + item['name'], item) for item in value['input_inventory'])])
         for name, original in originals:
             actual = e.proof(directory / name, context=context)
             if any(actual[key] != original[key] for key in ('size_bytes',)):
@@ -354,15 +388,24 @@ def retained_preparations(root, records, *, context=None):
             resolved = False
             if destination.exists():
                 accepted = _json(destination / 'accepted.json', context)
-                if accepted.get('host_preparation') == ref:
+                reference=accepted.get('host_preparation')
+                if (isinstance(reference,dict)
+                        and set(reference) in ({'path','size_bytes'},{'path','size_bytes','file_stat'})
+                        and all(ref.get(key)==item for key,item in reference.items())):
                     # Historical verification uses snapshot bytes but the original inode
                     # fence applies only when no legitimate restore changed them.
                     historical = dict(value, directory_identity=_identity(destination))
                     _accepted(destination, historical, config, ref, context, historical=True)
                     originals = {path.relative_to(root).as_posix(): ref,
                         (destination / 'accepted.json').relative_to(root).as_posix(): e.proof(destination / 'accepted.json', context=context)}
-                    originals.update({(destination / name).relative_to(root).as_posix(): e.proof(destination / name, context=context)
-                        for name in ['source.py', *('inputs/' + item['name'] for item in value['input_inventory'])]})
+                    if 'code_version' in accepted:
+                        if e._code_export_entry(root,accepted) is None:
+                            packet=Path(accepted['script']['path'])
+                            name=(packet.relative_to(root).as_posix() if packet.is_relative_to(root) else str(packet))
+                            originals[name]=e.proof(packet,context=context)
+                    else:
+                        originals.update({(destination / name).relative_to(root).as_posix(): e.proof(destination / name, context=context)
+                            for name in ['source.py', *('inputs/' + item['name'] for item in value['input_inventory'])]})
                     restored = _historical_owner(root, value, originals, context)
                     if not restored and _identity(destination) != value['directory_identity']:
                         _fail('Original published snapshot directory identity changed')
@@ -375,12 +418,18 @@ def retained_preparations(root, records, *, context=None):
             receipt = _json(path, context)
             kinds = {'.discard.intent.json':'discard_partial_snapshot',
                 '.discard.outcome.json':'partial_snapshot_discarded', '.published.json':'accepted_snapshot_published'}
-            if (token not in bindings or receipt.get('binding') != bindings[token]
+            reference=receipt.get('binding')
+            if (token not in bindings or not isinstance(reference,dict)
+                    or set(reference) not in ({'path','size_bytes'},{'path','size_bytes','file_stat'})
+                    or any(bindings[token].get(key)!=item for key,item in reference.items())
                     or receipt.get('version') != 1 or receipt.get('kind') != kinds[suffix]):
                 _fail('Host preparation operation receipt lost its exact binding')
             if suffix == '.discard.outcome.json':
                 intent_path = calls / (token + '.discard.intent.json')
-                if receipt.get('intent') != e.proof(intent_path, context=context):
+                reference=receipt.get('intent')
+                _verify_ref(root,reference,context)
+                actual=e.proof(intent_path,context=context)
+                if any(actual.get(key)!=item for key,item in reference.items()):
                     _fail('Host preparation discard outcome lost its original intent')
     return rows
 
@@ -394,7 +443,7 @@ def _authority(root, value, config, accepted, context, *, directory=None):
     from . import execution_authority as authority, budget
     for ref in refs.values():
         _verify_ref(root, ref, context)
-    permit = authority._permit(root, refs['authority'], config, accepted['execution_target'],
+    permit = authority._permit(root, {key:refs['authority'][key] for key in ('path','size_bytes')}, config, accepted['execution_target'],
         value['call_id'], None, authority.host_secret(root))
     if any(permit[key] != refs[key] for key in ('allocation', 'request', 'decision')):
         _fail('Original accepted authority references changed')
@@ -414,7 +463,7 @@ def _authority(root, value, config, accepted, context, *, directory=None):
             or allocation.get('call_id') != value['call_id']
             or any(binding.get(key) != expected[key] for key in ('scope', 'native_attempt', 'interface'))
             or allocation.get('native_intent') != request.get('native_intent')
-            or request.get('native_intent') != native_intent
+            or any(native_intent.get(key)!=item for key,item in request['native_intent'].items())
             or request.get('call_id') != value['call_id'] or c.record_ref(root / request.get('job', {})['path']) != value['scope']['job_ref']
             or decision.get('request') != refs['request'] or permit.get('decision') != refs['decision']
             or decision.get('nonce_hash') != request.get('nonce_hash')
@@ -435,7 +484,12 @@ def _authority(root, value, config, accepted, context, *, directory=None):
         directory = directory or Path(value['records']) / value['snapshot']
         accepted_ref = e.proof(directory / 'accepted.json', context=context)
         accepted_ref['path'] = canonical.relative_to(root).as_posix()
-        if reservation['bound'] != dict(accepted=accepted_ref, prepared=value['prepared']):
+        bound=reservation['bound']
+        saved=bound.get('accepted')
+        if (set(bound)!={'accepted','prepared'} or bound['prepared']!=value['prepared']
+                or not isinstance(saved,dict) or set(saved) not in (
+                    {'path','size_bytes'},{'path','size_bytes','file_stat'})
+                or any(accepted_ref.get(key)!=item for key,item in saved.items())):
             _fail('Original reservation already binds another acceptance')
 
 
@@ -454,9 +508,10 @@ def discard_owned_snapshot(config, binding_ref, *, reason, context):
     root = experiment_client.root_for_configuration(config)
     records = Path(config['record_dir'])
     path = _verify_ref(root, binding_ref, context)
-    value, original, ref = _binding(root, records, path, context)
-    if config != original or binding_ref != ref:
+    value, original, current_ref = _binding(root, records, path, context)
+    if config != original or any(current_ref.get(key)!=item for key,item in binding_ref.items()):
         _fail('Snapshot cleanup escaped its original writer')
+    ref = dict(binding_ref)
     _live(root, value)
     snapshot = files.check_path(records / value['snapshot'])
     intent_path = path.with_name(value['snapshot_token'] + '.discard.intent.json')
@@ -467,21 +522,36 @@ def discard_owned_snapshot(config, binding_ref, *, reason, context):
         directory_identity=value['directory_identity'], reason=reason)
     if intent_path.exists():
         prior = _json(intent_path, context)
-        if any(prior.get(key) != intent[key] for key in ('version', 'kind', 'binding', 'directory_identity')):
+        _verify_ref(root,prior['binding'],context)
+        if (any(prior.get(key)!=intent[key] for key in ('version','kind','directory_identity'))
+                or any(current_ref.get(key)!=item for key,item in prior['binding'].items())):
             _fail('Snapshot discard retry changed its original operation')
         intent = prior
+        ref = prior['binding']
     if snapshot.exists():
         if (snapshot / 'accepted.json').exists():
             _fail('Durable accepted snapshot requires publication, not partial discard', 'preparation_publish_required')
         _tree(snapshot, value, complete=False, context=context)
         from . import instance_delete as deletion
         deletion._preflight_tree(snapshot, value['directory_identity'], context=context)
-        _receipt(intent_path, intent, context)
+        if not intent_path.exists():_receipt(intent_path, intent, context)
         deletion._remove_tree(snapshot, value['directory_identity'], context=context)
     elif not intent_path.exists():
         _fail('Missing partial snapshot has no original discard intent')
-    _receipt(outcome, dict(version=1, kind='partial_snapshot_discarded', binding=ref,
-        intent=e.proof(intent_path, context=context)), context)
+    if outcome.exists():
+        prior=_json(outcome,context)
+        _verify_ref(root,prior['binding'],context)
+        _verify_ref(root,prior['intent'],context)
+        actual_intent=e.proof(intent_path,context=context)
+        if (set(prior)!={'version','kind','binding','intent'} or prior.get('version')!=1
+                or prior.get('kind')!='partial_snapshot_discarded'
+                or any(current_ref.get(key)!=item for key,item in prior['binding'].items())
+                or any(actual_intent.get(key)!=item for key,item in prior['intent'].items())):
+            _fail('Snapshot discard outcome changed its original operation')
+        ref=prior['binding']
+    else:
+        _receipt(outcome, dict(version=1, kind='partial_snapshot_discarded', binding=ref,
+            intent=e.proof(intent_path, context=context)), context)
     return _result(value, ref, 'partial_discarded')
 
 

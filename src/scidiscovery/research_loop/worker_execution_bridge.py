@@ -57,7 +57,7 @@ def local_process_launch(config, accepted, command, cwd, *, operation_context=No
         _LOCAL_LAUNCH_CONTEXT.reset(token)
 
 
-def _arguments(arguments, work):
+def _arguments(arguments, work, config=None):
     from .experiments import CallerError
     if (not isinstance(arguments,list) or not 1<=len(arguments)<=128
             or any(not isinstance(arg,str) or '\x00' in arg or len(arg.encode())>4096 for arg in arguments)
@@ -79,8 +79,16 @@ def _arguments(arguments, work):
             if (path.resolve()!=path or not path.is_relative_to(work)
                     or path==work):
                 raise CallerError('Use an ordinary scientific file inside the assigned task workspace; do not use links or parent directories.')
-            if option!='--output' and not path.exists():
-                raise CallerError('The selected scientific input is missing. Write or select its task file, then check exp help <command>.',error='scientific_input_not_found')
+            if option!='--output':
+                try:
+                    if option=='--experiment-dir':
+                        if not path.is_dir():raise FileNotFoundError(path)
+                    elif config is not None:
+                        from . import experiment_client
+                        experiment_client.input_reference(config,path)
+                    elif not path.is_file():raise FileNotFoundError(path)
+                except FileNotFoundError:
+                    raise CallerError('The selected scientific input is missing. Write or select its task file, then check exp help <command>.',error='scientific_input_not_found') from None
             value=str(path)
         result.extend([option,value]);index+=2
     return result
@@ -163,9 +171,9 @@ def _configuration(server):
 
 
 def _execute(server, arguments):
-    arguments=_arguments(arguments,server.work)
     from . import experiments as e
     config=_configuration(server)
+    arguments=_arguments(arguments,server.work,config)
     from . import contracts as c,experiment_client,budget
     deadline=_bridge_deadline(experiment_client.root_for_configuration(config),config)
     c.write(server.record/'bridge-operation.json',dict(boot_id=budget.clock_stamp()['boot_id'],deadline_boottime=deadline))
@@ -214,40 +222,102 @@ def _call_evidence(config, call_id):
     return value
 
 
-def _verify_calls(config, calls):
+def _verify_calls(config, calls, *, arguments=None, response=None):
     """Pure original-byte verification; no factory, backend query or replay."""
     from . import experiments as e
+    purpose=_request_consumption(arguments) if calls and arguments is not None else None
+    result=response.get('result',{}) if isinstance(response,dict) else {}
+    consume=(purpose is not None and purpose.command=='collect' and result.get('status')=='collected')
+    fields=('path','size_bytes','file_stat')
+    def bound(item):
+        reference={key:item[key] for key in fields if key in item}
+        if any(e.proof(reference['path']).get(key)!=saved for key,saved in reference.items()):
+            raise e.IntegrityError('Cached submission original changed')
     complete=True
     for call in calls:
-        directory=e.Records(config).directory(call['call_id'])
+        records=e.Records(config);directory=records.directory(call['call_id'])
         current=_call_evidence(config,call['call_id'])
-        if set(call)!=set(current) or any(value is not None and current[key]!=value for key,value in call.items()):
+        if set(call)!=set(current) or any(value is not None and (
+                not isinstance(value,dict) and current[key]!=value or isinstance(value,dict)
+                and (not isinstance(current[key],dict)
+                    or any(current[key].get(field)!=saved for field,saved in value.items())))
+                for key,value in call.items()):
             raise e.IntegrityError('Cached submission original call changed')
-        accepted=e.Records(config).accepted(call['call_id'])
-        if (accepted['script']['path']!=str(directory/'source.py')
-                or e.proof(directory/'source.py')!=accepted['script']):
-            raise e.IntegrityError('Cached submission source snapshot changed')
-        for item in accepted.get('snapshot_files',[]):
-            relative=Path(item['name'])
-            if relative.is_absolute() or '..' in relative.parts or relative.as_posix()!=item['name']:
-                raise e.IntegrityError('Cached submission snapshot namespace changed')
-            actual=e.proof(directory/'inputs'/relative)
-            if any(actual[key]!=item[key] for key in ('size_bytes',)):
-                raise e.IntegrityError('Cached submission input snapshot changed')
-        if current['completed'] is not None:
-            completed=json.loads(e.read(directory/'completed.json'))
-            for item in completed.get('proofs',[]):
-                if e.proof(item['path'])!=item:
-                    raise e.IntegrityError('Cached submission terminal original changed')
-            for item in completed.get('outputs',[]):
-                if e.proof(item['path'])!={key:item[key] for key in ('path','size_bytes')}:
-                    raise e.IntegrityError('Cached submission output original changed')
+        accepted=records.accepted(call['call_id']);selected=[];source_controls=()
+        if current['observation'] is None and accepted.get('execution_authority') is not None:
+            body=accepted.get('interface',{}).get('config_record')
+            if isinstance(body,dict) and body.get('record_dir') is not None:
+                from . import experiment_client
+                frozen=dict(body,execution_interface=accepted['interface'])
+                if experiment_client.root_for_configuration(frozen,allow_standalone=True) is not None:
+                    source_controls=e._source_control_metadata(frozen,accepted)['control_paths']
         if current['observation'] is not None:
             observed=json.loads(e.read(directory/'execution-observation.json'))
-            e.verify_observation(observed,lambda item:Path(item['path']),interface=accepted['interface'])
+            e.verify_observation(observed,lambda item:Path(item['path']),
+                interface=accepted['interface'],verify_files=False)
+            if consume and call['call_id']==purpose.call_id:
+                # Bind only outputs returned in this bounded cached response.
+                # Reading a cache never reruns the frozen public projection.
+                selected=observed.get('scientific_outputs',observed['outputs'])
         elif current['retirement'] is not None:
             value=json.loads(e.read(directory/'submission-retirement.json'))
-            e.verify_retirement(value,lambda item:Path(item['path']),interface=accepted['interface'])
+            science,controls=e._observation_file_roles(None,accepted,{},
+                directory=directory,source_controls=source_controls)
+            script={key:accepted['script'][key] for key in fields if key in accepted['script']}
+            e.verify_retirement(value,lambda item:Path(item['path']),
+                interface=accepted['interface'],verify_files=script['path'] in controls or script not in science)
+        else:
+            completed=(json.loads(e.read(directory/'completed.json'))
+                if current['completed'] is not None else {})
+            if completed and any(completed.get(key)!=accepted.get(key)
+                    for key in ('call_id','scope','mechanism_binding')):
+                raise e.IntegrityError('Cached submission terminal binding changed')
+            science,controls=e._observation_file_roles(None,accepted,completed,
+                directory=directory,source_controls=source_controls)
+            for item in accepted.get('snapshot_files',[]):
+                relative=Path(item['name'])
+                if relative.is_absolute() or '..' in relative.parts or relative.as_posix()!=item['name']:
+                    raise e.IntegrityError('Cached submission snapshot namespace changed')
+            for item in [accepted['script'],*completed.get('proofs',[])]:
+                reference={key:item[key] for key in fields if key in item}
+                if item['path'] in controls or reference not in science:bound(item)
+            if accepted.get('execution_authority') is not None:bound(accepted['execution_authority'])
+            if isinstance(accepted.get('tcad'),dict):
+                for key in ('prepared_ref','authority'):
+                    item=accepted['tcad'].get(key)
+                    if isinstance(item,dict) and 'path' in item:bound(item)
+            if (directory/'submission.json').exists():records.external(call['call_id'])
+            process=directory/'process.json'
+            if accepted.get('interface',{}).get('terminal_evidence')=='local_process' and process.exists():
+                identity=json.loads(e.read(process))
+                if (not isinstance(identity,dict) or identity.get('task_ref')!=dict(path=str(directory/'accepted.json'))
+                        or any(type(identity.get(key)) is not int or identity[key]<=0
+                            for key in ('pid','start_ticks','pgid','sid'))):
+                    raise e.IntegrityError('Cached submission process binding changed')
+            if consume and call['call_id']==purpose.call_id:
+                selected=[*completed.get('outputs',[])]
+                if isinstance(completed.get('model'),dict):selected.append(completed['model'])
+                selected.extend(item for item in completed.get('proofs',[])
+                    if Path(item['path']).parent==directory and Path(item['path']).name in {'stdout.raw','stderr.raw'})
+        if consume and call['call_id']==purpose.call_id:
+            outputs=result.get('outputs')
+            if not isinstance(outputs,list):raise e.IntegrityError('Cached collection outputs changed')
+            for output in outputs:
+                if not isinstance(output,dict):raise e.IntegrityError('Cached collection output is malformed')
+                path=output.get('path',output.get('local_path'))
+                from . import experiment_client, contracts as c
+                root=experiment_client.root_for_configuration(config,allow_standalone=True)
+                work=c.workspace(root,config['scope']['step']) if root is not None else None
+                matches=[]
+                for item in selected:
+                    target=(str(work/'work/retained-experiments'/call['call_id']/'outputs'/item['name'])
+                        if work is not None and 'name' in item else item.get('path'))
+                    if (path not in {item.get('path'),target} or item.get('size_bytes')!=output.get('size_bytes')
+                            or 'name' in item and item['name']!=output.get('name')):continue
+                    matches.append(dict({key:item[key] for key in fields if key in item},path=path))
+                if not matches or any(item!=matches[0] for item in matches):
+                    raise e.IntegrityError('Cached collection lost its declared original output')
+                bound(matches[0])
         if call['observation'] is None and call['retirement'] is None:complete=False
     return complete
 
@@ -316,18 +386,19 @@ def _handle(server, raw, *, retained=False):
                     or binding['step']!=server.client['step']
                     or type(binding['attempt']) is not int or binding['attempt']<0
                     or binding['configuration'].get('scope')!=server.configuration['scope']
-                    or binding['submission']!=e.proof(claim/'submit.json')):
+                    or any(e.proof(claim/'submit.json').get(key)!=item for key,item in binding['submission'].items())):
                 raise ValueError('Submission original binding differs')
             response_path=claim/'response.json';outcome=claim/'outcome.json'
             if response_path.exists() and outcome.exists():
                 expected=c.read(c.regular(outcome))
                 if (not isinstance(expected,dict) or set(expected)!={'submission','response','calls'}
-                        or expected['submission']!=e.proof(claim/'binding.json')
-                        or expected['response']!=e.proof(response_path)
+                        or any(e.proof(claim/'binding.json').get(key)!=item for key,item in expected['submission'].items())
+                        or any(e.proof(response_path).get(key)!=item for key,item in expected['response'].items())
                         or not isinstance(expected['calls'],list)):
                     raise ValueError('Submission original result differs')
                 response=json.loads(_read_file(response_path))
-                if not _verify_calls(server.configuration,expected['calls']):response=_pending_cache(response,expected['calls'])
+                if not _verify_calls(server.configuration,expected['calls'],
+                        arguments=request['arguments'],response=response):response=_pending_cache(response,expected['calls'])
             else:response=_unknown()
         else:
             _publish(claim/'submit.json',raw)
@@ -336,7 +407,7 @@ def _handle(server, raw, *, retained=False):
             before={path.name for path in e.Records(server.configuration).calls()}
             response=_unknown() if retained else _execute(server,request['arguments'])
             calls=[] if retained else _response_calls(server,request,response,before)
-            _verify_calls(server.configuration,calls)
+            _verify_calls(server.configuration,calls,arguments=request['arguments'],response=response)
             # A fresh e.main return owns its verified pending state and handle.
             # Only reuse of an older pending response is qualified as unknown.
             response=dict(response,submission_ref=reference,request=request)
@@ -655,6 +726,18 @@ def main(argv=None):
         response['result']['handoff']=managed_wait.handoff(None,response['result'],'run')
     print(json.dumps(response['result'],ensure_ascii=False,allow_nan=False))
     return response['code']
+
+
+def _request_consumption(arguments):
+    """Interpret the current request without resolving any scientific paths."""
+    from . import experiments as e
+    if (not isinstance(arguments,list) or not 1<=len(arguments)<=128
+            or any(not isinstance(arg,str) or '\x00' in arg or len(arg.encode())>4096 for arg in arguments)
+            or arguments[0] not in COMMANDS):
+        raise e.CallerError('Choose an existing scientific command with exp help.')
+    parser,_=e._cli_parser(configuration=False)
+    try:return parser.parse_args(arguments)
+    except SystemExit:raise e.CallerError('Check required options with exp help <command>.') from None
 
 
 if __name__=='__main__':raise SystemExit(main())

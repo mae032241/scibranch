@@ -2,15 +2,16 @@
 
 [简体中文](ARCHITECTURE.zh-CN.md) | English
 
-Control does not hash scientific content by default. Hashing is restricted to
-approval bindings and small control requests that require durable idempotency;
-these helpers must not traverse scientific files, code, logs, observations, inputs,
-results, Skills or archives. Explicit scientific tools may use their own algorithms
+Control does not hash scientific data or outputs by default. Hashing is restricted
+to approval bindings, small control requests that require durable idempotency and
+the host-owned Git code capture described below. Approval/idempotency helpers must
+not traverse scientific files, code, logs, observations, inputs, results, Skills or
+archives. Explicit scientific tools may use their own algorithms
 on selected evidence; that is separate from control identity. Protocol 26 uses
 `record_ref = {"path": "/absolute/original"}` and
 `file_ref = {"path": "/absolute/original", "size_bytes": N}`. Control bindings use
 `*_ref` fields; paths, producers and lifecycle identities replace content digests.
-Managed object paths use UUIDs, without content deduplication or hash caches.
+Scientific archive object paths use UUIDs, without content deduplication or hash caches.
 Archive v4, checkpoint v3 and fork manifest v2 follow this contract. Earlier
 protocols and packages are incompatible with current advancement/restoration;
 originals are preserved without migration. Read-only Linux mounts protect selected
@@ -190,13 +191,51 @@ host services that slot for the native attempt's lifetime and writes responses
 automatically. External mode leaves service ownership with its declared launcher.
 Neither path adds an agent, daemon, UDS or FIFO.
 
+New W execution code belongs in the current scientific workspace's `code/`, with
+data, logs and outputs outside that directory. Local
+`--experiment-dir experiments/<name>` selects an independent runtime working
+directory and captures the whole `code/` tree; `--script code/<name>/run.py` selects its entry. Without
+`--experiment-dir`, only that script is captured, including for Cov. Stop editing
+the selected code during capture. Capture accepts ordinary files and real
+directories, rejects symlinks and special files, and defaults to 1 MiB per file,
+50 MiB per tree and 4,096 files. It does not capture the experiment working
+directory, scientific data or execution outputs.
+
+Before `adapter.prepare`, the host pins the exact original call in an
+instance-private Git repository and retains the seven-field `code_version`:
+`version`, `object_format`, `commit`, `tree_path`, `selection`, `entry` and
+`logical_root`. This is a narrow code-identity exception to the hash rule, not
+scientific qualification, execution permission or a change to data/output identity.
+Adapters cannot supply or alter this host binding. An export is a temporary
+read-only execution view, not a permanent scientific original. The supported
+launch path overlays the entire selected logical code directory with the fixed
+export; even a single-file selection hides mutable draft siblings. The independent
+runtime working directory and its `artifacts/` remain writable.
+
+Same-call query, result, collection and cleanup do not require an export that has
+already been removed. Actual code consumption requires the retained commit and
+its original call pin, and materializes that version without falling back to a
+mutable draft. New compiler records use `code_version` without an `author`
+snapshot and retain their original UUID identity; pre-Git records retain their
+saved interpretation. Ordinary execution-local `file_stat` fingerprints supplement
+path/size checks where needed; they do not add fingerprints to global materials,
+history or qualification references. Original authorization, budgets, deadlines
+and unknown-call reconciliation remain unchanged.
+
+This G1 code path retains the existing scientific data/output retention below.
+G2 data-reference changes and G3 archive/fork consumer changes are not implemented;
+the existing archive/fork sections do not establish complete lifecycle support for
+new Git-backed runs. Real production validation of default native, registered Cov
+and Codex sandbox namespaces is deferred until after G3 through an independent
+user CLI run. Source changes do not establish a real sandbox guarantee.
+
 The default local command backend resolves the selected Codex installation's native
 binary and uses its sandbox with a restricted scientific subprocess file view. The
-accepted directory snapshot is read-only at its original scientific path, with a
-separate writable `artifacts/`; a source-only call maps its sealed script back to
-its scientific source path. The backend receives runtime files, the scientific
-workspace and a task-native permission configuration, without native authentication,
-provider configuration, control originals or the submission slot. The native Worker
+accepted Git code export is read-only at its logical scientific code directory;
+pre-Git calls retain their saved directory/script snapshot behavior. The backend
+receives runtime files, the scientific workspace and a task-native permission
+configuration, without native authentication, provider configuration, control
+originals or the submission slot. The native Worker
 and backend honor the same supported legacy `workspace-write` declaration, including
 declared network access and temporary-directory exclusions, interpreted equivalently
 for their respective working directories, `TMPDIR` values and namespaces. The
@@ -313,6 +352,7 @@ All listed files are in `src/scidiscovery/research_loop/` unless stated otherwis
 | Scientific contracts and originals | `contracts.py`, `semantic.py`, `instance_science.py` |
 | Candidates and delivery | `selection.py`, `delivery.py`, `worker_delivery.py` |
 | Execution and original-call recovery | `experiments.py`, `managed_wait.py`, `local_experiments.py`; domain adapters |
+| Host-owned selected code and temporary exports | `code_versions.py`, `experiment_client.py`, `execution_inputs.py` |
 | Local W submission lifetime and scientific subprocess view | `native.py`, `worker_execution_bridge.py`, `native_execution.py` |
 | Provenance, independent review, approval | `qualification.py`, `formal_review.py`, `execution_inputs.py`, `execution_authority.py` |
 | Budget and execution resources | Original control ledger in `budget.py` |

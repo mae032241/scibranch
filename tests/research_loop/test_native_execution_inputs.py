@@ -612,3 +612,127 @@ def test_native_compile_retains_distinct_originals_for_equal_package_bytes(chain
     assert accepted['source_script']==str(first)
     assert retained.read_bytes()==first.read_bytes()
     assert backend.submits==0
+
+
+from test_mutable_run_inputs import fixed_code
+
+
+@pytest.fixture
+def compiler_case(tmp_path, monkeypatch):
+    """Synthetic admission only; no CLI, native launcher or scientific backend."""
+    root = tmp_path / 'instance'; work = c.workspace(root, 2)
+    job = dict(step=2, role='W', worker_view_version=1, global_materials=[],
+        direct_refs=[], direct_materials=[], selected_inputs=[])
+    job_path = root / 'jobs/002.json'; c.write(job_path, job)
+    intent_path = root / 'native-evidence/002/native-intent.json'
+    c.write(intent_path, dict(task_ref=c.record_ref(job_path)))
+    contract = dict(key='implementation_authoring')
+    config = dict(worker_view_version=1,
+        record_dir=str(root / 'host-runtime/experiment-control/002/records'),
+        scope=dict(step=2, role='W', job_ref=c.record_ref(job_path)), native_attempt=dict(number=0),
+        execution_interface=dict(public_capabilities=[contract]))
+    c.write(root / 'host-runtime/experiment-control/002/interfaces/000.json', config)
+    author = work / 'code/author.json'; author.parent.mkdir(parents=True)
+    author.write_bytes(b'{"author":"v1"}\n')
+    capability = root / 'operator-capability.json'; c.write(capability, dict(fixture=True))
+    output = root / 'host-runtime/experiment-control/002/implementations/I001/package.json'
+    output.parent.mkdir(parents=True)
+    host = object.__new__(inputs.NativeInputHost)
+    host.root, host.job, host.config = root, job, config
+    host.intent = inputs.q._ref(root, intent_path)
+    monkeypatch.setattr(authority, '_remaining', lambda *args: (None, 60.))
+    monkeypatch.setattr(c, 'settings', lambda *args: {})
+    receipts = []; save = inputs.q._save
+
+    def saved(owner, path, value):
+        ref = save(owner, path, value)
+        if path.name == 'compiler.json':receipts.append((path, ref))
+        return ref
+
+    monkeypatch.setattr(inputs.q, '_save', saved)
+    return dict(host=host, author=author, output=output, receipts=receipts,
+        options=dict(slots=[], aliases={}, capability=inputs.q._identity(capability), contract=contract))
+
+
+def test_compiler_git_builder_reads_commit_after_draft_edit_and_export_cleanup(compiler_case, fixed_code, monkeypatch):
+    from scidiscovery.research_loop import code_versions
+    case = compiler_case; host = case['host']; before = case['author'].read_bytes()
+    calls = []; exports = []; materialize = code_versions.materialize
+    capture = code_versions.capture; cleanup = code_versions.cleanup_export
+
+    def captured(root, **options):
+        calls.append(options['call_id'])
+        return capture(root, **options)
+
+    def exported(root, **options):
+        result = materialize(root, **options); exports.append(result)
+        case['author'].write_bytes(b'{"author":"v2"}\n')
+        assert options['call_id'] == calls[0]
+        return result
+
+    def cleaned(root, **options):
+        assert options['call_id'] == calls[0]
+        return cleanup(root, **options)
+
+    monkeypatch.setattr(code_versions, 'capture', captured)
+    monkeypatch.setattr(code_versions, 'materialize', exported)
+    monkeypatch.setattr(code_versions, 'cleanup_export', cleaned)
+    received = []
+    result = host.compile(case['author'], case['output'], **case['options'],
+        builder=lambda raw, slots: received.append((raw, slots)) or b'{"package":"v1"}\n')
+    receipt, proof = case['receipts'][0]; value = c.read(receipt)
+    assert received == [(before, [])] and receipt.parent.name == calls[0]
+    assert set(value['code_version']) == {'version','object_format','commit','tree_path','selection','entry','logical_root'}
+    assert not {'author','author_origin'} & set(value) and value.get('author_input') is None
+    assert not (receipt.parent / 'author.json').exists()
+    assert all(set(value[key])=={'path','size_bytes'} for key in ('job','configuration','native_intent','capability','capability_source'))
+    assert set(value['output'])=={'path','size_bytes','file_stat'}
+    assert len(exports) == 1 and not exports[0].exists()
+    assert 'no execution permission' in result['qualification']
+    case['author'].unlink()
+    assert inputs.verify_compilation(host.root, proof) == value
+    assert case['output'].read_bytes() == b'{"package":"v1"}\n'
+
+
+@pytest.mark.parametrize('damage', ['mixed_author', 'schema', 'pin', 'package'])
+def test_compiler_git_verification_rejects_changed_binding_or_package(compiler_case, fixed_code, damage):
+    case = compiler_case; host = case['host']
+    host.compile(case['author'], case['output'], **case['options'], builder=lambda raw, slots: b'{}')
+    receipt, proof = case['receipts'][0]; value = c.read(receipt)
+    assert inputs.verify_compilation(host.root,proof)==value
+    if damage == 'pin':
+        fixed_code['bindings'].clear()
+    elif damage == 'package':
+        case['output'].chmod(0o600); case['output'].write_bytes(b'{"changed":true}')
+    else:
+        if damage == 'mixed_author':value['author'] = value['capability']
+        elif damage == 'schema':value['code_version'].pop('tree_path')
+        else:value['code_version']['selection'] = 'directory'
+        receipt.chmod(0o600); c.write(receipt, value); proof = inputs.q._ref(host.root, receipt)
+    with pytest.raises(ValueError):
+        inputs.verify_compilation(host.root, proof)
+
+
+def test_compiler_git_client_package_uses_execution_fingerprint_without_changing_controls(compiler_case,fixed_code):
+    from scidiscovery.operations.execution import AdapterCapability
+    from scidiscovery.research_loop import qualification as q
+    case=compiler_case;host=case['host'];work=c.workspace(host.root,2)
+    capability=AdapterCapability('implementation_authoring','authoring','fixture.compiler.v1',1,
+        'application/json',b'{}',{})
+    class Adapter:
+        def capabilities(self):return (capability,)
+        def compile_implementation(self,source,aliases,output):
+            assert aliases=={}
+            return host.compile(source,output,**dict(case['options'],contract=host.config['execution_interface']['public_capabilities'][0]),
+                builder=lambda raw,slots:b'{"package":"fixed"}')
+    adapter=Adapter();host.config['execution_interface']['public_capabilities']=e._public_capabilities(adapter)
+    c.write(host.root/'host-runtime/experiment-control/002/interfaces/000.json',host.config)
+    public=work/'artifacts/implementation.json';public.parent.mkdir(parents=True)
+    result=e.compile_implementation.__wrapped__(host.config,adapter,case['author'],{},public)
+    receipt,reference=case['receipts'][0];compiler=inputs.verify_compilation(host.root,reference)
+    package=Path(compiler['output']['path']);client=c.read(package.parent/'client.json')
+    assert result['status']=='compiled' and client['package']==compiler['output']==e.proof(package)
+    assert set(client['package'])=={'path','size_bytes','file_stat'}
+    assert all(set(compiler[key])=={'path','size_bytes'} for key in ('job','configuration','native_intent','capability'))
+    material=dict(path='inputs/parents/002/artifacts/implementation.json',source=str(public),size_bytes=public.stat().st_size)
+    assert inputs.verify_compilation(host.root,reference,material=material,client_binding=q._ref(host.root,package.parent/'client.json'))==compiler

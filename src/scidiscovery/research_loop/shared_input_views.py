@@ -288,5 +288,28 @@ def ensure_capability(*, context=None):
 def wrap(root, job, work, argv, *, context=None):
     """All local native argv, including opaque protocol/custom launchers."""
     program = ensure_capability(context=context)
-    return [program, '--unshare-user', '--die-with-parent', '--bind', '/', '/',
-        *workspace_arguments(root, work), *mount_arguments(root, job, work, private=True, context=context), '--', *argv]
+    holder, ancestors = _private_git_arguments(root)
+    return [program, '--unshare-user', '--unshare-pid', '--die-with-parent', '--bind', '/', '/', '--proc', '/proc',
+        *ancestors, *workspace_arguments(root, work), *mount_arguments(root, job, work, private=True, context=context),
+        '--ro-bind', str(holder), str(holder), '--', *argv]
+
+
+def _private_git_arguments(root):
+    """Prepare the planned holder and pin every renameable ancestor mount."""
+    try:
+        root = _exact(root)
+        for directory in (root, *root.parents):
+            if not stat.S_ISDIR(directory.lstat().st_mode):
+                raise _unsupported('private code requires ordinary directory ancestors')
+        holder = root / 'host-runtime/code-versions'
+        for directory in (holder.parent, holder):
+            _exact(directory).mkdir(mode=0o700, exist_ok=True)
+            if not stat.S_ISDIR(directory.lstat().st_mode):
+                raise _unsupported('private code requires an ordinary directory holder')
+    except OSError as error:
+        raise _unsupported('private code directory is missing or not ordinary') from error
+    arguments = []
+    for directory in reversed(holder.parents):
+        if directory != Path('/'):
+            arguments.extend(['--bind', str(directory), str(directory)])
+    return holder, arguments

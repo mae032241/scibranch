@@ -224,7 +224,7 @@ def prepare(root, step, record, work, home, args, *, standard, resume_position=N
 def _launch(value,config,accepted,command,cwd,*,public,root):
     from . import experiments as e, shared_input_views, storage_policy
     from . import contracts as c
-    from . import worker_execution_bridge
+    from . import worker_execution_bridge, experiment_client
     context=storage_policy.Deadline(config['max_seconds'],upstream=worker_execution_bridge.operation_context())
     shared_input_views.ensure_capability(context=context)
     job=c.read(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
@@ -232,23 +232,67 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
         raise e.UnsupportedExecution('Selected executor has no default scientific subprocess namespace')
     directory=e.Records(config).directory(accepted['call_id'])
     work=Path(value['workspace']);source=Path(accepted['source_script'])
-    if source.resolve()!=source or not source.is_relative_to(work):
-        raise e.UnsupportedExecution('Scientific source is outside its assigned workspace')
-    command=list(command);bindings=[]
-    if 'entry' in accepted:
-        target=Path(accepted['experiment_directory'])
-        if target.resolve()!=target or not target.is_relative_to(work):
-            raise e.UnsupportedExecution('Scientific experiment is outside its assigned workspace')
-        bindings=[('--ro-bind',directory/'inputs',target),
-            ('--bind',directory/'inputs/artifacts',target/'artifacts')]
-        command[accepted['script_index']]=str(target/accepted['entry']);cwd=str(target)
+    command=list(command);bindings=[];code_root=None
+    if 'code_version' in accepted:
+        from . import code_versions
+        if e._code_version_binding(config,accepted)!=root:
+            raise e.IntegrityError('Scientific code belongs to another exact instance')
+        version=accepted['code_version'];code_root=work/version['logical_root']
+        cwd=cwd or str(work)
+        if (code_root.resolve()!=code_root or not code_root.is_dir()
+                or Path(cwd).is_relative_to(code_root)):
+            raise e.UnsupportedExecution('Scientific working directory must remain outside the ordinary code directory')
+        if accepted.get('experiment_directory') is not None:
+            target=Path(accepted['experiment_directory'])
+            if (target.resolve()!=target or not target.is_dir() or not target.is_relative_to(work)
+                    or str(target)!=cwd):
+                raise e.UnsupportedExecution('Scientific experiment is outside its accepted working directory')
+            for item in accepted['snapshot_files']:
+                logical=target/item['name']
+                reference=experiment_client.input_reference(config,logical)
+                if any(reference[key]!=item.get(key) for key in ('path','size_bytes','file_stat')):
+                    raise e.IntegrityError('Scientific input differs from its accepted original')
+                bindings.append(('--ro-bind',Path(item['path']),logical))
+            artifacts=target/'artifacts'
+            if artifacts.resolve()!=artifacts or artifacts.exists() and not artifacts.is_dir():
+                raise e.UnsupportedExecution('Scientific artifacts require an ordinary output directory')
+            from . import local_experiments
+            bindings.append(('--bind',local_experiments.artifact_directory(config,accepted['call_id']),artifacts))
+        elif accepted.get('snapshot_files'):
+            raise e.IntegrityError('Scientific code snapshots require their accepted experiment directory')
+        command[accepted['script_index']]=str(source)
     else:
-        bindings=[('--ro-bind',directory/'source.py',source)]
-        command[accepted['script_index']]=str(source);cwd=cwd or str(work)
+        if source.resolve()!=source or not source.is_relative_to(work):
+            raise e.UnsupportedExecution('Scientific source is outside its assigned workspace')
+        if 'entry' in accepted:
+            target=Path(accepted['experiment_directory'])
+            if target.resolve()!=target or not target.is_relative_to(work):
+                raise e.UnsupportedExecution('Scientific experiment is outside its assigned workspace')
+            bindings=[('--ro-bind',directory/'inputs',target),
+                ('--bind',directory/'inputs/artifacts',target/'artifacts')]
+            command[accepted['script_index']]=str(target/accepted['entry']);cwd=str(target)
+        else:
+            bindings=[('--ro-bind',directory/'source.py',source)]
+            command[accepted['script_index']]=str(source);cwd=cwd or str(work)
     if Path(cwd).resolve()!=Path(cwd) or not Path(cwd).is_relative_to(work):
         raise e.UnsupportedExecution('Scientific working directory is outside its assigned workspace')
     if _profile(value['policy'],Path(cwd),'/task-tmp',virtual=True)!=value['backend_permission_profile']['configuration']:
         raise e.IntegrityError('Accepted scientific cwd differs from its native permission projection')
+    input_mounts=None
+    if code_root is not None:
+        input_mounts=shared_input_views.mount_arguments(root,job,work,include_skills=False,context=context)
+        targets=[Path(input_mounts[index+2]) for index,argument in enumerate(input_mounts)
+            if argument in ('--bind','--ro-bind')]
+        if any(target.is_relative_to(code_root) or code_root.is_relative_to(target) for target in targets):
+            raise e.UnsupportedExecution('Scientific input mount overlaps the selected code directory')
+        try:
+            export=code_versions.materialize(root,step=config['scope']['step'],call_id=accepted['call_id'],
+                code_version=version,context=context)
+        except (OSError,ValueError) as error:
+            raise e.IntegrityError('Accepted code version original changed or is unavailable') from error
+        bindings.insert(0,('--ro-bind',export,code_root))
+        if accepted.get('experiment_directory') is not None:
+            (Path(cwd)/'artifacts').mkdir(exist_ok=True)
     backend=Path('/task-native')
     wrapped=[value['bwrap']['path'],'--unshare-user','--unshare-pid','--unshare-ipc','--unshare-uts',
         '--die-with-parent','--new-session','--clearenv','--proc','/proc','--dev','/dev','--tmpfs','/tmp']
@@ -277,12 +321,13 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
         '--tmpfs',str(work/'work/experiment'),'--tmpfs','/task-tmp','--chdir',cwd])
     # Codex protects these metadata directories even when they were absent at
     # preparation. Supply them in the host workspace before inner sandboxing.
-    metadata_root=directory/'inputs' if 'entry' in accepted else Path(cwd)
+    metadata_root=directory/'inputs' if code_root is None and 'entry' in accepted else Path(cwd)
     for name in ('.git','.agents','.codex','.aws'):
         path=metadata_root/name
         if not path.exists():path.mkdir(mode=0o700)
     for mode,source_path,target in bindings:wrapped.extend([mode,str(source_path),str(target)])
-    wrapped.extend(shared_input_views.mount_arguments(root,job,work,include_skills=False,context=context))
+    wrapped.extend(input_mounts if input_mounts is not None else
+        shared_input_views.mount_arguments(root,job,work,include_skills=False,context=context))
     environment=dict(PATH='/usr/bin:/bin',HOME='/task-tmp',CODEX_HOME=str(backend),
         TMPDIR='/task-tmp',XDG_RUNTIME_DIR='/task-tmp',LANG='C.UTF-8',PYTHONDONTWRITEBYTECODE='1')
     for key,content in environment.items():wrapped.extend(['--setenv',key,content])

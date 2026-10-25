@@ -2,12 +2,13 @@
 
 简体中文 | [English](ARCHITECTURE.md)
 
-控制层默认不计算科学内容哈希。哈希仅限审批绑定及确实需要持久幂等的小型控制请求；
-这些入口不得遍历科学文件、代码、日志、观察、输入、结果、Skill 或归档内容。显式科学工具
+控制层默认不计算科学数据或输出哈希。哈希仅限审批绑定、确实需要持久幂等的小型控制请求，
+以及下述宿主拥有的 Git 代码捕获。审批/幂等入口不得遍历科学文件、代码、日志、观察、输入、
+结果、Skill 或归档内容。显式科学工具
 可以按自己的算法处理选定证据，这不属于控制身份计算。协议 26 使用
 `record_ref = {"path": "/absolute/original"}` 与
 `file_ref = {"path": "/absolute/original", "size_bytes": N}`，控制绑定采用 `*_ref` 字段，
-以路径、producer 和生命周期身份取代内容摘要。受管对象采用 UUID 路径，不按内容去重，
+以路径、producer 和生命周期身份取代内容摘要。科学归档对象采用 UUID 路径，不按内容去重，
 也不保留哈希缓存。archive v4、checkpoint v3 与 fork manifest v2 遵循此合同。
 旧协议和旧包不兼容当前推进与恢复，保留原件但不迁移。Linux 只读挂载保护科学命名空间中的
 选定输入；可信同 UID 进程仍是软边界，不承诺防止主动改写或检测内容篡改。
@@ -122,9 +123,34 @@ W 显式非空但形状损坏的 finding 作为 partial 交 A，不产生 screen
 视图由既有原生宿主在本次 native attempt 生命周期内处理提交并自动写回响应；external
 模式仍由声明的 launcher 负责。两条路径均不引入额外 Agent、daemon、UDS 或 FIFO。
 
+W 新编写的执行代码须放在当前科学工作区的 `code/`，数据、日志和输出放在该目录之外。
+Local 的 `--experiment-dir experiments/<name>` 只选独立运行工作目录，并固定整个 `code/`
+树；`--script code/<name>/run.py` 指定入口。不带 `--experiment-dir` 时只固定该脚本，Cov
+也遵循单文件选择。捕获期间须停止修改选定代码；只接受普通文件和真实目录，拒绝符号链接
+及特殊文件，默认每文件 1 MiB、每树 50 MiB、4,096 个文件。实验工作目录、科学数据和执行
+输出不进入 Git 捕获。
+
+宿主在 `adapter.prepare` 前，将准确原调用固定到实例私有 Git 仓库，并保留七字段
+`code_version`：`version`、`object_format`、`commit`、`tree_path`、`selection`、`entry`、
+`logical_root`。这是代码身份的有限哈希例外，不授科学资格、执行权限，也不改变数据/输出
+身份。adapter 不能提供或改写此宿主绑定。导出仅是临时只读执行视图，不是永久科学原件。
+受支持启动路径用固定导出覆盖整个选定逻辑代码目录；即使只选一个文件，也屏蔽可变草稿的
+兄弟文件。独立运行工作目录及其 `artifacts/` 保持可写。
+
+同一调用的 query、result、collect 和 cleanup 不依赖已删除的导出；实际消费代码须保留原
+commit 和准确调用 pin，按该版本重新物化，不回退可变草稿。新 compiler 记录使用
+`code_version`，不依赖 `author` 快照，原 UUID 身份仍保留；旧记录沿用原解释。执行局部的
+普通 `file_stat` 指纹按需补充路径/大小检查，不向全局材料、history 或 qualification 引用
+添加指纹。原授权、预算、期限及未知原调用核对规则不变。
+
+G1 仅增加这条代码路径，下述科学 data/output 留存语义保持。G2 数据引用与 G3 archive/fork
+消费方改动尚未实现；既有归档/分支章节不证明新 Git 调用已有完整生命周期支持。
+真实 production、default native、registered Cov 与 Codex sandbox 命名空间验收留到 G3 后，
+由用户独立 CLI 运行；源码改动不构成真实 sandbox 保证。
+
 默认本地命令后端解析所选 Codex 安装的原生二进制，使用其 sandbox 和受限的科学子进程
-文件视图。已接受的目录快照只读映回原科学路径，`artifacts/` 独立可写；单文件调用将
-封存脚本映回其科学源码路径。后端只获得运行时文件、科学工作区及 task-native 权限配置，
+文件视图。已接受的 Git 代码导出只读映回逻辑科学代码目录；旧调用沿用原目录/脚本快照
+语义。后端只获得运行时文件、科学工作区及 task-native 权限配置，
 不获得原生认证、provider 配置、控制原件或提交槽。原生 Worker 与后端遵守同一受支持的
 legacy `workspace-write` 声明，包括网络权限和临时目录排除，并按各自工作目录、`TMPDIR`
 和命名空间等义解释。原生 Worker 保留 `--sandbox workspace-write` 及捕获的 legacy
@@ -197,6 +223,7 @@ workspace 与框架已知路径的元数据。同用户外部宿主进程、既�
 | 科学合同、原文与成果 | `contracts.py`、`semantic.py`、`instance_science.py` |
 | 候选比较与交付 | `selection.py`、`delivery.py`、`worker_delivery.py` |
 | 执行注册与原调用恢复 | `experiments.py`、`managed_wait.py`、`local_experiments.py`；领域插件提供 adapter |
+| 宿主选定代码与临时导出 | `code_versions.py`、`experiment_client.py`、`execution_inputs.py` |
 | 本地 W 提交生命周期与科学子进程视图 | `native.py`、`worker_execution_bridge.py`、`native_execution.py` |
 | 来源、正式独审和执行批准 | `qualification.py`、`formal_review.py`、`execution_inputs.py`、`execution_authority.py` |
 | 预算与累计资源 | `budget.py` 的原 control ledger |

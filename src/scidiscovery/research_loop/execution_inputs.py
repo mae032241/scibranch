@@ -405,20 +405,24 @@ def verify_compilation(root, ref, *, material=None, client_binding=None, source=
         raise q.IntegrityError('Compiler public contract changed')
     if any(value['capability'][key] != value['capability_source'][key] for key in ('size_bytes',)):
         raise q.IntegrityError('Compiler retained capability differs from its operator original')
-    q._read(root, value['capability']); q._read(root, value['author'])
-    author_origin = Path(value['author_origin']['path'])
-    if (not author_origin.is_relative_to(c.workspace(root, step))
-            or author_origin.resolve() != author_origin
-            or any(value['author'][key] != value['author_origin'][key] for key in ('size_bytes',))):
-        raise q.IntegrityError('Compiler author snapshot differs from its declared source')
-    author_input = value.get('author_input')
-    if author_input is not None:
-        author_material = resolve_native_original(root, author_input, compiler_job=job)
-        if (author_origin != c.workspace(root, step) / author_material['path']
-                or any(value['author'][key] != author_material[key] for key in ('size_bytes',))):
-            raise q.IntegrityError('Compiler author input differs from its exact bound original')
-    elif author_origin.is_relative_to(c.workspace(root, step) / 'inputs'):
-        raise q.IntegrityError('Compiler author input has no declared original contribution')
+    q._read(root, value['capability'])
+    if 'code_version' in value:
+        _verify_compiler_code(root, job, ref, value)
+    else:
+        q._read(root, value['author'])
+        author_origin = Path(value['author_origin']['path'])
+        if (not author_origin.is_relative_to(c.workspace(root, step))
+                or author_origin.resolve() != author_origin
+                or any(value['author'][key] != value['author_origin'][key] for key in ('size_bytes',))):
+            raise q.IntegrityError('Compiler author snapshot differs from its declared source')
+        author_input = value.get('author_input')
+        if author_input is not None:
+            author_material = resolve_native_original(root, author_input, compiler_job=job)
+            if (author_origin != c.workspace(root, step) / author_material['path']
+                    or any(value['author'][key] != author_material[key] for key in ('size_bytes',))):
+                raise q.IntegrityError('Compiler author input differs from its exact bound original')
+        elif author_origin.is_relative_to(c.workspace(root, step) / 'inputs'):
+            raise q.IntegrityError('Compiler author input has no declared original contribution')
     seen = set()
     for item in value['inputs']:
         if item['semantic_name'] in seen:
@@ -428,7 +432,11 @@ def verify_compilation(root, ref, *, material=None, client_binding=None, source=
         if (item['alias'] != source['path'] or type(item['size_bytes']) is not int or item['size_bytes'] != source['size_bytes']
                 or not isinstance(item['media_type'], str)):
             raise q.IntegrityError('Compiler input alias/metadata changed')
-    q._check(value['output'])
+    q._check({key:value['output'][key] for key in ('path','size_bytes')})
+    if 'file_stat' in value['output']:
+        from . import experiments as e
+        if e.proof(value['output']['path'])!=value['output']:
+            raise q.IntegrityError('Compiler output original changed')
     private_output = type(job.get('worker_view_version')) is int and job['worker_view_version'] == 1
     if private_output:
         output = Path(value['output']['path'])
@@ -449,14 +457,15 @@ def verify_compilation(root, ref, *, material=None, client_binding=None, source=
                     or binding['public_path'] != str(source) or not source.is_relative_to(c.workspace(root, step) / 'artifacts')
                     or _implementation_client(material) != expected):
                 raise q.IntegrityError('Compiler client differs from its exact scientific material and private package')
-            q._check(dict(path=material['source'], size_bytes=material['size_bytes']))
+            q._check(dict(path=material['source'],size_bytes=material['size_bytes']))
         elif client_binding is not None:
             binding, _ = verify_legacy_author_client(root, job, client_binding)
             if (binding['legacy_authorization']['compiler'] != ref or binding['public_path'] != material.get('original_source',material['source'])
                     or _implementation_client(material) != binding['client']):
                 raise q.IntegrityError('Legacy compiler client is not the exact sealed scientific material')
-            q._check(dict(path=material['source'], size_bytes=material['size_bytes']))
-        elif value['output'] != dict(path=material.get('original_source',material['source']), size_bytes=material['size_bytes']):
+            q._check(dict(path=material['source'],size_bytes=material['size_bytes']))
+        elif any(value['output'].get(key)!=item for key,item in dict(
+                path=material.get('original_source',material['source']),size_bytes=material['size_bytes']).items()):
             raise q.IntegrityError('Compiler output is not the exact sealed material')
     return value
 
@@ -518,19 +527,24 @@ def verify_original_compilation(source, ref, *, material=None, client_binding=No
         raise q.IntegrityError('Original compiler capability contract changed')
     if any(value['capability'][field] != value['capability_source'][field] for field in ('size_bytes',)):
         raise q.IntegrityError('Original compiler capability snapshot changed')
-    for opaque in ('capability', 'author'):
-        originals.resolve_ref(originals.source_for_ref(source, value[opaque]), value[opaque])
-    author = Path(value['author_origin']['path'])
-    if (not author.is_relative_to(source.logical_workspace)
-            or any(value['author'][field] != value['author_origin'][field] for field in ('size_bytes',))):
-        raise q.IntegrityError('Original compiler author snapshot changed its source')
-    if value.get('author_input') is not None:
-        author_material = _original_input(source, value['author_input'], job)
-        if author != source.logical_workspace / author_material['path'] or any(
-                value['author'][field] != author_material[field] for field in ('size_bytes',)):
-            raise q.IntegrityError('Original compiler author input changed')
-    elif author.is_relative_to(source.logical_workspace / 'inputs'):
-        raise q.IntegrityError('Original compiler author input has no declared producer')
+    originals.resolve_ref(originals.source_for_ref(source, value['capability']), value['capability'])
+    if 'code_version' in value:
+        if source.inherited:
+            raise q.IntegrityError('Inherited compiler code requires its exact NodeSource Git holder')
+        _verify_compiler_code(root, job, ref, value)
+    else:
+        originals.resolve_ref(originals.source_for_ref(source, value['author']), value['author'])
+        author = Path(value['author_origin']['path'])
+        if (not author.is_relative_to(source.logical_workspace)
+                or any(value['author'][field] != value['author_origin'][field] for field in ('size_bytes',))):
+            raise q.IntegrityError('Original compiler author snapshot changed its source')
+        if value.get('author_input') is not None:
+            author_material = _original_input(source, value['author_input'], job)
+            if author != source.logical_workspace / author_material['path'] or any(
+                    value['author'][field] != author_material[field] for field in ('size_bytes',)):
+                raise q.IntegrityError('Original compiler author input changed')
+        elif author.is_relative_to(source.logical_workspace / 'inputs'):
+            raise q.IntegrityError('Original compiler author input has no declared producer')
     seen = set()
     for item in value['inputs']:
         original = _original_input(source, item['original'], job)
@@ -541,7 +555,11 @@ def verify_original_compilation(source, ref, *, material=None, client_binding=No
         seen.add(item['semantic_name'])
     output = value['output']
     output_owner, output_path = originals.material_owner(source, dict(output, source=output['path']))
-    originals.resolve_ref(output_owner, dict(output, path=output_path))
+    actual_output=originals.resolve_ref(output_owner, dict(output, path=output_path))
+    if 'file_stat' in output and not source.inherited:
+        from . import experiments as e
+        if e.proof(actual_output)['file_stat']!=output['file_stat']:
+            raise q.IntegrityError('Compiler output original changed')
     private = job.get('worker_view_version') == 1
     if private and not _private_compile_output(root, job, config, Path(output['path']), source=source):
         raise q.IntegrityError('Original compiler output escaped its private namespace')
@@ -567,7 +585,8 @@ def verify_original_compilation(source, ref, *, material=None, client_binding=No
                     or binding['public_path'] != material.get('original_source',material['source'])
                     or _implementation_client(material, source=source) != binding['client']):
                 raise q.IntegrityError('Legacy compiler client is not the exact sealed scientific material')
-        elif output != dict(path=material.get('original_source',material['source']), size_bytes=material['size_bytes']):
+        elif any(output.get(key)!=item for key,item in dict(
+                path=material.get('original_source',material['source']),size_bytes=material['size_bytes']).items()):
             raise q.IntegrityError('Original compiler output is not its exact sealed material')
     return value
 
@@ -724,16 +743,16 @@ def execution_input_coverage(root, job, subject):
     return found[0]['compiler']
 
 
-def _local_source(root, job, item, authoring, *, source=None):
+def _local_source(root, job, item, authoring, *, source=None, logical=None):
     """Exact aliases first; remaining declared authoring bytes belong to this W."""
     path = Path(item['path']); work = c.workspace(root, job['step'])
     matches = {}
     for material in job['global_materials']:
-        if path in {root / material['source'], work / material['path']}:
+        if (logical==work/material['path'] if logical is not None else path in {root/material['source'],work/material['path']}):
             origin = dict(kind='global', material=material)
             matches[json.dumps(origin, sort_keys=True)] = origin
     for material in _bound(job):
-        if path in {Path(material['source']), work / material['path']}:
+        if (logical==work/material['path'] if logical is not None else path in {Path(material['source']),work/material['path']}):
             origin = dict(kind='producer', original=_producer(root, material, source=source))
             matches[json.dumps(origin, sort_keys=True)] = origin
     if len(matches) > 1:
@@ -761,8 +780,9 @@ def _local_authoring(work, directory):
 def local_input_sources(config, interface, payload, metadata):
     """Called by the actual adapter before acceptance; no scientific inference."""
     from . import experiments as e
+    fixed_code = 'code_version' in metadata
     if (not isinstance(interface, dict) or interface.get('version') != e.VERSION
-            or 'entry' not in metadata):
+            or ('experiment_directory' not in metadata if fixed_code else 'entry' not in metadata)):
         return None
     root = experiment_client.root_for_configuration(config, allow_standalone=True)
     if root is None:
@@ -782,9 +802,30 @@ def local_input_sources(config, interface, payload, metadata):
     if q._read(root, intent)['task_ref'] != c.record_ref(root / 'jobs' / f'{step:03d}.json'):
         raise q.IntegrityError('Local authoring has no exact native intent')
     directory = Path(metadata['experiment_directory']); authoring = _local_authoring(work, directory)
+    if fixed_code:
+        try:
+            e._code_version_binding(dict(config, execution_interface=interface),
+                dict(metadata, scope=config['scope']))
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise q.IntegrityError('Local input view lost its host-owned code selection') from error
+        names = {str((work / item['path']).relative_to(directory))
+            for item in experiment_client._input_rows(job)
+            if (work / item['path']).is_relative_to(directory)
+                and not (work / item['path']).is_relative_to(directory / 'artifacts')}
+        if (authoring is None or metadata.get('cwd') != str(directory)
+                or not isinstance(metadata.get('snapshot_files'), list)
+                or {item.get('name') for item in metadata['snapshot_files']} != names
+                or len(metadata['snapshot_files']) != len(names)):
+            raise q.IntegrityError('Local code input view changed its frozen scientific inventory')
+        for item in metadata['snapshot_files']:
+            reference = experiment_client.input_reference(config, directory / item['name'])
+            if (set(item) != {'name','path','size_bytes','file_stat'}
+                    or any(item.get(key) != reference[key] for key in ('path','size_bytes','file_stat'))):
+                raise q.IntegrityError('Local code input view requires exact frozen scientific inputs')
     return dict(job=q._ref(root, root / 'jobs' / f'{step:03d}.json'), native_intent=intent,
         configuration=q._ref(root, projection), prepared=payload.model_dump(mode='json'),
-        files=[dict(name=item['name'], origin=_local_source(root, job, item, authoring))
+        files=[dict(name=item['name'], origin=_local_source(root, job, item, authoring,
+            logical=directory/item['name']))
                for item in metadata['snapshot_files']])
 
 
@@ -822,6 +863,63 @@ def validate_local_input_sources(root, job, accepted, *, source=None):
             or q._read(root, view['native_intent'], source=source)['task_ref'] != dict(path=str(root/view['job']['path']))
             or accepted['config_record'] != {key:value for key,value in config.items() if key != 'execution_interface'}):
         raise q.IntegrityError('Local input view lost its exact host owner')
+    if 'code_version' in accepted:
+        from . import code_versions
+        if source is not None and source.inherited:
+            raise q.IntegrityError('Inherited Local code requires its exact NodeSource Git holder')
+        try:
+            if config['scope']['step'] != job['step'] or e._code_version_binding(config, accepted) != root:
+                raise ValueError('Local code belongs to another original root')
+            code_versions.verify(root, step=job['step'], call_id=accepted['call_id'],
+                code_version=accepted['code_version'])
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise q.IntegrityError('Local code version lost its exact selected source or original pin') from error
+        directory = Path(accepted['experiment_directory']); authoring = _local_authoring(work, directory)
+        if (authoring is None or accepted.get('cwd') != str(directory)
+                or not isinstance(view['files'], list)
+                or not isinstance(accepted.get('snapshot_files'), list)
+                or len(view['files']) != len(accepted['snapshot_files'])):
+            raise q.IntegrityError('Local code input view changed its scientific inventory')
+        if source is None:q.validate_inputs(root, job)
+        else:q._original_inputs(source, job)
+        edges = q._read(root, job['source_provenance'], source=source)['edges']
+        names = {str((work / item['path']).relative_to(directory))
+            for item in experiment_client._input_rows(job)
+            if (work / item['path']).is_relative_to(directory)
+                and not (work / item['path']).is_relative_to(directory / 'artifacts')}
+        seen = set(); complete = True; contributions = []
+        for declared, item in zip(view['files'], accepted['snapshot_files']):
+            name = item['name']; relative = Path(name)
+            if (set(declared) != {'name','origin'} or set(item) != {'name','path','size_bytes','file_stat'}
+                    or relative.is_absolute() or '..' in relative.parts or relative.as_posix() != name
+                    or not relative.parts or name in seen or name not in names or declared['name'] != name):
+                raise q.IntegrityError('Local code input view changed a declared scientific file')
+            seen.add(name)
+            retained = {key:item[key] for key in ('path','size_bytes','file_stat')}
+            q._check({key:retained[key] for key in ('path','size_bytes')}, source=source)
+            if e.proof(retained['path'])!=retained:
+                raise q.IntegrityError('Local code input original changed')
+            reference = experiment_client.input_reference(config, directory / relative)
+            if retained != reference:
+                raise q.IntegrityError('Local code input lost its exact scientific binding')
+            origin = declared['origin']
+            if origin != _local_source(root,job,item,authoring,source=source,logical=directory/relative):
+                raise q.IntegrityError('Local code input source differs from its frozen exact origin')
+            if origin['kind'] == 'producer':
+                native = origin['original']; material = resolve_native_original(root, native, compiler_job=job, source=source)
+                if not any(edge['kind'] == 'producer' and edge['step'] == native['producer_step']
+                        and edge['seal'] == native['producer_seal'] for edge in edges):
+                    raise q.IntegrityError('Local code input producer is absent from original source edges')
+                seal = q._read(root, native['producer_seal'], source=source)
+                contributions.append(dict(origin_step=native['producer_step'], origin_result_ref=seal['result_ref'], material=material))
+            elif origin['kind'] == 'global':
+                if not any(edge['kind'] == 'global' and edge['material'] == origin['material'] for edge in edges):
+                    raise q.IntegrityError('Local code global input is absent from original source edges')
+            else:
+                complete = False
+        if seen != names:
+            raise q.IntegrityError('Local code input view omitted a frozen scientific file')
+        return contributions if complete else None
     directory = Path(accepted['experiment_directory']); authoring = _local_authoring(work, directory)
     if source is not None:
         records = (root / 'host-runtime/experiment-control' / f'{accepted["scope"]["step"]:03d}' / 'records'
@@ -876,7 +974,7 @@ class NativeInputHost:
         self.config = config
 
     def compile(self, source, output, *, slots, aliases, capability, contract, builder):
-        from . import execution_authority as authority
+        from . import execution_authority as authority, experiments as e
         from . import shared_originals, storage_policy as storage
         _, remaining=authority._remaining(self.root, self.config)
         context=storage.Deadline(remaining)
@@ -897,21 +995,8 @@ class NativeInputHost:
                 or any(parent.is_symlink() for parent in output.parents)):
             raise ValueError('Compile source/output must be original files in this task and its host-owned output namespace'
                              if private_output else 'Compile source/output must be original files in this task and artifacts')
-        from . import atomic_files
-        source_generation=atomic_files._generation(c.regular(source).lstat())
-        authored = source.read_bytes(); source_identity = q._identity(source)
-        if atomic_files._generation(source.lstat())!=source_generation:
-            raise q.IntegrityError('Compiler author changed while reading')
-        if len(authored) != source_identity['size_bytes']:
-            raise q.IntegrityError('Compiler author changed between reading and identity capture')
-        author_input = None
-        if source.is_relative_to(work / 'inputs'):
-            found = {json.dumps(row, sort_keys=True): row for row in _bound(self.job) if work / row['path'] == source}
-            if len(found) != 1:
-                raise ValueError('Author input must name one exact frozen scientific document')
-            material = next(iter(found.values())); author_input = _producer(self.root, material)
-            if any(source_identity[key] != material[key] for key in ('size_bytes',)):
-                raise q.IntegrityError('Author read copy differs from its original scientific document')
+        from . import atomic_files, code_versions
+        logical_source=source
         if set(aliases) != {slot['semantic_name'] for slot in slots}:
             raise ValueError('Select one exact bound scientific-file alias for every slot')
         inputs = []
@@ -926,6 +1011,13 @@ class NativeInputHost:
             inputs.append(dict(slot, alias=alias, original=original, size_bytes=material['size_bytes']))
         if c.output_quota_exceeded(c.settings(self.root, self.job), (item['size_bytes'] for item in inputs)):
             raise ValueError('Scientific inputs exceed the explicit frozen handoff quota')
+        attempt = self.config['native_attempt']['number']
+        projection = self.root / 'host-runtime/experiment-control' / f'{self.config["scope"]["step"]:03d}' / 'interfaces' / f'{attempt:03d}.json'
+        invocation = dict(job=q._ref(self.root, self.root / 'jobs' / f'{self.job["step"]:03d}.json'),
+            native_intent=self.intent, configuration=q._ref(self.root, projection),
+            implementation=self.config['execution_interface'], contract=contract,
+            capability_source=capability, inputs=inputs)
+        existing = None
         if output.exists() or output.is_symlink():
             matches=[]
             for receipt in _directory(self.root,self.job['step']).glob('*/compiler.json'):
@@ -933,44 +1025,96 @@ class NativeInputHost:
                 if value.get('output',{}).get('path')==str(output):matches.append((receipt,value))
             if len(matches)!=1:
                 raise q.IntegrityError('Existing compiled output has no unique original call')
-            receipt,value=matches[0]
-            if (value.get('author_origin')!=source_identity or value.get('inputs')!=inputs
-                    or value.get('capability_source')!=capability or value.get('contract')!=contract
-                    or value.get('implementation')!=self.config['execution_interface']):
+            receipt, existing = matches[0]
+            proof = q._ref(self.root, receipt)
+            verify_compilation(self.root, proof)
+            if any(existing.get(key) != value for key, value in invocation.items()):
                 raise q.IntegrityError('Existing compiled output differs from its original invocation')
-            verify_compilation(self.root,q._ref(self.root,receipt))
-            return dict(status='compiled',path=str(output) if private_output else str(output.relative_to(work)),
-                qualification='Unreviewed compiled material; no execution permission')
-        raw = builder(authored, [{key: item[key] for key in item if key != 'alias'} for item in inputs])
-        if type(raw) is not bytes or atomic_files._generation(source.lstat()) != source_generation:
-            raise q.IntegrityError('Compiler author original changed during compilation')
-        if c.output_quota_exceeded(c.settings(self.root, self.job), [len(raw)]):
-            raise ValueError('Compiled package exceeds explicit output quota')
-        identity = uuid.uuid4().hex
+        identity = (_compiler_call_id(self.root, self.job['step'], proof)
+                    if existing is not None and 'code_version' in existing else uuid.uuid4().hex)
         directory = _directory(self.root, self.job['step']) / identity
         if directory.resolve() != directory:
             raise q.IntegrityError('Compiler original directory changed')
-        directory.mkdir(parents=True, exist_ok=True)
-        author_path = directory / 'author.json'
-        c._bind_original(source, author_path, policy=policy, context=context, root=self.root, size_bytes=source_identity['size_bytes'], source_kind='mutable')
-        c._bind_original(Path(capability['path']), directory / 'capability.json', policy=policy, context=context, root=self.root, size_bytes=capability['size_bytes'], source_kind='mutable')
-        snapshot = q._ref(self.root, directory / 'capability.json')
-        if output.exists() or output.is_symlink():
-            raise ValueError('Choose a new output; sealed packages cannot be overwritten')
-        frozen=shared_originals.publish_bytes(self.root,raw,policy=policy,context=context)
-        shared_originals.link(frozen,output,size_bytes=len(raw),
-            root=self.root,policy=policy,context=context)
-        attempt = self.config['native_attempt']['number']
-        projection = self.root / 'host-runtime/experiment-control' / f'{self.config["scope"]["step"]:03d}' / 'interfaces' / f'{attempt:03d}.json'
-        value = dict(version=1, job=q._ref(self.root, self.root / 'jobs' / f'{self.job["step"]:03d}.json'),
-            native_intent=self.intent, configuration=q._ref(self.root, projection),
-            implementation=self.config['execution_interface'], contract=contract,
-            author=q._ref(self.root, author_path), author_origin=source_identity, author_input=author_input,
-            capability_source=capability, capability=snapshot, inputs=inputs, output=q._identity(output))
-        proof = q._save(self.root, directory / 'compiler.json', value)
-        verify_compilation(self.root, proof)
-        return dict(status='compiled', path=str(output) if private_output else str(output.relative_to(work)),
+        code_version = None; cleanup_code = False
+        try:
+            # Existing pre-Git records keep their saved interpretation. A new
+            # mutable author must use the explicit current-W code selection.
+            selection = (experiment_client.code_selection(self.config, logical_source)
+                         if existing is None or 'code_version' in existing else None)
+            if selection is not None:
+                cleanup_code = True
+                code_version = code_versions.capture(self.root, step=self.job['step'], call_id=identity,
+                    **selection, context=context)
+                if existing is not None:
+                    if code_version != existing['code_version']:
+                        raise q.IntegrityError('Existing compiled output selected another exact code source')
+                else:
+                    export = code_versions.materialize(self.root, step=self.job['step'], call_id=identity,
+                        code_version=code_version, context=context)
+                    source = export / code_version['entry']
+            else:
+                if existing is not None and 'code_version' in existing:
+                    raise q.IntegrityError('Existing compiled output requires its original current-W code selection')
+                source_identity = q._identity(logical_source)
+                source = logical_source
+                author_origin = dict(source_identity, path=str(logical_source)); author_input = None
+                if logical_source.is_relative_to(work / 'inputs'):
+                    found = {json.dumps(row, sort_keys=True): row for row in _bound(self.job)
+                             if work / row['path'] == logical_source}
+                    if len(found) != 1:
+                        raise ValueError('Author input must name one exact frozen scientific document')
+                    material = next(iter(found.values())); author_input = _producer(self.root, material)
+                    if any(source_identity[key] != material[key] for key in ('size_bytes',)):
+                        raise q.IntegrityError('Author input differs from its original scientific document')
+            if existing is not None:
+                if code_version is None and (existing.get('author_origin') != author_origin
+                        or existing.get('author_input') != author_input):
+                    raise q.IntegrityError('Existing compiled output differs from its original author source')
+                return dict(status='compiled',path=str(output) if private_output else str(output.relative_to(work)),
                     qualification='Unreviewed compiled material; no execution permission')
+            source_generation = atomic_files._generation(c.regular(source).lstat())
+            authored = source.read_bytes()
+            if (atomic_files._generation(source.lstat()) != source_generation
+                    or code_version is None and (q._identity(source) != source_identity
+                        or len(authored) != source_identity['size_bytes'])):
+                raise q.IntegrityError('Compiler author changed while reading its fixed source')
+            raw = builder(authored, [{key: item[key] for key in item if key != 'alias'} for item in inputs])
+            if type(raw) is not bytes or atomic_files._generation(source.lstat()) != source_generation:
+                raise q.IntegrityError('Compiler author original changed during compilation')
+            if c.output_quota_exceeded(c.settings(self.root, self.job), [len(raw)]):
+                raise ValueError('Compiled package exceeds explicit output quota')
+            directory.mkdir(parents=True, exist_ok=True)
+            q._check(capability)
+            author_binding = dict(code_version=code_version, author_input=None)
+            from . import originals
+            if code_version is None:
+                q._check(source_identity)
+                author_path=c._bind_original(source,directory/'author.json',policy=policy,context=context,
+                    root=self.root,size_bytes=source_identity['size_bytes'],source_kind='mutable')
+                author_ref=q._ref(self.root,author_path)
+                originals.resolve_root_ref(self.root,author_ref)
+                author_binding = dict(author=author_ref, author_origin=author_origin, author_input=author_input)
+            capability_path=c._bind_original(Path(capability['path']),directory/'capability.json',policy=policy,
+                context=context,root=self.root,size_bytes=capability['size_bytes'],source_kind='mutable')
+            snapshot=q._ref(self.root,capability_path)
+            originals.resolve_root_ref(self.root,snapshot)
+            if output.exists() or output.is_symlink():
+                raise ValueError('Choose a new output; sealed packages cannot be overwritten')
+            frozen=shared_originals.publish_bytes(self.root,raw,policy=policy,context=context)
+            shared_originals.link(frozen,output,size_bytes=len(raw),root=self.root,policy=policy,context=context)
+            value = dict(version=1, **invocation, **author_binding,
+                capability=snapshot, output=e.proof(output,context=context))
+            proof = q._save(self.root, directory / 'compiler.json', value)
+            verify_compilation(self.root, proof)
+            return dict(status='compiled', path=str(output) if private_output else str(output.relative_to(work)),
+                        qualification='Unreviewed compiled material; no execution permission')
+        finally:
+            if cleanup_code:
+                try:
+                    code_versions.cleanup_export(self.root, step=self.job['step'], call_id=identity, context=context)
+                except (OSError, ValueError) as error:
+                    from . import experiments as e
+                    e._diagnostic(error, 'Compiler code export cleanup failed', config=self.config)
 
     def for_payload(self, payload, resolved_inputs):
         from . import execution_authority as authority
@@ -1004,3 +1148,27 @@ class NativeInputHost:
                 yield stream
 
         return metadata, open_original
+
+
+def _compiler_call_id(root, step, ref):
+    path = Path(root) / ref['path']; identity = path.parent.name
+    if (re.fullmatch(r'[0-9a-f]{32}', identity) is None
+            or path != _directory(root, step) / identity / 'compiler.json'):
+        raise q.IntegrityError('Compiler code version has no exact original call')
+    return identity
+
+
+
+def _verify_compiler_code(root, job, ref, value):
+    from . import code_versions
+    if ('author' in value or 'author_origin' in value or value.get('author_input') is not None):
+        raise q.IntegrityError('Compiler code version is mixed with an author snapshot or scientific input')
+    identity = _compiler_call_id(root, job['step'], ref)
+    version = value['code_version']
+    try:
+        code_versions.verify(root, step=job['step'], call_id=identity, code_version=version)
+        if (version['selection'] != 'file' or Path(version['logical_root']).parts[0] != 'code'
+                or Path(version['entry']).name != version['entry']):
+            raise ValueError('Compiler code must select one current-W code entry')
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        raise q.IntegrityError('Compiler code version lost its exact selected source or original pin') from error

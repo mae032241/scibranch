@@ -105,9 +105,9 @@ def _preview(directory, accepted, *, scientific=False, config_projection=None):
         if (directory / OUTCOME).exists():
             value = json.loads(e.read(directory / OUTCOME))
             intent = json.loads(e.read(directory / INTENT))
-            if (value['intent_ref'] != e.proof(directory / INTENT)
-                    or intent['accepted_ref'] != e.proof(directory / 'accepted.json')
-                    or intent['completed_ref'] != e.proof(directory / 'completed.json')):
+            if (any(e.proof(directory/INTENT).get(key)!=item for key,item in value['intent_ref'].items())
+                    or any(e.proof(directory/'accepted.json').get(key)!=item for key,item in intent['accepted_ref'].items())
+                    or any(e.proof(directory/'completed.json').get(key)!=item for key,item in intent['completed_ref'].items())):
                 raise e.IntegrityError('Engineering feedback differs from its original call')
             original = value['result']
             if scientific:
@@ -159,8 +159,8 @@ def complete(config, adapter, call_id, observation):
             # record_observation already verified the complete backend originals.
             # Reuse that fact; only the small accepted/completed bindings need
             # rechecking here, not every model/log/public data file again.
-            if (observation['accepted'] != e.proof(directory / 'accepted.json')
-                    or observation['completed'] != e.proof(directory / 'completed.json')):
+            if (any(e.proof(directory/'accepted.json').get(key)!=item for key,item in observation['accepted'].items())
+                    or any(e.proof(directory/'completed.json').get(key)!=item for key,item in observation['completed'].items())):
                 raise e.IntegrityError('Engineering check has no exact confirmed completion')
             declared = [item for item in adapter.capabilities() if item.key == KEY]
             available = (len(declared) == 1 and callable(getattr(adapter,'replay_check',None)))
@@ -192,3 +192,27 @@ def complete(config, adapter, call_id, observation):
             e.write(directory / OUTCOME, dict(intent_ref=e.proof(directory / INTENT), result=result))
     except Exception:
         return  # The original scientific result and every already-written receipt remain intact.
+
+
+def cleanup_confirmed(config, call_id, observation):
+    """Read existing cleanup evidence without starting or repeating a replay."""
+    try:
+        records=e.Records(config);directory=records.directory(call_id)
+        accepted=records.accepted(call_id);bound=accepted.get('engineering_check')
+        if (observation['call_id']!=call_id
+                or observation['accepted']!=e.proof(directory/'accepted.json')
+                or observation['completed']!=e.proof(directory/'completed.json')):
+            return False
+        intent_path=directory/INTENT;outcome_path=directory/OUTCOME
+        if not intent_path.exists() and not intent_path.is_symlink():
+            return ((bound is None or bound.get('status')=='unsupported')
+                and not outcome_path.exists() and not outcome_path.is_symlink())
+        intent=json.loads(e.read(intent_path));outcome=json.loads(e.read(outcome_path))
+        result=outcome['result']
+        return (intent['accepted_ref']==observation['accepted']
+            and intent['completed_ref']==observation['completed'] and intent['check']==bound
+            and outcome['intent_ref']==e.proof(intent_path)
+            and result.get('status') in STATES and isinstance(result.get('note'),str)
+            and result.get('cleanup_confirmed') is True)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False

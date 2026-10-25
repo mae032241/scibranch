@@ -84,7 +84,7 @@ def resolve(path, value):
     origin = root / 'native-evidence' / f'{step:03d}'
     record = origin if attempt == 0 else origin / 'continuations' / f'{attempt:03d}'
     host_path = record / 'experiment-config.json'
-    if proof(host_path) != binding['configuration']:
+    if any(proof(host_path).get(key)!=item for key,item in binding['configuration'].items()):
         raise IntegrityError('Execution client original configuration changed')
     config = c.read(c.regular(host_path))
     intent = c.read(c.regular(record / 'native-intent.json'))
@@ -105,7 +105,7 @@ def payload_path(config, path):
     """Resolve only an exact host-bound compiled implementation client."""
     from . import contracts as c
     from .experiments import IntegrityError, proof, read, MAX_ASSET
-    path=Path(path).absolute()
+    requested=Path(path).absolute();reference=input_reference(config,requested);path=Path(reference['path'])
     if config.get('worker_view_version')!=VERSION:return path
     try:value=json.loads(read(path,MAX_ASSET))
     except (UnicodeError,ValueError):return path
@@ -118,14 +118,14 @@ def payload_path(config, path):
     from . import execution_inputs
     job=c.read(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
     materials={json.dumps(item,sort_keys=True):item for item in execution_inputs._bound(job)
-        if path in (work/item['path'],Path(item['source']))}
+        if requested in (work/item['path'],root/Path(item['source']))}
     if materials:
         if len(materials)!=1:raise IntegrityError('Scientific implementation input is ambiguous')
         material=next(iter(materials.values()));actual=proof(path)
         if any(actual[key]!=material[key] for key in ('size_bytes',)):
             raise IntegrityError('Scientific implementation input differs from its bound original')
         package=execution_inputs.compiled_payload(root,material)
-        if proof(package['path'])!=package:
+        if any(proof(package['path'])[key]!=package[key] for key in package if key in {'path','size_bytes','file_stat'}):
             raise IntegrityError('Scientific implementation package differs from its compiled original')
         return Path(package['path'])
     if not path.is_relative_to(work/'artifacts'):
@@ -134,6 +134,93 @@ def payload_path(config, path):
     binding=c.read(c.regular(directory/'client.json'))
     package=directory/'package.json'
     if (not isinstance(binding,dict) or set(binding)!={'client','public_path','package'} or binding['client']!=value
-            or binding['public_path']!=str(path) or binding['package']!=proof(package)):
+            or binding['public_path']!=str(path)
+            or any(proof(package).get(key)!=item for key,item in binding['package'].items())):
         raise IntegrityError('Scientific implementation differs from its exact compiled original')
     return package
+
+
+def _input_rows(job):
+    return [*job.get('global_materials',[]),*job.get('direct_refs',[]),*job.get('direct_materials',[]),
+        *job.get('history',{}).get('files',[]),
+        *job.get('history',{}).get('execution_recovery_materials',[]),
+        *[row['material'] for row in job.get('selected_inputs',[])]]
+
+
+
+def code_selection(config, path, *, resolved=None, experiment_directory=None):
+    """Select dedicated current-W code; saved scientific inputs stay direct."""
+    from . import contracts as c, shared_input_views
+    from .experiments import CallerError, IntegrityError
+    if config.get('scope',{}).get('role')!='W':return None
+    root=root_for_configuration(config,allow_standalone=True)
+    if root is None:return None
+    path=Path(path).absolute()
+    work=c.workspace(root,config['scope']['step'])
+    job=c.read(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
+    rows=_input_rows(job)
+    bound=any(path in (work/item['path'],root/Path(item.get('source',work/item['path'])))
+        for item in rows)
+    if bound or resolved is not None and Path(resolved)!=path:
+        if experiment_directory is not None:
+            raise CallerError('Choose a current-W code entry for --experiment-dir; bound scientific inputs and compiled packages remain direct inputs.')
+        return None
+    if path.resolve()!=path:
+        raise IntegrityError('Code selection requires an exact ordinary path')
+    if any(path.is_relative_to(work/'work'/name) for name in shared_input_views.DYNAMIC_ROOTS):
+        input_reference(config,path)
+        return None
+    code_root=work/'code'
+    if not path.is_relative_to(code_root) or path==code_root:
+        raise CallerError('Move a new code entry into code/; --experiment-dir selects only the Local runtime working directory.')
+    if experiment_directory is not None:
+        directory=Path(experiment_directory).absolute()
+        relative=directory.relative_to(work) if directory.is_relative_to(work) else Path()
+        if (config.get('execution_interface',{}).get('executor')!='local_execution:command'
+                or len(relative.parts)!=2 or relative.parts[0]!='experiments'
+                or directory.resolve()!=directory or not directory.is_dir()
+                or directory.is_relative_to(code_root)):
+            raise CallerError('Choose an explicit current-W experiments/<name> runtime directory outside code/.')
+        selection='directory';selected=code_root
+        entry=path.relative_to(code_root).as_posix()
+    else:
+        code_root=path.parent;selection='file';selected=path;entry=path.name
+    for item in rows:
+        for material in (work/item['path'],root/Path(item.get('source',work/item['path']))):
+            if selected.is_relative_to(material) or material.is_relative_to(selected):
+                raise CallerError('Selected code overlaps a bound scientific input; keep data outside the selected code scope.')
+    return dict(code_root=code_root,entry=entry,selection=selection,
+        logical_root=code_root.relative_to(work).as_posix())
+
+
+
+def input_reference(config, path):
+    """Check the HEAD input binding, then fingerprint this call's frozen slot."""
+    from . import contracts as c, originals
+    from .experiments import IntegrityError, proof
+    path=Path(path).absolute()
+    if path.resolve()!=path:
+        raise IntegrityError('Scientific input requires an exact ordinary path')
+    root=root_for_configuration(config,allow_standalone=True)
+    if root is None:return proof(path)
+    work=c.workspace(root,config['scope']['step'])
+    job=c.read(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
+    matches={json.dumps(item,sort_keys=True):item for item in _input_rows(job)
+        if path in (work/item['path'],root/Path(item.get('source',work/item['path'])))}
+    if matches:
+        if len(matches)!=1:raise IntegrityError('Scientific input binding is ambiguous')
+        material=next(iter(matches.values()))
+        original=originals.material_path(root,dict(material,source=material.get('source',str(work/material['path']))))
+        if proof(original)['size_bytes']!=material['size_bytes']:
+            raise IntegrityError('Scientific input differs from its original bound size')
+        # HEAD prepares an independent frozen scientific read slot. Its inode is
+        # deliberately distinct from the source's inode and absent from job rows.
+        slot=originals.resolve_root_ref(root,dict(path=str(work/material['path']),size_bytes=material['size_bytes']))
+        actual=slot if path==work/material['path'] else original
+        reference=proof(actual)
+        if reference['size_bytes']!=material['size_bytes']:
+            raise IntegrityError('Scientific input differs from its frozen read slot')
+        return reference
+    if not path.is_relative_to(work) or path==work or path.is_relative_to(work/'inputs'):
+        raise IntegrityError('Scientific input is outside this task bound inputs or current workspace files')
+    return proof(path)

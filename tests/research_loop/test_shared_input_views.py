@@ -373,3 +373,79 @@ def test_adapter_record_effect_refuses_replaced_holder_before_lock_or_adapter_wr
         Adapter().status_details()
     assert not (directory/'record-writer.lock').exists()
     assert list(directory.iterdir())==[]
+
+
+def _private_git_wrapper(tmp_path,monkeypatch,*,existing=False):
+    """Real wrapper/private-Git delta over an inert existing data-view seam."""
+    root=tmp_path/'ancestor/instance';work=root/'project/nodes/001'
+    (work/'work').mkdir(parents=True);(work/'inputs').mkdir();(work/'artifacts').mkdir()
+    holder=root/'host-runtime/code-versions'
+    if existing:
+        holder.mkdir(parents=True);holder.parent.chmod(0o751);holder.chmod(0o750)
+    def forbidden(*args,**kwargs):pytest.fail('A wrapper argv test reached a process or capability probe')
+    monkeypatch.setattr(views,'ensure_capability',lambda **kwargs:'/argv-only/bwrap')
+    for name in ('Popen','run','call'):monkeypatch.setattr(subprocess,name,forbidden)
+    data=['--ro-bind',str(work/'inputs'),str(work/'inputs')]
+    monkeypatch.setattr(views,'mount_arguments',lambda *args,**kwargs:list(data))
+    return root,work,holder,data
+
+
+def test_git_wrapper_prepares_holder_before_existing_mounts_and_covers_later_children(tmp_path,monkeypatch):
+    root,work,holder,data=_private_git_wrapper(tmp_path,monkeypatch)
+    workspace=views.workspace_arguments;events=[]
+    def prepared(*args,**kwargs):
+        assert holder.is_dir() and holder.stat().st_mode&0o777==0o700
+        assert not (holder/'repository.git').exists() and not (holder/'exports').exists()
+        events.append(holder.stat().st_ino)
+        return workspace(*args,**kwargs)
+    monkeypatch.setattr(views,'workspace_arguments',prepared)
+    argv=['custom-native','--sandbox','danger-full-access','--network=original','--web=live','--subagents=on']
+    command=views.wrap(root,{},work,argv);divider=command.index('--')
+    assert command[divider+1:]==argv and events==[holder.stat().st_ino]
+    assert command[divider-3:divider]==['--ro-bind',str(holder),str(holder)]
+    existing=[*workspace(root,work),*data]
+    assert command[divider-3-len(existing):divider-3]==existing
+    for relative in ('repository.git/objects/blob','capture-later.index','exports/001/call/tree/code.py'):
+        child=holder/relative;child.parent.mkdir(parents=True,exist_ok=True);child.write_text('later host child')
+        assert str(child) not in command[:divider]
+    assert holder.stat().st_ino==events[0]
+
+
+def test_git_wrapper_pins_ordinary_ancestors_in_order_and_keeps_modes(tmp_path,monkeypatch):
+    root,work,holder,data=_private_git_wrapper(tmp_path,monkeypatch,existing=True)
+    paths=(root,holder.parent,holder,work,work/'work',work/'artifacts')
+    modes={path:path.stat().st_mode for path in paths}
+    command=views.wrap(root,{},work,['native','--permission=original'])
+    assert command[:9]==['/argv-only/bwrap','--unshare-user','--unshare-pid','--die-with-parent',
+        '--bind','/','/','--proc','/proc']
+    first_workspace=command.index(str(work))-1
+    ancestors=command[9:first_workspace]
+    triples=[tuple(ancestors[index:index+3]) for index in range(0,len(ancestors),3)]
+    destinations=[Path(target) for mode,source,target in triples if mode=='--bind' and source==target]
+    assert len(destinations)==len(triples)==len(holder.parents)-1
+    assert destinations[0].parent==Path('/') and destinations[-3:]==[root.parent,root,holder.parent]
+    assert all(child.parent==parent for parent,child in zip(destinations,destinations[1:]))
+    assert Path('/') not in destinations and holder not in destinations
+    divider=command.index('--')
+    assert command[divider-3:divider]==['--ro-bind',str(holder),str(holder)]
+    assert {path:path.stat().st_mode for path in paths}==modes
+
+
+@pytest.mark.parametrize('part,kind',[
+    ('root','file'),('root','symlink'),('root','missing'),
+    ('runtime','file'),('runtime','symlink'),('holder','file'),('holder','symlink')])
+def test_git_wrapper_refuses_nonordinary_holder_or_ancestors_before_data_mounts(tmp_path,monkeypatch,part,kind):
+    valid,work,holder,_=_private_git_wrapper(tmp_path/'valid',monkeypatch)
+    assert str(holder) in views.wrap(valid,{},work,['native'])
+    root=tmp_path/'broken/instance';target={'root':root,'runtime':root/'host-runtime',
+        'holder':root/'host-runtime/code-versions'}[part]
+    target.parent.mkdir(parents=True,exist_ok=True)
+    if kind=='file':target.write_text('ordinary fixture file')
+    elif kind=='symlink':
+        ordinary=tmp_path/'ordinary';ordinary.mkdir();target.symlink_to(ordinary,target_is_directory=True)
+    def unexpected(*args,**kwargs):pytest.fail('Invalid private Git paths reached the existing data-view seam')
+    monkeypatch.setattr(views,'workspace_arguments',unexpected)
+    monkeypatch.setattr(views,'mount_arguments',unexpected)
+    with pytest.raises(UnsupportedExecution):views.wrap(root,{},root/'project/nodes/001',['native'])
+    if kind=='file':assert target.read_text()=='ordinary fixture file'
+    elif kind=='symlink':assert target.is_symlink() and not (ordinary/'code-versions').exists()

@@ -60,7 +60,7 @@ def _proof(path, limit=None, *, context=None):
 
 def _check(proof):
     actual = _proof(Path(proof['path']))
-    if actual != proof:raise IntegrityError('Original call proof changed')
+    if any(actual.get(key)!=value for key,value in proof.items()):raise IntegrityError('Original call proof changed')
     return Path(proof['path'])
 
 
@@ -117,17 +117,27 @@ def _config(path):
     return value
 
 
-def _completed(directory, *, verify_assets=True):
+def _completed(directory, *, verify_assets=True, verify_source=True):
     path = directory/'completed.json'
     if not path.exists():return None
     result = json.loads(_read(path))
+    accepted = json.loads(_read(directory/'accepted.json'))
+    controls={directory/name for name in ('accepted.json','stdout.raw','stderr.raw','receipt.json','row.json','terminal.json')}
+    source=Path(accepted['script']['path'])
+    temporary=None
+    if 'code_version' in accepted:
+        from scidiscovery.research_loop import experiments
+        root=experiments._code_version_binding(accepted.get('config_record'),accepted)
+        temporary=experiments._code_export_entry(root,accepted)
+    model=directory/'model.pkl' if result['model'] is not None else None
     for proof in result['proofs']:
-        if not verify_assets and Path(proof['path']) not in {directory / name for name in ('accepted.json', 'source.py', 'stdout.raw', 'stderr.raw', 'receipt.json', 'row.json', 'terminal.json', 'model.pkl')}:
+        if Path(proof['path']) not in controls|{source,model}:
             raise IntegrityError('Progress proof escaped this exact call')
-        if verify_assets or Path(proof['path']).name not in {'source.py', 'model.pkl'}:
+        if proof==temporary:continue
+        if Path(proof['path']) in controls or (verify_assets
+                and (Path(proof['path']) != source or verify_source)):
             _check(proof)
     if result['model'] is not None and verify_assets:_check(result['model'])
-    accepted = json.loads(_read(directory/'accepted.json'))
     if result.get('mechanism_binding')!=accepted.get('mechanism_binding'):
         raise IntegrityError('Completion changed accepted scientific mechanism')
     if result['call_id'] != accepted['call_id'] or result['scope'] != accepted['scope'] or result['parent'] != accepted['parent'] or result['change_intent'] != accepted['change_intent']:
@@ -142,15 +152,18 @@ def _completed(directory, *, verify_assets=True):
                 or type(row.get('run_id')) is not int or row['run_id']<1
                 or result['run_id']!=row['run_id'] or result['candidate_id']!=f'run-{row["run_id"]}'
                 or row.get('ok') is not ok or terminal.get('returncode')!=(0 if ok else 1)
+                or type(terminal.get('returncode')) is not int
+                or any(terminal.get(key)!=accepted.get(key) for key in ('call_id','scope','mechanism_binding'))
                 or terminal.get('cleanup_confirmed') is not True or terminal.get('transport_complete') is not True
                 or (result['model'] is not None)!=ok
                 or (ok and row.get('model_path')!=str(Path(accepted['runs_root'])/f'model_run{row["run_id"]}.pkl'))):
             raise IntegrityError('Completion differs from immutable same-call transport')
-        if ok and ((verify_assets and result['model']!=_proof(directory/'model.pkl'))
+        if ok and ((verify_assets and any(_proof(directory/'model.pkl').get(key)!=item for key,item in result['model'].items()))
                    or result['model']['path']!=str(directory/'model.pkl') or result['model'] not in result['proofs']):
             raise IntegrityError('Completed model differs from this exact call original')
-        required={str(directory/name) for name in ('accepted.json','source.py','stdout.raw','stderr.raw','receipt.json','row.json','terminal.json')}
-        if not required.issubset({proof['path'] for proof in result['proofs']}):
+        required={str(path) for path in controls}
+        if (not required.issubset({proof['path'] for proof in result['proofs']})
+                or temporary is None and accepted['script'] not in result['proofs']):
             raise IntegrityError('Completion lacks original transport proofs')
     elif result['status']!='unknown' or any(result[key] is not None for key in ('candidate_id','run_id','model')):
         raise IntegrityError('Unknown completion acquired an experiment identity')
@@ -208,10 +221,25 @@ def _receipt(directory, accepted, rows, returncode, cleanup, transport_complete=
         return None
     matches = [item for item in rows if item.get('run_id') == row['run_id']]
     if len(matches) != 1 or matches[0] != row:return None
-    if not cleanup or returncode not in (0,1) or row.get('ok') is not (returncode == 0):return None
-    if _proof(Path(accepted['script']['path']), context=context) != accepted['script']:
+    if cleanup is not True or type(returncode) is not int or returncode not in (0,1) or row.get('ok') is not (returncode == 0):return None
+    terminal=json.loads(_read(directory/'terminal.json'))
+    if (terminal.get('returncode')!=returncode or type(terminal.get('returncode')) is not int
+            or terminal.get('cleanup_confirmed') is not True or terminal.get('transport_complete') is not True
+            or any(terminal.get(key)!=accepted.get(key) for key in ('call_id','scope','mechanism_binding'))):
+        return None
+    if (directory/'completed.json').exists():
+        return _completed(directory,verify_source='code_version' not in accepted)
+    if 'code_version' not in accepted and any(
+            _proof(Path(accepted['script']['path']),context=context).get(key)!=value
+            for key,value in accepted['script'].items()):
         raise IntegrityError('Executed source snapshot changed')
-    if _proof(Path(accepted['source_script']), context=context) != dict(path=accepted['prepared']['local_path'],size_bytes=accepted['prepared']['size_bytes']):
+    if 'code_version' in accepted:
+        from scidiscovery.research_loop import experiments
+        root=experiments._code_version_binding(accepted.get('config_record'),accepted)
+        if experiments._code_export_entry(root,accepted) is None:
+            raise IntegrityError('Executed code lost its accepted export binding')
+    elif any(_proof(Path(accepted['source_script']),context=context).get(key)!=value for key,value in
+            dict(path=accepted['prepared']['local_path'],size_bytes=accepted['prepared']['size_bytes']).items()):
         raise IntegrityError('Executed source changed')
     model = None
     if row['ok']:
@@ -229,7 +257,8 @@ def _receipt(directory, accepted, rows, returncode, cleanup, transport_complete=
     frozen = shared_originals.publish_bytes(storage_root, payload, context=context, policy=policy)
     shared_originals.link(frozen, directory/'row.json',
         size_bytes=len(payload), root=storage_root, context=context, policy=policy)
-    proofs = [_proof(directory/name, context=context) for name in ('accepted.json','source.py','stdout.raw','stderr.raw','receipt.json','row.json','terminal.json')]
+    proofs = [_proof(directory/name, context=context) for name in ('accepted.json','stdout.raw','stderr.raw','receipt.json','row.json','terminal.json')]
+    if 'code_version' not in accepted:proofs.append(accepted['script'])
     if model:proofs.append(model)
     return dict(call_id=accepted['call_id'],status='known_success' if row['ok'] else 'known_failed',
         candidate_id=f'run-{row["run_id"]}',run_id=row['run_id'],model=model,parent=accepted['parent'],
@@ -360,6 +389,11 @@ def observe(request):
             result=dict(call_id=accepted['call_id'],scope=accepted['scope'],status='unknown',candidate_id=None,run_id=None,model=None,
                 parent=accepted['parent'],change_intent=accepted['change_intent'],proofs=[_proof(directory/'accepted.json')],note='Accepted original without exact completion')
         if result['status']=='unknown' and 'mechanism_binding' in accepted:result['mechanism_binding']=accepted['mechanism_binding']
+        if 'code_version' in accepted and result['status'] in {'known_success','known_failed'}:
+            from scidiscovery.research_loop import experiments
+            _,version=experiments._source_projection(accepted['config_record'],accepted)
+            result['artifact']=None
+            result['source_code_version']=version
         if result['status']=='known_success':models[result['candidate_id']]=dict(result['model'])
         if result['scope']['step'] != request['step']:continue
         if result and result['call_id'] not in set(request.get('known_contexts',[])):

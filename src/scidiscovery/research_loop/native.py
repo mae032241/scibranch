@@ -296,13 +296,15 @@ def run_native(root: Path, step: int, attempt=0):
             lifecycle=selected['capabilities'],result_protocol=selected['result_protocol']),ensure_ascii=False)
             +'. First read capabilities and the relevant complete public input contract with describe; do not invent an opaque payload format. '
             'If no input contract is declared, use an already bound original payload or report unsupported. '
+            'Keep new W-authored code under code/ and pause edits while submission captures it; after acceptance, drafts may be revised for a later version. '
             'Use only declared lifecycle operations on original call IDs. Unavailable optional capabilities are unsupported, never a passing verdict. '
             'Native shell remains available for scratch; only managed calls are recorded. Never repeat an unknown submission.\n')
     if experiment_config is not None and experiment_config['execution_interface']['executor']=='local_execution:command':
         prompt += ('\nManaged local experiments: run '+json.dumps([*managed_command,
-            'run','--experiment-dir','experiments/<name>','--script','experiments/<name>/run.py','--','<script args>'])
-            +'. Use real paths/arguments. Only the chosen directory is snapshotted, excluding its artifacts/. '
-            'The copied script runs with that read-only snapshot as cwd and writes the writable artifacts/. '
+            'run','--experiment-dir','experiments/<name>','--script','code/run.py','--','<script args>'])
+            +'. Use real paths/arguments. Submission fixes the selected code version in Git. '
+            'The chosen experiment directory is the runtime cwd; keep outputs, logs and scratch outside code/. '
+            'The fixed code runs with that cwd and writes its writable artifacts/. '
             'The default native backend also exposes the task public_root read-only at its declared absolute path; '
             'that live public tree is outside the input snapshot and does not prove all dynamic reads were frozen. '
             'Control retains exit/time/logs/inputs/outputs. Optional artifacts/result.json is version 1 JSON with metrics '

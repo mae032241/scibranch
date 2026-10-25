@@ -178,3 +178,132 @@ def test_malformed_independent_receipt_never_borrows_success_logs_or_replays(wra
     adapter=experiments.load(json.loads(wrapper.config.read_text()),path=wrapper.config)
     assert adapter.status_details(result['call_id'])['state']=='unknown'
     assert wrapper.calls()==calls and len(wrapper.accepted())==1
+
+
+@pytest.mark.parametrize('missing',[False,True],ids=['four-replay-roles','optional-input-unavailable'])
+def test_cov_acceptance_keeps_public_harness_roles_outside_scientific_snapshots(tmp_path,monkeypatch,missing):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from cov_execution.experiments import CovExecution, _replay_roles
+    from scidiscovery.research_loop import protocol
+    harness=tmp_path/'public/environment/harness';harness.mkdir(parents=True)
+    cli=harness/'exp_cli.py';cli.write_text(CLI)
+    runner=harness/'runner.py';runner.write_text(RUNNER)
+    for name in ('train.csv','val.csv','meta.json'):(harness/name).write_text('inert public '+name)
+    for key,name in (('EXP_RUNNER','runner.py'),('EXP_TRAIN','train.csv'),('EXP_VAL','val.csv'),('EXP_META','meta.json')):
+        monkeypatch.setenv(key,str(harness/name))
+    if missing:(harness/'meta.json').unlink()
+    config=dict(receipt_channel='public_runner_main',run_argv=[sys.executable,'-B','-I',str(cli)],
+        runs_root=str(tmp_path/'runs'),evaluation_key='fixture')
+    before=deepcopy(config);adapter=object.__new__(CovExecution);adapter.config=config
+    accepted=adapter.acceptance_metadata(SimpleNamespace(local_path='/science/code/source.py'),new=True)
+    assert config==before and accepted['config_record']==before and accepted['snapshot_files']==[]
+    assert accepted['receipt_transport']['backend']==cov_receipt.original(cli)
+    assert accepted['receipt_transport']['runner']==cov_receipt.runner_profile(runner)
+    if missing:
+        assert accepted['replay_inputs_unavailable'] is True and 'replay_runtime' not in accepted
+        return
+    runtime=accepted['replay_runtime']
+    assert runtime['invoked_path']==str(Path(sys.executable).absolute())
+    assert {key:runtime[key] for key in ('path','size_bytes','file_stat')}==experiments.proof(Path(sys.executable).resolve())
+    inputs=runtime['inputs']
+    assert [item['name'] for item in inputs]==['replay/harness/train.csv','replay/harness/val.csv',
+        'replay/harness/meta.json','replay/scid-current-protocol']
+    assert [item['path'] for item in inputs]==[str(harness/name) for name in ('train.csv','val.csv','meta.json')]+[str(Path(protocol.__file__).resolve())]
+    assert all({key:item[key] for key in ('path','size_bytes','file_stat')}==experiments.proof(item['path']) for item in inputs)
+    roles=_replay_roles(accepted)
+    assert len(roles)==5 and roles[0]['name']=='replay/harness/runner.py'
+    assert {key:roles[0][key] for key in ('path','size_bytes')}==cov_receipt.original(runner)
+    assert set(roles[0])=={'path','size_bytes','name'}
+    assert 'file_stat' not in accepted['receipt_transport']['runner']
+
+
+def _fixed_cov_completion(tmp_path,monkeypatch,*,status='known_success',legacy=False):
+    """Complete inert transport originals; no registered/native execution."""
+    from copy import deepcopy
+    from cov_execution.experiments import CovExecution
+    from test_cov_command_contract import _fixed_cov_launcher
+    case=_fixed_cov_launcher(tmp_path,monkeypatch)
+    runs=case.root/'runs';runs.mkdir()
+    case.config.update(runs_root=str(runs),evaluation_key='fixture')
+    accepted=case.accepted
+    if legacy:
+        accepted.pop('code_version');source=case.source
+    else:source=case.export/'run.py'
+    accepted['script']=experiments.proof(source)
+    accepted['prepared']=dict(local_path=str(source),size_bytes=accepted['script']['size_bytes'])
+    accepted.update(change_intent='exact fixture change',runs_root=str(runs),config_record=deepcopy(case.config))
+    (case.record/'accepted.json').write_bytes(experiments.encoded(accepted))
+    for name in ('stdout.raw','stderr.raw'):(case.record/name).write_bytes(b'ordinary inert log\n')
+    code=1 if status=='known_failed' else 0
+    terminal=dict(call_id=accepted['call_id'],scope=accepted['scope'],returncode=code,
+        cleanup_confirmed=True,transport_complete=True)
+    (case.record/'terminal.json').write_bytes(experiments.encoded(terminal))
+    row=dict(script=accepted['source_script'],run_id=1,ok=code==0,wall_seconds=.01)
+    if code==0:
+        model=runs/'model_run1.pkl';model.write_bytes(b'inert exact model original')
+        row.update(model_path=str(model),val_score=.5)
+    if status!='unknown':
+        (case.record/'receipt.json').write_bytes(cov_receipt.encoded(cov_receipt.envelope(accepted,row)))
+        (runs/'results.jsonl').write_bytes(experiments.encoded(row))
+    else:(case.record/'process.json').write_bytes(b'{}\n')
+    adapter=object.__new__(CovExecution);adapter.config=case.config;adapter.records=experiments.Records(case.config)
+    case.adapter=adapter;case.source_original=source;case.row=row;case.returncode=code
+    return case
+
+
+@pytest.mark.parametrize('status',['known_success','known_failed','unknown'])
+def test_cov_git_completion_and_metadata_survive_removed_draft_and_export(tmp_path,monkeypatch,status):
+    from types import SimpleNamespace
+    from scidiscovery.research_loop import local_experiments
+    case=_fixed_cov_completion(tmp_path,monkeypatch,status=status)
+    case.source.unlink();case.source_original.unlink()
+    before=(case.record/'accepted.json').read_bytes()
+    result=case.adapter.completion(case.record,case.accepted,case.returncode,True,True)
+    assert result['status']==status and case.accepted['script'] not in result['proofs']
+    if status=='known_success':
+        assert result['model']['path']==str(case.record/'model.pkl')
+        assert result['model']['path']!=case.row['model_path']
+        assert Path(result['model']['path']).read_bytes()==Path(case.row['model_path']).read_bytes()
+    expected={'accepted.json','stdout.raw','stderr.raw','terminal.json'}
+    if status!='unknown':expected|={'receipt.json','row.json'}
+    assert expected<={Path(item['path']).name for item in result['proofs']}
+    (case.record/'completed.json').write_bytes(experiments.encoded(result))
+    assert cov_lineage._completed(case.record)==result
+    monkeypatch.setattr(experiments,'registration',lambda *args:(SimpleNamespace(
+        scientific_source=local_experiments.LocalExecution.scientific_source),None))
+    observed=cov_lineage.observe(dict(root=str(case.root),step=1,config=dict(
+        runs='runs',calls='project/nodes',evaluation_key='fixture')))
+    context=observed['contexts'][0]
+    if status!='unknown':
+        assert context['artifact'] is None and context['source_code_version']==case.version
+    assert (case.record/'accepted.json').read_bytes()==before
+    assert case.materialized==case.verified==[] and not (case.record/'engineering-replay').exists()
+
+
+@pytest.mark.parametrize('damage',['receipt.json','terminal.json','row.json','model','missing-receipt-proof','missing-terminal-proof'])
+def test_cov_git_completion_without_export_keeps_mandatory_transport_and_model_proofs(tmp_path,monkeypatch,damage):
+    case=_fixed_cov_completion(tmp_path,monkeypatch)
+    case.source_original.unlink()
+    result=case.adapter.completion(case.record,case.accepted,0,True,True)
+    (case.record/'completed.json').write_bytes(experiments.encoded(result))
+    assert cov_lineage._completed(case.record)==result
+    if damage.startswith('missing-'):
+        name='receipt.json' if damage=='missing-receipt-proof' else 'terminal.json'
+        result['proofs']=[item for item in result['proofs'] if Path(item['path']).name!=name]
+    (case.record/'completed.json').write_bytes(experiments.encoded(result))
+    if not damage.startswith('missing-'):
+        path=Path(result['model']['path']) if damage=='model' else case.record/damage
+        path.chmod(path.stat().st_mode|0o200);path.write_bytes(path.read_bytes()+b' ')
+    with pytest.raises(experiments.IntegrityError):cov_lineage._completed(case.record)
+    assert case.materialized==case.verified==[]
+
+
+def test_cov_legacy_completion_keeps_source_original_required(tmp_path,monkeypatch):
+    case=_fixed_cov_completion(tmp_path,monkeypatch,legacy=True)
+    result=case.adapter.completion(case.record,case.accepted,0,True,True)
+    assert case.accepted['script'] in result['proofs']
+    (case.record/'completed.json').write_bytes(experiments.encoded(result))
+    case.source_original.unlink()
+    with pytest.raises((ValueError,OSError)):cov_lineage._completed(case.record)
+    assert case.materialized==case.verified==[]
