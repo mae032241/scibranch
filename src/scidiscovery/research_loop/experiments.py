@@ -1501,8 +1501,32 @@ def retire_original(config,adapter,call_id):
         return dict(call_id=call_id,status='unknown',note='Original submission or retirement still owns its call lease')
 
 
+def _saved_observation(config, adapter, call_id, path, *, operation_context, verify_files):
+    if not path.exists():return None
+    value=json.loads(read(path));verify_observation(value,lambda item:Path(item['path']),
+        interface=config['execution_interface'],context=operation_context,verify_files=verify_files)
+    from . import execution_authority
+    execution_authority.reconcile_resources(config,adapter,call_id,observation=value,operation_context=operation_context)
+    _cleanup_terminal_code_export(config,call_id,value)
+    return value
+
+
 @_configuration_effect
-def record_observation(config, adapter, call_id, *, collected=None, operation_context=None, verify_files=True):
+def reconcile_saved_observation(config, adapter, call_id, *, operation_context=None):
+    """Verify saved terminal controls and reconcile accounting and export cleanup.
+
+    Missing observations remain missing; this operation never queries terminal
+    status or collects and publishes terminal evidence.
+    """
+    from . import storage_policy as storage
+    operation_context=storage.Deadline(config['max_seconds'],operation_context)
+    path=Records(config).directory(call_id)/'execution-observation.json'
+    return _saved_observation(config,adapter,call_id,path,
+        operation_context=operation_context,verify_files=False)
+
+
+@_configuration_effect
+def record_observation(config, adapter, call_id, *, collected=None, operation_context=None):
     """Freeze one backend-verified terminal projection while executing its protocol.
 
     The adapter owns its native terminal evidence. In particular local adapters
@@ -1516,14 +1540,9 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
     inventory=storage.Inventory(config.get('storage_policy'),context=operation_context)
     retained={}
     path=directory/'execution-observation.json'
-    if path.exists():
-        value=json.loads(read(path));verify_observation(value,lambda item:Path(item['path']),
-            interface=config['execution_interface'],context=operation_context,verify_files=verify_files)
-        from . import execution_authority
-        execution_authority.reconcile_resources(config,adapter,call_id,observation=value,operation_context=operation_context)
-        _cleanup_terminal_code_export(config,call_id,value)
-        return value
-    if not verify_files:return None
+    saved=_saved_observation(config,adapter,call_id,path,
+        operation_context=operation_context,verify_files=True)
+    if saved is not None:return saved
     accepted=records.accepted(call_id)
     if accepted['interface']!=config['execution_interface']:
         raise IntegrityError('Observation interface differs from accepted execution')
@@ -1714,7 +1733,7 @@ def _original_dispatch_state(config, payload, *, parent=None, new=False, change=
             if state not in {'known_success','known_failed'} or records.external(path.name) is None:
                 return dict(status=state if state in PENDING_EXECUTION_STATES and records.external(path.name) is not None else 'unknown',
                     call_id=path.name,note='Preserve original execution; query its identity instead of replay')
-            observed=record_observation(original,prior,path.name,verify_files=False)
+            observed=reconcile_saved_observation(original,prior,path.name)
         except (ReviewRequired,common.ReviewRequired,breadth.OpportunityRequired):
             return dict(status='unknown',call_id=path.name,
                 note='Original accepted execution outcome is unknown; reconcile this exact call without resubmission.')
@@ -2177,14 +2196,17 @@ def main(argv=None):
             else:result=dict(status=adapter.cancel_original(args.call_id))
             if args.command=='collect':
                 cached=(Records(config).directory(args.call_id)/'execution-observation.json').exists()
-                observed=record_observation(config,adapter,args.call_id,collected=descriptors,
-                    operation_context=operation_context,verify_files=not cached)
+                if cached:
+                    observed=reconcile_saved_observation(config,adapter,args.call_id,operation_context=operation_context)
+                else:
+                    observed=record_observation(config,adapter,args.call_id,collected=descriptors,
+                        operation_context=operation_context)
                 if observed is None:raise IntegrityError('Collected execution has no verified terminal observation')
                 if instance_owner.configuration_root(config) is not None:
                     result=_collected_view(config,args.call_id,observed,adapter,operation_context=operation_context)
             elif args.command in {'query','lookup'} and execution_status(result.get('state')) in {'known_success','known_failed'}:
                 if (Records(config).directory(args.call_id)/'execution-observation.json').exists():
-                    record_observation(config,adapter,args.call_id,verify_files=False)
+                    reconcile_saved_observation(config,adapter,args.call_id)
             if args.command in {'query','lookup'}:result=_status_view(result)
             code=2 if args.command=='reconcile' and result['status'] not in {'known_success','known_failed'} else 0
         result=_candidate_view(config,result)
