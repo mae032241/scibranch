@@ -11,6 +11,7 @@ from execution_fixtures import execution_registry
 from scidiscovery.research_loop import contracts as c, controller, experiments as e, history, native, experiment_client
 from scidiscovery.research_loop.local_experiments import LocalExecution
 from scidiscovery.research_loop.protocol import CURRENT
+from scidiscovery.research_loop import worker_execution_bridge as bridge
 
 
 @pytest.fixture
@@ -29,7 +30,24 @@ def local(tmp_path, execution_registry):
         scope=dict(handoff_protocol=CURRENT,step=2,role='W',job_ref=dict(path='/fixture/jobs/002.json'),execution_key=dict(path='/fixture/native-evidence/002/native-intent.json'),mechanism_ref=None),
         run_argv=[sys.executable],max_seconds=10),'local_execution:command',path=config_path)
     config_path.write_text(json.dumps(config))
-    return root,script,config,config_path
+    # Explicit trusted host fixture seam; this is not namespace-isolation evidence.
+    def trusted_callback(body,accepted,command,cwd):
+        assert body==accepted['interface']['config_record']
+        frozen=dict(body,execution_interface=accepted['interface'])
+        assert accepted['scope']==body['scope']
+        assert e.Records(frozen).accepted(accepted['call_id'])==accepted
+        return command,cwd,None
+    token=bridge._LOCAL_LAUNCH.set(trusted_callback)
+    try:yield root,script,config,config_path
+    finally:bridge._LOCAL_LAUNCH.reset(token)
+
+
+def test_local_process_launch_without_original_host_owner_is_rejected(tmp_path):
+    token=bridge._LOCAL_LAUNCH.set(None)
+    try:
+        with pytest.raises(e.UnsupportedExecution,match='no bare local subprocess fallback'):
+            bridge.local_process_launch({}, {}, [sys.executable], tmp_path)
+    finally:bridge._LOCAL_LAUNCH.reset(token)
 
 
 @pytest.mark.process_e2e
@@ -46,6 +64,7 @@ def test_r1_snapshot_argv_facts_and_original_lookup(local,monkeypatch):
     assert result['status']=='known_success' and result['returncode']==0 and result['wall_seconds']>=0
     call=result['call_id'];directory=e.Records(config).directory(call)
     accepted=json.loads((directory/'accepted.json').read_text())
+    assert 'code_version' not in accepted
     assert {'run.py','inputs/value.txt'} <= {item['name'] for item in accepted['snapshot_files']}
     assert not any(item['name'].startswith('artifacts/') for item in accepted['snapshot_files'])
     assert accepted['command'][-2:]==['literal $(never-run)','two words']
@@ -91,6 +110,7 @@ def test_r1_input_link_rejected_before_acceptance_and_output_link_is_collection_
     script.write_text('import pathlib\npathlib.Path("artifacts/link").symlink_to("/etc/passwd")\n')
     result=e.dispatch(config,script,command_options=dict(experiment_directory=str(root),arguments=[]))
     assert result['status']=='known_success' and result['result']['status']=='unavailable'
+    assert 'code_version' not in e.Records(config).accepted(result['call_id'])
     assert result['outputs']==[]
 
 
@@ -370,13 +390,8 @@ def test_r1_lost_local_process_original_keeps_budget_cleanup_blocked(tmp_path,ex
 def test_r2_cov_missing_receipt_fallback_keeps_domain_context_shape(local,monkeypatch):
     from cov_execution.experiments import CovExecution
     from cov_execution import lineage as cov_lineage
-    from scidiscovery.research_loop import worker_execution_bridge as bridge
     root,script,config,_=local
-    # Explicit trusted host fixture seam; this is not namespace-isolation evidence.
-    token=bridge._LOCAL_LAUNCH.set(lambda config,accepted,command,cwd:(command,cwd,None))
-    try:
-        result=e.dispatch(config,script,command_options=dict(experiment_directory=str(root),arguments=[]))
-    finally:bridge._LOCAL_LAUNCH.reset(token)
+    result=e.dispatch(config,script,command_options=dict(experiment_directory=str(root),arguments=[]))
     directory=e.Records(config).directory(result['call_id'])
     accepted=c.read(directory/'accepted.json');accepted.pop('local_observation_version')
     monkeypatch.setattr(cov_lineage,'_receipt',lambda *args,**kwargs:None)

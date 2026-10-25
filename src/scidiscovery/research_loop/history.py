@@ -387,6 +387,18 @@ def scientific_outputs(root, job, call, *, verify_files=True):
     return result
 
 
+def _observed_original_refs(accepted, observed):
+    originals=[observed[key] for key in ('accepted','completed','submission')]+observed['proofs']
+    if accepted.get('execution_authority') is not None:originals.append(accepted['execution_authority'])
+    if isinstance(accepted.get('tcad'),dict):originals.append(accepted['script'])
+    if 'native_terminal' in observed:originals.append(observed['native_terminal'])
+    originals.extend(observed.get('scientific_outputs',[]))
+    if observed.get('scientific_source') is not None:originals.append(observed['scientific_source'])
+    # Retain every collected descriptor even when result outputs use scientific names.
+    originals.extend(observed['outputs'])
+    return originals
+
+
 @_job_storage
 def managed_calls(root, job, *, context=None, call_ids=None):
     """Capture small common receipts, independent of domain candidates or observers."""
@@ -415,10 +427,7 @@ def managed_calls(root, job, *, context=None, call_ids=None):
         observed_path=directory/'execution-observation.json';observed=None;extra=[]
         if observed_path.exists():
             observed=c.read(c.regular(observed_path))
-            extra=[observed[key] for key in ('accepted','completed','submission')]+observed['proofs']
-            if 'native_terminal' in observed:extra.append(observed['native_terminal'])
-            extra.extend(observed.get('scientific_outputs',[]))
-            if observed.get('scientific_source') is not None:extra.append(observed['scientific_source'])
+            extra=_observed_original_refs(accepted,observed)
         interface=_execution_interface(root,accepted)
         direct=('code_version' in accepted and observed is not None
             and experiments._local_original_observation(dict(execution_interface=interface),observed))
@@ -454,9 +463,6 @@ def managed_calls(root, job, *, context=None, call_ids=None):
                     **(dict(public_result=observed['public_result']) if observed is not None and 'public_result' in observed else {}),
                     **(dict(native_state=value['native_state']) if 'native_state' in value else {})))
                if 'result' in value or observed is not None else {}))
-        if observed is not None:
-            # Retain every collected descriptor even when local result outputs use scientific names.
-            row['originals'].extend(_managed_proof(root,item['path'],item,context=context) for item in observed['outputs'])
         row['status']=managed_status(root,row,context=context)
         result.append(row)
     return result
@@ -513,11 +519,7 @@ def validate_managed(root, job, rows, *, context=None, verify_files=True):
             originals=[*accepted.get('snapshot_files',[])]
             observed=c.read(root/row['observation']['snapshot']) if row.get('observation') else None
             if observed is not None:
-                originals.extend([observed[key] for key in ('accepted','completed','submission')]+observed['proofs'])
-                if 'native_terminal' in observed:originals.append(observed['native_terminal'])
-                originals.extend(observed.get('scientific_outputs',[]))
-                if observed.get('scientific_source') is not None:originals.append(observed['scientific_source'])
-                originals.extend(observed['outputs'])
+                originals.extend(_observed_original_refs(accepted,observed))
             else:originals.extend(completed.get('proofs',[]))
             if (len(row['originals'])!=len(originals) or any(any(proof[key]!=original[key] for key in ('size_bytes',))
                     for proof,original in zip(row['originals'],originals))):

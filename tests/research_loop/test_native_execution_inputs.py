@@ -13,6 +13,7 @@ from scidiscovery.operations.execution import LocalFileDescriptor
 from scidiscovery.research_loop import (budget, contracts as c, controller, execution_inputs as inputs,
     execution_authority as authority, experiments as e, formal_review as review, native)
 from tcad_artifact import managed_execution as managed
+from tcad_artifact.command_adapter import read_command_configuration
 from tcad_artifact.execution_policy import execution_admission
 from tcad_artifact.project_packager import (materialize_execution_inputs, package_execution_package_json,
     validate_execution_package_json)
@@ -21,9 +22,10 @@ from test_history_handoff import finish
 
 
 class InputBackend:
-    def __init__(self):
+    def __init__(self, config=None):
+        self.config = config
         self.prepared = []; self.submits = 0; self.policy_reads = 0
-        self.state = 'queued'; self.submissions = {}
+        self.state = 'queued'; self.submissions = {}; self.collection_directories = []
 
     def execution_admission(self, raw, *, preparation_profile):
         self.policy_reads += 1
@@ -54,19 +56,48 @@ class InputBackend:
     def status_details(self, external):
         return dict(state=self.state, run_id=external)
 
-    def collect_with_budget(self, external, *, context):
+    def collect_with_budget(self, external, *, context, output_directory=None):
         assert external in self.submissions.values()
         context.remaining_seconds()
-        self.output_root.mkdir(parents=True, exist_ok=True)
+        destination = self.output_root if output_directory is None else Path(output_directory)
+        destination.mkdir(parents=True, exist_ok=True)
+        self.collection_directories.append(destination)
         manifest = dict(started_at=None, completed_at='2026-10-17T00:00:00Z',
             terminal_state=self.state, exit_code=0, error='', outputs=[])
         result = []
         for name, raw, media in [('tcad_log', b'synthetic input-chain terminal\n', 'text/plain'),
                 ('tcad_manifest', e.encoded(manifest), 'application/json')]:
-            path = self.output_root / name; path.write_bytes(raw)
+            path = destination / name
+            if output_directory is None:path.write_bytes(raw)
+            else:
+                with path.open('xb') as stream:stream.write(raw)
             result.append(LocalFileDescriptor(name=name, local_path=str(path),
                  size_bytes=len(raw), media_type=media))
         return tuple(result)
+
+
+def _project_base(tmp_path):
+    """Two explicit tracked files; this fixture is used only by process_e2e."""
+    import os
+    import shutil
+    import subprocess
+    base = tmp_path / 'base-project'
+    (base / 'src').mkdir(parents=True)
+    (base / 'data').mkdir()
+    (base / 'src/implementation.json').write_bytes(b'{"old_base_is_not_the_draft":true}\n')
+    (base / 'data/context.txt').write_bytes(b'readonly project context\n')
+    git = shutil.which('git', path=os.defpath)
+    assert git
+    environment = dict(PATH=os.defpath, HOME=os.devnull, XDG_CONFIG_HOME=os.devnull,
+        GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, LC_ALL='C',
+        GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@example.invalid',
+        GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@example.invalid')
+    for command in [('init', '--quiet', '--object-format=sha1', '--template='),
+            ('add', '--', 'src/implementation.json', 'data/context.txt'),
+            ('commit', '--quiet', '-m', 'Exact fixture base')]:
+        subprocess.run([git, '-c', 'core.hooksPath=' + os.devnull, *command], cwd=base,
+            env=environment, check=True, capture_output=True, timeout=5)
+    return dict(base_root=str(base), editable=['src'], scratch=['build'], outputs=['out'])
 
 
 @pytest.fixture
@@ -75,25 +106,42 @@ def chain(tmp_path, monkeypatch, request):
     snapshot = tmp_path / 'operator-capability.json'; c.write(snapshot, old['capability'])
     launcher = tmp_path / 'codex'; launcher.write_text('# synthetic identity files only; never executed\n'); launcher.chmod(0o700)
     public = tmp_path / 'public'; public.mkdir(); objective = public / 'objective.md'; objective.write_text('Use one exact supplied mesh.')
-    backend = InputBackend()
+    command_config = tmp_path / 'fake-command-transport.json'
+    c.write(command_config, dict(executable='/usr/bin/true'));command_config.chmod(0o400)
+    backend = InputBackend(read_command_configuration(command_config))
     monkeypatch.setattr(e, 'registration', lambda name: (managed.REGISTRATION, 'tcad'))
     monkeypatch.setattr(managed, 'build_adapter', lambda *args, **kwargs: backend)
     root = tmp_path / 'instance'
-    options = dict(transport='socket', socket_path=str(tmp_path / 'unused.sock'),
+    options = dict(transport='command', command_config_path=str(command_config),
         implementation_compilation=dict(capability_snapshot_path=str(snapshot)))
     plugin_config = tmp_path / 'tcad-plugin.json'; c.write(plugin_config, options)
+    project = _project_base(tmp_path) if getattr(request, 'param', None) == 'project' else None
     controller.prepare(root, objective, public, [str(launcher)], max_tokens=4000, max_seconds=1000,
         max_steps=12, model='fixture', reasoning_effort='high', search_policy=None, experiment_mode='local',
         node_budget_mode='soft', execution_config=dict(executor='tcad_execution:tcad', config_file=str(plugin_config)),
         formal_review_policy={'version': 1}, execution_authority_policy={'version': 1},
         execution_resource_policy=dict(version=1, allowance=dict(wall_time_seconds=100, max_storage_bytes=1000000)),
         source_restrictions=[] if getattr(request, 'param', None) == 'unknown_source' else [
-            dict(source=str(objective), restriction='clear')])
+            dict(source=str(objective), restriction='clear')],
+        **(dict(project=project, native_options=dict(workspace='workspace-write', network=False))
+           if project is not None else {}))
     # Only the native scheduling/identity boundary is synthetic. Source binding,
     # compiler proofs, formal qualification rules, gate and resource ledger run
     # through their actual production functions if this test is later authorized.
     monkeypatch.setattr(authority, '_remaining', lambda *args, **kwargs: (budget.clock_stamp(), 100.))
     original_seal = c.seal_result
+    from scidiscovery.research_loop import execution_resume
+    original_capture_pending = execution_resume._capture_pending
+    pending_capture_failures = []
+
+    def capture_pending(actual_root, job):
+        try:
+            return original_capture_pending(actual_root, job)
+        except Exception as error:
+            pending_capture_failures.append(dict(step=job['step'], error=type(error).__name__, message=str(error)[:240]))
+            raise
+
+    monkeypatch.setattr(execution_resume, '_capture_pending', capture_pending)
 
     def seal(root, step):
         from test_direct_public_collect import stopped_attempt
@@ -107,31 +155,41 @@ def chain(tmp_path, monkeypatch, request):
             home=str(home), path=str(session)))
         c.write(record / 'native-outcome.json', outcome)
         stopped_attempt(root, c.read(root / 'jobs' / f'{step:03d}.json'), record, monkeypatch)
-        return original_seal(root, step)
+        try:
+            return original_seal(root, step)
+        except Exception as error:
+            if pending_capture_failures:
+                error.add_note('Original pending capture failures: ' + json.dumps(pending_capture_failures, sort_keys=True))
+            raise
 
     monkeypatch.setattr(c, 'seal_result', seal)
     finish(root, 1, 'H', [], action='experiment', files={'mesh.tdr': 'mesh'})
     job = c.build_job(root, 2, 'W', [1]); work = c.workspace(root, 2); record = c.host_record(work)
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/002.json')))
     config_path = work / 'work/execution.json'; config = e.configure(root, 2, 'tcad_execution:tcad', options, config_path)
-    author = work / 'work/implementation.json'
+    author = work / ('project/src/implementation.json' if project is not None else 'work/implementation.json')
     c.write(author, dict(solver_kind='sdevice', files=[dict(relative_path='main.cmd', content='Solve {}\n')],
         input_slots=[dict(semantic_name='mesh', target_relative_path='inputs/mesh.tdr', media_type='application/octet-stream')],
         entrypoint='main.cmd', resource_limits=dict(wall_time_seconds=1, cpu_time_seconds=1,
             max_memory_bytes=1024, max_output_bytes=128, max_storage_bytes=100000)))
     aliases = work / 'work/scientific-files.json'; c.write(aliases, {'mesh': 'inputs/parents/001/artifacts/mesh.tdr'})
-    return root, backend, options, config, config_path, author, aliases
+    compile_source = Path(project['base_root']) / 'src/implementation.json' if project is not None else author
+    return root, backend, options, config, config_path, compile_source, aliases
 
 
 def _reviewed_execution(chain, capsys, *, opaque=False):
     root, backend, options, config, config_path, author, aliases = chain
     output = c.workspace(root, 2) / 'artifacts/package.json'
     if opaque:
+        from copy import deepcopy
         from scidiscovery.artifact_agent.schema.common import canonical_json
         from tcad_artifact.project_packager import ExecutionPackage
         old = json.loads((Path(__file__).parents[1] / 'fixtures/tcad_analysis_package.json').read_bytes())
-        old['project']['resource_limits'] = c.read(author)['resource_limits']
-        package = ExecutionPackage.model_validate_json(json.dumps(dict(project=old['project'], capability=old['capability'])),strict=True)
+        project = deepcopy(old['project'])
+        project['resource_limits'] = c.read(author)['resource_limits']
+        for field in ('source_tree_sha256', 'project_sha256', 'declarations_sha256'):
+            project.get('preflight_attestation', {}).pop(field, None)
+        package = ExecutionPackage.model_validate_json(json.dumps(dict(project=project, capability=old['capability'])),strict=True)
         output.write_bytes(canonical_json(package.model_dump(mode='json')))
     else:
         assert e.main(['--config', str(config_path), 'compile', '--implementation', str(author),
@@ -189,6 +247,37 @@ def test_public_compile_exact_review_and_existing_run_keep_native_original(chain
     assert output.read_bytes() == before
 
 
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('chain', ['project'], indirect=True)
+def test_project_json_compile_review_run_keeps_exact_single_file_source_and_base(chain, capsys, monkeypatch):
+    diagnostics = []
+    original_diagnostic = e._diagnostic
+
+    def diagnostic(error, *args, **kwargs):
+        diagnostics.append((type(error).__name__, str(error)))
+        return original_diagnostic(error, *args, **kwargs)
+
+    monkeypatch.setattr(e, '_diagnostic', diagnostic)
+    root, backend, output, active, current, _ = _reviewed_execution(chain, capsys)
+    author_job = c.read(root / 'jobs/002.json')
+    seal = c.read(c.host_record(c.workspace(root, 2)) / 'result-identity.json')
+    row = next(item for item in seal['compiled_implementations'] if item['material']['source'] == str(output))
+    compiled = inputs.verify_compilation(root, row['compiler'], material=row['material'], client_binding=row['client_binding'])
+    assert compiled['code_version']['selection'] == 'file'
+    assert compiled['code_version']['logical_root'] == 'project'
+    assert compiled['code_version']['entry'] == 'src/implementation.json'
+    assert compiled['base_identity'] == author_job['project']['base_identity']
+    assert not backend.prepared and not backend.submits
+    assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
+    result = json.loads(capsys.readouterr().out)
+    assert result['status'] == 'queued' and backend.prepared == [{'mesh': b'mesh'}] and backend.submits == 1, (
+        result['status'], diagnostics, len(backend.prepared), backend.submits)
+    accepted = e.Records(current).accepted(result['call_id'])
+    assert accepted['base_identity'] == author_job['project']['base_identity']
+    assert accepted['base_identity'] == c.read(root / 'jobs/006.json')['project']['base_identity']
+    assert 'code_version' not in accepted  # The reviewed self-contained package owns this run.
+
+
 def test_logical_inputs_mount_the_same_original_without_host_aliases(chain):
     from scidiscovery.research_loop import experiment_client, originals, shared_input_views
     root, _, _, config, _, _, _ = chain
@@ -227,15 +316,37 @@ def test_logical_inputs_mount_the_same_original_without_host_aliases(chain):
         experiment_client.input_reference(config, work / material['path'])
 
 
-def test_self_contained_v2_terminal_keeps_exact_inputs_and_next_subject_review(chain, capsys):
+def test_self_contained_v2_terminal_keeps_exact_inputs_and_next_subject_review(chain, capsys, monkeypatch):
     from copy import deepcopy
-    from scidiscovery.research_loop import history, qualification as q
+    from scidiscovery.research_loop import history, preparation_recovery, qualification as q
     root, backend, output, active, current, _ = _reviewed_execution(chain, capsys, opaque=True)
     assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
     call = json.loads(capsys.readouterr().out)['call_id']
     job = c.read(root / 'jobs/006.json')
     accepted = e.Records(current).accepted(call)
     assert backend.submits == 1 and backend.prepared == [{}]
+    assert not (e.Records(current).directory(call)/'source.py').exists()
+    assert e._direct_execution_input(current,accepted,accepted['prepared'],accepted['script'])
+    from scidiscovery.research_loop import experiment_client
+    with monkeypatch.context() as patch:
+        patch.setattr(experiment_client,'payload_path',lambda *args,**kwargs:
+            pytest.fail('A copied original does not need its former draft'))
+        assert not e._direct_execution_input(current,
+            dict(source_script=accepted['prepared']['local_path']),accepted['prepared'],accepted['script'])
+        frozen_alias=dict(acceptance_base=dict(source_script=str(output),script=accepted['script']),
+            prepared=accepted['prepared'])
+        assert preparation_recovery._direct_input(frozen_alias,current)
+        frozen_copy=dict(acceptance_base=dict(source_script=accepted['prepared']['local_path'],
+            script=dict(path=str(e.Records(current).directory(call)/'source.py'),
+                size_bytes=accepted['prepared']['size_bytes'])),prepared=accepted['prepared'])
+        assert not preparation_recovery._direct_input(frozen_copy,current)
+    for field, replacement in (
+            ('local_path',accepted['prepared']['local_path']+'.changed'),
+            ('size_bytes',accepted['prepared']['size_bytes']+1),
+            ('file_stat',[0,0,accepted['prepared']['size_bytes'],0])):
+        changed=deepcopy(accepted);changed['tcad']['prepared'][field]=replacement
+        with pytest.raises(e.IntegrityError,match='Prepared execution'):
+            e._direct_execution_input(current,changed,changed['prepared'],changed['script'])
     assert 'config_record' not in accepted  # Local metadata is not a generic accepted field.
     assert accepted['interface']['config_record'] == current['execution_interface']['config_record']
     assert inputs.managed_source_contributions(root, job, accepted)['complete']
@@ -243,7 +354,24 @@ def test_self_contained_v2_terminal_keeps_exact_inputs_and_next_subject_review(c
     backend.state = 'succeeded'
     assert e.main(['--config', str(active), 'reconcile', '--call-id', call]) == 0
     capsys.readouterr()
-    finish(root, 6, 'W', [5], files={'revised.txt':'A derivative of the exact opaque package.'})
+    from scidiscovery.research_loop.local_experiments import artifact_directory
+    exact_outputs = artifact_directory(current, call)
+    assert backend.collection_directories == [exact_outputs]
+    assert (exact_outputs / 'tcad_log').read_bytes() == b'synthetic input-chain terminal\n'
+    call_row=next(row for row in history.managed_calls(root,job) if row['call_id']==call)
+    history.validate_managed(root,job,[call_row])
+    for required in (accepted['execution_authority'],accepted['script']):
+        retained=history._retained_original(root,call_row,required)
+        assert root/retained['snapshot']==Path(required['path'])
+        changed_call=deepcopy(call_row)
+        changed_call['originals']=[row for row in changed_call['originals']
+            if not history._same_original(root,required,row)]
+        with pytest.raises(history.ObserverIntegrityError,match='Managed execution observation original changed'):
+            history.managed_status(root,changed_call,verify_files=False)
+    native_intent=e.proof(c.host_record(c.workspace(root,6))/'native-intent.json')
+    finish(root, 6, 'W', [5], files={'revised.txt':'A derivative of the exact opaque package.'},
+        preserve_native_intent=True)
+    assert e.proof(native_intent['path'])==native_intent
     record = c.host_record(c.workspace(root, 6)); seal = c.read(record / 'result-identity.json')
     proof = q._read(root, seal['source_provenance'])
     covered = proof['managed_input_coverage'][0]
@@ -252,9 +380,10 @@ def test_self_contained_v2_terminal_keeps_exact_inputs_and_next_subject_review(c
     assert q.output_status(root, 6)['restriction'] == 'clear' and review.authors(root, 6)['complete']
     assert set(map(tuple,review.authors(root,2)['participants'])) <= set(map(tuple,review.authors(root,6)['participants']))
     selecting = c.build_job(root, 7, 'A', [6])
-    material = next(row for row in seal['materials'] if row['source'].endswith('/revised.txt'))
-    choices = [row['id'] for row in history.implementation_options(root, 6) if row['label']=='revised.txt'
-        and history.resolve_implementation(root,row['id'],selecting['history']['nodes'])==material]
+    material = c._public_materials(root,[next(row for row in seal['materials']
+        if row['source'].endswith('/revised.txt'))])[0]
+    choices = [row['id'] for row in history.implementation_options(root, 6)
+        if history.resolve_implementation(root,row['id'],selecting['history']['nodes'])==material]
     assert len(choices)==1
     requested,_,request_record=finish(root,7,'A',[6],action='formal_review',selection=choices)
     _,_,_,back=review.request_route(root,requested,c.read(request_record/'result.json'),[7])
@@ -269,10 +398,31 @@ def test_self_contained_v2_terminal_keeps_exact_inputs_and_next_subject_review(c
         inputs.managed_source_contributions(root,job,changed)
     legacy={key:value for key,value in accepted.items() if key!='input_sources'}
     assert inputs.managed_source_contributions(root,job,legacy) is None
+    changed=deepcopy(accepted);changed['input_sources']['view']['evidence'][0]['unexpected']=True
+    with pytest.raises(q.IntegrityError,match='preparation original changed'):
+        inputs.managed_source_contributions(root,job,changed)
     archive=root/accepted['input_sources']['view']['evidence'][1]['path']
+    import os
+    before=archive.read_bytes();original_stat=archive.stat()
+    replacement=archive.with_name(archive.name+'.replacement');replacement.write_bytes(before)
+    os.utime(replacement,ns=(original_stat.st_atime_ns,original_stat.st_mtime_ns));replacement.replace(archive)
+    assert archive.read_bytes()==before and archive.stat().st_mtime_ns==original_stat.st_mtime_ns
+    assert archive.stat().st_ino!=original_stat.st_ino
+    with pytest.raises(q.IntegrityError,match='preparation original changed'):
+        inputs.managed_source_contributions(root,job,accepted)
+    assert inputs.managed_source_contributions(root,job,accepted,controls_only=True)['complete']
     archive.chmod(0o600);archive.write_bytes(b'changed actual prepared archive')
     with pytest.raises(q.IntegrityError,match='preparation original changed'):
         inputs.managed_source_contributions(root,job,accepted)
+    packet=Path(accepted['script']['path']);packet_stat=packet.stat()
+    replacement=packet.with_name(packet.name+'.replacement');replacement.write_bytes(packet.read_bytes())
+    os.utime(replacement,ns=(packet_stat.st_atime_ns,packet_stat.st_mtime_ns));replacement.replace(packet)
+    with pytest.raises(preparation_recovery.PreparationError,match='host preparation binding'):
+        preparation_recovery.retained_preparations(root,Path(current['record_dir']))
+    with pytest.raises(preparation_recovery.PreparationError,match='original bytes changed'):
+        preparation_recovery._verify_ref(root,frozen_alias['acceptance_base']['script'])
+    with pytest.raises(history.ObserverIntegrityError,match='observation original changed'):
+        history.managed_status(root,call_row,verify_files=False)
     assert backend.submits==1
 
 

@@ -100,8 +100,17 @@ def _request(parent, step, child, budget, guidance_text):
     return dict(parent_root=str(parent), step=step, child_root=str(child), budget=_budget(budget), guidance_text=guidance_text)
 
 
+def _project_targets(settings, *targets):
+    project=settings.get('project')
+    if project is None:return
+    base=Path(project['base_root'])
+    if any(base.is_relative_to(target) or Path(target).is_relative_to(base) for target in targets):
+        raise ForkError('fork_path_unsafe','Fork target or staging overlaps the frozen project base')
+
+
 def _inspect(request):
     plan = _source_call(fork_sources.inspect_source, Path(request['parent_root']), request['step'])
+    _project_targets(plan['selected_settings'],Path(request['child_root']))
     from scidiscovery.execution_security import request_digest
     blockers = list(plan.get('blocked_reasons', []))
     blockers.extend(_source_call(fork_sources.storage_blockers, plan, Path(request['child_root']).parent))
@@ -338,9 +347,10 @@ def _sync_tree(root):
 def _prepare(plan, request, transaction, *, _on_created=None):
     """Rebuild declared configuration with new identity and no inherited grant."""
     source_store = transaction / 'origins'
-    _source_call(fork_sources.copy_source, plan, source_store)
     stage = transaction / 'child'
     final = Path(request['child_root'])
+    _project_targets(plan['selected_settings'],transaction,stage,final)
+    _source_call(fork_sources.copy_source, plan, source_store)
     document = research_config.to_document(Path(request['parent_root']), plan['selected_settings'])
     snapshot = originals._snapshot(plan)
     global_paths = []

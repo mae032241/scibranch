@@ -16,7 +16,7 @@ try:
 except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 
-from . import contracts, controller, search
+from . import contracts, controller, search, project_layout
 
 DEFAULT_MODEL = 'gpt-6.1-sol'
 DEFAULT_REASONING_EFFORT = 'high'
@@ -106,7 +106,7 @@ def from_document(document, *, base):
     document = copy.deepcopy(document)
     base = Path(base).expanduser().resolve()
     _table(document, {'version', 'research', 'agent', 'permissions', 'budget',
-                      'executor', 'delivery', 'ui', 'policies', 'skills'}, 'research configuration')
+                      'executor', 'delivery', 'ui', 'policies', 'skills', 'project'}, 'research configuration')
     if type(document.get('version', 1)) is not int or document.get('version', 1) != 1:
         raise ValueError('Unsupported research configuration version')
     research = _table(document.get('research', {}),
@@ -118,6 +118,8 @@ def from_document(document, *, base):
         raise ValueError('research requires exactly one objective or objective_text')
     result = {key: _path(research[key], base, f'research.{key}')
               for key in ('root', 'public_root')}
+    if 'project' in document:
+        result['project'] = project_layout.configuration(document['project'])
     if 'objective_text' in research:
         if not isinstance(research['objective_text'], str) or not research['objective_text'].strip():
             raise ValueError('research.objective_text must contain original user text')
@@ -424,6 +426,9 @@ def to_document(root, settings=None):
                   budget=budgets, executor=executor, policies=policies, ui=copy.deepcopy(value.get('ui', {})))
     if value.get('skills') is not None:
         result['skills'] = dict(sets=copy.deepcopy(value['skills']['sets']))
+    if value.get('project') is not None:
+        result['project'] = {key: copy.deepcopy(value['project'][key])
+                             for key in ('base_root', 'editable', 'scratch', 'outputs')}
     if value.get('delivery_policy') is not None:
         result['delivery'] = copy.deepcopy(value['delivery_policy'])
         adapter = result['delivery'].get('adapter')
@@ -440,12 +445,13 @@ def validate_update(root, document, *, base=None):
     from . import configuration_updates
     previous = configuration_updates.editable(root)
     baseline = to_document(root, previous)
-    for key in ('version', 'research', 'ui'):
+    for key in ('version', 'research', 'ui', 'project'):
         if document.get(key, baseline.get(key)) != baseline.get(key):
             raise ValueError(f'{key} is immutable for an existing research instance')
     candidate = copy.deepcopy(document)
-    for key in ('version', 'research', 'ui'):
-        candidate[key] = baseline[key]
+    for key in ('version', 'research', 'ui', 'project'):
+        if key in baseline:
+            candidate[key] = baseline[key]
     if candidate == baseline:
         return previous
     options = from_document(candidate, base=root if base is None else base)

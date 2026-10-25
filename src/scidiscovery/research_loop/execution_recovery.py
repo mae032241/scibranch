@@ -190,12 +190,16 @@ def _validate_event(root,ref,value,chains,*,originals=True,sources=None,pending=
                 script_bound=(isinstance(script['file_stat'],list) and len(script['file_stat'])==4
                     and all(type(part) is int for part in script['file_stat'])
                     and script['file_stat'][2]==script['size_bytes'])
+            try:e._validate_base_identity(job.get('project'),accepted)
+            except (ValueError,KeyError,TypeError) as error:
+                raise history.ObserverIntegrityError('Recovered execution changed its original project identity') from error
             if 'code_version' in accepted:
-                from . import code_versions
+                from . import project_layout
                 try:
-                    version=code_versions._version(accepted['code_version'])
+                    project=job.get('project')
+                    version=project_layout.validate_code(project,accepted['code_version'],purpose='run')
                     logical=Path(version['logical_root']);entry=Path(version['entry'])
-                    selected_code=(logical==Path('code') and accepted['interface'].get('executor')=='local_execution:command'
+                    selected_code=(logical==Path('project' if project is not None else 'code') and accepted['interface'].get('executor')=='local_execution:command'
                         if version['selection']=='directory' else logical.parts[0]=='code' and len(entry.parts)==1)
                     source_bound=(selected_code and accepted.get('source_script')==str(c.workspace(logical_root,step)/logical/entry)
                         and not any(key in accepted for key in ('entry','source_reference','source_input')))

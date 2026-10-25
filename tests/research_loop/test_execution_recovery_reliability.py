@@ -236,6 +236,45 @@ def test_git_recovery_metadata_survives_missing_export_draft_and_science(recover
     assert row['validations']==[dict(context=None,verify_files=False)]
 
 
+def _project_recovery_metadata(row):
+    project=dict(base_root=str(row['root']/'deleted-base'),editable=['src','tools'],scratch=['build'],
+        outputs=['out'],base_identity=dict(object_format='sha1',commit='b'*40))
+    row['job']['project']=project
+    c.write(row['root']/'jobs/002.json',row['job'])
+    accepted=row['accepted'];accepted['base_identity']=dict(project['base_identity'])
+    accepted['code_version'].update(logical_root='project',entry='src/main.py')
+    accepted['source_script']=str(c.workspace(row['root'],2)/'project/src/main.py')
+    accepted['script']['path']=str(row['root']/'host-runtime/code-versions/exports/002/original/tree/src/main.py')
+    accepted['prepared']['local_path']=accepted['script']['path']
+    c.write(row['accepted_path'],accepted)
+    return row
+
+
+def test_project_recovery_metadata_uses_original_job_without_base_or_code_reads(recovery_metadata,monkeypatch):
+    from scidiscovery.research_loop import project_layout
+    row=_project_recovery_metadata(recovery_metadata)
+    monkeypatch.setattr(project_layout,'files',lambda *args,**kwargs:pytest.fail('Recovery reopened current project base'))
+    chains={}
+    execution_recovery._validate_event(row['root'],row['ref'],row['value'],chains,sources=row['sources'])
+    assert chains[(2,'original')]['value']==row['value']
+    assert not Path(row['job']['project']['base_root']).exists()
+
+
+@pytest.mark.parametrize('damage',['base_identity','missing_identity','entry','source','file_selection','job_identity'])
+def test_project_recovery_metadata_rejects_changed_original_project(recovery_metadata,damage):
+    from scidiscovery.research_loop import history
+    row=_project_recovery_metadata(recovery_metadata);accepted=row['accepted']
+    if damage=='base_identity':accepted['base_identity']['commit']='c'*40
+    elif damage=='missing_identity':accepted.pop('base_identity')
+    elif damage=='entry':accepted['code_version']['entry']='data/not-editable.py'
+    elif damage=='source':accepted['source_script']=row['job']['project']['base_root']+'/src/main.py'
+    elif damage=='file_selection':accepted['code_version']['selection']='file'
+    else:row['job']['project']['base_identity']['commit']='d'*40
+    c.write(row['accepted_path'],accepted)
+    with pytest.raises(history.ObserverIntegrityError):
+        execution_recovery._validate_event(row['root'],row['ref'],row['value'],{},sources=row['sources'])
+
+
 @pytest.mark.parametrize('damage',['schema','source','size','fingerprint','prepared'])
 def test_git_recovery_metadata_rejects_changed_original_bindings(recovery_metadata,damage):
     from scidiscovery.research_loop import history

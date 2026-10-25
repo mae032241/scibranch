@@ -4,7 +4,8 @@
 
 Control does not hash scientific data or outputs by default. Hashing is restricted
 to approval bindings, small control requests that require durable idempotency and
-the host-owned Git code capture described below. Approval/idempotency helpers must
+the host-owned Git code capture and raw Git blob verification of explicitly
+declared project bases described below. Approval/idempotency helpers must
 not traverse scientific files, code, logs, observations, inputs, results, Skills or
 archives. Explicit scientific tools may use their own algorithms
 on selected evidence; that is separate from control identity. Protocol 26 uses
@@ -192,7 +193,7 @@ host services that slot for the native attempt's lifetime and writes responses
 automatically. External mode leaves service ownership with its declared launcher.
 Neither path adds an agent, daemon, UDS or FIFO.
 
-New W execution code belongs in the current scientific workspace's `code/`, with
+Without `[project]`, new W execution code belongs in the current scientific workspace's `code/`, with
 data, logs and outputs outside that directory. Local
 `--experiment-dir experiments/<name>` selects an independent runtime working
 directory and captures the whole `code/` tree; `--script code/<name>/run.py` selects its entry. Without
@@ -291,6 +292,37 @@ faithfully projected yield explicit unsupported managed launches; ordinary nativ
 permissions are not replaced to make them run. The internal permission profile adds
 no operator setting. These file views do not establish hostile same-user process
 isolation or a blanket guarantee for generic native execution.
+
+**Declared project views.** `project_layout.py` owns strict project declarations,
+frozen base Git identity and bounded tracked-file/raw-blob validation. The
+[project configuration contract](RESEARCH_CONFIGURATION.md#declared-projects--声明工程)
+owns its supported fields and permission limits. The original base path exposes
+only verified HEAD ordinary files read-only, without `.git`, untracked/ignored
+files, a base-data copy or an overlay filesystem. Its SHA-1/SHA-256 HEAD identity
+is immutable across configuration revisions and forks. Missing or changed base
+bytes affect only later consumption that needs them, not known terminal records
+or metadata-only queries.
+
+Project draft exposure is limited to declared editable code. Initial tracked-code seed and a
+uniquely selected retained parent commit use existing shared code limits;
+ambiguous or absent parent selection reports a frozen-base fallback. Existing
+jobs keep their current drafts. A local project run captures all editable roots
+into one `code_version` rooted at `project`, then mounts that exact export
+read-only; empty roots use read-only tmpfs. Scratch roots are temporary tmpfs and
+output roots map to the original call's artifacts with full relative paths.
+W may write only its exact editable/scratch/node-output targets in the base view;
+other roles receive only the read-only base, without W drafts. Scientific input
+protection is applied last.
+
+Run cwd may be the exact base root; the backend's internal permission policy
+retains the task-work cwd and adds only declared scratch/output writable targets.
+The native Worker retains its frozen Codex `workspace-write` policy with exact
+project targets projected into it. Unsupported native permission or launcher
+configurations are rejected before launch rather than replaced. Network, web,
+subagent, Skill and authentication contracts remain unchanged. TCAD retains the
+self-contained implementation-JSON compiler/review/package path; DeckFiles and
+typed inputs remain the author's explicit dependency closure. Host project paths
+and the whole base tree are not automatically sent to remote execution.
 
 Existing legacy retention records keep their saved `host-history/objects/<uuid>`
 paths and owning-hardlink interpretation. Each independent freeze has its own
@@ -657,7 +689,9 @@ The child uses no parent alternates, object hardlinks or persistent transfer bun
 removing the source private Git does not remove those transferred versions.
 
 Current dirty/untracked code B is copied separately from historical code A and restored
-to the child's writable `code/` directory when its selected job is built. The existing
+to the child's writable `code/` directory when its selected job is built, or only
+the declared editable drafts under `project/` for a declared project. The original
+base remains a shared external dependency. The existing
 `visibility=private_snapshot` entries retain unsealed handoff drafts as readable,
 inert private state. They do not populate the child's native execution namespace,
 create a native intent, commit or seal, or grant scientific qualification or execution

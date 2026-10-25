@@ -21,7 +21,8 @@ MCP/Root 角色、systemd 服务或默认实例。已有 site 或任一薄 wrapp
 
 ## 创建与运行
 
-推荐通过单一 TOML 声明准备新实例，路径相对该文件解析：
+推荐通过单一 TOML 声明准备新实例；除要求准确绝对路径的 `project.base_root` 外，
+声明路径相对该文件解析：
 
 ```sh
 scid-research config-check --config /absolute/project/research.toml
@@ -47,6 +48,25 @@ scid-research prepare \
   --max-tokens 8000000 --max-seconds 1800 --max-steps 3
 scid-research run --root /absolute/path/new-instance
 ```
+
+已有 Git 工程可在完整 TOML 的对应表中明确配置标准 Codex 权限与工程目录，再使用同一
+`config-check`、`prepare --config` 入口；省略 `[project]` 仍使用 `code/`。例如：
+
+```toml
+[agent]
+launcher = ["codex"]
+[permissions]
+workspace = "workspace-write"
+[project]
+base_root = "/absolute/source-project"
+editable = ["src", "tools"]
+scratch = ["build"]
+outputs = ["out"]
+```
+
+基础工程只读且仅暴露 HEAD 追踪原件；声明、HEAD 身份和可写目录随实例冻结，fork 保留原值。
+原路径写入、单 commit 采集、初始/后继草稿、输出和 TCAD 包边界见
+[工程主合同](RESEARCH_CONFIGURATION.md#declared-projects--声明工程)。
 
 可重复传入 `--user-update /path/to/statement.md`，将用户补充和原始目标一起冻结。
 运行中可通过下述 guidance 命令追加面向未来任务的用户方向；已冻结输入不改写。Codex 默认 `gpt-6.1-sol`、`high`、`default` 服务档位。
@@ -156,7 +176,8 @@ scid-research start --continue --root /absolute/project/branch
 执行许可不授权新 subject 或调用。指引按原文作为可不采纳的 advice；正式审查仍用中立输入，
 通用指引延后到合法后继。已选 run 的准确代码 A 经有界 Git 对象传输进入 child 自有私有 Git，
 不依赖父 alternates、对象硬链接或持久 bundle；父私有 Git 删除后仍可消费已转移的代码。
-当前 dirty/untracked 代码 B 另行复制，构建所选 child job 时恢复到可写 `code/`；未封存交接
+当前 dirty/untracked 代码 B 另行复制，构建所选 child job 时恢复到可写 `code/`
+（project 模式仅为 `project/` 下准确声明的 editable 草稿）；未封存交接
 草稿留在已有 `private_snapshot` 条目中可读，不回填 child 的 native 执行命名空间，不自动
 commit、seal、启动调用或继承科学资格与许可。科学可见范围仍由原任务准确输入 cut 限定。
 必要 typed 控制由 child 持有，读取已复制控制不依赖父 jobs/control 继续存在。
@@ -415,7 +436,8 @@ Cov launcher 需要在其选定 runtime 显式安装 `scidiscovery-cov-execution
 模式在 settings/job 中冻结，恢复沿用原选择；已有实例缺少此字段时保持原配置路径。
 原生 shell 和权限照常可用，临时分析无需逐项受管。
 
-W 新编写的执行代码须位于当前科学工作区的 `code/`，数据、日志和输出放在该目录之外。
+未声明 `[project]` 时，W 新编写的执行代码须位于当前科学工作区的 `code/`，数据、日志和输出放在该目录之外；
+以下示例使用此默认模式。工程原路径与 editable 入口按[工程主合同](RESEARCH_CONFIGURATION.md#declared-projects--声明工程)处理。
 Local 的 `--experiment-dir` 选择独立的 `experiments/<name>` 运行工作目录；它固定整个
 `code/` 树，脚本由 `--script` 指定。例如先编写 `code/check-one/run.py` 及其代码模块，
 再使用独立 cwd：

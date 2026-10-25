@@ -12,7 +12,7 @@ FROZEN_TASK_SETTINGS = (
     'native_backend', 'native_options', 'native_launcher_argv', 'max_output_item_bytes', 'max_output_total_bytes',
     'final_a_completion_policy', 'live_feedback_version', 'experiment_interface_version',
     'managed_admission_version', 'worker_view_version', 'storage_policy',
-    'skills', 'worker_profiles', 'role_profile_declarations',
+    'skills', 'worker_profiles', 'role_profile_declarations', 'project',
 )
 
 
@@ -225,17 +225,18 @@ def selected_science_view(root, job):
 
 
 def _selected_files(root, selected):
-    from . import fork_sources, originals
+    from . import contracts as c, fork_sources, originals, project_layout
     manifest = fork_sources.validate_manifest(root)
     source = selected['source']
-    prefix = f'project/nodes/{source.step:03d}/code/'
+    layout=project_layout.code_roots(selected['job'].get('project'),c.workspace(Path(source.original_root),source.step))
+    prefixes=[row['source'].relative_to(source.original_root).as_posix()+'/' for row in layout['editable']]
     for entry in manifest['entries']:
         if (entry['origin_identity'] == source.origin_identity
                 and entry['visibility'] == 'private_snapshot'):
             path = originals.relative(entry['path'])
             # Native handoff drafts stay inert in the existing private entry.
             # A child starts its own accepted native chain in a clean namespace.
-            if path.startswith(prefix):
+            if any(path.startswith(prefix) for prefix in prefixes):
                 yield path, originals.resolve_ref(source, entry), entry
 
 
@@ -261,6 +262,10 @@ def build_selected_job(root, step):
     work.mkdir(parents=True, exist_ok=True)
     (work / 'work').mkdir(exist_ok=True)
     (work / 'artifacts').mkdir(exist_ok=True)
+    if selected['job'].get('project') is not None:
+        from . import project_layout
+        for row in project_layout.code_roots(selected['job']['project'],work)['editable']:
+            row['source'].mkdir(parents=True,exist_ok=True)
     from . import storage_policy as storage
     from scidiscovery import archive_io as files
     frozen=configuration_updates.for_new_job(root,step)

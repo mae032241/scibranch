@@ -13,6 +13,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import tempfile
 from urllib.parse import unquote, urlsplit
 
 MAX_RESULT_BYTES = 64_000
@@ -681,6 +682,16 @@ def science_view(job, root=None):
         'global': dict(objective='inputs/global/objective.md',
                        updates=[row['path'] for row in job['global_materials'][1:]]),
         'public_root': job['public_root'],
+        **(dict(project=dict(base_root=job['project']['base_root'],
+            editable=job['project']['editable'], scratch=job['project']['scratch'], outputs=job['project']['outputs'],
+            base_view='Frozen Git HEAD tracked files only; untracked and ignored files are unavailable.',
+            code='Author only within declared editable directories. Managed runs use one retained code version.',
+            seed={'selected_commit':'Draft initialized from the exact selected original code version.',
+                  'frozen_base':'Draft initialized from frozen base editable files because no unique original code version was selected.',
+                  'existing_draft':'Existing current draft was preserved; it is not asserted to match a parent commit.'}.get(
+                      job.get('project_code_seed',{}).get('source')),
+            writes='Use declared scratch for temporary files and outputs for retained results. Other project paths are readonly; move failed writes into the declared directories.'))
+           if job.get('project') is not None else {}),
         **(dict(configured_delivery=job['configured_delivery'],
             delivery_requirements={
                 'W':'Identify the actual deliverables and native evidence required by the original task. Preserve the needed evaluated objects and original receipts in existing declared outputs before temporary work is removed; source code or a metric alone may not satisfy the task. Retain necessary results, not every intermediate, and report missing items without manufacturing them. Do not write hashes or mechanical inventories.',
@@ -859,6 +870,143 @@ def _bind_original(source: Path, destination: Path, *, root, size_bytes,
     return destination
 
 
+def _selected_project_code(root, job):
+    """Resolve only explicitly selected scientific objects to exact original code."""
+    from . import execution_inputs, experiments as e, history, originals
+    candidates={}
+    for selected in job.get('selected_inputs',[]):
+        material=selected['material']
+        origin=execution_inputs._producer(root,material,controls_only=True)
+        step=origin['producer_step'];owner=originals.node(root,step)
+        parent=originals.source_job(owner)
+        if parent.get('project')!=job['project']:
+            raise ValueError('Selected code belongs to another frozen project')
+        seal=read(originals.source_record(owner,'result-identity.json'))
+        compiled=[item for item in seal.get('compiled_implementations',[]) if item['material']==material]
+        version=None;call_id=None;kind=None
+        if len(compiled)>1:raise ValueError('Selected project compiler is ambiguous')
+        if compiled:
+            item=compiled[0]
+            value=execution_inputs.verify_compilation(root,item['compiler'],material=material,
+                client_binding=item.get('client_binding'),source=owner if owner.inherited else None,controls_only=True)
+            if 'code_version' in value:
+                version=value['code_version'];kind='compiler'
+                call_id=execution_inputs._compiler_call_id(Path(owner.original_root),step,item['compiler'])
+        else:
+            parts=Path(material['path']).parts
+            prefix=('inputs','parents',f'{step:03d}','artifacts','experiments')
+            if (len(parts)<8 or parts[:5]!=prefix or parts[6]!='artifacts'
+                    or seal.get('observations') is None):continue
+            call_id=parts[5];name=Path(*parts[7:]).as_posix()
+            observed=history.validate_observation_original(owner,parent,seal,controls_only=True)
+            matches=[row for row in observed.get('managed_calls',[]) if row['call_id']==call_id
+                and len([item for item in row.get('outputs',[]) if item['name']==name
+                    and item['size_bytes']==material['size_bytes']])==1]
+            if len(matches)!=1:continue
+            proof=matches[0]['accepted']
+            accepted=read(originals.resolve_ref(owner,dict(proof,path=proof['snapshot'])))
+            if 'code_version' in accepted:
+                interface=accepted['interface']
+                config=dict(interface['config_record'],execution_interface=interface)
+                e._code_version_binding(config,accepted,source=owner)
+                version=accepted['code_version'];kind='run'
+        if version is None:continue
+        binding=dict(source='selected_commit',kind=kind,step=step,call_id=call_id,
+            original_job=originals.original_ref(owner,f'jobs/{step:03d}.json'),code_version=dict(version))
+        holder=owner.storage_root.parents[1] if owner.inherited else owner.storage_root
+        key=json.dumps(binding,sort_keys=True)
+        candidates[key]=(holder,binding)
+    if len(candidates)==1:return next(iter(candidates.values()))
+    return None,dict(source='frozen_base',reason='No unique exact code version is bound by selected scientific inputs.')
+
+
+@contextmanager
+def _project_seed_export(holder, binding, *, project, context):
+    """Release only an exact export first created for this seed's reads."""
+    if holder is None:
+        yield None
+        return
+    from . import code_versions, project_layout, storage_policy as storage
+    version=binding['code_version'];step=binding['step'];call=binding['call_id']
+    paths=code_versions.verify(holder,step=step,call_id=call,code_version=version,context=context)
+    project_layout.validate_code(project,version,purpose=binding['kind'],paths=paths)
+    exact=code_versions._private(holder,step,call,create=False,context=context).export
+    existed=exact.exists() or exact.is_symlink()
+    export=code_versions.materialize(holder,step=step,call_id=call,code_version=version,context=context)
+    try:yield export
+    finally:
+        if not existed:
+            code_versions.cleanup_export(holder,step=step,call_id=call,context=storage.Deadline(65))
+
+
+def _seed_project_code(root, job, work, *, context):
+    """Publish one bounded writable draft; an existing draft always wins."""
+    from . import code_versions, project_layout, storage_policy as storage
+    project=job['project'];layout=project_layout.code_roots(project,work);target=layout['root']
+    if target.exists() or target.is_symlink():
+        _,anchors=code_versions._directory(target)
+        for row in layout['editable']:
+            directory=target
+            for component in Path(row['relative']).parts:
+                directory=directory/component
+                code_versions._mkdir(directory,anchors)
+        return dict(source='existing_draft')
+    policy=code_versions._limits(None)
+    holder,binding=_selected_project_code(root,job)
+    with _project_seed_export(holder,binding,project=project,context=context) as export:
+        if holder is not None:
+            version=binding['code_version']
+            observed=code_versions._scan(export,version['entry'],'directory',policy,context)
+            records=[dict(relative=name,source=export/name,signature=signature)
+                for name,signature in observed[0].items()]
+        else:
+            records=[row for row in project_layout.files(project,context=context)
+                if any(row['relative'].startswith(name+'/') for name in project['editable'])]
+        directories={parent.as_posix() for row in records for parent in Path(row['relative']).parents
+            if str(parent)!='.'}
+        for name in project['editable']:
+            directories.add(name)
+            directories.update(parent.as_posix() for parent in Path(name).parents if str(parent)!='.')
+        inventory=storage.Inventory(policy,context=context)
+        for _ in directories:inventory.entry()
+        for row in records:
+            inventory.entry();inventory.file(row['signature'][3])
+        actual=storage.Inventory(policy,context=context)
+        stage=Path(tempfile.mkdtemp(prefix='.project-seed-',dir=work));created=[];created_directories=[]
+        try:
+            _,stage_anchors=code_versions._directory(stage)
+            for name in sorted(directories,key=lambda name:(len(Path(name).parts),name)):
+                code_versions._mkdir(stage/name,stage_anchors)
+                created_directories.append(stage/name)
+            for row in records:
+                code_versions._unchanged(stage_anchors)
+                if holder is not None:
+                    code_versions._source_parents(export,row['relative'],observed[1])
+                else:project_layout._unchanged(row['ancestors'])
+                raw=code_versions._read_file(row['source'],row['signature'],actual)
+                destination=stage/row['relative']
+                with destination.open('xb') as stream:
+                    created.append(destination);stream.write(raw)
+                    os.fchmod(stream.fileno(),0o755 if row['signature'][2]&0o111 else 0o644)
+            if holder is not None:
+                if code_versions._scan(export,version['entry'],'directory',policy,context)!=observed:
+                    raise ValueError('Selected original code changed during draft seed')
+            else:
+                for row in records:
+                    project_layout._unchanged(row['ancestors'])
+                    if code_versions._signature(row['source'].lstat())!=row['signature']:
+                        raise ValueError('Frozen base editable code changed during draft seed')
+            if target.exists() or target.is_symlink():raise ValueError('Current project draft appeared during seed')
+            code_versions._unchanged(stage_anchors)
+            stage.rename(target)
+            return binding
+        finally:
+            if stage.exists():
+                for path in reversed(created):path.unlink()
+                for directory in reversed(created_directories):directory.rmdir()
+                stage.rmdir()
+
+
 @owner_effect
 def build_job(root: Path, step: int, role: str, parents: list[int], instruction='', evidence_return=None,
               correction_request=None, author_correction=None, *, purpose=None, source_cutoff=None, delivery_sources=None, engineering_repair=None, final_report=None):
@@ -969,6 +1117,17 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
                instruction=instruction, direct_refs=refs, direct_materials=materials, direct_entry_points=entry_points, global_materials=globals_,
                evidence_return=evidence_return, **(dict(selected_inputs=selected) if selected else {}),
                **(dict(handoff_protocol=protocol) if protocol >= 2 else {}))
+    if retained is not None:
+        if retained.get('project') != policy.get('project'):
+            raise ValueError('Frozen scientific project changed')
+        if retained.get('project') is not None:job['project'] = retained['project']
+    elif policy.get('project') is not None:
+        job['project'] = json.loads(json.dumps(policy['project']))
+    if role=='W' and job.get('project') is not None:
+        if retained is None:
+            job['project_code_seed']=_seed_project_code(root,job,work,context=input_inventory.context)
+        elif 'project_code_seed' in retained:
+            job['project_code_seed']=retained['project_code_seed']
     if revision is not None:
         job['configuration_revision'] = revision
     if retained is None:

@@ -328,15 +328,23 @@ class _Closure:
 
     def snapshot(self, source):
         """Keep only this node's declared code directory and existing output draft."""
-        from . import code_versions, execution, storage_policy as storage
+        from . import code_versions, contracts as c, execution, project_layout, storage_policy as storage
         if source.inherited:
             return
         root = source.storage_root
-        prefix = f'project/nodes/{source.step:03d}/code'
-        code = files.check_path(root / prefix)
+        job=o.source_job(source)
+        layout=project_layout.code_roots(job.get('project'),c.workspace(root,source.step))
+        code = files.check_path(layout['root'])
         context = storage.Deadline(65)
         inventory = storage.Inventory(code_versions._limits(None), context=context)
-        pending = [code] if code.exists() else []
+        pending = []
+        if code.exists():
+            for row in layout['editable']:
+                directory=files.check_path(row['source'])
+                if job.get('project') is not None:
+                    inventory.entry()
+                    if not directory.exists():raise ValueError('Declared current project draft directory is missing')
+                pending.append(directory)
         while pending:
             directory = pending.pop()
             if not stat.S_ISDIR(directory.lstat().st_mode):
@@ -528,7 +536,7 @@ class _Closure:
         return value
 
     def code(self, source, step, call_id, version):
-        from . import code_versions
+        from . import code_versions, project_layout
         code_versions._version(version)
         holder = source.storage_root.parents[1] if source.inherited else source.storage_root
         key = (o.identity_key(source.origin_identity), step, call_id)
@@ -536,7 +544,10 @@ class _Closure:
         if key in self.code_transfers and self.code_transfers[key] != transfer:
             raise ValueError('Fork code call has conflicting exact versions')
         if key not in self.code_transfers:
-            code_versions.verify(holder,step=step,call_id=call_id,code_version=version)
+            paths=code_versions.verify(holder,step=step,call_id=call_id,code_version=version)
+            project=o.source_job(o.at_step(source,step)).get('project')
+            project_layout.validate_code(project,version,
+                purpose='compiler' if version['selection']=='file' else 'run',paths=paths)
         self.code_transfers[key] = transfer
 
     def science_ref(self, source, proof):

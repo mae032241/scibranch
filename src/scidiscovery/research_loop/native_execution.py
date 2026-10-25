@@ -30,6 +30,26 @@ def _merge(target, source):
         else:target[key]=value
 
 
+def project_policy(settings):
+    """Fail before submission when the frozen native policy cannot project."""
+    from .experiments import UnsupportedExecution
+    options = settings.get('native_options')
+    launcher = settings.get('native_launcher_argv', [])
+    contract = settings.get('native_capabilities', {}).get('native_launcher_contract')
+    if (settings.get('native_backend', 'codex') != 'codex' or len(launcher) != 1
+            or Path(launcher[0]).name != 'codex' or contract is not None
+            or not isinstance(options, dict) or options.get('workspace') != 'workspace-write'):
+        raise UnsupportedExecution('Project namespaces require an explicit frozen standard Codex workspace-write policy; inherited, readonly and custom native policies have no supported project projection')
+    if (Path('/etc/codex/managed_config.toml').exists() or Path('/etc/codex/requirements.toml').exists()):
+        raise UnsupportedExecution('Managed native permissions have no supported project namespace projection')
+    policy = dict(writable_roots=[], network_access=options['network'],
+        exclude_tmpdir_env_var=False, exclude_slash_tmp=False)
+    policy.update(options.get('sandbox_workspace_write', {}))
+    if policy['writable_roots']:
+        raise UnsupportedExecution('Additional native writable roots have no exact project namespace mapping; use a supported frozen policy without extra roots')
+    return policy
+
+
 def _permissions(home, work):
     """Capture relevant existing legacy declarations, then override both users.
 
@@ -81,7 +101,7 @@ def _permissions(home, work):
     return policy, originals
 
 
-def _profile(policy, workspace, tmpdir, *, virtual=False):
+def _profile(policy, workspace, tmpdir, *, virtual=False, project_writes=()):
     # Extending the native built-in retains its protected workspace metadata.
     # Exclusion removes an additional temporary write grant, never a write
     # already supplied by the workspace or the other temporary root.
@@ -91,10 +111,10 @@ def _profile(policy, workspace, tmpdir, *, virtual=False):
         if not temporary.is_absolute():temporary=workspace/temporary
         if not virtual:temporary=temporary.resolve()
     slash_tmp=Path('/tmp') if virtual else Path('/tmp').resolve()
-    writable=[workspace]
+    writable=[workspace, *[Path(path) for path in project_writes]]
     if not policy['exclude_slash_tmp']:writable.append(slash_tmp)
     if not policy['exclude_tmpdir_env_var'] and temporary is not None:writable.append(temporary)
-    filesystem={}
+    filesystem={str(path): 'write' for path in project_writes}
     for excluded,name,path in ((policy['exclude_tmpdir_env_var'],':tmpdir',temporary),
             (policy['exclude_slash_tmp'],':slash_tmp',slash_tmp)):
         if excluded and path is not None and not any(path.is_relative_to(root) for root in writable):
@@ -149,7 +169,15 @@ def prepare(root, step, record, work, home, args, *, standard, resume_position=N
         native_attempt=dict(number=len(execution.records(root,step))-1,execution_key=execution.identity(root,step)),
         intent=e.proof(record/'native-intent.json'),
         native_argv=list(args),home=str(home),workspace=str(work))
-    public=Path(c.read(c.regular(root/'jobs'/f'{step:03d}.json'))['public_root'])
+    job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
+    project=job.get('project')
+    if project is not None:
+        frozen=c.settings(root,job)
+        if frozen.get('project')!=project or frozen.get('native_options')!=native_options:
+            raise e.IntegrityError('Project native policy differs from its frozen job')
+        project_policy(frozen)
+        value['project']=project
+    public=Path(job['public_root'])
     native_args=list(args)
     try:
         if not standard:
@@ -177,10 +205,12 @@ def prepare(root, step, record, work, home, args, *, standard, resume_position=N
              *value['runtime_roots'],value['native']['path'],value['python'])])
         backend=record/'scientific-native-home';backend.mkdir(mode=0o700)
         tmpdir=os.environ.get('TMPDIR')
-        projection=_profile(policy,work,tmpdir)
+        from . import shared_input_views
+        project_writes=shared_input_views.project_targets(project,writable=False)
+        projection=_profile(policy,work,tmpdir,project_writes=project_writes)
         # A node workspace and every accepted cwd below it cannot cover either
         # top-level virtual temporary root; recheck the actual cwd at launch.
-        backend_projection=_profile(policy,work,'/task-tmp',virtual=True)
+        backend_projection=_profile(policy,work,'/task-tmp',virtual=True,project_writes=project_writes)
         value['permission_environment']=dict(TMPDIR=tmpdir)
         value['permission_profile']=dict(name=PERMISSION_PROFILE,configuration=projection)
         value['backend_permission_profile']=dict(name=PERMISSION_PROFILE,configuration=backend_projection)
@@ -195,9 +225,15 @@ def prepare(root, step, record, work, home, args, *, standard, resume_position=N
                 or not 2<=resume_position<len(native_args) or native_args[resume_position]!='resume'):
             raise e.IntegrityError('Original native resume command position changed')
         position=resume_position if resume_position is not None else len(native_args)-1
-        native_args[position:position]=['-c','sandbox_workspace_write='+_toml(policy)]
+        worker_policy=dict(policy)
+        if project is not None:
+            worker_policy['writable_roots']=[str(path) for path in shared_input_views.project_targets(project,writable=True)]
+            value['worker_permission_policy']=worker_policy
+            value['project_writable_targets']=[str(path) for path in project_writes]
+        native_args[position:position]=['-c','sandbox_workspace_write='+_toml(worker_policy)]
         value['applied_native_argv']=list(native_args)
     except e.UnsupportedExecution as error:
+        if project is not None:raise
         value['unsupported']=str(error)
     with snapshot.open('x') as stream:
         json.dump(value,stream,ensure_ascii=False,allow_nan=False);stream.flush();os.fsync(stream.fileno())
@@ -228,6 +264,9 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
     context=storage_policy.Deadline(config['max_seconds'],upstream=worker_execution_bridge.operation_context())
     shared_input_views.ensure_capability(context=context)
     job=c.read(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
+    project=job.get('project')
+    if value.get('project')!=project:
+        raise e.IntegrityError('Scientific project differs from its frozen native attempt')
     if config['execution_interface']['executor']!='local_execution:command':
         raise e.UnsupportedExecution('Selected executor has no default scientific subprocess namespace')
     directory=e.Records(config).directory(accepted['call_id'])
@@ -238,7 +277,7 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
         if e._code_version_binding(config,accepted)!=root:
             raise e.IntegrityError('Scientific code belongs to another exact instance')
         version=accepted['code_version'];code_root=work/version['logical_root']
-        cwd=cwd or str(work)
+        cwd=cwd or str(Path(project['base_root']) if project is not None else work)
         if (code_root.resolve()!=code_root or not code_root.is_dir()
                 or Path(cwd).is_relative_to(code_root)):
             raise e.UnsupportedExecution('Scientific working directory must remain outside the ordinary code directory')
@@ -260,7 +299,7 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
             bindings.append(('--bind',local_experiments.artifact_directory(config,accepted['call_id']),artifacts))
         elif accepted.get('snapshot_files'):
             raise e.IntegrityError('Scientific code snapshots require their accepted experiment directory')
-        command[accepted['script_index']]=str(source)
+        command[accepted['script_index']]=str(Path(project['base_root'])/version['entry'] if project is not None else source)
     else:
         if source.resolve()!=source or not source.is_relative_to(work):
             raise e.UnsupportedExecution('Scientific source is outside its assigned workspace')
@@ -282,9 +321,12 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
         else:
             bindings=[('--ro-bind',directory/'source.py',source)]
             command[accepted['script_index']]=str(source);cwd=cwd or str(work)
-    if Path(cwd).resolve()!=Path(cwd) or not Path(cwd).is_relative_to(work):
+    if (Path(cwd).resolve()!=Path(cwd) or not (Path(cwd).is_relative_to(work)
+            or project is not None and Path(cwd)==Path(project['base_root']))):
         raise e.UnsupportedExecution('Scientific working directory is outside its assigned workspace')
-    if _profile(value['policy'],Path(cwd),'/task-tmp',virtual=True)!=value['backend_permission_profile']['configuration']:
+    policy_cwd=work if project is not None else Path(cwd)
+    project_writes=shared_input_views.project_targets(project,writable=False)
+    if _profile(value['policy'],policy_cwd,'/task-tmp',virtual=True,project_writes=project_writes)!=value['backend_permission_profile']['configuration']:
         raise e.IntegrityError('Accepted scientific cwd differs from its native permission projection')
     input_mounts=None
     if code_root is not None:
@@ -329,17 +371,27 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
         '--tmpfs',str(work/'work/experiment'),'--tmpfs','/task-tmp','--chdir',cwd])
     # Codex protects these metadata directories even when they were absent at
     # preparation. Supply them in the host workspace before inner sandboxing.
-    metadata_root=directory/'inputs' if code_root is None and 'entry' in accepted else Path(cwd)
+    metadata_root=directory/'inputs' if code_root is None and 'entry' in accepted else policy_cwd
     for name in ('.git','.agents','.codex','.aws'):
         path=metadata_root/name
         if not path.exists():path.mkdir(mode=0o700)
     for mode,source_path,target in bindings:wrapped.extend([mode,str(source_path),str(target)])
+    if project is not None:
+        if code_root is None:
+            raise e.UnsupportedExecution('Project local execution requires an exact project code version')
+        from . import local_experiments
+        wrapped.extend(shared_input_views.project_arguments(project,work,code_tree=export,
+            artifacts=local_experiments.artifact_directory(config,accepted['call_id']),writable=False,context=context))
+        shared_input_views.project_overlap(project,[(Path(input_mounts[index+1]),Path(input_mounts[index+2]))
+            for index,argument in enumerate(input_mounts) if argument in ('--bind','--ro-bind')])
     wrapped.extend(input_mounts if input_mounts is not None else
         shared_input_views.mount_arguments(root,job,work,mounts=final_mounts,include_skills=False,context=context))
     environment=dict(PATH='/usr/bin:/bin',HOME='/task-tmp',CODEX_HOME=str(backend),
         TMPDIR='/task-tmp',XDG_RUNTIME_DIR='/task-tmp',LANG='C.UTF-8',PYTHONDONTWRITEBYTECODE='1')
     for key,content in environment.items():wrapped.extend(['--setenv',key,content])
     bootstrap='umask 077; chmod 700 /task-tmp; exec "$@"'
+    if project is not None:
+        command=['/bin/sh','-c','cd "$1" && shift && exec "$@"','scid-project-cwd',cwd,*command]
     scientific=['/bin/sh','-c',bootstrap,'scid-scientific-sandbox',value['native']['path'],
-        'sandbox','-P',PERMISSION_PROFILE,'-C',cwd,'--',*command]
+        'sandbox','-P',PERMISSION_PROFILE,'-C',str(policy_cwd),'--',*command]
     return wrapped+scientific,None,None

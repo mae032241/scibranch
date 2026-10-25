@@ -133,8 +133,10 @@ Workers write ordinary scientific files and use the thin experiment submission a
 wait interface. Their instructions add no hash calculation, comparison, verification
 or hash inventories. Control retains exact path, producer and size references
 privately under the [architecture's hash allowlist](docs/ARCHITECTURE.md).
-New W execution code belongs in `code/`, separate from the experiment working
-directory; host-owned Git fixes the selected code before adapter preparation.
+By default, new W execution code belongs in `code/`, separate from the experiment
+working directory; host-owned Git fixes the selected code before adapter preparation.
+For an existing Git project, declare its read-only base and explicit editable,
+scratch and output directories through the [project configuration contract](docs/RESEARCH_CONFIGURATION.md#declared-projects--声明工程).
 See the [CLI examples](docs/ROOTLESS_CLI.zh-CN.md#受管本地实验) and [code contract](docs/ARCHITECTURE.md).
 
 The operator evidence exporter keeps default omission metadata within 8 KiB and

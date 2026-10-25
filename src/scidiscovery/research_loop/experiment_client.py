@@ -148,14 +148,45 @@ def _input_rows(job):
 
 
 
+def code_path(config, path):
+    """Map declared original-path aliases to the exact current project draft."""
+    from . import contracts as c, project_layout
+    from .experiments import CallerError, IntegrityError
+    path = Path(path).absolute()
+    if config.get('scope', {}).get('role') != 'W':return path
+    root = root_for_configuration(config, allow_standalone=True)
+    if root is None:return path
+    work = c.workspace(root, config['scope']['step'])
+    job = c.read(c.regular(root / 'jobs' / f'{config["scope"]["step"]:03d}.json'))
+    if any(path in (work / item['path'], root / Path(item.get('source', work / item['path'])))
+           for item in _input_rows(job)):
+        return path
+    project = job.get('project')
+    if project is None:return path
+    layout = project_layout.code_roots(project, work)
+    for alias in (Path(project['base_root']), layout['root']):
+        if not path.is_relative_to(alias):continue
+        relative = path.relative_to(alias)
+        if '..' in relative.parts or not any(
+                relative.is_relative_to(row['relative']) and relative != Path(row['relative'])
+                for row in layout['editable']):
+            raise CallerError('Choose a code entry inside a declared project editable directory.')
+        selected = layout['root'] / relative
+        if selected.resolve() != selected:
+            raise IntegrityError('Code selection requires an exact ordinary project draft path')
+        return selected
+    return path
+
+
 def code_selection(config, path, *, resolved=None, experiment_directory=None):
     """Select dedicated current-W code; saved scientific inputs stay direct."""
-    from . import contracts as c, shared_input_views
+    from . import contracts as c, project_layout, shared_input_views
     from .experiments import CallerError, IntegrityError
     if config.get('scope',{}).get('role')!='W':return None
     root=root_for_configuration(config,allow_standalone=True)
     if root is None:return None
-    path=Path(path).absolute()
+    path=code_path(config,path)
+    if resolved is not None:resolved=code_path(config,resolved)
     work=c.workspace(root,config['scope']['step'])
     job=c.read(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
     rows=_input_rows(job)
@@ -170,9 +201,11 @@ def code_selection(config, path, *, resolved=None, experiment_directory=None):
     if any(path.is_relative_to(work/'work'/name) for name in shared_input_views.DYNAMIC_ROOTS):
         input_reference(config,path)
         return None
-    code_root=work/'code'
+    project=job.get('project')
+    layout=project_layout.code_roots(project,work)
+    code_root=layout['root']
     if not path.is_relative_to(code_root) or path==code_root:
-        raise CallerError('Move a new code entry into code/; --experiment-dir selects only the Local runtime working directory.')
+        raise CallerError('Move a new code entry into the declared code scope; --experiment-dir selects only the Local runtime working directory.')
     if experiment_directory is not None:
         directory=Path(experiment_directory).absolute()
         relative=directory.relative_to(work) if directory.is_relative_to(work) else Path()
@@ -183,14 +216,19 @@ def code_selection(config, path, *, resolved=None, experiment_directory=None):
             raise CallerError('Choose an explicit current-W experiments/<name> runtime directory outside code/.')
         selection='directory';selected=code_root
         entry=path.relative_to(code_root).as_posix()
+    elif project is not None:
+        selection='directory';selected=code_root;entry=path.relative_to(code_root).as_posix()
     else:
         code_root=path.parent;selection='file';selected=path;entry=path.name
     for item in rows:
         for material in (work/item['path'],root/Path(item.get('source',work/item['path']))):
-            if selected.is_relative_to(material) or material.is_relative_to(selected):
+            scopes=[row[key] for row in layout['editable'] for key in ('source','target')] if project is not None else [selected]
+            if any(scope.is_relative_to(material) or material.is_relative_to(scope) for scope in scopes):
                 raise CallerError('Selected code overlaps a bound scientific input; keep data outside the selected code scope.')
-    return dict(code_root=code_root,entry=entry,selection=selection,
+    result=dict(code_root=code_root,entry=entry,selection=selection,
         logical_root=code_root.relative_to(work).as_posix())
+    if project is not None:result['roots']=[row['relative'] for row in layout['editable']]
+    return result
 
 
 

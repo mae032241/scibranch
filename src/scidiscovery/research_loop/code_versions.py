@@ -232,8 +232,8 @@ def _git(private, arguments, *, context, data=b'', index=None, input_limit=10485
             stream.close()
 
 
-def _scan(code_root, entry, selection, policy, context):
-    inventory = Inventory(policy, context=context)
+def _scan(code_root, entry, selection, policy, context, *, inventory=None):
+    inventory = inventory if inventory is not None else Inventory(policy, context=context)
     info = code_root.lstat()
     root_fd = _open_directory(code_root, expected=(info.st_dev, info.st_ino))
     files, directories = {}, {'.': _signature(os.fstat(root_fd))}
@@ -283,11 +283,51 @@ def _scan(code_root, entry, selection, policy, context):
             entries.close()
         for fd in opened:
             os.close(fd)
-    if entry not in files:
+    if entry is not None and entry not in files:
         raise ValueError('Selected code entry is absent from the captured tree')
     required = {parent.as_posix() for name in files for parent in Path(name).parents if str(parent) != '.'}
     if set(directories) != {'.', *required}:
         raise ValueError('Git cannot represent an empty selected code directory')
+    return files, directories
+
+
+def _declared_roots(value, *, entry, selection, logical_root):
+    if value is None:
+        return None
+    if (not isinstance(value, (list, tuple)) or not value
+            or selection != 'directory' or logical_root != 'project'):
+        raise ValueError('Declared code roots require a project directory selection')
+    roots = tuple(_relative(name, git_path=True) for name in value)
+    if any(left == right or left.startswith(right + '/') or right.startswith(left + '/')
+           for number, left in enumerate(roots) for right in roots[number + 1:]):
+        raise ValueError('Declared code roots must be distinct and nonoverlapping')
+    if not any(entry.startswith(name + '/') for name in roots):
+        raise ValueError('Selected code entry is outside the declared code roots')
+    return roots
+
+
+def _scan_roots(code_root, entry, roots, policy, context):
+    """Visit only explicit editable directories with one aggregate inventory."""
+    inventory = Inventory(policy, context=context)
+    anchors = _lineage(code_root)
+    files, directories = {}, {'.': _signature(code_root.lstat())}
+    for relative in roots:
+        directory = code_root / relative
+        _extend(anchors, _lineage(directory))
+        for parent in reversed(Path(relative).parents):
+            name = parent.as_posix()
+            if name not in directories:
+                inventory.entry()
+                directories[name] = _signature((code_root / parent).lstat())
+        inventory.entry()
+        found, observed = _scan(directory, None, 'directory', policy, context,
+                                inventory=inventory)
+        files.update((relative + '/' + name, info) for name, info in found.items())
+        directories.update((relative if name == '.' else relative + '/' + name, info)
+                           for name, info in observed.items())
+    if entry not in files:
+        raise ValueError('Selected code entry is absent from the captured tree')
+    _unchanged(anchors)
     return files, directories
 
 
@@ -388,7 +428,7 @@ def _pin(private, commit, context):
 
 
 def capture(root, *, step, call_id, code_root, entry, selection, logical_root,
-            limits=None, context=None) -> dict:
+            roots=None, limits=None, context=None) -> dict:
     """Capture selected raw files and create the immutable original call ref once."""
     context = Deadline(65, upstream=context)
     policy = _limits(limits)
@@ -396,8 +436,15 @@ def capture(root, *, step, call_id, code_root, entry, selection, logical_root,
     logical_root = _relative(logical_root)
     if selection not in ('file', 'directory'):
         raise ValueError('Code selection must be file or directory')
+    if isinstance(roots, (list, tuple)) and len(roots) > policy['max_scan_entries']:
+        raise StorageQuotaExceeded('Code root entry limit exceeded')
+    roots = _declared_roots(roots, entry=entry, selection=selection, logical_root=logical_root)
     code_root, source_anchors = _directory(code_root)
-    before = _scan(code_root, entry, selection, policy, context)
+    def scan():
+        if roots is None:
+            return _scan(code_root, entry, selection, policy, context)
+        return _scan_roots(code_root, entry, roots, policy, context)
+    before = scan()
     private = _private(root, step, call_id, create=True, context=context)
     actual = Inventory(policy, context=context)
     with _index(private) as index:
@@ -439,7 +486,7 @@ def capture(root, *, step, call_id, code_root, entry, selection, logical_root,
         tree = _oid(_git(private, ('write-tree',), index=index, context=context))
         commit = _oid(_git(private, ('commit-tree', tree), data=_MESSAGE,
                            index=index, context=context))
-        if _scan(code_root, entry, selection, policy, context) != before:
+        if scan() != before:
             raise ValueError('Selected code changed during capture')
         _unchanged(source_anchors)
         _pin(private, commit, context)
@@ -500,12 +547,13 @@ def _tree(private, version, policy, context, *, objects=None):
     return files, directories
 
 
-def verify(root, *, step, call_id, code_version, limits=None, context=None) -> None:
+def verify(root, *, step, call_id, code_version, limits=None, context=None) -> tuple[str, ...]:
     """Verify schema, exact call pin, complete regular tree and selected entry."""
     context = Deadline(65, upstream=context)
     version = _version(code_version)
     private = _private(root, step, call_id, create=False, context=context)
-    _tree(private, version, _limits(limits), context)
+    files, _ = _tree(private, version, _limits(limits), context)
+    return tuple(files)
 
 
 def transfer(source_root, target_root, *, step, call_id, code_version, limits=None, context=None) -> None:

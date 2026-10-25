@@ -27,6 +27,43 @@ max_steps = 8
     return path
 
 
+def test_project_declaration_roundtrip_preserves_frozen_identity(tmp_path):
+    project = dict(base_root='/exact/base', editable=['src', 'tools'], scratch=['build'], outputs=['out'])
+    path = declaration(tmp_path, '\n[project]\nbase_root = "/exact/base"\n'
+        'editable = ["src", "tools"]\nscratch = ["build"]\noutputs = ["out"]\n')
+    parsed = research_config.from_document(research_config.read_declaration(path), base=tmp_path)
+    assert parsed['project'] == project
+    frozen = {**project, 'base_identity': dict(object_format='sha256', commit='a' * 64)}
+    settings = dict(objective='Original task', public_root=str(tmp_path / 'public'),
+        native_launcher_argv=['never-launched'], model='model', project=frozen)
+    document = research_config.to_document(tmp_path / 'instance', settings)
+    assert document['project'] == project
+    assert 'base_identity' not in document['project']
+    assert settings['project'] == frozen
+
+
+@pytest.mark.parametrize('change', ['replace', 'remove', 'add'])
+def test_project_is_immutable_before_operational_revalidation(tmp_path, monkeypatch, change):
+    from scidiscovery.research_loop import configuration_updates
+    frozen = dict(base_root='/exact/base', editable=['src'], scratch=[], outputs=[],
+        base_identity=dict(object_format='sha1', commit='a' * 40))
+    settings = dict(objective='Original task', public_root=str(tmp_path / 'public'),
+                    native_launcher_argv=['never-launched'], model='model')
+    if change != 'add':
+        settings['project'] = frozen
+    monkeypatch.setattr(c, 'settings', lambda root: settings)
+    monkeypatch.setattr(configuration_updates, 'editable', lambda root: settings)
+    document = research_config.to_document(tmp_path / 'instance', settings)
+    if change == 'remove':
+        # Missing means retain unchanged in an operational declaration; an
+        # explicit null is an attempted removal of the frozen project.
+        document['project'] = None
+    else:
+        document['project'] = dict(base_root='/another/base', editable=['src'])
+    with pytest.raises(ValueError, match='project is immutable'):
+        research_config.validate_update(tmp_path / 'instance', document)
+
+
 def output(capsys):
     return json.loads(capsys.readouterr().out)
 

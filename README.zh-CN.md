@@ -88,6 +88,8 @@ A 选择候选时须提供 `selection_explanation`，声明当前比较准则及
 
 Worker 写普通科学文件，使用薄实验提交与等待接口。其提示词不增加哈希计算、比对、校验或
 哈希清单工作；控制程序按[架构的哈希白名单](docs/ARCHITECTURE.zh-CN.md)在宿主私有空间保留精确路径、producer 与大小引用。
+已有 Git 工程可按[工程配置主合同](docs/RESEARCH_CONFIGURATION.md#declared-projects--声明工程)
+声明只读基础和准确 editable、scratch、output 目录；未声明 `[project]` 时沿用 `code/` 流程。
 
 操作侧证据导出工具将默认省略元数据限制在 8 KiB 内，并按需链接到每页不超过 16 KiB
 的完整科学详情；这一限制只针对省略部分，不针对整个证据索引。详情描述缺失材料，

@@ -222,6 +222,55 @@ def _killed_local(root, config, boundary='partial'):
     return snapshot, counter
 
 
+@pytest.mark.parametrize('damage', ['clean', 'unknown_file', 'source_symlink'])
+def test_legacy_copied_snapshot_consumer_uses_retained_originals(tmp_path, monkeypatch, damage):
+    records = tmp_path / 'records'
+    snapshot = records / '.prepared-legacy'; snapshot.mkdir(parents=True)
+    draft = tmp_path / 'retired-draft.py'; draft.write_bytes(b'legacy copied source\n')
+    source = snapshot / 'source.py'; source.write_bytes(draft.read_bytes())
+    prepared = dict(name='legacy-call', local_path=str(draft), size_bytes=draft.stat().st_size,
+        media_type='application/octet-stream')
+    draft.unlink()
+    inputs = snapshot / 'inputs'; inputs.mkdir()
+    retained_input = inputs / 'context.txt'; retained_input.write_bytes(b'exact copied input\n')
+    inventory = [dict(e.proof(retained_input), name='context.txt')]
+    scope = dict(step=2, role='W')
+    attempt = dict(number=0)
+    interface = dict(executor='remote_execution:fixture')
+    base = dict(call_id=prepared['name'], scope=scope, native_attempt=attempt, interface=interface,
+        prepared=prepared, source_script=str(draft),
+        script=dict(path=str(records / 'calls' / prepared['name'] / 'source.py'),
+            size_bytes=prepared['size_bytes']), snapshot_files=inventory, parent=dict(candidate_id=None))
+    value = dict(records=str(records), call_id=prepared['name'], prepared=prepared, scope=scope,
+        native_attempt=attempt, interface=interface, acceptance_base=base,
+        input_inventory=inventory, directory_identity=recovery._identity(snapshot))
+    binding = tmp_path / 'legacy-binding.json'; binding.write_text(json.dumps(value))
+    ref = e.proof(binding)
+    accepted = dict(base, host_preparation=ref)
+    accepted_path = snapshot / 'accepted.json'; accepted_path.write_text(json.dumps(accepted))
+    originals = {path: path.read_bytes() for path in (source, retained_input, binding, accepted_path)}
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('Legacy copied snapshot consumer reopened live payload resolution')
+    monkeypatch.setattr(recovery.experiment_client, 'payload_path', forbidden)
+    config = dict(worker_view_version=1)
+    assert not draft.exists() and 'code_version' not in accepted
+    assert recovery._accepted(snapshot, value, config, ref, historical=True) == accepted
+    recovery._tree(snapshot, value, config, complete=True)
+    assert all(path.read_bytes() == raw for path, raw in originals.items())
+    if damage == 'clean':
+        return
+    neighbor = tmp_path / 'neighbor'; neighbor.write_bytes(b'untouched neighbor\n')
+    if damage == 'unknown_file':
+        (snapshot / 'extra').write_bytes(b'unknown ownership')
+    else:
+        source.unlink(); source.symlink_to(neighbor)
+    with pytest.raises(recovery.PreparationError, match='unknown file|link or filesystem boundary'):
+        recovery._tree(snapshot, value, config, complete=True)
+    assert neighbor.read_bytes() == b'untouched neighbor\n'
+    assert binding.read_bytes() == originals[binding] and accepted_path.read_bytes() == originals[accepted_path]
+
+
 @pytest.mark.process_e2e
 def test_killed_unbound_local_writer_explicit_cli_cleanup_removes_only_its_blocker(tmp_path, monkeypatch, capsys):
     write = c.write

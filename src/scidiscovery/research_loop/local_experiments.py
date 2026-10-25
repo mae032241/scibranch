@@ -265,7 +265,10 @@ class LocalExecution:
         cwd=accepted.get('cwd')
         if 'entry' in accepted:
             cwd=str(directory/'inputs');(Path(cwd)/'artifacts').mkdir()
-        elif 'code_version' in accepted and accepted.get('experiment_directory') is not None:
+        elif 'code_version' in accepted and (accepted.get('experiment_directory') is not None
+                or accepted.get('base_identity') is not None):
+            # verify_scientific_inputs above bound project metadata to the
+            # original job; even an empty declared output view needs its holder.
             artifact_directory(self.config,call_id).mkdir(parents=True)
         deadline=self._execution_deadline(accepted)
         if deadline is None:deadline=started+self.config['max_seconds']
@@ -369,9 +372,13 @@ class LocalExecution:
             return self.result(accepted['call_id'])
         known=cleanup and transport_complete and type(returncode) is int
         script=[accepted['script']]
+        project_run=False
         if 'code_version' in accepted:
             root=e._code_version_binding(dict(self.config,execution_interface=self.frozen_interface)
                 if getattr(self,'frozen_interface',None) is not None else self.config,accepted)
+            # The binding checks original job.project, exact base_identity and
+            # directory code selection without consuming current base bytes.
+            project_run=accepted.get('base_identity') is not None
             if e._code_export_entry(root,accepted) is not None:script=[]
         original=dict(call_id=accepted['call_id'],status=('known_success' if returncode==0 else 'known_failed') if known else 'unknown',
             candidate_id=None,run_id=None,model=None,parent=accepted['parent'],change_intent=None,scope=accepted['scope'],
@@ -379,7 +386,8 @@ class LocalExecution:
             note='Original local command outcome; no domain metric or candidate qualification')
         if accepted.get('local_observation_version')!=1:return original
         outputs=[];result=dict(status='not_requested',metrics=[],outputs=[])
-        if 'entry' in accepted or 'code_version' in accepted and accepted.get('experiment_directory') is not None:
+        if ('entry' in accepted or 'code_version' in accepted
+                and (accepted.get('experiment_directory') is not None or project_run)):
             if not cleanup:
                 result=dict(status='unavailable',metrics=[],outputs=[],diagnostic='execution_cleanup_unknown')
             else:

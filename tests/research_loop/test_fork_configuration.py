@@ -17,6 +17,67 @@ REVISED_ALLOWANCE = dict(max_tokens=800, max_seconds=50, max_steps=4)
 RESOURCES = dict(wall_time_seconds=100, max_storage_bytes=10000)
 
 
+def test_fork_freezes_exact_project_declaration_and_base_identity(tmp_path):
+    project=dict(base_root=str(tmp_path/'base'),editable=['src'],scratch=['build'],outputs=['out'],
+        base_identity=dict(object_format='sha1',commit='a'*40))
+    original=dict(project=project)
+    assert fork_runtime.changed_task_settings(original,copy.deepcopy(original))==[]
+    changed=copy.deepcopy(original);changed['project']['base_identity']['commit']='b'*40
+    assert fork_runtime.changed_task_settings(original,changed)==['project']
+    changed=copy.deepcopy(original);changed['project']['editable']=['tools']
+    assert fork_runtime.changed_task_settings(original,changed)==['project']
+
+
+@pytest.mark.parametrize('target',['base/child','base','base-parent'])
+def test_fork_rejects_final_or_staging_project_overlap_before_copy(tmp_path,target):
+    project=dict(base_root=str(tmp_path/'base-parent/base'))
+    selected=dict(project=project)
+    path={'base/child':tmp_path/'base-parent/base/child',
+        'base':tmp_path/'base-parent/base','base-parent':tmp_path/'base-parent'}[target]
+    with pytest.raises(fork_service.ForkError,match='overlaps the frozen project'):
+        fork_service._project_targets(selected,path)
+    fork_service._project_targets(selected,tmp_path/'separate-child')
+
+
+@pytest.mark.parametrize('overlap',['final','staging'])
+def test_fork_preparation_rejects_project_overlap_before_source_copy(tmp_path,monkeypatch,overlap):
+    base=tmp_path/'base'
+    transaction=base/'operation' if overlap=='staging' else tmp_path/'operation'
+    final=base/'child' if overlap=='final' else tmp_path/'child'
+    plan=dict(selected_settings=dict(project=dict(base_root=str(base))))
+    monkeypatch.setattr(fork_sources,'copy_source',lambda *args:pytest.fail('Unsafe target copied fork sources'))
+    with pytest.raises(fork_service.ForkError,match='overlaps the frozen project'):
+        fork_service._prepare(plan,dict(child_root=str(final)),transaction)
+
+
+@pytest.mark.parametrize('limited',[False,True])
+def test_fork_project_snapshot_reads_only_declared_drafts_and_shares_quota(tmp_path,monkeypatch,limited):
+    from types import SimpleNamespace
+    from scidiscovery.research_loop import code_versions,execution,originals
+    root=tmp_path/'instance';work=c.workspace(root,2);record=root/'native-evidence/002'
+    project=dict(base_root=str(tmp_path/'base'),editable=['src','tools','empty'],scratch=[],outputs=[],
+        base_identity=dict(object_format='sha1',commit='a'*40))
+    for name in project['editable']:(work/'project'/name).mkdir(parents=True)
+    (work/'project/src/main.py').write_bytes(b'one\n')
+    (work/'project/tools/helper.py').write_bytes(b'two\n')
+    (work/'project/unselected').symlink_to(tmp_path/'missing')
+    source=SimpleNamespace(inherited=False,storage_root=root,step=2)
+    monkeypatch.setattr(originals,'source_job',lambda selected:dict(project=project))
+    monkeypatch.setattr(execution,'origin',lambda *args:record)
+    monkeypatch.setattr(execution,'record',lambda *args:record)
+    if limited:
+        limits=code_versions._limits(None);limits['max_files']=1
+        monkeypatch.setattr(code_versions,'_limits',lambda value:limits)
+    closure=fork_sources._Closure();captured=[]
+    closure.add=lambda selected,path,**kwargs:captured.append(path)
+    if limited:
+        with pytest.raises(ValueError):closure.snapshot(source)
+    else:
+        closure.snapshot(source)
+        assert set(captured)=={(work/'project'/name).relative_to(root).as_posix()
+            for name in ('src/main.py','tools/helper.py')}
+
+
 @pytest.fixture
 def selected_fork(tmp_path, monkeypatch):
     public = tmp_path / 'public'

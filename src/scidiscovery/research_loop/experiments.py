@@ -794,7 +794,9 @@ def configure(root,step,executor,config,output):
     implementation={}
     if selected is not None:
         expected=dict(selected['configuration'])
-        if executor=='local_execution:command':expected.setdefault('cwd',str(c.workspace(root,step)))
+        if executor=='local_execution:command':
+            expected.setdefault('cwd',job['project']['base_root'] if job.get('project') is not None
+                else str(c.workspace(root,step)))
         if executor!=selected['executor'] or config!=selected['configuration']:
             raise IntegrityError('Host execution configuration differs from the frozen operator selection')
         config=expected
@@ -920,6 +922,34 @@ def original_adapter(config,call_id,capability):
     return original,adapter
 
 
+def _direct_execution_input(config, metadata, prepared, original):
+    """Use the accepted code or exact original-package binding, without copying it."""
+    if 'code_version' in metadata:return True
+    if config.get('worker_view_version')!=1:return False
+    tcad=metadata.get('tcad')
+    if isinstance(tcad,dict) and 'prepared' in tcad:
+        bound=tcad['prepared']
+        if (not isinstance(bound,dict)
+                or set(bound) not in (set(prepared),set(prepared)|{'file_stat'})):
+            raise IntegrityError('Prepared execution binding fields differ')
+        if 'file_stat' in bound:
+            saved=bound['file_stat']
+            if (not isinstance(saved,list) or len(saved)!=4
+                    or any(type(value) is not int for value in saved)
+                    or saved[2]!=prepared['size_bytes'] or saved!=original.get('file_stat')):
+                raise IntegrityError('Prepared execution input original changed')
+        if {key:value for key,value in bound.items() if key!='file_stat'}!=prepared:
+            raise IntegrityError('Prepared execution binding differs')
+        return True
+    if (isinstance(metadata.get('source_script'),str)
+            and Path(metadata['source_script']).absolute()!=Path(prepared['local_path'])):
+        from . import experiment_client
+        selected=experiment_client.payload_path(config,metadata['source_script'])
+        return (selected==Path(prepared['local_path'])
+            and selected!=Path(metadata['source_script']).absolute())
+    return False
+
+
 class Records:
     """One canonical accepted/process/terminal/completed owner, shared by drivers."""
     def __init__(self, config):
@@ -1030,34 +1060,20 @@ class Records:
         original=proof(descriptor.local_path,context=operation_context)
         if original['size_bytes']!=descriptor.size_bytes:
             raise IntegrityError('Prepared execution input changed')
-        fixed_code='code_version' in metadata
         destination=self.root/'calls'/descriptor.name
-        bound_package=False
-        if not fixed_code and self.config.get('worker_view_version')==1:
-            tcad=metadata.get('tcad')
-            if isinstance(tcad,dict) and 'prepared' in tcad:
-                prepared=tcad['prepared'];public=descriptor.model_dump(mode='json')
-                if (not isinstance(prepared,dict)
-                        or set(prepared) not in (set(public),set(public)|{'file_stat'})):
-                    raise IntegrityError('Prepared execution binding fields differ')
-                if 'file_stat' in prepared:
-                    saved=prepared['file_stat']
-                    if (not isinstance(saved,list) or len(saved)!=4
-                            or any(type(value) is not int for value in saved)
-                            or saved[2]!=descriptor.size_bytes or saved!=original['file_stat']):
-                        raise IntegrityError('Prepared execution input original changed')
-                if {key:value for key,value in prepared.items() if key!='file_stat'}!=public:
-                    raise IntegrityError('Prepared execution binding differs')
-                bound_package=True
-            elif isinstance(metadata.get('source_script'),str):
-                selected=experiment_client.payload_path(self.config,metadata['source_script'])
-                bound_package=(selected==Path(descriptor.local_path)
-                    and selected!=Path(metadata['source_script']).absolute())
-        direct_input=fixed_code or bound_package
+        direct_input=_direct_execution_input(self.config,metadata,descriptor.model_dump(mode='json'),original)
         source_proof=original if direct_input else dict(path=str(destination/'source.py'),size_bytes=descriptor.size_bytes)
         accepted = dict(metadata, call_id=descriptor.name, scope=self.config['scope'],
             source_script=metadata.get('source_script',descriptor.local_path) if direct_input else descriptor.local_path, script=source_proof,native_attempt=self.config.get('native_attempt'),
             prepared=descriptor.model_dump(mode='json'), interface=interface)
+        if instance is not None:
+            job=c.read(c.regular(instance/'jobs'/f'{self.config["scope"]["step"]:03d}.json'))
+            if job.get('project') is not None:
+                if 'base_identity' in accepted:_validate_base_identity(job['project'],accepted)
+                accepted['base_identity']=dict(job['project']['base_identity'])
+            else:_validate_base_identity(None,accepted)
+        elif 'base_identity' in accepted:
+            raise IntegrityError('Standalone execution cannot supply a project identity')
         import shutil,tempfile
         self.root.mkdir(parents=True,exist_ok=True)
         directory=Path(tempfile.mkdtemp(prefix='.prepared-',dir=self.root))
@@ -1158,6 +1174,14 @@ class Records:
         if candidate is not None and not candidate_refs.valid_parent_id(candidate):
             raise IntegrityError('Published execution parent is malformed')
         if 'code_version' in value:_code_version_binding(self.config,value)
+        else:
+            from . import contracts as c, experiment_client
+            instance=experiment_client.root_for_configuration(self.config,allow_standalone=True)
+            if instance is not None:
+                job=c.read(c.regular(instance/'jobs'/f'{self.config["scope"]["step"]:03d}.json'))
+                _validate_base_identity(job.get('project'),value)
+            elif 'base_identity' in value:
+                raise IntegrityError('Standalone execution cannot supply a project identity')
         return value
 
     @_configuration_effect
@@ -1204,7 +1228,7 @@ def dispatch(config, script, *, parent=None, new=False, change=None, mechanism=N
     """Convenience input path; neutral callers may provide a descriptor directly."""
     from . import experiment_client
     with instance_owner.lease_for_configuration(config):
-        logical=Path(script).absolute()
+        logical=experiment_client.code_path(config,script)
         reference=experiment_client.input_reference(config,logical)
         source=experiment_client.payload_path(config,logical);item=proof(source)
         if str(source)==reference['path'] and item!=reference:
@@ -1752,6 +1776,12 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, pa
     pending=_pending_dispatch(config,instance)
     if pending is not None:return pending
     if [path.name for path in records.calls()]!=expected_calls:return None
+    logical=Path(_source_script or payload.local_path).absolute()
+    selection=experiment_client.code_selection(config,logical,resolved=payload.local_path,
+        experiment_directory=(command_options or {}).get('experiment_directory'))
+    if (selection is not None and selection['logical_root']=='project'
+            and config['execution_interface']['executor']!='local_execution:command'):
+        raise UnsupportedExecution('Project directory execution requires the managed Local runtime; compile a self-contained implementation JSON for this executor.')
     _require_new_execution(config)
     try:records.preflight(expected_calls=expected_calls,mechanism=mechanism)
     except (ReviewRequired,breadth.OpportunityRequired) as error:_raise_admission_refusal(error)
@@ -1767,9 +1797,6 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, pa
     local_preparation=(type(adapter) is LocalExecution
         and config['execution_interface']['executor']=='local_execution:command')
     operation_context=storage.Deadline(config['max_seconds'])
-    logical=Path(_source_script or payload.local_path).absolute()
-    selection=experiment_client.code_selection(config,logical,resolved=payload.local_path,
-        experiment_directory=(command_options or {}).get('experiment_directory'))
     # Legacy direct Local input selection is host-owned and effect-free. New W
     # code reaches every adapter through its exact Git export first.
     local_metadata=(adapter.acceptance_metadata(descriptor,parent=parent,new=new,change=change,**options)
@@ -1778,6 +1805,8 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, pa
     try:
         if selection is not None:
             try:
+                logical=selection['code_root']/selection['entry']
+                descriptor=descriptor.model_copy(update={'local_path':str(logical)})
                 if proof(descriptor.local_path,context=operation_context)['size_bytes']!=descriptor.size_bytes:
                     raise IntegrityError('Selected code changed before capture')
                 code_version=code_versions.capture(instance,step=config['scope']['step'],call_id=call_id,
@@ -1803,6 +1832,12 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, pa
         metadata=dict(metadata)
         if 'code_version' in metadata:
             raise IntegrityError('Adapters cannot supply host-owned code versions')
+        if 'base_identity' in metadata:
+            raise IntegrityError('Adapters cannot supply host-owned project identity')
+        if instance is not None:
+            from . import contracts as c
+            job=c.read(c.regular(instance/'jobs'/f'{config["scope"]["step"]:03d}.json'))
+            if job.get('project') is not None:metadata['base_identity']=dict(job['project']['base_identity'])
         if code_version is not None:
             metadata['code_version']=dict(code_version)
             metadata['source_script']=str(logical)
@@ -1958,6 +1993,7 @@ def compile_implementation(config, adapter, source, aliases, output):
     if config.get('worker_view_version')!=1:return adapter.compile_implementation(source, aliases, output)
     from . import contracts as c,experiment_client
     root=experiment_client.root_for_configuration(config);work=c.workspace(root,config['scope']['step'])
+    source=experiment_client.code_path(config,source)
     output=Path(output).absolute()
     if output.resolve()!=output or not output.is_relative_to(work/'artifacts') or output.exists():
         raise ValueError('Choose a new scientific implementation output under this task artifacts')
@@ -2257,10 +2293,10 @@ def _code_export_entry(root, accepted):
     return {key:script.get(key) for key in ('path','size_bytes','file_stat')}
 
 
-def _compiler_source_version(compiler, reference, subject):
+def _compiler_source_version(compiler, reference, subject, *, project=None):
     """Check only the compiler's saved code role and original producer identity."""
-    from . import code_versions
-    try:version=code_versions._version(compiler['code_version'])
+    from . import project_layout
+    try:version=project_layout.validate_code(project,compiler['code_version'],purpose='compiler')
     except (KeyError,TypeError,ValueError) as error:
         raise IntegrityError('Compiler source code version is malformed') from error
     path=Path(reference['path']);identity=path.parent.name;step=subject['producer_step']
@@ -2269,9 +2305,10 @@ def _compiler_source_version(compiler, reference, subject):
             or type(compiler.get('version')) is not int or compiler['version']!=1
             or compiler.get('job',{}).get('path')!=f'jobs/{step:03d}.json'
             or 'author' in compiler or 'author_origin' in compiler or compiler.get('author_input') is not None
-            or version['selection']!='file' or Path(version['logical_root']).parts[0]!='code'
-            or Path(version['entry']).name!=version['entry']):
+            or version['selection']!='file'
+            or project is None and Path(version['entry']).name!=version['entry']):
         raise IntegrityError('Compiler source code version changed its exact producer binding')
+    _validate_base_identity(project,compiler)
     return dict(version)
 
 
@@ -2344,6 +2381,7 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False, sourc
         return q._read(root,dict(path=actual.relative_to(root).as_posix(),size_bytes=reference['size_bytes']))
     try:
         job=read_control(control_ref(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
+        _validate_base_identity(job.get('project'),accepted)
         attempt=accepted.get('native_attempt') or {};number=attempt.get('number')
         if type(number) is not int or not 0<=number<10000:
             raise IntegrityError('Scientific source has no exact native attempt')
@@ -2418,8 +2456,8 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False, sourc
         control_paths.add(control_address(reference))
         version=None
         if 'code_version' in compiler:
-            version=_compiler_source_version(compiler,reference,subject)
             compiler_job=read_control(compiler['job']);compiler_config=read_control(compiler['configuration'])
+            version=_compiler_source_version(compiler,reference,subject,project=compiler_job.get('project'))
             compiler_attempt=compiler_config['native_attempt']['number']
             if type(compiler_attempt) is not int or not 0<=compiler_attempt<10000:
                 raise IntegrityError('Scientific compiler native attempt changed')
@@ -2500,9 +2538,17 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False, sourc
         raise IntegrityError('Scientific source control metadata is malformed') from error
 
 
+def _validate_base_identity(project, value):
+    """Bind frozen metadata without consuming the current base or draft bytes."""
+    expected=None if project is None else project['base_identity']
+    if (value.get('base_identity')!=expected
+            or project is None and 'base_identity' in value):
+        raise IntegrityError('Accepted project base identity differs from its original task')
+
+
 def _code_version_binding(config, accepted, *, source=None):
     """Check permanent code metadata without opening code, drafts or exports."""
-    from . import code_versions, contracts as c, experiment_client
+    from . import code_versions, contracts as c, experiment_client, project_layout
     if source is not None and not source.inherited:source=None
     try:version=code_versions._version(accepted['code_version'])
     except (KeyError,TypeError,ValueError) as error:
@@ -2512,6 +2558,7 @@ def _code_version_binding(config, accepted, *, source=None):
         raise IntegrityError('Accepted code version requires its exact W configuration')
     if source is None:
         root=experiment_client.root_for_configuration(config)
+        job=c.read(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
     else:
         from . import originals
         source=originals.at_step(source,config['scope']['step'])
@@ -2530,8 +2577,13 @@ def _code_version_binding(config, accepted, *, source=None):
                 or frozen.get('execution_interface')!=config.get('execution_interface')):
             raise IntegrityError('Accepted code version differs from its original native configuration')
     logical=Path(version['logical_root']);entry=Path(version['entry'])
+    project=job.get('project')
+    try:project_layout.validate_code(project,version,purpose='run')
+    except (ValueError,KeyError,TypeError) as error:
+        raise IntegrityError('Accepted code version differs from its original project') from error
+    _validate_base_identity(project,accepted)
     if version['selection']=='directory':
-        valid=(logical==Path('code')
+        valid=(logical==Path('project' if project is not None else 'code')
             and config.get('execution_interface',{}).get('executor')=='local_execution:command')
     else:valid=logical.parts[0]=='code' and len(entry.parts)==1
     if (not valid or accepted.get('source_script')!=str(c.workspace(root,config['scope']['step'])/logical/entry)
@@ -2544,10 +2596,13 @@ def verify_scientific_inputs(accepted, *, config=None, context=None):
     """Consume retained code versions and saved data, never current W drafts."""
     items=[*accepted.get('snapshot_files',[])]
     if 'code_version' in accepted:
-        from . import code_versions
+        from . import code_versions, contracts as c, project_layout
         root=_code_version_binding(config,accepted)
-        try:code_versions.verify(root,step=config['scope']['step'],call_id=accepted['call_id'],
-            code_version=accepted['code_version'],context=context)
+        try:
+            paths=code_versions.verify(root,step=config['scope']['step'],call_id=accepted['call_id'],
+                code_version=accepted['code_version'],context=context)
+            job=c.read(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
+            project_layout.validate_code(job.get('project'),accepted['code_version'],purpose='run',paths=paths)
         except (OSError,ValueError) as error:
             raise IntegrityError('Accepted code version original changed or is unavailable') from error
     elif (accepted.get('script',{}).get('path')==accepted.get('prepared',{}).get('local_path')

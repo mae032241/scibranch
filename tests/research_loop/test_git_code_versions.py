@@ -39,6 +39,95 @@ def _capture(helper, root, code, call='call-1', **kwargs):
                           entry='main.py', selection='directory', logical_root='code', **kwargs)
 
 
+def _project(tmp_path):
+    root = tmp_path / 'instance'
+    root.mkdir()
+    project = root / 'workspace/project'
+    for name in ('src', 'tools', 'empty'):
+        (project / name).mkdir(parents=True)
+    (project / 'src/main.py').write_bytes(b'run\n')
+    (project / 'tools/helper.py').write_bytes(b'help\n')
+    return root, project, dict(step=7, call_id='call-1', code_root=project,
+        entry='src/main.py', selection='directory', logical_root='project',
+        roots=['src', 'tools', 'empty'])
+
+
+@pytest.mark.process_e2e
+def test_project_capture_aggregates_only_declared_roots_and_preserves_empty_root_protocol(tmp_path, monkeypatch, helper):
+    root, project, arguments = _project(tmp_path)
+    (project / 'undeclared').symlink_to(tmp_path / 'unreadable-missing')
+    original_scandir = helper.os.scandir
+    original_open = helper.os.open
+    scanned = []
+
+    def scandir(path):
+        if isinstance(path, int):
+            assert helper.os.fstat(path).st_ino != project.stat().st_ino
+        scanned.append(path)
+        return original_scandir(path)
+
+    def open_file(path, flags, *args, **kwargs):
+        assert str(path) != str(project / 'undeclared')
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(helper.os, 'scandir', scandir)
+    monkeypatch.setattr(helper.os, 'open', open_file)
+    version = helper.capture(root, **arguments)
+    assert version['logical_root'] == 'project'
+    assert version['entry'] == 'src/main.py'
+    assert version['selection'] == 'directory'
+    export = helper.materialize(root, step=7, call_id='call-1', code_version=version)
+    assert (export / 'src/main.py').read_bytes() == b'run\n'
+    assert (export / 'tools/helper.py').read_bytes() == b'help\n'
+    assert not (export / 'empty').exists()
+    assert not (export / 'undeclared').exists()
+    assert helper.materialize(root, step=7, call_id='call-1', code_version=version) == export
+    assert scanned
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('limits', [{'max_files': 1}, {'max_total_bytes': 8}, {'max_scan_entries': 4}])
+def test_project_capture_shares_limits_across_declared_roots_before_git(tmp_path, helper, limits):
+    root, _, arguments = _project(tmp_path)
+    with pytest.raises(ValueError):
+        helper.capture(root, **arguments, limits=limits)
+    assert not (root / 'host-runtime').exists()
+
+
+@pytest.mark.process_e2e
+def test_project_capture_rejects_cross_root_change_and_same_call_edit(tmp_path, monkeypatch, helper):
+    root, project, arguments = _project(tmp_path)
+    first = helper.capture(root, **arguments)
+    (project / 'tools/helper.py').write_bytes(b'other\n')
+    with pytest.raises(ValueError, match='already pins different code'):
+        helper.capture(root, **arguments)
+    helper.verify(root, step=7, call_id='call-1', code_version=first)
+    original_read = helper._read_file
+
+    def read(path, expected, inventory):
+        result = original_read(path, expected, inventory)
+        if path == project / 'tools/helper.py':
+            (project / 'src/main.py').write_bytes(b'changed after its read\n')
+        return result
+
+    monkeypatch.setattr(helper, '_read_file', read)
+    arguments['call_id'] = 'call-2'
+    with pytest.raises(ValueError, match='changed during capture'):
+        helper.capture(root, **arguments)
+    ref = root / 'host-runtime/code-versions/repository.git/refs/scidiscovery/steps/007/calls/call-2'
+    assert not ref.exists()
+
+
+@pytest.mark.parametrize('roots,entry', [(['src'], 'tools/helper.py'), (['src', 'src'], 'src/main.py'),
+    (['src', 'src/nested'], 'src/main.py'), (['../src'], 'src/main.py'), ([], 'src/main.py')])
+def test_project_capture_rejects_invalid_roots_before_git(tmp_path, helper, roots, entry):
+    root, _, arguments = _project(tmp_path)
+    arguments.update(roots=roots, entry=entry)
+    with pytest.raises(ValueError):
+        helper.capture(root, **arguments)
+    assert not (root / 'host-runtime').exists()
+
+
 @pytest.mark.process_e2e
 def test_capture_exports_raw_bytes_modes_despite_poisoned_git_environment(tmp_path, monkeypatch, helper):
     root, code = _source(tmp_path)

@@ -206,12 +206,33 @@ def _live(root, value):
     owner.require_owner(root)
 
 
-def _tree(directory, value, *, complete, context=None):
+def _direct_input(value, config):
+    accepted=value['acceptance_base'];prepared=value['prepared']
+    try:
+        tcad=accepted.get('tcad');script=accepted.get('script')
+        if 'code_version' in accepted or isinstance(tcad,dict) and 'prepared' in tcad:
+            return e._direct_execution_input(config,accepted,prepared,script)
+        # The original host snapshot records the producer's direct/copy choice.
+        # Replaying live alias resolution would reopen historical science.
+        return (config.get('worker_view_version')==1
+            and isinstance(accepted.get('source_script'),str) and bool(accepted['source_script'])
+            and Path(accepted['source_script']).absolute()!=Path(prepared['local_path'])
+            and isinstance(script,dict) and set(script)=={'path','size_bytes','file_stat'}
+            and script['path']==prepared['local_path'] and type(script['size_bytes']) is int
+            and script['size_bytes']==prepared['size_bytes']
+            and isinstance(script['file_stat'],list) and len(script['file_stat'])==4
+            and all(type(part) is int for part in script['file_stat'])
+            and script['file_stat'][2]==script['size_bytes'])
+    except (OSError,ValueError,KeyError,TypeError,AttributeError):
+        _fail('Host preparation lost its exact prepared input binding')
+
+
+def _tree(directory, value, config, *, complete, context=None):
     from . import instance_delete as deletion
     deletion._same(directory, value['directory_identity'])
     deletion._check_mounts(directory)
     expected = {}
-    if 'code_version' not in value['acceptance_base']:
+    if not _direct_input(value,config):
         expected['source.py'] = value['prepared']
         expected.update({'inputs/' + item['name']: item for item in value['input_inventory']})
     allowed_dirs = {'.'}
@@ -263,9 +284,11 @@ def _accepted(directory, value, config, ref, context=None, *, historical=False):
             or accepted.get('snapshot_files', []) != value['input_inventory']):
         _fail('Durable accepted original differs from its host snapshot binding')
     fixed_code='code_version' in accepted
-    if fixed_code:
+    direct_input=_direct_input(value,config)
+    if direct_input:
         try:
-            root=e._code_version_binding(config,accepted)
+            root=(e._code_version_binding(config,accepted) if fixed_code
+                else experiment_client.root_for_configuration(config))
             script=accepted['script']
             if (not isinstance(script,dict) or set(script)!={'path','size_bytes','file_stat'}
                     or script['path']!=prepared['local_path'] or script['size_bytes']!=prepared['size_bytes']
@@ -276,10 +299,11 @@ def _accepted(directory, value, config, ref, context=None, *, historical=False):
                 _fail('Durable accepted code changed its exact prepared binding')
             # A legitimate transformed packet remains an actual control. Only
             # the exact temporary Git entry is metadata-only at this boundary.
-            if e._code_export_entry(root,accepted) is None:
+            if not fixed_code or e._code_export_entry(root,accepted) is None:
                 _verify_ref(root,script,context)
         except (OSError,ValueError,KeyError,TypeError,AttributeError) as error:
-            _fail('Durable accepted code lost its host preparation binding')
+            _fail('Durable accepted code lost its host preparation binding' if fixed_code
+                else 'Durable accepted input lost its host preparation binding')
     elif (accepted.get('source_script')!=prepared['local_path']
             or accepted.get('script')!=dict(path=str(destination/'source.py'),size_bytes=prepared['size_bytes'])):
         _fail('Durable accepted original differs from its host snapshot binding')
@@ -289,14 +313,14 @@ def _accepted(directory, value, config, ref, context=None, *, historical=False):
     if not isinstance(parent, dict) or 'candidate_id' not in parent:
         _fail('Durable accepted original has no exact parent')
     if historical:
-        originals = ([] if fixed_code else [('source.py', prepared),
+        originals = ([] if direct_input else [('source.py', prepared),
             *(('inputs/' + item['name'], item) for item in value['input_inventory'])])
         for name, original in originals:
             actual = e.proof(directory / name, context=context)
             if any(actual[key] != original[key] for key in ('size_bytes',)):
                 _fail('Historical accepted snapshot original changed')
     else:
-        _tree(directory, value, complete=True, context=context)
+        _tree(directory, value, config, complete=True, context=context)
     return accepted
 
 
@@ -398,8 +422,8 @@ def retained_preparations(root, records, *, context=None):
                     _accepted(destination, historical, config, ref, context, historical=True)
                     originals = {path.relative_to(root).as_posix(): ref,
                         (destination / 'accepted.json').relative_to(root).as_posix(): e.proof(destination / 'accepted.json', context=context)}
-                    if 'code_version' in accepted:
-                        if e._code_export_entry(root,accepted) is None:
+                    if _direct_input(value,config):
+                        if 'code_version' not in accepted or e._code_export_entry(root,accepted) is None:
                             packet=Path(accepted['script']['path'])
                             name=(packet.relative_to(root).as_posix() if packet.is_relative_to(root) else str(packet))
                             originals[name]=e.proof(packet,context=context)
@@ -531,7 +555,7 @@ def discard_owned_snapshot(config, binding_ref, *, reason, context):
     if snapshot.exists():
         if (snapshot / 'accepted.json').exists():
             _fail('Durable accepted snapshot requires publication, not partial discard', 'preparation_publish_required')
-        _tree(snapshot, value, complete=False, context=context)
+        _tree(snapshot, value, original, complete=False, context=context)
         from . import instance_delete as deletion
         deletion._preflight_tree(snapshot, value['directory_identity'], context=context)
         if not intent_path.exists():_receipt(intent_path, intent, context)
@@ -680,7 +704,7 @@ def _maintain(root, step, call_id, snapshot_token, *, action, max_seconds, autho
                 return _result(value, ref, 'partial_discarded')
             _fail('Original host snapshot is absent without a completed exact discard')
         if not (snapshot / 'accepted.json').exists():
-            _tree(snapshot, value, complete=False, context=context)
+            _tree(snapshot, value, config, complete=False, context=context)
             if action == 'publish-accepted':
                 _fail('No durable original accepted snapshot exists', 'preparation_incomplete')
             return _result(value, ref, 'partial')

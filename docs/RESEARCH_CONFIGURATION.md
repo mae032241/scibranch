@@ -12,9 +12,8 @@ an adapter or successful command does not qualify a model, browser or solver.
 ## Prepare once / 一次准备
 
 The independent workspace webpage starts with a blank structured form: enter the
-task, public material directory, new instance directory and finite budgets. All
-supported declaration fields have editable controls; role, permission, execution,
-delivery and policy groups are optional advanced settings. Role models and stage targets
+task, public material directory, new instance directory and finite budgets. Role,
+permission, execution, delivery and policy groups are optional advanced settings. Role models and stage targets
 share a compact role table; related limits use grouped fields with units and expandable
 help. Role budget shares and resume options use labelled controls. Plugin
 structures retain an expandable typed editor for lossless import/edit/export. Opening
@@ -86,18 +85,21 @@ saving a configuration does not recover the clock or reset consumption.
 
 ## Declaration fields / 声明字段
 
-Unknown tables and fields are rejected. Paths listed below resolve relative to the
-TOML file, including `~` expansion; changing the caller's working directory does not
+Unknown tables and fields are rejected. Except for the exact absolute
+`project.base_root`, paths listed below resolve relative to the TOML file,
+including `~` expansion; changing the caller's working directory does not
 change them. Only a path-like `agent.launcher[0]` is resolved this way; remaining
 argv elements are literal native arguments, so use absolute paths for their inputs.
 
-未知表和字段会拒绝。下列路径相对 TOML 所在目录解析，也支持 `~`。launcher 只有带路径的
+未知表和字段会拒绝。除要求准确绝对路径的 `project.base_root` 外，下列路径相对 TOML
+所在目录解析，也支持 `~`。launcher 只有带路径的
 首项如此解析，后续 argv 是原生参数，不猜测其路径含义，所需文件宜用绝对路径。
 
 | Table / 表 | Supported fields / 字段与含义 |
 | --- | --- |
 | top level / 顶层 | `version = 1` (default / 默认 1) |
 | `research` | Required path / 必填路径: `root`, `public_root`; exactly one / 二选一: `objective` (original path / 原件路径), `objective_text` (inline original text / 任务原文); optional / 可选: `user_updates` (path array / 路径数组), `source_restrictions` (existing declaration objects; each `source` is a path / 原声明数组，`source` 为路径) |
+| `project` | Optional exact Git worktree `base_root`; required nonempty relative directory array `editable`; optional arrays `scratch`, `outputs` (default empty). See [declared projects](#declared-projects--声明工程). / 可选工程声明：准确 Git 工作树根 `base_root`、非空相对目录数组 `editable`，以及默认空数组的 `scratch`、`outputs`。 |
 | `agent` | `backend` (`codex` or `protocol`), `launcher` (argv array), `model`, `reasoning_effort`, `service_tier`, `roles`, `native` |
 | `agent.roles.H`, `.W`, `.A`, `.E` | Optional `model`, `reasoning_effort`, `service_tier`; omitted roles/fields inherit the global profile / 省略项继承全局配置 |
 | `permissions` | `workspace`: `read-only`, `workspace-write` (default), or `danger-full-access`; `network`: boolean (default false); `web`: `disabled` (default), `cached`, or `live`; `subagents`: boolean (default false) |
@@ -138,6 +140,131 @@ Codex 默认模型、推理力度、档位和 launcher 如上。标准单命令 
 local 实验，并在原生原 home 最多执行两次仅输出补填；未指定节点目标时引用原总上限。
 protocol 必须显式提供 launcher 和 model，不套用 Codex 推理或服务档位默认值。
 自定义 launcher 默认由 external 路径拥有实验执行，除非另行配置。
+
+## Declared projects / 声明工程
+
+Use an explicit TOML declaration to work at an existing project's original paths.
+Omitting `[project]` preserves the existing `code/` workflow. Configure the
+corresponding tables in a complete research declaration, with the standard
+single-command Codex launcher and an explicit workspace permission:
+
+通过显式 TOML 声明，可在已有工程的原路径工作；省略 `[project]` 时沿用原有 `code/`
+流程。在完整科研声明的对应表中配置以下字段，使用标准单命令 Codex launcher 并明确工作区权限：
+
+```toml
+[agent]
+launcher = ["codex"]
+[permissions]
+workspace = "workspace-write"
+[project]
+base_root = "/absolute/source-project"
+editable = ["src", "tools"]
+scratch = ["build"]
+outputs = ["out"]
+```
+
+`base_root` must be the exact canonical absolute root of an ordinary Git worktree,
+with no symlink ancestors; relative paths, `~`, bare repositories and linked
+worktrees are unsupported. `editable` names directories, including empty roots;
+the other arrays default to empty. Roots must be canonical relative directory
+paths, without `.`, `..`, backslashes or `.git` components. Duplicates and any
+ancestor/descendant overlap within or across the arrays are rejected. The base
+cannot overlap instance, public, native-home or protected runtime paths; declared
+mounts cannot overlap exact bound scientific inputs.
+
+`base_root` 必须是普通 Git 工作树准确的 canonical 绝对根路径，全部祖先不得为符号链接；
+不支持相对路径、`~`、bare 仓库或 linked worktree。`editable` 指定目录，允许空根目录，
+其余数组默认空。各项必须是规范相对目录，不含 `.`、`..`、反斜杠或 `.git` 组件；
+数组内及数组间重复、祖先/后代交叠均拒绝。基础工程不得与实例、公开材料、native home
+或受保护运行时路径交叠；声明挂载目录不得与准确绑定的科学输入交叠。
+
+Preparation freezes these declarations and the base's object format and HEAD
+commit. SHA-1 and SHA-256 bases are supported. Existing-instance edits and forks
+retain that exact identity. The base view contains only HEAD-tracked ordinary
+files, read-only at their original paths; `.git`, untracked and ignored files are
+absent. Dependencies must therefore be tracked. Bounded Git index/tree enumeration
+and streamed raw Git blob checks reject staged changes, tracked symlinks/gitlinks,
+changed bytes or executable modes, including CRLF or filter transformations.
+Index optimization flags cannot bypass those checks; implicit fetch and remote
+helpers are disabled. Base files are not copied into the instance and no second
+file manifest is retained. Missing or
+changed base sources prevent a later use that needs those bytes; they do not
+rewrite known terminal outcomes or block metadata-only historical queries.
+
+准备时冻结上述声明、基础仓库对象格式与 HEAD commit；支持 SHA-1 和 SHA-256 基础仓库。
+已有实例的配置修改及 fork 均保留原身份。基础视图只在原路径只读暴露 HEAD 追踪的普通
+文件，不暴露 `.git`、untracked 或 ignored 文件，因此依赖须明确纳入 Git。控制程序只做
+有界 Git 索引/树枚举及流式 raw Git blob 校验，拒绝 staged 修改、追踪 symlink/gitlink、
+原字节或执行位漂移，包括 CRLF/filter 变换；索引优化标志不能跳过核验，隐式 fetch 和
+remote helper 均禁用。基础文件不复制进实例，也不持久保留第二份文件清单。来源缺失或漂移只阻止后续真正需要这些
+字节的消费，不改写已知终态，也不阻断只读历史元数据查询。
+
+W edits explicit `project/<editable>` drafts mapped to the original base paths.
+The first draft copies only tracked editable code under the existing shared code
+limits. A uniquely selected parent run or compiled implementation supplies its
+exact retained commit; absent a unique selection, the draft starts from frozen
+base code with that fallback reported. No latest-call or dirty-draft inference is
+used, and rebuilding an existing job preserves its current draft. A fork keeps
+selected commits and current drafts distinct and still depends on the original
+shared base. Each local project run captures all editable roots in one directory
+`code_version`, including only declared code paths; initial seed, capture and
+exports retain the existing code quotas.
+
+W 编辑 `project/<editable>` 草稿，并映射到基础工程原路径。初始草稿只复制追踪的 editable
+代码，全部根共享现有代码额度。唯一明确选中的父 run 或 compiled implementation 提供准确
+留存 commit；没有唯一选择时回到冻结基础代码并说明该回退。不按最新调用或未提交草稿
+推断来源，已有 job 重建保留当前草稿。fork 区分准确 commit 与当前草稿，并继续依赖原共享
+基础工程。每次本地 project run 将全部 editable 根聚合为一个目录 `code_version`，只含
+声明代码路径；初始 seed、采集及导出继续受现有代码额度约束。
+
+There is no overlay filesystem. W can write only its declared editable, scratch
+and node-output targets in the base view; other roles see the read-only base, not
+W's draft. A run mounts its exact code version read-only, with read-only tmpfs for
+empty editable roots. It may use the exact base root as cwd. Each scratch root is
+temporary tmpfs; run outputs retain their full relative paths under the original
+call's artifact directory and use the existing stop-writer/seal/collect lifecycle.
+W's node outputs are drafts, not future call originals. Writes elsewhere fail;
+declare the exact needed scratch/output directory rather than making the base
+writable. Existing scientific input mounts remain read-only.
+
+不使用 overlay 文件系统。W 在基础视图中只可写声明的 editable、scratch 与节点输出目标；
+其他角色看到只读基础工程，不读取 W 草稿。run 将准确代码版本只读挂载，空 editable 根
+用只读 tmpfs 表示，可使用准确 base 根作 cwd。每个 scratch 根为临时 tmpfs；run 输出在
+原调用 artifact 目录下保留完整相对路径，沿用原停写、封存与采集生命周期。W 节点输出
+仍是草稿，不是未来调用原件。其他位置写入失败；需要工作目录或输出时，应声明准确
+scratch/output 目录。科学输入挂载仍只读。
+
+Project projection requires Linux namespace support and an explicitly configured
+standard Codex `workspace-write` policy. Inherited or unspecified native workspace
+modes, `read-only` or `danger-full-access`, native named/default or selected
+configuration permission profiles, managed policies, additional writable roots
+and custom/protocol/registered launchers are unsupported and rejected before
+launch. Native permission profiles here mean access-policy selections; role and
+named Worker model/Skill profiles retain their existing contract. The framework
+does not switch native permissions to make a project run. Network, web and
+subagent declarations remain unchanged; existing Skill, authentication, review
+and execution-authorization limits apply. The same-user host boundary remains soft.
+
+工程投影要求 Linux namespace 支持，以及显式配置的标准 Codex `workspace-write` 策略。
+继承或未明确声明的原生 workspace 模式、`read-only` 或 `danger-full-access`、原生 named/default
+或选定配置中的权限 profile、managed policy、额外可写根，以及自定义/protocol/registered
+launcher 均不支持，在启动前明确拒绝。此处原生权限 profile 指访问策略选择；角色或命名
+Worker 的模型/Skill profile 继续沿用现有合同。不为运行工程而替换原生权限。网络、web 和
+子 Agent 声明保持原值；现有 Skill、认证、审查与执行授权限制继续适用，同用户宿主访问
+仍属软边界。
+
+TCAD supports a self-contained implementation JSON inside an editable root through
+the existing compiler, independent review and bounded package path. The scientific
+author still closes dependencies with DeckFiles and typed inputs. The base tree is
+not automatically inserted into a package, and remote execution does not inherit
+the host's absolute project paths. A remote project-directory run requiring that
+unsupported view is rejected before provider preparation. Project support grants
+no scientific qualification or model/solver validation.
+
+TCAD 支持将自包含 implementation JSON 放在 editable 根内，继续经过原 compiler、独立审查
+与有界打包路径；科学作者仍用 DeckFiles 和 typed inputs 明确依赖闭包。不自动把整个基础
+工程注入包，也不默认远端保留宿主绝对工程路径；需要该不受支持视图的远端工程目录运行
+在 provider preparation 前拒绝。工程支持不授科学资格，也不证明真实模型或 solver 已验收。
 
 ## Credentials and permissions / 凭据与权限
 
@@ -312,8 +439,8 @@ existing root and does not start research.
 
 尚无研究实例时，可用上述 `--workspace` 命令打开网页；已有目录仅承载管理入口，没有科学身份、
 预算或研究启动按钮。首页是独立的研究工作台，即使没有配置也可以加载已有实例。已加载列表仅保留于本次会话，
-重启后可按目录重新加载。选择“新建实例”后，页面从空白任务和预算开始，不隐式读取 `research.toml`。表单覆盖
-全部支持的声明项，未填写的可选项交给 CLI 相同的默认引擎处理。用户检查预览后明确创建，
+重启后可按目录重新加载。选择“新建实例”后，页面从空白任务和预算开始，不隐式读取 `research.toml`。表单中的
+声明项由 CLI 相同的默认引擎处理，未填写的可选项沿用默认值。用户检查预览后明确创建，
 任务原文才写入实例 `project/global/objective.md` 并冻结；创建拒绝已有目录且不启动模型，
 随后须另点“开始研究”。可选的导入、导出与明确保存配置共用同一组控件，保存与本次创建
 分开；创建不自动回写原配置。两种入口二选一。

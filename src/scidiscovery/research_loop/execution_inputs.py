@@ -119,8 +119,17 @@ def validate_exact_input_sources(root, job, accepted, *, source=None, controls_o
         raise q.IntegrityError('Declared input view omitted its actual preparation evidence')
     if not controls_only:
         for ref in view['evidence']:
-            if Path(ref['path']).is_absolute() or q._ref(root, root / ref['path'], source=source) != ref:
+            control_ref = {key:value for key,value in ref.items() if key != 'file_stat'}
+            if Path(ref['path']).is_absolute() or q._ref(root, root / ref['path'], source=source) != control_ref:
                 raise q.IntegrityError('Declared preparation original changed')
+            try:
+                if source is None and 'origin_identity' in ref:
+                    from . import originals
+                    originals.resolve_root_ref(root, ref)
+                else:
+                    q._check(dict(ref, path=str(root / ref['path'])), source=source)
+            except ValueError as error:
+                raise q.IntegrityError('Declared preparation original changed') from error
     return validate_source_view(root, job, view['sources'], source=source, controls_only=controls_only)
 
 
@@ -399,6 +408,8 @@ def verify_compilation(root, ref, *, material=None, client_binding=None, source=
     if value.get('version') != 1 or type(value.get('version')) is not int:
         raise q.IntegrityError('Compiler original version changed')
     job = q._read(root, value['job']); step = job['step']
+    from . import experiments as e
+    e._validate_base_identity(job.get('project'),value)
     if (value['job'] != q._ref(root, root / 'jobs' / f'{step:03d}.json')
             or job['role'] != 'W' or Path(root / ref['path']).parent.parent != _directory(root, step)):
         raise q.IntegrityError('Compiler original has no exact W owner')
@@ -563,6 +574,8 @@ def verify_original_compilation(source, ref, *, material=None, client_binding=No
         return c.read(originals.resolve_ref(owner, value))
     value = read_ref(ref)
     job = read_ref(value['job'])
+    from . import experiments as e
+    e._validate_base_identity(job.get('project'),value)
     step = job['step']
     source = originals.at_step(source, step)
     root = Path(source.original_root)
@@ -940,7 +953,7 @@ def local_input_sources(config, interface, payload, metadata):
 
 def _local_source_metadata(root, job, accepted, view, *, source=None):
     """Read saved Local contributor relations without reopening retained bytes."""
-    from . import code_versions
+    from . import experiments as e, project_layout
     fixed = 'code_version' in accepted
     directory = Path(accepted['experiment_directory'])
     authoring = _local_authoring(c.workspace(root, job['step']), directory)
@@ -948,7 +961,8 @@ def _local_source_metadata(root, job, accepted, view, *, source=None):
     if not isinstance(view['files'], list) or not isinstance(files, list) or len(view['files']) != len(files):
         raise q.IntegrityError('Local input view changed its frozen file inventory')
     if fixed:
-        code_versions._version(accepted['code_version'])
+        project_layout.validate_code(job.get('project'),accepted['code_version'],purpose='run')
+        e._validate_base_identity(job.get('project'),accepted)
     else:
         records = Path(accepted['config_record']['record_dir'])
         snapshot = records / 'calls' / accepted['call_id']
@@ -1042,8 +1056,10 @@ def validate_local_input_sources(root, job, accepted, *, source=None, controls_o
         try:
             if config['scope']['step'] != job['step'] or e._code_version_binding(config, accepted) != root:
                 raise ValueError('Local code belongs to another original root')
-            code_versions.verify(root, step=job['step'], call_id=accepted['call_id'],
+            paths=code_versions.verify(root, step=job['step'], call_id=accepted['call_id'],
                 code_version=accepted['code_version'])
+            from . import project_layout
+            project_layout.validate_code(job.get('project'),accepted['code_version'],purpose='run',paths=paths)
         except (OSError, ValueError, KeyError, TypeError) as error:
             raise q.IntegrityError('Local code version lost its exact selected source or original pin') from error
         directory = Path(accepted['experiment_directory']); authoring = _local_authoring(work, directory)
@@ -1151,7 +1167,7 @@ class NativeInputHost:
         _, remaining=authority._remaining(self.root, self.config)
         context=storage.Deadline(remaining)
         policy=c.settings(self.root,self.job).get('storage_policy')
-        work = c.workspace(self.root, self.job['step']); source = Path(source).absolute(); output = Path(output).absolute()
+        work = c.workspace(self.root, self.job['step']); source = experiment_client.code_path(self.config,source); output = Path(output).absolute()
         private_output = type(self.job.get('worker_view_version')) is int and self.job['worker_view_version'] == 1
         if not private_output:
             from . import shared_input_views
@@ -1189,6 +1205,8 @@ class NativeInputHost:
             native_intent=self.intent, configuration=q._ref(self.root, projection),
             implementation=self.config['execution_interface'], contract=contract,
             capability_source=capability, inputs=inputs)
+        if self.job.get('project') is not None:
+            invocation['base_identity']=dict(self.job['project']['base_identity'])
         existing = None
         if output.exists() or output.is_symlink():
             matches=[]
@@ -1213,6 +1231,9 @@ class NativeInputHost:
             # mutable author must use the explicit current-W code selection.
             selection = (experiment_client.code_selection(self.config, logical_source)
                          if existing is None or 'code_version' in existing else None)
+            if selection is not None and self.job.get('project') is not None:
+                selection=dict(code_root=work/'project',entry=logical_source.relative_to(work/'project').as_posix(),
+                    logical_root='project',selection='file')
             if selection is not None:
                 cleanup_code = True
                 code_version = code_versions.capture(self.root, step=self.job['step'], call_id=identity,
@@ -1334,18 +1355,21 @@ def _compiler_call_id(root, step, ref):
 
 
 def _verify_compiler_code(root, job, ref, value, *, verify_pin=True, git_holder=None):
-    from . import code_versions
+    from . import code_versions, experiments as e, project_layout
     if ('author' in value or 'author_origin' in value or value.get('author_input') is not None):
         raise q.IntegrityError('Compiler code version is mixed with an author snapshot or scientific input')
     identity = _compiler_call_id(root, job['step'], ref)
     version = value['code_version']
     try:
-        code_versions._version(version)
+        project=job.get('project')
+        project_layout.validate_code(project,version,purpose='compiler')
+        e._validate_base_identity(project,value)
         if verify_pin:
-            code_versions.verify(root if git_holder is None else git_holder,
+            paths=code_versions.verify(root if git_holder is None else git_holder,
                 step=job['step'], call_id=identity, code_version=version)
-        if (version['selection'] != 'file' or Path(version['logical_root']).parts[0] != 'code'
-                or Path(version['entry']).name != version['entry']):
+            project_layout.validate_code(project,version,purpose='compiler',paths=paths)
+        if (version['selection'] != 'file'
+                or project is None and Path(version['entry']).name != version['entry']):
             raise ValueError('Compiler code must select one current-W code entry')
     except (OSError, ValueError, TypeError, KeyError) as error:
         raise q.IntegrityError('Compiler code version lost its exact selected source or original pin') from error

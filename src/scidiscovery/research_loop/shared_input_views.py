@@ -82,6 +82,111 @@ def workspace_arguments(root, work, *, target_work=None, readonly=False):
     return [mode, str(work), str(target), mode, str(work / 'work'), str(target / 'work')]
 
 
+def project_targets(project, *, writable):
+    """Exact namespace grants; the base itself is never a writable root."""
+    if project is None:return []
+    base = Path(project['base_root'])
+    names = [*(project['editable'] if writable else []), *project['scratch'], *project['outputs']]
+    return [base / name for name in names]
+
+
+def project_overlap(project, mappings):
+    """Reject exact scientific-input aliases intersecting a project write view."""
+    if project is None:return
+    targets = project_targets(project, writable=True)
+    for source, destination in mappings:
+        for path in (Path(source), Path(destination)):
+            if any(path.is_relative_to(target) or target.is_relative_to(path) for target in targets):
+                raise _unsupported('a declared project directory overlaps an exact scientific input')
+
+
+def _project_readonly_aliases(project, work, target, mappings, *, context=None):
+    """Project writable bind aliases must receive every final readonly overlay."""
+    if project is None:return []
+    from . import project_layout
+    layout = project_layout.code_roots(project, work)
+    backings = [(target / entry['source'].relative_to(work), entry['target'])
+        for entry in layout['editable']]
+    backings.extend((target / 'artifacts/project' / name, Path(project['base_root']) / name)
+        for name in project['outputs'])
+    aliases = {}
+    for destination, source in mappings.items():
+        if context is not None:context.remaining_seconds()
+        destination, source = Path(destination), Path(source)
+        for backing, visible in backings:
+            if destination.is_relative_to(backing):
+                aliases[str(visible / destination.relative_to(backing))] = source
+            elif backing.is_relative_to(destination):
+                # A readonly parent overlay also replaces the corresponding
+                # writable subtree; do not leave its pre-overlay base alias.
+                original = _exact(source / backing.relative_to(destination))
+                if not original.exists():
+                    raise _unsupported('a readonly parent view omits a declared project backing directory')
+                aliases[str(visible)] = original
+    return [(source, Path(destination)) for destination, source in aliases.items()]
+
+
+def _project_directory(path):
+    path = Path(path)
+    for parent in reversed((path, *path.parents)):
+        _exact(parent)
+        if not parent.exists():parent.mkdir(mode=0o700)
+        if not stat.S_ISDIR(parent.lstat().st_mode):
+            raise _unsupported('a project backing directory is not ordinary')
+    return path
+
+
+def project_arguments(project, work, *, code_tree=None, artifacts, writable, context=None):
+    """Tracked-only base at its original path, with declared directory mounts.
+
+    A run consumes an exact materialized commit, including absent empty roots;
+    it never reads the current editable directories in the physical base.
+    """
+    if project is None:return []
+    from . import project_layout
+    base = _exact(project['base_root'])
+    work, artifacts = _exact(work), _exact(artifacts)
+    if writable and code_tree is not None:
+        raise _unsupported('a writable project cannot use a retained code export')
+    layout = project_layout.code_roots(project, work)
+    code_view = writable or code_tree is not None
+    excluded = [*(project['editable'] if code_view else []), *project['scratch'], *project['outputs']]
+    originals = project_layout.files(project, context=context, exclude=excluded)
+    targets = [base / name for name in excluded]
+    for protected in (work, artifacts, *([Path(code_tree)] if code_tree is not None else [])):
+        if protected.is_relative_to(base) or base.is_relative_to(protected):
+            raise _unsupported('project base overlaps its private backing directories')
+    arguments = ['--tmpfs', str(base)]
+    directories = set(targets)
+    for item in originals:
+        destination = base / item['relative']
+        directories.update(parent for parent in destination.parents if parent.is_relative_to(base) and parent != base)
+    for target in targets:
+        directories.update(parent for parent in target.parents if parent.is_relative_to(base) and parent != base)
+    for path in sorted(directories, key=lambda item: (len(item.parts), str(item))):
+        arguments.extend(['--dir', str(path)])
+    for item in originals:
+        arguments.extend(['--ro-bind', str(item['source']), str(base / item['relative'])])
+    arguments.extend(['--remount-ro', str(base)])
+    for entry in layout['editable'] if code_view else []:
+        source = Path(code_tree) / entry['relative'] if code_tree is not None else entry['source']
+        destination = entry['target']
+        if code_tree is not None and not source.exists():
+            arguments.extend(['--tmpfs', str(destination), '--remount-ro', str(destination)])
+        else:
+            source = _exact(source)
+            if not source.is_dir():raise _unsupported('an exact project code directory is missing')
+            arguments.extend(['--bind' if writable else '--ro-bind', str(source), str(destination)])
+    for name in project['scratch']:
+        arguments.extend(['--tmpfs', str(base / name)])
+        if not writable and code_tree is None:arguments.extend(['--remount-ro', str(base / name)])
+    for name in project['outputs']:
+        source = _project_directory(artifacts / 'project' / name)
+        arguments.extend(['--bind' if writable or code_tree is not None else '--ro-bind', str(source), str(base / name)])
+    if context is not None:context.remaining_seconds()
+    return arguments
+
+
 class _Inventory:
     def __init__(self, context=None):
         from .storage_policy import Deadline
@@ -385,6 +490,7 @@ def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=Fal
         if Path(destination) != target / 'inputs':
             mappings[str(destination)] = Path(source)
             if str(destination) in declared:declared[str(destination)] = Path(source)
+    project_overlap(job.get('project'), [(source, Path(destination)) for destination, source in mappings.items()])
     _dynamic_mountpoints(work, target, declared, context=context)
     inventory = _Inventory(context)
     host_aliases=_host_aliases(root,work,inventory) if private else []
@@ -436,6 +542,9 @@ def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=Fal
         for destination, source in sorted(input_mappings, key=lambda item: len(item[0].parts)):
             arguments.extend(['--ro-bind', str(source), str(destination)])
         arguments.extend(['--remount-ro', str(inputs)])
+    if job.get('role') == 'W':
+        for source, destination in _project_readonly_aliases(job.get('project'), work, target, mappings, context=context):
+            arguments.extend(['--ro-bind', str(source), str(destination)])
     if context is not None:context.remaining_seconds()
     return arguments
 
@@ -481,9 +590,28 @@ def wrap(root, job, work, argv, *, context=None):
     """All local native argv, including opaque protocol/custom launchers."""
     program = ensure_capability(context=context)
     holder, ancestors = _private_git_arguments(root)
+    project = job.get('project')
+    project_mounts = []
+    if project is not None:
+        from . import contracts as c, native_execution
+        settings = c.settings(root, job)
+        if settings.get('project') != project:
+            raise _unsupported('project namespace differs from its frozen job')
+        policy = native_execution.project_policy(settings)
+        worker = job.get('role') == 'W'
+        if worker:
+            policy = dict(policy, writable_roots=[str(path) for path in project_targets(project, writable=True)])
+            declaration = 'sandbox_workspace_write='+native_execution._toml(policy)
+            if not any(argument == declaration and argv[index-1] == '-c'
+                    for index, argument in enumerate(argv) if index):
+                argv = list(argv)
+                position = argv.index('resume') if 'resume' in argv else len(argv)-1
+                argv[position:position] = ['-c', declaration]
+        project_mounts = project_arguments(project, work, artifacts=work/'artifacts', writable=worker, context=context)
     return [program, '--unshare-user', '--unshare-pid', '--die-with-parent', '--bind', '/', '/', '--proc', '/proc',
         '--dev', '/dev',
-        *ancestors, *workspace_arguments(root, work), *mount_arguments(root, job, work, private=True, context=context),
+        *ancestors, *workspace_arguments(root, work), *project_mounts,
+        *mount_arguments(root, job, work, private=True, context=context),
         '--ro-bind', str(holder), str(holder), '--', *argv]
 
 

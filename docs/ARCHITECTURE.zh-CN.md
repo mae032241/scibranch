@@ -3,7 +3,8 @@
 简体中文 | [English](ARCHITECTURE.md)
 
 控制层默认不计算科学数据或输出哈希。哈希仅限审批绑定、确实需要持久幂等的小型控制请求，
-以及下述宿主拥有的 Git 代码捕获。审批/幂等入口不得遍历科学文件、代码、日志、观察、输入、
+以及下述宿主拥有的 Git 代码捕获与显式工程基础的 raw Git blob 核验。
+审批/幂等入口不得遍历科学文件、代码、日志、观察、输入、
 结果、Skill 或归档内容。显式科学工具
 可以按自己的算法处理选定证据，这不属于控制身份计算。协议 26 使用
 `record_ref = {"path": "/absolute/original"}` 与
@@ -124,7 +125,7 @@ W 显式非空但形状损坏的 finding 作为 partial 交 A，不产生 screen
 视图由既有原生宿主在本次 native attempt 生命周期内处理提交并自动写回响应；external
 模式仍由声明的 launcher 负责。两条路径均不引入额外 Agent、daemon、UDS 或 FIFO。
 
-W 新编写的执行代码须放在当前科学工作区的 `code/`，数据、日志和输出放在该目录之外。
+未声明 `[project]` 时，W 新编写的执行代码须放在当前科学工作区的 `code/`，数据、日志和输出放在该目录之外。
 Local 的 `--experiment-dir experiments/<name>` 只选独立运行工作目录，并固定整个 `code/`
 树；`--script code/<name>/run.py` 指定入口。不带 `--experiment-dir` 时只固定该脚本，Cov
 也遵循单文件选择。捕获期间须停止修改选定代码；只接受普通文件和真实目录，拒绝符号链接
@@ -187,6 +188,27 @@ legacy `workspace-write` 声明，包括网络权限和临时目录排除，并�
 managed policy、额外可写根以及无法忠实投影后端权限的自定义 launcher，会对受管启动
 明确返回不支持，不为执行而替换其原生权限。内部权限 profile 不增加操作者配置项。
 这些文件视图不构成防同用户恶意进程的隔离，也不对泛原生执行提供统一隔离保证。
+
+**声明工程视图。** `project_layout.py` 拥有严格工程声明、冻结基础 Git 身份和有界追踪文件/
+raw blob 核验；支持字段与权限限制由[工程配置主合同](RESEARCH_CONFIGURATION.md#declared-projects--声明工程)
+统一说明。基础工程原路径只读暴露核验后的 HEAD 普通文件，不含 `.git`、untracked/ignored
+文件，不复制基础数据，也不使用 overlay 文件系统。SHA-1/SHA-256 HEAD 身份在配置修订与
+fork 中保持不变。基础字节缺失或漂移只影响后续需要它们的消费，不改变已知终态记录或
+只读元数据查询。
+
+工程草稿只暴露声明的 editable 代码。初始追踪代码 seed 与唯一选中的留存父 commit 沿用现有
+共享代码额度；父选择有歧义或缺失时，说明回退到冻结基础代码。已有 job 保留当前草稿。
+本地 project run 将全部 editable 根聚合为一个以 `project` 为根的 `code_version`，准确导出
+随后只读挂载，空根使用只读 tmpfs。scratch 根为临时 tmpfs；output 根按完整相对路径映射
+到原调用 artifacts。W 在基础视图中只可写准确 editable/scratch/节点输出目标；其他角色
+只读基础工程，不读取 W 草稿。科学输入只读保护最后叠加。
+
+run cwd 可为准确 base 根；后端内部权限策略仍以 task-work cwd 为基准，只增加声明的
+scratch/output 可写目标。原生 Worker 保留冻结的 Codex `workspace-write` 策略，并投影准确
+工程目标。不支持的原生权限或 launcher 配置在启动前拒绝，不替换原策略。网络、web、
+子 Agent、Skill 与认证合同保持不变。TCAD 继续使用自包含 implementation JSON 的编译/
+审查/打包路径，DeckFiles 与 typed inputs 仍由科学作者明确依赖闭包；不自动把宿主绝对工程
+路径或整个基础工程发送到远端执行。
 
 既有 legacy 留存记录保留原 `host-history/objects/<uuid>` 路径及自有硬链接解释。
 每次独立冻结保留自己的身份，相同字节不合并原 call、origin 或科学路径。当前任务、wake、
@@ -402,7 +424,8 @@ commit/tree/blob 对象，传入子实例自有私有 Git；不依赖父仓库 a
 持久交接 bundle。父私有 Git 删除后，已经转移的代码版本仍由 child 持有。
 
 当前 dirty/untracked 代码 B 与历史代码 A 分别传递；构建所选 child job 时，B 复制到既有
-可写 `code/`。未封存交接草稿保留在现有 `visibility=private_snapshot` 条目中，作为可读的
+可写 `code/`；声明工程时，只恢复 `project/` 下准确声明的 editable 草稿，基础工程仍为原
+共享外部依赖。未封存交接草稿保留在现有 `visibility=private_snapshot` 条目中，作为可读的
 惰性私有状态，不写入 child 的 native 执行命名空间，不生成 native intent、commit、seal、
 科学资格或执行许可。已经由 seal 绑定 completed-output acceptance 的 pending 是科学引用，
 不再作为当前交接草稿。科学可见范围仍由原任务准确输入 cut 限定。

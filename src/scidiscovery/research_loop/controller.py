@@ -36,6 +36,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
             worker_fragment_policy: dict | None = None, role_budget_policy: dict | None = None,
             selection_policy: dict | None = None, role_profiles: dict | None = None,
             worker_profiles: dict | None = None, skills: dict | None = None,
+            project: dict | None = None,
             experiment_mode: str | None = None, execution_config: dict | None = None,
             source_restrictions: list[dict] | None = None, formal_review_policy: dict | None = None,
             execution_authority_policy: dict | None = None,
@@ -85,6 +86,28 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     if (type(max_seconds) not in (int, float) or not 0 < max_seconds < float("inf")):
         raise ValueError("max_seconds must be positive and finite")
     storage_context = storage.Deadline(max_seconds)
+    from . import project_layout
+    if (_existing_settings is not None and _existing_settings.get('project') is None
+            and project is not None):
+        raise ValueError('Project declaration is immutable for an existing instance')
+    native_home = Path((resume_policy or {}).get('native_home',
+        os.environ.get('CODEX_HOME', str(Path.home() / '.codex')))).absolute()
+    frozen_project = project_layout.prepare(project,
+        protected=[root.absolute(), identity_root, public_root.absolute(), public_identity,
+                   native_home, *[Path(path) for path in
+                   ('/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc', '/dev', '/proc', '/sys', '/run',
+                    '/task-native', '/task-tmp')]],
+        existing=(_existing_settings or {}).get('project'), context=storage_context)
+    if frozen_project is not None:
+        # Scientific originals can be readonly base context, but cannot be
+        # shadowed by a declared writable/code mount at their original path.
+        originals = [objective, *[Path(path) for path in (user_updates or [])],
+                     *[Path(row['source']) for row in (source_restrictions or [])
+                       if isinstance(row, dict) and isinstance(row.get('source'), str)]]
+        for relative in frozen_project['editable'] + frozen_project['scratch'] + frozen_project['outputs']:
+            target = Path(frozen_project['base_root']) / relative
+            if any(project_layout._overlap(target, path.absolute()) for path in originals):
+                raise ValueError('Project declared directory overlaps an exact scientific original: ' + relative)
     for name,value in (("max_output_item_bytes",max_output_item_bytes),("max_output_total_bytes",max_output_total_bytes)):
         if value is not None and (type(value) is not int or value<=0):
             raise ValueError(f"{name} must be a positive integer or null")
@@ -93,6 +116,9 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     from . import backends as agent_backends
     backend_settings = agent_backends.configuration(native_backend, launcher,
         {} if native_options is None else native_options, existing=_existing_settings)
+    if frozen_project is not None:
+        from . import native_execution
+        native_execution.project_policy(backend_settings)
     launcher = backend_settings['native_launcher_argv']
     if not isinstance(model, str) or not model.strip():
         raise ValueError('An explicit model is required')
@@ -213,6 +239,8 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
         max_output_total_bytes=max_output_total_bytes,
         storage_policy=storage_limits)
     settings.update(backend_settings)
+    if frozen_project is not None:
+        settings['project'] = frozen_project
     if ui is not None:
         settings['ui'] = dict(ui)
     from .protocol import CURRENT
