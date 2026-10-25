@@ -148,6 +148,60 @@ def test_real_process_dynamic_publication_and_native_permissions(layout,monkeypa
     assert (work/'work/new.txt').read_text()=='ordinary work'
     assert (work/'artifacts/new.txt').read_text()=='ordinary artifact'
 
+
+PTY_PROBE = r'''import os,pathlib,pty,subprocess,sys,time
+work=pathlib.Path(sys.argv[1]);holder=pathlib.Path(sys.argv[2])
+master,slave=pty.openpty()
+try:
+ subprocess.run(['/bin/sh','-c','test -t 0 && test -t 1 && printf "pty shell ready\\n"'],
+  stdin=slave,stdout=slave,stderr=slave,check=True,timeout=5)
+ assert os.read(master,1024).replace(b'\r\n',b'\n')==b'pty shell ready\n'
+finally:
+ os.close(master);os.close(slave)
+def readonly(path,expected):
+ for action in (lambda:path.chmod(0o600),lambda:path.write_text('changed')):
+  try:action()
+  except OSError:pass
+  else:raise AssertionError('Shared input or private Git mutation succeeded')
+ assert path.read_text()==expected
+readonly(work/'inputs/original.txt','shared original')
+(work/'work/pty-ready').write_text('ready')
+later=holder/'repository.git/objects/later'
+deadline=time.monotonic()+10
+while not later.exists():
+ assert time.monotonic()<deadline
+ time.sleep(.02)
+readonly(later,'later host original')
+(work/'artifacts/pty-result').write_text('pty shell completed')
+'''
+
+
+@pytest.mark.process_e2e
+def test_real_process_pty_shell_keeps_inputs_and_later_private_git_readonly(layout):
+    require_mounts()
+    root,work,source,_,canonical=layout
+    job=dict(step=1,role='H',global_materials=[dict(source=str(canonical),
+        path='inputs/original.txt',size_bytes=canonical.stat().st_size)])
+    c.write(root/'jobs/001.json',job)
+    holder=root/'host-runtime/code-versions'
+    command=views.wrap(root,job,work,[sys.executable,'-I','-c',PTY_PROBE,str(work),str(holder)])
+    process=subprocess.Popen(command,cwd=work,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    try:
+        deadline=time.monotonic()+10
+        while not (work/'work/pty-ready').exists() and process.poll() is None and time.monotonic()<deadline:
+            time.sleep(.02)
+        assert (work/'work/pty-ready').exists(),process.communicate(timeout=2)
+        later=holder/'repository.git/objects/later'
+        later.parent.mkdir(parents=True);later.write_text('later host original')
+        stdout,stderr=process.communicate(timeout=15)
+        assert process.returncode==0,(stdout,stderr)
+    finally:
+        if process.poll() is None:process.kill();process.wait(timeout=2)
+    assert source.read_text()=='shared original' and source.stat().st_mode&0o777==0o400
+    assert later.read_text()=='later host original'
+    assert (work/'artifacts/pty-result').read_text()=='pty shell completed'
+
+
 NATIVE_PROBE = r'''import json,os,pathlib,subprocess,sys
 backend=sys.argv[1];work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE']);request=sys.stdin.read()
 args=sys.argv[2:]
@@ -416,10 +470,10 @@ def test_git_wrapper_pins_ordinary_ancestors_in_order_and_keeps_modes(tmp_path,m
     paths=(root,holder.parent,holder,work,work/'work',work/'artifacts')
     modes={path:path.stat().st_mode for path in paths}
     command=views.wrap(root,{},work,['native','--permission=original'])
-    assert command[:9]==['/argv-only/bwrap','--unshare-user','--unshare-pid','--die-with-parent',
-        '--bind','/','/','--proc','/proc']
+    assert command[:11]==['/argv-only/bwrap','--unshare-user','--unshare-pid','--die-with-parent',
+        '--bind','/','/','--proc','/proc','--dev','/dev']
     first_workspace=command.index(str(work))-1
-    ancestors=command[9:first_workspace]
+    ancestors=command[11:first_workspace]
     triples=[tuple(ancestors[index:index+3]) for index in range(0,len(ancestors),3)]
     destinations=[Path(target) for mode,source,target in triples if mode=='--bind' and source==target]
     assert len(destinations)==len(triples)==len(holder.parents)-1

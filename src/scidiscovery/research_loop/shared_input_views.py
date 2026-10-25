@@ -443,13 +443,15 @@ def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=Fal
 def _probe(program, generation, timeout):
     with tempfile.TemporaryDirectory(prefix='scid-readonly-probe-') as temporary:
         base = Path(temporary); protected = base / 'input'; protected.write_text('original')
-        source = ('import os,pathlib,sys; p=pathlib.Path(sys.argv[1]); '
+        source = ('import os,pathlib,pty,sys; p=pathlib.Path(sys.argv[1]); '
             'exec("for action in (lambda: p.chmod(0o600), lambda: p.write_text(\'changed\')):\\n'
             ' try: action()\\n except OSError: pass\\n else: raise SystemExit(31)"); '
-            '(p.parent/"writable").write_text("ok")')
+            '(p.parent/"writable").write_text("ok"); '
+            'master,slave=pty.openpty(); os.close(master); os.close(slave)')
         try:
             result = subprocess.run([program, '--unshare-user', '--die-with-parent', '--bind', '/', '/',
-                '--ro-bind', str(protected), str(protected), '--', sys.executable, '-I', '-c', source, str(protected)],
+                '--dev', '/dev', '--ro-bind', str(protected), str(protected),
+                '--', sys.executable, '-I', '-c', source, str(protected)],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout)
         except (OSError, subprocess.TimeoutExpired) as error:
             raise _unsupported('Linux readonly mount capability probe failed') from error
@@ -480,6 +482,7 @@ def wrap(root, job, work, argv, *, context=None):
     program = ensure_capability(context=context)
     holder, ancestors = _private_git_arguments(root)
     return [program, '--unshare-user', '--unshare-pid', '--die-with-parent', '--bind', '/', '/', '--proc', '/proc',
+        '--dev', '/dev',
         *ancestors, *workspace_arguments(root, work), *mount_arguments(root, job, work, private=True, context=context),
         '--ro-bind', str(holder), str(holder), '--', *argv]
 
