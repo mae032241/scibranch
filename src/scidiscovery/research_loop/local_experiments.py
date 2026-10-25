@@ -284,8 +284,10 @@ class LocalExecution:
                 operation_context=storage.Deadline(max(.001,deadline-time.monotonic())))
             if deadline is not None and time.monotonic()>=deadline:
                 raise TimeoutError('Original reserved experiment deadline reached before launch')
-            process=subprocess.Popen(command,cwd=cwd,stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,start_new_session=True)
+            from . import shared_input_views
+            with shared_input_views.popen_arguments(command) as (launch_command,pass_fds):
+                process=subprocess.Popen(launch_command,cwd=cwd,stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,start_new_session=True,pass_fds=pass_fds)
             identity=None
             try:
                 identity=runtime.process_identity(process.pid,dict(path=str(directory/'accepted.json')))

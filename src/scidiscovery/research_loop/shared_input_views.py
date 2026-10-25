@@ -4,6 +4,7 @@ Same-user host processes and pre-existing writable descriptors remain trusted.
 Only the assigned workspace and explicit framework mappings are inventoried.
 """
 import json
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import shutil
@@ -17,6 +18,44 @@ DYNAMIC_ROOTS = ('retained-experiments', 'execution-results', 'retained-implemen
 ALIAS_MAX_ENTRIES = 100_000
 ALIAS_SECONDS = 15
 _CAPABILITIES = set()
+
+
+class _BwrapCommand(list):
+    """Owned bwrap argv with its constructor's exact control/command boundary."""
+
+    def __init__(self, arguments, *, command_index):
+        super().__init__(arguments)
+        if type(command_index) is not int or not 1 <= command_index <= len(self):
+            raise ValueError('An owned bwrap command requires an exact command boundary')
+        self.command_index = command_index
+
+
+@contextmanager
+def popen_arguments(command):
+    """Keep owned bwrap control arguments outside execve's argv size limit.
+
+    The descriptor lives only across Popen. bwrap consumes and closes its
+    --args descriptor before executing the scientific child. Other launchers
+    retain their original argv and receive no inherited descriptors.
+    """
+    if not isinstance(command, _BwrapCommand):
+        yield command, ()
+        return
+    if not command:
+        raise ValueError('An owned bwrap command requires its executable')
+    if b'\0' in os.fsencode(command[0]):
+        raise ValueError('bwrap arguments must not contain NUL bytes')
+    with tempfile.TemporaryFile() as arguments:
+        for index in range(1, len(command)):
+            encoded = os.fsencode(command[index])
+            if b'\0' in encoded:
+                raise ValueError('bwrap arguments must not contain NUL bytes')
+            if index < command.command_index:
+                arguments.write(encoded)
+                arguments.write(b'\0')
+        arguments.seek(0)
+        descriptor = arguments.fileno()
+        yield [command[0], '--args', str(descriptor), *command[command.command_index:]], (descriptor,)
 
 
 def _unsupported(message):
@@ -558,10 +597,13 @@ def _probe(program, generation, timeout):
             '(p.parent/"writable").write_text("ok"); '
             'master,slave=pty.openpty(); os.close(master); os.close(slave)')
         try:
-            result = subprocess.run([program, '--unshare-user', '--die-with-parent', '--bind', '/', '/',
-                '--dev', '/dev', '--ro-bind', str(protected), str(protected),
-                '--', sys.executable, '-I', '-c', source, str(protected)],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout)
+            controls = [program, '--unshare-user', '--die-with-parent', '--bind', '/', '/',
+                '--dev', '/dev', '--ro-bind', str(protected), str(protected)]
+            command = _BwrapCommand([*controls, '--', sys.executable, '-I', '-c', source, str(protected)],
+                command_index=len(controls))
+            with popen_arguments(command) as (argv, pass_fds):
+                result = subprocess.run(argv, pass_fds=pass_fds,
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout)
         except (OSError, subprocess.TimeoutExpired) as error:
             raise _unsupported('Linux readonly mount capability probe failed') from error
         if result.returncode or protected.read_text() != 'original' or not (base / 'writable').exists():
@@ -608,11 +650,12 @@ def wrap(root, job, work, argv, *, context=None):
                 position = argv.index('resume') if 'resume' in argv else len(argv)-1
                 argv[position:position] = ['-c', declaration]
         project_mounts = project_arguments(project, work, artifacts=work/'artifacts', writable=worker, context=context)
-    return [program, '--unshare-user', '--unshare-pid', '--die-with-parent', '--bind', '/', '/', '--proc', '/proc',
+    controls = [program, '--unshare-user', '--unshare-pid', '--die-with-parent', '--bind', '/', '/', '--proc', '/proc',
         '--dev', '/dev',
         *ancestors, *workspace_arguments(root, work), *project_mounts,
         *mount_arguments(root, job, work, private=True, context=context),
-        '--ro-bind', str(holder), str(holder), '--', *argv]
+        '--ro-bind', str(holder), str(holder)]
+    return _BwrapCommand([*controls, '--', *argv], command_index=len(controls))
 
 
 def _private_git_arguments(root):

@@ -1,4 +1,4 @@
-"""Explicit project declarations and bounded, raw Git HEAD input views.
+"""Explicit project declarations and bounded Git HEAD input views.
 
 Only Git's tracked index/tree names are enumerated. Worktree data is never
 walked, copied or persisted as a second manifest. Returned stat anchors detect
@@ -6,7 +6,6 @@ ordinary replacement races; same-user concurrent writers remain trusted.
 """
 from __future__ import annotations
 
-import hashlib
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -160,7 +159,7 @@ def _git(root, arguments, *, context, output_limit=4096, worktree=True):
     if worktree:
         command.append('--work-tree=' + str(root))
     for setting in (f'core.hooksPath={os.devnull}', f'core.attributesFile={os.devnull}',
-                    f'core.excludesFile={os.devnull}', 'core.autocrlf=false',
+                    f'core.excludesFile={os.devnull}',
                     'core.fsmonitor=false', 'core.untrackedCache=false',
                     'core.splitIndex=false', 'maintenance.auto=false', 'gc.auto=0'):
         command.extend(('-c', setting))
@@ -210,7 +209,7 @@ def _identity(root, context):
     if object_format not in ('sha1', 'sha256'):
         raise ValueError('Project Git object format is unsupported')
     commit = _git(root, ('rev-parse', '--verify', 'HEAD^{commit}'), context=context).strip().decode('ascii')
-    if not re.fullmatch('[0-9a-f]{' + str(hashlib.new(object_format).digest_size * 2) + '}', commit):
+    if not re.fullmatch('[0-9a-f]{' + str(40 if object_format == 'sha1' else 64) + '}', commit):
         raise ValueError('Project HEAD must identify an ordinary Git commit')
     return dict(object_format=object_format, commit=commit)
 
@@ -233,52 +232,32 @@ def _listing(raw, *, index, object_format, context):
         except (ValueError, IndexError) as error:
             raise ValueError('Project Git contains an unsupported tracked path') from error
         if (mode not in (b'100644', b'100755') or stage != (b'0' if index else b'blob')
-                or not re.fullmatch(b'[0-9a-f]{' + str(hashlib.new(object_format).digest_size * 2).encode() + b'}', oid)
+                or not re.fullmatch(b'[0-9a-f]{' + str(40 if object_format == 'sha1' else 64).encode() + b'}', oid)
                 or name in result):
             raise ValueError('Project tracked symlink/gitlink, unmerged or unsupported entry: ' + name)
         result[name] = (int(mode, 8), oid.decode('ascii'))
     return result
 
 
-def _raw(root, name, mode, object_id, object_format, context):
+def _source(root, name, mode, object_id):
+    """Anchor an exact mount source without opening or hashing its contents."""
     source = root / name
     ancestors = _lineage(source.parent)
     before = source.lstat()
     if not stat.S_ISREG(before.st_mode) or bool(before.st_mode & 0o111) != (mode == 0o100755):
         raise ValueError('Project tracked file type/executable mode changed: ' + name)
     signature = _signature(before)
-    fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
-    try:
-        if _signature(os.fstat(fd)) != signature:
-            raise ValueError('Project tracked file changed before opening: ' + name)
-        digest = hashlib.new(object_format)
-        digest.update(b'blob ' + str(before.st_size).encode('ascii') + b'\0')
-        remaining = before.st_size
-        while remaining:
-            context.remaining_seconds()
-            chunk = os.read(fd, min(1024 * 1024, remaining))
-            if not chunk:
-                raise ValueError('Project tracked file changed during reading: ' + name)
-            digest.update(chunk)
-            remaining -= len(chunk)
-        if os.read(fd, 1) or _signature(os.fstat(fd)) != signature:
-            raise ValueError('Project tracked file changed during reading: ' + name)
-        if digest.hexdigest() != object_id:
-            raise ValueError('Project raw bytes differ from frozen HEAD (including CRLF/filter transformations): ' + name)
-    finally:
-        os.close(fd)
-    if _signature(source.lstat()) != signature:
-        raise ValueError('Project tracked file changed after reading: ' + name)
     _unchanged(ancestors)
     return dict(source=source, relative=name, mode=mode, object_id=object_id,
                 signature=signature, ancestors=ancestors)
 
 
 def files(project, *, context=None, exclude=()):
-    """Verify HEAD/index and raw tracked bytes, returning only this view's files.
+    """Verify HEAD/index and ordinary Git worktree state for this view's files.
 
     ``exclude`` may hide declared mount roots at actual consumption, so their
     current physical bytes cannot substitute for the selected code commit.
+    Git's normal filters and index flags apply; same-user writers are trusted.
     """
     project = _frozen(project)
     context = Deadline(SECONDS, upstream=context)
@@ -287,6 +266,12 @@ def files(project, *, context=None, exclude=()):
     if any(item not in declared for item in exclude) or len(set(exclude)) != len(exclude):
         raise ValueError('Project exclusions must be exact declared directory roots')
     root = Path(project['base_root'])
+    # Validate ordinary Git controls before invoking Git. Its normal worktree
+    # check may refresh index stat-cache metadata, so anchor controls afterward.
+    _control(root)
+    pathspec = ('.', *(':(top,literal,exclude)' + item for item in exclude))
+    dirty = _git(root, ('diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv', '--', *pathspec),
+                 context=context, output_limit=MAX_METADATA_BYTES)
     anchors, controls = _control(root)
     identity = _identity(root, context)
     if identity != project['base_identity']:
@@ -304,9 +289,10 @@ def files(project, *, context=None, exclude=()):
         context.remaining_seconds()
         if any(name == item or name.startswith(item + '/') for item in exclude):
             continue
-        result.append(_raw(root, name, mode, object_id, identity['object_format'], context))
-    # A replacement anywhere in the finite input set during a later file read
-    # invalidates the whole view, including an earlier file already hashed.
+        result.append(_source(root, name, mode, object_id))
+    if dirty:
+        raise ValueError('Project worktree differs from frozen HEAD')
+    # Catch ordinary source/parent replacements while building this mount view.
     for row in result:
         context.remaining_seconds()
         _unchanged(row['ancestors'])

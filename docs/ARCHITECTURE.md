@@ -4,8 +4,8 @@
 
 Control does not hash scientific data or outputs by default. Hashing is restricted
 to approval bindings, small control requests that require durable idempotency and
-the host-owned Git code capture and raw Git blob verification of explicitly
-declared project bases described below. Approval/idempotency helpers must
+host-owned Git code capture. Declared project bases use ordinary Git worktree
+checks, without control reading or hashing every base file. Approval/idempotency helpers must
 not traverse scientific files, code, logs, observations, inputs, results, Skills or
 archives. Explicit scientific tools may use their own algorithms
 on selected evidence; that is separate from control identity. Protocol 26 uses
@@ -294,14 +294,18 @@ no operator setting. These file views do not establish hostile same-user process
 isolation or a blanket guarantee for generic native execution.
 
 **Declared project views.** `project_layout.py` owns strict project declarations,
-frozen base Git identity and bounded tracked-file/raw-blob validation. The
+frozen base Git identity and bounded tracked-file/worktree validation. The
 [project configuration contract](RESEARCH_CONFIGURATION.md#declared-projects--声明工程)
 owns its supported fields and permission limits. The original base path exposes
 only verified HEAD ordinary files read-only, without `.git`, untracked/ignored
 files, a base-data copy or an overlay filesystem. Its SHA-1/SHA-256 HEAD identity
-is immutable across configuration revisions and forks. Missing or changed base
-bytes affect only later consumption that needs them, not known terminal records
-or metadata-only queries.
+is immutable across configuration revisions and forks. HEAD/index consistency is
+checked globally; ordinary Git dirty checks and source/parent stat race checks
+apply to visible base sources. Git filters and index optimization flags retain
+their normal semantics. W and runs exclude editable/scratch/output roots from
+those source checks; read-only roles exclude scratch/output roots. Missing or
+dirty visible sources affect only later consumption that needs them, not known
+terminal records or metadata-only queries.
 
 Project draft exposure is limited to declared editable code. Initial tracked-code seed and a
 uniquely selected retained parent commit use existing shared code limits;

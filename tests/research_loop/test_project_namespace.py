@@ -135,8 +135,10 @@ for path in paths:
     argv = [sys.executable, '-I', '-c', payload, *map(str, paths), str(base/'src'), '-c', declaration]
     wrapped = views.wrap(root, dict(step=1, role='W', project=project), work, argv)
     assert wrapped[0] == program
-    completed = subprocess.run(wrapped, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+    assert isinstance(wrapped, views._BwrapCommand)
+    with views.popen_arguments(wrapped) as (launch_args, pass_fds):
+        completed = subprocess.run(launch_args, pass_fds=pass_fds, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
     assert completed.returncode == 0, completed.stderr.decode(errors='replace')
     assert original.read_text() == 'scientific original'
     assert (work/'project/src/ordinary.txt').read_text() == 'allowed'

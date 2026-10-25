@@ -394,4 +394,4 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
         command=['/bin/sh','-c','cd "$1" && shift && exec "$@"','scid-project-cwd',cwd,*command]
     scientific=['/bin/sh','-c',bootstrap,'scid-scientific-sandbox',value['native']['path'],
         'sandbox','-P',PERMISSION_PROFILE,'-C',str(policy_cwd),'--',*command]
-    return wrapped+scientific,None,None
+    return shared_input_views._BwrapCommand(wrapped+scientific,command_index=len(wrapped)),None,None

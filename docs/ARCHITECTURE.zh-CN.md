@@ -3,7 +3,8 @@
 简体中文 | [English](ARCHITECTURE.md)
 
 控制层默认不计算科学数据或输出哈希。哈希仅限审批绑定、确实需要持久幂等的小型控制请求，
-以及下述宿主拥有的 Git 代码捕获与显式工程基础的 raw Git blob 核验。
+以及宿主拥有的 Git 代码捕获。声明工程基础采用普通 Git 工作树检查，控制层不逐个读取
+或 hash 基础文件。
 审批/幂等入口不得遍历科学文件、代码、日志、观察、输入、
 结果、Skill 或归档内容。显式科学工具
 可以按自己的算法处理选定证据，这不属于控制身份计算。协议 26 使用
@@ -190,10 +191,13 @@ managed policy、额外可写根以及无法忠实投影后端权限的自定义
 这些文件视图不构成防同用户恶意进程的隔离，也不对泛原生执行提供统一隔离保证。
 
 **声明工程视图。** `project_layout.py` 拥有严格工程声明、冻结基础 Git 身份和有界追踪文件/
-raw blob 核验；支持字段与权限限制由[工程配置主合同](RESEARCH_CONFIGURATION.md#declared-projects--声明工程)
+工作树检查；支持字段与权限限制由[工程配置主合同](RESEARCH_CONFIGURATION.md#declared-projects--声明工程)
 统一说明。基础工程原路径只读暴露核验后的 HEAD 普通文件，不含 `.git`、untracked/ignored
 文件，不复制基础数据，也不使用 overlay 文件系统。SHA-1/SHA-256 HEAD 身份在配置修订与
-fork 中保持不变。基础字节缺失或漂移只影响后续需要它们的消费，不改变已知终态记录或
+fork 中保持不变。HEAD/index 一致性仍全局检查；普通 Git dirty 检查与来源文件/父目录
+stat race 检查只作用于可见基础来源，采用 Git 通常的 filter 与索引优化标志语义。
+W 与 run 排除 editable/scratch/outputs，只读角色排除 scratch/outputs；隐藏来源变化不使
+对应视图失效。可见来源缺失或 dirty 只影响后续需要它们的消费，不改变已知终态记录或
 只读元数据查询。
 
 工程草稿只暴露声明的 editable 代码。初始追踪代码 seed 与唯一选中的留存父 commit 沿用现有

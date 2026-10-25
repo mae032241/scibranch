@@ -605,8 +605,9 @@ def run_native(root: Path, step: int, attempt=0):
                 # Its frozen module owns the final scientific namespace seam.
                 shared_input_views.ensure_capability(context=view_context)
             launch_started = True
-            process = subprocess.Popen(args, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                       stderr=err, env=env, start_new_session=True)
+            with shared_input_views.popen_arguments(args) as (launch_args, pass_fds):
+                process = subprocess.Popen(launch_args, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                           stderr=err, env=env, start_new_session=True, pass_fds=pass_fds)
             process_id = runtime.process_identity(process.pid, execution.identity(root, step, attempt))
             write(record / "native-process.json", process_id)
             process.stdin.write(backend.request(prompt, profile=profile, work=work, schema=schema_path))

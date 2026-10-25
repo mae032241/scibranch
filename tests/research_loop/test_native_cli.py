@@ -339,7 +339,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':7,'cached_inpu
         assert 'scidiscovery.research_loop.worker_execution_bridge' not in prompt
     assert registered['command'] == command
     assert local == [*command, 'run', '--experiment-dir', 'experiments/<name>',
-        '--script', 'experiments/<name>/run.py', '--', '<script args>']
+        '--script', 'code/run.py', '--', '<script args>']
 
 
 @pytest.mark.process_e2e

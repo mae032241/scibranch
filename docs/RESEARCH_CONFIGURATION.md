@@ -190,21 +190,27 @@ commit. SHA-1 and SHA-256 bases are supported. Existing-instance edits and forks
 retain that exact identity. The base view contains only HEAD-tracked ordinary
 files, read-only at their original paths; `.git`, untracked and ignored files are
 absent. Dependencies must therefore be tracked. Bounded Git index/tree enumeration
-and streamed raw Git blob checks reject staged changes, tracked symlinks/gitlinks,
-changed bytes or executable modes, including CRLF or filter transformations.
-Index optimization flags cannot bypass those checks; implicit fetch and remote
-helpers are disabled. Base files are not copied into the instance and no second
-file manifest is retained. Missing or
-changed base sources prevent a later use that needs those bytes; they do not
+rejects staged changes and tracked symlinks/gitlinks. Ordinary Git worktree checks
+reject dirty visible sources; Git's normal filters, assume-unchanged and
+skip-worktree flags apply. Control does not open or hash every base file.
+Only visible mount sources receive file/type, executable-mode and parent-directory
+stat race checks. W and runs exclude editable, scratch and output roots from the
+base check; read-only roles exclude scratch and output roots. Changes to these
+hidden sources do not invalidate their view. Implicit fetch and remote helpers
+are disabled. Base files are not copied into the instance and no second file
+manifest is retained. Missing or dirty visible base sources prevent a later use that needs them; they do not
 rewrite known terminal outcomes or block metadata-only historical queries.
 
 准备时冻结上述声明、基础仓库对象格式与 HEAD commit；支持 SHA-1 和 SHA-256 基础仓库。
 已有实例的配置修改及 fork 均保留原身份。基础视图只在原路径只读暴露 HEAD 追踪的普通
-文件，不暴露 `.git`、untracked 或 ignored 文件，因此依赖须明确纳入 Git。控制程序只做
-有界 Git 索引/树枚举及流式 raw Git blob 校验，拒绝 staged 修改、追踪 symlink/gitlink、
-原字节或执行位漂移，包括 CRLF/filter 变换；索引优化标志不能跳过核验，隐式 fetch 和
-remote helper 均禁用。基础文件不复制进实例，也不持久保留第二份文件清单。来源缺失或漂移只阻止后续真正需要这些
-字节的消费，不改写已知终态，也不阻断只读历史元数据查询。
+文件，不暴露 `.git`、untracked 或 ignored 文件，因此依赖须明确纳入 Git。有界 Git
+索引/树枚举拒绝 staged 修改与追踪 symlink/gitlink；普通 Git 工作树检查拒绝可见来源的
+dirty 状态，采用 Git 通常的 filter、assume-unchanged 和 skip-worktree 语义。控制程序
+不逐个打开或 hash 基础文件，只对可见挂载来源做文件类型、执行位及父目录 stat race 检查。
+W 与 run 的基础检查排除 editable、scratch 和 outputs；只读角色排除 scratch 和 outputs，
+这些隐藏来源的变化不使该视图失效。隐式 fetch 和 remote helper 均禁用。基础文件不复制
+进实例，也不持久保留第二份文件清单。可见来源缺失或 dirty 只阻止后续真正需要这些来源的
+消费，不改写已知终态，也不阻断只读历史元数据查询。
 
 W edits explicit `project/<editable>` drafts mapped to the original base paths.
 The first draft copies only tracked editable code under the existing shared code

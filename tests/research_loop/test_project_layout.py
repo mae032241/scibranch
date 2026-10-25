@@ -1,5 +1,6 @@
-"""Project views use exact Git names and raw bytes, without worktree discovery."""
+"""Project views use exact Git names and normal worktree checks without discovery."""
 import copy
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -135,18 +136,18 @@ def test_rejects_overlap_and_symlinks(tmp_path):
 
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('flag', ['--assume-unchanged', '--skip-worktree'])
-def test_raw_blob_identity_ignores_index_flags(tmp_path, flag):
+def test_worktree_checks_respect_normal_index_flags(tmp_path, flag):
     declaration = project(tmp_path)
     root = Path(declaration['base_root'])
     frozen = layout.prepare(declaration, protected=[])
     git(root, 'update-index', flag, '--', 'data.txt')
     (root / 'data.txt').write_bytes(b'drift hidden from status\n')
-    with pytest.raises(ValueError, match='raw bytes.*data.txt'):
-        layout.files(frozen)
+    assert {row['relative'] for row in layout.files(frozen)} == {
+        'data.txt', 'src/main.py', 'tools/helper.py'}
 
 
 @pytest.mark.process_e2e
-def test_filtered_worktree_bytes_rejected(tmp_path):
+def test_filtered_worktree_uses_normal_git_semantics(tmp_path):
     declaration = project(tmp_path)
     root = Path(declaration['base_root'])
     git(root, 'config', 'core.autocrlf', 'input')
@@ -154,8 +155,47 @@ def test_filtered_worktree_bytes_rejected(tmp_path):
     git(root, 'add', '--', 'data.txt')
     git(root, 'commit', '--quiet', '-m', 'normalized bytes')
     assert git(root, 'show', 'HEAD:data.txt').stdout == b'CRLF data\n'
-    with pytest.raises(ValueError, match='raw bytes.*CRLF/filter'):
-        layout.prepare(declaration, protected=[])
+    frozen = layout.prepare(declaration, protected=[])
+    assert {row['relative'] for row in layout.files(frozen)} == {
+        'data.txt', 'src/main.py', 'tools/helper.py'}
+
+
+@pytest.mark.process_e2e
+def test_repeated_views_do_not_open_read_or_hash_base_files(tmp_path, monkeypatch):
+    declaration = project(tmp_path)
+    root = Path(declaration['base_root'])
+    frozen = layout.prepare(declaration, protected=[])
+    paths = {root / name for name in ('data.txt', 'src/main.py', 'tools/helper.py')}
+    unchanged = (root / 'data.txt').stat()
+    os.utime(root / 'data.txt', ns=(unchanged.st_atime_ns, unchanged.st_mtime_ns + 1_000_000_000))
+    identities = {(path.stat().st_dev, path.stat().st_ino) for path in paths}
+    original_open, original_read, original_path_open = os.open, os.read, Path.open
+
+    def no_source_open(path, *args, **kwargs):
+        assert not isinstance(path, (str, bytes, os.PathLike)) or Path(os.fsdecode(path)) not in paths
+        return original_open(path, *args, **kwargs)
+
+    def no_source_read(descriptor, *args):
+        info = os.fstat(descriptor)
+        assert (info.st_dev, info.st_ino) not in identities
+        return original_read(descriptor, *args)
+
+    def no_source_path_open(path, *args, **kwargs):
+        assert path not in paths
+        return original_path_open(path, *args, **kwargs)
+
+    def no_hash(*args, **kwargs):
+        raise AssertionError('Project checks must not hash base file bytes in Python')
+
+    monkeypatch.setattr(os, 'open', no_source_open)
+    monkeypatch.setattr(os, 'read', no_source_read)
+    monkeypatch.setattr(Path, 'open', no_source_path_open)
+    monkeypatch.setattr(hashlib, 'new', no_hash)
+    # Real Git subprocesses may read/hash stat-changed files themselves. Python
+    # only consumes bounded Git pipe output and checks exact source metadata.
+    for _ in range(3):
+        assert {row['relative'] for row in layout.files(frozen)} == {
+            'data.txt', 'src/main.py', 'tools/helper.py'}
 
 
 @pytest.mark.process_e2e
@@ -183,6 +223,9 @@ def test_drift_and_missing_exact_path(tmp_path):
     (root / 'data.txt').unlink()
     with pytest.raises(FileNotFoundError):
         layout.files(frozen)
+    (root / 'data.txt').write_bytes(b'ordinary dirty data\n')
+    with pytest.raises(ValueError, match='worktree differs'):
+        layout.files(frozen)
     (root / 'data.txt').write_bytes(b'base data\n')
     (root / 'src/main.py').write_bytes(b'changed code\n')
     # The hidden host draft cannot replace the selected code commit at run.
@@ -196,16 +239,38 @@ def test_drift_and_missing_exact_path(tmp_path):
 
 
 @pytest.mark.process_e2e
-def test_later_read_cannot_hide_earlier_file_replacement(tmp_path, monkeypatch):
+@pytest.mark.parametrize('exclude', [('src', 'tools', 'build', 'out'), ('build', 'out')])
+def test_excluded_mount_sources_do_not_make_view_dirty(tmp_path, exclude):
+    declaration = project(tmp_path)
+    root = Path(declaration['base_root'])
+    for name in ('build', 'out'):
+        (root / name).mkdir()
+        (root / name / 'tracked.txt').write_bytes(b'tracked mount source\n')
+    git(root, 'add', '--', 'build/tracked.txt', 'out/tracked.txt')
+    git(root, 'commit', '--quiet', '-m', 'tracked mount roots')
+    frozen = layout.prepare(declaration, protected=[])
+    for name in exclude:
+        source = root / name
+        source.rename(root / ('hidden-' + name))
+        source.symlink_to('hidden-' + name, target_is_directory=True)
+    expected = {'data.txt'} if 'src' in exclude else {
+        'data.txt', 'src/main.py', 'tools/helper.py'}
+    assert {row['relative'] for row in layout.files(frozen, exclude=exclude)} == expected
+
+
+@pytest.mark.process_e2e
+def test_later_stat_cannot_hide_earlier_file_replacement(tmp_path, monkeypatch):
     declaration = project(tmp_path)
     frozen = layout.prepare(declaration, protected=[])
-    original = layout._raw
+    original = layout._source
     def replace_earlier(root, name, *args):
         row = original(root, name, *args)
         if name == 'tools/helper.py':
-            (root / 'data.txt').write_bytes(b'changed after earlier hash\n')
+            replacement = root / 'replacement.txt'
+            replacement.write_bytes(b'base data\n')
+            replacement.replace(root / 'data.txt')
         return row
-    monkeypatch.setattr(layout, '_raw', replace_earlier)
+    monkeypatch.setattr(layout, '_source', replace_earlier)
     with pytest.raises(ValueError, match='changed during verification'):
         layout.files(frozen)
 
