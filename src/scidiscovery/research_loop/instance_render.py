@@ -150,6 +150,7 @@ const connection = document.querySelector('[data-live-url]');
 const panel = document.querySelector('[data-progress]');
 let timer, generation = 0, cursor = panel?.dataset.cursor || '', progressURL = panel?.dataset.progress || '';
 let rows = panel ? JSON.parse(panel.querySelector('[data-raw-events]').textContent) : [];
+let catchupPages = 0, omittedRows = Number(panel?.querySelector('[data-progress-omissions]')?.dataset.omitted || 0), skippedLogs = 0;
 let source, sessionCheck = false, authorizationLost = false;
 async function responseProblem(response, fallback) {
   let value;
@@ -208,6 +209,7 @@ function tokenDetails(details) {
 async function poll(selectedGeneration) {
   if (!progressURL || selectedGeneration !== generation || authorizationLost) return;
   const status = panel.querySelector('[data-stream-status]');
+  let nextDelay = 2000;
   try {
     const response = await fetch(progressURL + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {cache:'no-store'});
     if (selectedGeneration !== generation) return;
@@ -225,12 +227,25 @@ async function poll(selectedGeneration) {
     status.textContent = value.progress_label;
     tokenDetails(value.token_details);
     for (const item of value.events) { rows.push(item); append(item); }
-    if (rows.length > 200) rows.splice(0, rows.length - 200);
+    if (rows.length > 200) { omittedRows += rows.length - 200; rows.splice(0, rows.length - 200); }
+    skippedLogs += (value.omitted_oversize_lines || 0) + (value.malformed_lines || 0);
+    let omissions = panel.querySelector('[data-progress-omissions]');
+    if (!omissions) { omissions = document.createElement('p'); omissions.className = 'note'; omissions.dataset.progressOmissions = ''; panel.querySelector('[data-events]').after(omissions); }
+    omissions.textContent = [omittedRows ? '已保留最近 200 条消息；' + omittedRows + ' 条较早消息未展开，可重新打开固定阶段进度页分批读取。' : '', skippedLogs ? '已跳过 ' + skippedLogs + ' 条超长或不可解析日志。' : ''].filter(Boolean).join(' ');
     panel.querySelector('[data-raw-events]').textContent = JSON.stringify(rows, null, 2);
+    if (value.sealed_conclusion?.available) {
+      let conclusion = panel.querySelector('[data-sealed-conclusion]');
+      if (!conclusion) { conclusion = document.createElement('a'); conclusion.dataset.sealedConclusion = ''; panel.appendChild(conclusion); }
+      conclusion.href = progressURL.slice(0, progressURL.indexOf('/nodes/')) + '/results/' + value.step;
+      conclusion.textContent = '阶段结论已记录，阅读结论原文';
+    }
     if (value.restart_required) { status.textContent += '；请重新打开此进度页以读取新来源'; return; }
     cursor = value.cursor || cursor;
+    if (value.sealed_conclusion?.available && !value.has_more) return;
+    if (value.has_more) { catchupPages++; if (catchupPages < 4) nextDelay = 0; else catchupPages = 0; }
+    else catchupPages = 0;
   } catch (error) { if (selectedGeneration === generation) status.textContent = (error.publicProblem ? error.message : '进度连接暂不可用') + '；正在重新连接，已显示内容保留'; }
-  if (selectedGeneration === generation) timer = window.setTimeout(() => poll(selectedGeneration), 2000);
+  if (selectedGeneration === generation) timer = window.setTimeout(() => poll(selectedGeneration), nextDelay);
 }
 function follow(current) {
   if (!panel?.dataset.followLatest || authorizationLost) return;
@@ -242,9 +257,10 @@ function follow(current) {
     }
     return;
   }
-  generation++; window.clearTimeout(timer); progressURL = next; cursor = ''; rows = [];
+  generation++; window.clearTimeout(timer); progressURL = next; cursor = ''; rows = []; catchupPages = 0; omittedRows = 0; skippedLogs = 0;
   panel.querySelector('[data-events]').replaceChildren();
   panel.querySelector('[data-raw-events]').textContent = '[]';
+  panel.querySelector('[data-progress-omissions]')?.remove(); panel.querySelector('[data-sealed-conclusion]')?.remove();
   tokenDetails([]);
   document.querySelector('[data-token-monitor] [data-token-scope]').textContent = current ? '第 ' + current.step + ' 阶段 · attempt ' + current.attempt + ' · 本次助手用量' : '当前阶段 · 等待助手用量';
   panel.querySelector('[data-progress-heading]').textContent = current ? '第 ' + current.step + ' 阶段 · ' + current.role + ' · 公开工作' : '当前助手的公开工作';

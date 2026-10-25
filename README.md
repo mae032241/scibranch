@@ -75,7 +75,9 @@ Add `--view current` to inspect the active configuration and any pending revisio
 The declaration affects new instances; existing instances retain their frozen settings.
 See [configuration and backend reference](docs/RESEARCH_CONFIGURATION.md).
 The webpage is optional and uses the same state and control logic; detached research
-continues when its webpage service exits. `result`, `materials` and `artifact` read or
+continues when its webpage service exits. The [UI contract](docs/ARCHITECTURE.md#instance-ui-control-and-display)
+defines form retries, display caches and translation boundaries.
+`result`, `materials` and `artifact` read or
 download exact sealed results through the CLI. The [CLI guide](docs/ROOTLESS_CLI.zh-CN.md)
 contains commands, policy examples, result retrieval and recovery rules.
 A single `codex` launcher defaults to local experiments: the native host handles

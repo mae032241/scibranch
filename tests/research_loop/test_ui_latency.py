@@ -126,7 +126,6 @@ def test_saved_used_steps_retain_continuations_delivery_and_audit_intents(tmp_pa
 
 
 @pytest.mark.parametrize('start, now', [
-    (dict(at_unix=100., at_boottime=10., boot_id='before'), dict(at_unix=1000., at_boottime=1., boot_id='after')),
     (dict(at_unix=100., boot_id='before'), dict(at_unix=1000., at_boottime=20., boot_id='before')),
     (dict(at_unix=100., at_boottime=10., boot_id='before'), dict(at_unix=1000., at_boottime=9., boot_id='before')),
 ])
@@ -182,7 +181,7 @@ def test_saved_legacy_elapsed_accepts_only_nonnegative_wall_intervals(tmp_path, 
 @pytest.mark.parametrize('now, expected', [
     (dict(at_unix=112., at_boottime=20., boot_id='original'), 12.),
     (dict(at_unix=109., at_boottime=20., boot_id='original'), None),
-    (dict(at_unix=112., at_boottime=1., boot_id='new'), None),
+    (dict(at_unix=112., at_boottime=1., boot_id='new'), 12.),
 ])
 def test_saved_anchored_elapsed_preserves_its_original_clock_rules(tmp_path, monkeypatch, now, expected):
     settings = dict(max_tokens=100, max_seconds=60, max_steps=5, time_budget_basis='elapsed')

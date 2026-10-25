@@ -51,6 +51,9 @@ SCRIPT = r'''
     if (value.config_generation !== state.config_generation) { entries.clear(); seen.clear(); }
     state.config_generation = value.config_generation; state.target_language = value.target_language;
     state.configured = value.configured;
+    if (value.status === 'unsupported') {
+      state.supported = false; state.unsupported_reason = value.reason;
+    }
     return value;
   }
   function paint() {
@@ -97,6 +100,7 @@ SCRIPT = r'''
       for (const batch of batches(missing)) {
         const value = await request('start', batch); message = '';
         for (const entry of value.entries) { entries.set(entry.source, entry); seen.add(entry.source); }
+        if (value.status === 'unsupported') break;
       }
     } catch (error) { message = error.message; }
     finally { busy = false; paint(); }

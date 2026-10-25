@@ -23,6 +23,10 @@ entries use compact key/type/value rows. No
 configuration file is required.
 Check the complete effective preview, explicitly create the instance, then start
 research separately. Editing the form after checking requires a new preview.
+The form also imports and exports `[project]`, `skills.sets`, named Workers and
+role `worker`/`skill_set` references. Declaring an optional set does not select it;
+an explicit role or Worker selection enables use. Existing-instance edits retain
+the original project and set inventory; operational revisions cannot replace them.
 
 独立工作台从空白结构表单开始，可直接输入任务原文、公开材料目录、新实例目录和有限预算。
 角色、权限、执行、交付与合同策略按用途分组；角色模型与阶段目标合并为紧凑的角色表，
@@ -31,6 +35,9 @@ research separately. Editing the form after checking requires a new preview.
 丢失未知值。“更多研究配置”内各分类可独立折叠，展开后使用紧凑分组表单，包括角色份额与恢复参数；
 插件扩展按键名、类型和值紧凑排列。无需先写 TOML/JSON，也不自动读取工作区已有任务或配置。检查完整有效
 预览后明确创建，再单独开始研究；修改参数后须重新预览。
+表单同样支持 `[project]`、`skills.sets`、命名 Worker 与角色 `worker`/`skill_set` 引用的
+导入及导出。声明可选集合本身不启用，须由角色或 Worker 显式选择。已有实例编辑保留
+原工程和集合清单，不能通过运行配置修订替换。
 
 TOML is an optional import/export and explicit save format. Imports populate the
 same controls. Save/update writes only the explicitly selected configuration file;
@@ -457,6 +464,9 @@ an imported declaration for creation affects only the new instance. The
 webpage also exposes queued budget changes, guidance, operation receipts, detached
 start/resume and bounded progress. CLI commands remain available independently.
 These implemented surfaces have no implied live-browser or backend qualification.
+UI intent replay, display caching and translation limits are defined in the
+[architecture](ARCHITECTURE.md#instance-ui-control-and-display); the
+[CLI guide](ROOTLESS_CLI.zh-CN.md) describes their user controls.
 
 `serve-ui` 可重复 `--instance-root` 添加明确实例；管理页也可按精确已有根打开，不扫描
 目录、不按新旧推断。实例内 `/configuration` 编辑后续节点配置并展示当前生效设置；
@@ -464,6 +474,8 @@ These implemented surfaces have no implied live-browser or backend qualification
 相同 API 检查和准备实例；TOML 为可选导入、导出及明确保存格式。导入文件目录决定其相对路径基准，
 导出与另存保留路径含义；新建声明编辑不修改已有实例。网页还提供预算排队、
 用户方向、操作回执、后台启动/恢复和有界进度。这些入口不额外授予真实浏览器或后端资格。
+UI 意图重试、显示缓存及翻译限制由[架构](ARCHITECTURE.zh-CN.md#实例-ui-的控制与显示)
+定义，具体操作见 [CLI 指南](ROOTLESS_CLI.zh-CN.md)。
 
 Cov execution is provided by the optional `scidiscovery-cov-execution` distribution
 (`SCID_PLUGINS=cov_execution`). Its executor key remains `cov_execution:experiment`;

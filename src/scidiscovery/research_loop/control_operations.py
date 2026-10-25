@@ -23,6 +23,18 @@ def _read(root, operation_id):
     return contracts.read(contracts.regular(_path(root, operation_id)))
 
 
+def _replay(root, operation_id, kind, request):
+    """Read one exact existing intent; never restart its accepted work."""
+    path = _path(root, operation_id)
+    if not path.exists() and not path.is_symlink():
+        return None
+    value = _read(root, operation_id)
+    if (value.get('operation_id') != operation_id or value.get('kind') != kind
+            or value.get('request') != request):
+        raise ValueError('Operation ID belongs to another exact control request')
+    return value
+
+
 def operation(root, operation_id):
     root = Path(root).resolve()
     from .instance_owner import lease
@@ -54,13 +66,21 @@ def operations(root):
     return sorted([operation(root, path.stem) for path in sorted((root / 'host-control' / 'operations').glob('*.json'))], key=lambda row: row.get('sequence', 0))
 
 
-def start_background(root, *, continue_run=False, ack_correction=None, authorization_note=None, resume_step=None):
+def start_background(root, *, continue_run=False, ack_correction=None, authorization_note=None, resume_step=None,
+                     operation_id=None):
     """Hand the existing single-writer lock to an independent controller process."""
     root = Path(root).resolve()
     from .instance_owner import lease
     from .protocol import require_current
     with lease(root):
         require_current(root)
+        request = dict(continue_run=bool(continue_run), ack_correction=ack_correction,
+                       authorization_note=authorization_note, resume_step=resume_step)
+        if operation_id is not None:
+            with budget._ledger_writer(root):
+                previous = _replay(root, operation_id, 'controller', request)
+                if previous is not None:
+                    return previous
         action = dict(kind='continue' if continue_run else 'run')
         if resume_step is not None:
             if continue_run or ack_correction is not None or authorization_note is not None:
@@ -74,6 +94,12 @@ def start_background(root, *, continue_run=False, ack_correction=None, authoriza
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
+                if operation_id is not None:
+                    with budget._ledger_writer(root):
+                        previous = _replay(root, operation_id, 'controller', request)
+                        if previous is not None:
+                            return previous
+                    raise RuntimeError('Another controller owns this instance; this exact request was not accepted')
                 active = [row for row in operations(root) if row['kind'] == 'controller'
                           and row['status'] in {'accepted', 'running'} and row.get('process') is not None
                           and runtime.process_matches(row['process'], row['operation_id'])]
@@ -90,6 +116,11 @@ def start_background(root, *, continue_run=False, ack_correction=None, authoriza
             value = _new('controller', action=action, continue_run=bool(continue_run), ack_correction=ack_correction,
                          authorization_note=authorization_note)
             with budget._ledger_writer(root):
+                if operation_id is not None:
+                    previous = _replay(root, operation_id, 'controller', request)
+                    if previous is not None:
+                        return previous
+                    value.update(operation_id=operation_id, request=request)
                 value['sequence'] = 1 + len(list((root / 'host-control' / 'operations').glob('*.json')))
                 contracts.write(_path(root, value['operation_id']), value)
             try:
@@ -116,11 +147,21 @@ def start_background(root, *, continue_run=False, ack_correction=None, authoriza
             os.close(descriptor)
 
 
-def request_budget_amendment(root, **amendment):
+def request_budget_amendment(root, *, operation_id=None, **amendment):
     root = Path(root).resolve()
+    if operation_id is not None:
+        with budget._ledger_writer(root):
+            previous = _replay(root, operation_id, 'budget_amend', amendment)
+            if previous is not None:
+                return previous
     budget._validate_amendment(root, **amendment)
     value = _new('budget_amend', amendment=amendment)
     with budget._ledger_writer(root):
+        if operation_id is not None:
+            previous = _replay(root, operation_id, 'budget_amend', amendment)
+            if previous is not None:
+                return previous
+            value.update(operation_id=operation_id, request=amendment)
         value['sequence'] = 1 + len(list((root / 'host-control' / 'operations').glob('*.json')))
         contracts.write(_path(root, value['operation_id']), value)
     try:

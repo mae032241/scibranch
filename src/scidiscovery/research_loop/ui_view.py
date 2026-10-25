@@ -11,6 +11,7 @@ import copy
 import math
 from pathlib import Path
 import re
+import threading
 import time
 
 from . import contracts as c, instance_display as display
@@ -40,6 +41,28 @@ EXTREME_TOOLTIP = '全部已观察数值，含失败记录；仅在同一口径�
 CANDIDATE_LIMIT = 20
 ROUND_LIMIT = 5
 WINDOW = 50
+
+
+_memo_lock = threading.RLock()
+
+
+def memo_lock(memo):
+    """Serialize UI cache transactions, including legacy plain-dict callers."""
+    return getattr(memo, 'lock', _memo_lock)
+
+
+class DisplayMemo(dict):
+    """Display-only records and compact history facts; never admission evidence."""
+
+    def __init__(self, *, lock=None):
+        super().__init__()
+        self.lock = lock if lock is not None else threading.RLock()
+        self.summaries = {}
+
+    def clear(self):
+        with self.lock:
+            super().clear()
+            self.summaries.clear()
 
 
 # ---------------------------------------------------------------- formatting
@@ -179,14 +202,20 @@ class Reader:
             for path in paths for info in [path.stat()])
 
     def node(self, step):
+        with memo_lock(self.memo):
+            return self._node(step)
+
+    def _node(self, step):
+        key = (str(self.root), step)
         if step not in self._nodes:
-            key = (str(self.root), step)
             saved = self.memo.get(key)
             if saved is not None:
                 try:
                     if self._fingerprint(saved['paths']) == saved['fingerprint']:
                         self._nodes[step] = copy.deepcopy(saved['node'])
                         self._observations[step] = copy.deepcopy(saved['observation'])
+                        self.memo.pop(key)
+                        self.memo[key] = saved
                         return self._nodes[step]
                 except (OSError, ValueError):
                     pass
@@ -224,7 +253,55 @@ class Reader:
                 self.memo[key] = dict(paths=paths, fingerprint=fingerprint, node=copy.deepcopy(node),
                     observation=copy.deepcopy(observation))
             self._nodes[step], self._observations[step] = node, observation
+        if key in self.memo:
+            # Keep frequently rendered window nodes while summaries cover the
+            # full history; local Reader hits also count as recent use.
+            saved = self.memo.pop(key)
+            self.memo[key] = saved
         return self._nodes[step]
+
+    def summary(self, step):
+        """Compact all-history facts survive eviction of the 256 large nodes.
+
+        Every reuse checks the same exact saved-source metadata as ``node``.
+        Missing or changed evidence is reread, never treated as an empty stage.
+        """
+        with memo_lock(self.memo):
+            summaries = getattr(self.memo, 'summaries', None)
+            key = (str(self.root), step)
+            saved = summaries.get(key) if summaries is not None else None
+            if saved is not None:
+                try:
+                    if (self._fingerprint(saved['paths']) == saved['fingerprint']
+                            and all(self._fingerprint(source['paths']) == source['fingerprint']
+                                for source in saved.get('dependencies', []))):
+                        return copy.deepcopy(saved['value'])
+                except (OSError, ValueError):
+                    pass
+                summaries.pop(key, None)
+            node = self.node(step)
+            observation = self.observation(step)
+            value = dict(role=node['job']['role'], observed=observation is not None,
+                candidates=[dict(id=row['id'], label=row.get('label'))
+                    for row in (observation or {}).get('candidates', [])
+                    if isinstance(row, dict) and isinstance(row.get('id'), str)])
+            payload = node['payload']
+            dependencies = []
+            if (value['role'] == 'A' and not node['job'].get('formal_review')
+                    and payload.get('next_action') != 'audit'):
+                try:
+                    value['recommendation'] = resolve_candidate(self.root, node['job'],
+                        payload.get('candidate_recommendation'), reader=self, dependencies=dependencies)
+                except (OSError, ValueError, KeyError, TypeError):
+                    # A later author choice with an unreadable source still
+                    # supersedes earlier A advice; never revive the old choice.
+                    value.update(recommendation=None, recommendation_gap=True)
+                    dependencies.append(None)
+            original = self.memo.get(key)
+            if summaries is not None and original is not None and None not in dependencies:
+                summaries[key] = dict(paths=original['paths'], fingerprint=original['fingerprint'],
+                    dependencies=dependencies, value=copy.deepcopy(value))
+            return value
 
     def observation(self, step):
         """Sealed observer snapshot bound to this node's exact output, if any."""
@@ -234,7 +311,7 @@ class Reader:
     def role(self, step):
         if step not in self._roles:
             try:
-                self._roles[step] = self.node(step)['job']['role']
+                self._roles[step] = self.summary(step)['role']
             except (OSError, ValueError):
                 self._roles[step] = c.read(self.root / 'jobs' / f'{step:03d}.json')['role']
         return self._roles[step]
@@ -256,7 +333,7 @@ def accepted_calls(observation):
     return sum(1 for call in observation.get('managed_calls', []) if isinstance(call, dict) and call.get('accepted'))
 
 
-def resolve_candidate(root, job, value, references=None, *, strict=False):
+def resolve_candidate(root, job, value, references=None, *, strict=False, reader=None, dependencies=None):
     """Author reference -> canonical id via frozen task mapping; never inferred.
 
     ``strict`` raises when the frozen mapping rejects the reference instead of
@@ -271,8 +348,14 @@ def resolve_candidate(root, job, value, references=None, *, strict=False):
             match = re.fullmatch(r'([HWAE])(\d{3,})-I(\d{3,})', resolved)
             step, index = int(match[2]), int(match[3])
             if step in {row['step'] for row in job.get('history', {}).get('nodes', [])}:
-                reader = Reader(root)
+                reader = reader if reader is not None else Reader(root)
+                if dependencies is not None:
+                    dependencies.append(None)
                 node = reader.node(step)
+                if dependencies is not None:
+                    source = reader.memo.get((str(root), step))
+                    dependencies[-1] = (dict(paths=source['paths'], fingerprint=source['fingerprint'])
+                        if source is not None else None)
                 materials = sorted(node['seal']['materials'], key=lambda row: row['path'])
                 if node['job']['role'] == match[1] and 1 <= index <= len(materials):
                     target = materials[index - 1]['path'].replace('inputs/parents/', 'history/nodes/', 1)
@@ -283,7 +366,7 @@ def resolve_candidate(root, job, value, references=None, *, strict=False):
             if strict and re.fullmatch(r'[HWAE]\d{3,}-I\d{3,}', resolved):
                 raise ValueError('Implementation has no unique frozen candidate binding')
     except ValueError:
-        if strict:
+        if strict or dependencies is not None and None in dependencies:
             raise
         resolved = value
     if references and resolved not in references:
@@ -692,6 +775,8 @@ def usage_stats(view, *, used_steps=None, candidates=None):
     card['href'] = '/candidates'
     if candidates.get('partial'):
         card['notes'].append('可读已封存观察的下界')
+    if candidates.get('recommendation_gap'):
+        card['notes'].append('当前 A 推荐的来源不可读，推荐暂不可核对')
     if candidates.get('recommended'):
         card['notes'].append('A 推荐 1')
     if candidates.get('delivered'):
@@ -708,29 +793,40 @@ def project(root, view, *, final_step=None, objective=None, memo=None):
     reader = Reader(root, memo)
     nodes = list(view.get('nodes') or [])
     steps = [node['step'] for node in nodes]
-    mechanisms = guarded(mechanism_labels, reader, steps)
-    mechanisms = {} if 'error' in mechanisms else mechanisms
     labels, references, candidate_ids, observed_any, unreadable = {}, {}, [], False, []
+    historical_recommendation = []
+    recommendation_gap = None
     from . import ui_saved_status
     count_steps = ui_saved_status.visible_steps(root)
     for step in count_steps:
         try:
-            saved = reader.node(step)
-            observation = reader.observation(step)
+            if hasattr(reader, 'summary'):
+                summary = reader.summary(step)
+            else:
+                observation = reader.observation(step)
+                summary = dict(observed=observation is not None,
+                    candidates=(observation or {}).get('candidates', []))
         except Exception:
             # Unsealed current nodes do not constitute missing sealed evidence.
             if (root / 'native-evidence' / f'{step:03d}' / 'result-identity.json').exists():
                 unreadable.append(step)
             continue
-        if observation is None:
+        if 'recommendation' in summary:
+            historical_recommendation[:] = [summary['recommendation']]
+            recommendation_gap = dict(step=step) if summary.get('recommendation_gap') else None
+        if not summary['observed']:
             continue
         observed_any = True
-        for row in observation.get('candidates', []):
+        for row in summary['candidates']:
             if isinstance(row, dict) and isinstance(row.get('id'), str):
                 if row['id'] not in labels:
                     candidate_ids.append(row['id'])
                 labels.setdefault(row['id'], clean(row['label'], 300) if isinstance(row.get('label'), str) and row['label']
                                   else row['id'].rsplit('-', 1)[-1][:12])
+    # Build all-history facts before the rendered window so its recent large
+    # nodes stay resident when the history exceeds the 256-node cache.
+    mechanisms = guarded(mechanism_labels, reader, steps)
+    mechanisms = {} if 'error' in mechanisms else mechanisms
     try:
         from . import candidate_refs
         records = [dict(step=node['step'], role=node['role'], observation=reader.observation(node['step']))
@@ -749,13 +845,16 @@ def project(root, view, *, final_step=None, objective=None, memo=None):
                 latest_a = latest_a or line
         if latest_a:
             break
-    recommended = latest_a.get('recommendation') if latest_a else None
+    recommended = (historical_recommendation[0] if historical_recommendation
+                   else latest_a.get('recommendation') if latest_a else None)
     confirmed = (closeout.get('last_confirmed') or {}).get('candidate_id')
     candidates = dict(count=len(candidate_ids) if observed_any or nodes else None,
                       partial=bool(unreadable),
                       recommended=recommended is not None, delivered=confirmed is not None)
     if unreadable:
         candidates['unreadable'] = len(unreadable)
+    if recommendation_gap:
+        candidates['recommendation_gap'] = recommendation_gap
     used_steps = view.get('used_steps', closeout.get('used_steps') if isinstance(closeout.get('used_steps'), int) else (steps[-1] if steps else 0))
     materials = sum(line.get('materials') or 0 for item in ([] if 'error' in trail else trail['rounds'])
                     for line in [item['h'], *item['w'], *item['a'], *item['others']] if line)

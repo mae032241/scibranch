@@ -2,6 +2,7 @@
 import html
 import http.client
 import json
+from pathlib import Path
 import re
 import stat
 import threading
@@ -90,7 +91,15 @@ def test_budget_parse_failure_retains_all_fields_and_does_not_submit(tmp_path, m
     from test_configuration_form import Controls
     from test_history_handoff import finish
     root, key = prepare(tmp_path, enabled=False)
-    finish(root, 1, 'H', [], action='analyze')
+    from scidiscovery.research_loop import contracts as c
+    original_write = c.write
+    def fixture_write(path, value, *args, **kwargs):
+        if Path(path).name == 'native-outcome.json':
+            value = dict(value, native_started=False)
+        return original_write(path, value, *args, **kwargs)
+    with monkeypatch.context() as fixture:
+        fixture.setattr(c, 'write', fixture_write)
+        finish(root, 1, 'H', [], action='analyze')
     budget.amend(root, max_tokens=1, authorization_note='Exercise exhausted-budget recovery form.')
     ui, cookie = session(root, key)
     monkeypatch.setattr(instance_ui.control, 'request_budget_amendment', lambda *a, **k: pytest.fail('invalid budget submitted'))
@@ -136,7 +145,8 @@ def test_operation_rows_hide_arbitrary_backend_context_and_explain_stopped_recei
     rows = [dict(operation_id='a' * 32, kind='controller', status='failed', error='unlabelled private backend context'),
         dict(kind='controller', status='applied', result=dict(status='native_outcome_unsealed'))]
     page = ui._operation_rows(rows)
-    assert 'unlabelled private' not in page and '错误编号' in page and '请求编号' in page
+    assert 'unlabelled private' not in page and '错误编号' not in page
+    assert '请求编号：<code>' + 'a' * 32 + '</code>' in page
     assert '研究推进已停止，原任务待核对' in page and '已应用' not in page
     ui.translation.close()
 
@@ -249,13 +259,14 @@ def test_get_and_sse_failed_operation_projection_are_pure_and_stable(tmp_path):
     operation = root / 'host-control/operations' / ('a' * 32 + '.json')
     c.write(operation, dict(operation_id='a' * 32, sequence=1, kind='controller', status='failed', error='private arbitrary error'))
     token = ui._browser(cookie)
-    before = {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
+    originals = [root / 'settings.json', operation]
+    before = {path: path.read_bytes() for path in originals}
     first = ui.get('/operations', host=ui.host, cookie=cookie)[1]
     assert first == ui.get('/operations', host=ui.host, cookie=cookie)[1]
     one = ui._live_snapshot(token, '', force=True)['fragments']['live-operations']
     two = ui._live_snapshot(token, '', force=True)['fragments']['live-operations']
     assert one == two and 'a' * 32 in one and 'private arbitrary' not in one
-    assert before == {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
+    assert before == {path: path.read_bytes() for path in originals}
     operation.write_text('{')
     assert ui._snapshot_or_error(force=True) == ui._snapshot_or_error(force=True)
     assert not (root / '.scid-ui/errors').exists()

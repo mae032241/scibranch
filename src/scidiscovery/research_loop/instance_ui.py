@@ -95,10 +95,11 @@ class InstanceUI:
         self.activity = {}
         # Display-only memo of verified sealed reads (identity-checked per use)
         # and candidate projections keyed by the instance metadata fingerprint.
-        self.view_memo = {}
-        self.status_memo = {}
-        self.candidate_cache = {}
-        self.history_pages = {}
+        self.cache_lock = threading.RLock()
+        self.view_memo = ui_view.DisplayMemo(lock=self.cache_lock)
+        self.status_memo = ui_view.DisplayMemo(lock=self.cache_lock)
+        self.candidate_cache = ui_view.DisplayMemo(lock=self.cache_lock)
+        self.history_pages = ui_view.DisplayMemo(lock=self.cache_lock)
         self._refresh_approval_host()
         self.translation = translation_service or ui_translation.TranslationService(self.root / ".scid-ui", config=translation_config)
         self.translation_nonce = secrets.token_urlsafe(32)
@@ -258,7 +259,7 @@ class InstanceUI:
                 self.form_nonces[key] = (secrets.token_urlsafe(32), now, dict(bindings or {}))
             return self.form_nonces[key][0]
 
-    def _consume_form(self, browser_token, action, form, *, consume=True):
+    def _consume_form(self, browser_token, action, form, *, consume=True, replay=False):
         with self.control_lock:
             if not hmac.compare_digest(form['csrf'], self._csrf(browser_token, action, form['nonce'])):
                 raise PermissionError('Instance control CSRF or nonce mismatch')
@@ -269,10 +270,32 @@ class InstanceUI:
                     self.form_nonces.pop(match)
                 raise ui_errors.InputError('nonce', '表单已过期或已提交；填写内容已保留。',
                     '核对当前状态与原操作编号后，显式重新提交；工作台不会自动重试。')
-            issued = self.form_nonces.pop(match) if consume else self.form_nonces[match]
+            issued = self.form_nonces[match]
             if any(form.get(key) != value for key, value in issued[2].items()):
                 raise ui_errors.InputError('nonce', '此表单绑定的原身份已变化。',
                     '重新打开原表单，核对原版本与原操作编号后显式提交。')
+            if not self.workspace and action not in {'fork-create', 'delete'} and display.settings(self.root)['goal_id'] != self.instance:
+                raise ui_errors.InputError('root', '此目录已属于另一个研究实例。', '从工作台按目录重新加载，核对新实例后操作。')
+            if replay:
+                # Keep this bounded credential for exact response-loss retries.
+                # A later rendered form gets a fresh intent; the old nonce can
+                # only recover its frozen submitted request.
+                self.form_nonces.pop(match)
+                self.form_nonces[(*match[:3], issued[0])] = (issued[0], issued[1],
+                    {key: value for key, value in form.items() if key not in {'nonce', 'csrf'}})
+            elif consume:
+                self.form_nonces.pop(match)
+
+    def _operation_id(self, browser_token, action, form):
+        return self._csrf(browser_token, 'operation-' + action, form['nonce'])[:32]
+
+    def _maintenance_blocked(self):
+        return self._serving and not self.workspace and self.workspace_host is None
+
+    def _require_maintenance_handoff(self, action):
+        if action in {'delete', 'fork-preview', 'fork-create'} and self._maintenance_blocked():
+            raise ui_errors.InputError('root', '独立实例页面正在持有此研究的维护锁。',
+                '先关闭此独立实例网页服务，再从工作台按完整目录加载该研究并执行删除或分支。')
 
     def _control_form(self, browser_token, action, *, correction_trigger=None):
         fields = ''
@@ -310,9 +333,10 @@ class InstanceUI:
         if not 0 < index < len(self.instance_roots) or self.instance_roots[index] in self.deleted_roots:
             raise ValueError('Select an explicitly opened instance')
         with self.control_lock:
-            if index not in self.children:
-                root = self.instance_roots[index]
-                source = display.settings(root).get('ui', {}).get('approval_secret_file') or self.secret_file
+            root = self.instance_roots[index]
+            settings = display.settings(root)
+            if index not in self.children or self.children[index].instance != settings['goal_id']:
+                source = settings.get('ui', {}).get('approval_secret_file') or self.secret_file
                 self.children[index] = InstanceUI(root, secret_file=source, approval_host=False, translation_service=self.translation)
                 self.children[index].workspace_host = self
             child = self.children[index]
@@ -320,6 +344,19 @@ class InstanceUI:
             child.live_stop = self.live_stop
             child.live_gate = self.live_gate
         return child
+
+    def _routed_child(self, index, route, cookie):
+        retained = self.deleted_children.get(index) if route in {'delete', 'control/delete'} else None
+        if retained is None:
+            return self._child(index)
+        if self.instance_roots[index] not in self.deleted_roots:
+            child = self._child(index)
+            try:
+                child._browser(cookie, scope='read')
+                return child
+            except BrowserAccessDenied:
+                pass
+        return retained
 
     @staticmethod
     def _mounted(result, index):
@@ -477,6 +514,7 @@ class InstanceUI:
         body += self._form(token, 'configuration-update', fields, '保存，从下一个节点生效').replace(
             '<form method="post"', '<form id="research-config-edit-form" method="post"', 1)
         body += ('<p class="note">任务原件、研究目录及已绑定的材料保持原有身份。补充研究关注点可使用<a href="/guidance">方向建议</a>。</p>'
+            '<p class="note">工程目录与技能集合在创建时冻结；角色仍可选择本次研究已有的具名技能集合或命名研究者。</p>'
             '<details class="configuration-active"><summary>查看当前生效配置与权限说明</summary>'
             '<section class="configuration-section"><h2>模型与角色</h2>' + facts([
                 ('运行后端', view.get('native_backend', '未声明')),
@@ -795,7 +833,7 @@ class InstanceUI:
             if isinstance(operation_id, str) and len(operation_id) == 32 and all(char in '0123456789abcdef' for char in operation_id):
                 body += '<p class="note">请求编号：<code>' + operation_id + '</code></p>'
             if row.get('error'):
-                body += self._problem(ui_errors.ControlFailure('Saved operation failed'), context='control', reference=operation_id or '').markup()
+                body += self._problem(ui_errors.ControlFailure('Saved operation failed'), context='control').markup()
             body += '</section>'
         return body or '<p>还没有控制请求。</p>'
 
@@ -840,6 +878,18 @@ class InstanceUI:
             'unavailable': '公开进度暂不可用', 'replaced': '日志来源已变化',
             'truncated': '日志已截短'}.get(value['stream_state'], '公开日志状态待确认')
         value['progress_label'] = lifecycle + '；' + stream
+        omissions = []
+        if value.get('tail_omitted'):
+            omissions.append('仅显示最近一批公开日志；更早消息可从固定阶段进度页读取')
+        if value.get('omitted_oversize_lines'):
+            omissions.append('已跳过 ' + str(value['omitted_oversize_lines']) + ' 条超长日志')
+        if value.get('malformed_lines'):
+            omissions.append('已跳过 ' + str(value['malformed_lines']) + ' 条不可解析日志')
+        if value.get('has_more'):
+            omissions.append('仍有公开日志，正在分批读取')
+        value['omission_label'] = '；'.join(omissions)
+        if value['omission_label']:
+            value['progress_label'] += '；' + value['omission_label']
         value['token_details'] = ui_view.token_details(value.get('usage') or {},
             dict(value.get('context') or {}, step=step, attempt=attempt))
         return value
@@ -852,6 +902,7 @@ class InstanceUI:
         body += '<p><a href="' + base + '">重新读取公开进度</a> · <a href="/nodes/' + str(step) + '">查看此阶段</a></p>'
         body += '<section data-progress="/nodes/' + str(step) + '/events?attempt=' + str(attempt) + '" data-cursor="' + html.escape(value.get('cursor') or '', quote=True) + '"><h2>助手公开工作记录</h2><p data-stream-status>' + html.escape(value['progress_label']) + '</p><div data-events>'
         body += ''.join(self._event_html(item) for item in value['events'][-200:]) + '</div>'
+        body += '<p class="note" data-progress-omissions data-omitted="' + str(max(0, len(value['events']) - 200)) + '">' + ('已保留最近 200 条消息；' + str(len(value['events']) - 200) + ' 条较早消息未展开。' if len(value['events']) > 200 else '') + '</p>'
         if not value['events']:
             body += '<p class="note">此阶段没有可显示的公开消息。</p>'
         body += '<details><summary>高级：公开事件详情</summary><pre data-raw-events>' + html.escape(json.dumps(value['events'][-200:], ensure_ascii=False, indent=2)) + '</pre></details></section>'
@@ -887,24 +938,31 @@ class InstanceUI:
             value['stop_reason_omitted_characters'] = max(0, len(node['stop_reason']) - 300)
         return value
 
+    def _clear_display_caches(self):
+        """Clear shared display transactions without acquiring snapshot locks."""
+        with self.cache_lock:
+            for memo in (self.view_memo, self.status_memo, self.candidate_cache, self.history_pages):
+                memo.clear()
+
     def _snapshot(self, *, force=False):
         def load():
-            latest = self._latest_step()
-            view = saved_status.status(self.root, after=max(0, latest - ui_view.WINDOW), limit=ui_view.WINDOW, memo=self.status_memo)
-            conclusion = None
-            for node in reversed(view['nodes']):
-                if node['state'] == 'seal_present_unverified':
-                    sealed = display.node(self.root, node['step'])
-                    job, payload = sealed['job'], sealed['payload']
-                    conclusion = dict(step=node['step'], role=node['role'], ordinary=not job.get('formal_review') and job.get('purpose') != 'closeout', payload=payload)
-                    break
-            operations = saved_status.operations(self.root, memo=self.status_memo)
-            final = self._final_step()
-            # One read-only projection per snapshot; components fail separately.
-            projection = self._guarded(ui_view.project, self.root, view, final_step=final, memo=self.view_memo,
-                                         clean=ui_view.cleaner(self.root))
-            return dict(view=view, conclusion=conclusion, operation=operations[-1] if operations else None, operations=operations[-20:],
-                        final=final, ui=projection)
+            with self.cache_lock:
+                latest = self._latest_step()
+                view = saved_status.status(self.root, after=max(0, latest - ui_view.WINDOW), limit=ui_view.WINDOW, memo=self.status_memo)
+                conclusion = None
+                for node in reversed(view['nodes']):
+                    if node['state'] == 'seal_present_unverified':
+                        sealed = display.node(self.root, node['step'])
+                        job, payload = sealed['job'], sealed['payload']
+                        conclusion = dict(step=node['step'], role=node['role'], ordinary=not job.get('formal_review') and job.get('purpose') != 'closeout', payload=payload)
+                        break
+                operations = saved_status.operations(self.root, memo=self.status_memo)
+                final = self._final_step()
+                # One read-only projection per snapshot; components fail separately.
+                projection = self._guarded(ui_view.project, self.root, view, final_step=final, memo=self.view_memo,
+                                             clean=ui_view.cleaner(self.root))
+                return dict(view=view, conclusion=conclusion, operation=operations[-1] if operations else None, operations=operations[-20:],
+                            final=final, ui=projection)
         return self.live_cache.read(self.root, load, force=force)
 
     def _receipt(self, snapshot):
@@ -917,19 +975,20 @@ class InstanceUI:
     def _summary_snapshot(self, *, force=False):
         """Loaded-instance cards need saved status, not every scientific trail."""
         def load():
-            latest = self._latest_step()
-            view = saved_status.status(self.root, after=max(0, latest - 1), limit=1, memo=self.status_memo)
-            conclusion = None
-            if view['nodes'] and view['nodes'][-1]['state'] == 'seal_present_unverified':
-                node = display.node(self.root, latest)
-                job = node['job']
-                conclusion = dict(step=latest, role=job['role'],
-                    ordinary=not job.get('formal_review') and job.get('purpose') != 'closeout', payload=node['payload'])
-            operations = saved_status.operations(self.root, memo=self.status_memo)
-            return dict(view=view, conclusion=conclusion, final=self._final_step(),
-                operation=operations[-1] if operations else None, operations=operations[-20:],
-                ui=dict(header=ui_view.header(self.root, view['objective']),
-                    used_steps=view.get('used_steps', (view.get('closeout') or {}).get('used_steps', latest))))
+            with self.cache_lock:
+                latest = self._latest_step()
+                view = saved_status.status(self.root, after=max(0, latest - 1), limit=1, memo=self.status_memo)
+                conclusion = None
+                if view['nodes'] and view['nodes'][-1]['state'] == 'seal_present_unverified':
+                    node = display.node(self.root, latest)
+                    job = node['job']
+                    conclusion = dict(step=latest, role=job['role'],
+                        ordinary=not job.get('formal_review') and job.get('purpose') != 'closeout', payload=node['payload'])
+                operations = saved_status.operations(self.root, memo=self.status_memo)
+                return dict(view=view, conclusion=conclusion, final=self._final_step(),
+                    operation=operations[-1] if operations else None, operations=operations[-20:],
+                    ui=dict(header=ui_view.header(self.root, view['objective']),
+                        used_steps=view.get('used_steps', (view.get('closeout') or {}).get('used_steps', latest))))
         return self.summary_cache.read(self.root, load, force=force)
 
     def _loaded_instances(self, *, force=False):
@@ -1186,6 +1245,7 @@ class InstanceUI:
                 current = snapshot['view']['nodes'][-1] if snapshot['view']['nodes'] else None
                 if manager:
                     fragments['live-operations'] = self._fragment(self._operation_rows, snapshot['operations'], href='/operations')
+                    fragments['live-budget-navigation'] = self._budget_navigation(snapshot)
             if manager and not mount:
                 fragments['live-instances'] = self._loaded_instances(force=force)
         if mount:
@@ -1206,6 +1266,11 @@ class InstanceUI:
             not status['display']['active'] and bool(ui_view.exhausted_limits(
                 snapshot['view'], (snapshot.get('ui') or {}).get('used_steps'))))
 
+    def _budget_navigation(self, snapshot):
+        if self._budget_recovery_available(snapshot):
+            return '<p id="budget"><a href="/budget-recovery#budget">恢复前追加预算</a></p>'
+        return '<p><a href="/configuration#budget-settings">在当前研究配置中调整总预算</a></p>'
+
     def _more_actions(self, browser_token, snapshot, *, step=None, open_=False):
         """Secondary controls; every form keeps its existing endpoint, CSRF and controller gates."""
         manager = 'maintenance' in self.browser.verify(browser_token, instance_id=self.instance).scopes
@@ -1220,10 +1285,7 @@ class InstanceUI:
         body += '</div>'
         if step is not None:
             body += self._form(browser_token, 'resume', '<input type="hidden" name="step" value="' + str(step) + '">', '继续此阶段原任务（须满足原有条件）')
-        if self._budget_recovery_available(snapshot):
-            body += '<p id="budget"><a href="/budget-recovery#budget">恢复前追加预算</a></p>'
-        else:
-            body += '<p><a href="/configuration#budget-settings">在当前研究配置中调整总预算</a></p>'
+        body += '<div id="live-budget-navigation">' + self._budget_navigation(snapshot) + '</div>'
         body += '<p><a href="/delete">删除实例</a> · <a href="/candidates">全候选历史</a> · <a href="/operations">控制请求记录</a> · <a href="/?after=0">浏览全部阶段记录</a>'
         if self.approvals:
             body += ' · <a href="/requests">实验执行请求</a>'
@@ -1303,6 +1365,10 @@ class InstanceUI:
         if problem:
             body += problem.markup()
             body += '<p class="note">错误代码：' + html.escape(problem.code) + '</p>'
+        if self._maintenance_blocked():
+            body += ('<button type="button" disabled>分支暂不可用</button>'
+                '<p class="note">独立实例网页服务正在持有维护锁。先关闭该服务，再从工作台按完整目录加载此研究，即可预览和创建分支。</p>')
+            return (problem.status if problem else 200), self._page('从第 ' + str(step) + ' 阶段分叉', body, live=False), {}
         if preview:
             body += fork_ui.summary(preview)
         draft = dict(draft or {})
@@ -1400,69 +1466,76 @@ class InstanceUI:
                     truncated=len(steps) > len(shown))
 
     def _candidates(self, step, *, job=None, reader=None, history_only=False):
-        reader = reader or ui_view.Reader(self.root, self.view_memo)
-        job = job if job is not None else reader.node(step)['job']
-        # The exact immutable input job and every referenced saved observation
-        # identify this display projection; changing any source invalidates it.
-        steps = [row['step'] for row in (job.get('history') or {}).get('nodes', [])]
-        sources = [(number, reader.node(number), reader.observation(number)) for number in steps]
-        key = json.dumps([str(self.root), job, sources, history_only], sort_keys=True)
-        value = self.candidate_cache.get(key)
-        if value is None:
-            value = ui_view.candidate_projection(self.root, step, job=job, reader=reader, history_only=history_only)
-            while len(self.candidate_cache) >= 8:
-                self.candidate_cache.pop(next(iter(self.candidate_cache)))
-            self.candidate_cache[key] = copy.deepcopy(value)
-        return copy.deepcopy(value)
+        with self.cache_lock:
+            reader = reader or ui_view.Reader(self.root, self.view_memo)
+            job = job if job is not None else reader.node(step)['job']
+            # The exact immutable input job and every referenced saved observation
+            # identify this display projection; changing any source invalidates it.
+            steps = [row['step'] for row in (job.get('history') or {}).get('nodes', [])]
+            sources = [(number, reader.node(number), reader.observation(number)) for number in steps]
+            key = json.dumps([str(self.root), job, sources, history_only], sort_keys=True)
+            value = self.candidate_cache.get(key)
+            if value is None:
+                value = ui_view.candidate_projection(self.root, step, job=job, reader=reader, history_only=history_only)
+                while len(self.candidate_cache) >= 8:
+                    self.candidate_cache.pop(next(iter(self.candidate_cache)))
+                self.candidate_cache[key] = copy.deepcopy(value)
+            return copy.deepcopy(value)
 
     def _candidate_history(self, *, through=None, prefix=None, after=0):
-        if prefix is not None:
-            saved = self.history_pages.get(prefix)
-            if saved is None or saved['through'] != through:
-                raise ui_errors.InputError('prefix', '候选历史分页已过期。', '从候选历史入口重新打开。')
-            identity = prefix
-            missing = saved['missing']
-            projection = copy.deepcopy(saved['projection'])
-        else:
-            numbers = self._sealed_steps()
-            through = max(numbers, default=0) if through is None else through
-            reader = ui_view.Reader(self.root, self.view_memo)
-            entries, missing = [], []
-            for step in numbers:
-                if step > through:
-                    continue
-                try:
-                    reader.node(step)
-                    reader.observation(step)
-                    entries.append(dict(step=step))
-                except Exception:
-                    missing.append(step)
-            job = dict(history=dict(nodes=entries))
-            projection = self._candidates(through + 1, job=job, reader=reader, history_only=True)
-            identity = uuid.uuid4().hex
-            while len(self.history_pages) >= 8:
-                self.history_pages.pop(next(iter(self.history_pages)))
-            self.history_pages[identity] = dict(through=through, missing=missing,
-                                              projection=copy.deepcopy(projection))
-        total = len(projection['index'])
-        projection['index'] = projection['index'][after:after + 20]
-        rows = ui_view.candidate_rows(projection, clean=ui_view.cleaner(self.root), all_candidates=True)
-        body = self._navigation() + '<p>全部已封存候选历史，按首次观察顺序分页；按评估口径与机制分组。全部已观察数值，含失败记录，不代表科学推荐。</p>'
-        body += '<p>固定已封存前缀：第 ' + str(through) + ' 阶段 · <code>' + identity + '</code>；已观察 ' + str(total) + ' 个候选。</p>'
-        if missing:
-            body += '<p class="gap">部分阶段不可读，计数为下界；缺口阶段：' + ', '.join(map(str, missing)) + '。</p>'
-        for gap in projection.get('unresolved', []):
-            label = '推荐' if gap['field'] == 'recommendation' else '提名'
-            body += '<p class="gap">第 ' + str(gap['step']) + ' 阶段有 ' + str(gap['count']) + ' 条' + label + '的候选来源不可读，未计为可用关联；' + ui.link('查看该阶段原文', '/results/' + str(gap['step'])) + '。</p>'
-        body += ui.candidate_table(dict(rows, all_candidates=True))
-        if after + 20 < total:
-            body += '<p><a href="/candidates?through=' + str(through) + '&amp;prefix=' + identity + '&amp;after=' + str(after + 20) + '">下一页候选</a></p>'
-        return 200, self._page('全候选历史', body, live=False), {}
+        with self.cache_lock:
+            if prefix is not None:
+                saved = self.history_pages.get(prefix)
+                if saved is None or saved['through'] != through:
+                    raise ui_errors.InputError('prefix', '候选历史分页已过期。', '从候选历史入口重新打开。')
+                identity = prefix
+                missing = saved['missing']
+                projection = copy.deepcopy(saved['projection'])
+            else:
+                numbers = self._sealed_steps()
+                through = max(numbers, default=0) if through is None else through
+                reader = ui_view.Reader(self.root, self.view_memo)
+                entries, missing = [], []
+                for step in numbers:
+                    if step > through:
+                        continue
+                    try:
+                        reader.node(step)
+                        reader.observation(step)
+                        entries.append(dict(step=step))
+                    except Exception:
+                        missing.append(step)
+                job = dict(history=dict(nodes=entries))
+                projection = self._candidates(through + 1, job=job, reader=reader, history_only=True)
+                identity = uuid.uuid4().hex
+                while len(self.history_pages) >= 8:
+                    self.history_pages.pop(next(iter(self.history_pages)))
+                self.history_pages[identity] = dict(through=through, missing=missing,
+                                                  projection=copy.deepcopy(projection))
+            total = len(projection['index'])
+            projection['index'] = projection['index'][after:after + 20]
+            rows = ui_view.candidate_rows(projection, clean=ui_view.cleaner(self.root), all_candidates=True)
+            body = self._navigation() + '<p>全部已封存候选历史，按首次观察顺序分页；按评估口径与机制分组。全部已观察数值，含失败记录，不代表科学推荐。</p>'
+            body += '<p>固定已封存前缀：第 ' + str(through) + ' 阶段 · <code>' + identity + '</code>；已观察 ' + str(total) + ' 个候选。</p>'
+            if missing:
+                body += '<p class="gap">部分阶段不可读，计数为下界；缺口阶段：' + ', '.join(map(str, missing)) + '。</p>'
+            for gap in projection.get('unresolved', []):
+                label = '推荐' if gap['field'] == 'recommendation' else '提名'
+                body += '<p class="gap">第 ' + str(gap['step']) + ' 阶段有 ' + str(gap['count']) + ' 条' + label + '的候选来源不可读，未计为可用关联；' + ui.link('查看该阶段原文', '/results/' + str(gap['step'])) + '。</p>'
+            body += ui.candidate_table(dict(rows, all_candidates=True))
+            if after + 20 < total:
+                body += '<p><a href="/candidates?through=' + str(through) + '&amp;prefix=' + identity + '&amp;after=' + str(after + 20) + '">下一页候选</a></p>'
+            return 200, self._page('全候选历史', body, live=False), {}
 
     def _delete_page(self, token, *, form=None, problem=None):
         self._admin(token)
         if self.workspace:
             raise PermissionError('Open an explicit instance to delete')
+        if self._maintenance_blocked():
+            body = self._navigation() + (problem.markup() if problem else '')
+            body += ('<button type="button" disabled>删除暂不可用</button>'
+                '<p class="note">独立实例网页服务正在持有维护锁。先关闭该服务，再从工作台按完整目录加载此研究，核对实例身份后删除。</p>')
+            return (problem.status if problem else 200), self._page('删除实例', body, live=False), {}
         if form is None:
             if token in self.delete_requests:
                 form = self.delete_requests[token]
@@ -1566,8 +1639,7 @@ class InstanceUI:
             if len(parts) != 4 or not parts[2].isascii() or not parts[2].isdecimal():
                 raise ValueError('Exact explicit instance route required')
             index = int(parts[2])
-            child = self.deleted_children.get(index) if parts[3] in {'delete', 'control/delete'} else None
-            child = child or self._child(index)
+            child = self._routed_child(index, parts[3], cookie)
             return self._mounted(child.get('/' + parts[3] + ('?' + parsed.query if parsed.query else ''), host=host, cookie=cookie), int(parts[2]))
         assets = {
             '/assets/style.css': (render.CSS, 'text/css; charset=utf-8'),
@@ -1791,8 +1863,7 @@ class InstanceUI:
             if len(parts) != 4 or not parts[2].isascii() or not parts[2].isdecimal():
                 raise ValueError('Exact explicit instance route required')
             index = int(parts[2])
-            child = self.deleted_children.get(index) if parts[3] in {'delete', 'control/delete'} else None
-            child = child or self._child(index)
+            child = self._routed_child(index, parts[3], cookie)
             return self._mounted(child.post('/' + parts[3], host=host, origin=origin, cookie=cookie,
                 content_type=content_type, body=body), int(parts[2]))
         if parsed.path.startswith('/translation/'):
@@ -1832,10 +1903,12 @@ class InstanceUI:
             if not hmac.compare_digest(form['csrf'], self._csrf(browser_token, action, form['nonce'])):
                 raise PermissionError('Instance control CSRF or nonce mismatch')
             try:
+                self._require_maintenance_handoff(action)
                 # Export is read-only and leaves its source form visible. The
                 # next mutating submit still atomically consumes this nonce.
                 self._consume_form(browser_token, action, form,
-                    consume=not (action == 'configure' and form.get('mode') == 'export'))
+                    consume=not (action == 'configure' and form.get('mode') == 'export'),
+                    replay=action in {'start', 'resume', 'continue', 'budget', 'fork-create', 'delete'})
                 return self._control_post(browser_token, action, form)
             except Exception as error:
                 return self._control_error(browser_token, action, form, error)
@@ -1867,6 +1940,7 @@ class InstanceUI:
 
 
     def _control_post(self, browser_token, action, form):
+        self._require_maintenance_handoff(action)
         def integer(field, *, optional=False):
             try:
                 return int(form[field]) if form[field] or not optional else None
@@ -1883,15 +1957,22 @@ class InstanceUI:
             parent = self.workspace_host
             if parent is None:
                 self.live_stop.set()
-            self.live_cache.value = self.summary_cache.value = None
-            self.view_memo.clear(); self.candidate_cache.clear(); self.status_memo.clear()
+            self._clear_display_caches()
+            for cache in (self.live_cache, self.summary_cache):
+                with cache.lock:
+                    cache.value = None
+                    cache.checked = 0.0
             if parent is not None:
                 # Keep positional mount identities stable for other open tabs.
                 for index, child in tuple(parent.children.items()):
                     if child is self:
                         parent.deleted_children[index] = parent.children.pop(index)
-                parent.deleted_roots.add(self.root)
-                parent.summary_cache.value = parent.live_cache.value = None
+                if not self.root.exists():
+                    parent.deleted_roots.add(self.root)
+                for cache in (parent.summary_cache, parent.live_cache):
+                    with cache.lock:
+                        cache.value = None
+                        cache.checked = 0.0
             return 303, b'', {'Location': '/instances'}
         if action in {'fork-preview', 'fork-create'}:
             from . import fork_service
@@ -1913,11 +1994,14 @@ class InstanceUI:
                 + html.escape(json.dumps({key: receipt[key] for key in ('status', 'operation_id', 'child_identity') if key in receipt}, ensure_ascii=False)) + '</pre>', live=False), {}
         elif action == 'continue':
             self._continue(ack_correction=form['ack_correction'] or None,
-                           authorization_note=form['authorization_note'] or None)
+                           authorization_note=form['authorization_note'] or None,
+                           operation_id=self._operation_id(browser_token, action, form))
         elif action == 'start':
-            self.control_result = control.start_background(self.root)
+            self.control_result = control.start_background(self.root,
+                operation_id=self._operation_id(browser_token, action, form))
         elif action == 'resume':
-            self.control_result = control.start_background(self.root, resume_step=integer('step'))
+            self.control_result = control.start_background(self.root, resume_step=integer('step'),
+                operation_id=self._operation_id(browser_token, action, form))
         elif action == 'pause':
             self.control_result = control.request_pause(self.root)
         elif action == 'budget':
@@ -1931,6 +2015,7 @@ class InstanceUI:
                     raise ValueError(message) from None
             self.control_result = control.request_budget_amendment(self.root,
                 **values,
+                operation_id=self._operation_id(browser_token, action, form),
                 authorization_note=form['authorization_note'],
                 authorization_statement=form['authorization_statement'] if form.get('authorization_statement', '').strip() else (
                     form['authorization_note'] if values['max_steps'] is not None else None))
@@ -1955,6 +2040,7 @@ class InstanceUI:
             selected = Path(form['root']).expanduser().resolve()
             selected.stat()  # A missing chosen instance is a 404, not a type error.
             display.settings(selected)  # Explicit existing root, never an inferred directory choice.
+            self.deleted_roots.discard(selected)
             if selected not in self.instance_roots:
                 self.instance_roots.append(selected)
             index = self.instance_roots.index(selected)

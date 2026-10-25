@@ -835,6 +835,36 @@ rejection or an invitation to retry. Bounds and failure evidence survive recover
 Read views and UI render the same sealed scientific bytes without rewriting them.
 CLI result/materials/artifact and the webpage use the same exact-original API; downloads refuse existing destinations. Webpage configuration, explicit instance choices, queued budget changes and guidance use public interfaces and never infer an instance by discovery or recency.
 
+### Instance UI control and display
+
+Each submitted start, resume, continue or budget form retains one operation ID and
+its exact request. A retry reconciles the saved pending or terminal receipt without
+dispatching again; a newly opened form represents a new intent. Loaded instances
+are bound to immutable `goal_id`, so a replacement at the same path gets a fresh
+UI session. A standalone instance UI holding `ui.lock` disables fork and delete;
+close that host and load the exact directory from a workspace to use those controls.
+Direct requests retain the same refusal and never bypass the lock.
+
+Display caches serialize read, invalidation and eviction. Compact all-history facts
+survive the 256-large-node cache limit, with saved-source metadata checks including
+referenced recommendation sources; history aggregation still grows with recorded
+history. Candidate pages retain a fixed sealed prefix and report an expired view
+after its cache is cleared or evicted. These are display projections, never scientific
+admission evidence. Displayed time uses the control budget's interval rules, including
+supported cross-boot intervals; unreadable intervals remain unknown. Public progress
+uses bounded catchup, explicit omissions and links to newly sealed conclusions.
+
+Field translation is a separate application service, with explicit model start
+and its own cache. Translation sets the native shell and image tool switches to
+false before launch and inherits only named runtime, authentication, proxy and
+certificate environment keys. Authentication-home references remain available
+without copying credential files.
+Tool-event rejection is an additional check, not proof that every native tool is
+absent or that same-user access is isolated. Unknown UI errors use fixed public
+messages and bounded private diagnostics; operation request IDs are distinct from
+saved diagnostic references. See the [CLI guide](ROOTLESS_CLI.zh-CN.md) for the
+supported controls and translation limits.
+
 ## Support and qualification
 
 Managed local experiments, candidate delivery, UI, declared provenance, execution gates

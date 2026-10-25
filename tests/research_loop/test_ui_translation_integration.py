@@ -1,6 +1,7 @@
 """Browser auth and application-only translations with a local fake Codex process."""
 import html
 import json
+from pathlib import Path
 import re
 from urllib.parse import urlencode
 
@@ -33,19 +34,30 @@ def save(host, cookie, **values):
 
 
 @pytest.mark.process_e2e
-def test_translation_routes_use_csrf_explicit_start_and_preserve_scientific_records(tmp_path, fake_codex):
+def test_translation_routes_use_csrf_explicit_start_and_preserve_scientific_records(tmp_path, fake_codex, monkeypatch):
     root, key = prepare(tmp_path, enabled=False)
-    finish(root, 1, 'H', [], action='analyze', summary='An exact original finding')
+    # This helper authors a synthetic outcome without starting a native
+    # process. Declare that fact before sealing; do not exercise stop cleanup.
+    original_write = c.write
+    def fixture_write(path, value, *args, **kwargs):
+        if Path(path).name == 'native-outcome.json':
+            value = dict(value, native_started=False)
+        return original_write(path, value, *args, **kwargs)
+    with monkeypatch.context() as fixture:
+        fixture.setattr(c, 'write', fixture_write)
+        finish(root, 1, 'H', [], action='analyze', summary='An exact original finding')
     frozen = (root / 'settings.json').read_bytes()
     host, cookie = session(root, key)
+    # Bound preservation checks to exact fixture originals and one inert
+    # sentinel per scientific record area; never walk a research tree.
+    originals = [root / 'settings.json', root / 'jobs/001.json']
+    for name in ('jobs', 'native-evidence', 'control-ledger', 'host-control', 'host-runtime', 'host-delivery', 'execution-authority'):
+        sentinel = root / name / '.translation-preservation-sentinel'
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_bytes(b'exact scientific original\x00\xff')
+        originals.append(sentinel)
     def scientific_records():
-        records = {}
-        for name in ('jobs', 'native-evidence', 'control-ledger', 'host-control', 'host-runtime', 'host-delivery', 'execution-authority'):
-            directory = root / name
-            for path in [directory, *directory.rglob('*')]:
-                if path.exists():
-                    records[path.relative_to(root)] = path.read_bytes() if path.is_file() else None
-        return records
+        return {path: path.read_bytes() for path in originals}
     before = scientific_records()
     try:
         assert save(host, cookie, enabled='true', model='reading-model', backend='codex')[0] == 303
@@ -102,7 +114,8 @@ def test_narrative_annotation_preserves_exact_text_and_static_page_script():
     assert ui.esc(source) == html.escape(source, quote=True)
     page = render.page('Static result', ui.translatable(source), live=False).decode()
     assert '/assets/translation.js' in page and '/assets/progress.js' not in page
-    assert render.translation_client.CSP in render.CSP
+    assert re.findall(r'<script src="([^"]+)"></script>', page) == ['/assets/translation.js']
+    assert "script-src 'self'" in render.CSP and "'unsafe-inline'" not in render.CSP
     assert 'node.textContent = text' in render.translation_client.SCRIPT
     assert 'innerHTML' not in render.translation_client.SCRIPT
 

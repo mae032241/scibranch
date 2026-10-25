@@ -34,13 +34,19 @@ FIELDS = [
     Field('research.public_root', '公开材料目录', required=True),
     Field('research.user_updates', '已有全局补充原件', 'strings'),
     Field('research.source_restrictions', '来源限制声明', 'array'),
+    Field('project.base_root', '已有工程的准确 Git 根目录'),
+    Field('project.editable', '允许修改的工程相对目录', 'strings'),
+    Field('project.scratch', '临时工作相对目录', 'strings'),
+    Field('project.outputs', '工程输出相对目录', 'strings'),
+    Field('skills.sets', '可选择的研究技能集合', 'table'),
     Field('agent.backend', 'Agent 后端', choices=('codex', 'protocol'), placeholder='codex'),
     Field('agent.launcher', '启动命令参数（逐项）', 'strings'),
     Field('agent.model', '全局模型', placeholder=research_config.DEFAULT_MODEL),
     Field('agent.reasoning_effort', '全局推理力度', placeholder=research_config.DEFAULT_REASONING_EFFORT),
     Field('agent.service_tier', '全局服务档位', placeholder=research_config.DEFAULT_SERVICE_TIER),
     *[Field(f'agent.roles.{role}.{key}', f'{role} 角色{label}')
-      for role in 'HWAE' for key, label in [('model', '模型'), ('reasoning_effort', '推理力度'), ('service_tier', '服务档位')]],
+      for role in 'HWAE' for key, label in [('model', '模型'), ('reasoning_effort', '推理力度'), ('service_tier', '服务档位'), ('worker', '命名研究者'), ('skill_set', '技能集合')]],
+    Field('agent.workers', '命名研究者配置', 'table'),
     Field('agent.native.sandbox_workspace_write.writable_roots', '原生额外可写目录', 'strings'),
     *[Field(f'agent.native.sandbox_workspace_write.{key}', label, 'boolean') for key, label in [
         ('network_access', '原生 sandbox 联网'), ('exclude_tmpdir_env_var', '排除 TMPDIR'), ('exclude_slash_tmp', '排除 /tmp')]],
@@ -341,9 +347,9 @@ def parse_edit(fields, *, base, configuration):
         failure = error
     else:
         failure = None
-    immutable = ('research', 'ui', 'version')
+    immutable = ('research', 'ui', 'version', 'project', 'skills')
     if any(key in result['document'] for key in immutable):
-        raise ValueError('实例任务、材料原件和网页应用设置不能在研究配置中修改')
+        raise ValueError('实例任务、材料原件、工程、技能集合和网页应用设置不能在研究配置中修改')
     for key in immutable:
         if key in configuration:
             result['document'][key] = copy.deepcopy(configuration[key])
@@ -372,7 +378,7 @@ def render(draft, *, edit=False):
     extras = copy.deepcopy(document)
     _delete(extras, 'research.objective_text')
     if edit:
-        for key in ('research', 'ui', 'version'):
+        for key in ('research', 'ui', 'version', 'project', 'skills'):
             extras.pop(key, None)
     counter = [0]
     def tree(value, parent):
@@ -436,6 +442,12 @@ def render(draft, *, edit=False):
         'version': '当前声明格式版本为 1；新建时可留空。',
         'research.user_updates': '服务器上的原文文件路径，每项一个文件；用于保留你对全局任务的补充。留空且不声明列表时省略。',
         'research.source_restrictions': '声明材料原件的使用限制、定位和摘要。此项需要结构配置；无额外限制时保持未声明。',
+        'project.base_root': '可选：已有普通 Git 工作树的准确绝对根目录，不支持 ~、相对路径或符号链接。创建时冻结 HEAD 身份；已有实例继续保留原工程。',
+        'project.editable': '声明工程时必填非空列表；每项是相对工程根的目录，例如 src。不得含 .、..、.git，不得与其他声明目录交叠。',
+        'project.scratch': '可选的临时工作目录，每项为规范相对目录；不与可修改目录或输出目录交叠。',
+        'project.outputs': '可选的输出目录，每项为规范相对目录；保留原调用的输出采集与封存条件。',
+        'skills.sets': '按集合名称填写对象，每个集合包含 items 文本数组。只有角色或命名研究者用 skill_set 明确选择该集合时才启用。插件提供的可选技能不会自动启用。',
+        'agent.workers': '命名研究者的模型和可选 skill_set 声明；技能集合名称必须来自本次研究已声明的集合。',
         'agent.backend': '留空使用 Codex。Protocol 用于已接入的自定义后端，需要明确填写模型和启动命令；不自动补推理力度或服务档位。',
         'agent.launcher': '留空由 Codex 使用 codex。自定义时第一项是可执行程序，之后每项是一个独立参数；不按空格拆分。',
         'agent.native.sandbox_workspace_write.writable_roots': '仅 Codex 的可写工作目录模式使用。每项是允许额外写入的服务器目录，不会自动开放其他路径。',
@@ -483,6 +495,8 @@ def render(draft, *, edit=False):
         'ui.approval_secret_file': '可选的宿主管理密钥文件路径。这里只填写路径，不读取或复制密钥内容。',
     })
     for role in 'HWAE':
+        hints[f'agent.roles.{role}.worker'] = '可选：填写 agent.workers 中准确的命名研究者。角色显式模型字段和技能集合覆盖该研究者的对应配置。'
+        hints[f'agent.roles.{role}.skill_set'] = '可选：填写已声明或由明确选中的插件提供的准确集合名称；留空沿用明确引用的命名研究者配置，未引用时不启用。'
         for key in ('model', 'reasoning_effort', 'service_tier'):
             hints[f'agent.roles.{role}.{key}'] = '留空沿用上方全局'+dict(model='模型', reasoning_effort='推理力度', service_tier='服务档位')[key]+'。支持的值取决于该角色选择的模型和后端。'
         for key, unit in [('max_observed_tokens', 'tokens'), ('max_seconds', '秒')]:
@@ -504,7 +518,7 @@ def render(draft, *, edit=False):
         if field.path.startswith('budget.node_targets.'):
             label = '单次工作 tokens 目标' if field.path.endswith('max_observed_tokens') else '单次工作时间目标（秒）'
         if field.path.startswith('agent.roles.'):
-            label = dict(model='模型', reasoning_effort='推理力度', service_tier='服务档位')[field.path.split('.')[-1]]
+            label = dict(model='模型', reasoning_effort='推理力度', service_tier='服务档位', worker=field.label, skill_set=field.label)[field.path.split('.')[-1]]
         if matrix:
             label = escape(field.label)
         label += ' <span class="required-mark">必填</span>' if field.required else ''
@@ -611,6 +625,8 @@ def render(draft, *, edit=False):
         '<p class="note">日常创建只需上方任务、模型和总预算。下面可选配置不会自动增加权限或预算。已导入的值在折叠后仍完整保留。</p>'))
     categories = [
         ('补充任务与材料约束','research','已有全局补充原文、材料来源限制。'),
+        ('已有工程','project','可选：在准确 Git 工程路径使用声明目录；创建时冻结工程身份，权限与执行条件仍需满足。'),
+        ('研究技能集合','skills','可选：声明具名技能集合，再由角色或命名研究者明确选择。插件声明不会自动启用技能。'),
         ('后端接入与原生设置','agent','日常使用 Codex 可保持留空。更换后端、启动程序或原生环境时才需设置。'),
         ('探索节奏与用量分配','budget','设置实验探索切片、角色份额、补正阈值与输出体积限制；这些设置不增加总预算。'),
         ('实验执行插件与资源','executor','仅在本次研究需要实验执行时接入。配置本身不会授予实验执行许可。'),
@@ -620,7 +636,7 @@ def render(draft, *, edit=False):
         ('声明格式','version','导入配置的格式版本。'),
     ]
     for title, prefix, explanation in categories:
-        if edit and prefix in {'research', 'ui', 'version'}:
+        if edit and prefix in {'research', 'ui', 'version', 'project', 'skills'}:
             continue
         paths = [field.path for field in FIELDS if field.path not in used and (field.path == prefix or field.path.startswith(prefix+'.'))]
         regular = [path for path in paths if by_path[path].kind not in ('table','array') or path in GROUP_FIELDS]

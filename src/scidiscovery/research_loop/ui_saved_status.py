@@ -3,6 +3,7 @@ import copy
 import math
 
 from . import budget, contracts as c, instance_display as display, native_usage, runtime
+from .ui_view import memo_lock
 
 
 def _read(path, default=None):
@@ -13,16 +14,29 @@ def _saved_read(path, memo):
     """UI-only immutable record memo; never used by control admission."""
     if memo is None:
         return _read(path)
+    with memo_lock(memo):
+        return _memo_read(path, memo)
+
+
+def _memo_read(path, memo):
+    key = str(path)
     try:
         info = path.stat()
     except FileNotFoundError:
+        memo.pop(key, None)
         return None
-    key = str(path)
     identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-    if key in memo and memo[key][0] == identity:
-        return copy.deepcopy(memo[key][1])
+    saved = memo.get(key)
+    if saved is not None and saved[0] == identity:
+        return copy.deepcopy(saved[1])
     memo.pop(key, None)
     value = c.read(path)
+    try:
+        after = path.stat()
+    except FileNotFoundError:
+        return value
+    if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+        return value
     while len(memo) >= 1024:
         memo.pop(next(iter(memo)))
     memo[key] = (identity, copy.deepcopy(value))
@@ -44,12 +58,16 @@ def visible_steps(root):
 def operations(root, *, memo=None):
     rows = []
     for path in (root / 'host-control/operations').glob('*.json'):
-        cached = (memo or {}).get(str(path))
-        terminal = cached is not None and cached[1].get('status') in {'applied', 'completed', 'failed'}
-        row = _saved_read(path, memo if terminal else None)
-        if memo is not None and row.get('status') in {'applied', 'completed', 'failed'} and not terminal:
-            row = _saved_read(path, memo)
-        rows.append(row)
+        with memo_lock(memo):
+            cached = memo.get(str(path)) if memo is not None else None
+            terminal = cached is not None and cached[1].get('status') in {'applied', 'completed', 'failed'}
+            row = _saved_read(path, memo if terminal else None)
+            if row is None:
+                continue
+            if memo is not None and row.get('status') in {'applied', 'completed', 'failed'} and not terminal:
+                row = _saved_read(path, memo)
+            if row is not None:
+                rows.append(row)
     return sorted(rows, key=lambda row: row.get('sequence', 0))[-20:]
 
 
@@ -157,22 +175,26 @@ def _budget(root, settings, events):
     at = start
     durations = dict(advance=0., waiting=0., paused=0., unclassified=0.)
     def duration(before, after):
-        key = 'at_boottime'
-        if basis == 'elapsed' and key not in before:
-            key = 'at_unix'
-        elif not before.get('boot_id') or before.get('boot_id') != after.get('boot_id'):
-            return None
-        values = (before.get(key), after.get(key))
-        if any(type(value) not in (int, float) or not math.isfinite(value) for value in values):
-            return None
-        elapsed = values[1] - values[0]
-        if basis == 'elapsed' and key == 'at_boottime':
-            wall = (before.get('at_unix'), after.get('at_unix'))
-            if any(type(value) not in (int, float) or not math.isfinite(value) for value in wall):
+        # Saved display records are not admission-validated. Check readability
+        # here, but let the control clock own interval and cross-boot rules.
+        keys = ['at_unix']
+        if 'at_boottime' in before:
+            keys.append('at_boottime')
+            if any(not isinstance(stamp.get('boot_id'), str) or not stamp['boot_id']
+                    for stamp in (before, after)):
                 return None
-            if wall[1] - wall[0] < 0 or wall[1] - wall[0] + .02 < elapsed:
+        elif basis != 'elapsed':
+            return None
+        for key in keys:
+            values = (before.get(key), after.get(key))
+            if any(type(value) not in (int, float) or not math.isfinite(value)
+                    or key == 'at_boottime' and value < 0 for value in values):
                 return None
-        return elapsed if elapsed >= 0 else None
+        try:
+            value = budget._duration(before, after, legacy_elapsed=basis == 'elapsed')
+            return value if math.isfinite(value) and value >= 0 else None
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
     def add(phase, before, after):
         value = duration(before, after)
         durations[phase] = durations[phase] + value if durations[phase] is not None and value is not None else None
@@ -203,7 +225,7 @@ def _budget(root, settings, events):
     else:
         elapsed = duration(start, now)
         if basis == 'elapsed' and elapsed is not None:
-            elapsed = now['at_unix'] - start['at_unix']
+            elapsed = duration(dict(at_unix=start['at_unix']), now)
     if basis == 'active':
         anchor = start.get('at_boottime') if start is not None else None
         anchored = start is None or (type(anchor) in (int, float) and math.isfinite(anchor)

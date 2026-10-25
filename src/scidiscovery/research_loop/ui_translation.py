@@ -33,6 +33,12 @@ _MAX_OUTPUT = 1024 * 1024
 _FAILED = "Translation did not complete. Request a retry explicitly."
 _MAX_STDERR = 8192
 _MAX_NATIVE_ERROR = 4096
+_ENVIRONMENT_KEYS = (
+    "PATH", "HOME", "CODEX_HOME", "LANG", "LC_ALL",
+    "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+)
 _FAILURES = {
     "model_rejected": "翻译模型不可用或名称不受支持。请在阅读与翻译中核对模型名称和账号权限，再手动重试。",
     "authentication": "翻译服务认证失败。请检查本机启动器的登录状态或凭据，再手动重试。",
@@ -420,6 +426,12 @@ class TranslationService:
             schema_path, pending = work / "response-schema.json", work / "response.json"
             schema_path.write_text(json.dumps(schema), encoding="utf-8")
             args = adapter.launch(profile, work, pending, schema_path, _INSTRUCTION)
+            # Translation has a separate, narrower startup configuration from
+            # scientific native roles. These native switches disable command
+            # execution and image viewing before the request is sent. They do
+            # not claim that every possible native tool is absent.
+            args[-1:-1] = ['-c', 'features.shell_tool=false', '-c', 'tools.view_image=false',
+                '-c', 'shell_environment_policy.inherit="none"']
             request = adapter.request(prompt, profile=profile, work=work, schema=schema_path)
             result, usage = self._invoke(adapter, args, request, work, pending, config["timeout_seconds"])
         if not isinstance(result, dict) or set(result) != {"translations"} or not isinstance(result["translations"], list):
@@ -476,7 +488,8 @@ class TranslationService:
                     raise _TranslationError("cancelled")
                 try:
                     process = subprocess.Popen(args, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE, start_new_session=True)
+                        stderr=subprocess.PIPE, start_new_session=True,
+                        env={key: os.environ[key] for key in _ENVIRONMENT_KEYS if key in os.environ})
                 except OSError as exc:
                     raise _TranslationError("launcher_unavailable", details=str(exc)) from exc
                 self._process = process

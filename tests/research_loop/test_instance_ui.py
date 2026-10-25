@@ -255,15 +255,16 @@ def test_continue_delegates_to_detached_owner_and_pause_remains_immediate(tmp_pa
 
     monkeypatch.setattr(control, 'start_background', detached)
     control.request_pause(root)
-    assert post(ui, cookie, 'continue', form(ui, cookie, 'continue'))[0] == 303
-    assert owners == [(root, dict(continue_run=True, ack_correction=None, authorization_note=None))]
+    continuing = form(ui, cookie, 'continue')
+    assert post(ui, cookie, 'continue', continuing)[0] == 303
+    assert owners == [(root, dict(continue_run=True, ack_correction=None, authorization_note=None,
+        operation_id=ui._operation_id(ui._browser(cookie), 'continue', continuing)))]
     # The UI does not own a controller thread or clear its pause marker; the
     # detached shared control operation owns the actual transition.
     assert not hasattr(ui, 'control_thread')
     pause = form(ui, cookie, 'pause')
     assert post(ui, cookie, 'pause', pause)[0] == 303
-    with pytest.raises(PermissionError, match='nonce'):
-        post(ui, cookie, 'pause', pause)
+    assert post(ui, cookie, 'pause', pause)[0] == 422
     assert (root / 'pause.request').exists()
 
 
@@ -296,8 +297,8 @@ def test_budget_form_queues_exact_limits_and_original_adjustment_text(tmp_path, 
         assert c.read(root / 'host-control/operations' / (operations[0]['operation_id'] + '.json'))['amendment'] == amendment
     assert (root / 'settings.json').read_bytes() == settings
     assert not (root / 'execution-authority').exists()
-    with pytest.raises(PermissionError, match='nonce'):
-        post(ui, cookie, 'budget', fields)
+    assert post(ui, cookie, 'budget', fields)[0] == 303
+    assert len(control.operations(root)) == 1
     ui.translation.close()
 
 
@@ -961,6 +962,16 @@ network = false
         (record / 'native.jsonl').write_text(json.dumps(dict(type='item.completed', item=dict(type='agent_message', text='Earlier browser fixture'))) + '\n')
         return dict(operation_id='a' * 32, kind='controller', status='accepted')
 
+    original_write = c.write
+    def fixture_write(path, value, *args, **options):
+        # finish() synthesizes these records without starting a native task.
+        # State that fact so physical cleanup retains its production checks.
+        selected = Path(path)
+        if selected.name == 'native-outcome.json' and selected.is_relative_to(root):
+            value = dict(value, native_started=False)
+        return original_write(path, value, *args, **options)
+    monkeypatch.setattr(c, 'write', fixture_write)
+
     # Browser-only fixture host updates: the signal files never reach a model
     # or solver, and scientific production instances are not used.
     original_snapshot = InstanceUI._snapshot
@@ -1166,7 +1177,7 @@ const returned = await evaluate(`JSON.stringify(Array.from(new FormData(document
 if (imported !== returned || !returned.includes('imported-worker-model') || !returned.includes('retained')) throw new Error('Imported nested controls changed across steps');
 // Opening more configuration preserves closed categories; imported plugin rows remain compact when expanded.
 await evaluate(`document.querySelector('[data-setup-go="2"]').click();document.querySelector('.advanced-settings').open=true;true`);
-await waitFor(`(()=>{const categories=Array.from(document.querySelectorAll('.advanced-settings details.advanced-category[data-config-group]'));return categories.length===8 && categories.every(group=>!group.open && group.querySelector('summary').checkVisibility({contentVisibilityAuto:true})) && !document.querySelector('[name="cfg.agent.backend"]').checkVisibility({contentVisibilityAuto:true})})()`);
+await waitFor(`(()=>{const categories=Array.from(document.querySelectorAll('.advanced-settings details.advanced-category[data-config-group]'));const groups=new Map(categories.map(group=>[group.dataset.configGroup,group]));const required=['research','project','skills','agent','budget','executor','delivery','policies','ui','version'];return required.every(name=>groups.has(name)) && groups.size===categories.length && categories.every(group=>!group.open && group.querySelector('summary').checkVisibility({contentVisibilityAuto:true})) && !document.querySelector('[name="cfg.agent.backend"]').checkVisibility({contentVisibilityAuto:true})})()`);
 await evaluate(`document.querySelectorAll('.advanced-settings details.structured-setting,.advanced-settings details.expert-settings,.advanced-settings details.advanced-category').forEach(group=>group.open=true);true`);
 await waitFor(`document.querySelector('[data-parent="@extra"] .config-node').checkVisibility({contentVisibilityAuto:true})`);
 await screenshot('config-advanced-imported-before-geometry');
@@ -1428,7 +1439,7 @@ if (await evaluate(`document.querySelector('#research-config-form') !== null || 
 if (!(await evaluate(`document.querySelector('#budget-settings [name="cfg.budget.max_tokens"]') && document.querySelectorAll('[name="cfg.budget.max_tokens"]').length===1 && !document.querySelector('form[action$="/control/budget"]')`))) throw new Error('Research configuration does not provide one canonical budget editor');
 if (!(await evaluate(`(()=>{const matrix=document.querySelector('[data-config-group="agent.roles"] .role-settings-matrix');return matrix && matrix.querySelectorAll('tbody tr').length===4 && !document.querySelector('.role-settings-card')})()`))) throw new Error('Role controls are not consolidated into one matrix');
 await evaluate(`document.querySelector('.advanced-settings').open=true;true`);
-await waitFor(`(()=>{const categories=Array.from(document.querySelectorAll('.advanced-settings details.advanced-category[data-config-group]'));return categories.length===5 && categories.every(group=>!group.open && group.querySelector('summary').checkVisibility({contentVisibilityAuto:true})) && !document.querySelector('[name="cfg.budget.breadth.initial_calls"]').checkVisibility({contentVisibilityAuto:true})})()`);
+await waitFor(`(()=>{const categories=Array.from(document.querySelectorAll('.advanced-settings details.advanced-category[data-config-group]'));const groups=new Map(categories.map(group=>[group.dataset.configGroup,group]));const required=['agent','budget','executor','delivery','policies'],frozen=['research','project','skills','ui','version'];return required.every(name=>groups.has(name)) && frozen.every(name=>!groups.has(name)) && groups.size===categories.length && categories.every(group=>!group.open && group.querySelector('summary').checkVisibility({contentVisibilityAuto:true})) && !document.querySelector('[name="cfg.budget.breadth.initial_calls"]').checkVisibility({contentVisibilityAuto:true})})()`);
 await evaluate(`['agent','budget','executor','policies'].forEach(prefix=>document.querySelector('.advanced-category[data-config-group="'+prefix+'"]').open=true);true`);
 await waitFor(`(()=>{const advanced=document.querySelector('.advanced-settings');const paths=['agent.backend','agent.native.features.fast_mode','budget.breadth.initial_calls','budget.correction.pause_after','budget.max_output_item_bytes','budget.role_shares.min_w_share','executor.mode','executor.config.executor','policies.formal_review','policies.resume.max_attempts','policies.resume.output_only'];return paths.every(path=>advanced.querySelector('[name="cfg.'+path+'"]').checkVisibility({contentVisibilityAuto:true}))})()`);
 await waitFor(`(()=>{const boxes=['max_w_seconds','max_w_observed_tokens','max_requested_repairs','initial_calls'].map(key=>document.querySelector('[name="cfg.budget.breadth.'+key+'"]').getBoundingClientRect());return boxes.every((box,index)=>box.width>100 && Math.abs(box.top-boxes[0].top)<2 && (!index || box.left>boxes[index-1].right))})()`);
@@ -1508,7 +1519,9 @@ console.log(rendered);
         assert checked.returncode == 0, checked.stderr
         assert '已连接' in checked.stdout
         assert 'Public browser fixture' in checked.stdout
-        assert owners == [(root, {})] and c.settings(root)['max_tokens'] == 1234
+        assert len(owners) == 1 and owners[0][0] == root
+        assert set(owners[0][1]) == {'operation_id'} and re.fullmatch('[0-9a-f]{32}', owners[0][1]['operation_id'])
+        assert c.settings(root)['max_tokens'] == 1234
     finally:
         if browser is not None:
             import signal
