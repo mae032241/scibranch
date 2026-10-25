@@ -33,6 +33,8 @@ def _source_path(source, ref):
     owner = originals.source_for_ref(source, ref)
     path = Path(ref['path'])
     if path.is_absolute():
+        if not path.is_relative_to(owner.original_root):
+            return originals.resolve_ref(owner,ref)
         path = path.relative_to(owner.original_root)
     return originals.resolve_ref(owner, dict(ref, path=path.as_posix()))
 
@@ -190,7 +192,7 @@ def _inputs(root, job):
         document = _original_inputs(source, original)
         for edge in document['edges']:
             if edge['kind'] == 'producer':
-                producer = originals.dependency(source, edge['step'], seal_ref=control_reference(source.original_root, edge['seal'], source=source))
+                producer = originals.dependency(source, edge['step'], seal_ref=edge['seal'])
                 edge['seal'] = dict(edge['seal'], origin_identity=producer.origin_identity)
         return document
     sources = _sources(root)
@@ -361,7 +363,7 @@ def _original_inputs(source, job, *, _active=None):
         expected = _original_inputs(original, original_job, _active={*active, identity})
         for edge in expected['edges']:
             if edge['kind'] == 'producer':
-                producer = originals.dependency(original, edge['step'], seal_ref=control_reference(source.original_root, edge['seal'], source=source))
+                producer = originals.dependency(original, edge['step'], seal_ref=edge['seal'])
                 edge['seal'] = dict(edge['seal'], origin_identity=producer.origin_identity)
         if document != expected:
             raise IntegrityError('Original fork provenance changed its exact selected source')
@@ -399,7 +401,7 @@ def _original_inputs(source, job, *, _active=None):
     for edge in producers:
         if not 0 < edge['step'] < job['step']:
             raise IntegrityError('Original producer is outside its task input boundary')
-        parent = originals.dependency(source, edge['step'], seal_ref=control_reference(source.original_root, edge['seal'], source=source))
+        parent = originals.dependency(source, edge['step'], seal_ref=edge['seal'])
         seal = _source_read(parent, edge['seal'])
         job_ref = originals.original_ref(parent, f'jobs/{edge["step"]:03d}.json')
         if seal['job_ref'] != control_reference(parent.original_root, job_ref, source=parent):
@@ -464,7 +466,7 @@ def _original_input_status(source,*,active=None,controls_only=False):
                         raise IntegrityError('Original public snapshot differs from its declaration')
                 states.append(declaration['restriction'])
         elif edge['kind'] == 'producer':
-            parent = originals.dependency(source, edge['step'], seal_ref=control_reference(source.original_root, edge['seal'], source=source))
+            parent = originals.dependency(source, edge['step'], seal_ref=edge['seal'])
             states.append(original_status(parent,active={*active,key},controls_only=controls_only)['restriction'])
         else:
             states.append('unknown')

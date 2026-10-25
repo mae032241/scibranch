@@ -228,18 +228,19 @@ def _selected_files(root, selected):
     from . import fork_sources, originals
     manifest = fork_sources.validate_manifest(root)
     source = selected['source']
-    prefix = f'project/nodes/{source.step:03d}/'
+    prefix = f'project/nodes/{source.step:03d}/code/'
     for entry in manifest['entries']:
         if (entry['origin_identity'] == source.origin_identity
-                and entry['visibility'] == 'scientific_input' and entry['path'].startswith(prefix)):
-            relative = originals.relative(entry['path'][len(prefix):])
-            if not relative.startswith('inputs/'):
-                raise ValueError('Fork scientific input is outside its exact input namespace')
-            yield relative, originals.resolve_ref(source, entry), entry['size_bytes']
+                and entry['visibility'] == 'private_snapshot'):
+            path = originals.relative(entry['path'])
+            # Native handoff drafts stay inert in the existing private entry.
+            # A child starts its own accepted native chain in a clean namespace.
+            if path.startswith(prefix):
+                yield path, originals.resolve_ref(source, entry), entry
 
 
 def build_selected_job(root, step):
-    """Prepare a new child task from the selected task's frozen input bytes."""
+    """Prepare the frozen task and restore its inert, writable current drafts."""
     from . import contracts as c, configuration_updates, fork_sources, user_guidance
     root = Path(root)
     selected = fork_sources.selected_task(root)
@@ -253,21 +254,22 @@ def build_selected_job(root, step):
         from . import skill_supply
         skill_supply.project(root, configuration_updates.for_job(root, job), job)
         return job
-    # First admission verifies the complete immutable closure. Later reads
-    # verify metadata plus the exact members they consume.
+    # First admission verifies copied controls/drafts. Scientific inputs are
+    # checked through their original bindings by their actual consumers.
     selected = fork_sources.selected_task(root, full=True)
     work = c.workspace(root, step)
     work.mkdir(parents=True, exist_ok=True)
     (work / 'work').mkdir(exist_ok=True)
     (work / 'artifacts').mkdir(exist_ok=True)
-    job = _selected_base(root, selected, bind_inputs=True)
     from . import storage_policy as storage
+    from scidiscovery import archive_io as files
     frozen=configuration_updates.for_new_job(root,step)
     context=storage.Deadline(frozen['max_seconds'])
     inventory=storage.Inventory(frozen.get('storage_policy'),context=context)
-    for relative, source, size_bytes in _selected_files(root, selected):
-        inventory.entry();inventory.file(source.stat().st_size)
-        c._bind_original(source, work/relative, root=root, policy=frozen.get('storage_policy'), context=context, size_bytes=(source).stat().st_size, source_kind='managed_frozen')
+    for relative, source, entry in _selected_files(root, selected):
+        inventory.entry();inventory.file(entry['size_bytes'])
+        files.copy_original(source,root/relative,dict(entry,kind='file'),context=context)
+    job = _selected_base(root, selected, bind_inputs=True)
     # Review inputs remain neutral; general advice waits for the next legal task.
     if job.get('formal_review'):
         statements = selected['job'].get('user_guidance', [])
@@ -319,7 +321,4 @@ def validate_selected_job(root, work, job):
             raise ValueError('Fork advice differs from its exact applied user original')
     if c.read(c.regular(Path(work) / 'science-task.json')) != selected_science_view(root, job):
         raise ValueError('Fork scientific task projection changed')
-    for relative, original, size_bytes in _selected_files(root, selected):
-        if c.regular(Path(work) / relative).stat().st_ino != original.stat().st_ino or (Path(work) / relative).stat().st_dev != original.stat().st_dev:
-            raise ValueError('Fork scientific input bytes changed')
     execution_authority.validate_job(root, job)

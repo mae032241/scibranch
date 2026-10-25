@@ -418,6 +418,51 @@ def test_original_effective_limits_can_be_supplied_to_verify_and_materialize(tmp
 
 
 @pytest.mark.process_e2e
+def test_transfer_preserves_exact_calls_after_source_git_is_deleted(tmp_path, helper):
+    root, code = _source(tmp_path)
+    (code / 'helper.sh').write_bytes(b'#!/bin/sh\nprintf original\\n\n')
+    (code / 'helper.sh').chmod(0o755)
+    first = _capture(helper, root, code)
+    (code / 'main.py').write_bytes(b'next accepted version\n')
+    second = _capture(helper, root, code, call='call-2')
+    (code / 'main.py').write_bytes(b'current uncommitted draft\n')
+    child = tmp_path / 'child'
+    child.mkdir()
+    for call, version in (('call-1', first), ('call-2', second)):
+        helper.transfer(root, child, step=7, call_id=call, code_version=version)
+        helper.transfer(root, child, step=7, call_id=call, code_version=version)
+    shutil.rmtree(root / 'host-runtime/code-versions/repository.git')
+    repository = child / 'host-runtime/code-versions/repository.git'
+    assert not (repository / 'objects/info/alternates').exists()
+    try:
+        for call, version, raw in (('call-1', first, b"print('original')\r\n"),
+                ('call-2', second, b'next accepted version\n')):
+            exported = helper.materialize(child, step=7, call_id=call, code_version=version)
+            assert (exported / 'main.py').read_bytes() == raw
+            assert stat.S_IMODE((exported / 'helper.sh').stat().st_mode) == 0o555
+    finally:
+        for call in ('call-1', 'call-2'):
+            helper.cleanup_export(child, step=7, call_id=call)
+
+
+@pytest.mark.process_e2e
+def test_transfer_rejects_conflicting_original_call_ref(tmp_path, helper):
+    root, code = _source(tmp_path)
+    first = _capture(helper, root, code)
+    child = tmp_path / 'child'
+    child.mkdir()
+    helper.transfer(root, child, step=7, call_id='call-1', code_version=first)
+    other_case = tmp_path / 'conflict'
+    other_case.mkdir()
+    other_root, other_code = _source(other_case)
+    (other_code / 'main.py').write_bytes(b'conflicting original\n')
+    conflict = _capture(helper, other_root, other_code)
+    with pytest.raises(ValueError, match='already pins different code'):
+        helper.transfer(other_root, child, step=7, call_id='call-1', code_version=conflict)
+    helper.verify(child, step=7, call_id='call-1', code_version=first)
+
+
+@pytest.mark.process_e2e
 def test_invalid_identifiers_paths_and_version_shape_refuse(tmp_path, helper):
     root, code = _source(tmp_path)
     for call in ('.', '..', 'a..b', '.hidden', 'trailing.', 'x.lock', 'bad/ref'):

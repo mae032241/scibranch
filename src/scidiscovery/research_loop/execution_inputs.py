@@ -591,9 +591,8 @@ def verify_original_compilation(source, ref, *, material=None, client_binding=No
         raise q.IntegrityError('Original compiler capability snapshot changed')
     originals.resolve_ref(originals.source_for_ref(source, value['capability']), value['capability'])
     if 'code_version' in value:
-        if source.inherited and not controls_only:
-            raise q.IntegrityError('Inherited compiler code requires its exact NodeSource Git holder')
-        _verify_compiler_code(root, job, ref, value, verify_pin=not controls_only)
+        holder=source.storage_root.parents[1] if source.inherited else root
+        _verify_compiler_code(root, job, ref, value, verify_pin=not controls_only, git_holder=holder)
     if controls_only:
         seen = set()
         for item in value['inputs']:
@@ -1334,7 +1333,7 @@ def _compiler_call_id(root, step, ref):
 
 
 
-def _verify_compiler_code(root, job, ref, value, *, verify_pin=True):
+def _verify_compiler_code(root, job, ref, value, *, verify_pin=True, git_holder=None):
     from . import code_versions
     if ('author' in value or 'author_origin' in value or value.get('author_input') is not None):
         raise q.IntegrityError('Compiler code version is mixed with an author snapshot or scientific input')
@@ -1343,7 +1342,8 @@ def _verify_compiler_code(root, job, ref, value, *, verify_pin=True):
     try:
         code_versions._version(version)
         if verify_pin:
-            code_versions.verify(root, step=job['step'], call_id=identity, code_version=version)
+            code_versions.verify(root if git_holder is None else git_holder,
+                step=job['step'], call_id=identity, code_version=version)
         if (version['selection'] != 'file' or Path(version['logical_root']).parts[0] != 'code'
                 or Path(version['entry']).name != version['entry']):
             raise ValueError('Compiler code must select one current-W code entry')

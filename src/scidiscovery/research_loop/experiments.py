@@ -1220,7 +1220,7 @@ def local_terminal_status(accepted, completed, terminal):
     return expected if completed.get('status')==expected else 'unknown'
 
 
-def verify_observation(value, original, *, interface=None, context=None, verify_files=True):
+def verify_observation(value, original, *, interface=None, context=None, verify_files=True, source=None):
     """Verify frozen control facts using exact bytes, never a live backend query."""
     if type(verify_files) is not bool:raise ValueError('Explicit observation file verification required')
     def reference(item):
@@ -1275,10 +1275,10 @@ def verify_observation(value, original, *, interface=None, context=None, verify_
         if not isinstance(body,dict) or body.get('scope')!=accepted['scope']:
             raise IntegrityError('Scientific source code version has no exact frozen configuration')
         config=dict(body,execution_interface=value['interface'])
-        metadata=(_source_control_metadata(config,accepted)
+        metadata=(_source_control_metadata(config,accepted,source=source)
             if accepted.get('execution_authority') is not None else None)
         if 'code_version' in accepted:
-            _code_version_binding(config,accepted)
+            _code_version_binding(config,accepted,source=source)
             expected_version=accepted['code_version']
             if metadata is not None and metadata['code_version'] not in (None,expected_version):
                 raise IntegrityError('Scientific source has conflicting accepted and compiler code versions')
@@ -1305,16 +1305,16 @@ def verify_observation(value, original, *, interface=None, context=None, verify_
         if (descriptor.name!=item['name'] or descriptor.local_path!=item['source']['path']
                 or descriptor.size_bytes!=item['size_bytes']):
             raise IntegrityError('Retained collection differs from its original descriptor')
-    source=value.get('scientific_source')
-    if source is not None:
-        reference(source);reference(source['source'])
+    scientific_source=value.get('scientific_source')
+    if scientific_source is not None:
+        reference(scientific_source);reference(scientific_source['source'])
         if ('source_code_version' in value and 'code_version' in accepted
-                and {key:source['source'].get(key) for key in ('path','size_bytes','file_stat')}
-                    ==_code_export_entry(_code_version_binding(config,accepted),accepted)):
+                and {key:scientific_source['source'].get(key) for key in ('path','size_bytes','file_stat')}
+                    ==_code_export_entry(_code_version_binding(config,accepted,source=source),accepted)):
             raise IntegrityError('Scientific code source retained its temporary export instead of its code version')
-        if verify_files or source['path'] in controls or source['source']['path'] in controls:bound(source)
-        if verify_files or source['source']['path'] in controls:bound(source['source'])
-        if source['size_bytes']!=source['source']['size_bytes']:
+        if verify_files or scientific_source['path'] in controls or scientific_source['source']['path'] in controls:bound(scientific_source)
+        if verify_files or scientific_source['source']['path'] in controls:bound(scientific_source['source'])
+        if scientific_source['size_bytes']!=scientific_source['source']['size_bytes']:
             raise IntegrityError('Scientific source lost its retained original')
     if 'public_result' in value:
         public=_run_view(value['public_result'])
@@ -2248,13 +2248,64 @@ def _compiler_source_version(compiler, reference, subject):
     return dict(version)
 
 
-def _source_control_metadata(config, accepted, *, verify_signatures=False):
+def _source_control_metadata(config, accepted, *, verify_signatures=False, source=None):
     """Read the accepted source's existing controls without consuming its science."""
-    from . import experiment_client,contracts as c,execution_authority as authority,qualification as q
+    from . import experiment_client,contracts as c,execution_authority as authority,qualification as q,originals
     if accepted.get('execution_authority') is None:return None
-    root=experiment_client.root_for_configuration(config)
+    if source is not None and not source.inherited:source=None
+    if source is None:
+        root=experiment_client.root_for_configuration(config)
+    else:
+        source=originals.at_step(source,config['scope']['step'])
+        root=Path(source.original_root);job=originals.source_job(source)
+        records=(root/'host-runtime/experiment-control'/f'{job["step"]:03d}'/'records'
+            if job.get('worker_view_version')==experiment_client.VERSION else c.workspace(root,job['step'])/'work/lineage')
+        if config.get('record_dir')!=str(records):raise IntegrityError('Scientific control record namespace changed')
     if verify_signatures and not (root/'execution-authority/host-key-source.json').exists():return None
+    def entry_owner(path,reference=None):
+        owner=originals.source_for_ref(source,reference or {})
+        path=Path(path)
+        if path.is_absolute():
+            if not path.is_relative_to(owner.original_root):
+                owner,_=originals.material_owner(owner,dict(source=str(path)))
+            path=path.relative_to(owner.original_root)
+        relative=originals.relative(path.as_posix())
+        key=(originals.identity_key(owner.origin_identity),relative)
+        entries=owner._index.get(key,())
+        if not entries:
+            parts=path.parts;step=None
+            if len(parts)>1 and parts[0] in {'jobs','native-evidence'}:
+                number=parts[1].split('.')[0]
+                if number.isdecimal():step=int(number)
+            if step is not None:
+                owner=originals.dependency(owner,step)
+                entries=owner._index.get((originals.identity_key(owner.origin_identity),relative),())
+        if len(entries)!=1 or entries[0].get('visibility') not in {'host_proof','effect_only'}:
+            raise IntegrityError('Scientific control lacks an exact transported control entry')
+        return owner,relative,entries[0]
+    def control_ref(path):
+        if source is None:return q._ref(root,path)
+        owner,relative,entry=entry_owner(path)
+        result=dict(path=relative,size_bytes=entry['size_bytes'])
+        if owner.origin_identity!=source.origin_identity:result['origin_identity']=owner.origin_identity
+        return result
+    def read_control(reference):
+        if source is None:return q._read(root,reference)
+        if set(reference)-{'origin_identity'} not in ({'path','size_bytes'},{'path','size_bytes','file_stat'}):
+            raise IntegrityError('Scientific control original fields changed')
+        owner,relative,entry=entry_owner(reference['path'],reference)
+        if 'size_bytes' in reference and reference['size_bytes']!=entry['size_bytes']:
+            raise IntegrityError('Scientific control differs from its original size')
+        actual=originals.resolve_ref(owner,dict(reference,path=relative))
+        data=read(actual,32*1024*1024)
+        if len(data)!=entry['size_bytes']:raise IntegrityError('Scientific control bytes changed')
+        return json.loads(data)
+    def control_address(reference):
+        if source is None:return q.control_reference(root,reference)['path']
+        owner,relative,_=entry_owner(reference['path'],reference)
+        return str(Path(owner.original_root)/relative)
     def control(reference):
+        if source is not None:return read_control(reference)
         path=Path(reference['path'])
         actual=path if path.is_absolute() else root/path
         if not actual.is_relative_to(root):raise IntegrityError('Scientific control escaped its instance')
@@ -2265,25 +2316,26 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False):
         # q owns path/size controls; the execution fingerprint is checked above.
         return q._read(root,dict(path=actual.relative_to(root).as_posix(),size_bytes=reference['size_bytes']))
     try:
-        job=q._read(root,q._ref(root,root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
+        job=read_control(control_ref(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
         attempt=accepted.get('native_attempt') or {};number=attempt.get('number')
         if type(number) is not int or not 0<=number<10000:
             raise IntegrityError('Scientific source has no exact native attempt')
         native=root/'native-evidence'/f'{job["step"]:03d}'
         if number:native=native/'continuations'/f'{number:03d}'
-        native_config=c.read(c.regular(native/'experiment-config.json'))
+        native_config=(c.read(c.regular(native/'experiment-config.json')) if source is None else
+            read_control(control_ref(native/'experiment-config.json')))
         authorization=control(accepted['execution_authority'])
-        request_ref=authorization['request'];request=q._read(root,request_ref)
+        request_ref=authorization['request'];request=read_control(request_ref)
         request_id=Path(request_ref['path']).parent.name
         if not authority.ID.fullmatch(request_id):raise IntegrityError('Scientific source request identity changed')
         directory=root/'execution-authority/requests'/request_id
         body={key:item for key,item in request.items() if key!='nonce_hash'}
-        if (request_ref!=q._ref(root,directory/'request.json')
+        if (request_ref!=control_ref(directory/'request.json')
                 or Path(accepted['execution_authority']['path'])!=directory/'authorization.json'
                 or authority.security.request_digest(body)!=request_id):
             raise IntegrityError('Scientific source request original changed')
-        allocation_ref=authorization['allocation'];allocation=q._read(root,allocation_ref)
-        decision_ref=authorization['decision'];decision=q._read(root,decision_ref)
+        allocation_ref=authorization['allocation'];allocation=read_control(allocation_ref)
+        decision_ref=authorization['decision'];decision=read_control(decision_ref)
         binding=allocation['binding'];subject=request['subject'];call=accepted['call_id']
         alias=request.get('payload_alias',request['payload']);target=accepted.get('execution_target')
         if (native_config.get('scope')!=accepted['scope'] or native_config.get('native_attempt')!=attempt
@@ -2291,8 +2343,8 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False):
                 or config.get('scope')!=accepted['scope'] or config.get('native_attempt')!=attempt
                 or config.get('execution_interface')!=accepted['interface']
                 or accepted['scope'].get('job_ref')!=dict(path=str(root/'jobs'/f'{job["step"]:03d}.json'))
-                or job.get('role')!='W' or request['job']!=q._ref(root,root/'jobs'/f'{job["step"]:03d}.json')
-                or allocation_ref!=q._ref(root,root/'execution-authority/calls'/call/'allocation.json')
+                or job.get('role')!='W' or request['job']!=control_ref(root/'jobs'/f'{job["step"]:03d}.json')
+                or allocation_ref!=control_ref(root/'execution-authority/calls'/call/'allocation.json')
                 or allocation['call_id']!=call or binding['scope']!=accepted['scope']
                 or binding['native_attempt']!=attempt or binding['interface']!=accepted['interface']
                 or binding['subject']!=subject or binding['review']!=request['review']
@@ -2302,9 +2354,9 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False):
                 or authorization['target']!=target or request['target']!=target
                 or authorization['payload_alias']!=alias
                 or allocation['native_intent']!=request['native_intent']
-                or request['native_intent']!=q._ref(root,native/'native-intent.json')
-                or q._read(root,request['native_intent'])['task_ref']!=q.control_reference(root,request['job'])
-                or decision_ref!=q._ref(root,directory/'decision.json')
+                or request['native_intent']!=control_ref(native/'native-intent.json')
+                or read_control(request['native_intent'])['task_ref']!=q.control_reference(root,request['job'])
+                or decision_ref!=control_ref(directory/'decision.json')
                 or decision['request']!=request_ref or decision['nonce_hash']!=request['nonce_hash']
                 or not authority.security.decision_authorizes(request['kind'],decision['selected_option'],request['options'])):
             raise IntegrityError('Scientific source differs from its exact accepted authority controls')
@@ -2315,9 +2367,9 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False):
                 if not authority.hmac.compare_digest(signed.get('receipt_hmac',''),
                         authority.security.receipt_hmac(secret,authority.security.canonical(signed_body))):
                     raise IntegrityError('Scientific source host signature changed')
-        seal=q._read(root,subject['producer_seal']);material=subject['material'];step=subject['producer_step']
+        seal=read_control(subject['producer_seal']);material=subject['material'];step=subject['producer_step']
         if (type(step) is not int or not 0<step<job['step']
-                or subject['producer_seal']!=q._ref(root,c.host_record(c.workspace(root,step))/'result-identity.json')
+                or subject['producer_seal']!=control_ref(c.host_record(c.workspace(root,step))/'result-identity.json')
                 or not any({key:value for key,value in row.items() if key!='file_stat'}==material
                     for row in seal.get('materials',[]))
                 or material not in [*job.get('direct_materials',[]),*[row['material'] for row in job.get('selected_inputs',[])]]
@@ -2328,16 +2380,19 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False):
         control_paths={str(root/'jobs'/f'{job["step"]:03d}.json'),str(native/'experiment-config.json'),
             accepted['execution_authority']['path'],str(directory/'request.json'),
             str(root/'execution-authority/calls'/call/'allocation.json'),str(directory/'decision.json'),
-            str(native/'native-intent.json'),q.control_reference(root,subject['producer_seal'])['path']}
+            str(native/'native-intent.json'),control_address(subject['producer_seal'])}
         compiled=[item for item in seal.get('compiled_implementations',[]) if item['material']==material]
         if len(compiled)>1:raise IntegrityError('Scientific source has ambiguous compiler provenance')
         if not compiled:return dict(subject=subject,compiler=None,compiled=None,code_version=None,control_paths=control_paths)
-        item=compiled[0];reference=item['compiler'];compiler=q._read(root,reference)
-        control_paths.add(q.control_reference(root,reference)['path'])
+        item=compiled[0];reference=item['compiler'];compiler=read_control(reference)
+        if source is not None:
+            owner,_,_=entry_owner(reference['path'],reference)
+            source=originals.at_step(owner,step);root=Path(source.original_root)
+        control_paths.add(control_address(reference))
         version=None
         if 'code_version' in compiler:
             version=_compiler_source_version(compiler,reference,subject)
-            compiler_job=q._read(root,compiler['job']);compiler_config=q._read(root,compiler['configuration'])
+            compiler_job=read_control(compiler['job']);compiler_config=read_control(compiler['configuration'])
             compiler_attempt=compiler_config['native_attempt']['number']
             if type(compiler_attempt) is not int or not 0<=compiler_attempt<10000:
                 raise IntegrityError('Scientific compiler native attempt changed')
@@ -2346,10 +2401,10 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False):
             declarations=[row for row in compiler['implementation'].get('public_capabilities',[])
                 if row['key']=='implementation_authoring']
             if (compiler_job.get('step')!=step or compiler_job.get('role')!='W'
-                    or compiler['job']!=q._ref(root,root/'jobs'/f'{step:03d}.json')
-                    or compiler['configuration']!=q._ref(root,root/'host-runtime/experiment-control'/f'{step:03d}'/'interfaces'/f'{compiler_attempt:03d}.json')
-                    or compiler['native_intent']!=q._ref(root,compiler_native/'native-intent.json')
-                    or q._read(root,compiler['native_intent'])['task_ref']!=q.control_reference(root,compiler['job'])
+                    or compiler['job']!=control_ref(root/'jobs'/f'{step:03d}.json')
+                    or compiler['configuration']!=control_ref(root/'host-runtime/experiment-control'/f'{step:03d}'/'interfaces'/f'{compiler_attempt:03d}.json')
+                    or compiler['native_intent']!=control_ref(compiler_native/'native-intent.json')
+                    or read_control(compiler['native_intent'])['task_ref']!=q.control_reference(root,compiler['job'])
                     or compiler_config['scope'].get('step')!=step
                     or compiler_config['scope'].get('job_ref')!=q.control_reference(root,compiler['job'])
                     or compiler['implementation']!=compiler_config['execution_interface']
@@ -2357,8 +2412,8 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False):
                     or any(compiler['capability'].get(key)!=compiler['capability_source'].get(key) for key in ('size_bytes',))
                     or any(request['payload'].get(key)!=item for key,item in compiler['output'].items())):
                 raise IntegrityError('Scientific compiler lost its frozen control binding')
-            q._read(root,compiler['capability'])
-            control_paths.update(q.control_reference(root,compiler[key])['path']
+            read_control(compiler['capability'])
+            control_paths.update(control_address(compiler[key])
                 for key in ('job','configuration','native_intent','capability'))
             from . import originals
             seen=set();frozen=[*compiler_job.get('direct_materials',[]),
@@ -2377,13 +2432,15 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False):
                         or len(parts)<5 or parts[:2]!=('inputs','parents')
                         or parts[2]!=f'{input_step:03d}' or parts[3]!='artifacts'):
                     raise IntegrityError('Scientific compiler input changed its exact producer')
-                producer=originals.node(root,input_step)
+                producer=(originals.node(root,input_step) if source is None else
+                    originals.dependency(source,input_step,seal_ref=original['producer_seal']))
                 relative=f'native-evidence/{input_step:03d}/result-identity.json'
-                producer_seal=(originals.original_ref(producer,relative) if producer.inherited else
+                producer_seal=(control_ref(Path(producer.original_root)/relative) if source is not None else
+                    originals.original_ref(producer,relative) if producer.inherited else
                     q._ref(root,c.host_record(c.workspace(root,input_step))/'result-identity.json'))
                 expected=dict(instance_id=producer.origin_identity['goal_id'],producer_step=input_step,
                     producer_seal=producer_seal,material_path=input_material['path'],size_bytes=input_material['size_bytes'])
-                seal=q._read(root,producer_seal)
+                seal=read_control(producer_seal)
                 if (json.dumps(original,sort_keys=True)!=json.dumps(expected,sort_keys=True)
                         or [{key:value for key,value in row.items() if key!='file_stat'}
                             for row in seal.get('materials',[]) if row['path']==input_material['path']]!=[input_material]
@@ -2392,7 +2449,7 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False):
                         or slot['alias']!=input_material['path'] or type(slot['size_bytes']) is not int
                         or slot['size_bytes']!=input_material['size_bytes'] or not isinstance(slot['media_type'],str)):
                     raise IntegrityError('Scientific compiler input alias or original metadata changed')
-                control_paths.update((q.control_reference(root,producer_seal)['path'],
+                control_paths.update((control_address(producer_seal),
                     str(Path(producer.original_root)/relative)))
             if type(compiler_job.get('worker_view_version')) is int and compiler_job['worker_view_version']==1:
                 output=Path(compiler['output']['path']);client_ref=item.get('client_binding')
@@ -2400,10 +2457,10 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False):
                         or compiler_config.get('record_dir')!=str(root/'host-runtime/experiment-control'/f'{step:03d}'/'records')
                         or output.parent.parent!=Path(compiler_config['record_dir']).parent/'implementations'
                         or re.fullmatch(r'I[0-9]{3,}',output.parent.name) is None or output.name!='package.json'
-                        or client_ref!=q._ref(root,output.parent/'client.json')):
+                        or client_ref!=control_ref(output.parent/'client.json')):
                     raise IntegrityError('Scientific compiler client lost its sealed control binding')
-                client=q._read(root,client_ref)
-                control_paths.add(q.control_reference(root,client_ref)['path'])
+                client=read_control(client_ref)
+                control_paths.add(control_address(client_ref))
                 expected=dict(worker_implementation_version=1,implementation_ref=output.parent.name)
                 if (set(client)!={'client','public_path','package'} or client['client']!=expected
                         or type(client['client'].get('worker_implementation_version')) is not int
@@ -2416,16 +2473,35 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False):
         raise IntegrityError('Scientific source control metadata is malformed') from error
 
 
-def _code_version_binding(config, accepted):
+def _code_version_binding(config, accepted, *, source=None):
     """Check permanent code metadata without opening code, drafts or exports."""
     from . import code_versions, contracts as c, experiment_client
+    if source is not None and not source.inherited:source=None
     try:version=code_versions._version(accepted['code_version'])
     except (KeyError,TypeError,ValueError) as error:
         raise IntegrityError('Accepted code version binding is malformed') from error
     if (config is None or accepted.get('scope')!=config.get('scope')
             or config.get('scope',{}).get('role')!='W'):
         raise IntegrityError('Accepted code version requires its exact W configuration')
-    root=experiment_client.root_for_configuration(config)
+    if source is None:
+        root=experiment_client.root_for_configuration(config)
+    else:
+        from . import originals
+        source=originals.at_step(source,config['scope']['step'])
+        root=Path(source.original_root);job=originals.source_job(source)
+        records=(root/'host-runtime/experiment-control'/f'{job["step"]:03d}'/'records'
+            if job.get('worker_view_version')==experiment_client.VERSION else c.workspace(root,job['step'])/'work/lineage')
+        if (config.get('record_dir')!=str(records) or job.get('role')!='W'
+                or accepted['scope'].get('job_ref')!=dict(path=str(root/'jobs'/f'{job["step"]:03d}.json'))):
+            raise IntegrityError('Accepted code version lost its original task configuration')
+        attempt=(accepted.get('native_attempt') or {}).get('number',0)
+        if type(attempt) is not int or not 0<=attempt<10000:
+            raise IntegrityError('Accepted code version lost its original native attempt')
+        native=f'native-evidence/{job["step"]:03d}' + (f'/continuations/{attempt:03d}' if attempt else '')
+        frozen=c.read(originals.resolve_ref(source,dict(path=native+'/experiment-config.json')))
+        if (frozen.get('scope')!=accepted['scope'] or frozen.get('native_attempt')!=accepted.get('native_attempt')
+                or frozen.get('execution_interface')!=config.get('execution_interface')):
+            raise IntegrityError('Accepted code version differs from its original native configuration')
     logical=Path(version['logical_root']);entry=Path(version['entry'])
     if version['selection']=='directory':
         valid=(logical==Path('code')

@@ -1,6 +1,6 @@
 """Exact local and inherited originals; storage location is not authorship.
 
-This module only reads retained bytes. It grants no qualification, authority,
+This module reads exact originals and transported controls. It grants no qualification, authority,
 budget, recovery, or native-session continuation.
 """
 from __future__ import annotations
@@ -169,12 +169,24 @@ def dependency(source, step, *, seal_ref=None):
     if source.entries is None:
         return node(source.storage_root, step)
     path = f'native-evidence/{step:03d}/result-identity.json'
-    matches = [row for row in source.entries if row['path'] == path
-        and (seal_ref is None or seal_ref.get('path') in {path,
-            str(Path(row['origin_identity']['settings_ref']['path']).parent / path)})]
-    same = [row for row in matches if row['origin_identity'] == source.origin_identity]
-    if same:
-        matches = same
+    matches = []
+    for row in source.entries:
+        if row['path'] != path:
+            continue
+        if seal_ref is not None:
+            identity = row['origin_identity']
+            origin = source.snapshot.origins.get(identity_key(identity))
+            if origin is None or origin.get('identity') != identity:
+                raise ValueError('Historical dependency has no exact origin binding')
+            if ('origin_identity' in seal_ref and seal_ref['origin_identity'] != identity
+                    or seal_ref.get('path') not in {path, str(Path(origin['original_root']) / path)}
+                    or 'size_bytes' in seal_ref and seal_ref['size_bytes'] != row['size_bytes']):
+                continue
+        matches.append(row)
+    if seal_ref is None or 'origin_identity' not in seal_ref:
+        same = [row for row in matches if row['origin_identity'] == source.origin_identity]
+        if same:
+            matches = same
     if len(matches) != 1:
         raise ValueError('Historical dependency has no unique exact original')
     return _snapshot_source(source.storage_root, source.snapshot, matches[0]['origin_identity'], step)
@@ -239,20 +251,27 @@ def _check_identity(path, ref, *, context=None):
     return path
 
 
-def _logical_input(root, path, *, context=None):
+def _logical_input(root, path, *, source=None, context=None):
     """Resolve one declared task path without requiring a host-side alias."""
     parts = PurePosixPath(path).parts
     if (len(parts)<5 or parts[:2]!=('project','nodes') or not parts[2].isdecimal()
             or parts[2]!=f'{int(parts[2]):03d}' or parts[3] not in {'inputs','work'}):
         return None
-    job_path=root/'jobs'/f'{int(parts[2]):03d}.json'
-    if not job_path.exists():return None
-    job=_json(job_path);logical='/'.join(parts[3:])
+    step=int(parts[2]);root=Path(root)
+    if source is None:
+        job_path=root/'jobs'/f'{step:03d}.json'
+        if not job_path.exists():return None
+        job=_json(job_path)
+    else:
+        source=at_step(source,step)
+        job=source_job(source)
+    logical='/'.join(parts[3:])
     materials=[row for row in [*job.get('direct_materials',[]),
         *[item['material'] for item in job.get('selected_inputs',[])]] if row['path']==logical]
     if materials:
         if any(row!=materials[0] for row in materials):raise ValueError('Logical input has conflicting originals')
-        return material_path(root,materials[0])
+        host=source.storage_root.parents[1] if source is not None and source.inherited else root
+        return material_path(host,materials[0])
     rows=[row for row in [*job.get('global_materials',[]),*job.get('history',{}).get('files',[]),
         *job.get('history',{}).get('execution_recovery_materials',[])] if row['path']==logical]
     if rows:
@@ -260,10 +279,13 @@ def _logical_input(root, path, *, context=None):
         if 'source' not in rows[0]:raise ValueError('Legacy logical input original is unavailable')
         selected=Path(rows[0]['source'])
         if root/selected==root/path:raise ValueError('Selected scientific input original is unavailable')
-        return resolve_root_ref(root,rows[0],context=context)
+        if source is None:return resolve_root_ref(root,rows[0],context=context)
+        actual=selected if selected.is_absolute() else Path(source.original_root)/selected
+        return _check_identity(files.check_path(actual),rows[0],context=context)
     direct=[row for row in job.get('direct_refs',[]) if row['path']==logical]
     if len(direct)==1:
-        owner=node(root,int(PurePosixPath(logical).parts[2]))
+        producer=int(PurePosixPath(logical).parts[2])
+        owner=dependency(source,producer) if source is not None else node(root,producer)
         seal=_json(source_record(owner,'result-identity.json'))
         raw=resolve_ref(owner,seal['raw_ref'],context=context)
         from . import contracts as c, candidate_refs
@@ -273,6 +295,41 @@ def _logical_input(root, path, *, context=None):
         if public!=original:raise ValueError('Selected public scientific projection is unavailable')
         return _check_identity(raw,direct[0],context=context)
     return None
+
+
+def _declared_science(source, actual, ref, *, context=None):
+    """Resolve only a source explicitly named by this original task/declarations."""
+    actual=Path(actual)
+    if source.inherited and not source._index.get((identity_key(source.origin_identity),f'jobs/{source.step:03d}.json')):
+        raise ValueError('Scientific path has no exact declared original membership')
+    job=source_job(source)
+    rows=[*job.get('global_materials',[]),*job.get('direct_materials',[]),
+        *[item['material'] for item in job.get('selected_inputs',[])],
+        *job.get('history',{}).get('files',[]),
+        *job.get('history',{}).get('execution_recovery_materials',[])]
+    proofs=[]
+    for row in rows:
+        if 'source' not in row:continue
+        path=Path(row['source'])
+        if (path if path.is_absolute() else Path(source.original_root)/path)==actual:
+            proofs.append(row)
+    settings=source_settings(source)
+    declaration=settings.get('source_provenance')
+    if declaration is not None:
+        document=_json(resolve_ref(source_for_ref(source,declaration),declaration,context=context))
+        for row in document.get('declarations',[]):
+            for name in ('origin','retained'):
+                proof=row.get(name) or {}
+                path=Path(proof.get('path',''))
+                if (path if path.is_absolute() else Path(source.original_root)/path)==actual:
+                    proofs.append(proof)
+    if not proofs:
+        raise ValueError('Scientific path has no exact declared original membership')
+    if any(proof.get('size_bytes')!=proofs[0].get('size_bytes') for proof in proofs):
+        raise ValueError('Scientific path has conflicting declared identities')
+    for proof in proofs:
+        _check_identity(files.check_path(actual),proof,context=context)
+    return _check_identity(actual,ref,context=context)
 
 
 def resolve_root_ref(root, ref, *, context=None):
@@ -285,6 +342,14 @@ def resolve_root_ref(root, ref, *, context=None):
         if not reference_path.is_relative_to(root):
             if 'source' not in ref and 'file_stat' not in ref:
                 raise ValueError('External original requires an exact bound source')
+            manifest=_manifest(root)
+            if manifest is not None:
+                origins=[row for row in manifest['origins'].values()
+                    if reference_path.is_relative_to(row['original_root'])]
+                if len(origins)==1:
+                    owner=for_origin(root,origins[0]['identity'])
+                    return resolve_ref(owner,ref,context=context)
+                return _declared_science(selected_source(root),reference_path,ref,context=context)
             return _check_identity(files.check_path(reference_path), ref, context=context)
         path = relative(reference_path.relative_to(root).as_posix())
     else:
@@ -362,12 +427,14 @@ def material_path(root, material):
         logical = Path(origin['original_root'])
         if source.is_relative_to(logical):
             relative_path = source.relative_to(logical).as_posix()
-            matches.extend(row for row in manifest['entries'] if row['origin_identity'] == origin['identity']
-                and row['path'] == relative_path and row['size_bytes'] == saved['size_bytes'])
+            matches.append((origin,relative_path))
+    if not matches:
+        return _declared_science(selected_source(root),source,ref)
     if len(matches) != 1:
         raise ValueError('Scientific material has no unique exact inherited origin')
-    return resolve_ref(for_origin(root, matches[0]['origin_identity']), dict(matches[0],
-        **{key: saved[key] for key in ('file_stat',) if key in saved}))
+    origin,path=matches[0]
+    owner_step=int(parts[2]) if len(parts)>=3 and parts[:2]==('inputs','parents') and parts[2].isdecimal() else 1
+    return resolve_ref(for_origin(root, origin['identity'],step=owner_step),dict(ref,path=path))
 
 
 def material_owner(source, material):
@@ -386,11 +453,11 @@ def material_owner(source, material):
         logical_root = Path(origin['original_root'])
         if logical.is_relative_to(logical_root):
             path = logical.relative_to(logical_root).as_posix()
-            matches.extend(row for row in manifest['entries'] if row['origin_identity'] == origin['identity']
-                and row['path'] == path and row['size_bytes'] == material['size_bytes'])
+            matches.append((origin,path))
     if len(matches) != 1:
         raise ValueError('Material has no unique exact original origin')
-    return for_origin(root, matches[0]['origin_identity'], step=source.step), matches[0]['path']
+    origin,path=matches[0]
+    return for_origin(root, origin['identity'], step=source.step), path
 
 
 def has_original(source, path):
@@ -402,7 +469,11 @@ def has_original(source, path):
     path = relative(path)
     if source.inherited:
         if not source._index.get((identity_key(source.origin_identity), path)):
-            return False
+            try:
+                resolve_ref(source,dict(path=path))
+            except (OSError,ValueError):
+                return False
+            return True
     elif not (source.storage_root / path).exists():
         return False
     resolve_ref(source, dict(path=path))
@@ -416,9 +487,14 @@ def resolve_ref(source, ref, *, context=None):
     origin = ref.get('origin_identity', source.origin_identity)
     key = identity_key(origin)
     raw_path = ref.get('source', ref['path'])
-    if (Path(raw_path).is_absolute() and not Path(raw_path).is_relative_to(Path(source.original_root))
-            and 'file_stat' in ref and source.entries is None):
-        return _check_identity(files.check_path(Path(raw_path)), ref, context=context)
+    if origin != source.origin_identity:
+        raise ValueError('Cross-origin reference requires its own original handle')
+    if Path(raw_path).is_absolute() and not Path(raw_path).is_relative_to(Path(source.original_root)):
+        if source.inherited:
+            return _declared_science(source,Path(raw_path),ref,context=context)
+        if 'file_stat' in ref:
+            return _check_identity(files.check_path(Path(raw_path)), ref, context=context)
+        return _declared_science(source,Path(raw_path),ref,context=context)
     if Path(raw_path).is_absolute():
         original = Path(raw_path)
         if not original.is_relative_to(Path(source.original_root)):
@@ -426,24 +502,34 @@ def resolve_ref(source, ref, *, context=None):
         path = relative(original.relative_to(source.original_root).as_posix())
     else:
         path = relative(raw_path)
-    if origin != source.origin_identity:
-        raise ValueError('Cross-origin reference requires its own original handle')
     expected = ref
     if source.entries is None:
         actual = files.check_path(source.storage_root / path)
+        if not actual.exists():
+            bound=_logical_input(source.storage_root,path,source=source,context=context)
+            if bound is not None:actual=bound
     else:
         matches = source._index.get((key, path), ())
         if len(matches) != 1:
-            raise ValueError('Original has no unique frozen path binding: ' + key + ':' + path)
+            bound=_logical_input(Path(source.original_root),path,source=source,context=context)
+            if bound is not None:return _check_identity(bound,ref,context=context)
+            return _declared_science(source,Path(source.original_root)/path,ref,context=context)
         entry = matches[0]
         if entry['storage_path'] != f'inherited/{key}/{path}':
             raise ValueError('Original storage binding changed')
         if 'size_bytes' in ref and ref['size_bytes'] != entry['size_bytes']:
             raise ValueError('Original reference differs from its frozen binding')
         expected = entry
-        actual = files.check_path(source.storage_root / entry['storage_path'])
+        if entry.get('visibility') in {'scientific_input','historical_science'}:
+            bound=_logical_input(Path(source.original_root),path,source=source,context=context)
+            actual=(files.check_path(Path(source.original_root)/path) if bound is None else bound)
+        else:
+            actual = files.check_path(source.storage_root / entry['storage_path'])
+            # A copied control's source fingerprint is not the identity of its
+            # child inode. Its bounded immutable entry binds the transported
+            # control; scientific references still check their real originals.
     _check_identity(actual, expected, context=context)
-    if expected is not ref and 'file_stat' in ref:
+    if expected is not ref and 'file_stat' in ref and entry.get('visibility') in {'scientific_input','historical_science'}:
         _check_identity(actual, ref, context=context)
     return actual
 

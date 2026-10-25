@@ -459,7 +459,7 @@ def _version(value):
     return value
 
 
-def _tree(private, version, policy, context):
+def _tree(private, version, policy, context, *, objects=None):
     _ref_path(private)
     if _git(private, ('symbolic-ref', '--quiet', private.ref), context=context, allowed=(0, 1)):
         raise ValueError('Original code ref must not be symbolic')
@@ -483,6 +483,8 @@ def _tree(private, version, policy, context):
             raise ValueError('Duplicate private code tree path')
         seen.add(name)
         identity = _oid(oid)
+        if objects is not None:
+            objects.add(identity)
         if mode == b'040000' and kind == b'tree' and size == b'-':
             directories.add(name)
         elif mode in (b'100644', b'100755') and kind == b'blob' and size.isdigit():
@@ -504,6 +506,29 @@ def verify(root, *, step, call_id, code_version, limits=None, context=None) -> N
     version = _version(code_version)
     private = _private(root, step, call_id, create=False, context=context)
     _tree(private, version, _limits(limits), context)
+
+
+def transfer(source_root, target_root, *, step, call_id, code_version, limits=None, context=None) -> None:
+    """Transfer this exact call's bounded objects into an independent private Git."""
+    context = Deadline(65, upstream=context)
+    version, policy = _version(code_version), _limits(limits)
+    source = _private(source_root, step, call_id, create=False, context=context)
+    objects = {version['commit']}
+    _tree(source, version, policy, context, objects=objects)
+    objects.add(_oid(_git(source, ('rev-parse', version['commit'] + '^{tree}'), context=context)))
+    # Explicit object IDs exclude unrelated refs and commit ancestry. Disable
+    # deltas so the receiving repository never depends on a source-side base.
+    payload_limit = policy['max_total_bytes'] + policy['max_scan_entries'] * (_PATH_BYTES + 256) + 1048576
+    names = ''.join(oid + '\n' for oid in sorted(objects)).encode('ascii')
+    packed = _git(source, ('pack-objects', '--stdout', '--window=0', '--threads=1',
+        '--no-reuse-object', '--no-reuse-delta'), data=names, input_limit=len(names),
+        output_limit=payload_limit, context=context)
+    target = _private(target_root, step, call_id, create=True, context=context)
+    _git(target, ('index-pack', '--stdin'), data=packed, input_limit=payload_limit,
+        output_limit=128, context=context)
+    _tree(source, version, policy, context)
+    _pin(target, version['commit'], context)
+    _tree(target, version, policy, context)
 
 
 def _blob(private, record, context):

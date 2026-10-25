@@ -565,7 +565,20 @@ def validate_managed_original(source,job,rows,*,controls_only=False):
             raise ObserverIntegrityError('Inherited managed original has no exact archived bytes')
         return originals.resolve_ref(source, dict(proof, path=proof['snapshot']))
     def native_proof(proof):
-        return proof_path(_retained_original(source.original_root,row,proof))
+        retained=_retained_original(source.original_root,row,proof)
+        actual=proof_path(retained)
+        path=Path(retained['snapshot'])
+        if path.is_absolute():
+            if not path.is_relative_to(source.original_root):return actual
+            path=path.relative_to(source.original_root)
+        entries=source._index.get((originals.identity_key(source.origin_identity),path.as_posix()),())
+        if len(entries)==1 and entries[0].get('visibility') in {'host_proof','effect_only'}:
+            if entries[0]['size_bytes']>MAX_HISTORY_BYTES:
+                raise ObserverIntegrityError('Inherited control exceeds its bounded byte reader')
+            # Transported control bytes retain their original typed bindings,
+            # while the destination inode is necessarily a new host object.
+            return actual.read_bytes()
+        return actual
     seen = set()
     for row in rows:
         if row['call_id'] in seen or row['scope'] != scope:
@@ -595,7 +608,7 @@ def validate_managed_original(source,job,rows,*,controls_only=False):
                 value = c.read(proof_path(row['observation']))
                 if not _same_original(source.original_root, value['accepted'], row['accepted']) or not _same_original(source.original_root, value['completed'], row['completed']):
                     raise ObserverIntegrityError('Inherited terminal differs from its exact accepted call')
-                status = experiments.verify_observation(value,native_proof,interface=interface,verify_files=not controls_only)
+                status = experiments.verify_observation(value,native_proof,interface=interface,verify_files=not controls_only,source=source)
             elif interface.get('observation_version') is None:
                 terminal = c.read(proof_path(row['terminal'])) if row.get('terminal') else None
                 status = experiments.local_terminal_status(accepted, completed, terminal)

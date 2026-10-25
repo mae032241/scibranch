@@ -927,15 +927,16 @@ def _admission_usage_refs(root, step):
     return [_ref(Path(root),path) for path in paths]
 
 
-def _validate_output_acceptance(root, value):
+def _validate_output_acceptance(root, value, *, source=None):
     """Read the exact acceptance declaration without rechecking returned results."""
     root=Path(root);step=value.get('step')
     if (value.get('version')!=1 or value.get('scope')!='explicit_completed_author_output'
             or type(step) is not int or step<=0 or value.get('attempt')!=2):
         raise ValueError('Explicit exact completed-output acceptance required')
     upgrade_path=_output_record(root,step,'upgrade')
-    if _check(root,value['upgrade'])!=upgrade_path:raise ValueError('Completed-output upgrade identity changed')
-    _validate_output_upgrade(root,c.read(upgrade_path))
+    _declared_ref(root,value['upgrade'],upgrade_path)
+    upgrade=_check(root,value['upgrade'],source=source)
+    _validate_output_upgrade(root,c.read(upgrade),source=source)
     record=root/'native-evidence'/f'{step:03d}'/'continuations/002'
     names={'native-intent.json','native-outcome.json','usage.json','usage-observation.json','native.jsonl',
         'runner-process.json','native-process.json','result.pending.json','experiment-config.json','author-closeout-facts.json'}
@@ -945,9 +946,10 @@ def _validate_output_acceptance(root, value):
     if set(value.get('originals',{}))!=names:raise ValueError('Completed-output original set changed')
     for name,ref in value['originals'].items():
         _declared_ref(root,ref,record/name)
-        if name in {'native-intent.json','experiment-config.json'}:_check(root,ref)
+        if name in {'native-intent.json','experiment-config.json'}:_check(root,ref,source=source)
     _declared_ref(root,value['session'])
-    if _check(root,value['job'])!=root/'jobs'/f'{step:03d}.json':raise ValueError('Completed-output job changed')
+    _declared_ref(root,value['job'],root/'jobs'/f'{step:03d}.json')
+    _check(root,value['job'],source=source)
     for ref in value['usage_originals']:_declared_ref(root,ref)
     admission=value.get('admission',{})
     import math
@@ -957,7 +959,7 @@ def _validate_output_acceptance(root, value):
             or any(type(admission.get(key)) not in (int,float) or not math.isfinite(admission[key]) or admission[key]<0
                 for key in ('seconds_remaining','required_seconds'))):
         raise ValueError('Completed-output original admission numbers are invalid')
-    _check(root,admission['ledger'])
+    _check(root,admission['ledger'],source=source)
     return value
 
 
@@ -1019,8 +1021,39 @@ def require_output_eligibility(root, value):
     return value
 
 
-def accepted_output(root, step, record, intent, outcome):
+def accepted_output(root, step, record, intent, outcome, *, source=None, seal=None, controls_only=False):
     """Revalidate bound result evidence for scientific sealing, not permission reading."""
+    if source is not None:
+        from . import originals
+        logical=Path(source.original_root);receipt=(seal or {}).get('completed_output_acceptance')
+        if receipt is None:return None
+        if receipt.get('origin_identity',source.origin_identity)!=source.origin_identity:
+            raise ValueError('Completed-output acceptance differs from its original source')
+        _declared_ref(logical,{key:receipt[key] for key in ('path','size_bytes')},_output_record(logical,step,'acceptance'))
+        value=c.read(originals.resolve_ref(source,receipt))
+        _validate_output_acceptance(logical,value,source=source)
+        expected=logical/'native-evidence'/f'{step:03d}'/'continuations/002'
+        if (value['step']!=step or Path(record)!=expected or intent.get('attempt')!=2
+                or intent.get('continuation_kind')!='author_closeout' or outcome.get('returncode')!=0
+                or outcome.get('stop_reason')!='author_closeout_token_limit'):
+            raise ValueError('Original completed-output acceptance changed its attempt')
+        upgrade=c.read(_check(logical,value['upgrade'],source=source))
+        successor=c.read(_check(logical,upgrade['successor'],source=source))
+        permit=c.read(_check(logical,successor['original_permit'],source=source))
+        _validate_original(logical,permit,source=source)
+        if upgrade['step']!=step or permit['step']!=step:
+            raise ValueError('Original completed-output acceptance changed its producer')
+        for name,payload in (('native-intent.json',intent),('native-outcome.json',outcome)):
+            if c.read(_check(logical,value['originals'][name],source=source))!=payload:
+                raise ValueError('Completed-output acceptance belongs to another original attempt')
+        if (Path(seal['raw_ref']['path'])!=expected/'science-output.json'
+                or seal.get('completed_output_limitation')!=value['facts']):
+            raise ValueError('Accepted original completed output changed')
+        if not controls_only:
+            pending=_check(logical,value['originals']['result.pending.json'],source=source)
+            raw=originals.resolve_ref(source,seal['raw_ref'])
+            if not raw.samefile(pending):raise ValueError('Accepted completed output alias changed')
+        return dict(receipt=receipt,raw_ref=dict(seal['raw_ref']),facts=value['facts'])
     root=Path(root);path=_output_record(root,step,'acceptance')
     if not path.exists():return None
     value=require_output_eligibility(root,c.read(c.regular(path)))

@@ -1,7 +1,7 @@
 """Read-only fork preview and durable, paused child creation.
 
-Source originals stay in a private immutable namespace. Creation never runs a
-scientific participant or imports a prior execution grant into the new ledger.
+Necessary controls and inert drafts stay private; scientific bodies remain at
+their actual originals. Creation never runs a participant or imports a grant.
 """
 from contextlib import contextmanager
 import copy
@@ -113,7 +113,8 @@ def _inspect(request):
             visibility='legal_successors' if plan['source'].get('intent_kind') == 'formal_review' else 'selected_and_legal_successors'),
         blockers=blockers, limitations=plan.get('limitations', []),
         entry_count=len(plan.get('entries', [])),
-        size_bytes=sum(row.get('size_bytes', 0) for row in plan.get('entries', [])),
+        size_bytes=sum(row.get('size_bytes', 0) for row in plan.get('entries', [])
+            if row['visibility'] not in {'scientific_input', 'historical_science'}),
         inherited_costs=plan.get('inherited_costs', dict(status='unknown', reason='Exact cut costs are not reconstructed')))
     settings = plan.get('selected_settings', {})
     result['native'] = {key: settings[key] for key in ('native_backend', 'model', 'reasoning_effort', 'service_tier', 'role_profiles') if key in settings}
@@ -341,11 +342,19 @@ def _prepare(plan, request, transaction, *, _on_created=None):
     stage = transaction / 'child'
     final = Path(request['child_root'])
     document = research_config.to_document(Path(request['parent_root']), plan['selected_settings'])
-    document['research'].update(root=str(stage), public_root=str(source_store / 'public'))
-    # Exact selected globals already live in immutable inherited storage. Their
-    # original bindings are retained by the source resolver, not re-read from
-    # the parent's current project tree.
-    document['research'].pop('user_updates', None)
+    snapshot = originals._snapshot(plan)
+    global_paths = []
+    for row in plan.get('selected_globals', []):
+        reference = row['original_ref']
+        owner = originals._snapshot_source(source_store, snapshot, reference['origin_identity'], request['step'])
+        global_paths.append(_source_call(originals.resolve_ref, owner, reference))
+    if not global_paths:
+        raise ForkError('fork_input_missing', 'Selected task lacks its exact original objective')
+    if global_paths[0].read_text(encoding='utf-8') != plan['selected_settings']['objective']:
+        raise ForkError('fork_origin_invalid', 'Selected objective differs from its exact original global')
+    document['research'].update(root=str(stage), public_root=plan['selected_settings']['public_root'],
+        objective=str(global_paths[0]), user_updates=[str(path) for path in global_paths[1:]])
+    document['research'].pop('objective_text', None)
     document['budget'].update(request['budget'])
     document.get('executor', {}).pop('resource_policy', None)
     document['ui'] = dict(port=0, open_browser=False)
@@ -372,19 +381,8 @@ def _prepare(plan, request, transaction, *, _on_created=None):
                   'role_profiles', 'history_observer'):
         if selected_settings.get(field) is None:
             options[field] = None
-    selected_globals = plan.get('selected_globals', [])
-    texts = []
-    source_snapshot = originals._snapshot(plan) if selected_globals else None
-    for row in selected_globals:
-        reference = row['original_ref']
-        owner = originals._snapshot_source(source_store, source_snapshot, reference['origin_identity'], request['step'])
-        original = _source_call(originals.resolve_ref, owner, reference)
-        texts.append(original.read_bytes().decode('utf-8'))
-    if texts and texts[0] != plan['selected_settings']['objective']:
-        raise ForkError('fork_origin_invalid', 'Selected objective differs from its exact original global')
     from . import storage_policy as storage
     context = storage.Deadline(65)
-    policy = storage.configuration(selected_settings.get('storage_policy'))
     def register_created(storage_root):
         if _on_created is not None:
             _on_created(storage_root)
@@ -394,18 +392,12 @@ def _prepare(plan, request, transaction, *, _on_created=None):
         source_store.rename(destination)
         from . import skill_supply
         skill_supply.inherit(storage_root, selected_settings)
-        configured = _child_source_facts(storage_root, global_materials, plan)
-        # Prepare will verify these exact retained originals when it freezes
-        # declarations. Seed immutable aliases so public payloads stay shared.
-        for index, declaration in enumerate(configured):
-            origin = declaration['origin']
-            source = Path(origin['path'])
-            retained = storage_root / 'source-provenance/originals' / f'{index:06d}'
-            with storage.mutation(storage_root, 0, policy=policy, context=context):
-                _source_call(files.link_original, source, retained, dict(origin, mode=0o400), context=context)
-        return configured
+        from . import code_versions
+        for transfer in plan.get('code_transfers', []):
+            _source_call(code_versions.transfer, Path(transfer['source_root']), storage_root,
+                **{key: transfer[key] for key in ('step', 'call_id', 'code_version')}, context=context)
+        return _child_source_facts(storage_root, global_materials, plan)
     settings = controller.prepare(**options, _existing_settings=selected_settings, _identity_root=final,
-        _public_identity_root=final / 'host-runtime/fork/public', _user_update_texts=texts[1:],
         _source_facts_factory=source_facts, _on_created=register_created)
     settings = c.settings(stage)
     changed = fork_runtime.changed_task_settings(selected_settings, settings)
@@ -429,9 +421,13 @@ def _child_source_facts(stage, global_materials, plan):
     """
     source = plan.get('source_declarations', {})
     configured = []
-    def retain(path, restriction):
+    def retain(path, declaration):
+        restriction=declaration['restriction'];origin=copy.deepcopy(declaration['origin'])
         if restriction in {'clear', 'restricted'}:
-            configured.append(dict(origin=qualification._identity(path), restriction=restriction))
+            if Path(origin['path'])!=path:
+                raise ForkError('fork_origin_invalid','Selected declaration differs from its actual original')
+            qualification._check(origin)
+            configured.append(dict(origin=origin,restriction=restriction))
     for selected, child_material in zip(plan.get('selected_globals', []), global_materials):
         material = selected['material']
         mappings = [row for row in source.get('globals', []) if row['material'] == material]
@@ -439,14 +435,11 @@ def _child_source_facts(stage, global_materials, plan):
             continue  # A missing original declaration remains unknown.
         declarations = [row for row in source.get('declarations', []) if row['origin'] == mappings[0]['origin']]
         if len(declarations) == 1:
-            retain(stage / child_material['source'], declarations[0]['restriction'])
-    for snapshot in plan.get('public_snapshots', []):
-        reference = snapshot['original_ref']
-        declarations = [row for row in source.get('declarations', [])
-            if row.get('retained', {}).get('path') == reference['path']
-            and row['retained'].get('size_bytes') == reference['size_bytes']]
-        if len(declarations) == 1:
-            retain(stage / 'host-runtime/fork/public' / snapshot['path'], declarations[0]['restriction'])
+            retain(stage / child_material['source'], declarations[0])
+    for declaration in source.get('declarations', []):
+        path = Path(declaration['origin']['path'])
+        if str(path) not in {row['origin']['path'] for row in configured}:
+            retain(path, declaration)
     return configured
 
 

@@ -1175,16 +1175,18 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     return job
 
 
-def _native_output_identity(root, step, native_record, intent, outcome):
+def _native_output_identity(root, step, native_record, intent, outcome, *, source=None, seal=None, controls_only=False):
     from . import budget
-    job = read(regular(Path(root) / 'jobs' / f'{step:03d}.json'))
-    if settings(root, read(regular(root / 'jobs' / f'{step:03d}.json'))).get('final_a_completion_policy') is not None or outcome.get('final_a_completion') is not None or (intent.get('budget_slice') or {}).get('final_return') is not None:
-        budget.validate_final_a_receipt(root, job, intent, outcome)
+    if source is None:
+        job = read(regular(Path(root) / 'jobs' / f'{step:03d}.json'))
+        if settings(root, job).get('final_a_completion_policy') is not None or outcome.get('final_a_completion') is not None or (intent.get('budget_slice') or {}).get('final_return') is not None:
+            budget.validate_final_a_receipt(root, job, intent, outcome)
     # The original stopped outcome remains byte-exact. Only a separate explicit
     # completed-return receipt can provide its exceptional final raw identity.
     if outcome.get('stop_reason')=='author_closeout_token_limit' and intent.get('attempt')==2:
         from . import author_closeout
-        accepted=author_closeout.accepted_output(root,step,native_record,intent,outcome)
+        options={} if source is None else dict(source=source,seal=seal,controls_only=controls_only)
+        accepted=author_closeout.accepted_output(root,step,native_record,intent,outcome,**options)
         if accepted is not None:return accepted['raw_ref'],accepted
     return outcome.get('raw_ref'),None
 
@@ -1246,8 +1248,14 @@ def validate_original(source, *, _active=None, _memo=None, controls_only=False):
     outcome = read(originals.source_record(source, 'native-outcome.json'))
     raw = None if controls_only else originals.resolve_ref(source,seal['raw_ref'])
     result = originals.resolve_ref(source,seal['result_ref'])
+    raw_ref,accepted=_native_output_identity(Path(source.original_root),source.step,
+        Path(seal['raw_ref']['path']).parent,intent,outcome,source=source,seal=seal,controls_only=controls_only)
+    identity=({key:raw_ref.get(key) for key in ('path','size_bytes')}
+        if accepted is not None and isinstance(raw_ref,dict) else raw_ref)
     if (intent.get('task_ref') != seal['job_ref'] or outcome.get('returncode') != 0
-            or outcome.get('raw_ref') != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}):
+            or not isinstance(raw_ref,dict)
+            or identity != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}
+            or (seal.get('completed_output_acceptance') is not None and accepted is None)):
         raise ValueError('Source terminal lost its exact original task/output')
     payload = read(result) if controls_only else _sealed_science(job,seal,raw,result,source=source)
     if job.get('scientific_response_fields') != response_fields(job, policy):
