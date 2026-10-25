@@ -28,6 +28,10 @@ MAX_CALLS = 128
 from scidiscovery.research_loop.experiments import IntegrityError
 
 
+class _LedgerShapeError(ValueError):
+    """Public output is not a sequence of structurally usable run rows."""
+
+
 def _bytes(value):
     return (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + '\n').encode()
 
@@ -70,6 +74,8 @@ def _rows(path):
         from scidiscovery.research_loop import contracts as c
         with c.regular(path).open(encoding='utf-8') as stream:
             rows=[json.loads(line) for line in stream if line.strip()]
+    if any(not isinstance(row,dict) or 'run_id' not in row for row in rows):
+        raise _LedgerShapeError('Public ledger output requires run row objects')
     ids = [row['run_id'] for row in rows]
     if any(type(i) is not int or i < 1 for i in ids) or len(set(ids)) != len(ids):
         raise IntegrityError('Public ledger run identities are ambiguous')
@@ -117,6 +123,10 @@ def _config(path):
     return value
 
 
+def output_unavailable(result):
+    return isinstance(result.get('result'),dict) and result['result'].get('status')=='unavailable'
+
+
 def _completed(directory, *, verify_assets=True, verify_source=True):
     path = directory/'completed.json'
     if not path.exists():return None
@@ -142,7 +152,23 @@ def _completed(directory, *, verify_assets=True, verify_source=True):
         raise IntegrityError('Completion changed accepted scientific mechanism')
     if result['call_id'] != accepted['call_id'] or result['scope'] != accepted['scope'] or result['parent'] != accepted['parent'] or result['change_intent'] != accepted['change_intent']:
         raise IntegrityError('Completion differs from accepted scientific context')
-    if result['status'] in {'known_success','known_failed'}:
+    if output_unavailable(result):
+        terminal=json.loads(_read(directory/'terminal.json'))
+        from scidiscovery.research_loop import experiments
+        required={str(directory/name) for name in ('accepted.json','stdout.raw','stderr.raw','terminal.json')}
+        known=(terminal.get('cleanup_confirmed') is True and terminal.get('transport_complete') is True
+            and type(terminal.get('returncode')) is int)
+        expected=('known_success' if terminal['returncode']==0 else 'known_failed') if known else 'unknown'
+        if (any(result.get(key) is not None for key in ('candidate_id','run_id','model'))
+                or not required.issubset({proof['path'] for proof in result['proofs']})
+                or result['status']!=expected
+                or any(terminal.get(key)!=accepted.get(key) for key in ('call_id','scope','mechanism_binding'))
+                or result['status']!='unknown' and experiments.local_terminal_status(accepted,result,terminal)!=result['status']
+                or result.get('returncode')!=terminal.get('returncode')
+                or result['result'].get('metrics')!=[] or result['result'].get('outputs')!=[]
+                or temporary is None and accepted['script'] not in result['proofs']):
+            raise IntegrityError('Cov unavailable output changed its original execution or acquired a candidate')
+    elif result['status'] in {'known_success','known_failed'}:
         # Canonical completion comes only from the immutable same-call transport.
         row=json.loads(_read(directory/'row.json'))
         receipt=_receipt_row(directory,accepted)
@@ -188,7 +214,7 @@ def _parent(config, name, new):
     options = [(row['name'],row['candidate_id'],row['model'],'sealed',row['binding']) for row in config['parents']]
     for path in _calls(config):
         result = _completed(path, verify_assets=False)
-        if result and result['status'] == 'known_success':
+        if result and result['status'] == 'known_success' and result.get('model') is not None:
             options.append((result['candidate_id'],result['candidate_id'],result['model'],'same_node_completed_call',_binding(result,_proof(path/'completed.json'))))
     matches = [row for row in options if row[0] == name]
     if len(matches) != 1:raise ValueError('parent_plan_unresolved')
@@ -209,9 +235,11 @@ def _binding(context, completion):
 def _receipt_row(directory,accepted):
     """Read one exact independent receipt; logs never qualify an execution."""
     try:
-        value=json.loads(_read(directory/'receipt.json'))
-    except (OSError,ValueError):return None
-    from cov_execution.receipt import envelope
+        value=json.loads(_read(directory/'receipt.json',MAX_BYTES))
+        from cov_execution.receipt import encoded, envelope
+        # Completion originals use strict JSON even when the producer did not.
+        encoded(value)
+    except (OSError,ValueError,OverflowError,RecursionError):return None
     if not isinstance(value,dict) or value!=envelope(accepted,value.get('row')):return None
     return value['row']
 
@@ -343,7 +371,7 @@ def _progress(config, scope):
                     raise IntegrityError('Live process binding differs from the accepted call')
                 if runtime.process_matches(identity, key):
                     state = 'running'
-            if state in {'known_success', 'known_failed'}:
+            if state in {'known_success', 'known_failed'} and completed.get('candidate_id') is not None:
                 original = json.loads(_read(directory / 'row.json'))
                 metric = original.get('val_score')
                 wall = original.get('wall_seconds')
@@ -377,7 +405,11 @@ def observe(request):
         if path.is_absolute() or '..' in path.parts or (root/path).resolve() != root/path:raise IntegrityError('Observer escaped original instance')
     if Path(config['calls']) != Path('project/nodes'):
         raise IntegrityError('Observer requires the original scientific task namespace')
-    rows = _rows(root/config['runs']/'results.jsonl');known=set(request.get('known_candidates',[]))
+    partial=False
+    try:rows=_rows(root/config['runs']/'results.jsonl')
+    except (json.JSONDecodeError,_LedgerShapeError):
+        rows=[];partial=True  # Invalid public output cannot erase retained contexts.
+    known=set(request.get('known_candidates',[]))
     contexts=[];models={}
     from scidiscovery.research_loop import experiment_client
     directories = [directory for node in sorted((root/config['calls']).glob('*'))
@@ -398,24 +430,33 @@ def observe(request):
         if result['status']=='unknown' and 'mechanism_binding' in accepted:result['mechanism_binding']=accepted['mechanism_binding']
         if 'code_version' in accepted and result['status'] in {'known_success','known_failed'}:
             from scidiscovery.research_loop import experiments
-            _,version=experiments._source_projection(accepted['config_record'],accepted)
+            from cov_execution.experiments import CovExecution
+            saved=dict(accepted['config_record'],execution_interface=accepted['interface'])
+            original=experiments.original_configuration(saved,accepted['call_id'])
+            _,version=experiments._source_projection_from_provider(original,accepted,CovExecution.scientific_source)
             result['artifact']=None
             result['source_code_version']=version
-        if result['status']=='known_success':models[result['candidate_id']]=dict(result['model'])
+        if result['status']=='known_success' and result.get('model') is not None:
+            models[result['candidate_id']]=dict(result['model'])
         if result['scope']['step'] != request['step']:continue
         if result and result['call_id'] not in set(request.get('known_contexts',[])):
-            # _completed checks immutable proofs; relative names let core archive once.
-            for proof in result['proofs']:proof['path']=str(Path(proof['path']).relative_to(root))
-            if result['model']:result['model']['path']=str(Path(result['model']['path']).relative_to(root))
+            # _completed checks full private identities. The public observer
+            # contract carries only original locators and sizes for core to archive.
+            result['proofs']=[dict(path=str(Path(proof['path']).relative_to(root)),size_bytes=proof['size_bytes'])
+                for proof in result['proofs']]
+            if result['model']:
+                result['model']=dict(path=str(Path(result['model']['path']).relative_to(root)),
+                    size_bytes=result['model']['size_bytes'])
             contexts.append(result)
-    candidates=[];partial=False
+    candidates=[]
     for row in rows:
         cid=f'run-{row["run_id"]}'
         if cid in known:continue
         candidates.append(dict(id=cid,label=f'Public experiment {row["run_id"]}',implementation=None,evaluation_key=config['evaluation_key'],
             metric=row.get('val_score'),direction='max',status='ok' if row.get('ok') is True else 'failed',evidence=[str(Path(config['runs'])/'results.jsonl')]))
     bound={item['candidate_id'] for item in contexts if item['candidate_id']}
-    partial=partial or any(row['id'] not in bound for row in candidates) or any(item['status']=='unknown' for item in contexts)
+    partial=partial or any(row['id'] not in bound for row in candidates) or any(
+        item['status']=='unknown' or output_unavailable(item) for item in contexts)
     actual=None;submission_note=''
     submitted=root/config['runs']/'submitted.json';model=root/config['runs']/'submitted_model.pkl'
     if submitted.exists():
@@ -491,7 +532,10 @@ def public_feedback(config, result, *, include_model=False):
     if include_model:value['model']={'retained':True} if result['model'] else None
     from scidiscovery.research_loop import replay_check
     value['engineering_check'] = replay_check.public(config, result['call_id'])
-    if result['status'] in {'known_success','known_failed'}:
+    if output_unavailable(result):
+        value['result']=result['result']
+        value.update({key:result[key] for key in ('returncode','wall_seconds') if key in result})
+    elif result['status'] in {'known_success','known_failed'}:
         path=Path(config['record_dir'])/'calls'/result['call_id']/'row.json'
         data=_read(path)
         proof=next((item for item in result['proofs'] if item['path']==str(path)),None)

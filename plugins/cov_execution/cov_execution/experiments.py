@@ -152,6 +152,8 @@ class CovExecution(LocalExecution):
             # complete() already verified the original observation and these
             # small bindings; do not hash every model/log a second time here.
             completed = json.loads(e.read(directory / 'completed.json'))
+            if cov.output_unavailable(completed):
+                return dict(status='unsupported',note='cov_output_unavailable',cleanup_confirmed=True)
             runtime = accepted['replay_runtime']
             reference(runtime)
             if Path(runtime['invoked_path']).resolve() != Path(runtime['path']):
@@ -251,11 +253,21 @@ class CovExecution(LocalExecution):
             cleanup_confirmed=True, diagnostic_originals=diagnostics)
 
     def completion(self,directory,accepted,returncode,cleanup,transport_complete, *, context=None):
-        result=cov._receipt(directory,accepted,cov._rows(Path(self.config['runs_root'])/'results.jsonl'),
-            returncode,cleanup,transport_complete=transport_complete,
-            storage_root=self.records.storage_root(), policy=self.config.get('storage_policy'), context=context)
+        terminal=json.loads(e.read(directory/'terminal.json'))
+        if any(terminal.get(key)!=accepted.get(key) for key in ('call_id','scope','mechanism_binding')):
+            raise e.IntegrityError('Cov terminal differs from its original accepted call')
+        if (terminal.get('returncode')!=returncode or terminal.get('cleanup_confirmed') is not cleanup
+                or terminal.get('transport_complete') is not transport_complete):
+            raise e.IntegrityError('Cov completion differs from its original terminal facts')
+        try:
+            rows=cov._rows(Path(self.config['runs_root'])/'results.jsonl')
+            cov_receipt.recover_pending(directory,accepted,terminal,rows)
+            result=cov._receipt(directory,accepted,rows,returncode,cleanup,transport_complete=transport_complete,
+                storage_root=self.records.storage_root(), policy=self.config.get('storage_policy'), context=context)
+        except (OSError,json.JSONDecodeError,cov._LedgerShapeError):
+            result=None
         if result is None:
-            result=super().completion(directory,accepted,returncode,cleanup,False,context=context)
+            result=super().completion(directory,accepted,returncode,cleanup,transport_complete,context=context)
             source=[accepted['script']]
             if 'code_version' in accepted:
                 root=e._code_version_binding(self.config,accepted)
@@ -263,7 +275,9 @@ class CovExecution(LocalExecution):
             result.update(change_intent=accepted['change_intent'],
                 proofs=[e.proof(directory/name) for name in ('accepted.json','stdout.raw','stderr.raw','terminal.json')]
                     +source,
-                note='No exact completed public receipt; preserve without replay')
+                result=dict(status='unavailable',metrics=[],outputs=[],diagnostic='cov_receipt_unavailable'),
+                returncode=returncode,wall_seconds=terminal.get('wall_seconds'),
+                note='Original execution terminal retained; Cov output unavailable without an exact completed public receipt; no replay')
         return result
 
     def command(self,accepted):
@@ -284,7 +298,14 @@ class CovExecution(LocalExecution):
 
     @e.record_effect
     def result(self,call_id):
-        result=cov._completed(self.records.directory(call_id),verify_source='code_version' not in self.records.accepted(call_id))
+        directory=self.records.directory(call_id);accepted=self.records.accepted(call_id)
+        result=cov._completed(directory,verify_source='code_version' not in accepted)
+        if result is None and (directory/'terminal.json').exists():
+            terminal=json.loads(e.read(directory/'terminal.json'))
+            result=self.completion(directory,accepted,terminal.get('returncode'),
+                terminal.get('cleanup_confirmed'),terminal.get('transport_complete'))
+            self.records.publish(call_id,'completed.json',result)
+            result=cov._completed(directory,verify_source='code_version' not in accepted)
         return result if result is not None else dict(status='unknown',call_id=call_id,note='Original call has no completion')
 
     @e.record_effect
@@ -305,16 +326,18 @@ class CovExecution(LocalExecution):
 
     @e.record_effect
     def status_details(self,call_id):
-        state=self._state(call_id)
         directory=self.records.directory(call_id)
+        self.result(call_id)  # Reconcile retained terminal/output facts, never execute.
+        state=self._state(call_id)
         result=cov._completed(directory,verify_assets=False)
         accepted=json.loads(e.read(directory/'accepted.json'))
-        row=json.loads(e.read(directory/'row.json')) if result and result['status'] in {'known_success','known_failed'} else {}
+        row=json.loads(e.read(directory/'row.json')) if result and result.get('candidate_id') is not None else {}
         if result and result['status']=='unknown':state='unknown'
         return dict(state=state,call_id=call_id,candidate_id=result['candidate_id'] if result else None,
             evaluation_key=self.config['evaluation_key'],metric=row.get('val_score') if cov._finite(row.get('val_score')) else None,
             direction='max',wall_seconds=row.get('wall_seconds') if cov._finite(row.get('wall_seconds')) else None,
-            parent_candidate=accepted['parent']['candidate_id'])
+            parent_candidate=accepted['parent']['candidate_id'],
+            **(dict(result=result['result'],returncode=result.get('returncode')) if result and cov.output_unavailable(result) else {}))
 
     def public_result(self,result):
         return cov.public_feedback(self.config,result,include_model=True) if 'proofs' in result else super().public_result(result)
@@ -326,7 +349,11 @@ def build(context):
 
 def validate_context(item, accepted, parent):
     """Cov's native run/model and derivation contract, separate from host identity."""
-    if ((item['status']=='known_success') != (item.get('model') is not None)
+    if cov.output_unavailable(item):
+        if (item['status'] not in {'known_success','known_failed','unknown'}
+                or any(item.get(key) is not None for key in ('candidate_id','run_id','model'))):
+            raise e.IntegrityError('Cov unavailable output acquired scientific qualification')
+    elif ((item['status']=='known_success') != (item.get('model') is not None)
             or item['status']!='unknown' and (type(item.get('run_id')) is not int
                 or item['run_id']<1 or not isinstance(item['candidate_id'],str))):
         raise ValueError('Cov failed/unknown context cannot acquire model qualification')

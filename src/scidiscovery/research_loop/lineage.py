@@ -64,7 +64,8 @@ def contexts(root, job, items, archive, previous=()):
         raise ValueError('Execution context list required')
     from .protocol import stage_scope
     expected_scope=stage_scope(root,job)
-    result=[];seen=set();available={item['candidate_id']:item for item in previous if item['status']=='known_success'}
+    result=[];seen=set();available={item['candidate_id']:item for item in previous
+        if item['status']=='known_success' and item['candidate_id'] is not None}
     for item in items:
         if not isinstance(item,dict) or not {'call_id','scope','status','candidate_id','parent','change_intent','note','proofs'} <= set(item):
             raise ValueError('Plugin context fields differ from contract2')
@@ -122,7 +123,8 @@ def contexts(root, job, items, archive, previous=()):
         if declared.context_validator is not None:
             declared.context_validator(validated,accepted,available.get(item['parent']['candidate_id']))
         result.append(validated)
-        if validated['status']=='known_success':available[validated['candidate_id']]=validated
+        if validated['status']=='known_success' and validated['candidate_id'] is not None:
+            available[validated['candidate_id']]=validated
     return result
 
 
@@ -156,8 +158,14 @@ def build(root, before_step, *, sources=None, search_state=None):
             if identity in calls:raise ValueError('Context was sealed more than once')
             calls.add(identity);candidate=context['candidate_id']
             _parent_original(root,context,available,source=owner)
-            if context['status']=='known_success':available[candidate]=context
+            if context['status']=='known_success' and candidate is not None:available[candidate]=context
             if context['status']=='unknown':coverage='partial';continue
+            if (candidate is None and isinstance(context.get('result'),dict)
+                    and context['result'].get('status')=='unavailable'
+                    and context.get('run_id') is None and context.get('model') is None):
+                # Native terminal facts remain in the sealed context and managed
+                # experiment index; unavailable output supplies no candidate edge.
+                coverage='partial';continue
             if candidate not in candidates:raise ValueError('Context has no observed candidate')
             parent=context['parent'];item=candidates[candidate]
             item.update(execution_status=context['status'],mechanism_ref=(context.get('mechanism_binding') or {}).get('mechanism_ref',context['scope']['mechanism_ref']),

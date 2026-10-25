@@ -370,15 +370,23 @@ def test_r1_lost_local_process_original_keeps_budget_cleanup_blocked(tmp_path,ex
 def test_r2_cov_missing_receipt_fallback_keeps_domain_context_shape(local,monkeypatch):
     from cov_execution.experiments import CovExecution
     from cov_execution import lineage as cov_lineage
+    from scidiscovery.research_loop import worker_execution_bridge as bridge
     root,script,config,_=local
-    result=e.dispatch(config,script,command_options=dict(experiment_directory=str(root),arguments=[]))
+    # Explicit trusted host fixture seam; this is not namespace-isolation evidence.
+    token=bridge._LOCAL_LAUNCH.set(lambda config,accepted,command,cwd:(command,cwd,None))
+    try:
+        result=e.dispatch(config,script,command_options=dict(experiment_directory=str(root),arguments=[]))
+    finally:bridge._LOCAL_LAUNCH.reset(token)
     directory=e.Records(config).directory(result['call_id'])
     accepted=c.read(directory/'accepted.json');accepted.pop('local_observation_version')
     monkeypatch.setattr(cov_lineage,'_receipt',lambda *args,**kwargs:None)
     adapter=CovExecution(dict(config,runs_root=str(root/'runs')))
     fallback=adapter.completion(directory,accepted,0,True,True)
-    assert set(fallback)=={'call_id','status','candidate_id','run_id','model','parent','change_intent','scope','proofs','note'}
-    assert fallback['status']=='unknown'
+    assert set(fallback)=={'call_id','status','candidate_id','run_id','model','parent','change_intent','scope','proofs','note',
+        'result','returncode','wall_seconds'}
+    assert fallback['status']=='known_success' and fallback['returncode']==0
+    assert fallback['result']['status']=='unavailable'
+    assert fallback['candidate_id'] is fallback['run_id'] is fallback['model'] is None
 
 
 @pytest.mark.stress

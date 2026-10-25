@@ -128,7 +128,13 @@ public material fields. Code audit views retain the original compiler reference,
 requires confirmed native, bridge and applicable backend shutdown; unknown retains it.
 
 Cov keeps the existing `runs_root/model_run<run_id>.pkl` original after exact
-call/run/receipt checks and retains its single-script entry contract. TCAD command
+call/run/receipt checks and retains its single-script entry contract. Cov publishes
+complete bounded result rows and host receipts exclusively. Same-call recovery may
+publish a complete pending host receipt only when its frozen acceptance, stopped
+terminal and original ledger agree; it never reruns the experiment. Native terminal
+facts survive output-publication failure: unavailable scientific output carries no
+candidate, run or model qualification. A raw backend row alone is not a host receipt.
+TCAD command
 collection first writes native scientific outputs, the existing scientific `tcad_log`
 and facts at the existing node/call output directory. Manifest, transport-derived
 files, bindings and transfer spool stay private. New socket-backed preparation is
@@ -184,6 +190,14 @@ fallback. Built-in launchers retain their read-only input mounts. A final reques
 writable delivery artifact may be independently materialized; this is an explicit
 output, not a repeated copy of the entire input stage. Native permissions and
 same-original unknown-call reconciliation remain unchanged.
+
+Cov confirmation may also read the exact final operation marker's
+`.rootless-pending` sibling. It confirms only the original operation, candidate,
+artifact, audit and both current target generations together; confirmation does not
+write, remove pending files or repeat promotion. Partial or mismatched publication
+remains unknown. Promotion refuses any of its four existing pending targets before
+writing a target. Earlier partial continuation/cancellation is unsupported when
+those files lack exact operation ownership; filename or age does not establish it.
 
 ## Retained transport leaves
 

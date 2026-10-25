@@ -76,6 +76,59 @@ def environment(accepted,directory):
         encoded(value['scope']).decode(),encoded(value['source_ref']).decode())))
 
 
+def _publish_pending(pending, destination):
+    pending.chmod(0o400)
+    os.link(pending,destination)  # Complete bytes, atomic exclusive publication.
+    pending.unlink()
+    descriptor=os.open(destination.parent,os.O_RDONLY|os.O_DIRECTORY)
+    try:os.fsync(descriptor)
+    finally:os.close(descriptor)
+
+
+def publish(path, data, *, pending=None):
+    """Publish complete output without replacing an existing final or pending file."""
+    path=Path(path)
+    pending=path.with_name(path.name+'.pending') if pending is None else Path(pending)
+    if len(data)>MAX_BYTES:raise ValueError('Cov result exceeds its declared publication bound')
+    if path.exists() or path.is_symlink():raise FileExistsError(path)
+    with pending.open('xb') as stream:
+        stream.write(data);stream.flush();os.fsync(stream.fileno())
+    _publish_pending(pending,path)
+
+
+def recover_pending(directory, accepted, terminal, rows):
+    """Finish only this stopped call's complete legacy envelope; never run a command."""
+    final=directory/'receipt.json';pending=directory/'receipt.pending'
+    if (any(terminal.get(key)!=accepted.get(key) for key in ('call_id','scope','mechanism_binding'))
+            or terminal.get('cleanup_confirmed') is not True or terminal.get('transport_complete') is not True
+            or type(terminal.get('returncode')) is not int or terminal['returncode'] not in (0,1)):
+        return
+    try:
+        original(pending,MAX_BYTES)
+        data=pending.read_bytes()
+        if len(data)>MAX_BYTES:return
+        value=json.loads(data)
+        if len(encoded(value))>MAX_BYTES:return
+    except (OSError,ValueError,OverflowError,RecursionError):
+        return  # Partial or unknown pending bytes never become a receipt.
+    row=value.get('row') if isinstance(value,dict) else None
+    if (not isinstance(row,dict) or value!=envelope(accepted,row)
+            or type(row.get('run_id')) is not int or row['run_id']<1
+            or row.get('script')!=accepted['source_script']
+            or row.get('ok') is not (terminal['returncode']==0)
+            or [item for item in rows if item.get('run_id')==row['run_id']]!=[row]):
+        return
+    if final.exists() or final.is_symlink():
+        try:
+            original(final,MAX_BYTES)
+            if final.read_bytes()==data:pending.unlink()
+        except (OSError,ValueError):pass
+        return  # Never replace an already published receipt.
+    # The interrupted producer may have stopped before its own file fsync.
+    with pending.open('rb') as stream:os.fsync(stream.fileno())
+    _publish_pending(pending,final)
+
+
 def _runner(accepted,directory):
     transport=accepted['receipt_transport'];runner=transport['runner']
     if original(transport['backend']['path'])!=transport['backend'] or runner_profile(runner['path'])!=runner:
@@ -92,12 +145,8 @@ def _runner(accepted,directory):
             row=frame.f_locals.get('rec')
             if not isinstance(row,dict):raise ValueError('Public runner output has no actual record object')
             data=encoded(envelope(accepted,row))
-            pending=directory/'receipt.pending'
-            with pending.open('xb') as stream:
-                stream.write(data);stream.flush();os.fsync(stream.fileno())
-            pending.chmod(0o400)
-            os.link(pending,directory/'receipt.json')  # Atomic, exclusive publication.
-            pending.unlink();published=True
+            publish(directory/'receipt.json',data,pending=directory/'receipt.pending')
+            published=True
         builtins.print(*args,**kwargs)
     module.print=receipt_print
     sys.argv=[runner['path'],accepted['source_script']]
@@ -132,8 +181,7 @@ def science_runner(path):
             if not isinstance(row,dict):raise ValueError('Public runner has no actual result row')
             data=encoded(row)
             if len(data)>MAX_BYTES:raise ValueError('Public runner result exceeds its declared bound')
-            with Path(invocation['output']).open('xb') as stream:
-                stream.write(data);stream.flush();os.fsync(stream.fileno())
+            publish(Path(invocation['output']),data)
             published=True
         builtins.print(*args,**kwargs)
     module.print=receipt_print

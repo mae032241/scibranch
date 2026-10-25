@@ -385,6 +385,11 @@ def _run_view(value):
 def _source_projection(config, accepted):
     """Project a declared file or its permanent code identity, without exporting code."""
     declared,_=registration(config['execution_interface']['executor'])
+    return _source_projection_from_provider(config,accepted,declared.scientific_source)
+
+
+def _source_projection_from_provider(config, accepted, scientific_source):
+    """Use an already selected provider with the same original-source checks."""
     implementation=None;version=None;code_entry=None
     if 'code_version' in accepted:
         root=_code_version_binding(config,accepted)
@@ -401,7 +406,7 @@ def _source_projection(config, accepted):
                 if version is not None and version!=compiler_version:
                     raise IntegrityError('Scientific source has conflicting accepted and compiler code versions')
                 version=compiler_version
-            elif declared.scientific_source is not None:
+            elif scientific_source is not None:
                 # Legacy author-file projections keep their original scientific
                 # validation. New Git metadata never takes this consumption path.
                 binding=execution_authority.accepted_input_subject(root,job,accepted)
@@ -415,8 +420,8 @@ def _source_projection(config, accepted):
                     actual=(originals.resolve_ref(originals.source_for_ref(owner,author),author)
                         if owner.inherited else originals.resolve_root_ref(root,author))
                     implementation=dict(author,path=str(actual))
-    source=(declared.scientific_source(accepted,implementation=implementation)
-        if declared.scientific_source is not None else None)
+    source=(scientific_source(accepted,implementation=implementation)
+        if scientific_source is not None else None)
     if (source is not None and code_entry is not None
             and {key:source.get(key) for key in ('path','size_bytes','file_stat')}==code_entry):source=None
     if source is not None and any(proof(source['path']).get(key)!=item for key,item in source.items()

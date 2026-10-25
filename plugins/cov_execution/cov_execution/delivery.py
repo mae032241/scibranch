@@ -339,6 +339,50 @@ def _replace(path, data):
     os.replace(pending, path)
 
 
+def _promote(request, runs, submission, artifact, audit):
+    # Fixed temporary names have no independent operation ownership. Refuse
+    # every known pending target before replacing even the first published file.
+    for path in (runs/'submitted_model.pkl', submission/'model.pkl',
+                 runs/'submitted.json', runs/'rootless-delivery-operation.json'):
+        pending = path.with_name(path.name + '.rootless-pending')
+        if pending.exists() or pending.is_symlink():
+            raise ValueError('Uncertain delivery target temporary exists')
+    # A multi-file commit can be interrupted. The marker is written last;
+    # anything partial stays unknown and is queried without resubmission.
+    published = {}
+    for name, path in [('run_model', runs/'submitted_model.pkl'), ('submission_model', submission/'model.pkl')]:
+        published[name] = _copy_selected(artifact, path)
+    audit = dict(audit, model_path=str(Path(request['target']['runs']) / 'submitted_model.pkl'))
+    _replace(runs / 'submitted.json', (json.dumps(audit, allow_nan=False) + '\n').encode())
+    marker = dict(operation_id=request['operation_id'], candidate_id=request['candidate_id'],
+                  artifact_ref=request['artifact_ref'], artifact_origin=request['artifact_origin'], audit=audit, published=published)
+    _replace(runs / 'rootless-delivery-operation.json', (json.dumps(marker) + '\n').encode())
+
+
+def _submission_matches(request, runs, submission, marker_path):
+    """Read one exact completion marker and the current published originals."""
+    try:
+        marker = json.loads(_exact(marker_path).read_text())
+        actual = json.loads(_exact(runs/'submitted.json').read_text())
+        return (isinstance(marker, dict) and isinstance(marker.get('published'), dict)
+                and all(marker.get(key) == request[key] for key in ('operation_id', 'candidate_id', 'artifact_ref', 'artifact_origin'))
+                and _audit(actual, request['context']['row']['run_id']) and actual == marker['audit']
+                and _generation(runs / 'submitted_model.pkl') == marker['published']['run_model']
+                and _generation(submission / 'model.pkl') == marker['published']['submission_model'])
+    except (OSError, ValueError, KeyError):
+        return False
+
+
+def _confirm(request, runs, submission):
+    # Only a complete final marker can prove the original operation finished.
+    # Confirmation never repairs, promotes or removes any pending file.
+    marker = runs/'rootless-delivery-operation.json'
+    for path in (marker, marker.with_name(marker.name + '.rootless-pending')):
+        if _submission_matches(request, runs, submission, path):
+            return _reply(request, 'confirmed', 'exact_public_submission_confirmed')
+    return _reply(request, 'unknown', 'exact_submission_not_confirmed')
+
+
 def _current_guard(request):
     # Standalone task Python has no framework import; load the host-frozen pure contract.
     import runpy
@@ -445,29 +489,10 @@ def leaf(request):
         if not _audit(audit, run_id) or _exact('/scratch/runs/submitted_model.pkl').stat().st_size != request['artifact_ref']['size_bytes']:
             return _reply(request, 'failed', 'audit_not_completed')
         artifact=_exact('/inputs/artifact')
-        # A multi-file commit can be interrupted. The marker is written last;
-        # anything partial stays unknown and is queried without resubmission.
-        published = {}
-        for name, path in [('run_model', runs/'submitted_model.pkl'), ('submission_model', submission/'model.pkl')]:
-            published[name] = _copy_selected(artifact, path)
-        audit['model_path'] = str(Path(request['target']['runs']) / 'submitted_model.pkl')
-        _replace(runs / 'submitted.json', (json.dumps(audit, allow_nan=False) + '\n').encode())
-        marker = dict(operation_id=request['operation_id'], candidate_id=request['candidate_id'],
-                      artifact_ref=request['artifact_ref'], artifact_origin=request['artifact_origin'], audit=audit, published=published)
-        _replace(runs / 'rootless-delivery-operation.json', (json.dumps(marker) + '\n').encode())
+        _promote(request, runs, submission, artifact, audit)
     elif phase != 'confirm':
         raise ValueError('Unknown delivery phase')
-    try:
-        marker = json.loads(_exact(runs/'rootless-delivery-operation.json').read_text())
-        actual = json.loads(_exact(runs/'submitted.json').read_text())
-        if (all(marker.get(key) == request[key] for key in ('operation_id', 'candidate_id', 'artifact_ref', 'artifact_origin'))
-                and _audit(actual, run_id) and actual == marker['audit']
-                and _generation(runs / 'submitted_model.pkl') == marker['published']['run_model']
-                and _generation(submission / 'model.pkl') == marker['published']['submission_model']):
-            return _reply(request, 'confirmed', 'exact_public_submission_confirmed')
-    except (OSError, ValueError, KeyError):
-        pass
-    return _reply(request, 'unknown', 'exact_submission_not_confirmed')
+    return _confirm(request, runs, submission)
 
 
 def isolate(request, adapter):

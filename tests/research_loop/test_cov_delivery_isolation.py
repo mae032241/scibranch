@@ -13,6 +13,140 @@ from test_delivery import accepted,closeout_decision
 
 
 @pytest.mark.process_e2e
+def test_unknown_submit_confirms_exact_pending_marker_with_read_only_targets(tmp_path,monkeypatch,execution_registry):
+    from cov_execution import delivery as cov_delivery
+    from scidiscovery.research_loop import history
+    from test_direct_public_collect import stopped_attempt
+    import sys
+    import traceback
+    observer_errors=[];capture=history._capture;run=subprocess.run
+    def capture_with_diagnostics(root,job,*args,**kwargs):
+        adapter=(c.settings(root,job).get('history_observer') or {}).get('adapter')
+        expected=[sys.executable,'-I',str(Path(adapter))] if adapter else None
+        stderr=[]
+        def run_with_diagnostics(command,*options,**settings):
+            try:
+                return run(command,*options,**settings)
+            finally:
+                stream=settings.get('stderr')
+                if command==expected and stream is not None:
+                    position=None
+                    try:
+                        position=stream.tell();stream.seek(0,os.SEEK_END)
+                        stream.seek(max(0,stream.tell()-8192))
+                        tail=stream.read()
+                        if tail:stderr.append(tail.decode(errors='replace'))
+                    except (OSError,ValueError,AttributeError):
+                        pass
+                    finally:
+                        if position is not None:
+                            try:stream.seek(position)
+                            except (OSError,ValueError):pass
+        try:
+            with monkeypatch.context() as context:
+                context.setattr(subprocess,'run',run_with_diagnostics)
+                return capture(root,job,*args,**kwargs)
+        except Exception as error:
+            observer_errors.append(dict(step=job['step'],failure_type=type(error).__name__,
+                message=str(error)[:4096],traceback=traceback.format_exc(limit=8)[-8192:],stderr=stderr))
+            raise
+    monkeypatch.setattr(history,'_capture',capture_with_diagnostics)
+    seal=c.seal_result
+    def seal_synthetic_author(root,step):
+        # These Node authors are presealed fixture records; scientific callback
+        # calls and all delivery processes run with the real process validator.
+        assert step in (1,2,3)
+        job=c.read(root/'jobs'/f'{step:03d}.json')
+        with monkeypatch.context() as context:
+            stopped_attempt(root,job,c.host_record(c.workspace(root,step)),context)
+            return seal(root,step)
+    monkeypatch.setattr(c,'seal_result',seal_synthetic_author)
+    root,nodes,first,*_=current_managed_scene(tmp_path,monkeypatch)
+    phases=[];original=delivery._call;confirmed_mounts=[]
+    marker=root/'runs/rootless-delivery-operation.json'
+    pending=marker.with_name(marker.name+'.rootless-pending')
+    def observe(spec,request,seconds,**kwargs):
+        phases.append(request['phase'])
+        if request['phase']=='confirm':
+            # Inspect the production namespace arguments before running the
+            # same real isolated entry. No harness or adapter bytes change.
+            commands=[]
+            with monkeypatch.context() as context:
+                context.setattr(cov_delivery.os,'execv',lambda program,args:commands.append(args))
+                cov_delivery.isolate(request,spec['adapter'])
+            arguments=commands[0]
+            assert '--bind' not in arguments
+            for key in ('runs','submission'):
+                assert any(arguments[index:index+3]==['--ro-bind',spec['target'][key],'/target/'+key]
+                    for index in range(len(arguments)-2))
+            confirmed_mounts.append(request['operation_id'])
+        response=original(spec,request,seconds,**kwargs)
+        if request['phase']=='promote':
+            assert response['status']=='confirmed'
+            data=marker.read_bytes()
+            marker.replace(pending)
+            assert pending.read_bytes()==data
+            # The accepted call completed and cleaned up, but its response was
+            # lost. Retain that unknown outcome and reconcile this operation.
+            return None
+        return response
+    monkeypatch.setattr(delivery,'_call',observe)
+    refs=delivery.freeze_sources(root,nodes)
+    selected=[item for item in refs['items'] if item['candidate_id']==first['candidate_id']]
+    if not selected:
+        observations=[]
+        for node in nodes:
+            try:
+                seal=c.read(c.host_record(c.workspace(root,node['step']))/'result-identity.json')
+                proof=seal.get('observations')
+                fact=c.read(root/proof['path']) if isinstance(proof,dict) and 'path' in proof else {}
+                observations.append(dict(step=node['step'],proof=proof,
+                    fact={key:fact[key] for key in ('coverage','diagnostic','candidate_diagnostics') if key in fact},
+                    candidate_ids=[row['id'] for row in fact.get('candidates',[])],
+                    contexts=[dict(call_id=row['call_id'],status=row['status']) for row in fact.get('contexts',[])],
+                    managed_calls=[dict(call_id=row['call_id'],status=row['status']) for row in fact.get('managed_calls',[])]))
+            except (OSError,ValueError,KeyError) as error:
+                observations.append(dict(step=node['step'],diagnostic_error=type(error).__name__))
+        diagnostic=dict(expected_candidate_id=first['candidate_id'],refs=refs,phases=phases,
+            observations=observations,observer_errors=observer_errors)
+        log=os.environ.get('SCID_TEST_LOG_DIR')
+        if log:
+            try:
+                directory=Path(log);directory.mkdir(parents=True,exist_ok=True)
+                (directory/'g4-delivery-missing-candidate.json').write_text(json.dumps(diagnostic,indent=2)+'\n')
+            except OSError as error:
+                diagnostic['log_error']=type(error).__name__
+        assert selected,diagnostic
+    chosen=selected[0]
+    assert chosen['status']=='audit_pending'
+    originals={root/proof['path'] for proof in (chosen['ledger'],*chosen['objects'].values(),chosen['artifact_origin'])}
+    def snapshot(paths):
+        return {path:(cov_delivery._generation(path),path.read_bytes()) for path in paths}
+    original_before=snapshot(originals)
+    _,_,bound=closeout_decision(root,refs,recommendation=first['candidate_id'])
+    submit=accepted(root,bound)
+    unknown=delivery.invoke(root,submit,20)
+    assert unknown['status']=='unknown' and unknown['cleanup_confirmed']
+    assert unknown['operation_id']==bound['operation_id']
+    budget.action_outcome(root,submit,unknown)
+    targets=(root/'runs/submitted.json',root/'runs/submitted_model.pkl',root/'submission/model.pkl',pending)
+    target_before=snapshot(targets)
+    assert not marker.exists()
+    confirmation=accepted(root,bound,'confirm')
+    assert confirmation['operation_id']==submit['operation_id'] and confirmation['binding']==submit['binding']
+    result=delivery.invoke(root,confirmation,10)
+    assert result['status']=='confirmed' and result['cleanup_confirmed']
+    budget.action_outcome(root,confirmation,result)
+    assert phases==['resolve','audit','promote','confirm']
+    assert confirmed_mounts==[bound['operation_id']]
+    assert snapshot(targets)==target_before and snapshot(originals)==original_before
+    assert not marker.exists() and pending.is_file()
+    actions=budget.closeout_state(root)['actions']
+    assert [row['intent']['action_kind'] for row in actions]==['submit','confirm']
+    assert actions[0]['outcome']['result']==unknown
+
+
+@pytest.mark.process_e2e
 def test_real_isolated_resolve_audit_promote_and_confirm(tmp_path,monkeypatch,execution_registry):
     root,nodes,first,*_=current_managed_scene(tmp_path,monkeypatch)
     settings=(root/'settings.json').read_bytes();phases=[];resolved=[]

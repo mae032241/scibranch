@@ -452,7 +452,8 @@ def backend_launcher(s,w,h,materials):
                 # actual returncode, transport and cleanup before any success.
                 if not isinstance(row,dict) or row.get('script')!=str(source):
                     raise e.IntegrityError('Scientific runner row differs from its original source')
-                e.write(directory/'receipt.json',cov_receipt.envelope(accepted,row))
+                cov_receipt.publish(directory/'receipt.json',cov_receipt.encoded(cov_receipt.envelope(accepted,row)),
+                    pending=directory/'receipt.pending')
         elif config['execution_interface']['executor']=='local_execution:command':
             command=list(command)
             if code_root is not None:

@@ -337,10 +337,12 @@ class LocalExecution:
             from . import atomic_files
             atomic_files._finish(out,0o400)
             atomic_files._finish(err,0o400)
-        if finish is not None:finish(returncode,cleanup,transport_complete)
         self.records.publish(call_id,'terminal.json',dict(returncode=returncode,cleanup_confirmed=cleanup,
             transport_complete=transport_complete,wall_seconds=time.monotonic()-started,
             **(dict(storage_limit_reached=True) if log_limited else {})))
+        # Output publication can fail after the child and its writers stopped.
+        # Retain those execution facts before invoking the output adapter.
+        if finish is not None:finish(returncode,cleanup,transport_complete)
         completion_context=storage.Deadline(max(.001,deadline-time.monotonic()))
         if 'code_version' not in accepted:
             try:

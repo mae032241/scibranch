@@ -176,7 +176,8 @@ def _adapter(root, job=None, *, context=None):
             continue
         inventory.entry(); inventory.file(_file(proof['path']).stat().st_size)
         from . import experiments
-        if experiments.proof(_file(proof['path']), context=context) != {key:proof[key] for key in ('path','size_bytes')}:
+        current = experiments.proof(_file(proof['path']), context=context)
+        if any(current.get(key) != proof[key] for key in ('path','size_bytes','file_stat') if key in proof):
             raise ValueError('Frozen delivery executable or public harness changed')
     from . import generic_delivery
     if Path(spec['adapter']) == Path(generic_delivery.__file__).resolve():

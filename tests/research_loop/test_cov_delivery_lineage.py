@@ -123,7 +123,7 @@ def current_managed_scene(tmp_path,monkeypatch,*,native_launcher=None,native_pro
         cov_lineage.configure(root,2,[sys.executable,'-I',str(harness/'exp_cli.py')],root/'runs',path,receipt_channel='public_runner_main')
     configuration=experiment_client.resolve(path,c.read(path))
     launch=launcher.backend_launcher(settings,work,home,[(receipt_path,receipt_path)])
-    source=work/'train.py'
+    source=work/'code/train.py';source.parent.mkdir(parents=True,exist_ok=True)
     def diagnostics(reply):
         tails=[]
         for call in experiments.Records(configuration).calls()[-2:]:
