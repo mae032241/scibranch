@@ -19,13 +19,17 @@ def clock_stamp():
                 boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip())
 
 
-def _duration(before, after, *, legacy_elapsed=False):
+def _duration(before, after, *, legacy_elapsed=False, exclude_downtime=False):
     if 'at_boottime' not in before:  # Legacy elapsed startup has no monotonic anchor.
         wall = after['at_unix'] - before['at_unix']
         if wall < 0:
             raise ValueError('Control clock moved backwards; consumption is not refundable')
         return wall
     if before['boot_id'] != after['boot_id']:
+        if exclude_downtime:
+            # Only the new boot's uptime is known. The previous boot's tail
+            # after its last recorded observation cannot be reconstructed.
+            return after['at_boottime']
         # Persisted Unix timestamps survive a host restart. Keep previously
         # measured intervals and charge the open cross-boot gap without ever
         # refunding consumption if the wall clock was corrected backwards.
@@ -97,6 +101,13 @@ def _read_events(root, settings, *, resources=False):
             _verify_reanchor(root, settings, event, events)
         elif events:
             _duration(events[-1], event, legacy_elapsed=settings.get('time_budget_basis', 'elapsed') == 'elapsed')
+        if 'uptime_accounting' in event and (event['uptime_accounting'] is not True
+                or settings.get('time_budget_basis', 'elapsed') != 'active'):
+            raise ValueError('Invalid uptime accounting marker')
+        if 'observed_advance_seconds' in event and (event.get('uptime_accounting') is not True
+                or type(event['observed_advance_seconds']) not in (int, float)
+                or not math.isfinite(event['observed_advance_seconds']) or event['observed_advance_seconds'] < 0):
+            raise ValueError('Invalid recorded advancement observation')
         if event['kind'] == 'budget_amend':
             for limits in (event.get('before'), event.get('after')):
                 if (not isinstance(limits, dict) or set(limits) != {'max_tokens', 'max_seconds'}
@@ -557,6 +568,11 @@ def _append(root, settings, events, parent, **fields):
     stamp = clock_stamp()
     event = dict(seq=len(events) + 1, parent_ref=parent,
                  settings_ref=contracts.record_ref(root / 'settings.json'), **stamp, **fields)
+    if settings.get('time_budget_basis', 'elapsed') == 'active':
+        event['uptime_accounting'] = True
+        # Preserve every durable observation, including non-clock events,
+        # when old native anchors have ambiguous UTC ordering across boots.
+        event['observed_advance_seconds'] = _snapshot(root, settings, events, sample_stamp=stamp)['advance_seconds']
     if 'reanchor' in event:
         _verify_reanchor(root, settings, event, events)
     elif events:
@@ -631,6 +647,147 @@ def snapshot(root, settings=None, *, sample_stamp=None):
     return _snapshot(root, original, events, sample_stamp=sample_stamp)
 
 
+def _accepted_advance_floors(root, start, events, now, *, basis):
+    """Recover already persisted native observations only across boot histories."""
+    stamps = [stamp for stamp in (start, *events, now) if stamp is not None]
+    if basis != 'active' or len({stamp.get('boot_id') for stamp in stamps}) < 2:
+        return {}
+    from . import execution, fork_runtime
+    floors, observations = {}, []
+    for step in fork_runtime.local_steps(root, include_native=True):
+        for _, intent in execution.accepted_intents(root, step):
+            anchor = intent.get('budget_slice')
+            if anchor is None:
+                continue
+            if (not isinstance(anchor, dict) or anchor.get('task_ref') != intent.get('task_ref')
+                    or not isinstance(anchor.get('boot_id'), str) or not anchor['boot_id']
+                    or type(anchor.get('advance_seconds')) not in (int, float)
+                    or not math.isfinite(anchor['advance_seconds']) or anchor['advance_seconds'] < 0):
+                raise ValueError('Accepted native budget observation changed')
+            boot = anchor['boot_id']
+            floors[boot] = max(floors.get(boot, 0.), anchor['advance_seconds'])
+            observations.append((boot, anchor['advance_seconds'], intent.get('prepared_at')))
+    observed = {stamp.get('boot_id') for stamp in stamps}
+    boundaries = [(before, after) for before, after in zip(stamps, stamps[1:])
+        if before.get('boot_id') != after.get('boot_id')]
+    for boot, floor, prepared in observations:
+        if boot in observed:
+            continue
+        # Old acceptance could leave no clock record on its boot. Locate its
+        # original ordering before a subsequent observed boot, independently
+        # of which later boot is currently being sampled. Missing old display
+        # timestamps use the first known boundary, never a fabricated uptime.
+        valid_time = type(prepared) in (int, float) and math.isfinite(prepared)
+        boundary = next((pair for pair in boundaries if valid_time and pair[1]['at_unix'] >= prepared), boundaries[0])
+        predecessor = boundary[0]['boot_id']
+        floors[predecessor] = max(floors.get(predecessor, 0.), floor)
+    return floors
+
+
+def _clock_durations(start, events, now, *, basis, duration=None, advance_floors=None):
+    """Fold clock facts for control and display; this grants no permission.
+
+    A display-only reader may supply a nullable readability check. Unmarked
+    closed clock intervals retain their historical charge; current intervals
+    and new closures use every recorded uptime observation.
+    """
+    if duration is None:
+        def duration(before, after, *, exclude_downtime=False):
+            return _duration(before, after, legacy_elapsed=basis == 'elapsed', exclude_downtime=exclude_downtime)
+    def plus(left, right):
+        return left + right if left is not None and right is not None else None
+    durations = dict(advance=0., waiting=0., paused=0., unclassified=0.)
+    floors = advance_floors or {}
+    phase, at = ('paused' if basis == 'active' else 'unclassified'), start
+    previous, pending, retained = start, 0., 0.
+    clock_seen = False
+    pending_tail = unmeasured_tail = False
+    def retain(boot):
+        nonlocal retained
+        floor = floors.get(boot, 0.)
+        measured = plus(durations['advance'], pending if phase == 'advance' else 0.)
+        if measured is not None:
+            retained = max(retained, floor - measured)
+    def retain_closed(event):
+        if 'observed_advance_seconds' not in event:
+            return
+        value = event['observed_advance_seconds']
+        if (event.get('uptime_accounting') is not True or type(value) not in (int, float)
+                or not math.isfinite(value) or value < 0):
+            durations['advance'] = None  # Saved display data is not admission-validated.
+        elif durations['advance'] is not None:
+            durations['advance'] = max(durations['advance'], value)
+    def retain_pending(event):
+        nonlocal retained
+        if 'observed_advance_seconds' not in event:
+            return
+        value = event['observed_advance_seconds']
+        if (event.get('uptime_accounting') is not True or type(value) not in (int, float)
+                or not math.isfinite(value) or value < 0):
+            durations['advance'] = None
+            return
+        measured = plus(durations['advance'], pending if phase == 'advance' else 0.)
+        if measured is not None:
+            # pending already contains this phase's measured uptime; retain
+            # only the missing cumulative fact until its phase is committed.
+            retained = max(retained, value - measured)
+    for index, event in enumerate(events):
+        if not clock_seen and event['kind'] != 'clock':
+            # Configuration/resource facts may predate host start. Until the
+            # first clock phase, only start anchors the initial idle interval.
+            retain_pending(event)
+            continue
+        clock_seen = True
+        prior_pending = pending
+        prior_retained = retained
+        if previous is not None:
+            uptime = basis == 'active'
+            if uptime and previous.get('boot_id') != event.get('boot_id'):
+                retain(previous.get('boot_id'))
+            pending = plus(pending, duration(previous, event, exclude_downtime=uptime))
+            pending_tail |= uptime and previous.get('boot_id') != event.get('boot_id')
+        previous = event
+        if event['kind'] != 'clock':
+            retain_pending(event)
+            continue
+        marked = event.get('uptime_accounting') is True
+        if 'reanchor' in event:
+            if at is not None and index:
+                value = prior_pending if marked else duration(at, events[index - 1])
+                durations['paused'] = plus(durations['paused'], value)
+                if marked:
+                    durations['advance'] = plus(durations['advance'], prior_retained)
+            retain_closed(event)
+            at, phase = event, 'paused'
+            pending, pending_tail, retained = 0., False, 0.
+            continue
+        if at is not None:
+            value = pending if marked else duration(at, event)
+            durations[phase] = plus(durations[phase], value)
+            if marked:
+                durations['advance'] = plus(durations['advance'], retained)
+            unmeasured_tail |= marked and pending_tail
+        retain_closed(event)
+        at, phase = event, event['phase']
+        pending, pending_tail, retained = 0., False, 0.
+    if at is not None and now is not None:
+        uptime = basis == 'active'
+        if uptime and previous.get('boot_id') != now.get('boot_id'):
+            retain(previous.get('boot_id'))
+        pending = plus(pending, duration(previous, now, exclude_downtime=uptime))
+        if uptime:
+            retain(now.get('boot_id'))
+        pending_tail |= uptime and previous.get('boot_id') != now.get('boot_id')
+        unmeasured_tail |= pending_tail
+        value = pending if uptime else duration(at, now)
+        durations[phase] = plus(durations[phase], value)
+        durations['advance'] = plus(durations['advance'], retained)
+    elif at is not None and basis == 'active':
+        retain(previous.get('boot_id'))
+        durations['advance'] = plus(durations['advance'], retained)
+    return durations, phase, unmeasured_tail
+
+
 def _snapshot(root, settings, events, *, sample_stamp=None):
     basis = settings.get('time_budget_basis', 'elapsed')
     if basis not in {'active', 'elapsed'}:
@@ -648,38 +805,9 @@ def _snapshot(root, settings, events, *, sample_stamp=None):
         interval(start, now)
     if basis == 'active' and start is not None and 'at_boottime' not in start:
         raise ValueError('Active clock requires its original boot anchor')
-    advance = paused = unclassified = waiting = 0.
-    phase, at = ('paused' if basis == 'active' else 'unclassified'), start
-    for index, event in enumerate(events):
-        if event['kind'] != 'clock':
-            continue
-        if 'reanchor' in event:
-            # Its predecessor phase is verified paused by _events. The idle
-            # cross-boot gap is unmeasured, never refunded advancement/waiting.
-            if at is not None and index:
-                paused += interval(at, events[index - 1])
-            at, phase = event, 'paused'
-            continue
-        if at is not None:
-            duration = interval(at, event)
-            if phase == 'advance':
-                advance += duration
-            elif phase == 'waiting':
-                waiting += duration
-            elif phase == 'paused':
-                paused += duration
-            else:
-                unclassified += duration
-        at, phase = event, event['phase']
-    if at is not None:
-        if phase == 'advance':
-            advance += interval(at, now)
-        elif phase == 'waiting':
-            waiting += interval(at, now)
-        elif phase == 'paused':
-            paused += interval(at, now)
-        else:
-            unclassified += interval(at, now)
+    floors = _accepted_advance_floors(root, start, events, now, basis=basis)
+    durations, phase, unmeasured_tail = _clock_durations(start, events, now, basis=basis, advance_floors=floors)
+    advance, waiting, paused, unclassified = (durations[key] for key in ('advance', 'waiting', 'paused', 'unclassified'))
     elapsed = None if bridged else interval(start, now) if start is not None else 0.
     if basis == 'elapsed' and start is not None:
         elapsed = _duration(dict(at_unix=start['at_unix']), now)
@@ -689,7 +817,8 @@ def _snapshot(root, settings, events, *, sample_stamp=None):
                 seconds_remaining=max(0., limits['max_seconds'] - consumed), clock_phase=phase,
                 ledger_events=len(events), historical_time='unknown_before_ledger' if basis == 'elapsed' else
                 'recorded_active_with_unmeasured_paused_gap' if bridged else 'recorded',
-                **(dict(unmeasured_paused_gap=True) if bridged else {}))
+                **(dict(unmeasured_paused_gap=True) if bridged else {}),
+                **(dict(unmeasured_shutdown_tail=True) if unmeasured_tail else {}))
 
 
 def status_snapshot(root):
@@ -708,6 +837,13 @@ def status_snapshot(root):
         return snapshot(root, settings)
     started = root / 'host-started.json'
     stamp = events[-1] if events else contracts.read(started) if started.exists() else None
+    if started.exists() and not any(event['kind'] == 'clock' for event in events):
+        start = contracts.read(started)
+        if (stamp is None or start.get('boot_id') == stamp.get('boot_id')
+                and start.get('at_boottime', 0.) > stamp.get('at_boottime', 0.)):
+            # A pre-start configuration fact is not the initial paused clock's
+            # endpoint. Both choices are saved facts; never sample now here.
+            stamp = start
     value = snapshot(root, settings, sample_stamp=stamp)
     if started.exists():
         value.update(paused_seconds=None, elapsed_seconds=None)
@@ -1279,7 +1415,7 @@ def _validate_final_a_event(root, settings, event, previous):
     """Replay only the original admission facts; never sample live budget here."""
     fields = {'seq', 'parent_ref', 'settings_ref', 'at_unix', 'at_boottime', 'boot_id',
               'kind', 'version', 'step', 'attempt', 'basis', 'anchor', 'selection', 'reserve'}
-    if (_final_a_policy(settings) is None or set(event) != fields
+    if (_final_a_policy(settings) is None or set(event) - {'uptime_accounting', 'observed_advance_seconds'} != fields
             or type(event['version']) is not int or event['version'] != 2
             or type(event['step']) is not int or event['step'] <= 0
             or type(event['attempt']) is not int or event['attempt'] != 0
@@ -1708,11 +1844,26 @@ def accept_node(root, job, *, final_report=None):
     reason = node_admission(root, job, final_report=final_report)
     if reason:
         raise NodeBudgetUnavailable(reason)
-    limits, stamp = snapshot(root), clock_stamp()
+    limits, stamp = _observe_node_clock(root)
     anchor = dict(task_ref=contracts.record_ref(root / 'jobs' / f'{job["step"]:03d}.json'), role=job['role'],
                 boot_id=stamp['boot_id'], advance_seconds=limits['advance_seconds'], limits=policy,
                 shared_limits={key: limits[key] for key in ('max_tokens', 'max_seconds')})
     return _accept_final_a(root, job, anchor, limits, final_report=final_report)
+
+
+def _observe_node_clock(root):
+    """Persist acceptance's observation using the existing clock event kind."""
+    with _ledger_writer(root):
+        settings = contracts.settings(root)
+        events, parent = _events(root)
+        phase = next((event['phase'] for event in reversed(events) if event['kind'] == 'clock'),
+            'paused' if settings.get('time_budget_basis', 'elapsed') == 'active' else None)
+        if settings.get('time_budget_basis', 'elapsed') != 'active':
+            stamp = clock_stamp()
+            return _snapshot(root, settings, events, sample_stamp=stamp), stamp
+        event = _append(root, settings, events, parent, kind='clock', phase=phase,
+            reason='accepted_native_budget_observation')
+        return _snapshot(root, settings, [*events, event], sample_stamp=event), event
 
 
 def stop_node(root, job, intent, limits, meter):
@@ -1748,13 +1899,14 @@ def accept_continuation(root, job, paths, *, output_repair=None):
     from . import native
     tokens, seconds = _attempt_consumption(root, job, paths)
     policy = node_limits(root, job)
-    limits, meter = snapshot(root), native.usage(root)
+    limits, stamp = _observe_node_clock(root)
+    meter = native.usage(root)
     if final is not None:
         original=contracts.read(contracts.regular(paths[0]/'native-intent.json'))
         final_a_return(root,job,original)
         if seconds >= policy['max_seconds']:
             raise NodeBudgetUnavailable('worker_resume_node_exhausted')
-        return dict(original['budget_slice'],boot_id=clock_stamp()['boot_id'],advance_seconds=limits['advance_seconds'],
+        return dict(original['budget_slice'],boot_id=stamp['boot_id'],advance_seconds=limits['advance_seconds'],
             previous_tokens=tokens,previous_seconds=seconds)
     if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0:
         raise NodeBudgetUnavailable('worker_resume_node_exhausted')
@@ -1772,7 +1924,7 @@ def accept_continuation(root, job, paths, *, output_repair=None):
             or step_limit(root) - used_steps(root) < 1 + reserve['steps']):
         raise NodeBudgetUnavailable('worker_resume_budget_unavailable')
     return dict(task_ref=contracts.record_ref(root / 'jobs' / f'{job["step"]:03d}.json'), role=job['role'],
-                boot_id=clock_stamp()['boot_id'], advance_seconds=limits['advance_seconds'], limits=policy,
+                boot_id=stamp['boot_id'], advance_seconds=limits['advance_seconds'], limits=policy,
                 shared_limits={key: limits[key] for key in ('max_tokens', 'max_seconds')},
                 previous_tokens=tokens, previous_seconds=seconds)
 

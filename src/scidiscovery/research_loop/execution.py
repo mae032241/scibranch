@@ -43,6 +43,8 @@ def accepted_intents(root, step):
     previous = None
     if (first/'native-intent.json').exists():
         value = c.read(c.regular(first/'native-intent.json'))
+        if not isinstance(value, dict):
+            raise ValueError('Original accepted native intent must be an object')
         _skill_intent(root, step, value)
         if (value.get('task_ref') != task or 'attempt' in value
                 or 'step' in value and (type(value['step']) is not int or value['step'] != step)):
@@ -61,6 +63,8 @@ def accepted_intents(root, step):
             if any(path.iterdir()):raise ValueError('Unaccepted continuation has unexpected execution facts')
             continue
         value = c.read(c.regular(file))
+        if not isinstance(value, dict):
+            raise ValueError('Accepted native continuation intent must be an object')
         _skill_intent(root, step, value)
         if (previous is None or number != accepted+1 or type(value.get('attempt')) is not int
                 or value['attempt'] != number or value.get('task_ref') != task

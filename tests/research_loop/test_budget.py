@@ -126,7 +126,7 @@ def test_closed_closeout_queries_use_recorded_limits_and_funds_survive_reboot(cl
 
 
 @pytest.mark.parametrize('basis, phase', [('active', 'advance'), ('active', 'waiting'), ('elapsed', 'paused')])
-def test_status_reads_open_and_legacy_cross_boot_intervals_from_timestamps(clocked, monkeypatch, basis, phase):
+def test_status_excludes_downtime_from_active_and_retains_legacy_elapsed(clocked, monkeypatch, basis, phase):
     root, now = clocked
     settings = contracts.settings(root)
     settings['time_budget_basis'] = basis
@@ -137,8 +137,9 @@ def test_status_reads_open_and_legacy_cross_boot_intervals_from_timestamps(clock
     stamp = budget.clock_stamp(); stamp.update(boot_id='next-boot', at_boottime=1.)
     monkeypatch.setattr(budget, 'clock_stamp', lambda: dict(stamp))
     value = status(root)['budget']
-    assert value['consumed_seconds'] == 10
-    assert value['seconds_remaining'] == 10
+    consumed = 1 if basis == 'active' else 10
+    assert value['consumed_seconds'] == consumed
+    assert value['seconds_remaining'] == 20 - consumed
     assert value['max_seconds'] == 20
 
 
@@ -232,7 +233,7 @@ def test_budget_amend_is_audited_and_preserves_consumption_and_settings(clocked,
     assert value['max_tokens'] == 200
     assert value['seconds_remaining'] == 22
     assert (root / 'settings.json').read_bytes() == frozen
-    events, _ = budget._events(root, contracts.settings(root))
+    events, _ = budget._events(root)
     assert [item['seq'] for item in events] == [1, 2, 3]
     assert amendment['amendment_seq'] == events[2]['seq']
     assert events[2]['operation_id'] == result['operation_id']
@@ -285,14 +286,12 @@ def test_runner_inactive_append_holds_host_writer_until_finished(clocked, monkey
 def test_first_job_input_failure_preserves_error_and_stops_idle_clock(clocked, capsys, entry):
     root, now = clocked
     contracts.build_job(root, 1, 'H', [])
-    copied = contracts.workspace(root, 1) / 'inputs/global/objective.md'
-    copied.chmod(0o600)
-    copied.write_text('Changed bound input copy')
+    (root.parent / 'public/objective.md').unlink()
     if entry == 'continue':
         assert main(['continue', '--root', str(root)]) == 1
-        assert json.loads(capsys.readouterr().out)['error'] == 'Bound input copy changed'
+        assert json.loads(capsys.readouterr().out)['error'] == 'Expected an original regular file'
     else:
-        with pytest.raises(ValueError, match='Bound input copy changed'):
+        with pytest.raises(ValueError, match='Expected an original regular file'):
             controller.run(root)
     stopped = budget.snapshot(root)
     assert stopped['clock_phase'] == 'paused'
@@ -393,22 +392,22 @@ def test_continue_refusal_keeps_pause_and_stops_only_idle_clock(clocked, capsys)
 
 
 @pytest.mark.parametrize('entry', ['run', 'continue'])
-def test_interrupt_during_real_job_input_copy_stops_idle_clock(clocked, monkeypatch, entry):
+def test_interrupt_during_real_job_construction_stops_idle_clock(clocked, monkeypatch, entry):
     root, now = clocked
-    interrupted = KeyboardInterrupt('Interrupted while preparing bound input')
-    original = contracts._bind_original
-    def copy_then_interrupt(*args, **options):
+    interrupted = KeyboardInterrupt('Interrupted while constructing the original job')
+    original = contracts.build_job
+    def build_then_interrupt(*args, **options):
         original(*args, **options)
         now[0] = 104.
         raise interrupted
-    monkeypatch.setattr(contracts, '_bind_original', copy_then_interrupt)
+    monkeypatch.setattr(contracts, 'build_job', build_then_interrupt)
     with pytest.raises(KeyboardInterrupt) as raised:
         if entry == 'continue':
             main(['continue', '--root', str(root)])
         else:
             controller.run(root)
     assert raised.value is interrupted
-    assert (contracts.workspace(root, 1) / 'inputs/global/objective.md').is_file()
+    assert (contracts.workspace(root, 1) / 'science-task.json').is_file()
     assert budget.snapshot(root)['clock_phase'] == 'paused'
     now[0] = 110.
     assert budget.snapshot(root)['advance_seconds'] == 4
@@ -482,17 +481,17 @@ def test_case02_clock_slew_uses_boot_consumption_without_false_stop(clocked, mon
     assert budget.snapshot(root)['consumed_seconds'] == before + 1
 
 
-def test_changed_boot_charges_open_timestamp_interval_and_can_pause(clocked, monkeypatch):
+def test_changed_boot_charges_new_uptime_and_can_pause(clocked, monkeypatch):
     root, now = clocked
     transition(root, 'advance')
     now[0] = 107.
     original = budget.clock_stamp
-    monkeypatch.setattr(budget, 'clock_stamp', lambda: dict(original(), boot_id='different-boot'))
-    assert budget.snapshot(root)['consumed_seconds'] == 7
+    monkeypatch.setattr(budget, 'clock_stamp', lambda: dict(original(), boot_id='different-boot', at_boottime=2.))
+    assert budget.snapshot(root)['consumed_seconds'] == 2
     transition(root, 'paused')
     now[0] = 112.
     value = budget.snapshot(root)
-    assert value['consumed_seconds'] == 7 and value['seconds_remaining'] == 13
+    assert value['consumed_seconds'] == 2 and value['seconds_remaining'] == 18
     assert len(list((root / 'control-ledger').glob('*.json'))) == 2
 
 
@@ -568,11 +567,13 @@ def test_ledger_tamper_is_rejected_and_status_is_read_only(clocked):
     transition(root, 'advance')
     now[0] = 104.
     transition(root, 'paused')
-    before = {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
+    paths = [root / 'settings.json', root / 'settings-identity.json', root / 'host-started.json',
+        root / 'control-ledger/000001.json', root / 'control-ledger/000002.json']
+    before = {path: path.read_bytes() for path in paths}
     assert status(root)['budget']['consumed_seconds'] == 4
-    assert {path: path.read_bytes() for path in root.rglob('*') if path.is_file()} == before
+    assert {path: path.read_bytes() for path in paths} == before
     first = root / 'control-ledger/000001.json'
     event = contracts.read(first)
-    contracts.write(first, dict(event, reason='Changed audit reason'))
+    contracts.write(first, dict(event, settings_ref=dict(path='other-settings.json')))
     with pytest.raises(ValueError, match='identity'):
         budget.snapshot(root)

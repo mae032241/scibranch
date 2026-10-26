@@ -170,17 +170,20 @@ scratch = ["build"]
 outputs = ["out"]
 ```
 
-`base_root` must be the exact canonical absolute root of an ordinary Git worktree,
-with no symlink ancestors; relative paths, `~`, bare repositories and linked
-worktrees are unsupported. `editable` names directories, including empty roots;
+Use an independent ordinary clone dedicated to this research. Do not commit,
+switch branches or move HEAD during the research. `base_root` must be the exact
+canonical absolute root of that ordinary Git worktree, with no symlink ancestors;
+relative paths, `~`, bare repositories and linked worktrees are unsupported.
+`editable` names directories, including empty roots;
 the other arrays default to empty. Roots must be canonical relative directory
 paths, without `.`, `..`, backslashes or `.git` components. Duplicates and any
 ancestor/descendant overlap within or across the arrays are rejected. The base
 cannot overlap instance, public, native-home or protected runtime paths; declared
 mounts cannot overlap exact bound scientific inputs.
 
-`base_root` 必须是普通 Git 工作树准确的 canonical 绝对根路径，全部祖先不得为符号链接；
-不支持相对路径、`~`、bare 仓库或 linked worktree。`editable` 指定目录，允许空根目录，
+请使用研究专用的独立普通 clone；研究期间不要提交、切换分支或移动 HEAD。`base_root`
+必须是该普通 Git 工作树准确的 canonical 绝对根路径，全部祖先不得为符号链接；不支持
+相对路径、`~`、bare 仓库或 linked worktree。`editable` 指定目录，允许空根目录，
 其余数组默认空。各项必须是规范相对目录，不含 `.`、`..`、反斜杠或 `.git` 组件；
 数组内及数组间重复、祖先/后代交叠均拒绝。基础工程不得与实例、公开材料、native home
 或受保护运行时路径交叠；声明挂载目录不得与准确绑定的科学输入交叠。
@@ -190,7 +193,8 @@ commit. SHA-1 and SHA-256 bases are supported. Existing-instance edits and forks
 retain that exact identity. The whole base directory is mounted read-only at its
 original path, including untracked and ignored files; its root `.git` directory
 is masked. The frozen Git identity covers tracked state, while the remaining
-base contents are the host's current files. Bounded Git index/tree enumeration
+base contents are the host's current files. Frozen HEAD is a code identity, not
+an adversarial content-integrity check. Bounded Git index/tree enumeration
 rejects staged changes and tracked symlinks/gitlinks. Ordinary Git worktree checks
 reject dirty tracked sources; Git's normal filters, assume-unchanged and
 skip-worktree flags apply. Control does not open, hash or stat every base file
@@ -205,8 +209,9 @@ rewrite known terminal outcomes or block metadata-only historical queries.
 准备时冻结上述声明、基础仓库对象格式与 HEAD commit；支持 SHA-1 和 SHA-256 基础仓库。
 已有实例的配置修改及 fork 均保留原身份。整个基础目录在原路径只读挂载，包含 untracked
 和 ignored 文件；只遮蔽根 `.git` 目录。冻结 Git 身份覆盖追踪状态，其余基础内容采用
-宿主当前文件。有界 Git 索引/树枚举拒绝 staged 修改与追踪 symlink/gitlink；普通 Git
-工作树检查拒绝追踪来源的 dirty 状态，采用 Git 通常的 filter、assume-unchanged 和
+宿主当前文件。冻结 HEAD 用于代码身份，不提供恶意内容篡改检测。有界 Git 索引/树枚举
+拒绝 staged 修改与追踪 symlink/gitlink；普通 Git 工作树检查拒绝追踪来源的 dirty 状态，
+采用 Git 通常的 filter、assume-unchanged 和
 skip-worktree 语义。命名空间启动不逐个打开、hash 或 stat 基础文件；Git 元数据校验
 仍随追踪条目数量增长。W 与 run 的 dirty 检查排除 editable、scratch 和 outputs；只读角色排除 scratch 和 outputs，
 这些隐藏来源的变化不使该视图失效。隐式 fetch 和 remote helper 均禁用。基础文件不复制
@@ -222,14 +227,21 @@ used, and rebuilding an existing job preserves its current draft. A fork keeps
 selected commits and current drafts distinct and still depends on the original
 shared base. Each local project run captures all editable roots in one directory
 `code_version`, including only declared code paths; initial seed, capture and
-exports retain the existing code quotas.
+exports retain the existing code quotas. All editable roots share fixed limits
+of 1 MiB per file, 50 MiB total, 4,096 files and 8,192 scan entries; `[project]`
+currently offers no override. These code-capture limits do not apply to the
+read-only base contents. Configuration checks and preparation may succeed before
+the first W draft seed exceeds a limit and prevents that node from starting.
 
 W 编辑 `project/<editable>` 草稿，并映射到基础工程原路径。初始草稿只复制追踪的 editable
 代码，全部根共享现有代码额度。唯一明确选中的父 run 或 compiled implementation 提供准确
 留存 commit；没有唯一选择时回到冻结基础代码并说明该回退。不按最新调用或未提交草稿
 推断来源，已有 job 重建保留当前草稿。fork 区分准确 commit 与当前草稿，并继续依赖原共享
 基础工程。每次本地 project run 将全部 editable 根聚合为一个目录 `code_version`，只含
-声明代码路径；初始 seed、采集及导出继续受现有代码额度约束。
+声明代码路径；初始 seed、采集及导出继续受现有代码额度约束。全部 editable 根共享
+固定限制：每文件 1 MiB、总计 50 MiB、4096 个文件、8192 个扫描条目；当前 `[project]`
+没有覆盖项。只读 base 内容不受这些代码采集额度限制。配置检查和准备可能通过，但首次
+W 草稿 seed 超额仍会阻止该节点启动。
 
 There is no overlay filesystem. W can write only its declared editable, scratch
 and node-output targets in the base view; other roles see the read-only base, not

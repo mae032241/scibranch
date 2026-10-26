@@ -172,9 +172,7 @@ def _budget(root, settings, events):
     now = None
     current_known = True
     phase = 'paused' if basis == 'active' else 'unclassified'
-    at = start
-    durations = dict(advance=0., waiting=0., paused=0., unclassified=0.)
-    def duration(before, after):
+    def duration(before, after, *, exclude_downtime=False):
         # Saved display records are not admission-validated. Check readability
         # here, but let the control clock own interval and cross-boot rules.
         keys = ['at_unix']
@@ -191,32 +189,27 @@ def _budget(root, settings, events):
                     or key == 'at_boottime' and value < 0 for value in values):
                 return None
         try:
-            value = budget._duration(before, after, legacy_elapsed=basis == 'elapsed')
+            value = budget._duration(before, after, legacy_elapsed=basis == 'elapsed', exclude_downtime=exclude_downtime)
             return value if math.isfinite(value) and value >= 0 else None
         except (KeyError, TypeError, ValueError, OverflowError):
             return None
-    def add(phase, before, after):
-        value = duration(before, after)
-        durations[phase] = durations[phase] + value if durations[phase] is not None and value is not None else None
-    for index, event in enumerate(events):
-        if event['kind'] != 'clock':
-            continue
-        if event.get('reanchor'):
-            if at is not None and index:
-                add('paused', at, events[index - 1])
-            phase, at = 'paused', event
-            continue
-        if at is not None:
-            add(phase, at, event)
-        phase, at = event['phase'], event
-    if at is not None:
-        if basis == 'active' and phase == 'paused':
-            # The open paused tail does not change recorded active consumption.
-            durations['paused'] = None
-        else:
-            now = budget.clock_stamp()
-            current_known = not events or duration(events[-1], now) is not None
-            add(phase, at, now)
+    phase = next((event['phase'] for event in reversed(events) if event['kind'] == 'clock'), phase)
+    if (start is not None or events) and (basis != 'active' or phase != 'paused'):
+        now = budget.clock_stamp()
+        current_known = not events or duration(events[-1], now) is not None
+    try:
+        floors = budget._accepted_advance_floors(root, start, events, now, basis=basis)
+    except (OSError, ValueError, TypeError, KeyError):
+        # An unreadable original prevents a usable time balance, but must not
+        # hide unrelated saved results, token observations or configured caps.
+        floors = None
+    durations, phase, unmeasured_tail = budget._clock_durations(start, events, now, basis=basis,
+        duration=duration, advance_floors=floors)
+    if floors is None:
+        durations['advance'] = None
+    if (start is not None or events) and basis == 'active' and phase == 'paused':
+        # The open paused tail does not change recorded active consumption.
+        durations['paused'] = None
     missing_start = start is None and any(event['kind'] == 'clock' for event in events)
     if start is None:
         elapsed = None if missing_start else 0.
@@ -239,7 +232,8 @@ def _budget(root, settings, events):
         advance_seconds=durations['advance'], waiting_seconds=durations['waiting'], paused_seconds=durations['paused'],
         unclassified_seconds=durations['unclassified'], elapsed_seconds=elapsed, consumed_seconds=consumed,
         seconds_remaining=max(0., limits['max_seconds'] - consumed) if consumed is not None else None,
-        time_status='recorded' if consumed is not None else 'unknown', clock_phase=phase, ledger_events=len(events))
+        time_status='recorded' if consumed is not None else 'unknown', clock_phase=phase, ledger_events=len(events),
+        **(dict(unmeasured_shutdown_tail=True) if unmeasured_tail else {}))
 
 
 def _correction(root):

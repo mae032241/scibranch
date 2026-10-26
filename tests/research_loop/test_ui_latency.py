@@ -131,20 +131,24 @@ def test_saved_used_steps_retain_continuations_delivery_and_audit_intents(tmp_pa
 ])
 def test_saved_active_time_keeps_unverifiable_intervals_unknown(tmp_path, monkeypatch, start, now):
     root, _ = prepare(tmp_path, enabled=False)
-    finish(root, 1, 'H', [], action='analyze')
+    c.build_job(root, 1, 'H', [])
+    record = c.host_record(c.workspace(root, 1))
+    c.write(record / 'native-intent.json', dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json')))
+    c.write(record / 'native-outcome.json', dict(returncode=0))
+    c.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=0, output_tokens=3))
     c.write(root / 'host-started.json', start)
     directory = root / 'control-ledger'; directory.mkdir(exist_ok=True)
     event = directory / '000001.json'
     c.write(event, dict(kind='clock', phase='advance', **start))
     monkeypatch.setattr(budget, 'clock_stamp', lambda: dict(now))
     originals = {path: path.read_bytes() for path in (root / 'host-started.json', event,
-        root / 'jobs/001.json', root / 'native-evidence/001/result-identity.json')}
+        root / 'jobs/001.json', record / 'native-intent.json', record / 'native-outcome.json', record / 'usage.json')}
     view = ui_saved_status.status(root)
     value = view['budget']
     assert value['consumed_seconds'] is None and value['seconds_remaining'] is None
     assert value['time_status'] == 'unknown'
     assert value['max_tokens'] == 4000 and value['max_seconds'] == 60
-    assert view['nodes'][0]['state'] == 'seal_present_unverified'
+    assert view['nodes'][0]['state'] == 'native_outcome_unsealed'
     assert view['usage']['observed_tokens'] == 10
     assert '时间' not in ui_view.exhausted_limits(view, 1)
     assert all(path.read_bytes() == original for path, original in originals.items())
