@@ -105,6 +105,13 @@ GROUP_FIELDS = {
         Field('policies.resume.output_repair', '允许修复输出格式', 'boolean'),
         Field('policies.resume.output_only', '恢复时只修复输出', 'boolean'),
         Field('policies.resume.native_home', '冻结的 Codex 主目录（绝对路径）'),
+        Field('policies.resume.automatic_recovery.enabled', '允许有界自动接续当前任务', 'boolean', placeholder='标准 Codex 新配置默认允许'),
+        Field('policies.resume.automatic_recovery.max_continues', '提前停止的 continue 上限（次）', 'integer', placeholder='2'),
+        Field('policies.resume.automatic_recovery.max_retries', '临时服务故障 retry 上限（次）', 'integer', placeholder='3'),
+        Field('policies.resume.automatic_recovery.initial_backoff_seconds', '首次服务退避（秒）', 'number', placeholder='30'),
+        Field('policies.resume.automatic_recovery.max_backoff_seconds', '单次服务退避上限（秒）', 'number', placeholder='300'),
+        Field('policies.resume.automatic_recovery.jitter_fraction', '服务退避抖动比例（0–1）', 'number', placeholder='0.1'),
+        Field('policies.resume.automatic_recovery.max_wait_seconds', '累计服务等待上限（秒）', 'number', placeholder='1800'),
     ],
 }
 ROLE_NAMES = dict(H='研究方向', W='实验与实现', A='综合评估', E='证据检索与提取')
@@ -378,12 +385,13 @@ def parse(fields, *, base, _fixed_skill_sets=None):
                 for child in GROUP_FIELDS.get(field.path, []):
                     raw = _single(fields, 'cfg.'+child.path)
                     if raw != '' or _single(fields, 'present.'+child.path) == 'yes':
-                        key = child.path.rsplit('.', 1)[1]
-                        if key in value:
+                        key = child.path[len(field.path)+1:]
+                        missing = object()
+                        if _get(value, key, missing) is not missing:
                             raise ValueError(f'{child.label}：专用字段与扩展字段重复')
                         if child.choices and raw not in child.choices:
                             errors.append(f'{child.label}：请选择支持的选项')
-                        value[key] = typed(raw, child.kind, child.label)
+                        _put(value, key, typed(raw, child.kind, child.label))
                 _put(result['document'], field.path, value)
             continue
         raw = _single(fields, 'cfg.'+field.path)
@@ -566,13 +574,20 @@ def render(draft, *, edit=False):
         'policies.decision_contract': '是否声明科学决策合同；研究结论仍由科学角色作出。',
         'policies.worker_context': 'same_session 保留同一会话，new_context 使用新上下文。此高级合同还需原调用恢复和全部角色阶段预算。',
         'policies.selection': '用于生产交付的候选选择合同；需已配置相应执行、观察与交付条件。',
-        'policies.resume': '恢复已知原调用，不重新提交未知外部实验，不恢复已消耗预算。标准 Codex 启动通常已有恢复配置；自定义时需冻结启动程序及全部角色阶段预算。',
+        'policies.resume': '恢复已知原调用，不重新提交未知外部实验，不恢复已消耗预算。标准单命令 Codex 新配置默认允许有界同会话自动接续与输出补填；显式旧策略未声明自动接续时保留原义。自定义时需冻结启动程序及全部角色阶段预算。',
         'policies.resume.max_attempts': '仅支持 1 或 2 次。次数针对同一原调用；不是重新开始研究。',
         'policies.resume.protocol': '当前合同只支持 codex_exec_resume，且需要支持恢复的 Codex 后端。',
         'policies.resume.usage_scope': '当前合同要求 turn：按一次调用计量用量，保留原始预算消耗。',
         'policies.resume.output_repair': '允许在有明确失败边界时恢复以修复输出格式；不豁免其他恢复条件。',
-        'policies.resume.output_only': '启用需同时允许修复输出；恢复只修复输出，不重新执行科学工作。',
+        'policies.resume.output_only': '启用需同时允许修复输出；此授权仅允许输出补填。自动接续当前未完成任务须由下方独立策略明确允许。',
         'policies.resume.native_home': '仅在“只修复输出”启用时使用，必须是规范绝对路径。这里只保存路径引用。',
+        'policies.resume.automatic_recovery.enabled': '独立允许标准 Codex 同会话接续未完成任务，以及原请求明确尚未开始时的有限启动重试。不会新开上下文、扩大权限或重新提交未知外部调用。已有显式策略留空不新增此授权。',
+        'policies.resume.automatic_recovery.max_continues': '单位：次。同一任务的原 attempt 链中，提前停止后最多追加的同会话工作次数；与临时故障重试分别累计，推进和重启均不清零。0 禁用此类接续。',
+        'policies.resume.automatic_recovery.max_retries': '单位：次。同一任务的原 attempt 链中，对明确可恢复的临时限流、容量或连接故障最多重试次数；永久错误和未知原因不重试，推进和重启均不清零。0 禁用此类重试。',
+        'policies.resume.automatic_recovery.initial_backoff_seconds': '单位：秒。首次服务退避的有限时长；后续指数增长，仍受单次及累计等待上限约束。',
+        'policies.resume.automatic_recovery.max_backoff_seconds': '单位：秒。一次服务退避的有限上限；不能小于首次退避，也不能大于累计服务等待上限。',
+        'policies.resume.automatic_recovery.jitter_fraction': '填 0 到 1 之间的小数，例如 0.1 表示最多 10% 的退避抖动。',
+        'policies.resume.automatic_recovery.max_wait_seconds': '单位：秒。本次恢复链累计服务退避上限；成功推进和重启不清零已保存值。停机及控制程序未运行的空闲不计入实际服务等待。',
         'policies.history_observer': '仅为已接入的宿主历史观察插件配置；参数与路径按插件说明填写。',
         'ui.port': '留空或 0 自动选择可用端口；指定时为 1 到 65535。',
         'ui.open_browser': '留空默认不开浏览器；在远程服务器通常保持默认。',
@@ -626,7 +641,10 @@ def render(draft, *, edit=False):
             if field.path in GROUP_FIELDS:
                 remainder = copy.deepcopy(body)
                 for child in GROUP_FIELDS[field.path]:
-                    remainder.pop(child.path.rsplit('.', 1)[1], None)
+                    key = child.path[len(field.path)+1:]
+                    missing = object()
+                    if _get(remainder, key, missing) is not missing:
+                        _delete(remainder, key)
                 contents = '<div class="config-grid config-grid-four">'+''.join(control(child, advanced=True) for child in GROUP_FIELDS[field.path])+'</div>'
                 contents += '<details class="expert-settings"><summary>其他已导入参数 / 专家编辑</summary><p class="note">标准参数请使用上方表单。这里保留其他键名与类型；未知字段会在检查配置时验证。</p>'
                 contents += '<div class="config-children" data-parent="@'+field.path+'">'+tree(remainder, '@'+field.path)+'</div><button type="button" class="config-add secondary-button" data-parent="@'+field.path+'">添加扩展项</button></details>'

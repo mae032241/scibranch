@@ -88,12 +88,18 @@ def records(root, step):
     if directory.resolve() != directory:raise ValueError('Native continuation directory changed')
     settings = configuration_updates.for_step(root, step)
     repair_limit = (settings.get('resume_policy') or {}).get('max_attempts', 0)
+    automatic = (settings.get('resume_policy') or {}).get('automatic_recovery')
+    if automatic is not None:
+        from . import native_recovery
+        automatic = native_recovery.policy(automatic)
+    automatic_limit = automatic['max_continues'] + automatic['max_retries'] if automatic and automatic['enabled'] else 0
     job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
     from . import checkpoint
     fragments = checkpoint.enabled(root, job)
     from . import budget
     author_permit=root/'host-recovery/author-closeout'/f'{step:03d}.json'
     limit = budget.historical_step_limit(root) - 1 if fragments else max(repair_limit,int(author_permit.exists()))
+    limit += automatic_limit
     # Reattaching an interrupted author does not spend a scientific retry.
     limit += sum(1 for path in directory.iterdir() if path.is_dir()
         and (path/'native-intent.json').exists()
@@ -153,8 +159,11 @@ def records(root, step):
         if ((settings.get('resume_policy') or {}).get('output_only') and kind in {'repair','fragment','execution_wake'}
                 and not output_repair and not wake_authorized):
             raise ValueError('Output-only policy cannot authorize scientific continuation')
-        if kind not in {'repair', 'fragment', 'execution_wake','author_closeout','startup_successor','reentry'} or kind == 'fragment' and not fragments:
+        if kind not in {'repair', 'fragment', 'execution_wake','author_closeout','startup_successor','reentry','automatic_recovery'} or kind == 'fragment' and not fragments:
             raise ValueError('Native continuation kind differs from its frozen policy')
+        if kind == 'automatic_recovery':
+            continuation.validate_automatic(root, step, intent, prior_record=result[-1],
+                prior_intents=[c.read(c.regular(item / 'native-intent.json')) for item in result])
         if kind == 'reentry':
             continuation.validate_reentry(root, job, intent, result[-1])
         if kind == 'startup_successor':

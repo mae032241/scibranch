@@ -148,6 +148,45 @@ scid-research guidance-revoke --root /absolute/instance --guidance-id ID --expec
 自动采用 research 范围并保留原目标记录。待应用项须按当前 revision 修改/撤销；已应用任务输入
 不改写，research 项可追加仅未来生效的撤销回执。建议不授结论、独审资格、预算或执行权限。
 
+### 有界自动接续
+
+启动命令仅含一个标准 `codex` 可执行程序时，新配置默认启用独立的
+`resume_policy.automatic_recovery`，保留原模型/profile、权限、native home 和认证来源。
+原 `output_only` 仍只允许输出补填；自动接续当前未完成任务依靠新策略的独立许可，
+不重定向 home 或复制认证。显式旧 resume 策略未声明此字段时保持原义；自定义、多参数
+launcher 及 protocol 后端不支持此自动路径，直接 controller API 不隐式添加默认策略。
+
+TOML 对应 `[policies.resume.automatic_recovery]`，CLI 通过原
+`--worker-resume-policy /absolute/resume.json` 在完整恢复对象内声明。网页在“更多研究配置
+→ 独立复核与原调用恢复 → 原调用恢复策略”提供同一组字段。默认 `enabled=true`、
+`max_continues=2`、`max_retries=3`、`initial_backoff_seconds=30`、
+`max_backoff_seconds=300`、`jitter_fraction=0.1`、`max_wait_seconds=1800`。
+时间单位为秒，`max_wait_seconds` 是累计实际服务等待上限；时间参数须有限非负且
+`initial_backoff_seconds <= max_backoff_seconds <= max_wait_seconds`。次数为 0 禁用对应动作，
+`enabled=false` 关闭自动策略；完整字段约束见[配置参考](RESEARCH_CONFIGURATION.md#automatic-recovery--自动接续)。
+
+原生结构化事件明确报告未完成的提前停止时，才有限追加同 session continue；明确临时
+限流、容量、连接或服务故障才有限退避重试。启动重试须有证据明确证明原请求未被接受，
+不能凭缺 session 推断。永久认证、配额、配置错误及未分类原因停止；原生失败 message
+额外支持本机 Codex CLI 连接合成 loopback 响应实证的 429 retry-limit/quota 完整文本及
+有界锚定 503 HTTP 信封，不扫描普通 agent/tool 正文。其他 message-only 错误及未知 CLI
+格式保持 unknown；本机取样不证明真实服务商 429/503 已恢复。正常完成 turn 缺少或给出无效必需输出仍走既有
+输出补填，合法 fragment 保持原阶段接续；正式完成、显式等待和暂停不自动追加普通工作。
+protected FINAL 与 closeout 禁用新自动策略，原有有限输出补填不变。
+
+continue/retry 在同一任务原 attempt 链中分别累计，推进、重启或配置修订均不清零。
+既有 controller writer 保留原 attempt、原因、分别计数、累计实际服务等待和 UTC 下次尝试
+时间，用单调时间实际等待；没有 controller 就不自行执行。停机及控制程序未运行的空闲
+不增加服务等待，崩溃时未测尾段保持未知。到期只允许重新仲裁，仍须过原预算与权限准入。
+服务端 retry hint 超过单次退避上限或累计剩余等待时停止，不截短提示绕过上限。
+`pause` 可停止服务等待并保留原安排，不启动替代 native；已接受的活动工作仍按原规则收尾。
+网页显示等待/停止原因、下次尝试、分别计数、服务等待及限制，服务等待不表示科学失败。
+
+原 native 存活或进程身份未核清、原受管调用 running/unknown 时不启动替代 agent；沿既有
+原调用入口核对，不重 submit 未知执行，不退款或清零预算。配置保存仍只影响后续新节点，
+不修改正在恢复任务的原策略。本批不新增必填科学输出、不提升协议，也不修复通用科学
+预算时钟；实际平台恢复资格须另有准确原生证据，不能由源码检查推断。
+
 ## 从历史任务创建分支
 
 `fork-preview` 与 `fork-create` 接受严格静止、冻结协议 26 的明确父实例，以及精确逻辑步骤 N；

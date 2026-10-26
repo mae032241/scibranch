@@ -1028,7 +1028,7 @@ class InstanceUI:
                        and conclusion['payload'].get('next_action') == 'wait')
         completed = snapshot['final'] is not None or (view.get('closeout') or {}).get('status') in {'final_a_completed', 'delivery_confirmed', 'exported_unsubmitted'}
         # A durable sealed/terminal node outranks a transient accepted receipt.
-        active = state == 'running' or (state in {'ready', 'prepared'} and receipt.get('status') in {'accepted', 'running'})
+        active = state in {'running', 'automatic_recovery_waiting'} or (state in {'ready', 'prepared'} and receipt.get('status') in {'accepted', 'running'})
         title = ('最终结论已返回' if completed else '等待补充条件' if waiting else
             '暂停已请求：本阶段结束后停止' if view['paused'] and active else '研究已暂停' if view['paused'] else
             '研究正在进行' if active else '可以开始研究' if not current else self._state(state))
@@ -1148,7 +1148,7 @@ class InstanceUI:
         trigger = (view['correction'].get('current_pause') or {}).get('trigger_id')
         if state in {'ready', 'idle'}:
             return ui.Safe(self._control_form(token, 'start', correction_trigger=trigger))
-        if state == 'active':
+        if state in {'active', 'service_wait'}:
             return ui.Safe(self._control_form(token, 'pause'))
         if state == 'paused':
             return ui.Safe(self._control_form(token, 'continue', correction_trigger=trigger))

@@ -20,6 +20,8 @@ from . import native_usage, public_output
 ROLE_LABELS = {'H': 'H · 假设', 'W': 'W · 实验', 'A': 'A · 综合评估', 'E': 'E · 证据'}
 ROLE_VERBS = {'H': 'H 正在提出假设', 'W': 'W 正在实验', 'A': 'A 正在综合评估', 'E': 'E 正在整理证据'}
 STATE_LABELS = {'prepared': '等待开始', 'running': '正在运行', 'waiting': '等待外部工作',
+    'automatic_recovery_waiting': '等待自动接续', 'automatic_recovery_stopped': '自动接续已停止',
+    'automatic_recovery_paused': '自动接续已暂停',
     'seal_present_unverified': '已有阶段结论', 'seal_present_originals_verified': '已有阶段结论',
     'native_outcome_unsealed': '工作已结束，结论尚未记录', 'native_not_submitted': '尚未提交',
     'native_intent_present_unknown': '原任务状态待核对', 'unknown': '原任务状态待核对'}
@@ -35,6 +37,7 @@ STATES = {
     'waiting': '等待条件', 'unknown': '需要核对', 'final': '最终评估', 'budget_exhausted': '预算已用完',
     'completed': '已完成', 'error': '状态不可读',
     'external_wait': '等待原实验', 'unsealed': '结论待封存', 'not_submitted': '提交意图待核对',
+    'service_wait': '等待服务恢复',
 }
 EXPERIMENT_TOOLTIP = '本阶段实验数 = 封存观察中已接受的受管调用数；不等于独立实验设计数或科学覆盖。'
 EXTREME_TOOLTIP = '全部已观察数值，含失败记录；仅在同一口径（evaluation_key）内按作者声明的指标方向取数值极值；不代表科学排序。'
@@ -451,6 +454,10 @@ def role_line(reader, node, clean, *, mechanisms=None, labels=None, references=N
                 state_label=STATE_LABELS.get(state, '状态待核对'), sealed=state in SEALED,
                 kind='ordinary', one_line=None, facts=[], links=_links(node, False), next_action=None)
     if not line['sealed']:
+        recovery = node.get('automatic_recovery')
+        if isinstance(recovery, dict):
+            line['automatic_recovery'] = recovery
+            line['facts'].extend(recovery_facts(recovery, clean))
         return line
     sealed = reader.node(step)
     job, payload, seal = sealed['job'], sealed['payload'], sealed['seal']
@@ -613,11 +620,30 @@ def rounds(reader, nodes, clean, *, completed=False, mechanisms=None, labels=Non
 
 # ---------------------------------------------------------------- status
 
+def recovery_facts(recovery, clean):
+    """Present saved recovery limits without implying permission to replay."""
+    facts = [dict(label='自动接续范围', value='仅原任务和已核对的原 session；未知外部调用只核对，不重提')]
+    for key, label in (('reason', '接续原因'), ('next_attempt_at', '下次仲裁（UTC）'),
+                       ('limitation', '接续限制')):
+        if recovery.get(key) is not None:
+            facts.append(dict(label=label, value=clean(str(recovery[key]), 500)))
+    facts.append(dict(label='已用恢复次数', value='retry ' + str(recovery.get('retry_count', 0))
+        + '；continue ' + str(recovery.get('continue_count', 0))))
+    if recovery.get('service_wait_seconds') is not None:
+        facts.append(dict(label='累计服务等待', value=fmt_duration(recovery['service_wait_seconds'])))
+    return facts
+
+
 def status_summary(presentation, view, *, final_phase=False, exhausted=None, waiting_reason=None,
                    current_round=None, completed_line=None, elapsed=None, clean=None):
     current = presentation['current']
+    recovery = (current or {}).get('automatic_recovery')
     if presentation['completed']:
         state = 'completed'
+    elif view.get('paused') and recovery and recovery.get('status') == 'paused':
+        state = 'paused'
+    elif recovery and recovery.get('status') == 'waiting' and not view.get('paused'):
+        state = 'service_wait'
     elif presentation['waiting']:
         state = 'waiting'
     elif presentation['state'] in {'unknown', 'native_intent_present_unknown'}:
@@ -641,6 +667,12 @@ def status_summary(presentation, view, *, final_phase=False, exhausted=None, wai
     round_text = ('第 ' + str(current_round) + ' 轮 · ') if current_round else ''
     if state == 'completed':
         headline = completed_line or '研究已完成，可以查看结果'
+    elif state == 'service_wait':
+        headline = '等待服务恢复：' + str(recovery.get('reason') or '有界退避后重新核对原任务')
+        if recovery.get('next_attempt_at') is not None:
+            headline += '；下次仲裁（UTC）' + str(recovery['next_attempt_at'])
+        if clean is not None:
+            headline = clean(headline, 900)
     elif state == 'waiting':
         headline = 'A 等待：' + (waiting_reason or '请查看本阶段结论中的等待条件')
     elif state in {'external_wait', 'unsealed', 'not_submitted'}:

@@ -4,8 +4,11 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 import fcntl
+import math
 import os
 import stat
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 import uuid
 
@@ -457,6 +460,176 @@ def _record(root, step):
     return root / "native-evidence" / f"{step:03d}"
 
 
+class _AutomaticRecoveryUnavailable(continuation.ResumeUnavailable):
+    def __init__(self, reason, *, paused=False):
+        self.status = 'paused' if paused else 'automatic_recovery_stopped'
+        super().__init__(reason)
+
+
+def _recovery_status(error):
+    return getattr(error, 'status', 'output_repair_unavailable')
+
+
+def _recovery_state(root, step, decision):
+    """Bind mutable scheduling facts to this exact accepted source attempt."""
+    record = Path(decision['source_record'])
+    if record != execution.record(root, step) or record.resolve() != record:
+        raise ValueError('Automatic recovery source attempt changed')
+    path = record / 'automatic-recovery.json'
+    counters = decision['counters']
+    binding = dict(version=1, task_ref=contracts.record_ref(root / 'jobs' / f'{step:03d}.json'),
+        source_intent_ref=contracts.record_ref(record / 'native-intent.json'),
+        source_attempt=decision['source_attempt'], action=decision['action'], reason=decision['reason'])
+    saved = contracts.read(contracts.regular(path)) if path.exists() else None
+    if saved is not None:
+        if any(saved.get(key) != value for key, value in binding.items() if key not in {'action', 'reason'}):
+            raise ValueError('Automatic recovery schedule lost its original task')
+        for key in ('local_wait_seconds', 'service_wait_seconds'):
+            if type(saved.get(key)) not in (int, float) or not math.isfinite(saved[key]) or saved[key] < 0:
+                raise ValueError('Automatic recovery waiting consumption changed')
+        if (saved.get('retry_count') != counters['retries'] or saved.get('continue_count') != counters['continues']
+                or not math.isclose(saved['service_wait_seconds'], counters['wait_seconds'] + saved['local_wait_seconds'], abs_tol=1e-8)):
+            raise ValueError('Automatic recovery schedule changed its consumed counters')
+    if saved is None:
+        delay = max(0., float(decision.get('delay_seconds') or 0.))
+        now = time.time()
+        saved = dict(binding, status='waiting', scheduled_at=_recovery_utc(now),
+            next_attempt_at=_recovery_utc(now + delay), delay_seconds=delay,
+            local_wait_seconds=0., service_wait_seconds=float(counters['wait_seconds']),
+            retry_count=counters['retries'], continue_count=counters['continues'])
+    else:
+        saved.update(binding)
+    return path, saved
+
+
+def _recovery_utc(seconds):
+    return datetime.fromtimestamp(seconds, timezone.utc).isoformat()
+
+
+def _recovery_remaining(saved, policy):
+    """UTC grants re-arbitration only; clock anomalies get one finite delay."""
+    cap = float(policy['max_backoff_seconds'])
+    try:
+        stamp = datetime.fromisoformat(saved['next_attempt_at'].replace('Z', '+00:00'))
+        if stamp.tzinfo is None:
+            raise ValueError('UTC recovery deadline required')
+        remaining = stamp.timestamp() - time.time()
+        if not math.isfinite(remaining) or remaining > cap:
+            raise ValueError('Recovery deadline is outside its bounded window')
+        return max(0., remaining)
+    except (ValueError, TypeError, KeyError, OverflowError, AttributeError):
+        remaining = min(float(policy['initial_backoff_seconds']), cap)
+        saved.update(next_attempt_at=_recovery_utc(time.time() + remaining),
+            limitation='Saved UTC deadline was not comparable; a bounded interval precedes fresh arbitration')
+        return remaining
+
+
+def _wait_automatic_recovery(root, step, decision):
+    require_writer(root)
+    path, saved = _recovery_state(root, step, decision)
+    policy = configuration_updates.for_step(root, step)['resume_policy']['automatic_recovery']
+    remaining = _recovery_remaining(saved, policy)
+    if saved['service_wait_seconds'] + remaining > policy['max_wait_seconds']:
+        saved.update(status='stopped', next_attempt_at=None, limitation='automatic_recovery_wait_limit')
+        contracts.write(path, saved)
+        raise _AutomaticRecoveryUnavailable('automatic_recovery_wait_limit')
+    saved['status'] = 'waiting'
+    contracts.write(path, saved)
+    budget.transition(root, 'waiting', 'automatic_service_backoff')
+    until = time.monotonic() + remaining
+    try:
+        while True:
+            if (root / 'pause.request').exists():
+                saved.update(status='paused', limitation='User pause prevents automatic continuation')
+                contracts.write(path, saved)
+                budget.transition(root, 'paused', 'automatic_recovery_paused')
+                raise _AutomaticRecoveryUnavailable('automatic_recovery_paused', paused=True)
+            limits = budget.snapshot(root)
+            if limits['seconds_remaining'] <= 0:
+                saved.update(status='stopped', next_attempt_at=None, limitation='wall_limit')
+                contracts.write(path, saved)
+                raise budget.NodeBudgetUnavailable('wall_limit')
+            left = max(0., until - time.monotonic())
+            if left <= 0:
+                break
+            allowance = policy['max_wait_seconds'] - saved['service_wait_seconds']
+            if allowance <= 0:
+                saved.update(status='stopped', next_attempt_at=None, limitation='automatic_recovery_wait_limit')
+                contracts.write(path, saved)
+                raise _AutomaticRecoveryUnavailable('automatic_recovery_wait_limit')
+            before = time.monotonic()
+            try:
+                time.sleep(min(1., left, allowance, limits['seconds_remaining']))
+            finally:
+                # Only this live controller's monotonic wait is added. Offline
+                # gaps and unknown crash tails are never inferred from UTC.
+                elapsed = max(0., time.monotonic() - before)
+                saved['local_wait_seconds'] += elapsed
+                saved['service_wait_seconds'] += elapsed
+                contracts.write(path, saved)
+        saved['status'] = 'ready'
+        contracts.write(path, saved)
+        current = continuation.automatic_decision(root, step)
+        if current['action'] not in {'retry', 'continue'}:
+            paused = (root / 'pause.request').exists()
+            saved.update(status='paused' if paused else 'stopped', next_attempt_at=None, limitation=current['reason'])
+            contracts.write(path, saved)
+            if paused:
+                budget.transition(root, 'paused', 'automatic_recovery_paused')
+            raise _AutomaticRecoveryUnavailable(current['reason'], paused=paused)
+        try:
+            continuation.automatic_start(root, step, current,
+                recovery_wait=dict(waited_seconds=saved['local_wait_seconds'], record_ref=contracts.record_ref(path)))
+        except continuation.ResumeUnavailable as error:
+            paused = (root / 'pause.request').exists()
+            saved.update(status='paused' if paused else 'stopped', next_attempt_at=None, limitation=str(error))
+            contracts.write(path, saved)
+            if paused:
+                budget.transition(root, 'paused', 'automatic_recovery_paused')
+            raise _AutomaticRecoveryUnavailable(str(error), paused=paused) from error
+        except budget.NodeBudgetUnavailable as error:
+            saved.update(status='stopped', next_attempt_at=None, limitation=error.reason)
+            contracts.write(path, saved)
+            raise
+        saved['status'] = 'started'
+        contracts.write(path, saved)
+    finally:
+        if saved['status'] != 'paused':
+            budget.transition(root, 'advance', 'automatic_recovery_arbitration')
+
+
+def _native_call(root, step, *, launch=False, operation=None):
+    """One controller consumer owns all automatic recovery scheduling."""
+    call = operation if operation is not None else native.execute_native if launch else native.wait_native
+    while True:
+        try:
+            return call(root, step)
+        except continuation.AutomaticRecoveryRequired as error:
+            _wait_automatic_recovery(root, step, error.decision)
+            call = native.wait_native
+        except (OutputRepairRequired, budget.NodeBudgetUnavailable):
+            raise
+        except Exception as error:
+            # Permanent/unknown failures remain failures. Save only the exact
+            # arbiter's stop reason so the UI can explain why no retry occurs.
+            stopped = None
+            try:
+                decision = continuation.automatic_decision(root, step)
+                if decision.get('action') == 'stop' and decision.get('source_record'):
+                    path, saved = _recovery_state(root, step, decision)
+                    paused = (root / 'pause.request').exists()
+                    saved.update(status='paused' if paused else 'stopped', next_attempt_at=None, limitation=decision['reason'])
+                    contracts.write(path, saved)
+                    stopped = _AutomaticRecoveryUnavailable(decision['reason'], paused=paused)
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+            # Integrity and exact-original failures retain their original typed
+            # exception even when a separate recovery decision also says stop.
+            if stopped is not None and not isinstance(error, ValueError):
+                raise stopped
+            raise
+
+
 def _parents(*steps):
     return list(dict.fromkeys(step for step in steps if step is not None))
 
@@ -764,13 +937,17 @@ def _run(root, *, continue_wait=None):
                 if (runtime.node_state(root, step) in {"running","waiting","terminal","interrupted","unstarted"} or checkpoint.enabled(root, retained_job)
                         or worker_delivery.applicable(retained_job)):
                     try:
-                        native.wait_native(root, step)
+                        _native_call(root, step)
                     except managed_wait.ExecutionWaiting as error:
                         return _finish(root,settings,'waiting_execution',completed,last,reason=error.reason,next_role=role)
                     except continuation.ResumeUnavailable as error:
-                        return _finish(root, settings, 'output_repair_unavailable', completed, last, reason=str(error), next_role=role)
+                        return _finish(root, settings, _recovery_status(error), completed, last, reason=str(error), next_role=role)
                     except OutputRepairRequired as error:
                         return _finish(root, settings, 'output_repair_required', completed, last, reason=error.code, next_role=role)
+                    except budget.NodeBudgetUnavailable as error:
+                        if _budget_denied(error.reason):
+                            return start_final(completed, step, role, error.reason)
+                        return _finish(root, settings, error.reason, completed, last, next_role=role)
                     except Exception:
                         if not _terminal_success(root, execution.record(root, step)):
                             return _finish(root, settings, "native_outcome_unsealed", completed, last,
@@ -786,7 +963,7 @@ def _run(root, *, continue_wait=None):
                 except managed_wait.ExecutionWaiting as error:
                     return _finish(root,settings,'waiting_execution',completed,last,reason=error.reason,next_role=role)
                 except continuation.ResumeUnavailable as error:
-                    return _finish(root, settings, 'output_repair_unavailable', completed, last, reason=str(error), next_role=role)
+                    return _finish(root, settings, _recovery_status(error), completed, last, reason=str(error), next_role=role)
                 except OutputRepairRequired as error:
                     return _finish(root, settings, 'output_repair_required', completed, last, reason=error.code, next_role=role)
                 except budget.NodeBudgetUnavailable as error:
@@ -856,7 +1033,7 @@ def _run(root, *, continue_wait=None):
             if limit:
                 return start_final(completed, step, role, limit)
             try:
-                native.execute_native(root, step)
+                _native_call(root, step, launch=True)
             except managed_wait.ExecutionWaiting as error:
                 return _finish(root,settings,'waiting_execution',completed,last,reason=error.reason,next_role=role)
             except budget.NodeBudgetUnavailable as error:
@@ -864,7 +1041,7 @@ def _run(root, *, continue_wait=None):
                     return start_final(completed, step, role, error.reason)
                 return _finish(root, settings, error.reason, completed, last, next_role=role)
             except continuation.ResumeUnavailable as error:
-                return _finish(root, settings, 'output_repair_unavailable', completed, last, reason=str(error), next_role=role)
+                return _finish(root, settings, _recovery_status(error), completed, last, reason=str(error), next_role=role)
             except OutputRepairRequired as error:
                 return _finish(root, settings, 'output_repair_required', completed, last, reason=error.code, next_role=role)
             except Exception as error:
@@ -1280,11 +1457,11 @@ def _run_final(root, begin):
         record = _record(root, step)
         if (record / 'native-intent.json').exists():
             if runtime.node_state(root, step) == 'running' or _terminal_success(root, record):
-                native.wait_native(root, step)
+                _native_call(root, step)
             else:
                 return _closeout_result(root, 'closeout_native_unsealed', reason='exact_final_original_unverified', step=step)
         else:
-            native.execute_native(root, step)
+            _native_call(root, step, launch=True)
     except (budget.NodeBudgetUnavailable, continuation.ResumeUnavailable, OutputRepairRequired, RuntimeError, ValueError) as error:
         return _closeout_result(root, 'closeout_native_unsealed', reason=str(error), step=step)
     result=_final_a_result(root,job,contracts.validate(contracts.workspace(root,step)))
@@ -1305,13 +1482,13 @@ def _collect_final_a(root, accepted):
                 startup_pending = (contracts.read(current/'native-intent.json').get('continuation_kind') == 'startup_successor'
                     and not (current/'native-outcome.json').exists())
                 if runtime.node_state(root, step) == 'running' or startup_pending:
-                    native.wait_native(root, step)
+                    _native_call(root, step)
                 elif _terminal_success(root, current):
-                    native.wait_native(root, step)
+                    _native_call(root, step)
                 else:
                     raise RuntimeError('The exact final A has no verified terminal output')
             else:
-                native.execute_native(root, step)
+                _native_call(root, step, launch=True)
         except (budget.NodeBudgetUnavailable, continuation.ResumeUnavailable, OutputRepairRequired, RuntimeError, ValueError) as error:
             if budget.closeout_state(root)['begin'] is not None:
                 return _closeout_result(root, 'closeout_native_unsealed', reason=str(error), step=step)
@@ -1542,15 +1719,9 @@ def _run_closeout(root):
                 return _closeout_result(root, 'closeout_unresolved', reason='semantic_correction_limit', step=step)
             if (record / 'native-intent.json').exists():
                 try:
-                    if runtime.node_state(root, step) == 'running':
-                        native.wait_native(root, step)
-                    elif _terminal_success(root, execution.record(root, step)):
-                        native.wait_native(root, step)
-                    else:
-                        return _closeout_result(root, 'closeout_native_unsealed', step=step,
-                            reason='Use worker-resume for this exact known failed task/session; unknown work is never replayed')
+                    _native_call(root, step)
                 except continuation.ResumeUnavailable as error:
-                    return _closeout_result(root, 'output_repair_unavailable', step=step, reason=str(error))
+                    return _closeout_result(root, _recovery_status(error), step=step, reason=str(error))
                 except OutputRepairRequired as error:
                     return _closeout_result(root, 'output_repair_required', step=step, reason=error.code)
                 except Exception:
@@ -1587,13 +1758,13 @@ def _run_closeout(root):
                 except engineering.RepairUnavailable as error:
                     return _closeout_result(root,str(error),step=step)
                 try:
-                    native.execute_native(root, step)
+                    _native_call(root, step, launch=True)
                 except budget.NodeBudgetUnavailable as error:
                     if _budget_denied(error.reason):
                         return _start_budget_closeout(root, begin['source_cutoff'], step, 'W' if repair else 'A', error.reason)
                     return _closeout_result(root, 'closeout_budget_unavailable', reason=error.reason, step=step)
                 except continuation.ResumeUnavailable as error:
-                    return _closeout_result(root, 'output_repair_unavailable', step=step, reason=str(error))
+                    return _closeout_result(root, _recovery_status(error), step=step, reason=str(error))
                 except OutputRepairRequired as error:
                     return _closeout_result(root, 'output_repair_required', step=step, reason=error.code)
                 except Exception:
@@ -1735,7 +1906,7 @@ def worker_closeout(root: Path, step: int, *, max_tokens, max_seconds, authoriza
         if len(paths)>1:
             intent=contracts.read(paths[-1]/'native-intent.json')
             author_closeout.validate_intent(root,contracts.read(root/'jobs'/f'{step:03d}.json'),intent)
-            native.wait_native(root,step)  # Collect this accepted turn; never submit another.
+            _native_call(root,step)  # Collect this accepted turn; never submit another.
         else:
             author_closeout.start(root,step,max_tokens=max_tokens,max_seconds=max_seconds,authorization_note=authorization_note)
         return _start_closeout(root,step,step+1,'operator_author_closeout')
@@ -1767,7 +1938,7 @@ def _worker_resume_locked(root, step):
     try:
         if type(step) is not int or not 0 < step <= budget.historical_step_limit(root):
             raise ValueError('An exact prepared node is required')
-        continuation.start(root, step)
+        _native_call(root, step, operation=continuation.start)
         return _run(root)
     except (continuation.ResumeUnavailable, budget.NodeBudgetUnavailable) as error:
         if isinstance(error, budget.NodeBudgetUnavailable) and error.reason == 'worker_resume_budget_unavailable':

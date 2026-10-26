@@ -439,7 +439,7 @@ All listed files are in `src/scidiscovery/research_loop/` unless stated otherwis
 | Preparation, routing, pause | `controller.py`, `runtime.py`, `instance_control.py` |
 | Unified configuration and backends | `research_config.py`, `backends.py` |
 | Detached control and user direction | `control_operations.py`, `user_guidance.py` |
-| Native work, continuation, usage | `native.py`, `execution.py`, `continuation.py` |
+| Native work, continuation, usage | `native.py`, `execution.py`, `continuation.py`, `native_recovery.py` |
 | Scientific contracts and originals | `contracts.py`, `semantic.py`, `instance_science.py` |
 | Candidates and delivery | `selection.py`, `delivery.py`, `worker_delivery.py` |
 | Execution and original-call recovery | `experiments.py`, `managed_wait.py`, `local_experiments.py`; domain adapters |
@@ -530,7 +530,8 @@ revoke that completion or its original authorized delivery. They authorize no ne
 experiment, scientific node or retry of unknown execution.
 
 Standard single-command `codex` CLI preparation freezes up to two output-only
-repairs or original managed-execution wakes by default, binding the original native home privately so configuration,
+repairs or original managed-execution wakes and a separate bounded automatic-recovery
+policy by default, binding the original native home privately so configuration,
 authentication and permissions remain unchanged. It freezes the absolute invoked
 launcher and its target without replacing invocation symlinks. If no node policy
 was supplied, per-role soft targets reference the original global ceilings; they
@@ -562,6 +563,48 @@ strings require same-call reconciliation before consumption; unknown or unavaila
 facts require reconciliation or an explicit obstacle instead of blind polling.
 This is a Worker handoff contract, not a forced scheduler or an added execution grant. New tasks freeze the
 handoff explanation literally; existing task and call originals remain unchanged.
+
+`native_recovery.py` classifies structured native failure fields and narrowly
+matched native failure envelopes, then supplies one bounded recovery decision
+through the existing continuation/controller path.
+Qualified unfinished turns may continue the original session; qualified temporary
+rate/capacity/connection or service failures may retry it. A startup retry needs
+explicit native evidence that the request was not accepted; absence of a session
+does not establish that fact. Permanent auth/quota/configuration failures and
+unclassified errors stop. Native failure events additionally support the exact 429
+retry-limit/quota texts and anchored bounded 503 HTTP envelope confirmed with the
+installed Codex CLI and synthetic loopback responses. Other message-only errors
+remain unknown; ordinary agent/tool text grants no retry. This local translation
+evidence is not real-provider outage qualification. A completed turn with incomplete
+required output uses existing output repair, while legal fragments keep their stage semantics.
+`output_only` retains its narrow meaning; `automatic_recovery` is an independent
+permission. Explicit older resume policies without it gain no permission; custom
+or multi-argument launchers and the protocol backend are unsupported for this path.
+
+Defaults are two early-stop continuations and three transient retries, separately
+cumulative across one job's original attempt chain, with 30-second initial
+exponential backoff, a 300-second per-backoff limit, 0.1 jitter and 1,800 seconds of
+cumulative service waiting. Progress, restart and configuration edits reset neither
+count nor wait. The existing controller writer owns arbitration and actual
+monotonic waiting; no recovery runs without it. The original attempt retains the
+reason, counters, actual wait and UTC next-attempt time. Downtime adds no service
+wait, and an unmeasured crash tail remains uncertain. UTC expiry permits renewed
+arbitration and budget admission, not launch by itself. Pause stops service waiting
+and preserves its original schedule and recorded consumption.
+Server retry hints exceeding the single-backoff or remaining cumulative limit
+stop recovery instead of being shortened to bypass that limit.
+
+Live or unverified native processes and running/unknown managed calls block a
+replacement native attempt; existing exact-call reconciliation remains responsible
+for those calls. Recovery preserves the original model/profile, home, permissions,
+accepted-call identities and consumption. It neither resubmits unknown external
+work nor grants more budget. Formal completion, explicit waits and user pause keep
+their existing boundaries. Automatic recovery is disabled for protected FINAL and
+closeout; their existing finite output repair remains separate. The UI projects
+waiting/stopped recovery reason, next attempt, separate counts, service wait and
+limitations without treating service waiting as scientific failure or owning a
+second state ledger. This adds no required scientific output or protocol change
+and does not replace the general scientific budget clock.
 
 New `prepare` freezes `final_a_completion_policy` version 1. Each ordinary state
 checks whether its remaining budget can start the next action. This mode reserves

@@ -107,6 +107,7 @@ def _node(root, step, job):
     record = records[-1]
     outcome = _read(record / 'native-outcome.json', {})
     intent = _read(record / 'native-intent.json', {})
+    recovery = _read(record / 'automatic-recovery.json')
     if (records[0] / 'result-identity.json').exists():
         state = 'seal_present_unverified'
     elif outcome:
@@ -120,7 +121,28 @@ def _node(root, step, job):
             state = 'running' if runner and runtime.process_matches(runner, runner.get('task_ref')) else 'unknown'
         except (OSError, ValueError, KeyError):
             state = 'unknown'
+    accepted_recovery = intent.get('automatic_recovery')
+    if recovery is None and isinstance(accepted_recovery, dict):
+        used = accepted_recovery.get('counters') or {}
+        recovery = dict(status='accepted', action=accepted_recovery.get('action'),
+            reason=accepted_recovery.get('reason'),
+            retry_count=used.get('retries', 0) + int(accepted_recovery.get('action') == 'retry'),
+            continue_count=used.get('continues', 0) + int(accepted_recovery.get('action') == 'continue'),
+            service_wait_seconds=used.get('wait_seconds', 0.) + accepted_recovery.get('wait_seconds', 0.))
+    if recovery is not None and state != 'seal_present_unverified':
+        if recovery.get('status') in {'waiting', 'ready'}:
+            state = 'automatic_recovery_waiting'
+        elif recovery.get('status') == 'paused':
+            state = 'automatic_recovery_paused'
+        elif recovery.get('status') == 'stopped':
+            state = 'automatic_recovery_stopped'
+    # These are display fields only. Exact job/session checks remain with the
+    # single recovery arbiter; private native/control paths never enter the UI.
+    shown = ({key: recovery[key] for key in ('status', 'action', 'reason', 'next_attempt_at',
+        'retry_count', 'continue_count', 'service_wait_seconds', 'limitation') if key in recovery}
+        if isinstance(recovery, dict) else None)
     return dict(step=step, role=job['role'], state=state, continuations=len(records) - 1,
+        **(dict(automatic_recovery=shown) if shown is not None else {}),
         stop_reason=outcome.get('stop_reason'), returncode=outcome.get('returncode'),
         budget_slice=intent.get('budget_slice'), budget_report=outcome.get('budget_slice'))
 

@@ -116,9 +116,9 @@ def node_state(root, step):
         intent = contracts.read(record / 'native-intent.json')
         if intent['task_ref'] != contracts.record_ref(root / 'jobs' / f'{step:03d}.json'):
             return 'unknown'
-        if intent.get('continuation_kind') == 'reentry' and not any(
+        if intent.get('continuation_kind') in {'reentry','automatic_recovery'} and not any(
                 (record / name).exists() for name in ('runner-process.json','native-process.json')):
-            return 'unstarted'  # Reuse this accepted reentry, including its exact session.
+            return 'unstarted'  # Reuse this accepted identity and its exact recovery scope.
         runner = contracts.read(record / 'runner-process.json')
         if process_matches(runner, binding):
             return 'running'

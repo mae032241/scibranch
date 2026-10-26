@@ -53,13 +53,14 @@ elif role=='W':
   locator_file=work/'work/retained-candidate-locator.json'
   if not resume:
    import subprocess
+   from scidiscovery.research_loop.worker_execution_bridge import SUBMISSION_DIRECTORY
    directory=work/'experiments/retained';directory.mkdir(parents=True)
    artifacts=['artifacts/model-'+str(i)+'.bin' for i in range(4)]
    declared=dict(version=1,metrics=[],outputs=[dict(path=path) for path in artifacts],candidates=[dict(artifact=path) for path in artifacts])
-   script=directory/'run.py'
+   code=work/'code';code.mkdir(exist_ok=True);script=code/'run.py'
    script.write_text('from pathlib import Path\nfor i,path in enumerate('+repr(artifacts)+'): Path(path).write_text("original model "+str(i))\nPath("artifacts/result.json").write_text('+repr(json.dumps(declared))+')\n')
-   outcome=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.experiments',
-    '--config',str(work/'work/experiment-config.json'),'run','--experiment-dir',str(directory),
+   outcome=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.worker_execution_bridge',
+    '--submission-directory',str(work/SUBMISSION_DIRECTORY),'run','--experiment-dir',str(directory),
     '--script',str(script),'--mechanism','Fixture mechanism'],capture_output=True,text=True)
    assert outcome.returncode==0,(outcome.stdout,outcome.stderr)
    result=json.loads(outcome.stdout);assert result['status']=='known_success'
@@ -103,14 +104,58 @@ def cli(root,*arguments,env):
     return json.loads(completed.stdout)
 
 
+def nomination_diagnostic(root, result, *, fault, fragment=False):
+    """Only the failing fake W's exact transport files, at most 128 KiB."""
+    record=execution.origin(root,2)
+    observed={}
+    for name,limit in (('native-outcome.json',32768),('native.stderr',49152),
+                       ('native.jsonl',16384),('runner.stderr',16384)):
+        path=record/name
+        if not path.is_file():
+            observed[name]='missing'
+            continue
+        with path.open('rb') as stream:
+            stream.seek(max(0,path.stat().st_size-limit))
+            observed[name]=stream.read(limit).decode('utf-8',errors='replace')
+    # Explicitly authorized node-002 host diagnostics only: one directory level,
+    # four entries at most. These stay in the test failure log, never science.
+    directory=root/'host-runtime/experiment-control/002/execution-diagnostics'
+    if directory.is_dir():
+        with os.scandir(directory) as entries:
+            for index,entry in enumerate(entries):
+                if index>=4:break
+                if not entry.name.endswith('.json') or not entry.is_file(follow_symlinks=False):continue
+                with Path(entry.path).open('rb') as stream:
+                    observed['execution-diagnostics/'+entry.name]=stream.read(8192).decode('utf-8',errors='replace')
+    rendered=json.dumps(dict(result=result,node=2,transport=observed),ensure_ascii=False,indent=2)
+    rendered=rendered.encode('utf-8')[:128*1024].decode('utf-8',errors='ignore')
+    if os.environ.get('SCID_TEST_LOG_DIR'):
+        destination=Path(os.environ['SCID_TEST_LOG_DIR']);destination.mkdir(parents=True,exist_ok=True)
+        (destination/f'{fault}-fragment-{int(fragment)}-node002.txt').write_text(rendered)
+    return rendered
+
+
 def prepare_cli(tmp_path,*,fault='missing',custom=False,explicit_false=False,final=False,fragment=False):
     public=tmp_path/'public';public.mkdir();objective=public/'objective.md';objective.write_text('Retain scientific uncertainty.')
     home=tmp_path/'inherited-home';home.mkdir()
     configuration='[sandbox_workspace_write]\nnetwork_access=true\nexclude_tmpdir_env_var=true\n'
     (home/'config.toml').write_text(configuration);(home/'auth.json').write_text('{"fixture":"private authentication marker"}')
-    program=tmp_path/'native.py';program.write_text('#!'+sys.executable+'\n'+NATIVE);program.chmod(0o755)
+    program=tmp_path/'native.py'
+    if fault.startswith('nomination-'):
+        # The model wire is fake; managed local execution still needs the real
+        # sandbox auxiliary from the selected native installation, as in the
+        # existing default-local transport fixture.
+        from test_default_native_local_execution import actual_native
+        actual=actual_native()
+        package=tmp_path/'node_modules/@openai/codex'
+        program=package/'bin/codex.js';program.parent.mkdir(parents=True)
+        architecture,target={'x86_64':('x64','x86_64-unknown-linux-musl'),
+            'aarch64':('arm64','aarch64-unknown-linux-musl')}[os.uname().machine]
+        auxiliary=package/'node_modules/@openai'/('codex-linux-'+architecture)/'vendor'/target/'bin/codex'
+        auxiliary.parent.mkdir(parents=True);auxiliary.symlink_to(actual)
+    program.write_text('#!'+sys.executable+'\n'+NATIVE);program.chmod(0o755)
     binary=tmp_path/'bin';binary.mkdir();(binary/'codex').symlink_to(program)
-    c.write(tmp_path/'launcher-config.json',dict(fault=fault,home=str(home),configuration=configuration,default_home=not explicit_false))
+    c.write(program.with_name('launcher-config.json'),dict(fault=fault,home=str(home),configuration=configuration,default_home=not explicit_false))
     env=dict(os.environ,CODEX_HOME=str(home),PATH=str(binary)+os.pathsep+os.environ.get('PATH',''))
     source=str(Path(__file__).resolve().parents[2]/'src')
     env['PYTHONPATH']=source+os.pathsep+env.get('PYTHONPATH','')
@@ -237,7 +282,7 @@ def test_w_nomination_structure_repairs_in_same_output_only_task_without_repeati
     root,home,env=prepare_cli(tmp_path,fault=fault,fragment=fragment)
     assert c.settings(root)['resume_policy']['output_only'] is True
     result=cli(root,'run',env=env)
-    assert result['status']=='finish',result
+    assert result['status']=='finish',nomination_diagnostic(root,result,fault=fault,fragment=fragment)
     chain=execution.records(root,2);assert len(chain)==2
     origin,current=chain;intent=c.read(current/'native-intent.json')
     assert intent['output_repair']['code']=='candidate_nominations_incomplete' and 'work_repair' not in intent
@@ -250,12 +295,16 @@ def test_w_nomination_structure_repairs_in_same_output_only_task_without_repeati
     else:assert original['candidate_nominations']['representatives'][0]['candidate']['call_id']=='unregistered-call'
     calls=experiment_client.record_directory(root,2)/'calls'
     assert len(list(calls.iterdir()))==1
+    locator=c.read(c.workspace(root,2)/'work/retained-candidate-locator.json')
+    original_call=calls/locator['call_id']
+    assert list(calls.iterdir())==[original_call]
     science=c.validate(c.workspace(root,2))
     assert science['candidate_nominations']['representatives'][0]['candidate'].startswith('local-')
     assert c.read(root/'jobs/003.json')['role']=='A' and not (root/'jobs/004.json').exists()
     continuation.validate_repair(root,2,intent)
     assert continuation.output_request(root,2,origin,source_attempt=0,verify_task=False)==intent['output_repair']
-    frozen={path:path.read_bytes() for path in [origin/'science-output.json',root/'jobs/002.json',*calls.rglob('accepted.json'),*calls.rglob('completed.json')]}
+    frozen={path:path.read_bytes() for path in [origin/'science-output.json',root/'jobs/002.json',
+        original_call/'accepted.json',original_call/'completed.json']}
     assert cli(root,'run',env=env)['status']=='finish'
     assert len(list(calls.iterdir()))==1 and all(path.read_bytes()==data for path,data in frozen.items())
 
@@ -265,12 +314,18 @@ def test_unknown_w_nomination_output_never_authorizes_repair_or_replays_original
     result=cli(root,'run',env=env)
     assert result['status']!='finish'
     origin=execution.origin(root,2);calls=experiment_client.record_directory(root,2)/'calls'
+    assert calls.is_dir(),nomination_diagnostic(root,result,fault='nomination-unknown')
     assert len(execution.records(root,2))==1 and len(list(calls.iterdir()))==1
+    locator=c.read(c.workspace(root,2)/'work/retained-candidate-locator.json')
+    original_call=calls/locator['call_id']
+    assert list(calls.iterdir())==[original_call]
+    retained={path:path.read_bytes() for path in (original_call/'accepted.json',original_call/'completed.json')}
     assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
     with pytest.raises(ValueError,match='known completed original turn'):
         continuation.output_request(root,2,origin,verify_task=False)
     cli(root,'run',env=env)
     assert len(execution.records(root,2))==1 and len(list(calls.iterdir()))==1
+    assert all(path.read_bytes()==data for path,data in retained.items())
     assert not (origin/'result-identity.json').exists() and not (root/'jobs/003.json').exists()
 
 

@@ -14,10 +14,224 @@ class ResumeUnavailable(ValueError):
     pass
 
 
+class AutomaticRecoveryRequired(RuntimeError):
+    """Return one finite recovery decision to the owning controller writer."""
+    def __init__(self, decision):
+        super().__init__(decision['reason'])
+        self.decision = decision
+
+
+def automatic_source(root, step, record):
+    """Verify the failure projection against the exact retained native JSONL."""
+    from . import backends, native_recovery
+    backend = backends.selected(configuration_updates.for_step(root, step))
+    if backend.name != 'codex' or not backend.standard:
+        raise ResumeUnavailable('automatic_recovery_unsupported_backend')
+    outcome = c.read(c.regular(record / 'native-outcome.json'))
+    failures = []
+    terminal = activity = False
+    original = c.read(c.regular(record / 'native-intent.json'))
+    thread = (original.get('session') or {}).get('thread_id')
+    with c.regular(record / 'native.jsonl', limit=None).open('rb') as stream:
+        for line in stream:
+            try:event = json.loads(line)
+            except ValueError:continue  # A truncated transport tail grants nothing.
+            if not isinstance(event, dict):continue
+            projected = backend.event(event)
+            if projected.get('failure') is not None:failures.append(projected['failure'])
+            terminal = terminal or projected.get('completed', False)
+            activity = activity or projected.get('activity', False)
+            if 'session' in projected:thread = projected['session']
+    expected = native_recovery.combine(failures)
+    if (outcome.get('native_failure') != expected
+            or outcome.get('terminal_observed') is not terminal
+            or outcome.get('native_activity_observed') is not activity
+            or outcome.get('thread_id') != thread):
+        raise ValueError('Automatic recovery native failure evidence changed')
+    return outcome
+
+
+def _automatic_session(root, step, record, outcome):
+    identity = outcome.get('native_identity') or {}
+    path = identity.get('path')
+    original = c.read(c.regular(record / 'native-intent.json'))
+    retained = original.get('session') or {}
+    if retained and outcome.get('thread_id') == retained.get('thread_id'):
+        path = Path(retained['path'])
+        if (path.resolve() != path or not path.is_relative_to(Path(retained['home']) / 'sessions')
+                or retained.get('workspace') != str(c.workspace(root, step))):
+            raise ValueError('Automatic recovery retained session identity changed')
+        with c.regular(path, limit=None).open('rb') as stream:header = stream.readline()
+        validate_session_header(header, retained['thread_id'], c.workspace(root, step))
+        if json.loads(header) != retained.get('header'):
+            raise ValueError('Original native session header changed')
+        return retained
+    if not path and retained:
+        path = retained.get('path')
+    if not path:
+        raise ResumeUnavailable('worker_resume_session_unavailable')
+    return session(root, step, record, home=identity.get('home') or retained.get('home'), session_path=path)
+
+
+def automatic_decision(root, step):
+    """One read-only arbiter; existing successful repair/fragment paths win."""
+    from . import backends, native_recovery
+    root = Path(root)
+    paths = execution.records(root, step)
+    last = paths[-1]
+    used = native_recovery.counters(c.read(c.regular(path / 'native-intent.json')) for path in paths)
+    base = dict(action='none', reason='automatic_recovery_disabled', source_attempt=len(paths)-1,
+        source_record=str(last), delay_seconds=0., retry_after_seconds=None, counters=used)
+    settings = configuration_updates.for_step(root, step)
+    supplied = (settings.get('resume_policy') or {}).get('automatic_recovery')
+    if supplied is None:return base
+    limits = native_recovery.policy(supplied)
+    if not limits['enabled']:return base
+    def stop(reason):return dict(base, action='stop', reason=reason)
+    if (execution.origin(root, step) / 'result-identity.json').exists():
+        return dict(base, reason='automatic_recovery_stage_sealed')
+    if runtime.node_state(root, step) != 'terminal':
+        return dict(base, reason='automatic_recovery_original_not_terminal')
+    job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
+    outcome = c.read(c.regular(last / 'native-outcome.json'))
+    if outcome.get('terminal_observed') is True:
+        return dict(base, reason='automatic_recovery_completed_turn')
+    original = c.read(c.regular(last / 'native-intent.json'))
+    if (original.get('continuation_kind') in {'author_closeout','startup_successor','execution_wake'}
+            or original.get('output_repair') or original.get('work_repair')):
+        return stop('automatic_recovery_special_scope_unavailable')
+    if (job.get('final_only') or job.get('purpose') == 'closeout'
+            or budget.final_a_barrier(root) is not None or budget.closeout_state(root)['begin'] is not None):
+        return stop('automatic_recovery_final_boundary')
+    if (root / 'pause.request').exists():return stop('worker_resume_paused_or_closeout')
+    from . import correction
+    if correction.gate(root, step - 1) is not None:return stop('worker_resume_correction_paused')
+    if outcome.get('stop_reason') not in {None, 'native_failure_event'}:
+        return stop(outcome['stop_reason'])
+    backend = backends.selected(settings)
+    if backend.name != 'codex' or not backend.standard:return stop('automatic_recovery_unsupported_backend')
+    if outcome.get('cleanup') != 'observed_group_cleaned':return stop('automatic_recovery_cleanup_unknown')
+    binding = execution.identity(root, step, len(paths)-1)
+    for name in ('runner-process.json', 'native-process.json'):
+        receipt = c.read(c.regular(last / name))
+        if (receipt.get('task_ref') != binding
+                or not isinstance(receipt.get('boot_id'), str) or not receipt['boot_id']
+                or any(type(receipt.get(key)) is not int or receipt[key] <= 0
+                    for key in ('pid','start_ticks','pgid','sid','ppid'))
+                or c.record_ref(last / name) != outcome.get('execution_processes', {}).get(name)):
+            raise ValueError('Automatic recovery original process identity changed')
+        if runtime.process_matches(receipt, binding):return dict(base, reason='worker_resume_original_running')
+    from . import history, execution_recovery
+    if execution_recovery.pending(root):return stop('automatic_recovery_managed_execution_pending')
+    if job['role'] == 'W' and any(row['status'] not in {'known_success','known_failed','not_submitted'}
+            for row in history.managed_calls(root, job)):
+        return stop('automatic_recovery_managed_execution_pending')
+    outcome = automatic_source(root, step, last)
+    try:_automatic_session(root, step, last, outcome);available = True
+    except ResumeUnavailable:available = False
+    decided = native_recovery.decision(outcome, limits, used, session_available=available,
+        activity_observed=outcome.get('native_activity_observed', False),
+        jitter=((len(paths) * 37 % 101) / 50. - 1))
+    return dict(base, **decided)
+
+
+def validate_automatic(root, step, intent, *, prior_record=None, prior_intents=None):
+    from . import native_recovery
+    request = intent.get('automatic_recovery')
+    settings = configuration_updates.for_step(root, step)
+    supplied = (settings.get('resume_policy') or {}).get('automatic_recovery')
+    if supplied is None:raise ValueError('Automatic recovery has no independent authorization')
+    limits = native_recovery.policy(supplied)
+    if prior_record is None:
+        chain = execution.records(root, step)
+        prior_record = chain[intent['attempt']-1]
+        prior_intents = [c.read(c.regular(path / 'native-intent.json')) for path in chain[:intent['attempt']]]
+    if prior_intents is None:raise ValueError('Automatic recovery requires its exact prior attempt chain')
+    outcome = automatic_source(root, step, prior_record)
+    job = c.read(c.regular(Path(root) / 'jobs' / f'{step:03d}.json'))
+    prior_intent = prior_intents[-1]
+    if (job.get('final_only') or job.get('purpose') == 'closeout'
+            or prior_intent.get('continuation_kind') in {'author_closeout','startup_successor','execution_wake'}
+            or prior_intent.get('output_repair') or prior_intent.get('work_repair')
+            or not native_recovery.recoverable_source(outcome)):
+        raise ValueError('Automatic recovery source is not an eligible unfinished task')
+    used = native_recovery.counters(prior_intents)
+    expected = native_recovery.decision(outcome, limits, used,
+        session_available=bool(intent.get('session')), activity_observed=outcome.get('native_activity_observed', False),
+        jitter=((intent['attempt'] * 37 % 101) / 50. - 1))
+    if (not isinstance(request, dict) or expected['action'] not in {'continue','retry'}
+            or any(request.get(key) != expected.get(key) for key in ('action','reason','startup_retry'))
+            or request.get('source_attempt') != intent['attempt']-1
+            or request.get('counters') != used
+            or type(request.get('wait_seconds')) not in (int, float)
+            or not 0 <= request['wait_seconds'] <= limits['max_wait_seconds'] - used['wait_seconds']):
+        raise ValueError('Automatic recovery differs from its original bounded failure')
+    if request['startup_retry']:
+        if intent.get('session') is not None:raise ValueError('Unaccepted startup retry cannot acquire a session')
+    elif intent.get('session') != _automatic_session(root, step, prior_record, outcome):
+        raise ValueError('Automatic recovery changed its original session')
+
+
+def automatic_start(root, step, decision, *, recovery_wait=None):
+    with budget._operator_writer(root):
+        return _automatic_start_locked(root, step, decision, recovery_wait=recovery_wait)
+
+
+def _automatic_start_locked(root, step, decision, *, recovery_wait=None):
+    """Accept one replacement under the existing owner/controller writer."""
+    from . import profiles, native_recovery
+    root = Path(root)
+    current = automatic_decision(root, step)
+    if current != decision or current['action'] not in {'continue','retry'}:
+        raise ResumeUnavailable('automatic_recovery_decision_stale')
+    validate_launcher(root, step)
+    job = validate_task(root, step)
+    paths = execution.records(root, step);last = paths[-1]
+    from . import fork_runtime
+    if any((execution.origin(root, later) / 'native-intent.json').exists()
+            for later in fork_runtime.local_steps(root, include_native=True) if later > step):
+        raise ResumeUnavailable('worker_resume_successor_present')
+    waited = (recovery_wait or {}).get('waited_seconds', 0.)
+    limits = native_recovery.policy(configuration_updates.for_step(root, step)['resume_policy']['automatic_recovery'])
+    if (type(waited) not in (int, float) or not 0 <= waited <= limits['max_wait_seconds']-current['counters']['wait_seconds']):
+        raise ResumeUnavailable('automatic_recovery_wait_limit')
+    if current['delay_seconds'] and recovery_wait is None:
+        raise ResumeUnavailable('automatic_recovery_wait_required')
+    request = {key:current[key] for key in ('action','reason','source_attempt','counters','startup_retry')}
+    request['wait_seconds'] = waited
+    if recovery_wait is not None:
+        state_path = last / 'automatic-recovery.json'
+        if (recovery_wait.get('record_ref') != c.record_ref(c.regular(state_path))
+                or c.read(state_path).get('local_wait_seconds') != waited
+                or c.read(state_path).get('status') != 'ready'):
+            raise ValueError('Automatic recovery wait differs from its durable original')
+        request['wait_record'] = recovery_wait['record_ref']
+    budget.transition(root, 'advance', 'accepted_automatic_recovery')
+    anchor = budget.accept_continuation(root, job, paths, automatic_recovery=current)
+    settings = configuration_updates.for_step(root, step)
+    binding = profiles.binding(settings, job)
+    profiles.validate_intent(settings, job, c.read(c.regular(paths[0] / 'native-intent.json')))
+    number = len(paths)
+    record = execution.origin(root, step) / 'continuations' / f'{number:03d}'
+    record.mkdir(parents=True, exist_ok=True)
+    intent = dict(step=step, attempt=number, continuation_kind='automatic_recovery', **binding,
+        task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json'),
+        root_intent_ref=c.record_ref(paths[0] / 'native-intent.json'), previous=execution.proof(last),
+        budget_slice=anchor, automatic_recovery=request)
+    if not request['startup_retry']:
+        intent['session'] = _automatic_session(root, step, last, c.read(last / 'native-outcome.json'))
+    validate_automatic(root, step, intent, prior_record=last,
+        prior_intents=[c.read(c.regular(path / 'native-intent.json')) for path in paths])
+    with (record / 'native-intent.json').open('x') as stream:
+        json.dump(intent, stream);stream.flush();os.fsync(stream.fileno())
+    runtime.start(root, step, number)
+    return intent
+
+
 def policy(value, launcher):
     required={'max_attempts','protocol','usage_scope'}
     if (not isinstance(value, dict) or not required <= set(value)
-            or set(value)-required-{'output_repair','output_only','execution_wake','native_home'}
+            or set(value)-required-{'output_repair','output_only','execution_wake','native_home','automatic_recovery'}
             or type(value['max_attempts']) is not int or not 1 <= value['max_attempts'] <= 2
             or value['protocol'] != 'codex_exec_resume' or value['usage_scope'] != 'turn'
             or ('output_repair' in value and type(value['output_repair']) is not bool)
@@ -36,7 +250,11 @@ def policy(value, launcher):
             original = c.regular(path.resolve())
             files.append(dict(invoked_path=str(path), path=str(original)))
     if not files:raise ValueError('Resume-capable launcher originals must be frozen')
-    return dict(value, launcher_files=files)
+    result = dict(value, launcher_files=files)
+    if 'automatic_recovery' in value:
+        from . import native_recovery
+        result['automatic_recovery'] = native_recovery.policy(value['automatic_recovery'])
+    return result
 
 
 def validate_launcher(root, step=None):
@@ -552,7 +770,7 @@ def start(root, step):
     from . import correction
     if correction.gate(root, step - 1) is not None:
         raise ResumeUnavailable('worker_resume_correction_paused')
-    repairs = sum(c.read(path / 'native-intent.json').get('continuation_kind', 'repair') not in {'fragment','reentry'} for path in paths[1:])
+    repairs = sum(c.read(path / 'native-intent.json').get('continuation_kind', 'repair') not in {'fragment','reentry','automatic_recovery'} for path in paths[1:])
     if repairs >= limits['max_attempts']:raise ResumeUnavailable('worker_resume_limit')
     settings = configuration_updates.for_step(root, step)
     from . import fork_runtime
@@ -616,7 +834,7 @@ def wake_start(root,step,observations):
     if any((execution.origin(root,later)/'native-intent.json').exists()
             for later in fork_runtime.local_steps(root, include_native=True) if later > step):
         raise ResumeUnavailable('worker_resume_successor_present')
-    attempts=sum(c.read(path/'native-intent.json').get('continuation_kind','repair') not in {'fragment','reentry'} for path in paths[1:])
+    attempts=sum(c.read(path/'native-intent.json').get('continuation_kind','repair') not in {'fragment','reentry','automatic_recovery'} for path in paths[1:])
     if attempts>=limits['max_attempts']:raise ResumeUnavailable('worker_resume_limit')
     _eligible_original(root,step,paths,successful=True,wait_runner=True)
     session_ref=session(root,step,last)

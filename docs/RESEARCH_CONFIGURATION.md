@@ -119,6 +119,7 @@ argv elements are literal native arguments, so use absolute paths for their inpu
 | `executor` | `mode` (`local` or `external`), `config` (existing `executor`/`configuration` object), `resource_policy` (existing cumulative allowance contract) |
 | `delivery` | Existing frozen delivery-policy object; optional adapter paths `adapter.adapter`, `adapter.source_roots` and path-like `adapter.launcher_argv[0]` resolve relative to TOML / 既有交付策略对象，上述路径相对 TOML |
 | `policies` | Boolean / 布尔值: `formal_review`, `execution_authority`, `candidate_audit`, `decision_contract`; existing contract objects / 既有合同对象: `selection`, `resume`, `history_observer`; `worker_context`: `same_session` or `new_context` |
+| `policies.resume.automatic_recovery` | Independent bounded standard-Codex recovery policy; fields and defaults below. / 独立的标准 Codex 有界自动接续策略，字段及默认值见下文。 |
 | `ui` | `port` (0–65535; default 0), `open_browser` (default false), `approval_secret_file` (host-private path reference / 宿主私有路径引用) |
 
 `budget.max_output_total_bytes` caps the aggregate collected output of each node.
@@ -137,16 +138,116 @@ A. The default is 2 extras.
 Codex defaults are `gpt-6.1-sol`, reasoning effort `high`, service tier `default`
 and launcher `["codex"]`. A standard single-command Codex launcher defaults to
 host-configured local experiments and at most two output-only repairs in the original
-native home; without explicit node targets each role references the original total
-ceilings. Protocol requires an explicit launcher and model, and does not invent
+native home, plus a separate bounded automatic-recovery policy. Without explicit
+node targets each role references the original total ceilings. Protocol requires an explicit launcher and model, and does not invent
 Codex reasoning-effort or service-tier defaults. Custom launchers default to external
 experiment ownership unless explicitly configured. The sample expands commonly used
 settings; optional policy shapes are described in the CLI guide and existing contracts.
 
 Codex 默认模型、推理力度、档位和 launcher 如上。标准单命令 Codex 默认使用宿主管理的
-local 实验，并在原生原 home 最多执行两次仅输出补填；未指定节点目标时引用原总上限。
+local 实验，在原生原 home 最多执行两次仅输出补填，并启用独立的有界自动接续策略；
+未指定节点目标时引用原总上限。
 protocol 必须显式提供 launcher 和 model，不套用 Codex 推理或服务档位默认值。
 自定义 launcher 默认由 external 路径拥有实验执行，除非另行配置。
+
+## Automatic recovery / 自动接续
+
+The standard single-executable Codex preparation path supplies
+`resume_policy.automatic_recovery` through the same defaults used by TOML, CLI
+and the webpage. TOML declares it as `[policies.resume.automatic_recovery]`;
+the existing CLI `--worker-resume-policy /absolute/resume.json` accepts it inside
+the complete resume object. In the webpage, use More research settings → independent
+review and original-call recovery → original-call recovery policy. The controls
+retain the distinction between output repair and recovery of unfinished work.
+
+启动命令仅含一个标准 Codex 可执行程序时，准备入口通过 TOML、CLI、网页共用的默认引擎提供
+`resume_policy.automatic_recovery`。TOML 对应 `[policies.resume.automatic_recovery]`；
+CLI 的既有 `--worker-resume-policy /absolute/resume.json` 在完整恢复对象内接受该字段。
+网页入口为“更多研究配置 → 独立复核与原调用恢复 → 原调用恢复策略”，使用专用类型控件，
+区分输出补填与未完成任务接续。
+
+| Field / 字段 | Default / 默认 | Meaning / 含义 |
+| --- | --- | --- |
+| `enabled` | `true` | Independent recovery permission; boolean. / 独立自动接续许可，布尔值。 |
+| `max_continues` | `2` | Cumulative same-task early-stop continuations; integer 0–100. / 同一任务提前停止后的累计接续次数，整数 0–100。 |
+| `max_retries` | `3` | Cumulative same-task transient-service retries; integer 0–100. / 同一任务临时服务故障的累计重试次数，整数 0–100。 |
+| `initial_backoff_seconds` | `30` | Initial finite nonnegative service backoff. / 首次有限非负服务退避秒数。 |
+| `max_backoff_seconds` | `300` | Finite nonnegative per-backoff limit. / 每次退避的有限非负秒数上限。 |
+| `jitter_fraction` | `0.1` | Jitter fraction, 0–1. / 退避抖动比例，0–1。 |
+| `max_wait_seconds` | `1800` | Cumulative actual service-wait limit, finite and nonnegative. / 实际累计服务等待的有限非负秒数上限。 |
+
+The time values must satisfy `initial_backoff_seconds <= max_backoff_seconds <=
+max_wait_seconds`. Zero attempts disable the corresponding recovery action.
+An explicitly supplied automatic-recovery table defaults its omitted fields;
+`enabled = false` disables it. An explicit older resume policy that omits this
+table gains no automatic-recovery permission. `output_only` still grants only
+output repair; it does not grant scientific work recovery. Custom/multi-argument
+launchers and the protocol backend do not gain this recovery capability. Original
+model profiles, permissions, native home and authentication remain unchanged;
+authentication is neither copied nor redirected.
+
+时间参数须满足上述大小关系；次数为 0 禁用对应动作。显式提供自动接续表时，其省略字段
+采用表中默认值；`enabled = false` 禁用策略。显式旧 resume 策略未声明此表时不新增自动
+接续许可。`output_only` 仍只授权输出补填，不授权科学工作接续。自定义、多参数 launcher
+及 protocol 后端不因此获得该恢复能力。原模型 profile、权限、native home 和认证来源保持，
+不复制或重定向认证。
+
+Recovery uses structured native failure fields and narrowly matched native failure
+envelopes: a qualified unfinished turn may continue its original session; a qualified temporary rate/capacity/connection or
+service failure may retry that session. A startup retry requires explicit native
+evidence that the original request was not accepted. Missing session identity is
+insufficient. Permanent auth/quota/configuration errors and unclassified failures
+stop. Native failure messages support the exact observed 429 retry-limit and quota
+texts, plus the anchored 503 HTTP envelope with a bounded single-line body and URL.
+These translations were checked using the installed Codex CLI against synthetic
+loopback HTTP responses; they do not establish recovery from a real provider outage.
+Other message-only errors and unrecognized CLI formats remain unknown; ordinary
+agent/tool text is never classified for retry. Permanent quota evidence takes
+precedence over a generic 429 or capacity signal.
+Known completed turns with missing or invalid required output use existing finite
+output repair; legal fragments retain their existing continuation semantics.
+
+恢复依据原生结构化失败字段及窄匹配的原生失败信封：明确未完成的提前停止可续接原 session，
+明确临时限流、容量、连接或服务故障可重试原 session。启动重试必须有原生证据明确证明原请求未被接受，不能凭
+缺 session 身份推断。永久认证、配额、配置错误及无法分类的失败明确停止；原生失败 message
+只额外支持已观察到的 429 retry-limit 与 quota 完整文本，以及具有有界单行正文和 URL 的
+锚定 503 HTTP 信封。这些翻译已用本机安装的 Codex CLI 连接合成 loopback HTTP 响应核对，
+不证明真实服务商故障已恢复。其他 message-only 错误及未知 CLI 格式保持 unknown，不扫描
+普通 agent/tool 正文来决定重试；永久 quota 证据优先于泛化的 429 或容量信号。
+已知完成 turn 缺少或给出无效必需输出时，走既有有限输出补填；合法 fragment 保持既有阶段接续语义。
+
+Both counters and cumulative wait belong to the original task's attempt chain;
+progress, restarts and configuration revisions do not reset them. The existing
+controller writer performs monotonic waits and persists the reason, original
+attempt, counters, actual wait and UTC next-attempt time. Downtime and idle time
+without a controller add no service wait; an unmeasured crash tail stays uncertain.
+An elapsed UTC deadline only permits re-arbitration under the original budget,
+identity and permission gates. Pause stops service waiting without launching a
+replacement. The webpage shows recovery reason, scope, next attempt, separate
+counts, accumulated wait and limitations; service waiting is not scientific failure.
+Server retry hints are not shortened to bypass a bound: a hint exceeding the
+per-backoff limit or remaining cumulative wait stops recovery.
+
+两个计数及累计等待归属原任务的 attempt 链，推进、重启或配置修订均不清零。既有 controller
+writer 用单调时间等待，持久保存原因、原 attempt、分别计数、实际等待及 UTC 下次尝试时间。
+停机与没有 controller 的空闲不新增服务等待，崩溃时未测尾段不伪造精确计量。UTC 到期只获得
+在原预算、身份和权限门槛下重新仲裁的资格。暂停会停止服务等待，不启动替代工作。网页显示
+原因、范围、下次尝试、分别计数、累计等待及限制；服务等待不表示科学失败。
+服务端 retry hint 超过单次退避上限或累计剩余等待时停止恢复，不截短提示来绕过上限。
+
+Live or unresolved native processes and running/unknown managed calls prevent a
+replacement native attempt; use the existing original-call reconciliation paths.
+Recovery never resubmits unknown external work or refunds consumption. Formal
+completion and explicit waits retain their existing boundaries. Automatic recovery
+is disabled for protected FINAL/closeout; their existing output-repair and completion
+policies remain binding.
+No background recovery runs without a controller. This configuration changes no
+required scientific output or protocol version and adds no general clock repair.
+
+原 native 仍存活或身份未核清、受管调用 running/unknown 时不启动替代 native；须用既有原调用
+核对入口。恢复不重新提交未知外部工作、不退款。正式完成和显式等待保留原边界；protected
+FINAL/closeout 禁用自动接续，原输出补填及完成策略继续有效。没有 controller 就不自行后台执行。
+本配置不新增必填科学输出或提升协议，也不提供通用科学预算时钟修复。
 
 ## Declared projects / 声明工程
 
@@ -350,7 +451,7 @@ contributor identity or independent review.
 
 | Backend / 后端 | Transport and limits / 输运与限制 |
 | --- | --- |
-| `codex` | Adapts native `exec` JSON events, model profiles, explicit permissions and usage. Qualified same-session output repair uses the frozen original home and policy. Complete participant scope is supported only for a standard single-agent launcher with subagents disabled. / 适配原生 exec、profile、权限和用量；原线程补填受原策略约束，完整参与者范围仅限标准单 Agent launcher。 |
+| `codex` | Adapts native `exec` JSON events, model profiles, explicit permissions and usage. Qualified same-session output repair and independently authorized automatic recovery use the frozen original home and policies. Complete participant scope is supported only for a standard single-agent launcher with subagents disabled. / 适配原生 exec、profile、权限和用量；原线程补填及独立授权的自动接续受原 home 与策略约束，完整参与者范围仅限标准单 Agent launcher。 |
 | `protocol` | Runs the exact supplied argv, sends one JSON request on stdin, reads JSONL events. Permissions are declarations with `enforcement = "hint_only"`; the launcher owns actual access controls. No native session resume or complete native authorship attestation; formal independent review is unavailable. / 精确 argv、stdin JSON、stdout JSONL；权限仅作提示，由 launcher 实施，不支持原线程恢复或完整作者证明，不能正式独审。 |
 
 The protocol request identifies `protocol = "scidiscovery-agent-v1"` and contains

@@ -1665,7 +1665,7 @@ def require_final_a_delivery_eligibility(root, decision, binding):
     return marker
 
 
-def _attempt_consumption(root, job, paths):
+def _attempt_consumption(root, job, paths, *, automatic_recovery=None, automatic_successor=None):
     """Derive cumulative consumption from exact completed native facts."""
     from . import native
     tokens, seconds = 0, 0.
@@ -1690,7 +1690,14 @@ def _attempt_consumption(root, job, paths):
             continue
         meter = contracts.read(contracts.regular(path / 'usage.json')) if (path/'usage.json').exists() else None
         if meter is None and not interrupted and not native_completion_known(dict(original,stop_reason=None), contracts.settings(root, job)):
-            raise ValueError('Missing billing has no known original completion')
+            from . import continuation
+            successor = (contracts.read(contracts.regular(paths[number + 1] / 'native-intent.json'))
+                         if number + 1 < len(paths) else automatic_successor or {})
+            automatic = ((automatic_recovery is not None and number == len(paths) - 1)
+                         or successor.get('continuation_kind') == 'automatic_recovery')
+            from . import native_recovery
+            if not automatic or not native_recovery.recoverable_source(continuation.automatic_source(root, job['step'], path)):
+                raise ValueError('Missing billing has no known original completion')
         # An absent meter contributes no reported tokens to the lower bound;
         # retain its absence and unknown coverage, never publish a zero meter.
         reported = meter or dict(input_tokens=0,cached_input_tokens=0,output_tokens=0)
@@ -1734,7 +1741,14 @@ def _node_duration(root, job, intent, limits):
         paths = execution.records(root, job['step'])
         if type(number) is not int or not 0 < number < len(paths):
             raise ValueError('Continuation has no exact original execution')
-        original = _attempt_consumption(root, job, paths[:number])
+        accepted = contracts.read(contracts.regular(paths[number] / 'native-intent.json'))
+        if accepted != intent:
+            raise ValueError('Continuation budget lost its exact accepted intent')
+        # The current accepted attempt is outside the prior-consumption slice.
+        # Retain that verified boundary so its failed source's unknown billing
+        # remains a lower bound during runner admission/reporting as at accept.
+        original = _attempt_consumption(root, job, paths[:number],
+            automatic_successor=accepted if accepted.get('continuation_kind') == 'automatic_recovery' else None)
         if (prior_tokens, prior) != original:
             raise ValueError('Continuation cannot refund original consumption')
     elif prior_tokens or prior:
@@ -1877,7 +1891,7 @@ def node_report(root, job, intent, meter):
                 limits=intent['budget_slice']['limits'])
 
 
-def accept_continuation(root, job, paths, *, output_repair=None):
+def accept_continuation(root, job, paths, *, output_repair=None, automatic_recovery=None):
     from .protocol import require_current
     require_current(root,job)
     final=final_a_barrier(root)
@@ -1887,7 +1901,12 @@ def accept_continuation(root, job, paths, *, output_repair=None):
                 output_repair!=continuation.output_request(root,job['step'],paths[-1])):
             raise NodeBudgetUnavailable('final_a_return_consumed')
     from . import native
-    tokens, seconds = _attempt_consumption(root, job, paths)
+    if automatic_recovery is not None:
+        from . import continuation
+        current = continuation.automatic_decision(root, job['step'])
+        if current != automatic_recovery or current.get('action') not in {'continue', 'retry'}:
+            raise ValueError('Automatic recovery budget admission lost its exact source decision')
+    tokens, seconds = _attempt_consumption(root, job, paths, automatic_recovery=automatic_recovery)
     policy = node_limits(root, job)
     limits, stamp = _observe_node_clock(root)
     meter = native.usage(root)
@@ -1904,7 +1923,10 @@ def accept_continuation(root, job, paths, *, output_repair=None):
     node_mode(root)
     reserve = (closeout_floor(settings, preparation_seconds=closeout_state(root)['begin']['preparation_seconds'])
         if job.get('purpose') == 'closeout' else delivery_reserve(settings)) or dict(tokens=0, seconds=0, steps=0)
-    if (meter.get('blocking_unknown_steps', meter['unknown_steps'])
+    unknown = meter.get('blocking_unknown_steps', meter['unknown_steps'])
+    if automatic_recovery is not None:
+        unknown = [step for step in unknown if step != job['step']]
+    if (unknown
             or limits['max_tokens'] - meter.get('accounted_tokens', meter['observed_tokens']) <= reserve['tokens']
             or limits['seconds_remaining'] <= reserve['seconds']
             or step_limit(root) - used_steps(root) < 1 + reserve['steps']):

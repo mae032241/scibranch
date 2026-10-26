@@ -283,7 +283,7 @@ workspace 与框架已知路径的元数据。同用户外部宿主进程、既�
 | 实例准备、路由与暂停 | `research_loop/controller.py`、`runtime.py`、`instance_control.py` |
 | 统一配置与后端 | `research_config.py`、`backends.py` |
 | 后台操作与用户方向 | `control_operations.py`、`user_guidance.py` |
-| 原生执行、原线程续接与计量 | `native.py`、`execution.py`、`continuation.py` |
+| 原生执行、原线程续接与计量 | `native.py`、`execution.py`、`continuation.py`、`native_recovery.py` |
 | 科学合同、原文与成果 | `contracts.py`、`semantic.py`、`instance_science.py` |
 | 候选比较与交付 | `selection.py`、`delivery.py`、`worker_delivery.py` |
 | 执行注册与原调用恢复 | `experiments.py`、`managed_wait.py`、`local_experiments.py`；领域插件提供 adapter |
@@ -345,7 +345,8 @@ output-repair 策略退回同一 A 补填。FINAL 补填保留同一任务、ses
 累计消耗、有限次数及原单次时长；共享余额耗尽不撤销该次完成或其原授权交付。
 它不授权新实验、新科学节点或重试未知执行。
 
-标准单命令 `codex` 的 CLI prepare 默认冻结最多两次仅输出补填或原受管执行唤醒，在私有策略中绑定原
+标准单命令 `codex` 的 CLI prepare 默认冻结最多两次仅输出补填或原受管执行唤醒，并启用独立的
+有界自动接续策略；在私有策略中绑定原
 native home，保留配置、认证及权限来源；冻结绝对 launcher 调用路径和目标文件，
 不替换符号链接调用语义。未提供节点策略时，各角色软目标引用原全局上限，不预扣额度。
 显式策略优先且可关闭默认补填；自定义 launcher 和直接 controller API 调用仍须显式策略。
@@ -365,6 +366,31 @@ W 合同说明冻结的唤醒权限及 pending 时正常交回方式，但不强
 实际原预算、时间或宿主停止限制触发，不设查询次数上限。终态字符串须先对同一调用
 reconcile 再消费；unknown 或不可用事实须核对或明确报告障碍，不能盲轮询。
 这是交接合同，不强制任意模型交回，也不增加执行权限。新任务冻结这段交接说明，旧任务和调用原件不改。
+
+`native_recovery.py` 分类原生结构化失败字段及窄匹配的原生失败信封，通过既有 continuation/controller 路径给出唯一
+有界恢复决定。明确未完成的提前停止可续接原 session；明确临时限流、容量、连接或服务故障
+可重试原 session。启动重试必须有原生证据明确证明请求未被接受，缺少 session 不构成证明。
+永久认证、配额、配置错误及未分类错误停止；原生失败事件额外支持本机 Codex CLI 连接合成
+loopback 响应实证的 429 retry-limit/quota 完整文本及有界锚定 503 HTTP 信封。其他
+message-only 错误保持 unknown，普通 agent/tool 正文不授重试许可；本机翻译证据不等于
+真实服务商故障恢复资格。已完成 turn 缺少或给出无效必需输出时仍走原输出补填，合法 fragment 保持
+阶段语义。`output_only` 原义不变，`automatic_recovery` 是独立许可；显式旧策略没有该字段
+就不新增许可，自定义、多参数 launcher 及 protocol 后端不支持此自动路径。
+
+默认提前停止 continue 两次、临时故障 retry 三次，在同一 job 原 attempt 链中分别累计；
+服务退避从 30 秒起指数增长，单次上限 300 秒、抖动比例 0.1、累计实际服务等待上限 1800 秒。
+推进、重启或配置修改均不清零次数与等待。既有 controller writer 拥有仲裁及实际单调时间
+等待，没有 controller 就不自行执行；原 attempt 保留原因、分别计数、实际等待及 UTC 下次
+尝试时间。停机不新增服务等待，崩溃时未测尾段保留不确定性；UTC 到期只获得重新仲裁和预算
+准入的资格，不直接启动。暂停停止服务等待，保留原安排及已记录消费。
+服务端 retry hint 超过单次退避或累计剩余等待上限时停止，不截短提示绕过上限。
+
+原 native 尚活或身份未核清、受管调用 running/unknown 时不启动替代 native，仍由既有准确
+原调用入口核对。恢复保留原模型/profile、home、权限、accepted-call 身份及消费，不重新
+提交未知外部工作，也不新增预算。正式完成、显式等待和用户暂停保持原边界。protected
+FINAL 与 closeout 禁用自动接续，原有限输出补填另守原策略。UI 投影等待/停止原因、下次
+尝试、分别计数、服务等待及限制，服务等待不冒充科学失败，也不建立第二份状态账本。
+本批不新增必填科学输出、不提升协议，也不替换通用科学预算时钟。
 
 H 选择 `wait` 且没有 pending 或未知外部执行时，进入既有持久 FINAL；存在原未决调用则保留等待机制。此入口要求已冻结的最终 A 完成能力，缺少时如实返回 `final_unavailable`，不补造完成授权。普通 A 明确 `finish` 即结束本轮且零提交；未配置交付策略时，`deliver` 与 `finish` 使用相同停止行为，原封存科学选择保持不变；已配置时，`deliver` 只消费原封存 A 的精确候选授权，不强制新 FINAL A。启用选择策略时，普通 A 原任务先冻结并展示完整比较目录，交付仍核对同一目录、原件及资格；失败或缺资格保留未决结果，不自动改选或新起科学作者。共享预算阻断保留原路线；可选 H/A 节点准入拒绝改为返回 H 作有界控制澄清，沿现有 author-correction 绑定准确封存选择及实际拒绝原因。首个根和原因跨重试/预算修订保持，既有两次补正额度不重置；下一科学选择仍核当前角色份额、无证据重复、共享预算和执行门槛。H 选择 W 才重新进入正常路线，控制不虚构实验或新证据；原调用活跃或未知时不启动这次 H 澄清。局部 W 只提名本次冻结范围内机制；按机制的最近声明及各自来源供 A/FINAL 读取，其他机制既有代表和缺口保持，新机制显示 pending，screen 仍可全局。
 

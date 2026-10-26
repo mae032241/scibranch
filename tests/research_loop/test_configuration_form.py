@@ -245,6 +245,51 @@ def test_policy_forms_edit_real_schemas_and_preserve_extra_fields(tmp_path):
     assert 'policies' not in form.parse(fields, base=tmp_path)['document']
 
 
+@pytest.mark.parametrize('edit', [False, True])
+def test_automatic_recovery_controls_retain_omission_false_and_finite_limits(tmp_path, edit):
+    from scidiscovery.research_loop import native_recovery
+    draft = complete(tmp_path)
+    def parse(fields):
+        return (form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
+            if edit else form.parse(fields, base=tmp_path))
+    legacy = dict(max_attempts=2, protocol='codex_exec_resume', usage_scope='turn',
+        output_repair=True, output_only=True)
+    automatic = dict(native_recovery.policy({}), enabled=False,
+        initial_backoff_seconds=.25, extension=dict(keep=[]))
+    for policy in (legacy, dict(legacy, automatic_recovery={}),
+                   dict(legacy, automatic_recovery=automatic)):
+        draft['document']['policies'] = dict(resume=policy)
+        html = form.render(draft, edit=edit)
+        fields = Controls(html).fields
+        assert (parse(fields)['document'] if edit else form.declaration(parse(fields))) == draft['document']
+    assert fields['cfg.policies.resume.automatic_recovery.enabled'] == 'false'
+    assert '累计服务等待上限（秒）' in html
+    assert '此授权仅允许输出补填' in html
+    fields['cfg.policies.resume.automatic_recovery.max_retries'] = '4'
+    parsed = parse(fields)
+    assert parsed['document']['policies']['resume']['automatic_recovery'] == dict(automatic, max_retries=4)
+    exported = research_config.tomllib.loads(form.export_toml(parsed))
+    assert exported['policies']['resume'] == parsed['document']['policies']['resume']
+    fields['cfg.policies.resume.automatic_recovery.max_retries'] = '1.5'
+    with pytest.raises(form.FormError) as caught:
+        parse(fields)
+    retained = Controls(form.render(caught.value.draft, edit=edit)).fields
+    assert retained['cfg.policies.resume.automatic_recovery.max_retries'] == '1.5'
+    assert retained['cfg.policies.resume.automatic_recovery.initial_backoff_seconds'] == '0.25'
+
+
+def test_automatic_recovery_dedicated_fields_reject_duplicate_extension_values(tmp_path):
+    draft = complete(tmp_path)
+    draft['document']['policies'] = dict(resume=dict(automatic_recovery=dict(enabled=False, max_retries=2)))
+    # A retained extension tree cannot supply the same dedicated leaf again.
+    fields = submitted(draft)
+    fields.update({'node.1900.kind': 'table', 'node.1900.parent': '@policies.resume',
+        'node.1900.key': 'automatic_recovery', 'node.1901.kind': 'integer',
+        'node.1901.parent': '1900', 'node.1901.key': 'max_retries', 'node.1901.value': '4'})
+    with pytest.raises(ValueError, match='专用字段与扩展字段重复'):
+        form.parse(fields, base=tmp_path)
+
+
 def test_collapsed_controls_keep_custom_values_false_empty_and_omission(tmp_path):
     draft = complete(tmp_path)
     draft['document']['agent'].update(reasoning_effort='backend-specific-effort',

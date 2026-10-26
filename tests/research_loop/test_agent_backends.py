@@ -339,10 +339,6 @@ def test_formal_review_task_retains_subject_and_uses_launcher_for_independent_ru
     public=dict(role='A',question='Assess exact claims',review=dict(subject='inputs/subject',instruction='Independent exact-subject assessment',scope='No execution permission'),final_response=['verdict','findings'])
     monkeypatch.setattr(formal_review,'public',lambda *args:public)
     monkeypatch.setattr(user_guidance,'public',lambda *args:{})
-    task=c.science_view(dict(formal_review={'exact':'original'}),tmp_path)
-    assert task['review']==dict(subject='inputs/subject',scope='No execution permission')
-    assert public['review']['instruction']=='Independent exact-subject assessment'
-
     run=tmp_path/'run';run.mkdir()
     root=prepare(run)
     record=intent(root, 'A')
@@ -350,6 +346,11 @@ def test_formal_review_task_retains_subject_and_uses_launcher_for_independent_ru
     c.write(root/'jobs/001.json',job)
     value=c.read(record/'native-intent.json');value['task_ref']=c.record_ref(root/'jobs/001.json')
     c.write(record/'native-intent.json',value)
+    # Use the same current build_job fixture for projection and launch, including
+    # its frozen worker/lineage view versions and complete scientific packet.
+    task=c.science_view(job,root)
+    assert task['review']==dict(subject='inputs/subject',scope='No execution permission')
+    assert public['review']['instruction']=='Independent exact-subject assessment'
     class LaunchCaptured(RuntimeError):
         pass
     def launch(self, profile, work, pending, schema, instruction):

@@ -89,6 +89,82 @@ def test_narrow_wake_permission_preserves_legacy_full_resume():
     assert continuation.wake_allowed(dict(output,execution_wake=True))
 
 
+def normalization_options(tmp_path, **options):
+    return dict(root=tmp_path / 'instance', objective=tmp_path / 'objective.md',
+        public_root=tmp_path / 'public', launcher=['codex'],
+        max_tokens=1000, max_seconds=120, max_steps=8, **options)
+
+
+def test_standard_defaults_separate_automatic_recovery_from_output_only(tmp_path, monkeypatch):
+    binary = tmp_path / 'codex'
+    binary.write_text('not invoked')
+    home = tmp_path / 'inherited-home'
+    monkeypatch.setattr(research_config.shutil, 'which', lambda executable: str(binary))
+    monkeypatch.setenv('CODEX_HOME', str(home))
+    options = normalization_options(tmp_path, native_options=dict(network=False, web='cached'))
+    prepared = research_config.normalize(options)
+    policy = prepared['resume_policy']
+    assert policy['output_only'] and policy['output_repair']
+    assert policy['automatic_recovery'] == dict(enabled=True, max_continues=2, max_retries=3,
+        initial_backoff_seconds=30, max_backoff_seconds=300, jitter_fraction=.1, max_wait_seconds=1800)
+    assert policy['native_home'] == str(home)
+    assert prepared['native_options'] == options['native_options']
+    assert 'resume_policy' not in options and not home.exists()
+    policy['automatic_recovery']['max_retries'] = 0
+    assert research_config.normalize(options)['resume_policy']['automatic_recovery']['max_retries'] == 3
+
+
+@pytest.mark.parametrize('mode', ['legacy', 'disabled', 'custom', 'protocol', 'fragment'])
+def test_automatic_recovery_defaults_do_not_expand_explicit_or_custom_launchers(tmp_path, monkeypatch, mode):
+    options = normalization_options(tmp_path)
+    legacy = dict(max_attempts=2, protocol='codex_exec_resume', usage_scope='turn',
+        output_repair=True, output_only=True)
+    if mode in {'legacy', 'disabled'}:
+        options['resume_policy'] = dict(legacy)
+        if mode == 'disabled':
+            options['resume_policy']['automatic_recovery'] = dict(enabled=False)
+    elif mode == 'custom':
+        options['launcher'] = ['codex', '--declared-argument']
+    elif mode == 'protocol':
+        options.update(native_backend='protocol', model='declared-model')
+    else:
+        options['worker_fragment_policy'] = dict(context='same_session')
+    monkeypatch.setattr(research_config.shutil, 'which', lambda executable: pytest.fail('must retain explicit launcher'))
+    prepared = research_config.normalize(options)
+    assert prepared.get('resume_policy') == options.get('resume_policy')
+    assert prepared['launcher'] == options['launcher']
+
+
+def test_toml_automatic_recovery_roundtrips_independent_policy(tmp_path):
+    path = declaration(tmp_path, '''
+[policies.resume]
+max_attempts = 2
+protocol = "codex_exec_resume"
+usage_scope = "turn"
+output_only = true
+output_repair = true
+[policies.resume.automatic_recovery]
+enabled = false
+max_continues = 1
+max_retries = 4
+initial_backoff_seconds = 0.5
+max_backoff_seconds = 2
+jitter_fraction = 0
+max_wait_seconds = 5
+''')
+    options = research_config.load(path)
+    policy = options['resume_policy']
+    assert policy['output_only'] is True
+    assert policy['automatic_recovery'] == dict(enabled=False, max_continues=1, max_retries=4,
+        initial_backoff_seconds=.5, max_backoff_seconds=2, jitter_fraction=0, max_wait_seconds=5)
+    settings = research_config.prepare(validate_only=True,
+        **{key: value for key, value in options.items() if key != 'resume_policy'})
+    settings['resume_policy'] = policy
+    document = research_config.to_document(tmp_path / 'instance', settings)
+    assert document['policies']['resume'] == policy
+    assert research_config.from_document(document, base=tmp_path)['resume_policy'] == policy
+
+
 @pytest.mark.parametrize('state,bound,query,wake,verified,expected',[
     ('running',True,True,True,False,'return_control'),
     ('running',True,True,False,False,'poll_original'),

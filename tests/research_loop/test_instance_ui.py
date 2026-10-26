@@ -14,6 +14,32 @@ from test_execution_authority import prepare
 from test_history_handoff import finish
 
 
+def test_service_backoff_presentation_remains_active_and_pausable(tmp_path):
+    from scidiscovery.research_loop import ui_view
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    token = ui._browser(cookie)
+    node = dict(step=2, role='W', state='automatic_recovery_waiting',
+        automatic_recovery=dict(status='waiting', reason='native_temporary', next_attempt_at='2026-10-26T12:00:00Z'))
+    snapshot = ui._snapshot()
+    snapshot.update(conclusion=None, final=None)
+    snapshot['view'].update(nodes=[node], paused=False, correction={})
+    shown = ui._presentation(snapshot, dict(status='running'))
+    assert shown['active'] is True and shown['current'] == node
+    status = ui._status(snapshot, dict(status='running'))
+    assert status['state'] == 'service_wait'
+    primary = str(ui._primary(token, True, snapshot, status))
+    assert 'action="/control/pause"' in primary
+    assert 'action="/control/start"' not in primary and 'action="/control/continue"' not in primary
+    assert 'action="/control/' not in str(ui._primary(token, False, snapshot, status))
+    snapshot['view']['paused'] = True
+    assert ui._presentation(snapshot, {})['active'] is True
+    node.update(state='automatic_recovery_paused', automatic_recovery=dict(status='paused'))
+    paused = ui._presentation(snapshot, {})
+    assert paused['active'] is False
+    assert ui_view.status_summary(paused, snapshot['view'])['state'] == 'paused'
+
+
 def session(root, key):
     ui = InstanceUI(root, secret_file=key); ui.host = '127.0.0.1:18753'
     _, _, headers = ui.get('/manage?' + urlencode({'token': ui.management_token}), host=ui.host)

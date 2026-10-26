@@ -125,6 +125,7 @@ def scene(tmp_path, monkeypatch):
             job_ref=record_ref(job_path), raw_ref=file_ref(record / "science-output.json"),control_outcome={}))
 
     contracts = SimpleNamespace(read=read, write=write, record_ref=record_ref, file_ref=file_ref,
+        record_path=reference_api.record_path,
         workspace=workspace, build_job=build_job, validate=validate,
         seal_result=seal_result,
         regular=importlib.import_module('scidiscovery.research_loop.contracts').regular,

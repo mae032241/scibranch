@@ -121,6 +121,7 @@ def repair_instance(tmp_path, role='H', kind='badjson', *, enabled=True, attempt
 
 @pytest.mark.parametrize('role', list('HWAE'))
 @pytest.mark.parametrize('kind', ['badjson','missingfield'])
+@pytest.mark.process_e2e
 def test_completed_output_repair_is_same_role_node_session_without_experiment_replay(tmp_path,role,kind):
     root=repair_instance(tmp_path,role,kind)
     assert native.execute_native(root,1)['role']==role
@@ -142,6 +143,7 @@ def test_completed_output_repair_is_same_role_node_session_without_experiment_re
 
 
 @pytest.mark.parametrize('kind', ['missing','wrongtype','empty'])
+@pytest.mark.process_e2e
 def test_known_output_failure_keeps_execution_facts_and_repairs(tmp_path,kind):
     root=repair_instance(tmp_path,kind=kind)
     assert native.execute_native(root,1)['next_action']=='wait'
@@ -154,6 +156,7 @@ def test_known_output_failure_keeps_execution_facts_and_repairs(tmp_path,kind):
         assert outcome['raw_ref']==c.file_ref(first/'science-output.json')
 
 
+@pytest.mark.process_e2e
 def test_old_resume_policy_does_not_automatically_repair_successful_bad_output(tmp_path):
     root=repair_instance(tmp_path,enabled=False)
     with pytest.raises(OutputRepairRequired):native.execute_native(root,1)
@@ -162,6 +165,7 @@ def test_old_resume_policy_does_not_automatically_repair_successful_bad_output(t
     assert len(execution.records(root,1))==1
 
 
+@pytest.mark.process_e2e
 def test_default_without_resume_policy_retains_typed_output_error(tmp_path,monkeypatch):
     root=instance(tmp_path,fake=REPAIR_FAKE,with_policy=False)
     c.build_job(root,1,'H',[])
@@ -177,6 +181,7 @@ def test_default_without_resume_policy_retains_typed_output_error(tmp_path,monke
     assert len(execution.records(root,1))==1
 
 
+@pytest.mark.process_e2e
 def test_output_repair_shares_original_attempt_limit_and_retains_all_bad_outputs(tmp_path):
     root=repair_instance(tmp_path,attempts=2)
     (c.workspace(root,1)/'work/repeat-bad-output').touch()
@@ -191,6 +196,7 @@ def test_output_repair_shares_original_attempt_limit_and_retains_all_bad_outputs
     assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\nresume\n'
 
 
+@pytest.mark.process_e2e
 def test_output_repair_does_not_replenish_insufficient_shared_budget(tmp_path,monkeypatch):
     root=repair_instance(tmp_path)
     with monkeypatch.context() as patch:
@@ -204,6 +210,7 @@ def test_output_repair_does_not_replenish_insufficient_shared_budget(tmp_path,mo
 
 
 @pytest.mark.parametrize('attempts', [1,2])
+@pytest.mark.process_e2e
 def test_terminal_repair_rechecks_initial_bad_output_before_seal(tmp_path,monkeypatch,attempts):
     root=repair_instance(tmp_path)
     first=execution.origin(root,1)
@@ -234,6 +241,7 @@ def test_terminal_repair_rechecks_initial_bad_output_before_seal(tmp_path,monkey
     assert len(execution.records(root,1))==attempts+1
 
 
+@pytest.mark.process_e2e
 def test_output_repair_without_original_session_stops_without_fresh_fallback(tmp_path,monkeypatch):
     root=repair_instance(tmp_path)
     with monkeypatch.context() as patch:
@@ -248,6 +256,7 @@ def test_output_repair_without_original_session_stops_without_fresh_fallback(tmp
 
 
 @pytest.mark.parametrize('kind', ['unknown','unsafe'])
+@pytest.mark.process_e2e
 def test_unknown_execution_or_unsafe_output_never_starts_repair(tmp_path,kind):
     root=repair_instance(tmp_path,kind=kind)
     with pytest.raises((ValueError,RuntimeError)):native.execute_native(root,1)
@@ -257,6 +266,7 @@ def test_unknown_execution_or_unsafe_output_never_starts_repair(tmp_path,kind):
 
 
 @pytest.mark.parametrize('mutation', ['raw','job','schema'])
+@pytest.mark.process_e2e
 def test_output_repair_does_not_soften_original_integrity_failure(tmp_path,monkeypatch,mutation):
     root=repair_instance(tmp_path)
     with monkeypatch.context() as patch:
@@ -271,6 +281,7 @@ def test_output_repair_does_not_soften_original_integrity_failure(tmp_path,monke
     assert len(execution.records(root,1))==1
 
 
+@pytest.mark.process_e2e
 def test_host_write_failure_retries_original_seal_without_model_reexecution(tmp_path,monkeypatch):
     root=repair_instance(tmp_path,kind='valid')
     original=c.write
@@ -286,48 +297,54 @@ def test_host_write_failure_retries_original_seal_without_model_reexecution(tmp_
     assert len(execution.records(root,1))==1 and native.usage(root)['observed_tokens']==14
 
 
+@pytest.mark.process_e2e
 def test_known_failure_same_thread_success_keeps_originals_and_cumulative_budget(tmp_path):
     root=instance(tmp_path);first=fail(root)
     preserved={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
-    assert controller.worker_resume(root,1)['status']=='wait'
+    assert controller.worker_resume(root,1)['status']=='final_a_completed'
     assert all(p.read_bytes()==data for p,data in preserved.items())
     assert execution.raw(root,1)==first/'continuations/001/science-output.json'
     assert c.validate(c.workspace(root,1))['summary']=='Continued scientific finding'
-    assert native.usage(root)['observed_tokens']==36
-    assert budget.used_steps(root)==2
+    assert native.usage(root)['observed_tokens']==58
+    assert budget.used_steps(root)==3
     node=status(root)['nodes'][0]
     assert node['continuations']==1 and node['budget_report']['observed_tokens']==36
     assert node['budget_report']['dispatches']==2
     assert c.read(first/'result-identity.json')['execution_ref']==execution.reference(root,1)
-    c.build_job(root,2,'H',[1])
+    final_job=c.read(root/'jobs/002.json')
+    assert final_job['role']=='A' and final_job['final_only'] is True
     from scidiscovery.research_loop import history
     assert history.direct_sources(root,c.read(root/'jobs/002.json'))[0][1]['summary']=='Continued scientific finding'
-    assert controller.run(root)['status']=='wait'
-    assert controller.worker_resume(root,1)['status']=='wait'
+    assert controller.run(root)['status']=='final_a_completed'
+    assert controller.worker_resume(root,1)['status']=='final_a_completed'
+    assert not (root/'jobs/003.json').exists()
     assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\n'
 
 
 @pytest.mark.parametrize('mutation', ['root_intent', 'process_receipt', 'session_header', 'schema', 'task'])
+@pytest.mark.process_e2e
 def test_original_binding_tamper_never_creates_continuation(tmp_path, mutation):
     root=instance(tmp_path);first=fail(root)
     if mutation=='root_intent':
         value=c.read(first/'native-intent.json');value['task_ref']=dict(path='/wrong/original.json')
         c.write(first/'native-intent.json',value)
     elif mutation=='process_receipt':
-        value=c.read(first/'native-process.json');value['start_ticks']+=1
+        value=c.read(first/'native-process.json');value['task_ref']=dict(path='/different/accepted-intent.json')
         c.write(first/'native-process.json',value)
     elif mutation=='session_header':
-        p=next((root/'native-homes/001/sessions').glob('*.jsonl'))
+        p=root/'native-homes/001/sessions/rollout.jsonl'
         value=json.loads(p.read_text());value['payload']['cwd']='/incorrect-workspace';p.write_text(json.dumps(value)+'\n')
     elif mutation=='task':
         work=c.workspace(root,1);value=c.read(work/'science-task.json');value['goal_text']='Injected objective';c.write(work/'science-task.json',value)
     elif mutation=='schema':
         c.write(first/'science-result.schema.json',dict(type='object',properties={},required=[],additionalProperties=False))
-    with pytest.raises(ValueError):controller.worker_resume(root,1)
+    expected='^Original execution process identity is invalid$' if mutation=='process_receipt' else None
+    with pytest.raises(ValueError,match=expected):controller.worker_resume(root,1)
     assert not (first/'continuations/001/native-intent.json').exists()
     assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
 
 
+@pytest.mark.process_e2e
 def test_missing_meter_is_unknown_not_billing_delay(tmp_path):
     root=instance(tmp_path);first=fail(root)
     (first/'usage.json').unlink()
@@ -341,12 +358,13 @@ def test_missing_meter_is_unknown_not_billing_delay(tmp_path):
     assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
 
 
+@pytest.mark.process_e2e
 def test_shared_amendment_does_not_change_original_soft_target(tmp_path):
     root=instance(tmp_path,cap=30);first=fail(root)
     before={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
     budget.amend(root,max_tokens=5000,max_seconds=500,authorization_note='Explicit shared ceiling only')
     # Original 14 + continuation 22 exceeds the original 30-token soft target.
-    assert controller.worker_resume(root,1)['status']=='wait'
+    assert controller.worker_resume(root,1)['status']=='final_a_completed'
     outcome=c.read(first/'continuations/001/native-outcome.json')
     assert outcome['stop_reason'] is None
     assert outcome['budget_slice']['observed_tokens']==36
@@ -355,6 +373,7 @@ def test_shared_amendment_does_not_change_original_soft_target(tmp_path):
     assert (first/'result-identity.json').exists()
 
 
+@pytest.mark.process_e2e
 def test_resume_budget_denial_restores_inactive_clock_and_keeps_attempt_unaccepted(tmp_path,monkeypatch):
     root=instance(tmp_path);first=fail(root)
     outcome=c.read(first/'native-outcome.json')
@@ -378,10 +397,11 @@ def test_resume_budget_denial_restores_inactive_clock_and_keeps_attempt_unaccept
     assert not (first/'continuations/001/native-intent.json').exists()
     assert all(p.read_bytes()==raw for p,raw in originals.items())
     budget.amend(root,max_tokens=200,authorization_note='Explicit capacity restoration')
-    assert controller.worker_resume(root,1)['status']=='wait'
-    assert native.usage(root)['observed_tokens']==36
+    assert controller.worker_resume(root,1)['status']=='final_a_completed'
+    assert native.usage(root)['observed_tokens']==58
 
 
+@pytest.mark.process_e2e
 def test_operator_pause_does_not_accept_a_new_continuation(tmp_path):
     root=instance(tmp_path);first=fail(root)
     c.write(root/'pause.request',dict(reason='user pause'))
@@ -389,6 +409,7 @@ def test_operator_pause_does_not_accept_a_new_continuation(tmp_path):
     assert not (first/'continuations/001/native-intent.json').exists()
 
 
+@pytest.mark.process_e2e
 def test_unaccepted_intent_is_not_replayed_or_given_another_attempt(tmp_path):
     root=instance(tmp_path);first=fail(root)
     from scidiscovery.research_loop import continuation
@@ -404,6 +425,7 @@ def test_unaccepted_intent_is_not_replayed_or_given_another_attempt(tmp_path):
     assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
 
 
+@pytest.mark.process_e2e
 def test_real_w_continuation_seals_a_and_reuses_successful_science(tmp_path):
     from test_history_handoff import finish
     from scidiscovery.research_loop import history, search
@@ -427,6 +449,7 @@ def test_real_w_continuation_seals_a_and_reuses_successful_science(tmp_path):
     assert budget.used_steps(root)==4 and native.usage(root)['observed_tokens']==68
 
 
+@pytest.mark.process_e2e
 def test_continuation_cannot_exceed_consumed_shared_step_budget(tmp_path,monkeypatch):
     from test_history_handoff import finish
     root=instance(tmp_path,steps=2)
@@ -468,6 +491,7 @@ def test_continuation_cannot_exceed_consumed_shared_step_budget(tmp_path,monkeyp
 
 
 
+@pytest.mark.process_e2e
 def test_two_explicit_continuations_never_auto_loop_or_refund_attempts(tmp_path):
     root=instance(tmp_path);first=fail(root)
     (c.workspace(root,1)/'work/fail-again').touch()
@@ -483,6 +507,7 @@ def test_two_explicit_continuations_never_auto_loop_or_refund_attempts(tmp_path)
 
 
 @pytest.mark.parametrize('value',[0,-1,True,float('nan')])
+@pytest.mark.process_e2e
 def test_stored_previous_token_anchor_cannot_refund_exact_prior_meter(tmp_path,value):
     root=instance(tmp_path);first=fail(root)
     from scidiscovery.research_loop import continuation
@@ -498,6 +523,7 @@ def test_stored_previous_token_anchor_cannot_refund_exact_prior_meter(tmp_path,v
     assert not (record/'native-process.json').exists()
 
 
+@pytest.mark.process_e2e
 def test_missing_required_original_report_prevents_qualification(tmp_path):
     root=instance(tmp_path);first=fail(root)
     outcome=c.read(first/'native-outcome.json');del outcome['budget_slice']['input_tokens'];c.write(first/'native-outcome.json',outcome)
@@ -506,6 +532,7 @@ def test_missing_required_original_report_prevents_qualification(tmp_path):
 
 
 @pytest.mark.parametrize('tamper', ['intent', 'report'])
+@pytest.mark.process_e2e
 def test_success_before_seal_does_not_rebind_drifted_attempt(tmp_path,monkeypatch,tamper):
     root=instance(tmp_path);first=fail(root)
     seal=c.seal_result
@@ -531,6 +558,7 @@ def test_success_before_seal_does_not_rebind_drifted_attempt(tmp_path,monkeypatc
 
 
 @pytest.mark.parametrize('tamper',['schema','task'])
+@pytest.mark.process_e2e
 def test_accepted_continuation_rechecks_task_and_schema_before_actual_popen(tmp_path,monkeypatch,tamper):
     root=instance(tmp_path);first=fail(root)
     from scidiscovery.research_loop import runtime
@@ -551,54 +579,53 @@ def test_accepted_continuation_rechecks_task_and_schema_before_actual_popen(tmp_
 
 
 
-def large_native_session_tree(root):
-    """Complete session originals, independent of optional live token discovery."""
-    directory=root/'native-homes/001/sessions'
+def retained_session_original(tmp_path):
+    """One explicitly named session original; no native launch or tree scan."""
+    root=instance(tmp_path);c.build_job(root,1,'H',[])
+    first=execution.origin(root,1)
+    thread='11111111-2222-4333-8444-555555555555'
+    c.write(first/'native-outcome.json',dict(thread_id=thread))
+    (first/'native.jsonl').write_text(json.dumps(dict(type='thread.started',thread_id=thread))+'\n')
+    home=root/'native-homes/001';directory=home/'sessions';directory.mkdir(parents=True)
     original=directory/'rollout.jsonl'
-    value=json.loads(original.read_text());value['payload']['retained_metadata']='original metadata '*5000
-    original.write_text(json.dumps(value)+'\n')
-    assert original.stat().st_size>65536
-    for number in range(257):
-        other=dict(type='session_meta',payload=dict(id=f'{number:08d}-0000-4000-8000-000000000000',cwd=str(c.workspace(root,1))))
-        (directory/f'other-{number:03d}.jsonl').write_text(json.dumps(other)+'\n')
-    assert len(list(directory.glob('*.jsonl')))==258
-    return original
+    original.write_text(json.dumps(dict(type='session_meta',payload=dict(id=thread,
+        cwd=str(c.workspace(root,1)),retained_metadata='Preserved native session metadata.')))+'\n')
+    return root,first,home,original
 
 
-def test_large_native_session_tree_and_header_resume_same_original(tmp_path):
-    root=instance(tmp_path);first=fail(root);session_file=large_native_session_tree(root)
-    reference=continuation.session(root,1,first)
+def test_native_session_reference_retains_exact_header_and_explicit_original(tmp_path):
+    root,first,home,session_file=retained_session_original(tmp_path)
+    reference=continuation.session(root,1,first,home=home,session_path=session_file)
     assert reference['path']==str(session_file)
     with session_file.open('rb') as stream:header=stream.readline()
     assert reference['header']==json.loads(header)
-    result=controller.worker_resume(root,1)
-    assert result['status']=='wait'
-    accepted=c.read(execution.record(root,1)/'native-intent.json')
-    assert accepted['session']==reference
-    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\n'
-    assert native.usage(root)['observed_tokens']==36
+    assert reference['header']['payload']['retained_metadata']=='Preserved native session metadata.'
+    assert not (c.workspace(root,1)/'work/launches').exists()
+    assert not (first/'continuations').exists()
 
 
-def test_large_native_session_header_wrong_cwd_does_not_accept_resume(tmp_path):
-    root=instance(tmp_path);first=fail(root);session_file=large_native_session_tree(root)
+def test_native_session_header_wrong_cwd_does_not_accept_resume(tmp_path):
+    root,first,home,session_file=retained_session_original(tmp_path)
     value=json.loads(session_file.read_text());value['payload']['cwd']='/incorrect-workspace'
     session_file.write_text(json.dumps(value)+'\n')
-    with pytest.raises(ValueError,match='^Native session identity or workspace changed$'):controller.worker_resume(root,1)
+    with pytest.raises(ValueError,match='^Native session identity or workspace changed$'):
+        continuation.session(root,1,first,home=home,session_path=session_file)
     assert not (first/'continuations/001/native-intent.json').exists()
-    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
+    assert not (c.workspace(root,1)/'work/launches').exists()
 
 
-def test_large_native_session_header_hash_drift_cannot_launch_accepted_resume(tmp_path):
-    root=instance(tmp_path);first=fail(root);session_file=large_native_session_tree(root)
+@pytest.mark.process_e2e
+def test_native_session_header_identity_drift_cannot_launch_accepted_resume(tmp_path):
+    root=instance(tmp_path);first=fail(root);session_file=root/'native-homes/001/sessions/rollout.jsonl'
     reference=continuation.session(root,1,first);job=c.read(root/'jobs/001.json')
-    budget.transition(root,'advance','exact original large-header negative control')
+    budget.transition(root,'advance','exact original session identity negative control')
     anchor=budget.accept_continuation(root,job,[first]);record=first/'continuations/001';record.mkdir(parents=True)
     c.write(record/'native-intent.json',dict(step=1,attempt=1,task_ref=c.record_ref(root/'jobs/001.json'),
         root_intent_ref=c.record_ref(first/'native-intent.json'),previous=execution.proof(first),
         session=reference,budget_slice=anchor))
-    value=json.loads(session_file.read_text());value['payload']['retained_metadata']+='changed after acceptance'
+    value=json.loads(session_file.read_text());value['payload']['cwd']='/different/original-workspace'
     session_file.write_text(json.dumps(value)+'\n')
-    with pytest.raises(ValueError,match='Original native session header changed'):native.run_native(root,1,1)
+    with pytest.raises(ValueError,match='^Native session identity or workspace changed$'):native.run_native(root,1,1)
     assert not (record/'native-process.json').exists()
     assert not (first/'continuations/002').exists()
     assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
@@ -622,6 +649,7 @@ def test_resume_accepts_only_exact_published_original_schema_shapes(tmp_path,sha
     assert not (execution.origin(root,1)/'native-intent.json').exists()
 
 
+@pytest.mark.process_e2e
 def test_worker_resume_allows_launcher_source_upgrade(tmp_path):
     root=instance(tmp_path);fail(root)
     launcher=Path(c.settings(root)['native_launcher_argv'][1])

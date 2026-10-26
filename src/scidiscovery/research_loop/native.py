@@ -108,7 +108,7 @@ def wait_native(root: Path, step: int, *, _reentry_started=False):
             record=execution.record(root,step);startup_until=time.monotonic()+5
             continue
         state = runtime.node_state(root, step)
-        if state == 'unstarted' and read(record / 'native-intent.json').get('continuation_kind') == 'reentry' and not reentry_started:
+        if state == 'unstarted' and read(record / 'native-intent.json').get('continuation_kind') in {'reentry','automatic_recovery'} and not reentry_started:
             runtime.start(root, step, read(record / 'native-intent.json')['attempt'])
             reentry_started = True
             startup_until = time.monotonic() + 5
@@ -133,6 +133,9 @@ def wait_native(root: Path, step: int, *, _reentry_started=False):
                     continue
                 if job['role']=='W' and fragments and not (record/'checkpoint.json').exists():
                     raise continuation.ResumeUnavailable('worker_fragment_checkpoint_unavailable')
+                decision = continuation.automatic_decision(root, step)
+                if decision['action'] in {'continue','retry'}:
+                    raise continuation.AutomaticRecoveryRequired(decision)
             try:result = continuation.seal_or_repair(root, step)
             except managed_wait.ExecutionWaiting:
                 continue
@@ -241,7 +244,11 @@ def run_native(root: Path, step: int, attempt=0):
     if settings.get('resume_policy') is not None:
         from . import continuation
         continuation.validate_launcher(root, step)
-    if attempt and intent.get('context_mode') != 'new_context':
+    startup_retry = bool((intent.get('automatic_recovery') or {}).get('startup_retry'))
+    if intent.get('continuation_kind') == 'automatic_recovery':
+        from . import continuation
+        continuation.validate_automatic(root, step, intent)
+    if attempt and intent.get('context_mode') != 'new_context' and not startup_retry:
         if not backend.supports_resume:
             from .continuation import ResumeUnavailable
             raise ResumeUnavailable('worker_resume_unsupported_backend')
@@ -368,13 +375,18 @@ def run_native(root: Path, step: int, attempt=0):
         control_budget.node_mode(root)
         remaining.update(mode='soft_targets',previous_observed_tokens=intent['budget_slice']['previous_tokens'])
         label = 'Original soft-target gaps (zero is not a new grant): '
-        context = 'new context for this same task/workspace' if intent.get('context_mode') == 'new_context' else 'same task/session/workspace'
+        context = ('task/workspace after its explicitly unaccepted original request' if startup_retry else
+                   'new context for this same task/workspace' if intent.get('context_mode') == 'new_context' else 'same task/session/workspace')
         recovery = ('Read the retained original execution results and complete only your final response. '
                     if output_only_wake else
                     'collect or recover managed executions by their original IDs rather than resubmitting. '
                     'Use scientific judgment for ordinary native shell checkpoints; no new mechanical registry is required. ')
         prompt = (label + json.dumps(remaining) + '\nContinue this ' + context + '. Read existing checkpoints and confirmed results; '
                   + recovery + '\n' + prompt)
+        if intent.get('continuation_kind') == 'automatic_recovery':
+            prompt = ('Continue completing the current assigned task. First check retained results and any '
+                'original managed calls, then continue from the current state within the original '
+                'permissions and budget. Never repeat an unknown submission.\n' + prompt)
         if intent.get('output_repair'):
             prompt = ('Repair only your final response for this same completed task. Preserve completed experiments and '
                       'their results; do not rerun or resubmit them. Return corrected scientific JSON using the frozen '
@@ -554,9 +566,11 @@ def run_native(root: Path, step: int, attempt=0):
     terminal_usage_observed = False
     terminal_usage_missing = False
     terminal_meter = dict(meter)
-    live_meter = backend.meter(meter_home, work, session=intent.get('session') if attempt and intent.get('context_mode') != 'new_context' else None)
+    live_meter = backend.meter(meter_home, work, session=intent.get('session') if attempt and intent.get('context_mode') != 'new_context' and not startup_retry else None)
     cleanup = None
-    thread_id = None
+    thread_id = (intent.get('session') or {}).get('thread_id') if attempt and not startup_retry else None
+    native_failures = []
+    native_activity_observed = False
     scientific_lifetime = ExitStack()
     code_exports = []
     launch_started = False
@@ -644,6 +658,9 @@ def run_native(root: Path, step: int, attempt=0):
                                     public_log.write(json.dumps(public_event,ensure_ascii=False)+'\n')
                                     public_log.flush()
                             event = backend.event(event)
+                            if event.get('failure') is not None:
+                                native_failures.append(event['failure'])
+                            native_activity_observed = native_activity_observed or bool(event.get('activity'))
                             if event.get('failed'):
                                 terminal_fault = terminal_fault or 'native_failure_event'
                             if terminal_observed and ('session' in event or event.get('activity')):
@@ -772,8 +789,11 @@ def run_native(root: Path, step: int, attempt=0):
         if observed:
             write(record / 'usage.json', meter)
         write(record / 'usage-observation.json', observation)
+    from . import native_recovery
     outcome = dict(returncode=process.returncode if process else None, native_started=process is not None,
           stop_reason=stop, usage=usage(root), thread_id=thread_id, cleanup=cleanup,
+          terminal_observed=terminal_observed, native_failure=native_recovery.combine(native_failures),
+          native_activity_observed=native_activity_observed,
           native_identity=backend.identity(live_meter, thread_id),
           native_backend=backend.name,
           native_permissions=backends.permission_summary(settings),
@@ -786,7 +806,7 @@ def run_native(root: Path, step: int, attempt=0):
         outcome['limitation']=str(error)
     if final_return is not None:
         outcome['final_a_completion'] = control_budget.final_a_receipt(final_return, intent, meter if observed else None, outcome['usage'])
-    if attempt and intent.get('context_mode') != 'new_context' and thread_id != intent['session']['thread_id']:
+    if attempt and intent.get('context_mode') != 'new_context' and not startup_retry and thread_id != intent['session']['thread_id']:
         stop = outcome['stop_reason'] = 'native_thread_changed'
     if (settings.get('resume_policy') is not None or intent.get('continuation_kind') in {'author_closeout','startup_successor'}) and process is not None:
         outcome['execution_processes'] = {name: record_ref(record / name) for name in ('runner-process.json', 'native-process.json')}

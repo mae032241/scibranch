@@ -46,6 +46,51 @@ def test_pending_revision_binds_only_new_jobs_and_keeps_original_bytes(tmp_path,
     assert third['configuration_revision'] == second['configuration_revision']
 
 
+def test_automatic_recovery_edit_binds_new_nodes_and_preserves_original_policy_and_meters(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import native_recovery
+    public = tmp_path / 'public'
+    public.mkdir()
+    objective = public / 'objective.md'
+    objective.write_text('Retain original identity and consumed work during recovery.')
+    binary = tmp_path / 'codex'
+    binary.write_text('#!/bin/sh\nexit 99\n')
+    binary.chmod(0o755)
+    root = tmp_path / 'research'
+    legacy = dict(max_attempts=2, protocol='codex_exec_resume', usage_scope='turn',
+        output_repair=True, output_only=True, native_home=str(tmp_path / 'native-home'))
+    research_config.prepare(root=root, objective=objective, public_root=public,
+        launcher=[str(binary)], max_tokens=10000, max_seconds=120, max_steps=8,
+        resume_policy=legacy, search_policy=None,
+        node_budget_policy={role: dict(max_observed_tokens=10000, max_seconds=120) for role in 'HWAE'})
+    monkeypatch.setattr(history, 'source_sequence', lambda *args, **kwargs: [])
+    first = c.build_job(root, 1, 'H', [])
+    originals = {path: path.read_bytes() for path in (root / 'settings.json', root / 'jobs/001.json')}
+    prior_policy = copy.deepcopy(updates.for_job(root, first)['resume_policy'])
+    assert 'automatic_recovery' not in prior_policy
+    budget._amend_locked(root, max_tokens=12000, authorization_note='Existing allowance before recovery-policy edit')
+    meter = root / 'control-ledger/000001.json'
+    originals[meter] = meter.read_bytes()
+    events = budget._events(root)[0]
+    document = updates.status(root)['configuration']
+    automatic = native_recovery.policy(dict(max_retries=1, max_wait_seconds=600))
+    document['policies']['resume']['automatic_recovery'] = automatic
+    saved = updates.submit(root, document, expected_revision=0)
+    assert saved['pending']
+    assert updates.for_job(root, first)['resume_policy'] == prior_policy
+    assert updates.for_new_job(root, 2)['resume_policy']['automatic_recovery'] == automatic
+    assert saved['configuration']['policies']['resume']['automatic_recovery'] == automatic
+    second = c.build_job(root, 2, 'H', [])
+    assert updates.for_job(root, second)['resume_policy']['automatic_recovery'] == automatic
+    assert budget._events(root)[0] == events
+    assert all(path.read_bytes() == data for path, data in originals.items())
+    # Removing the independent grant is explicit and applies only to a new node.
+    state = updates.status(root)
+    state['configuration']['policies']['resume'].pop('automatic_recovery')
+    updates.submit(root, state['configuration'], expected_revision=state['revision'])
+    assert updates.for_job(root, second)['resume_policy']['automatic_recovery'] == automatic
+    assert 'automatic_recovery' not in updates.for_new_job(root, 3)['resume_policy']
+
+
 def test_stale_invalid_and_noop_updates_do_not_publish_revision(tmp_path):
     root = instance(tmp_path)
     before = updates.status(root)

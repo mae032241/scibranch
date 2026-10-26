@@ -180,7 +180,9 @@ class Codex:
         kind = value.get('type')
         if kind=='thread.started':return dict(session=value.get('thread_id'))
         if kind=='turn.completed':return dict(completed=True,usage=_usage(value.get('usage')))
-        if kind in {'turn.failed','error'}:return dict(failed=True)
+        if kind in {'turn.failed','error','turn.incomplete','turn.interrupted'}:
+            from . import native_recovery
+            return dict(failed=True, failure=native_recovery.classify(value))
         if isinstance(kind,str) and kind.startswith(('turn.','item.','thread.')):
             return dict(activity=True)
         return {}
