@@ -178,6 +178,84 @@ def test_usage_cards_mark_overrun_unknown_usage_and_waiting():
     assert missing['tokens']['value'] == '未记录' and missing['time']['limit'] == '未记录' and missing['candidates']['value'] == '未记录'
 
 
+def test_final_coverage_displays_only_a_authored_rows_and_exact_scientific_sources():
+    job = dict(final_coverage_mechanisms=[dict(mechanism_ref='h001.m1', label='Alpha'),
+        dict(mechanism_ref='h001.m2', label='Waived alternative')])
+    payload = dict(final_coverage=[dict(mechanism_ref='h001.m1', status='screened_pending',
+        reason='Evidence remains preliminary.', science_refs=[dict(source_step=2, pointer='/scientific_result')],
+        unanswered_questions=['Does the response persist?']), dict(mechanism_ref='h001.m2', status='unexplored',
+        reason='Required input is unavailable.', science_refs=[dict(source_step=1, pointer='/search_plan')],
+        unanswered_questions=[])])
+    clean = lambda value, limit=16384: str(value)[:limit]
+    rows = ui_view.final_coverage(job, payload, clean)
+    assert [row['status'] for row in rows] == ['screened_pending', 'unexplored']
+    assert rows[0]['science_refs'] == [dict(source_step=2, pointer='/scientific_result')]
+    assert rows[1]['label'] == 'Waived alternative' and rows[1]['unanswered_questions'] == []
+    assert ui_view.final_coverage(job, dict(candidates=[dict(status='ok')]), clean) is None
+    assert ui_view.final_coverage(dict(job, formal_review=True), payload, clean) is None
+    reader = FakeReader({3: sealed(3, 'A', dict(payload, summary='Final', next_action='finish'), **job)})
+    assert ui_view.result_card(reader, 3, clean=clean)['final_coverage'] == rows
+
+
+def saved_breadth(*, partial=False, advice_status='available', reasons=None):
+    return dict(portfolio_metrics=dict(source_step=5, partial=partial,
+        mechanisms=[dict(mechanism_ref='a', label='Alpha'), dict(mechanism_ref='b', label='Beta')],
+        portfolio=dict(completed_cycle_count=2, pending_assessment=True,
+            pending_w=dict(source_step=6, mechanism_refs=['b']), main_line='a', mainline_streak=2,
+            mainline_source=dict(source_step=5, pointer='/portfolio_review/main_line'),
+            participation=[dict(mechanism_ref='a', participated_cycles=2, participation_fraction=1),
+                dict(mechanism_ref='b', participated_cycles=1, participation_fraction=.5)]),
+        discriminating_work=[dict(work_ref='a5.d1', source_a=5, mechanism_refs=['a', 'b'],
+            question='Which mechanism explains the response?', change_criterion='An independent observation differs.',
+            status='deferred', updates=[dict(source_a=5, action='defer', reason='The input is missing.',
+                trigger='The input arrives.', revisit='Before closing.')])],
+        token_advice=dict(status=advice_status, reference_cycles=3.5, minimum_samples=2, complete_sample_count=2,
+            excluded_sample_count=1, reasons=reasons or [], scope='Complete local W/A reported tokens only.',
+            samples=[dict(w_step=2, a_steps=[3]), dict(w_step=4, a_steps=[5])])))
+
+
+def test_saved_breadth_keeps_global_denominator_pending_streak_and_work_separate():
+    clean = lambda value, limit=16384: str(value)[:limit]
+    value = ui_view.breadth_metrics(saved_breadth(), clean)
+    assert value['completed_cycle_count'] == 2
+    assert [row['fraction_text'] for row in value['participation']] == ['100%', '50%']
+    assert value['pending_step'] == 6 and value['pending_labels'] == ['Beta']
+    assert value['main_line'] == 'Alpha' and value['mainline_streak'] == 2 and value['mainline_step'] == 5
+    assert value['work'][0]['trigger'] == 'The input arrives.' and value['active_work_count'] == 1
+    assert value['token_advice']['available'] and value['token_advice']['reference_cycles'] == '3.5'
+
+
+@pytest.mark.parametrize('partial,status,reasons', [(True, 'available', []),
+    (False, 'unavailable', ['unknown_usage']), (False, 'unavailable', ['insufficient_complete_samples'])])
+def test_saved_breadth_partial_unknown_and_insufficient_samples_never_show_numeric_estimate(partial, status, reasons):
+    clean = lambda value, limit=16384: str(value)[:limit]
+    value = ui_view.breadth_metrics(saved_breadth(partial=partial, advice_status=status, reasons=reasons), clean)
+    assert not value['token_advice']['available'] and value['token_advice']['reference_cycles'] is None
+    assert value['token_advice']['reasons'] == reasons
+    assert not ui_view.breadth_metrics(dict(nodes=[dict(step=99)]), clean)['available']
+
+
+def test_saved_breadth_zero_denominator_unknown_fraction_and_fork_history_are_explicit():
+    view = saved_breadth()
+    view['fork'] = dict(inherited_costs={})
+    portfolio = view['portfolio_metrics']['portfolio']
+    portfolio['completed_cycle_count'] = 0
+    assert all(row['fraction_text'] == '无完整周期样本' for row in ui_view.breadth_metrics(view, lambda value, limit: str(value))['participation'])
+    portfolio['completed_cycle_count'] = 2
+    portfolio['participation'][0]['participation_fraction'] = float('nan')
+    value = ui_view.breadth_metrics(view, lambda value, limit: str(value))
+    assert value['inherited'] and value['participation'][0]['fraction_text'] == '不可核实'
+
+
+@pytest.mark.parametrize('complete_samples,unknown', [(0, []), (1, []), (2, [6])])
+def test_saved_breadth_does_not_publish_available_label_with_insufficient_samples_or_unknown_usage(complete_samples, unknown):
+    view = saved_breadth()
+    view['portfolio_metrics']['token_advice']['complete_sample_count'] = complete_samples
+    view['usage'] = dict(unknown_steps=unknown)
+    value = ui_view.breadth_metrics(view, lambda text, limit=16384: str(text)[:limit])
+    assert not value['token_advice']['available'] and value['token_advice']['reference_cycles'] is None
+
+
 def test_unverifiable_time_is_explicit_without_claiming_exhaustion():
     view = dict(budget=dict(max_tokens=100, max_seconds=60, max_steps=5,
         consumed_seconds=None, seconds_remaining=None, time_status='unknown'),
@@ -487,7 +565,7 @@ def test_implementation_reference_uses_exact_candidate_binding_and_file(tmp_path
     observer = tmp_path / 'observer.py'
     observer.write_text('''import json,sys
 r=json.load(sys.stdin)
-rows=[dict(id=label,label=label,implementation='history/nodes/002/artifacts/'+label+'/model.py',evaluation_key='val',metric=metric,direction='max',status='ok',evidence=['project/global/objective.md']) for label,metric in [('P',.8),('Q',.6)]] if r['step']==2 else []
+rows=[dict(id=label,label=label,implementation='history/nodes/002/artifacts/'+label+'/model.py',evaluation_key='val',metric=metric,direction='max',status='ok',evidence=['project/nodes/002/artifacts/'+label+'/model.py']) for label,metric in [('P',.8),('Q',.6)]] if r['step']==2 else []
 print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=None,coverage=dict(status='complete',note='Fixture only'))))
 ''')
     root = tmp_path / 'instance'
@@ -501,6 +579,19 @@ print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=N
     projection = ui_view.candidate_projection(root, 3)
     reader = ui_view.Reader(root)
     card = ui_view.result_card(reader, 3, projection=projection)
+    if card['chosen'] is None:
+        diagnostic = dict(resolution_error=card['resolution_error'],
+            index=projection['index'], references=projection['references'], subject_history=projection['subject'].get('history'),
+            saved_recommendation=(reader.node(3).get('result') or {}).get('candidate_recommendation'),
+            w_observation=reader.observation(2),
+            w_materials=[row['path'] for row in reader.node(2)['seal']['materials']],
+            candidate_materials=history.candidate_materials(root, projection['subject']))
+        log_dir = os.environ.get('SCID_TEST_LOG_DIR')
+        if log_dir:
+            destination = Path(log_dir) / 'ui-candidate-binding.json'
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(json.dumps(diagnostic, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        raise AssertionError(json.dumps(diagnostic, ensure_ascii=False, indent=2))
     assert card['chosen']['id'] == 'P' and card['chosen']['indexed']
     assert card['chosen']['label'] == 'P' and card['chosen']['metric'] == '0.8'
     assert projection['nominated_ids'] == []

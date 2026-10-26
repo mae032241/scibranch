@@ -1501,7 +1501,27 @@ def refresh(root, before_step):
     latest = c.read(root / 'jobs' / f'{before_step-1:03d}.json') if before_step > 1 else {}
     if latest.get('lineage_projection_version') == 1:
         from . import lineage
-        overview = lineage.project(root, before_step)['candidates']
+        cutoff=(latest.get('final_report') or {}).get('source_cutoff',latest.get('source_cutoff'))
+        if cutoff is not None:
+            from . import search,originals
+            frozen=search._frozen_sources(root,latest)
+            sources=[frozen[key] for key in sorted(frozen)]+[_source(root,latest['step'])]
+            records=records_from_sources(root,sources,write_cache=False,include_details=False)
+            state=(search.fold(root,sources,recovery_refs=originals.recovery_refs(originals.node(root,latest['step']),latest))
+                if c.settings(root,latest).get('search_policy') is not None or any(
+                    originals.source_settings(originals.node(root,source['step'])).get('search_policy') is not None for source,_,_,_ in sources) else None)
+            projection=dict(candidates=lineage.candidate_view(records),search_state=state)
+        else:
+            projection=lineage.project(root,before_step)
+        overview=projection['candidates']
+        if projection['search_state'] is not None:
+            from . import native,search
+            threshold=(c.settings(root,latest).get('portfolio_policy') or {}).get('review_after_cycles')
+            try:advice=native.cycle_token_advice(root,projection['search_state'])
+            except (OSError,ValueError,KeyError,TypeError):
+                advice=dict(status='unavailable',reference_cycles=None,minimum_samples=2,complete_sample_count=0,excluded_sample_count=0,
+                    reasons=['current_usage_snapshot_unavailable'],samples=[],scope='Reported token reference unavailable; no time or admission guarantee.')
+            overview['portfolio_metrics']=search.metrics_view(projection['search_state'],threshold,source_step=latest['step'],token_advice=advice)
     else:
         overview = candidate_overview(rebuild(root, before_step))
     overview.pop('candidate_index')

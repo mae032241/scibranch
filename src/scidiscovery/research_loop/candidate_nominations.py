@@ -160,3 +160,37 @@ def preview(value, index):
         gaps=[row['mechanism_ref'] for row in value['gaps']],pending_mechanisms=value['pending_mechanisms'],
         distinct_candidate_count=len({row['candidate'] for row in [*value['representatives'],*value['extras']]}),
         scope='Latest W scientific declaration per mechanism, with each original source retained. Other mechanisms keep their prior declarations or explicit pending gaps; no new global judgment is inferred. Read nomination pages for reasons; the complete candidate index remains selectable by A.')
+
+
+def final_coverage_schema():
+    """A owns coverage depth; control checks exact declaration and citations."""
+    text=dict(type='string',pattern=r'\S')
+    ref=dict(type='object',properties=dict(source_step=dict(type='integer',minimum=1),
+        pointer=dict(type='string',pattern=r'^/(?:[^~]|~[01])*$')),required=['source_step','pointer'],additionalProperties=False)
+    fields=dict(mechanism_ref=text,status=dict(type='string',enum=['deep','screened_pending','ruled_out','unexplored']),
+        reason=text,science_refs=dict(type='array',minItems=1,items=ref),
+        unanswered_questions=dict(type='array',items=text))
+    return dict(type=['array','null'],items=dict(type='object',properties=fields,required=list(fields),additionalProperties=False),
+        description='Required when ending with finish/deliver or returning FINAL. Cover every frozen final_coverage_mechanisms entry exactly once, including waived. Author the depth, reasons and exact visible scientific references; explicitly list unanswered questions (empty if none). State input/resource limits in limitations. Candidate existence and calls do not establish depth. Null for nonfinal turns. No new experiment is authorized.')
+
+
+def require_final_coverage(root,job,payload):
+    if (job['role']!='A' or job.get('formal_review') or job.get('purpose')=='formal_review'
+            or not job.get('final_coverage_mechanisms')):return
+    final=bool(job.get('final_report') or job.get('final_only') or job.get('purpose')=='closeout')
+    if payload.get('next_action') in {'wait','audit','formal_review'}:return
+    if not final and payload.get('next_action') not in {'finish','deliver'}:return
+    import jsonschema
+    from . import search
+    def repair(detail):
+        raise OutputRepairRequired('final_coverage_incomplete','Correct final_coverage in this same A output: '+detail+
+            '. Preserve originals and report limitations; do not rerun experiments or start new scientific work.')
+    value=payload.get('final_coverage')
+    if value is None or not c.json_field_representable('final_coverage',value) or not jsonschema.Draft202012Validator(final_coverage_schema()).is_valid(value):
+        repair('declare authored coverage, reason, scientific references and explicit unanswered_questions for every frozen mechanism')
+    expected={row['mechanism_ref'] for row in job['final_coverage_mechanisms']}
+    names=[row['mechanism_ref'] for row in value]
+    if len(names)!=len(set(names)) or set(names)!=expected:repair('cover exactly the complete frozen mechanism list, including waived, without unknown or duplicate rows')
+    try:search.validate_science_refs(root,job,[ref for row in value for ref in row['science_refs']])
+    except ValueError:repair('science_refs must resolve within exact visible scientific originals')
+    return value

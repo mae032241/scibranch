@@ -71,7 +71,7 @@ def forbid_effect(monkeypatch):
     monkeypatch.setattr(subprocess, 'Popen', forbidden)
 
 
-@pytest.mark.parametrize('value', [None, 1, 8, 13, 14, 15, str(protocol.CURRENT), float(protocol.CURRENT), True])
+@pytest.mark.parametrize('value', [None, 1, 8, 13, 14, 15, protocol.CURRENT - 1, str(protocol.CURRENT), float(protocol.CURRENT), True])
 def test_execution_scope_requires_exact_current_integer_without_mutation(value):
     scope = dict(handoff_protocol=value, preserved='original field')
     before = copy.deepcopy(scope)

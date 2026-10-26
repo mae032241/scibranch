@@ -8,13 +8,13 @@ host-owned Git code capture. Declared project bases use ordinary Git worktree
 checks, without control reading or hashing every base file. Approval/idempotency helpers must
 not traverse scientific files, code, logs, observations, inputs, results, Skills or
 archives. Explicit scientific tools may use their own algorithms
-on selected evidence; that is separate from control identity. Protocol 26 uses
+on selected evidence; that is separate from control identity. Protocol 27 uses
 `record_ref = {"path": "/absolute/original"}` and
 `file_ref = {"path": "/absolute/original", "size_bytes": N}`. Control bindings use
 `*_ref` fields; paths, producers and lifecycle identities replace content digests.
 Legacy retained object paths use UUIDs, without content deduplication or hash caches.
 Fork manifest v2 retains this reference contract. Independent archive and whole-instance
-cold checkpoint packages are retired. Only current protocol 26 instances with
+cold checkpoint packages are retired. Only current protocol 27 instances with
 worker/lineage view 1, soft budgets and final-A policy v1 are supported. Earlier
 formats are rejected without compatibility reading, migration or owner reactivation. Read-only Linux mounts protect selected
 inputs in the scientific namespace; trusted same-UID code remains a soft boundary,
@@ -129,10 +129,45 @@ costs. Stable identity order is navigation; local improve/repair/validate work d
 not erase the global view. Explanations and H revisions do not reset investment.
 All unexcluded routes, including screened, accrue unserved cycles; only waived routes
 are excluded. `search_policy.initial_calls` configures initial registered-call
-opportunities. The optional portfolio interval requests a reminder only: no
-portfolio_review form, forced route switch, result-sealing or FINAL completion gate.
-A explains comparisons, concentration, postponement and exclusion in its existing
-scientific result and route reasons; control does not judge their sufficiency.
+opportunities. The optional portfolio interval controls an additional reminder.
+Every ordinary A substantively assessing a completed W supplies a top-level
+`portfolio_review`: the current main line, strongest viable competitor with exact
+scientific references, cheapest feasible discriminator, and its decision and reason.
+A may explain that no viable competitor or feasible discriminator exists. Missing or
+invalid required declarations use the same task's bounded output repair before sealing;
+a nullable `search_review` cannot waive this contract. Legitimate waiting, missing
+completed W, explicit no-search tasks and actual independent review retain their own
+contracts. FINAL also supplies this judgment when it assesses a completed W in its
+exact frozen inputs. Control validates structure and exact identities; A owns merit.
+
+An A disposition of `pending` restores the mechanism to the unfinished plan once,
+without resetting accepted calls, consumed authorizations or investment. Declared
+discriminating work stays in the existing derived scientific intent with its original
+A reference. Later A judgments execute it, defer it with updated reason and revisit
+conditions, or withdraw it with evidence. Execution records a response, without
+claiming the scientific question is resolved. H can revise or reopen an exact route;
+no forced rotation, new mechanism quota or per-route resource reserve is introduced.
+
+Completed investment counts distinct W→A assessment cycles, with pending W separate.
+H/A read the bounded `lineage.indexes.portfolio` page for cycle, pending and
+authored-main-line summaries; full participation stays in mechanism pages.
+Several mechanisms may participate in one cycle, so participation percentages can
+sum above 100%. Repeated native attempts and output repair do not create new cycles.
+The consecutive-main-line count follows independent authored A judgments. Forks keep
+only the exact cut's scientific history; the child's finite budget accounts its own
+new work. Token-based round advice requires at least two completely reported local
+cycles and a known current balance; missing, delayed or inflight usage makes it
+unavailable. It is a token-only reference, without a promise of time, steps or new
+execution admission. Node advance seconds are not an estimate of complete shared time.
+Current native session counters leave reporting delay unmeasured, so they do not
+qualify a numeric reference-cycle estimate. The UI reports this as unavailable.
+
+A ending or delivering the research also supplies `final_coverage` over every
+mechanism in its frozen portfolio, including waived routes: `deep`, `screened_pending`,
+`ruled_out` or `unexplored`, with reasons, exact scientific references and explicit
+unanswered questions. Report limitations retain resource and input gaps. The same
+requirement applies to ordinary finish/deliver and protected FINAL/closeout, without
+new experiments. Candidate presence or call success never determines coverage depth.
 
 Budget choices use current ordinary-work availability and the runtime
 `work/budget-status.json`. With protected FINAL, provider-reported consumption
@@ -183,7 +218,8 @@ audit. This description grants neither permission nor qualification. W preserves
 the original task's necessary deliverables and native receipts in existing declared
 outputs before temporary work disappears. A compares those results and the actual
 adapter scope with the task requirements, reports gaps, and may deliver the best
-existing partial result, including in FINAL. Coverage adds no completion gate.
+existing partial result, including in FINAL. Target attainment is not a completion
+gate; the authored mechanism-coverage declaration remains required where applicable.
 
 Managed call records use `host-runtime/experiment-control/<step>/records`, keyed
 by the exact task step rather than a job-content hash. `exp` is a thin submission
@@ -353,7 +389,7 @@ an explicit, file-scoped working copy under `work/`, never a pre-copied input tr
 Source ownership is supplied by its lifecycle, not inferred from mode or link
 count. Mode 0400 alone is not hostile same-user write isolation.
 
-Protocol 26 protects shared inputs at the final native launch boundary with Linux
+Protocol 27 protects shared inputs at the final native launch boundary with Linux
 read-only mounts, including custom protocol argv. An exactly registered module
 launcher retains host preparation and submission service ownership, then applies
 the same protection at its final scientific namespace. Its provider/module identity
@@ -483,7 +519,7 @@ Deterministic curve and figure algorithms are self-contained Skill scripts;
   scientific explanation; its rows, `keep`, rationale and evidence-step formatting
   do not grant or gate delivery. Actual audit and delivery actions still require
   an exact available candidate, qualification and execution permission. Null
-  does not authorize delivery. Protocol 26 rejects earlier frozen protocols without
+  does not authorize delivery. Protocol 27 rejects earlier frozen protocols without
   migrating their original bytes.
 - One advancing writer per instance; read views neither call models nor own scientific/budget state.
 - Exact immutable originals, configuration and calls; revisions inherit no prior qualification or approval.
@@ -645,7 +681,7 @@ exact identity checks and independent execution authorization still apply.
 Shared budget checks for new nodes remain unchanged. Author
 closeout token permits are also soft targets; their finite time limits remain
 enforced. Actual usage remains accounted without creating a new shared allowance.
-Protocol 26 accepts only soft node settings and final-A policy v1. Older protocols,
+Protocol 27 accepts only soft node settings and final-A policy v1. Older protocols,
 hard settings and missing final-A policies are rejected without migration. A denied start
 advances the existing control journal to durable `FINAL` (`closeout_begin` mode
 `final`); it never reclassifies an ordinary A as final from the remaining balance.

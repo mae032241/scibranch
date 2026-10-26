@@ -1237,8 +1237,9 @@ class InstanceUI:
             header = projection.get('header') or {}
         hero = self._fragment(ui.hero, header, status, primary=self._primary(token, manager, snapshot, status),
                        attention=self._attention(token, manager, snapshot, status), notices=self._notices(snapshot, receipt))
+        metrics = self._guarded(ui_view.breadth_metrics, view, ui_view.cleaner(self.root), clean=ui_view.cleaner(self.root))
         # A finished study shows every round as one line; otherwise the current round opens.
-        return {'live-hero': hero, 'live-usage': self._fragment(ui.stats, usage), 'live-activity': self._fragment(ui.activity, activity, href='/progress'),
+        return {'live-hero': hero, 'live-usage': self._fragment(ui.stats, usage) + self._fragment(ui.breadth_metrics, metrics), 'live-activity': self._fragment(ui.activity, activity, href='/progress'),
                 'live-trail': self._fragment(ui.trail, trail, older_href='/results', open_current=not display['completed']),
                 'live-token-monitor': '' if 'error' in usage else self._fragment(ui.token_monitor,
                     usage['tokens'].get('details'), scope='整个研究 · 累计已记录用量')}

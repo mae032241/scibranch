@@ -189,6 +189,9 @@ def response_fields(job, policy):
     fields=[];ordinary=job.get('purpose') is None and not job.get('final_report')
     if job.get('search') is not None and job['role'] in {'H','A'}:
         fields.append('search_plan' if job['role']=='H' else 'search_review')
+    if job['role']=='A' and policy.get('search_policy') is not None and not job.get('formal_review'):
+        fields.append('portfolio_review')
+        if job.get('final_coverage_mechanisms'):fields.append('final_coverage')
     if job['role']=='A' and ordinary:
         if policy.get('correction_policy') is not None:fields.append('progress_assessment')
         if policy.get('decision_contract_version')==1:fields.append('decision_request')
@@ -251,6 +254,10 @@ def result_schema(role: str,protocol=CURRENT,comparison=False,*,formal_review=Fa
         properties['search_plan' if role=='H' else 'search_review']=search.schema(role)
     if role=='A':
         from . import correction,decision
+        from . import search
+        properties['portfolio_review']=search.portfolio_review_schema()
+        from . import candidate_nominations
+        properties['final_coverage']=candidate_nominations.final_coverage_schema()
         properties.update(candidate_recommendation=dict(type=['string','null'],
                 description='Choose an exact candidate reference from the frozen candidate index, or its listed implementation reference when both identify that same registered object. Null supplies no recommendation. No default or host selection. Explain scientific rationale and evidence in scientific_result.'),
             progress_assessment=correction.schema(),decision_request=decision.schema())
@@ -261,7 +268,7 @@ def result_schema(role: str,protocol=CURRENT,comparison=False,*,formal_review=Fa
             from . import shortlist
             properties['candidate_comparison']=shortlist.schema()
     if auxiliary_fields is not None:
-        for field in ('mechanism_findings','candidate_nominations','search_plan','search_review','progress_assessment',
+        for field in ('mechanism_findings','candidate_nominations','search_plan','search_review','portfolio_review','final_coverage','progress_assessment',
                 'decision_request','candidate_comparison'):
             if field not in auxiliary_fields:properties.pop(field,None)
     return dict(type='object',properties=properties,required=list(properties),additionalProperties=False)
@@ -683,6 +690,7 @@ def science_view(job, root=None):
         **(dict(candidate_nomination_policy=job['candidate_nomination_policy'],
             candidate_nomination_mechanisms=job['candidate_nomination_mechanisms'])
            if job.get('candidate_nomination_mechanisms') else {}),
+        **(dict(final_coverage_mechanisms=job['final_coverage_mechanisms']) if job.get('final_coverage_mechanisms') else {}),
         **(dict(decision_context=context) if context is not None else {}),
         'global': dict(objective='inputs/global/objective.md',
                        updates=[row['path'] for row in job['global_materials'][1:]]),
@@ -725,6 +733,7 @@ def science_view(job, root=None):
         **(dict(decision_request='For scientific continuation, declare the decision, question and result that would change it. '
                 'Exact completed requests without new bound evidence require clarification; this is not a scientific value judgment.')
            if 'decision_request' in result_schema(job['role'],protocol,'selection' in job,**response_options(job))['properties'] else {}),
+        **(dict(portfolio_assessment=job['portfolio_context']) if job.get('portfolio_context') is not None else {}),
         'final_response': list(result_schema(job['role'], job['handoff_protocol'], 'selection' in job,**response_options(job))['properties']),
         **(dict(experiment_execution=('Host-configured registered W execution is available; only calls through the provided experiment command are recorded. Native scratch shell remains available.'
             if job['experiment_mode'] == 'local' else 'External launcher owns experiment configuration; native shell commands are not automatically recorded.'))
@@ -1194,7 +1203,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     else:
         job['history'],state=lineage.bind(root,step,role,protocol,source_cutoff=final_report['source_cutoff'] if final_report else source_cutoff,extra_steps=extra_steps,selection_protocol=selection_protocol,
             audit_projection_version=audit_projection_version,adjacent_audit=job.get('candidate_audit'),
-            worker_view_version=1)
+            worker_view_version=1,assessment_job=job if role=='A' else None)
         options = [item for parent in parents for item in history.implementation_options(root, parent)]
     from . import candidate_refs
     job['direct_originals']=refs
@@ -1226,6 +1235,10 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     if purpose is None and not job.get('formal_review') and final_report is None and engineering_repair is None and policy.get('search_policy') is not None:
         from . import search
         job['search'] = search.bind(root, step, role, protocol, state=state, unified=True)
+    if role=='A' and state is not None and not job.get('formal_review'):
+        job['portfolio_context']=job['history']['portfolio_assessment']
+        if policy.get('search_policy') is not None:
+            job['final_coverage_mechanisms']=[dict(mechanism_ref=ref,label=item['label'],status=item['status']) for ref,item in state['mechanisms'].items()]
     if role=='A' and purpose is None and review_binding is None and final_report is None and policy.get('selection_policy') is not None:
         from . import shortlist
         job['selection']=shortlist.bind_normal(root,job)
@@ -1656,7 +1669,7 @@ def seal_result(root: Path, step: int):
     if (record / 'result-identity.json').exists():
         result = validate(work)
         from . import history
-        history.refresh(root, step + 1) if job.get('purpose') != 'closeout' and not job.get('final_report') else None
+        history.refresh(root, step + 1)
         return result
     from . import execution
     native_record = execution.record(root, step)
@@ -1764,7 +1777,7 @@ def seal_result(root: Path, step: int):
             seal['formal_review']=formal_review.seal_review(root,job,value,seal)
     write(record / 'result-identity.json', seal)
     result = validate(work)
-    history.refresh(root, step + 1) if job.get('purpose') != 'closeout' and not job.get('final_report') else None
+    history.refresh(root, step + 1)
     return result
 
 

@@ -26,7 +26,74 @@ def selection_explanation(criteria='Compare the declared fixture observations wi
         changes=None,evidence=None,accepted_tradeoffs=None))
 
 
-def finish(root, step, role, parents, text='A bounded scientific finding', action='wait', files=None, summary='A contribution', limitations=None, recommendation=None, search_choice=None, progress=None, selection=None, mechanism_findings=None, candidate_nominations=None, preserve_native_intent=False):
+AUTO_PORTFOLIO = object()
+OMIT_PORTFOLIO = object()
+AUTO_COVERAGE = object()
+OMIT_COVERAGE = object()
+
+
+def fixture_portfolio_review(root, job, payload, value=AUTO_PORTFOLIO):
+    """Author a synthetic control fixture; explicit values retain negative cases.
+
+    The context establishes only applicability and exact visible identities.
+    These fixed scientific assumptions are test data, never inferred from calls
+    or their success. Tests with declared discriminating work must supply their
+    own authored update rather than receive an automatic scientific disposition.
+    """
+    if job['role'] != 'A':
+        return
+    if value is OMIT_PORTFOLIO:
+        payload.pop('portfolio_review', None)
+        return
+    if value is AUTO_PORTFOLIO:
+        from scidiscovery.research_loop import search
+        context = search.assessment_context(root, job)
+        value = None
+        if context['applicable'] and payload['next_action'] != 'wait':
+            assert not [row for row in context['discriminating_work'] if row['status'] != 'withdrawn'], (
+                'Supply explicit fixture portfolio_review for declared discriminating work')
+            resolved = search.interpret(root, job, payload)['focus']
+            action = payload['next_action']
+            value = dict(main_line=resolved['mechanism_ref'] if resolved else None,
+                main_line_reason='Synthetic fixture follows its declared focus; no scientific qualification.',
+                competitor=None,
+                no_competitor_reason='Synthetic fixture assumes no viable competitor for this control check; no scientific qualification.',
+                discriminating_work=None,
+                no_work_reason='Synthetic fixture assumes no feasible additional discriminator; no scientific qualification.',
+                decision='close' if action in {'finish', 'deliver'} else 'reframe' if action == 'revise_h' else 'continue',
+                reason='Synthetic fixture exercises the declared bounded action; no scientific qualification.',
+                deferral=None, work_updates=[])
+    payload['portfolio_review'] = value
+
+
+
+def fixture_final_coverage(root, job, payload, value=AUTO_COVERAGE):
+    """Explicit synthetic A declaration, not a depth inferred from executions.
+
+    AUTO is positive fixture data only. None and OMIT preserve negative controls;
+    full science fixtures should supply their own authored coverage claims.
+    """
+    if job['role'] != 'A':
+        return
+    if value is OMIT_COVERAGE:
+        payload.pop('final_coverage', None)
+        return
+    if value is AUTO_COVERAGE:
+        value = None
+        if job.get('final_coverage_mechanisms') and (payload.get('next_action') in {'finish', 'deliver'}
+                or job.get('final_report') or job.get('purpose') == 'closeout' or job.get('final_only')):
+            from scidiscovery.research_loop import search
+            context = search.assessment_context(root, job)
+            value = [dict(mechanism_ref=row['mechanism_ref'], status='unexplored',
+                reason='Synthetic fixture declares no scientific exploration depth; mechanical contract check only.',
+                science_refs=[dict(source_step=context['mechanisms'][row['mechanism_ref']]['source_h'],
+                    pointer='/scientific_result')],
+                unanswered_questions=['Scientific effectiveness is outside this mechanical fixture.'])
+                for row in job['final_coverage_mechanisms']]
+    payload['final_coverage'] = value
+
+
+def finish(root, step, role, parents, text='A bounded scientific finding', action='wait', files=None, summary='A contribution', limitations=None, recommendation=None, search_choice=None, progress=None, selection=None, mechanism_findings=None, candidate_nominations=None, preserve_native_intent=False, portfolio_review=AUTO_PORTFOLIO, final_coverage=AUTO_COVERAGE):
     path = root / 'jobs' / f'{step:03d}.json'
     previous = contracts.read(path) if path.exists() else {}
     job = contracts.build_job(root, step, role, parents, previous.get('instruction', ''),
@@ -52,6 +119,8 @@ def finish(root, step, role, parents, text='A bounded scientific finding', actio
     if role=='A':payload.update(decision_request=None,portfolio_review=None)
     if role in {'H', 'A'}:
         payload.update(next_action=action, route_reason='Exact scientific question')
+    fixture_portfolio_review(root, job, payload, portfolio_review)
+    fixture_final_coverage(root, job, payload, final_coverage)
     for name, contents in (files or {}).items():
         path = work / 'artifacts' / name
         path.parent.mkdir(parents=True, exist_ok=True)

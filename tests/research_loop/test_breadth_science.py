@@ -9,18 +9,24 @@ from scidiscovery.research_loop import breadth, contracts as c, controller, exec
 from cov_execution import lineage as cov_lineage
 from execution_fixtures import execution_registry
 from test_cov_lineage import BACKEND
-from test_history_handoff import finish
+from test_history_handoff import AUTO_COVERAGE, AUTO_PORTFOLIO, OMIT_PORTFOLIO, finish, fixture_final_coverage, fixture_portfolio_review
 
 
-def prepare(tmp_path, *, cov=False, initial_calls=1, portfolio=False):
+def prepare(tmp_path, *, cov=False, initial_calls=1, portfolio=False, qualified_local=False):
     public=tmp_path/'public';public.mkdir()
     objective=public/'objective.md';objective.write_text('Compare scientific mechanisms; execution is not scientific qualification.')
     root=tmp_path/'instance'
     observer=dict(adapter=str(Path(cov_lineage.__file__).resolve()),contract_version=2,
         config=dict(runs='runs',calls='project/nodes',evaluation_key='fixture-public-v1')) if cov else None
-    controller.prepare(root,objective,public,['never-call-a-model'],max_tokens=100000,max_seconds=600,max_steps=16,
+    if qualified_local:
+        from breadth_execution_fixtures import native_launcher
+        assert not cov
+    controller.prepare(root,objective,public,native_launcher() if qualified_local else ['never-call-a-model'],max_tokens=100000,max_seconds=600,max_steps=16,
         model='no-model',reasoning_effort='high',node_budget_mode='soft',
         search_policy=dict(search.DEFAULT_POLICY,initial_calls=initial_calls),history_observer=observer,
+        **(dict(native_options=dict(workspace='workspace-write',network=False),
+            execution_config=dict(executor='local_execution:command',
+                configuration=dict(run_argv=[sys.executable],max_seconds=30))) if qualified_local else {}),
         portfolio_policy=dict(review_after_cycles=3) if portfolio else None)
     return root
 
@@ -32,21 +38,26 @@ def h(root, step=1, parents=(), labels=('P','Q','R'), existing=None):
     finish(root,step,'H',list(parents),action='experiment',search_choice=choice)
 
 
-def worker(root, tmp_path, step, parents, *, cov=False):
+def worker(root, tmp_path, step, parents, *, cov=False, qualified_local=False):
     job=c.build_job(root,step,'W',parents);record=execution.record(root,step)
     c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),
         search_slice=search.accept(root,job)))
-    output=tmp_path/f'config-{step}.json'
+    output=c.workspace(root,step)/'work/experiment-config.json' if qualified_local else tmp_path/f'config-{step}.json'
+    assert not (cov and qualified_local)
     if cov:
         backend=tmp_path/'backend.py'
         if not backend.exists():backend.write_text(BACKEND)
         cov_lineage.configure(root,step,[sys.executable,str(backend),'--runs-root',str(root/'runs')],root/'runs',output,receipt_channel='backend_file')
     else:
-        experiments.configure(root,step,'local_execution:command',dict(run_argv=[sys.executable]),output)
-    return job,c.read(output)
+        if qualified_local:
+            selected=c.settings(root,job)['execution_config']
+            configured=experiments.configure(root,step,selected['executor'],selected['configuration'],output)
+        else:
+            configured=experiments.configure(root,step,'local_execution:command',dict(run_argv=[sys.executable]),output)
+    return job,configured if qualified_local else c.read(output)
 
 
-def run(root, config, label, *, failed=False, client_path=None):
+def run(root, config, label, *, failed=False, client_path=None, qualified_local=False):
     if 'scope' not in config:
         if client_path is None:
             raise ValueError('Scientific execution client requires its exact configured path')
@@ -54,12 +65,20 @@ def run(root, config, label, *, failed=False, client_path=None):
         if owner!=Path(root).absolute():
             raise ValueError('Scientific execution client belongs to another instance')
         config=experiment_client.resolve(client_path,config)
-    work=c.workspace(root,config['scope']['step'])/'work'
+    workspace=c.workspace(root,config['scope']['step'])
+    code=workspace/'code';code.mkdir(exist_ok=True)
     index=len(experiments.Records(config).calls())
-    source=work/f'{label}-{index}.payload'
+    source=code/f'{label}-{index}.payload'
     source.write_text(json.dumps(dict(mode='failed' if failed else 'success')) if 'runs_root' in config
         else 'raise SystemExit(3)\n' if failed else 'print("mechanical fixture only")\n')
-    return experiments.dispatch(config,source,new=True,mechanism=label)
+    options=None
+    if config['execution_interface']['executor']=='local_execution:command':
+        runtime=workspace/'experiments'/'breadth-fixture';runtime.mkdir(parents=True,exist_ok=True)
+        options=dict(experiment_directory=str(runtime))
+    if qualified_local:
+        from breadth_execution_fixtures import run as qualified_run
+        return qualified_run(root,config,source,label,runtime)
+    return experiments.dispatch(config,source,new=True,mechanism=label,command_options=options)
 
 
 def findings(*observed,blocked=()):
@@ -67,7 +86,7 @@ def findings(*observed,blocked=()):
         dict(mechanism=name,basis='blocked',finding='This fixture deliberately leaves this direction untested and asks A to allocate its later work.') for name in blocked]
 
 
-def a(root,step,parents,*,focus=None,dispositions=(),action='continue_w',mode='screen'):
+def a(root,step,parents,*,focus=None,dispositions=(),action='continue_w',mode='screen',portfolio_review=AUTO_PORTFOLIO,final_coverage=AUTO_COVERAGE):
     job=c.build_job(root,step,'A',parents);record=execution.record(root,step)
     payload=dict(summary='Assess exact scientific mechanisms',scientific_result='The original observations retain scientific limitations.',
         limitations=['Mechanical completion alone does not establish screening'],implementation_selection=None,
@@ -76,10 +95,12 @@ def a(root,step,parents,*,focus=None,dispositions=(),action='continue_w',mode='s
         next_action=action,route_reason='Resolve the mechanism comparison under the original constraints',
         decision_request=dict(decision='mechanism',question='Can the failed discriminating measurement be repaired?' if mode=='repair' else 'Which mechanism should receive the next independent comparison?',
             change_criterion='A trustworthy discriminating measurement would change the mechanism choice') if action in {'continue_w','revise_h'} else None)
+    fixture_portfolio_review(root,job,payload,portfolio_review)
+    fixture_final_coverage(root,job,payload,final_coverage)
     c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json')))
     c.write(record/'science-output.json',payload)
     c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
-    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_ref=c.file_ref(record/'science-output.json')))
+    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,native_started=False,usage=native.usage(root),raw_ref=c.file_ref(record/'science-output.json')))
     c.seal_result(root,step)
     return job
 

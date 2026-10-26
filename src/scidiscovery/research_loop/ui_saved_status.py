@@ -322,6 +322,40 @@ def closeout(root, events=None, numbers=None):
     return value
 
 
+
+def portfolio_metrics(root,numbers,usage_value,budget_value,*,memo=None):
+    """Read the disposable saved projection; never rebuild science on a UI poll."""
+    try:overview=_saved_read(root/'host-history/overview.json',memo) or {}
+    except (OSError,ValueError,UnicodeError):overview={}
+    value=copy.deepcopy(overview.get('portfolio_metrics')) if isinstance(overview,dict) else None
+    if not isinstance(value,dict):
+        return dict(status='unavailable',reason='portfolio_snapshot_unavailable',partial=True,source_step=None)
+    sealed=[step for step in numbers if (root/'native-evidence'/f'{step:03d}'/'result-identity.json').exists()]
+    value['partial']=bool(value.get('partial')) or value.get('source_step')!=max(sealed,default=0)
+    advice=value.get('token_advice',{})
+    # Snapshot advice has no current authority. A new accepted attempt, missing
+    # endpoint or unreported meter invalidates the number until the next seal.
+    accepted=[record for step in numbers for record in attempts(root,step) if (record/'native-intent.json').exists()]
+    inflight=any(not (record/'native-outcome.json').exists() for record in accepted)
+    reasons=list(advice.get('reasons',[]))
+    if inflight:reasons.append('current_usage_inflight')
+    if usage_value.get('unknown_steps'):reasons.append('usage_unknown')
+    if value['partial']:reasons.append('portfolio_snapshot_stale')
+    spent=usage_value.get('accounted_tokens');ceiling=budget_value.get('max_tokens')
+    remaining=max(0,ceiling-spent) if type(ceiling) is int and type(spent) is int else None
+    same_usage=(spent==advice.get('accounted_tokens') and len(accepted)==advice.get('accepted_attempt_count'))
+    mean=advice.get('mean_reported_tokens')
+    if (not reasons and advice.get('status')=='available' and same_usage and remaining is not None
+            and type(mean) in (int,float) and math.isfinite(mean) and mean>0):
+        # Only the ceiling changed. Exact closed usage and complete samples are
+        # unchanged, so an amendment can update this pure display estimate.
+        advice.update(reference_cycles=remaining/mean,remaining_reported_tokens=remaining,max_tokens=ceiling)
+    elif remaining!=advice.get('remaining_reported_tokens') or not same_usage:
+        reasons.append('current_balance_changed')
+    if reasons:advice.update(status='unavailable',reference_cycles=None,reasons=list(dict.fromkeys(reasons)))
+    value['token_advice']=advice
+    return value
+
 def status(root, *, after=0, limit=None, memo=None):
     settings = display.settings(root)
     numbers = steps(root)
@@ -338,9 +372,10 @@ def status(root, *, after=0, limit=None, memo=None):
         dict(step=step, role=originals.source_job(originals.node(root, step))['role'],
              state='seal_present_unverified', inherited=True) for step in selected]
     last = selected[-1] if selected else after
-    return dict(instance=str(root), goal_id=settings['goal_id'], objective=settings['objective'],
-        paused=(root / 'pause.request').exists(), nodes=nodes, usage=_usage(root, numbers, memo),
-        budget=_budget(root, settings, events), correction=_correction(root), closeout=closeout(root, events, numbers),
+    usage_value=_usage(root,numbers,memo);budget_value=_budget(root,settings,events)
+    return dict(portfolio_metrics=portfolio_metrics(root,numbers,usage_value,budget_value,memo=memo),instance=str(root), goal_id=settings['goal_id'], objective=settings['objective'],
+        paused=(root / 'pause.request').exists(), nodes=nodes, usage=usage_value,
+        budget=budget_value, correction=_correction(root), closeout=closeout(root, events, numbers),
         closeout_preparation=None, goal_completion='not_asserted', after=after,
         used_steps=used_steps(root, numbers, events),
         **(dict(fork=dict(inherited_costs=manifest.get('inherited_costs',

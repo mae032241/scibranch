@@ -816,6 +816,90 @@ def usage_stats(view, *, used_steps=None, candidates=None):
     return dict(tokens=tokens, time=duration, steps=steps, candidates=card)
 
 
+def final_coverage(job, payload, clean):
+    """Display A's exact coverage declaration; observations supply no verdict."""
+    rows = payload.get('final_coverage')
+    if not isinstance(rows, list) or job.get('formal_review'):
+        return None
+    labels = {row['mechanism_ref']: row.get('label') for row in job.get('final_coverage_mechanisms') or []
+              if isinstance(row, dict) and isinstance(row.get('mechanism_ref'), str)}
+    result = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        ref = row.get('mechanism_ref')
+        sources = [dict(source_step=item['source_step'], pointer=clean(item.get('pointer') or '', 300))
+                   for item in row.get('science_refs') or []
+                   if isinstance(item, dict) and type(item.get('source_step')) is int and item['source_step'] > 0]
+        result.append(dict(mechanism_ref=clean(ref or '', 160),
+            label=clean(labels.get(ref) or ref or '未声明机制', 300), authored_label=bool(labels.get(ref)),
+            status=clean(row.get('status') or '未声明', 100), reason=clean(row.get('reason') or '', 4000),
+            science_refs=sources, unanswered_questions=[clean(str(item), 2000)
+                for item in row['unanswered_questions']] if isinstance(row.get('unanswered_questions'), list) else None))
+    return result
+
+
+def breadth_metrics(view, clean):
+    """Format the saved global projection without replaying scientific history."""
+    saved = view.get('portfolio_metrics') or {}
+    partial = bool(saved.get('partial', True))
+    portfolio = saved.get('portfolio')
+    labels = {row['mechanism_ref']: row.get('label') for row in saved.get('mechanisms') or []
+              if isinstance(row, dict) and isinstance(row.get('mechanism_ref'), str)}
+    def label(ref):
+        return clean(labels.get(ref) or ref or '未声明', 300)
+    def count(value):
+        return value if type(value) is int and value >= 0 else None
+    def source(value):
+        return value if type(value) is int and value > 0 else None
+    result = dict(available=isinstance(portfolio, dict), partial=partial,
+        source_step=source(saved.get('source_step')), inherited=bool(view.get('fork')))
+    if not result['available']:
+        return result
+    denominator = count(portfolio.get('completed_cycle_count'))
+    participation = []
+    for row in portfolio.get('participation') or []:
+        fraction = row.get('participation_fraction')
+        valid = type(fraction) in (int, float) and math.isfinite(fraction) and 0 <= fraction <= 1
+        participation.append(dict(mechanism_ref=clean(row.get('mechanism_ref') or '', 160),
+            label=label(row.get('mechanism_ref')), participated_cycles=count(row.get('participated_cycles')),
+            fraction_text=_trim(fraction * 100) + '%' if denominator and valid else '无完整周期样本' if denominator == 0 else '不可核实'))
+    pending = portfolio.get('pending_w') or {}
+    pending_step = source(pending.get('source_step'))
+    result.update(completed_cycle_count=denominator, participation=participation,
+        pending_assessment=bool(portfolio.get('pending_assessment')), pending_step=pending_step,
+        pending_labels=[label(ref) for ref in pending.get('mechanism_refs') or []],
+        main_line=label(portfolio.get('main_line')) if portfolio.get('main_line') is not None else None,
+        mainline_streak=count(portfolio.get('mainline_streak')),
+        mainline_step=source((portfolio.get('mainline_source') or {}).get('source_step')))
+    active = [row for row in saved.get('discriminating_work') or [] if row.get('status') != 'withdrawn']
+    work = []
+    for row in active[:8]:
+        update = (row.get('updates') or [{}])[-1]
+        deferral = update.get('deferral') or {}
+        work.append(dict(question=clean(row.get('question') or '', 2000),
+            change_criterion=clean(row.get('change_criterion') or '', 2000),
+            source_step=source(row.get('source_a')), update_step=source(update.get('source_a')),
+            status=clean(row.get('status') or '', 100), action=clean(update.get('action') or '', 100),
+            reason=clean(update.get('reason') or deferral.get('reason') or '', 2000),
+            trigger=clean(update.get('trigger') or deferral.get('trigger') or '', 1000),
+            revisit=clean(update.get('revisit') or deferral.get('revisit') or '', 1000)))
+    result.update(work=work, active_work_count=len(active), work_omitted=max(0, len(active) - len(work)))
+    advice = saved.get('token_advice') or {}
+    value = advice.get('reference_cycles')
+    sample_count, minimum = count(advice.get('complete_sample_count')), count(advice.get('minimum_samples'))
+    available = (not partial and advice.get('status') == 'available' and type(value) in (int, float)
+        and math.isfinite(value) and value >= 0 and minimum is not None and minimum > 0
+        and sample_count is not None and sample_count >= minimum and not (view.get('usage') or {}).get('unknown_steps'))
+    result['token_advice'] = dict(available=available, reference_cycles=_trim(value) if available else None,
+        complete_sample_count=count(advice.get('complete_sample_count')), excluded_sample_count=count(advice.get('excluded_sample_count')),
+        minimum_samples=count(advice.get('minimum_samples')), scope=clean(advice.get('scope') or '', 2000),
+        reasons=[clean(str(item), 300) for item in advice.get('reasons') or []],
+        samples=[dict(w_step=source(row.get('w_step')), a_steps=[step for step in row.get('a_steps') or [] if source(step)])
+            for row in (advice.get('samples') or [])[:8]])
+    return result
+
+
 # ---------------------------------------------------------------- overview projection
 
 def project(root, view, *, final_step=None, objective=None, memo=None):
@@ -1112,6 +1196,11 @@ def result_card(reader, step, *, closeout=None, projection=None, goal_completion
         saved = sealed.get('result') or {}
         chosen = (saved['candidate_recommendation'] if 'candidate_recommendation' in saved else
             resolve_candidate(reader.root, job, value, references, strict=True) if value is not None else None)
+        if isinstance(chosen, str) and re.fullmatch(r'[HWAE]\d{3,}-I\d{3,}', chosen):
+            # Saved normalized output may retain an implementation reference.
+            # Resolve it through the same exact frozen material/observation
+            # binding as the authored reference before indexing the candidate.
+            chosen = resolve_candidate(reader.root, job, chosen, references, strict=True, reader=reader)
     except ValueError as error:
         chosen, resolution_error = None, clean(str(error), 300)
     if closeout and (closeout.get('existing_A_recommendation') or {}).get('author_step') == step:
@@ -1142,7 +1231,7 @@ def result_card(reader, step, *, closeout=None, projection=None, goal_completion
                      if change.get(key)])
     limitations = [clean(str(item), 1200) for item in payload.get('limitations') or []]
     goal = goal_completion if goal_completion is not None else (closeout or {}).get('goal_completion')
-    return dict(step=step, role=job['role'], kind='closeout' if job.get('purpose') == 'closeout' else
+    return dict(step=step, role=job['role'], kind='closeout' if job.get('purpose') == 'closeout' or job.get('final_report') or job.get('final_only') else
                 'formal_review' if job.get('formal_review') else 'ordinary',
                 next_action=payload.get('next_action'), decision=A_OUTCOMES.get(payload.get('next_action'), payload.get('next_action')),
                 summary=clean(payload['summary'], 1200) if isinstance(payload.get('summary'), str) else '未记录摘要',
@@ -1152,6 +1241,7 @@ def result_card(reader, step, *, closeout=None, projection=None, goal_completion
                 resolution_error=resolution_error,
                 reason=clean(reason, 400) if reason else '未记录',
                 criteria_change=criteria_change,
+                final_coverage=final_coverage(job, payload, clean),
                 unmet=limitations[:3], unmet_omitted=max(0, len(limitations) - 3),
                 goal_completion=GOAL_COMPLETION.get(goal, goal) if goal is not None else '未记录',
                 materials=len(seal.get('materials') or []))

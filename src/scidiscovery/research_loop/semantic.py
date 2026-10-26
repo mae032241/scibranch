@@ -19,6 +19,9 @@ def outcome(root,job,payload):
     formal_review.validate_choice(root,job,payload)
     enabled=c.settings(root, job).get('search_policy') is not None and not job.get('formal_review') and not job.get('final_report')
     interpretation=search.interpret(root,job,payload) if enabled else dict(focus=None,allocation=None,diagnostics=[])
+    search.require_portfolio_review(root,job,payload,interpretation=interpretation)
+    from . import candidate_nominations
+    candidate_nominations.require_final_coverage(root,job,payload)
     diagnostics=interpretation['diagnostics']
     selection=[];c.selected_inputs(c.workspace(root,job['step']),payload,job,selection)
     from . import decision

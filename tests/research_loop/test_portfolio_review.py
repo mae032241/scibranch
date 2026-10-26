@@ -10,7 +10,10 @@ from scidiscovery.research_loop import budget, contracts as c, controller, decis
 from execution_fixtures import execution_registry
 from scidiscovery.research_loop.protocol import CURRENT, UnsupportedProtocol
 from test_breadth_science import run as run_command, findings
-from test_history_handoff import finish
+from test_history_handoff import finish, fixture_portfolio_review, fixture_final_coverage, AUTO_PORTFOLIO
+from breadth_execution_fixtures import native_launcher
+
+pytestmark = pytest.mark.process_e2e
 
 P, Q, R = 'h001.m1', 'h001.m2', 'h001.m3'
 TRADEOFF = 'Retain the current branch for its decision value; remaining commitments remain unresolved under the original constraints.'
@@ -22,8 +25,10 @@ def prepare(tmp_path, *, threshold=2, enabled=True, version=2):
     public = tmp_path / 'public'; public.mkdir(parents=True)
     objective = public / 'objective.md'; objective.write_text('Judge the whole committed mechanism portfolio without abandoning original constraints.')
     root = tmp_path / 'instance'
-    controller.prepare(root, objective, public, ['never-launched'], max_tokens=100_000, max_seconds=3600,
+    controller.prepare(root, objective, public, native_launcher(), max_tokens=100_000, max_seconds=3600,
         max_steps=64, model='fixture', reasoning_effort='high', decision_contract_version=1,
+        native_options=dict(workspace='workspace-write',network=False),
+        execution_config=dict(executor='local_execution:command',configuration=dict(run_argv=[sys.executable],max_seconds=30)),
         portfolio_policy=dict(review_after_cycles=threshold, version=version) if enabled else None)
     plan = dict(scope='Competing solutions', commitments=[dict(label=label, minimal_test='A discriminating comparison', existing_ref=None)
                 for label in ('P', 'Q', 'R', 'S')], focus=dict(label='P', action='screen'))
@@ -56,10 +61,10 @@ def worker(root, step, parents, *, observed=P):
         dict(budget_slice=anchor) if anchor is not None else dict(search_slice=search.accept(root, job))))
     c.write(record / 'native-intent.json', intent)
     original_intent = (record / 'native-intent.json').read_bytes()
-    output = root.parent / f'portfolio-execution-{step}.json'
-    experiments.configure(root, step, 'local_execution:command', dict(run_argv=[sys.executable]), output)
-    config = c.read(output)
-    result = run_command(root, config, observed)
+    output = c.workspace(root,step)/'work/experiment-config.json'
+    selected=c.settings(root,job)['execution_config']
+    config=experiments.configure(root,step,selected['executor'],selected['configuration'],output)
+    result = run_command(root, config, observed,qualified_local=True)
     assert result['status'] == 'known_success' and result['mechanism_binding']['mechanism_ref'] == observed
     assigned = [row['mechanism_ref'] for row in job['search']['coverage_obligation']]
     assert observed in [row['mechanism_ref'] for row in job['search']['breadth']['mechanisms']]
@@ -73,7 +78,7 @@ def worker(root, step, parents, *, observed=P):
     c.write(record / 'science-output.json', payload)
     meter = dict(input_tokens=7, cached_input_tokens=2, output_tokens=3)
     c.write(record / 'usage.json', meter)
-    c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, usage=native.usage(root),
+    c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, native_started=False, usage=native.usage(root),
         raw_ref=c.file_ref(record / 'science-output.json'), search_slice=search.report(root, job, intent, meter)))
     c.seal_result(root, step)
     assert (record / 'native-intent.json').read_bytes() == original_intent
@@ -90,11 +95,13 @@ def author(root, step, parents, *, branch=None, portfolio=None, action='continue
         search_review=dict(dispositions=list(dispositions), next_focus=dict(mechanism_ref=branch, action=mode)),
         progress_assessment=dict(verdict='no_progress'), candidate_recommendation=None,
         next_action=action, route_reason='Exact scientific question', decision_request=request,
-        portfolio_review=portfolio)
+        portfolio_review=None)
+    fixture_portfolio_review(root,job,payload,AUTO_PORTFOLIO if portfolio is None or isinstance(portfolio,str) else portfolio)
+    fixture_final_coverage(root,job,payload)
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(path)))
     c.write(record / 'science-output.json', payload)
     c.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
-    c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, usage=native.usage(root),
+    c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, native_started=False, usage=native.usage(root),
                                              raw_ref=c.file_ref(record / 'science-output.json')))
     c.seal_result(root, step)
     return job, payload
@@ -122,14 +129,28 @@ def mechanism_rows(root, step, view):
     return rows
 
 
-def test_real_controller_reminder_does_not_require_report_or_author_correction(tmp_path, monkeypatch):
+def test_controller_requires_comparison_without_forced_author_correction(tmp_path, monkeypatch):
     root=prepare(tmp_path,threshold=3)
     pending_three(root)
     job,payload=author(root,7,[1,6])
     record=execution.record(root,7);raw=(record/'science-output.json').read_bytes()
-    view=c.science_view(job,root)['lineage']['mechanisms']
-    assert view['portfolio']['review_reminder'] is True
-    rows=mechanism_rows(root,7,view)
+    public=c.science_view(job,root)
+    assessment=public['portfolio_assessment']
+    assert assessment['required_for_completed_w'] is True
+    assert assessment['assessed_w']==[dict(source_step=6,pointer='/scientific_result')]
+    assert payload['portfolio_review'] is not None and 'portfolio_review' in public['final_response']
+    # The compact public brief may omit inline excerpts; its index retains the
+    # complete mechanism facts. The advisory reminder does not add a route.
+    view=public['lineage']
+    rows=mechanism_rows(root,7,dict(index=view['indexes']['mechanisms']))
+    summary_path=c.workspace(root,7)/view['indexes']['portfolio']
+    assert summary_path.stat().st_size<=history.MAX_PAGE_BYTES
+    summary=c.read(summary_path)
+    assert summary['completed_cycle_count']==summary['participation_denominator']==2
+    assert summary['pending_assessment'] and summary['pending_w']==dict(source_step=6,pointer='/scientific_result',completed=True)
+    assert summary['main_line']==P and summary['mainline_streak']==2
+    assert summary['mainline_source']==dict(source_step=5,pointer='/portfolio_review/main_line')
+    assert summary['review_reminder'] is True
     assert [row['mechanism_ref'] for row in rows]==[P,Q,R,'h001.m4']
     by_ref={row['mechanism_ref']:row for row in rows}
     assert by_ref['h001.m4']['unserved_cycles_if_assessed']==3
@@ -261,14 +282,29 @@ def test_many_mechanisms_bounded_default_complete_index_and_page_tamper(tmp_path
     job = c.build_job(root, 8, 'A', [7], instruction=route_instruction(root, [7]))
     view = c.science_view(job, root)['lineage']
     assert len((json.dumps(view,ensure_ascii=False,indent=2)+'\n').encode()) <= history.MAX_BRIEF_BYTES
-    assert len(view['mechanisms']['overview']) <= 4
-    assert view['mechanisms']['overview_omitted_count'] == 20 - len(view['mechanisms']['overview'])
-    path = view['mechanisms']['index']; rows=[]
+    assert view['mechanisms']['count']==20
+    assert view['mechanisms']['availability']=='available'
+    assert c.science_view(job,root)['portfolio_assessment']['required_for_completed_w'] is False
+    # Dense navigation may shed inline excerpts; the public portfolio index
+    # still locates exact prefix counts, pending state and authored main line.
+    summary_path=c.workspace(root,8)/view['indexes']['portfolio']
+    assert summary_path.stat().st_size<=history.MAX_PAGE_BYTES
+    summary=c.read(summary_path)
+    assert summary['source_step']==7
+    assert summary['completed_cycle_count']==summary['participation_denominator']==1
+    assert summary['mainline_streak']==0 and summary['main_line'] is None
+    assert summary['mainline_source']==dict(source_step=3,pointer='/portfolio_review/main_line')
+    assert summary['pending_assessment'] is False and summary['pending_w'] is None
+    assert 'participation' not in summary and 'discriminating_work' not in summary
+    path = view['indexes']['mechanisms']; rows=[]
     while path:
         page_path=c.workspace(root,8)/path
         assert page_path.stat().st_mode & 0o222 == 0
+        assert page_path.stat().st_size<=history.MAX_PAGE_BYTES
         page=c.read(page_path);rows.extend(page['mechanisms']);path=page['next_page']
-    assert len(rows)==20 and all('unserved_cycles' in row for row in rows)
+    assert len(rows)==20 and len({row['mechanism_ref'] for row in rows})==20
+    assert all('unserved_cycles' in row and row['participation_denominator']==1 for row in rows)
+    assert {row['mechanism_ref'] for row in rows}==set(search.project(root,8)['mechanisms'])
     page_path.chmod(0o600);page_path.write_text('{}\n')
     with pytest.raises(ValueError):c._validate_inputs(root,c.workspace(root,8),job)
 
@@ -276,7 +312,7 @@ def test_many_mechanisms_bounded_default_complete_index_and_page_tamper(tmp_path
 def test_default_portfolio_preserves_frozen_tasks_without_extra_report_field(tmp_path):
     root = prepare(tmp_path, enabled=False)
     job, _ = author(root, 3, [1, 2], action='wait')
-    assert job['handoff_protocol'] == CURRENT and 'portfolio_review' not in c.result_schema('A')['properties']
+    assert job['handoff_protocol'] == CURRENT and 'portfolio_review' in c.result_schema('A')['properties']
     paths=[root/'settings.json',root/'jobs/003.json',c.workspace(root,3)/'science-task.json',
            c.host_record(c.workspace(root,3))/'science-result.schema.json',c.host_record(c.workspace(root,3))/'result-identity.json']
     original={path:path.read_bytes() for path in paths}
@@ -287,8 +323,8 @@ def test_default_portfolio_preserves_frozen_tasks_without_extra_report_field(tmp
         c.result_schema('A', 10)
     view=c.science_view(job,root)['lineage']['mechanisms']
     assert view['portfolio']['review_after_cycles'] is None and view['portfolio']['review_reminder'] is False
-    assert 'portfolio_review' not in job['scientific_response_fields']
-    assert 'portfolio_review' not in c.result_schema('A',final_only=True)['properties']
+    assert 'portfolio_review' in job['scientific_response_fields']
+    assert 'portfolio_review' in c.result_schema('A',final_only=True)['properties']
     assert len(mechanism_rows(root,3,view))==4
 
 
@@ -317,3 +353,50 @@ def test_screened_alternative_remains_visible_after_local_improvement(tmp_path):
     state=search.project(root,6)['portfolio']
     assert state['invested']=={P:1,Q:1} and state['deferred'][P]==1
     assert search.project(root,6)['focus']==dict(mechanism_ref=Q,action='improve')
+
+
+def test_three_w_mechanical_comparison_tracks_overlap_work_and_authored_final(tmp_path,execution_registry):
+    from test_breadth_science import prepare as breadth_prepare,h,worker as configure_worker,run,findings
+    from test_portfolio_contract import comparison
+    root=breadth_prepare(tmp_path,qualified_local=True)
+    h(root,labels=('P','Q','R'))
+    def measured(step,parents,labels):
+        job,config=configure_worker(root,tmp_path,step,parents,qualified_local=True)
+        for label in labels:
+            assert run(root,config,label,qualified_local=True)['status']=='known_success'
+        finish(root,step,'W',parents,mechanism_findings=findings(*labels),preserve_native_intent=True)
+    measured(2,[1],('P','Q','R'))
+    review=comparison(action='continue_w',main=P)
+    review.update(discriminating_work=dict(existing_ref=None,mechanism_refs=[Q,R],
+        question='Which unobserved target condition would distinguish the two alternatives?',
+        change_criterion='A contradictory target observation changes the scientific choice.',next_action='extract'),
+        no_work_reason=None,deferral=dict(reason='Synthetic A defers the missing target evidence while refining P.',
+            trigger='P proxy ceases to predict the bounded observation.',revisit='At the next independent A assessment.'))
+    choice=dict(dispositions=[dict(mechanism_ref=ref,status='screened',reason='Synthetic A assesses the retained mechanical observation, without scientific qualification.') for ref in (P,Q,R)],
+        next_focus=dict(mechanism_ref=P,action='improve'))
+    finish(root,3,'A',[1,2],action='continue_w',search_choice=choice,portfolio_review=review)
+    measured(4,[1,3],('P',))
+    review2=comparison(action='continue_w',main=P)
+    review2.update(discriminating_work=dict(existing_ref='A003-D001'),no_work_reason=None,
+        work_updates=[dict(work_ref='A003-D001',action='defer',reason='Synthetic A retains this unresolved evidence question.',
+            trigger='A new target observation becomes available.',revisit='At the final A assessment.',evidence=[])])
+    finish(root,5,'A',[1,4],action='continue_w',search_choice=dict(dispositions=[],next_focus=dict(mechanism_ref=P,action='improve')),
+        portfolio_review=review2)
+    before=search.project(root,6)
+    assert len(before['portfolio']['seen_w'])==2 and before['order']['discriminating_work'][0]['status']=='deferred'
+    measured(6,[1,5],('P',))
+    final=copy.deepcopy(review2);final['decision']='close';final['reason']='Synthetic A stops within the declared finite scope.'
+    final['work_updates'][0].update(reason='This target evidence question remains unanswered at the bounded stop.',
+        trigger='A later explicitly authorized study supplies the missing input.',revisit='Only in a new authorized study.')
+    coverage=[dict(mechanism_ref=ref,status='deep' if ref==P else 'screened_pending',
+        reason='Synthetic authored depth for the bounded fixture; no model or scientific effectiveness qualification.',
+        science_refs=[dict(source_step=6 if ref==P else 2,pointer='/scientific_result')],
+        unanswered_questions=['Does the mechanical signal transfer to the original target condition?']) for ref in (P,Q,R)]
+    finish(root,7,'A',[1,6],action='finish',portfolio_review=final,final_coverage=coverage)
+    state=search.project(root,8);view=search.portfolio_view(state,3)
+    assert view['completed_cycle_count']==3 and view['mainline_streak']==3 and view['main_line']==P
+    assert state['portfolio']['invested']=={P:3,Q:1,R:1}
+    assert state['order']['discriminating_work'][0]['status']=='deferred'
+    saved=c.read(root/'host-history/overview.json')['portfolio_metrics']
+    assert saved['source_step']==7 and saved['portfolio']['completed_cycle_count']==3
+    assert c.validate(c.workspace(root,7))['final_coverage']==coverage

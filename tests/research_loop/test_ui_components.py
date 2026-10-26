@@ -101,3 +101,50 @@ def test_audit_result_identifies_the_target_without_claiming_a_recommendation():
     assert '推荐' not in markup and 'href="/results/2"' in markup
     missing = ui.result_card(dict(card, audit_target=None))
     assert '审计对象未能对应已观察候选' in missing and '推荐' not in missing
+
+
+def test_final_coverage_is_collapsed_authored_escaped_and_links_scientific_originals():
+    card = dict(step=7, kind='closeout', decision='finish', delivery_state='none', delivery_label='未推荐',
+        chosen=None, summary='Final', reason='Evidence', criteria_change=None, goal_completion='未声明',
+        unmet=['Missing input'], unmet_omitted=0, final_coverage=[dict(label=XSS, authored_label=True,
+            status='screened_pending', reason=XSS, science_refs=[dict(source_step=2, pointer='/scientific_result')],
+            unanswered_questions=[XSS]), dict(label='Untested', status='unexplored', reason='No input',
+            science_refs=[dict(source_step=1, pointer='/search_plan')], unanswered_questions=[])])
+    markup = ui.result_card(card)
+    coverage = markup.split('<details class="final-coverage"', 1)[1]
+    assert ' open' not in coverage.split('>', 1)[0]
+    assert 'data-details-key="final-coverage:7"' in markup and 'data-live-focus="final-coverage:7"' in markup
+    assert '已筛查待再议' in markup and '从未探索' in markup and 'A 声明无未回答问题' in markup
+    assert '/nodes/2/science' in markup and '/nodes/1/science' in markup and '/scientific_result' in markup
+    assert '<script>' not in markup and '<img' not in markup and '&lt;script&gt;' in markup
+    assert 'data-translation-source=' in coverage
+
+
+def test_breadth_metrics_preserve_overlapping_participation_and_token_only_advice():
+    from test_ui_view import saved_breadth
+
+    value = ui_view.breadth_metrics(saved_breadth(), lambda text, limit=16384: str(text)[:limit])
+    markup = ui.breadth_metrics(value)
+    assert ' open' not in markup.split('>', 1)[0]
+    assert 'data-details-key="breadth-metrics"' in markup and 'data-live-focus="breadth-metrics"' in markup
+    assert '100%' in markup and '50%' in markup and '合计可超过 100%' in markup
+    assert '待 A 评估的 W' in markup and '/nodes/6/science' in markup and '未计入已完成周期' in markup
+    assert '2 次独立组合判断' in markup and '仍有效的判别工作（1）' in markup
+    assert 'The input arrives.' in markup and 'Before closing.' in markup
+    assert '按已报告 token 的参考轮数：3.5' in markup and '不表示全部预算还能运行相应轮数' in markup
+    assert '最低样本数：2' in markup and '/nodes/3/science' in markup
+
+
+def test_breadth_metrics_missing_or_stale_snapshots_do_not_claim_current_global_estimate():
+    from test_ui_view import saved_breadth
+
+    clean = lambda text, limit=16384: str(text)[:limit]
+    assert '参考轮数不可估' in ui.breadth_metrics(ui_view.breadth_metrics({}, clean))
+    value = ui_view.breadth_metrics(dict(saved_breadth(partial=True), fork={"cut": 3}), clean)
+    markup = ui.breadth_metrics(value)
+    assert '不能代表当前全局统计' in markup and '参考轮数：不可估' in markup
+    assert '当前余额与消费仅计本分支' in markup and '参考轮数：3.5' not in markup
+    value['participation'][0]['label'] = XSS
+    value['work'][0]['question'] = XSS
+    markup = ui.breadth_metrics(value)
+    assert '<script>' not in markup and '<img' not in markup and '&lt;script&gt;' in markup

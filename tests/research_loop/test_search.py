@@ -10,7 +10,7 @@ import pytest
 
 from scidiscovery.research_loop import budget, contracts as c, controller, execution, experiments, native, protocol, search
 from execution_fixtures import execution_registry
-from test_history_handoff import finish
+from test_history_handoff import AUTO_COVERAGE, AUTO_PORTFOLIO, OMIT_PORTFOLIO, finish, fixture_final_coverage, fixture_portfolio_review
 from test_breadth_science import worker as configure_worker, run as run_command, findings
 
 
@@ -40,10 +40,10 @@ def scene(tmp_path, execution_registry):
     return root
 
 
-def worker(root, step, parents, *, observed=None):
-    """Actual registered local commands precede any observed W finding."""
+def worker(root, step, parents, *, observed=None, cov=False, qualified_local=False):
+    """Registered mechanical backend calls precede observed fixture findings."""
     path = root / 'jobs' / f'{step:03d}.json'
-    if path.exists():
+    if path.exists() and not cov and not qualified_local:
         job = c.read(path)
         assert job['role'] == 'W' and [int(row['path'].split('/')[2]) for row in job['direct_refs']] == parents
         c.write(execution.record(root, step) / 'native-intent.json',
@@ -52,14 +52,14 @@ def worker(root, step, parents, *, observed=None):
         experiments.configure(root, step, 'local_execution:command', dict(run_argv=[sys.executable]), output)
         config = c.read(output)
     else:
-        job, config = configure_worker(root, root.parent, step, parents)
+        job, config = configure_worker(root, root.parent, step, parents, cov=cov, qualified_local=qualified_local)
     mechanisms = config['breadth']['mechanisms']
     if observed is None:
         observed = [job['search']['focus']['mechanism_ref']]
     selected = [row for row in mechanisms if row['mechanism_ref'] in observed or row['label'] in observed]
     assert len(selected) == len(observed)
     for row in selected:
-        result = run_command(root, config, row['mechanism_ref'])
+        result = run_command(root, config, row['mechanism_ref'], qualified_local=qualified_local)
         assert result['status'] == 'known_success'
     selected_refs = {row['mechanism_ref'] for row in selected}
     assigned = {row['mechanism_ref'] for row in job['search']['coverage_obligation']}
@@ -71,8 +71,8 @@ def worker(root, step, parents, *, observed=None):
         preserve_native_intent=True)
 
 
-def assess(root, step, parents, *, action='continue_w', search_choice=None):
-    """Local current A fixture; the widely imported finish helper stays unchanged."""
+def assess(root, step, parents, *, action='continue_w', search_choice=None, portfolio_review=AUTO_PORTFOLIO, final_coverage=AUTO_COVERAGE):
+    """Seal an authored synthetic A; explicit portfolio values retain negatives."""
     path = root / 'jobs' / f'{step:03d}.json'
     job = c.read(path) if path.exists() else c.build_job(root, step, 'A', parents)
     assert job['role'] == 'A' and [int(row['path'].split('/')[2]) for row in job['direct_refs']] == parents
@@ -84,10 +84,12 @@ def assess(root, step, parents, *, action='continue_w', search_choice=None):
         decision_request=dict(decision='mechanism', question=f'Which declared mechanism should receive contribution {step}?',
             change_criterion='A new trustworthy discriminating observation would change the mechanism choice')
             if action in {'continue_w', 'revise_h'} else None)
+    fixture_portfolio_review(root, job, payload, portfolio_review)
+    fixture_final_coverage(root, job, payload, final_coverage)
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json')))
     c.write(record / 'science-output.json', payload)
     c.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
-    c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, usage=native.usage(root),
+    c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, native_started=False, usage=native.usage(root),
         raw_ref=c.file_ref(record / 'science-output.json')))
     c.seal_result(root, step)
     return job, c.workspace(root, step), record

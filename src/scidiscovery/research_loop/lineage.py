@@ -246,7 +246,9 @@ def project(root, before_step, *, source_cutoff=None, extra_steps=(), include_de
     recovery_refs = (originals.frozen_recovery_refs(root, before_step) if (Path(root) / originals.MANIFEST).exists()
         else execution_recovery.prefix(root,before_step))
     records=execution_recovery.project_records(root,history.records_from_sources(root,sources,write_cache=False,include_details=include_details),recovery_refs,sources=sources)
-    state=search.fold(root,sources,recovery_refs=recovery_refs) if configuration_updates.for_new_job(root,before_step).get('search_policy') is not None else None
+    enabled=configuration_updates.for_new_job(root,before_step).get('search_policy') is not None
+    historical=any(originals.source_settings(originals.node(root,job['step'])).get('search_policy') is not None for job,_,_,_ in sources)
+    state=search.fold(root,sources,recovery_refs=recovery_refs) if enabled or historical else None
     graph=build(root,before_step,sources=sources,search_state=state)
     return dict(sources=sources,records=records,search_state=state,graph=graph,candidates=candidate_view(records),recovery_refs=recovery_refs)
 
@@ -367,7 +369,7 @@ def public_relations(graph, sources):
 
 
 def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), selection_protocol=0,
-         audit_projection_version=0, adjacent_audit=None, worker_view_version=1):
+         audit_projection_version=0, adjacent_audit=None, worker_view_version=1,assessment_job=None):
     from .protocol import require_current, _current, UnsupportedProtocol
     require_current(root)
     _current(protocol, 'Scientific lineage')
@@ -478,17 +480,21 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
             row['disposition']=dict(reason=_clip(reason,160),reason_truncated=len(reason.encode())>160,
                 original=original)
     if state and 'portfolio' in state:
-        initial_calls=configuration_updates.for_new_job(root,step)['search_policy'].get('initial_calls',1)
+        current_search=configuration_updates.for_new_job(root,step).get('search_policy')
+        initial_calls=current_search.get('initial_calls',1) if current_search is not None else None
         for row in mechanisms:
             ref=row['mechanism_ref']
             row['accepted_calls']=state['opportunity_counts'].get(ref,0)
             row['initial_calls']=initial_calls
-            row['initial_calls_remaining']=max(0,initial_calls-row['accepted_calls'])
+            row['initial_calls_remaining']=max(0,initial_calls-row['accepted_calls']) if initial_calls is not None else None
             row['execution_usage_unknown']=state['opportunity_unknown']
             grant=state.get('extra_grant')
             row['extra_calls_remaining']=(max(0,1-sum(count for (source_a,_),count in state['opportunity_grants'].items() if source_a==grant['source_a']))
-                if grant and grant['mechanism_ref']==ref else 0)
+                if current_search is not None and grant and grant['mechanism_ref']==ref else 0 if current_search is not None else None)
             row['completed_cycles'] = state['portfolio']['invested'].get(row['mechanism_ref'], 0)
+            row['participated_cycles']=row['completed_cycles']
+            row['participation_denominator']=len(state['portfolio']['seen_w'])
+            row['participation_fraction']=(row['participated_cycles']/row['participation_denominator'] if row['participation_denominator'] else None)
             row['unserved_cycles'] = state['portfolio']['deferred'].get(row['mechanism_ref'], 0)
             if state and 'portfolio' in state:
                 pending = state['portfolio']['pending_w'] if role == 'A' else None
@@ -573,13 +579,31 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
         indexes['audits'] = audit_pages[0] if audit_pages else None
     elif audit_projection_version != 0:
         raise ValueError('Unsupported frozen audit projection')
+    threshold=(configuration_updates.for_new_job(root,step).get('portfolio_policy') or {}).get('review_after_cycles')
+    if state and 'portfolio' in state and role in {'H','A'}:
+        summary=search.portfolio_view(state,threshold,prospective=role=='A')
+        pending=summary['pending_w']
+        # A navigable compact page survives bounded_brief's excerpt fallback.
+        # Participation and work remain in their existing complete pages.
+        portfolio_page='inputs/lineage/portfolio/0001.json'
+        add(portfolio_page,dict(source_step=max((row['step'] for row in records),default=0),
+            completed_cycle_count=summary['completed_cycle_count'],participation_denominator=summary['completed_cycle_count'],
+            pending_assessment=summary['pending_assessment'],
+            pending_w=(dict(source_step=pending['source_step'],pointer='/scientific_result',completed=pending['completed']) if pending else None),
+            main_line=summary['main_line'],mainline_streak=summary['mainline_streak'],mainline_source=summary['mainline_source'],
+            cycles_if_assessed=summary['cycles_if_assessed'],review_after_cycles=summary['review_after_cycles'],
+            overdue_count_if_assessed=summary['overdue_count_if_assessed'],review_reminder=summary['review_reminder'],
+            scope=summary['scope']))
+        indexes['portfolio']=portfolio_page
     view=brief(records,state,projection['graph'],overview,indexes,selection_protocol=selection_protocol)
     if state and 'portfolio' in state:
-        threshold = (configuration_updates.for_new_job(root,step).get('portfolio_policy') or {}).get('review_after_cycles')
         # Stable identity order is navigation, never scientific ranking.
         view['mechanisms'].update(overview=mechanisms[:4], overview_omitted_count=max(0,len(mechanisms)-4),
                                   index=indexes['mechanisms'],
                                   portfolio=search.portfolio_view(state,threshold,prospective=role=='A'))
+        # Full participation is already in mechanism pages. Keep only summary
+        # statistics in the bounded default brief.
+        view['mechanisms']['portfolio'].pop('participation',None)
     if state:
         view['mechanisms']['unfinished_plan']=dict(remaining=order_rows[:4],remaining_count=len(order_rows),
             omitted_count=max(0,len(order_rows)-4),index=order_pages[0] if order_pages else None,
@@ -612,6 +636,11 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
         view['candidates']['candidate_facts']=[]
         view['candidates']['candidate_facts_omitted_count']=len(candidate_rows)
         bounded_brief(view)
+    work_navigation=None
+    if state is not None:
+        active=[dict(id=row['work_ref'],**row) for row in state['order'].get('discriminating_work',[]) if row['status']!='withdrawn']
+        work_pages=paged(active,8,'discriminating_work','inputs/history/discriminating-work','derived-from-sealed-A-originals')
+        work_navigation=dict(active_work_count=len(active),work_index=work_pages[0] if work_pages else None)
     if retained is not None:
         saved_files={row['path']:row for row in retained.get('history',{}).get('files',[])}
         for index,row in enumerate(files):
@@ -623,8 +652,18 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
             files[index]=dict(saved)
         order={path:index for index,path in enumerate(saved_files)}
         files.sort(key=lambda row:order.get(row['path'],len(order)))
-    return dict(**(dict(execution_recoveries=projection['recovery_refs'],execution_recovery_materials=recovery_materials) if projection['recovery_refs'] else {}),**(dict(audit_projection_version=1, audit_receipts=audit_refs, adjacent_audit=adjacent_audit) if audit_projection_version == 1 else {}), nodes=[dict(step=row['step'],seal_ref=row['seal_ref']) for row in records],files=files,
+    binding=dict(**(dict(execution_recoveries=projection['recovery_refs'],execution_recovery_materials=recovery_materials) if projection['recovery_refs'] else {}),**(dict(audit_projection_version=1, audit_receipts=audit_refs, adjacent_audit=adjacent_audit) if audit_projection_version == 1 else {}), nodes=[dict(step=row['step'],seal_ref=row['seal_ref']) for row in records],files=files,
                 candidate_ids=[row['id'] for row in candidate_rows],
+                **(dict(discriminating_work=work_navigation) if work_navigation is not None else {}),
                 **(dict(candidate_nomination_ids=nomination_ids) if nomination_ids is not None else {}),
                 candidate_references=references,
-                view=bounded_brief(candidate_refs.public_fields(view,references))),state
+                view=bounded_brief(candidate_refs.public_fields(view,references)))
+    if assessment_job is not None and role=='A' and state is not None:
+        context=search.assessment_context(root,dict(assessment_job,history=binding),state=state,source_rows=projection['sources'])
+        binding['portfolio_assessment']=dict(required_for_completed_w=context['applicable'],
+            assessed_w=[dict(source_step=row['step'],pointer='/scientific_result') for row in context['completed_w']],
+            **work_navigation,
+            instruction=('For a substantive non-wait assessment of the listed completed W, read every active work page and update each work_ref exactly once. Executed work remains active until your evidence-based withdrawal. A response records execution, not scientific resolution. Cite only source_step and a pointer into visible scientific output; exact original identity is bound by control.'
+                if context['applicable'] else
+                'Historical navigation only; this task requires no portfolio_review or active-work updates. Retain unresolved questions and exact scientific sources. Navigation grants no new scientific work.'))
+    return binding,state

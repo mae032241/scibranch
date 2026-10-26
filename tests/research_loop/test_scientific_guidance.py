@@ -1,4 +1,4 @@
-"""Frozen short advice and cov CLI compatibility without scientific protocol changes."""
+"""Frozen native role advice and the supported Cov CLI fixture surface."""
 import json
 import os
 from pathlib import Path
@@ -31,7 +31,8 @@ def test_only_current_role_literal_is_delivered_and_retained_bytes_are_stable(tm
     for step,role in enumerate(['H','W','A','E'],1):
         job,work,record=finish(root,step,role,[step-1] if step>1 else [])
         view=c.science_view(job,root)
-        assert view['role_guidance']==stored[role] and isinstance(view['role_guidance'],str)
+        assert job['native_role_instruction']==stored[role] and isinstance(job['native_role_instruction'],str)
+        assert 'role_guidance' not in view  # Literal instructions travel through the native prompt.
         assert 'role_guidance' not in c.result_schema(role,CURRENT)['properties']
         originals={p:p.read_bytes() for p in (root/'jobs'/f'{step:03d}.json',work/'science-task.json',record/'result-identity.json')}
         monkeypatch.setitem(guidance.DEFAULT,role,'Changed future guidance; not this task')

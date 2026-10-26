@@ -53,6 +53,71 @@ def usage(root: Path, *, budget_events=None):
     return result
 
 
+
+def _complete_reported_tokens(root,step):
+    """Strict advisory sample: missing endpoint/coverage never contributes zero."""
+    from . import contracts as c
+    total=0;accepted=0
+    for record in execution.records(root,step):
+        if not (record/'native-intent.json').exists():continue
+        accepted+=1
+        intent=c.read(c.regular(record/'native-intent.json'))
+        if intent.get('task_ref')!=c.record_ref(c.regular(Path(root)/'jobs'/f'{step:03d}.json')):
+            raise ValueError('Advisory sample task identity changed')
+        if not (record/'native-outcome.json').exists():return None,'current_usage_inflight'
+        outcome=c.read(c.regular(record/'native-outcome.json'))
+        if type(outcome.get('returncode')) is not int:return None,'terminal_endpoint_unavailable'
+        if not (record/'usage.json').exists():return None,'meter_unavailable'
+        value=c.read(c.regular(record/'usage.json'))
+        if _usage_event(dict(type='turn.completed',usage=value))!=value:return None,'meter_unavailable'
+        metadata=outcome.get('metering')
+        if metadata is None and (record/'usage-observation.json').exists():metadata=c.read(c.regular(record/'usage-observation.json'))
+        if not isinstance(metadata,dict) or metadata.get('coverage')!='terminal':return None,'terminal_coverage_unavailable'
+        # Present native session counters explicitly leave delay unmeasured.
+        # Do not upgrade that lower bound to a complete sample for a number.
+        if metadata.get('reporting_delay_unmeasured') is not False or metadata.get('inflight_usage_unknown') is not False:
+            return None,'reporting_delay_unmeasured'
+        total+=value['input_tokens']+value['output_tokens']
+    return (total,None) if accepted else (None,'accepted_attempts_unavailable')
+
+
+def cycle_token_advice(root,state,*,usage_snapshot=None,budget_snapshot=None):
+    """Reported-token reference only, independent of admission and shared clocks."""
+    from . import fork_runtime
+    root=Path(root);samples=[];excluded=0;excluded_samples=[];reasons=[];meters={}
+    local=set(fork_runtime.local_steps(root,include_native=True))
+    for step in sorted(local):
+        if not (execution.origin(root,step)/'native-intent.json').exists():continue
+        try:meters[step]=_complete_reported_tokens(root,step)
+        except (OSError,ValueError,KeyError,TypeError):meters[step]=(None,'attempt_history_unavailable')
+        if meters[step][1]:reasons.append(meters[step][1])
+    for cycle in state['portfolio'].get('cycles',[]):
+        nodes=[cycle['w_step'],*cycle['a_steps']]
+        if cycle.get('sample_exclusion'):
+            excluded+=1;excluded_samples.append(dict(w_step=cycle['w_step'],a_steps=list(cycle['a_steps']),reason=cycle['sample_exclusion']));continue
+        if any(step not in local for step in nodes):continue
+        if any(meters.get(step,(None,'missing'))[0] is None for step in nodes):
+            excluded+=1;excluded_samples.append(dict(w_step=cycle['w_step'],a_steps=list(cycle['a_steps']),reason='incomplete_cycle_meter'));continue
+        samples.append(dict(w_step=cycle['w_step'],a_steps=list(cycle['a_steps']),
+            science_refs=[dict(source_step=step,pointer='/scientific_result') for step in dict.fromkeys(nodes)],
+            reported_tokens=sum(meters[step][0] for step in dict.fromkeys(nodes))))
+    if len(samples)<2:reasons.append('insufficient_complete_local_cycles')
+    current=usage(root) if usage_snapshot is None else usage_snapshot
+    limits=control_budget.snapshot(root) if budget_snapshot is None else budget_snapshot
+    if current.get('unknown_steps') or current.get('reserved_unknown_steps') or current.get('blocking_unknown_steps'):
+        reasons.append('usage_unknown')
+    spent=current.get('accounted_tokens',current.get('observed_tokens'));ceiling=limits.get('max_tokens')
+    remaining=max(0,ceiling-spent) if type(ceiling) is int and type(spent) is int and spent>=0 else None
+    if remaining is None:reasons.append('current_balance_unavailable')
+    mean=sum(row['reported_tokens'] for row in samples)/len(samples) if samples else None
+    if mean is not None and mean<=0:reasons.append('nonpositive_sample_mean')
+    reasons=list(dict.fromkeys(reasons));available=not reasons
+    accepted_count=sum(1 for step in local for record in execution.records(root,step) if (record/'native-intent.json').exists())
+    return dict(accounted_tokens=spent,max_tokens=ceiling,accepted_attempt_count=accepted_count,status='available' if available else 'unavailable',reference_cycles=remaining/mean if available else None,
+        minimum_samples=2,complete_sample_count=len(samples),excluded_sample_count=excluded,reasons=reasons,
+        mean_reported_tokens=mean,remaining_reported_tokens=remaining,samples=samples,excluded_samples=excluded_samples,
+        scope='Reported native W/A tokens in complete child-local cycles only; inherited costs, H/E/audit/external calls and shared time are excluded from sample averages. Remaining balance includes current local usage. Not an execution grant or guarantee; existing time, steps and FINAL limits apply.')
+
 def _usage_event(event):
     if event.get('type') != 'turn.completed':
         return None

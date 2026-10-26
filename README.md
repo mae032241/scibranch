@@ -115,7 +115,7 @@ commands are retired. Historical packages remain read-only; they are not automat
 migrated, restored or reactivated. Ordinary execution checkpoints and original-call
 recovery remain supported; checkpoints do not retain or restore lost drafts.
 
-All H/W/A/E node token budgets and W stage targets are advisory: reaching a target requests a bounded conclusion without rejecting new managed experiments or forcing A review. Actual input plus output is fully accounted; no whole-node token allocation is prepaid. Current protocol 26 accepts only soft node settings and the frozen final-A completion policy. Earlier instance formats are unsupported; no compatibility reader or migration is provided. Shared budget checks for new nodes, finite execution time, permissions and cleanup limits remain enforced.
+All H/W/A/E node token budgets and W stage targets are advisory: reaching a target requests a bounded conclusion without rejecting new managed experiments or forcing A review. Actual input plus output is fully accounted; no whole-node token allocation is prepaid. Current protocol 27 accepts only soft node settings and the frozen final-A completion policy. Earlier instance formats are unsupported; no compatibility reader or migration is provided. Shared budget checks for new nodes, finite execution time, permissions and cleanup limits remain enforced.
 
 New instances freeze a final-A completion policy with one A per FINAL cycle: insufficient, zero or
 exceeded shared token, time or step budgets do not deny the final A's admission,
@@ -125,6 +125,12 @@ unknown and is never replaced with a zero meter. A completed native event, zero 
 and confirmed cleanup remain required. Observed usage remains accounted without
 raising the shared ceilings; original finite per-call time, permissions and other
 execution limits still apply. After an explicit threshold increase, the next run may resume the saved pending normal route when its full admission is affordable and original effects are known and quiescent. New physical IDs preserve prior final outputs, submissions and all consumption; a later budget denial begins another FINAL cycle. See the [architecture](docs/ARCHITECTURE.md).
+
+Search now requires a compact `portfolio_review` for each substantive A assessment
+of a completed W, with exact competing evidence and tracked discriminating work.
+Final A reports declare every mechanism's coverage and unanswered questions in
+`final_coverage`. Participation counts and token-only round advice remain hints;
+control imposes no route quota or forced switch. See the [architecture](docs/ARCHITECTURE.md).
 
 A candidate choice requires `selection_explanation`: its comparison criteria and
 whether they changed. Revised criteria explicitly acknowledge the prior rule,

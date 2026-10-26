@@ -47,6 +47,178 @@ def _text(nullable=False):
     return dict(type=['string', 'null'] if nullable else 'string', minLength=1)
 
 
+def portfolio_review_schema():
+    """Authored scientific comparison; nullable only for explicitly exempt turns."""
+    text=lambda nullable=False:dict(type=['string','null'] if nullable else 'string',pattern=r'\S')
+    evidence=dict(type='array',minItems=1,items=_object(dict(
+        source_step=dict(type='integer',minimum=1),pointer=dict(type='string',pattern=r'^/(?:[^~]|~[01])*$'))))
+    work=dict(anyOf=[dict(type='null'),_object(dict(existing_ref=dict(type='null'),
+        mechanism_refs=dict(type='array',minItems=1,uniqueItems=True,items=text()),question=text(),
+        change_criterion=text(),next_action=dict(type='string',enum=['continue_w','revise_h','extract']))),
+        _object(dict(existing_ref=text()))])
+    update=_object(dict(work_ref=text(),action=dict(type='string',enum=['execute','defer','withdraw']),reason=text(),
+        trigger=text(True),revisit=text(True),evidence=dict(type='array',items=evidence['items'])))
+    value=_object(dict(main_line=text(True),main_line_reason=text(),
+        competitor=_object(dict(mechanism_ref=text(True),explanation=text(),evidence=evidence),nullable=True),
+        no_competitor_reason=text(True),discriminating_work=work,no_work_reason=text(True),
+        decision=dict(type='string',enum=['continue','switch','reframe','close']),reason=text(),
+        deferral=_object(dict(reason=text(),trigger=text(),revisit=text()),nullable=True),
+        work_updates=dict(type='array',items=update)),nullable=True)
+    value['description']=('For every substantive A assessment of completed W, declare the current main line, strongest viable competing explanation with exact visible scientific source_step/RFC6901 pointer evidence, cheapest feasible discriminating work and continue/switch/reframe/close reason. '
+        'Use null with explicit no_competitor_reason/no_work_reason when none is feasible. New explanations route through H. '
+        'Every listed active discriminating work needs execute/defer/withdraw; defer needs reason/trigger/revisit, withdraw needs scientific evidence. '
+        'continue needs deferral only when a feasible competing work or active work is postponed. Declaration grants no execution; next_action and exact next_focus remain authoritative. '
+        'Evidence pointers address fields of original scientific output, e.g. /scientific_result, never host controls, paths or private bindings. Null is only for wait, no completed W, no search, or independent formal review.')
+    return value
+
+
+def _frozen_sources(root,job,*,source_rows=None):
+    """Resolve this exact task's declared prefix, never a latest-instance view."""
+    prepared=None if source_rows is None else {row[0]['step']:row for row in source_rows}
+    rows={}
+    for ref in job.get('history',{}).get('nodes',[]):
+        step=ref['step']
+        if type(step) is not int or not 0<step<job['step'] or step in rows:
+            raise ValueError('Scientific reference prefix identity changed')
+        row=history._source(root,step) if prepared is None else prepared.get(step)
+        if row is None:raise ValueError('Prepared scientific prefix omitted an original')
+        if row[3]!=ref['seal_ref']:raise ValueError('Scientific reference original changed')
+        rows[step]=row
+    for source,payload,seal in _direct_assessment_sources(root,job,prepared):
+        step=source['step']
+        if prepared is not None and step not in rows:raise ValueError('Prepared direct original is outside its frozen prefix')
+        row=history._source(root,step) if prepared is None else prepared[step]
+        if step in rows and rows[step][2]!=seal:raise ValueError('Scientific direct prefix changed')
+        rows[step]=row
+    return rows
+
+
+def _direct_assessment_sources(root,job,prepared=None):
+    if prepared is None:return history.direct_sources(root,job)
+    # During lineage construction no logical parent aliases have been published.
+    # Its typed rows already come from history.source_sequence/_source; bind the
+    # exact raw originals used by build_job, rather than resolving future aliases.
+    result=[];seen=set()
+    for ref in job.get('direct_originals',job['direct_refs']):
+        match=re.fullmatch(r'inputs/parents/([0-9]{3,})/conclusion\.json',ref['path'])
+        step=int(match[1]) if match is not None else None
+        row=prepared.get(step)
+        if (row is None or step in seen or not 0<step<job['step'] or match[1]!=f'{step:03d}'
+                or ref['size_bytes']!=row[2]['raw_ref']['size_bytes']):
+            raise ValueError('Prepared direct scientific original changed')
+        seen.add(step);result.append(row[:3])
+    return result
+
+
+def assessment_context(root,job,*,state=None,source_rows=None):
+    """Shared B1/FINAL identity facts; this does not define a B2 cycle."""
+    empty=dict(applicable=False,mechanisms={},completed_w=[],discriminating_work=[],sources={})
+    if job['role']!='A' or job.get('formal_review') or job.get('purpose')=='formal_review' or c.settings(root,job).get('search_policy') is None:
+        return empty
+    sources=_frozen_sources(root,job,source_rows=source_rows)
+    if state is None:
+        from . import execution_recovery
+        state=fold(root,[sources[key] for key in sorted(sources)],recovery_refs=originals.recovery_refs(originals.node(root,job['step']),job))
+    prepared=None if source_rows is None else {row[0]['step']:row for row in source_rows}
+    direct={source['step'] for source,_,_ in _direct_assessment_sources(root,job,prepared)}
+    final=bool(job.get('final_report') or job.get('purpose')=='closeout' or job.get('final_only'))
+    eligible=[row for step,row in sources.items() if row[0]['role']=='W' and row[1].get('stage_intent')=='review'
+        and (step in direct or final)]
+    # A final summary without a direct W can assess only the still-pending
+    # original inside its own cut. Already assessed history requires coverage,
+    # not another invented portfolio judgment.
+    if final and not any(row[0]['step'] in direct for row in eligible):
+        pending=(state.get('portfolio') or {}).get('pending_w')
+        eligible=[row for row in eligible if pending is not None and row[0]['step']==pending['step']]
+    result=dict(applicable=bool(eligible and state['mechanisms']),mechanisms=copy.deepcopy(state['mechanisms']),
+        completed_w=[dict(step=row[0]['step'],limitations=copy.deepcopy(row[1].get('limitations',[])),
+            delivery=copy.deepcopy(row[2].get('control_outcome',{}).get('worker_delivery'))) for row in eligible],
+        discriminating_work=copy.deepcopy(state['order'].get('discriminating_work',[])),sources=sources,final=final)
+    frozen=job.get('portfolio_context')
+    if source_rows is None and frozen is not None and (
+            frozen['required_for_completed_w']!=result['applicable']
+            or frozen['assessed_w']!=[dict(source_step=row['step'],pointer='/scientific_result') for row in result['completed_w']]
+            or frozen['active_work_count']!=sum(row['status']!='withdrawn' for row in result['discriminating_work'])):
+        raise ValueError('Portfolio context differs from its frozen scientific originals')
+    return result
+
+
+def validate_science_refs(root,job,refs):
+    """Check identity and author-visible fields only, never scientific merit."""
+    sources=_frozen_sources(root,job)
+    for ref in refs:
+        if not isinstance(ref,dict) or set(ref)!={'source_step','pointer'} or type(ref['source_step']) is not int:
+            raise ValueError('Scientific evidence needs source_step and RFC6901 pointer')
+        row=sources.get(ref['source_step']);pointer=ref['pointer']
+        if row is None or not isinstance(pointer,str) or not pointer.startswith('/') or re.search(r'~(?![01])',pointer):
+            raise ValueError('Scientific evidence is outside the frozen visible prefix')
+        source,payload,_,_=row
+        keys=[key.replace('~1','/').replace('~0','~') for key in pointer[1:].split('/')]
+        fields=c.result_schema(source['role'],source['handoff_protocol'],'selection' in source,**c.response_options(source))['properties']
+        if keys[0] not in fields or keys[0] in {'implementation_selection'}:
+            raise ValueError('Scientific evidence points outside declared scientific fields')
+        value=payload
+        for key in keys:
+            if isinstance(value,dict) and key in value:value=value[key]
+            elif isinstance(value,list) and re.fullmatch(r'0|[1-9][0-9]*',key) and int(key)<len(value):value=value[int(key)]
+            else:raise ValueError('Scientific evidence pointer does not resolve')
+    return copy.deepcopy(refs)
+
+
+def require_portfolio_review(root,job,payload,*,context=None,interpretation=None):
+    """Raw pre-seal completeness gate, also used by immutable replay."""
+    from .output_repair import OutputRepairRequired
+    import jsonschema
+    if job['role']!='A' or payload.get('next_action')=='wait':return None
+    context=assessment_context(root,job) if context is None else context
+    if not context['applicable']:return None
+    def reject(detail):
+        raise OutputRepairRequired('portfolio_review_incomplete',
+            'Correct portfolio_review in this same A output: '+detail+'. Retain completed originals; do not repeat experiments.')
+    review=payload.get('portfolio_review')
+    if review is None or not c.json_field_representable('portfolio_review',review) or not jsonschema.Draft202012Validator(portfolio_review_schema()).is_valid(review):
+        reject('supply a complete nonblank authored comparison')
+    mechanisms=context['mechanisms'];main=review['main_line'];action=payload.get('next_action')
+    if main is not None and main not in mechanisms:reject('main_line must be an exact listed mechanism')
+    competitor=review['competitor'];work=review['discriminating_work']
+    if (competitor is None)!=(review['no_competitor_reason'] is not None) or (work is None)!=(review['no_work_reason'] is not None):
+        reject('pair absent competitor/work with its explicit reason only')
+    if competitor is not None and competitor['mechanism_ref'] is not None and (competitor['mechanism_ref'] not in mechanisms or competitor['mechanism_ref']==main):
+        reject('competitor must name a different exact mechanism or a new explanation')
+    refs=[] if competitor is None else list(competitor['evidence'])
+    active={row['work_ref']:row for row in context['discriminating_work'] if row['status']!='withdrawn'}
+    updates=review['work_updates'];names=[row['work_ref'] for row in updates]
+    if len(names)!=len(set(names)) or set(names)!=set(active):reject('update every active work_ref exactly once, with no unknown refs')
+    for update in updates:
+        refs.extend(update['evidence'])
+        if update['action']=='defer' and (update['trigger'] is None or update['revisit'] is None):reject('deferred work needs trigger and revisit')
+        if update['action']=='withdraw' and not update['evidence']:reject('withdrawal needs exact scientific evidence')
+        if update['action']=='execute' and (work is None or work['existing_ref']!=update['work_ref']):reject('executed work must be the selected discriminating work')
+    if work is not None:
+        if work['existing_ref'] is not None:
+            if work['existing_ref'] not in active:reject('existing_ref must name active declared work')
+            work=dict(active[work['existing_ref']],existing_ref=work['existing_ref'])
+        if any(ref not in mechanisms for ref in work['mechanism_refs']):reject('work mechanisms must be exact listed refs')
+        if work['next_action']==action:
+            if context.get('final'):reject('final assessment cannot dispatch scientific work')
+            if work['existing_ref'] is not None and next(row for row in updates if row['work_ref']==work['existing_ref'])['action']!='execute':reject('selected dispatched work needs execute')
+            request=c.scientific_field(job,payload,'decision_request')
+            if request is not None and (request['question'].strip()!=work['question'].strip() or request['change_criterion'].strip()!=work['change_criterion'].strip()):reject('executed work must match the actual decision_request')
+        elif any(row['action']=='execute' for row in updates):reject('execute must match actual next_action')
+    if review['decision']=='close' and action not in {'finish','deliver'}:reject('close requires finish or deliver')
+    if action in {'finish','deliver'} and review['decision']!='close':reject('ending requires a close judgment')
+    if review['decision']=='reframe' and action!='revise_h':reject('reframe requires revise_h')
+    if action=='continue_w':
+        focus=(interpretation or {}).get('focus')
+        if focus is None or main is None or focus['mechanism_ref']!=main:reject('continue_w needs resolved next_focus matching main_line')
+        if work is not None and work['next_action']==action and main not in work['mechanism_refs']:reject('executed work must cover the resolved mechanism focus')
+    deferred=work is not None and work['existing_ref'] is None and work['next_action']!=action
+    if review['decision']=='continue' and deferred and review['deferral'] is None:reject('postponed feasible work needs reason, trigger and revisit')
+    try:validate_science_refs(root,job,refs)
+    except ValueError:reject('scientific evidence must resolve inside exact declared visible originals')
+    return review
+
+
 def schema(role, protocol=None):
     focus=lambda key:_object({key:_text(nullable=True),'action':dict(type='string',enum=list(MODES))},nullable=True)
     if role=='H':
@@ -293,9 +465,14 @@ def _apply_science(root,job,payload,state,diagnostics):
                     diagnostics.append(dict(code='screen_source_ambiguous' if screens else 'screen_source_unavailable',subject=ref));continue
             mechanisms[ref]['status']=item['status']
             mechanisms[ref]['disposition']=dict(reason=item['reason'],source_a=job['step'])
+            if item['status']=='pending' and not any(row['mechanism_ref']==ref for row in state['order']['remaining']):
+                state['order']['remaining'].append(dict(mechanism_ref=ref,planned_step=job['step']))
     from .scientific_intent import resolve_intent
     intent=dict(payload)
     for field in ('search_plan','search_review'):intent[field]=c.scientific_field(job,payload,field)
+    intent['portfolio_review']=c.scientific_field(job,payload,'portfolio_review') if job['role']=='A' else None
+    if intent['portfolio_review'] is not None and not assessment_context(root,job,state=state)['applicable']:
+        intent['portfolio_review']=None
     interpretation=resolve_intent(state,job,intent,assessed=_assessed(root,job,state))
     diagnostics.extend(interpretation['diagnostics'])
     focus=interpretation['focus']
@@ -306,13 +483,20 @@ def _apply_science(root,job,payload,state,diagnostics):
     state['focus']=focus
     if job['role']=='A' and interpretation['focus'] and ((c.scientific_field(job,payload,'search_review') or {}).get('next_focus') or {}).get('mechanism_ref') is not None and not diagnostics:
         state['extra_grant']=dict(mechanism_ref=interpretation['focus']['mechanism_ref'],source_a=job['step'])
-    state['order'].update(remaining=interpretation['unfinished_plan'],seen_w=interpretation['seen_w'],allocation=interpretation['allocation'],diagnostics=diagnostics)
+    state['order'].update(remaining=interpretation['unfinished_plan'],seen_w=interpretation['seen_w'],allocation=interpretation['allocation'],diagnostics=diagnostics,
+        discriminating_work=interpretation['discriminating_work'])
 
 
 def interpret(root,job,payload,*,state=None):
     """One prospective interpretation; callers do not publish its mutations."""
     state=copy.deepcopy(project(root,job['step']) if state is None else state)
-    if job.get('purpose') in {'closeout','formal_review'} or job.get('engineering_repair'):
+    if job.get('purpose')=='formal_review' or job.get('formal_review') or job.get('engineering_repair'):
+        return dict(state=state,focus=None,allocation=None,diagnostics=[])
+    if job.get('purpose')=='closeout' or job.get('final_report'):
+        from .scientific_intent import resolve_discriminating_work
+        review=c.scientific_field(job,payload,'portfolio_review')
+        if review is not None and assessment_context(root,job,state=state)['applicable']:
+            state['order']['discriminating_work']=resolve_discriminating_work(state,job,dict(payload,portfolio_review=review))
         return dict(state=state,focus=None,allocation=None,diagnostics=[])
     diagnostics=[]
     field='search_plan' if job['role']=='H' else 'search_review' if job['role']=='A' else None
@@ -341,7 +525,7 @@ def apply_source(root,job,payload,seal,state):
             or len(reported)<len(diagnostics) and not receipt['omitted_count']
             or receipt['resolved_focus']!=result['focus'] or receipt['resolved_allocation']!=result['allocation']):
         raise ValueError('Scientific intent differs from its sealed interpretation')
-    if job.get('purpose') in {'closeout','formal_review'} or job.get('engineering_repair'):return
+    if job.get('purpose')=='formal_review' or job.get('formal_review') or job.get('engineering_repair'):return
     if all(receipt.get(key)!='unresolved' for key in ('search_status','selection_status','decision_status')):
         state.clear();state.update(result['state'])
     else:
@@ -367,13 +551,15 @@ def fold(root,sources,*,recovery_refs=()):
     checked=execution_recovery.validate(root,ordered)
     cache={ref_key(ref):value for ref,value in zip(ordered,checked)}
     state=dict(opportunity_counts={},opportunity_grants={},opportunity_unknown=False,extra_grant=None,mechanisms={},current_h=None,scope=None,plan=None,authorized=set(),focus=None,accepted_slices=[],repairs={},
-        order=dict(remaining=[],seen_w=set(),allocation=None,diagnostics=[]))
-    state['portfolio']=dict(invested={},deferred={},seen_w=set(),pending_w=None,last_branch=None,last_decision_step=None)
+        order=dict(remaining=[],seen_w=set(),allocation=None,diagnostics=[],discriminating_work=[]))
+    state['portfolio']=dict(invested={},deferred={},seen_w=set(),pending_w=None,last_branch=None,last_decision_step=None,cycles=[],mainline_reviews=[])
     original_rows={}
+    scientific_sources={job['step']:(job,payload,seal,sha) for job,payload,seal,sha in sources}
     for job,payload,seal,seal_sha in sources:
         # Scientific claims see exactly their own frozen mechanical input prefix.
         _execution_opportunities(root,state,original_rows,source_refs[job['step']],cache)
         if originals.source_settings(originals.node(root,job['step'])).get('search_policy') is not None:apply_source(root,job,payload,seal,state)
+        _link_discriminating_responses(job,scientific_sources,state)
         if 'portfolio' in state:_portfolio_update(root,job,payload,seal,state,seal_sha)
         step=job['step'];source=originals.node(root,step)
         intent=originals.source_record(source,'native-intent.json')
@@ -394,6 +580,16 @@ def fold(root,sources,*,recovery_refs=()):
             original_rows[(job['step'],row['call_id'])]=dict(row=row,phase='original',native_state=None)
     _execution_opportunities(root,state,original_rows,list(recovery_refs),cache)
     return state
+
+
+def _link_discriminating_responses(job,sources,state):
+    """An observed response is traceable execution, never scientific resolution."""
+    from . import decision
+    for work in state['order'].get('discriminating_work',[]):
+        for request in work['executions']:
+            step=request['source_a'];row=sources.get(step)
+            if row is not None and job['step']==step+1 and decision._completed(row[0],row[1],sources):
+                request['response']=dict(source_step=job['step'],role=job['role'],pointer='/scientific_result')
 
 
 def _execution_opportunities(root,state,original_rows,refs,cache):
@@ -561,17 +757,28 @@ def _portfolio_update(root, job, payload, seal, state, seal_sha=None):
             identity=(job['step'],seal_sha['path'])
             if focus['action']=='repair':
                 original=job['search']['repair_root']
-                identity=(original,c.record_path(originals.source_record(originals.node(root,original),'result-identity.json')))
+                identity=(original,history.source_seal_ref(originals.node(root,original))['path'])
             branches=[focus['mechanism_ref']]
             if (job.get('search') or {}).get('breadth'):
                 observation=history.read_observation(root,job,seal) if seal.get('observations') else {}
                 branches=list(dict.fromkeys(row['mechanism_binding']['mechanism_ref'] for row in observation.get('managed_calls',[]) if row.get('mechanism_binding') is not None))
-            portfolio['pending_w']=dict(step=job['step'],identity=identity,branch=focus['mechanism_ref'],branches=branches)
+            if focus['action']=='repair':
+                for cycle in portfolio.setdefault('cycles',[]):
+                    if cycle['w_identity']==identity:cycle['sample_exclusion']='repair_cycle_consumption_incomplete'
+            portfolio['pending_w']=dict(step=job['step'],identity=identity,branch=focus['mechanism_ref'],branches=branches,completed=payload.get('stage_intent')=='review',repair=focus['action']=='repair')
         return
-    if job['role'] != 'A' or job.get('purpose') in {'closeout','formal_review'}:
+    if job['role'] != 'A' or job.get('purpose')=='formal_review' or job.get('formal_review'):
         return
     control = seal.get('control_outcome', {})
     valid = all(control.get(key) != 'unresolved' for key in ('search_status', 'selection_status', 'decision_status'))
+    review=c.scientific_field(job,payload,'portfolio_review')
+    if valid and review is not None and payload.get('next_action')!='wait' and (job.get('portfolio_context') or {}).get('required_for_completed_w',True):
+        root_step=(job.get('author_correction') or {}).get('root',{}).get('step',job['step'])
+        judgments=portfolio.setdefault('mainline_reviews',[])
+        row=dict(root_step=root_step,source_step=job['step'],main_line=review['main_line'])
+        prior=next((index for index,item in enumerate(judgments) if item['root_step']==root_step),None)
+        if prior is None:judgments.append(row)
+        else:judgments[prior]=row
     ordinary = not job.get('author_correction') and payload.get('next_action') not in {'audit', 'formal_review', 'extract', 'wait'}
     pending = portfolio['pending_w']
     original_cycle = ordinary
@@ -580,11 +787,21 @@ def _portfolio_update(root, job, payload, seal, state, seal_sha=None):
         original_cycle = (original['role'] == 'A' and any(ref['path'] == f'inputs/parents/{pending["step"]:03d}/conclusion.json' for ref in original['direct_refs']))
     focus=state['focus']
     repairing=focus and focus['action']=='repair' and pending and focus['mechanism_ref'] in (pending.get('branches',[pending['branch']]))
-    if valid and original_cycle and not repairing and payload.get('next_action') not in {'audit', 'formal_review', 'extract', 'wait'} and pending and any(ref['path'] == f'inputs/parents/{pending["step"]:03d}/conclusion.json' for ref in job['direct_refs']):
+    final=bool(job.get('final_report') or job.get('purpose')=='closeout' or job.get('final_only'))
+    direct=bool(pending and any(ref['path'] == f'inputs/parents/{pending["step"]:03d}/conclusion.json' for ref in job['direct_refs']))
+    if valid and original_cycle and not repairing and payload.get('next_action') not in {'audit', 'formal_review', 'extract', 'wait'} and pending and pending.get('completed',True) and (direct or final):
         if pending['identity'] not in portfolio['seen_w']:
             _portfolio_cycle(portfolio, mechanisms, pending['branch'],pending.get('branches'))
             portfolio['seen_w'].add(pending['identity'])
+            portfolio.setdefault('cycles',[]).append(dict(w_identity=pending['identity'],w_step=pending['step'],a_steps=[job['step']],mechanism_refs=list(pending.get('branches',[pending['branch']])),
+                sample_exclusion='repair_cycle_consumption_incomplete' if pending.get('repair') else 'author_correction_cycle_consumption_incomplete' if job.get('author_correction') else None))
         portfolio['pending_w'] = None
+    if valid and job.get('author_correction'):
+        root_step=job['author_correction']['root']['step']
+        for cycle in portfolio.setdefault('cycles',[]):
+            if root_step in cycle['a_steps'] and job['step'] not in cycle['a_steps']:
+                cycle['a_steps'].append(job['step'])
+                cycle['sample_exclusion']='author_correction_cycle_consumption_incomplete'
     # Evidence requests do not manufacture another W+A cycle. The neutral
     # decision source records no claim that the portfolio was adequately reviewed.
     if valid and payload.get('next_action') in {'continue_w','revise_h','finish'} and (payload.get('scientific_result') or payload.get('route_reason')):
@@ -594,14 +811,34 @@ def _portfolio_update(root, job, payload, seal, state, seal_sha=None):
 
 
 def portfolio_view(state,threshold,*,prospective=False,version=2):
-    portfolio=copy.deepcopy(state['portfolio'])
-    if prospective and portfolio['pending_w']:_portfolio_cycle(portfolio,state['mechanisms'],portfolio['pending_w']['branch'],portfolio['pending_w'].get('branches'))
-    branch=portfolio['last_branch']
+    actual=state['portfolio'];portfolio=copy.deepcopy(actual)
+    pending=actual['pending_w'];count=len(actual['seen_w'])
+    hypothetical=bool(prospective and pending and pending.get('completed',True) and pending['identity'] not in actual['seen_w'])
+    if hypothetical:_portfolio_cycle(portfolio,state['mechanisms'],pending['branch'],pending.get('branches'))
     overdue=[ref for ref,item in state['mechanisms'].items() if threshold is not None and item['status']!='waived' and portfolio['deferred'].get(ref,0)>=threshold]
-    actual=portfolio.get('last_branches',[])
-    return dict(version=2,review_after_cycles=threshold,last_assessed_branch=branch,
-        last_assessed_branches=actual[:4],last_assessed_branch_count=len(actual),last_assessed_branches_omitted_count=max(0,len(actual)-4),
-        completed_cycles=state['portfolio']['invested'].get(branch,0),cycles_if_assessed=portfolio['invested'].get(branch,0),
-        pending_assessment=bool(prospective and portfolio['pending_w']),overdue_count_if_assessed=len(overdue),
-        review_reminder=bool(overdue),unexcluded_count=sum(item['status']!='waived' for item in state['mechanisms'].values()),last_decision_step=portfolio['last_decision_step'],
-        scope='Compare all relevant unexcluded mechanisms, including screened. Counts retain observed investment, not scientific merit or resource cost. Explain concentration, postponement or exclusion in existing scientific judgment; no report gate or forced switch. Pending W assessment is not a completed cycle.')
+    branches=actual.get('last_branches',[])
+    reviews=actual.get('mainline_reviews',[]);main=reviews[-1]['main_line'] if reviews else None
+    streak=0
+    if main is not None:
+        for row in reversed(reviews):
+            if row['main_line']!=main:break
+            streak+=1
+    return dict(version=2,review_after_cycles=threshold,last_assessed_branch=actual['last_branch'],
+        last_assessed_branches=branches[:4],last_assessed_branch_count=len(branches),last_assessed_branches_omitted_count=max(0,len(branches)-4),
+        completed_cycles=count,completed_cycle_count=count,cycles_if_assessed=count+int(hypothetical),
+        participation=[dict(mechanism_ref=ref,participated_cycles=actual['invested'].get(ref,0),
+            participation_fraction=actual['invested'].get(ref,0)/count if count else None) for ref in state['mechanisms']],
+        pending_assessment=bool(pending),pending_w=(dict(source_step=pending['step'],mechanism_refs=list(pending.get('branches',[pending['branch']])),completed=pending.get('completed',True)) if pending else None),
+        main_line=main,mainline_streak=streak,mainline_source=(dict(source_step=reviews[-1]['source_step'],pointer='/portfolio_review/main_line') if reviews else None),
+        overdue_count_if_assessed=len(overdue),review_reminder=bool(overdue),
+        unexcluded_count=sum(item['status']!='waived' for item in state['mechanisms'].values()),last_decision_step=actual['last_decision_step'],
+        scope='Unique independently assessed W cycles; mechanism participation overlaps and may sum above 100%. Pending W and prospective advice are separate. Main-line streak uses authored A judgments, never calls. Counts are not scientific merit, resource costs or execution permission.')
+
+
+def metrics_view(state,threshold,*,source_step,token_advice=None):
+    return dict(portfolio=portfolio_view(state,threshold),
+        mechanisms=[dict(mechanism_ref=ref,label=item['label']) for ref,item in state['mechanisms'].items()],
+        discriminating_work=copy.deepcopy([row for row in state['order'].get('discriminating_work',[]) if row['status']!='withdrawn']),
+        source_step=source_step,partial=False,
+        token_advice=token_advice or dict(status='unavailable',reference_cycles=None,minimum_samples=2,
+            complete_sample_count=0,excluded_sample_count=0,reasons=['no_current_usage_snapshot'],samples=[],scope='Reported token reference only; no time or admission guarantee.'))

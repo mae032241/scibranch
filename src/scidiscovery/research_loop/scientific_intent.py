@@ -10,6 +10,31 @@ from __future__ import annotations
 import copy
 
 
+def resolve_discriminating_work(state,job,payload):
+    """Rebuild work from authored A declarations, separate from call allocation."""
+    rows=copy.deepcopy(state['order'].get('discriminating_work',[]))
+    review=payload.get('portfolio_review')
+    if job['role']!='A' or payload.get('next_action')=='wait' or not isinstance(review,dict):return rows
+    by_ref={row['work_ref']:row for row in rows}
+    for update in review['work_updates']:
+        row=by_ref.get(update['work_ref'])
+        if row is None or row['status']=='withdrawn':continue  # Raw contract gate rejects this output.
+        row['status']={'execute':'executed','defer':'deferred','withdraw':'withdrawn'}[update['action']]
+        row['updates'].append(dict(source_a=job['step'],**copy.deepcopy(update)))
+        if update['action']=='execute':row['executions'].append(dict(source_a=job['step'],response=None))
+    work=review['discriminating_work']
+    if work is not None and work['existing_ref'] is None:
+        executed=work['next_action']==payload.get('next_action')
+        rows.append(dict(work_ref=f'A{job["step"]:03d}-D001',source_a=job['step'],
+            declaration_pointer='/portfolio_review/discriminating_work',
+            **{key:copy.deepcopy(work[key]) for key in ('mechanism_refs','question','change_criterion','next_action')},
+            status='executed' if executed else 'deferred',
+            updates=[dict(source_a=job['step'],action='execute' if executed else 'defer',reason=review['reason'],
+                deferral=copy.deepcopy(review['deferral']))],
+            executions=[dict(source_a=job['step'],response=None)] if executed else []))
+    return rows
+
+
 def resolve_intent(state, job, payload, *, assessed=None):
     mechanisms=state['mechanisms'];authorized=state['authorized']
     remaining=copy.deepcopy(state['order']['remaining'])
@@ -62,4 +87,5 @@ def resolve_intent(state, job, payload, *, assessed=None):
     elif role not in {'H','A'} or action in {'audit','formal_review','extract','wait'}:
         focus=copy.deepcopy(state.get('focus'))
         allocation=copy.deepcopy(state['order'].get('allocation'))
-    return dict(focus=focus,allocation=allocation,unfinished_plan=remaining,seen_w=seen,diagnostics=diagnostics)
+    return dict(focus=focus,allocation=allocation,unfinished_plan=remaining,seen_w=seen,diagnostics=diagnostics,
+        discriminating_work=resolve_discriminating_work(state,job,payload))

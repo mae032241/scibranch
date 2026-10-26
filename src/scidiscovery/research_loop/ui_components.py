@@ -97,6 +97,82 @@ def stats(usage):
     return Safe('<div class="stats">' + ''.join(stat(usage[key]) for key in ('tokens', 'time', 'steps', 'candidates')) + '</div>')
 
 
+def breadth_metrics(value):
+    """Compact advice from the saved global projection, never the trail window."""
+    key = 'breadth-metrics'
+    summary = '探索投入提示'
+    if value.get('available') and value.get('completed_cycle_count') is not None:
+        summary += ' · 已评估 ' + str(value['completed_cycle_count']) + ' 周期'
+        if value.get('pending_assessment'):
+            summary += ' · 待 A 评估 1 项'
+        if value.get('partial'):
+            summary += '（保存范围）'
+    body = ('<details class="breadth-metrics" data-details-key="' + key + '"><summary data-live-focus="' + key
+            + '">' + esc(summary) + '</summary>')
+    if 'error' in value:
+        return Safe(body + error_inline(value, what='探索投入提示') + '</details>')
+    if not value.get('available'):
+        return Safe(body + empty('完整统计快照暂不可用；已完成独立 W→A 周期、参与比例及参考轮数不可估。') + '</details>')
+    asof = value.get('source_step')
+    body += '<p class="note">保存的科学历史统计' + ('截至第 ' + esc(asof) + ' 阶段' if asof else '，来源阶段未记录') + '；不以当前轨迹窗口计数。</p>'
+    if value.get('partial'):
+        body += '<p class="note">快照缺失或滞后，以下仅为已保存范围，不能代表当前全局统计；参考轮数不可估。</p>'
+    if value.get('inherited'):
+        body += '<p class="note">科学历史含准确 cut 内的继承记录；当前余额与消费仅计本分支。</p>'
+    count = value.get('completed_cycle_count')
+    body += '<p>已完成独立 W→A 评估周期：<strong>' + esc(count if count is not None else '不可核实') + '</strong>。</p>'
+    if value.get('pending_assessment'):
+        step = value.get('pending_step')
+        body += '<p>待 A 评估的 W：' + (link('第 ' + str(step) + ' 阶段', '/nodes/' + str(step) + '/science') if step else '来源未记录')
+        if value.get('pending_labels'):
+            body += ' · ' + '、'.join(translatable(item) for item in value['pending_labels'])
+        body += '；未计入已完成周期。</p>'
+    else:
+        body += '<p class="note">保存范围内没有待 A 评估的 W。</p>'
+    if value.get('participation'):
+        body += '<div class="table-scroll"><table class="compact"><thead><tr><th>机制</th><th>参与周期</th><th>参与比例</th></tr></thead><tbody>'
+        for row in value['participation']:
+            body += '<tr><td>' + translatable(row['label']) + '</td><td>' + esc(row['participated_cycles'] if row['participated_cycles'] is not None else '未知') + '</td><td>' + esc(row['fraction_text']) + '</td></tr>'
+        body += '</tbody></table></div>'
+    body += '<p class="note">每机制参与次数除以同一独立周期分母；同周期可涉及多个机制，比例重叠、合计可超过 100%。这不是资源份额或科学深度。</p>'
+    if value.get('main_line') is None:
+        body += '<p class="note">A 当前主线未声明。</p>'
+    else:
+        body += '<p>A 连续选择主线：' + translatable(value['main_line']) + ' · ' + esc(value.get('mainline_streak') if value.get('mainline_streak') is not None else '未知') + ' 次独立组合判断'
+        if value.get('mainline_step'):
+            body += '（' + link('A 原文', '/nodes/' + str(value['mainline_step']) + '/science') + '）'
+        body += '；与 W→A 周期分别计数。</p>'
+    body += '<h3>仍有效的判别工作（' + esc(value.get('active_work_count', 0)) + '）</h3>'
+    for row in value.get('work') or []:
+        body += '<article><p><strong>' + translatable(row['question']) + '</strong></p><p>改变判断的条件：' + translatable(row['change_criterion']) + '</p>'
+        action = row.get('action')
+        if action:
+            body += '<p class="note">最新 A 处置：' + esc({'execute': '选择执行', 'defer': '继续暂缓', 'withdraw': '撤回'}.get(action, action)) + '。执行响应本身不表示科学问题已解决。</p>'
+        for name, title in (('reason', '当前处置理由'), ('trigger', '触发条件'), ('revisit', '再议时点')):
+            if row.get(name):
+                body += '<p>' + title + '：' + translatable(row[name]) + '</p>'
+        sources = sorted({step for step in (row.get('source_step'), row.get('update_step')) if step})
+        body += links([dict(label='第 ' + str(step) + ' 阶段原文', href='/nodes/' + str(step) + '/science') for step in sources]) + '</article>'
+    if not value.get('active_work_count'):
+        body += empty('保存范围内没有仍有效的已声明判别工作。')
+    if value.get('work_omitted'):
+        body += '<p class="note">另有 ' + esc(value['work_omitted']) + ' 项未展开；' + link('按阶段查看完整原文', '/results?after=0') + '。</p>'
+    advice = value.get('token_advice') or {}
+    body += '<h3>按已报告 token 的参考轮数：' + (esc(advice['reference_cycles']) if advice.get('available') else '不可估') + '</h3>'
+    body += '<p class="note">仅供 token 口径参考，不表示全部预算还能运行相应轮数；时间、控制动作、FINAL 和执行权限仍分别约束。</p>'
+    body += '<p class="note">完整本分支周期样本：' + esc(advice.get('complete_sample_count') if advice.get('complete_sample_count') is not None else '未知')
+    body += '；最低样本数：' + esc(advice.get('minimum_samples') if advice.get('minimum_samples') is not None else '未记录')
+    body += '；排除样本：' + esc(advice.get('excluded_sample_count') if advice.get('excluded_sample_count') is not None else '未知') + '。</p>'
+    if advice.get('scope'):
+        body += '<p class="note">' + translatable(advice['scope']) + '</p>'
+    if advice.get('reasons'):
+        body += '<p class="note">不可估原因：' + '；'.join(translatable(item) for item in advice['reasons']) + '</p>'
+    for row in advice.get('samples') or []:
+        sources = ([row['w_step']] if row.get('w_step') else []) + row.get('a_steps', [])
+        body += links([dict(label='样本第 ' + str(step) + ' 阶段', href='/nodes/' + str(step) + '/science') for step in sources])
+    return Safe(body + '</details>')
+
+
 def token_monitor(rows=None, *, scope='当前阶段 · 本次助手用量', live=False):
     """A separate monitoring card; the live client preserves the same dt/dd pairs."""
     body = '<section class="token-monitor"' + (' data-token-monitor' if live else '') + '><header><h2>Token 监控</h2><p class="token-scope" data-token-scope>' + esc(scope) + '</p></header>'
@@ -358,6 +434,32 @@ def result_card(card, *, files=None, full_href=None):
             body += '<p class="note">另有 ' + esc(card['unmet_omitted']) + ' 条局限，见完整原文。</p>'
     else:
         body += empty('原文未单列局限。')
+    coverage = card.get('final_coverage')
+    if coverage is not None:
+        key = 'final-coverage:' + str(card['step'])
+        body += ('<details class="final-coverage" data-details-key="' + esc(key) + '"><summary data-live-focus="' + esc(key)
+                 + '">逐机制覆盖（A 作者声明，' + esc(len(coverage)) + ' 项）</summary>'
+                 '<p class="note">覆盖状态由最终 A 根据原件声明；候选、调用数量与成功状态不代表科学深度。资源与输入限制见本卡局限及完整原文。</p>')
+        statuses = {'deep': '已深入', 'screened_pending': '已筛查待再议', 'ruled_out': '已排除', 'unexplored': '从未探索'}
+        for row in coverage:
+            body += '<article><h4>' + (translatable(row['label']) if row.get('authored_label') else esc(row['label'])) + '</h4>'
+            body += '<p>' + badge(statuses.get(row['status'], row['status'])) + '</p><p>' + translatable(row['reason']) + '</p>'
+            refs = row.get('science_refs') or []
+            if refs:
+                body += '<p class="note">依据：' + '、'.join(link('第 ' + str(ref['source_step']) + ' 阶段',
+                    '/nodes/' + str(ref['source_step']) + '/science') + ' <code>' + esc(ref['pointer']) + '</code>' for ref in refs) + '</p>'
+            else:
+                body += empty('未记录准确证据引用；请核对完整原文。')
+            questions = row.get('unanswered_questions')
+            body += '<h5>仍未回答的问题</h5>'
+            if questions is None:
+                body += empty('原文未明确声明；请核对完整原文。')
+            elif questions:
+                body += '<ul>' + ''.join('<li>' + translatable(item) + '</li>' for item in questions) + '</ul>'
+            else:
+                body += '<p class="note">A 声明无未回答问题。</p>'
+            body += '</article>'
+        body += '</details>'
     if files:
         body += '<div class="result-actions">' + esc(files) + '</div>'
     return Safe(body + '</section>')
