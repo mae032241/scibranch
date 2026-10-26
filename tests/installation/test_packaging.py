@@ -95,11 +95,13 @@ if cohort == "core":
             raise AssertionError(f"core unexpectedly exposed {module}")
 elif cohort == "cov":
     distribution("scidiscovery-cov-execution")
-    from cov_execution import experiments as cov, lineage, delivery, receipt, observer, launcher
-    assert callable(launcher.main)
+    from cov_execution import experiments as cov, lineage, delivery, receipt, observer
+    from importlib.util import find_spec
+    assert find_spec("cov_execution.launcher") is None
     from scidiscovery.research_loop import experiments
     declared, binding = experiments.registration("cov_execution:experiment")
     assert declared is cov.REGISTRATION and binding == "experiment"
+    assert declared.native_launcher_module is None
     assert all(Path(module.__file__).resolve().is_relative_to(prefix)
                for module in (cov, lineage, delivery, receipt, observer))
     assert callable(observer.observe) and callable(delivery.leaf)

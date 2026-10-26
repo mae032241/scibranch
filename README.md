@@ -53,14 +53,21 @@ The [execution adapter API](docs/PLUGIN_RUNTIME_API.md) owns the installed adapt
 
 ## Install and start
 
-Provide Python 3.10+ and the runtime/build dependencies declared in
-[pyproject.toml](pyproject.toml), then install the application offline:
+Python 3.12 is recommended (the package supports 3.10+). Prepare Python and the
+runtime/build dependencies as described in the [installation guide](docs/INSTALL.md),
+then install offline as the current user, without sudo:
 
 ```sh
-SCID_PYTHON=/absolute/python deploy/install.sh --dry-run
-sudo SCID_PYTHON=/absolute/python deploy/install.sh install
+SCID_PYTHON=/absolute/python bash deploy/install.sh --dry-run
+SCID_PYTHON=/absolute/python bash deploy/install.sh install
+export PATH="$HOME/.local/bin:$PATH"
 scid-research --help
 ```
+
+The defaults are `$HOME/.local/share/scidiscovery` for code and Skills,
+`$HOME/.local/bin` for commands, and `$HOME/.local/state/scidiscovery/install`
+for installation transactions. Installation creates the command directory if needed;
+`--dry-run` writes nothing.
 
 Installation publishes `scid-research` and `scid-experiment` and requires a fresh
 installation prefix. Choose optional plugins explicitly with `SCID_PLUGINS`;

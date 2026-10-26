@@ -38,13 +38,18 @@ SciDiscovery 是以 CLI 为核心、提供 Codex 与显式 Agent 协议后端的
 
 ## 安装与开始使用
 
-提供 Python 3.10+ 和 [pyproject.toml](pyproject.toml) 声明的运行、构建依赖，离线安装应用：
+推荐 Python 3.12（包支持 3.10+）。按[安装指南](docs/INSTALL.zh-CN.md)准备 Python 和运行、构建依赖，
+再以当前用户离线安装，无需 sudo：
 
 ```sh
-SCID_PYTHON=/absolute/python deploy/install.sh --dry-run
-sudo SCID_PYTHON=/absolute/python deploy/install.sh install
+SCID_PYTHON=/absolute/python bash deploy/install.sh --dry-run
+SCID_PYTHON=/absolute/python bash deploy/install.sh install
+export PATH="$HOME/.local/bin:$PATH"
 scid-research --help
 ```
+
+默认代码与 Skill 前缀为 `$HOME/.local/share/scidiscovery`，命令目录为 `$HOME/.local/bin`，
+安装事务目录为 `$HOME/.local/state/scidiscovery/install`。安装按需创建命令目录；`--dry-run` 不写文件。
 
 安装发布 `scid-research`、`scid-experiment`，要求使用新安装前缀。通过 `SCID_PLUGINS`
 明确选择可选插件；依赖、路径设置与卸载见[安装指南](docs/INSTALL.zh-CN.md)。

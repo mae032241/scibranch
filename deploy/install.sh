@@ -7,13 +7,13 @@ if [[ "${SCID_DEPLOY_MODE:-thin}" != thin ]]; then
     exit 2
 fi
 readonly SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly CLI_ROOT="${SCID_BIN_ROOT:-/usr/local/bin}"
+readonly CLI_ROOT="${SCID_BIN_ROOT:-${HOME}/.local/bin}"
 readonly PYTHON="${SCID_PYTHON:-$(command -v python3 || true)}"
 readonly PLUGIN_SPECIFICATION="${SCID_PLUGINS:-}"
-readonly INSTALL_ROOT="${SCID_INSTALL_ROOT:-/opt/scidiscovery-thin}"
+readonly INSTALL_ROOT="${SCID_INSTALL_ROOT:-${HOME}/.local/share/scidiscovery}"
 readonly SITE_ROOT="${INSTALL_ROOT}/site"
 readonly SKILL_ROOT="${INSTALL_ROOT}/skills"
-readonly BACKUP_ROOT="${SCID_BACKUP_ROOT:-/var/backups/scidiscovery-thin}"
+readonly BACKUP_ROOT="${SCID_BACKUP_ROOT:-${HOME}/.local/state/scidiscovery/install}"
 PACKAGE_STAGE=""
 SKILL_STAGE=""
 TRANSACTION_ROOT=""
@@ -33,8 +33,8 @@ validate_thin_paths() {
     local path
     for path in "$INSTALL_ROOT" "$CLI_ROOT" "$BACKUP_ROOT"; do
         [[ "$path" = /* && "$(realpath -m -- "$path")" == "$path" ]] || die "thin deployment paths must be absolute and canonical"
+        [[ ! -L "$path" && ( ! -e "$path" || -d "$path" ) ]] || die "thin deployment paths must be directories, not symlinks or other file types: ${path}"
     done
-    [[ -d "$CLI_ROOT" && ! -L "$CLI_ROOT" ]] || die "SCID_BIN_ROOT must be an existing directory"
     [[ -n "$PYTHON" && "$PYTHON" = /* && -x "$PYTHON" ]] || die "base Python is unavailable: ${PYTHON}"
 }
 
@@ -111,14 +111,9 @@ print('base Python dependency check: pass')
 PY
 }
 
-require_root() {
-    [[ "$(id -u)" -eq 0 ]] || die "install and uninstall require sudo"
-}
-
-
 preview() {
     printf 'Thin deployment: stage packages at %s; publish scid-research/scid-experiment at %s.\n' "$SITE_ROOT" "$CLI_ROOT"
-    printf 'Source: %s\nPython: %s\nExecution adapters: %s\nSkill source: %s\n' "$SOURCE_ROOT" "$PYTHON" "${PLUGIN_SPECIFICATION:-none}" "$SKILL_ROOT"
+    printf 'Source: %s\nPython: %s\nExecution adapters: %s\nSkill source: %s\nInstall evidence: %s\n' "$SOURCE_ROOT" "$PYTHON" "${PLUGIN_SPECIFICATION:-none}" "$SKILL_ROOT" "$BACKUP_ROOT"
     printf 'No instance, budget, database, platform profile or service is created.\n'
 }
 
@@ -176,7 +171,7 @@ install_packages() {
     source_stage="$(mktemp -d)"
     source_root="${source_stage}/scidiscovery"
     if [[ ! -d "$INSTALL_ROOT" ]]; then
-        install -d -o root -g root -m 0755 "$INSTALL_ROOT"
+        install -d -m 0755 "$INSTALL_ROOT"
     fi
     rm -rf "$stage"
     install -d "$source_root/src"
@@ -327,7 +322,7 @@ complete_install_transaction() {
 }
 
 install_all() {
-    require_root
+    [[ -d "$CLI_ROOT" ]] || install -d -m 0755 "$CLI_ROOT"
     thin_deployment_lock
     validate_thin_targets
     validate_base_python
@@ -355,8 +350,11 @@ status() {
 }
 
 uninstall_services() {
-    require_root
     validate_thin_paths
+    if [[ ! -d "$CLI_ROOT" ]]; then
+        printf 'Thin command wrappers are absent. Package prefix retained; instance data was untouched.\n'
+        return
+    fi
     thin_deployment_lock
     local name module
     for name in scid-research scid-experiment; do

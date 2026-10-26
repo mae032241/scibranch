@@ -5,17 +5,29 @@
 
 ## 安装入口
 
-新部署默认 `SCID_DEPLOY_MODE=thin`：`deploy/install.sh --dry-run` 只预检，
-`sudo SCID_PYTHON=/absolute/python deploy/install.sh install` 离线安装应用，
-发布 `scid-research` / `scid-experiment`。默认 prefix 为 `/opt/scidiscovery-thin`，
-`SCID_BIN_ROOT` 为已存在的 `/usr/local/bin`；可显式换成其它绝对 canonical 目录。
-基础 Python 及应用第三方依赖由操作者预装；不创建 venv、不解析联网依赖。
+新部署默认 `SCID_DEPLOY_MODE=thin`，以当前用户安装，无需 sudo 或 root。
+推荐 Python 3.12（包支持 3.10+）；基础 Python、pip、应用与安装工具依赖须预装，
+一次性用户 venv 准备示例见[安装指南](INSTALL.zh-CN.md)。从源码 checkout 执行：
+
+```sh
+SCID_PYTHON=/absolute/python SCID_PLUGINS=cov_execution bash deploy/install.sh --dry-run
+SCID_PYTHON=/absolute/python SCID_PLUGINS=cov_execution bash deploy/install.sh install
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+`--dry-run` 只预检，不写文件。安装离线使用 `--no-deps` 发布 `scid-research` /
+`scid-experiment`，本身不创建 venv、不解析联网依赖；仅需核心时省略 `SCID_PLUGINS`。
+默认 `SCID_INSTALL_ROOT=$HOME/.local/share/scidiscovery`（含 `site/` 和 `skills/`），
+`SCID_BIN_ROOT=$HOME/.local/bin`，`SCID_BACKUP_ROOT=$HOME/.local/state/scidiscovery/install`。
+安装按需创建命令目录；三个路径均可显式换成当前用户可写的绝对 canonical 目录。
+模型/bootstrap 访问、Cov 训练数据与科学执行环境须另行准备。
 
 薄安装不要求旧 `SCID_WORKSPACE`/`SCID_CODEX_LAUNCH_ROOT`，不初始化旧 SQL、密钥、
 MCP/Root 角色、systemd 服务或默认实例。已有 site 或任一薄 wrapper 会拒绝覆盖，
 不停止旧 live 服务，也不更新已冻结实例。`status` 只核本配置 wrapper 归属；
 `uninstall` 仅删除匹配本配置的两个 wrapper，保留代码 prefix、实例及旧状态，
-不能把卸载命令等同于所有 native/外部作业已停止。升级/旧代码回收须另行确认原写者。
+不能把卸载命令等同于所有 native/外部作业已停止。`reinstall.sh` 无 sudo 调用同一
+fresh install 入口，不提供原位升级。升级/旧代码回收须另行确认原写者。
 
 `SCID_DEPLOY_MODE=legacy` 已退役并在修改文件前拒绝。当前不提供旧 SQL reader 或协议迁移。安装不会自动运行以下命令或增加任何预算。
 

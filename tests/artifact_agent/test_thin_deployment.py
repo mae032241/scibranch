@@ -36,6 +36,104 @@ def assert_preserved(originals):
     assert all(path.read_bytes()==raw for path,raw in originals.items())
 
 
+def home_scene(tmp_path):
+    home = tmp_path / 'home'; home.mkdir()
+    guard = tmp_path / 'guard'; guard.mkdir()
+    for name in ('sudo', 'id'):
+        command = guard / name
+        command.write_text('#!/bin/sh\nprintf "unexpected privilege command\\n" >&2\nexit 95\n')
+        command.chmod(0o755)
+    environment = {**os.environ, 'HOME': str(home), 'SCID_PYTHON': sys.executable,
+                   'PATH': str(guard) + os.pathsep + os.environ['PATH']}
+    for name in ('SCID_BIN_ROOT', 'SCID_INSTALL_ROOT', 'SCID_BACKUP_ROOT',
+                 'SCID_DEPLOY_MODE', 'SCID_PLUGINS'):
+        environment.pop(name, None)
+    return environment, home
+
+
+@pytest.mark.process_e2e
+def test_default_home_dry_run_does_not_create_directories(tmp_path):
+    environment, home = home_scene(tmp_path)
+    result = shell(environment, '''validate_base_python() { :; }
+validate_source() { :; }
+main --dry-run
+''')
+    assert result.returncode == 0, result.stderr
+    for relative in ('.local/bin', '.local/share/scidiscovery/site',
+                     '.local/share/scidiscovery/skills', '.local/state/scidiscovery/install'):
+        assert str(home / relative) in result.stdout
+    assert not (home / '.local').exists()
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('mode', ['status', 'uninstall'])
+def test_default_home_status_and_uninstall_without_install_are_read_only(tmp_path, mode):
+    environment, home = home_scene(tmp_path)
+    result = shell(environment, 'main ' + mode)
+    assert result.returncode == 0, result.stderr
+    assert not (home / '.local').exists()
+
+
+@pytest.mark.process_e2e
+def test_default_home_install_creates_bin_and_uninstalls_without_sudo(tmp_path):
+    import json
+
+    environment, home = home_scene(tmp_path)
+    # Package construction is a fixture; path selection, lock, transaction,
+    # publication, and uninstall all use the installer functions.
+    result = shell(environment, '''validate_base_python() { :; }
+validate_source() { :; }
+install_packages() {
+    PACKAGE_STAGE="$INSTALL_ROOT/.site.new.fixture"
+    SKILL_STAGE="$INSTALL_ROOT/.skills.new.fixture"
+    mkdir -p "$PACKAGE_STAGE" "$SKILL_STAGE"
+    printf 'retained package\\n' > "$PACKAGE_STAGE/fixture"
+    printf 'retained skill\\n' > "$SKILL_STAGE/SKILL.md"
+}
+probe_thin_package() { :; }
+main install
+''')
+    assert result.returncode == 0, result.stderr
+    binary = home / '.local/bin'
+    prefix = home / '.local/share/scidiscovery'
+    for name in ('scid-research', 'scid-experiment'):
+        wrapper = (binary / name).read_text()
+        assert 'PYTHONPATH=' + str(prefix / 'site') in wrapper
+    transactions = home / '.local/state/scidiscovery/install/transactions'
+    manifest = next(transactions.glob('*/manifest.json'))
+    transaction = json.loads(manifest.read_text())
+    assert transaction['state'] == 'complete'
+    assert {entry['path'] for entry in transaction['entries']} == {
+        str(binary / 'scid-research'), str(binary / 'scid-experiment')}
+    result = shell(environment, 'main uninstall')
+    assert result.returncode == 0, result.stderr
+    assert not (binary / 'scid-research').exists()
+    assert not (binary / 'scid-experiment').exists()
+    assert (prefix / 'site/fixture').read_text() == 'retained package\n'
+    assert (prefix / 'skills/SKILL.md').read_text() == 'retained skill\n'
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('setting', ['SCID_BIN_ROOT', 'SCID_INSTALL_ROOT', 'SCID_BACKUP_ROOT'])
+@pytest.mark.parametrize('kind', ['file', 'symlink'])
+def test_thin_rejects_unsafe_root_before_mutation(tmp_path, setting, kind):
+    environment, home = home_scene(tmp_path)
+    target = tmp_path / 'unsafe'
+    if kind == 'file':
+        target.write_bytes(b'foreign file')
+    else:
+        target.symlink_to(home, target_is_directory=True)
+    environment[setting] = str(target)
+    result = shell(environment, 'require_sources')
+    assert result.returncode != 0
+    assert 'thin deployment paths' in result.stderr
+    assert not (home / '.local').exists()
+    if kind == 'symlink':
+        assert target.is_symlink()
+    else:
+        assert target.read_bytes() == b'foreign file'
+
+
 @pytest.mark.process_e2e
 def test_default_thin_preview_needs_no_legacy_workspace_or_service(tmp_path):
     environment, originals=scene(tmp_path)
@@ -77,10 +175,9 @@ def test_thin_publication_failure_rolls_back_only_new_wrappers(tmp_path):
     environment['PREPARED_SITE']=str(prepared)
     skill_stage=tmp_path/'prepared-skills';skill_stage.mkdir();(skill_stage/'SKILL.md').write_text('fixture')
     environment['PREPARED_SKILLS']=str(skill_stage)
-    # Only package supply/preflight and privilege checks are stand-ins. Actual
+    # Only package supply/preflight checks are stand-ins. Actual
     # activation, transaction manifest, wrapper creation and rollback run.
-    result=shell(environment,'''require_root() { :; }
-validate_source() { :; }
+    result=shell(environment,'''validate_source() { :; }
 validate_base_python() { :; }
 install_packages() { PACKAGE_STAGE="$PREPARED_SITE"; SKILL_STAGE="$PREPARED_SKILLS"; }
 probe_thin_package() { return 43; }
@@ -111,7 +208,6 @@ def test_thin_status_and_uninstall_preserve_foreign_commands_and_package(tmp_pat
     result=shell(environment,'''thin_cli_wrapper scidiscovery.research_loop.cli > "$CLI_ROOT/scid-research"
 thin_cli_wrapper scidiscovery.research_loop.experiments > "$CLI_ROOT/scid-experiment"
 printf 'foreign modification\n' >> "$CLI_ROOT/scid-experiment"
-require_root() { :; }
 systemctl() { exit 91; }
 status
 uninstall_services
@@ -120,7 +216,6 @@ uninstall_services
     assert 'owned by another configuration' in result.stdout
     assert (binary/'scid-research').exists() and (binary/'scid-experiment').exists()
     result=shell(environment,'''thin_cli_wrapper scidiscovery.research_loop.experiments > "$CLI_ROOT/scid-experiment"
-require_root() { :; }
 systemctl() { exit 91; }
 uninstall_services
 ''')
@@ -145,24 +240,29 @@ def test_retired_service_deployment_is_rejected_before_any_mutation(tmp_path, sc
 
 
 @pytest.mark.process_e2e
-def test_reinstaller_passes_operator_python_and_selected_plugins_as_data(tmp_path):
+@pytest.mark.parametrize('mode, forwarded', [('reinstall', 'install'), ('install', 'install'),
+                                            ('--dry-run', '--dry-run'), ('status', 'status')])
+def test_reinstaller_forwards_settings_and_mode_without_sudo(tmp_path, mode, forwarded):
     environment, originals = scene(tmp_path)
     binary = Path(environment['SCID_BIN_ROOT'])
-    for name, body in {'id': 'printf "1000\\n"', 'sudo': 'printf "%s\\n" "$@"'}.items():
+    for name in ('id', 'sudo'):
         command = binary / name
-        command.write_text('#!/bin/sh\n' + body + '\n')
+        command.write_text('#!/bin/sh\nprintf "unexpected privilege command\\n" >&2\nexit 95\n')
         command.chmod(0o755)
     environment['PATH'] = str(binary) + os.pathsep + environment['PATH']
     environment['SCID_PLUGINS'] = 'tcad_artifact'
-    result = subprocess.run(['bash', str(SCRIPT.with_name('reinstall.sh')), 'reinstall'],
+    deployment = tmp_path / 'copied-source/deploy'; deployment.mkdir(parents=True)
+    wrapper = deployment / 'reinstall.sh'
+    wrapper.write_bytes(SCRIPT.with_name('reinstall.sh').read_bytes())
+    installer = deployment / 'install.sh'
+    installer.write_text('#!/bin/sh\nprintf "%s\\n" "$@" "$SCID_PYTHON" '
+                         '"$SCID_PLUGINS" "$SCID_INSTALL_ROOT" "$SCID_BIN_ROOT" "$SCID_BACKUP_ROOT"\n')
+    installer.chmod(0o755)
+    result = subprocess.run(['bash', str(wrapper), mode],
         env=environment, capture_output=True, text=True, timeout=10, check=False)
     assert result.returncode == 0, result.stderr
-    arguments = result.stdout.splitlines()
-    assert arguments[0] == 'env'
-    assert 'SCID_PYTHON=' + sys.executable in arguments
-    assert 'SCID_PLUGINS=tcad_artifact' in arguments
-    assert not any(value.startswith(('SCID_WORKSPACE=', 'SCID_STATE_ROOT=')) for value in arguments)
-    assert arguments[-2:] == [str(SCRIPT), 'install']
+    assert result.stdout.splitlines() == [forwarded, sys.executable, 'tcad_artifact',
+        environment['SCID_INSTALL_ROOT'], environment['SCID_BIN_ROOT'], environment['SCID_BACKUP_ROOT']]
     assert_preserved(originals)
 
 
@@ -207,5 +307,5 @@ activate_packages
     shutil.rmtree(source)
     assert (prefix / 'skills/fixture/SKILL.md').read_text() == 'frozen fixture bytes'
     wrapper = (Path(environment['SCID_BIN_ROOT']) / 'scid-research').read_text()
-    assert 'SCID_SKILLS_ROOT=' + str(prefix / 'skills') in wrapper
+    assert 'PYTHONPATH=' + str(prefix / 'site') in wrapper
     assert_preserved(originals)
