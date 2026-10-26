@@ -94,10 +94,18 @@ def _screen_refs(root,source,seal,state):
     owner=originals.node(root,source['step'])
     if owner.inherited:
         fact_path=originals.source_record(owner,worker_delivery.FACT_NAME)
+        native_record=owner.native_record or f'native-evidence/{owner.step:03d}'
+        fact_relative=native_record+'/'+worker_delivery.FACT_NAME
         facts=c.read(fact_path)
         intent=c.read(originals.source_record(owner,'native-intent.json'))
-        if facts.get('version')!=1 or facts.get('binding')!=dict(job_ref=seal['job_ref'],
-                raw_ref=seal['raw_ref'],source_attempt=intent.get('attempt',0)):
+        # The seal retains the full original fingerprint; delivery facts bind
+        # the selected attempt's ordinary file locator, without that fingerprint.
+        raw=originals.resolve_ref(owner,seal['raw_ref'])
+        raw_ref=dict(path=str(Path(owner.original_root)/native_record/'science-output.json'),
+            size_bytes=raw.stat().st_size)
+        if (seal['raw_ref']['path']!=raw_ref['path'] or facts.get('version')!=1
+                or facts.get('binding')!=dict(job_ref=seal['job_ref'],
+                    raw_ref=raw_ref,source_attempt=intent.get('attempt',0))):
             raise history.ObserverIntegrityError('Inherited W evidence changed its exact attempt')
         from . import execution_recovery
         recovered=execution_recovery.resolved(root,originals.recovery_refs(owner,source))
@@ -124,8 +132,9 @@ def _screen_refs(root,source,seal,state):
         record=execution.record(root,source['step'])
         facts=worker_delivery.validate(root,source,record)
         fact_path=c.regular(record/worker_delivery.FACT_NAME)
+        fact_relative=fact_path.relative_to(owner.storage_root).as_posix()
     receipt=seal['control_outcome'].get('worker_delivery') or {}
-    if receipt.get('facts_ref')!=history.source_control_ref(owner,(owner.native_record or f'native-evidence/{owner.step:03d}')+'/'+worker_delivery.FACT_NAME):
+    if receipt.get('facts_ref')!=history.source_control_ref(owner,fact_relative):
         raise history.ObserverIntegrityError('Final W scientific evidence differs from its seal')
     science=c.science_payload(originals.source_raw(owner),'W',source['handoff_protocol'])
     declared={};mechanisms=source['search']['breadth']['mechanisms']

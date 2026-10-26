@@ -46,27 +46,36 @@ def applicable(job):
     return job['role']=='W' and bool(job.get('candidate_nomination_mechanisms'))
 
 
-def resolve(root, job, declaration):
+def resolve(root, job, declaration, *, source=None):
     """Resolve only the declared candidate slots, preserving unresolvable advice."""
     import jsonschema
     if not isinstance(declaration,dict) or not jsonschema.Draft202012Validator(schema()).is_valid(declaration):return declaration
-    from . import candidate_refs, generic_results, history
-    value=copy.deepcopy(declaration);current=None
+    from . import candidate_refs, generic_results, history, originals
+    value=copy.deepcopy(declaration);current=None;retained=None
     for row in [*value.get('representatives',[]),*value.get('extras',[])]:
         if not isinstance(row,dict):continue
         candidate=row.get('candidate')
         if isinstance(candidate,str):
-            try:row['candidate']=candidate_refs.resolve_reference(root,job,candidate)
+            try:row['candidate']=candidate_refs.resolve_reference(root,job,candidate,source=source)
             except ValueError:pass
-        elif isinstance(candidate,dict) and root is not None:
+        elif isinstance(candidate,dict) and (root is not None or source is not None and source.inherited):
             if current is None:
-                seal_path=c.host_record(c.workspace(root,job['step']))/'result-identity.json'
-                receipt=c.read(c.regular(seal_path)).get('observations') if seal_path.exists() else None
-                current=(c.read(c.regular(root/receipt['path']))['managed_calls'] if receipt else history.managed_calls(root,job))
+                if source is not None and source.inherited:
+                    if originals.source_job(source)!=job:
+                        raise ValueError('Candidate nominations differ from their exact source task')
+                    seal=c.read(originals.source_record(source,'result-identity.json'))
+                    observed=history.validate_observation_original(source,job,seal,controls_only=True)
+                    current=(observed or {}).get('managed_calls',[])
+                    retained=({row['id'] for row in (observed or {}).get('candidates',[])}
+                        & {row['id'] for row in generic_results.candidates(current)})
+                else:
+                    seal_path=c.host_record(c.workspace(root,job['step']))/'result-identity.json'
+                    receipt=c.read(c.regular(seal_path)).get('observations') if seal_path.exists() else None
+                    current=(c.read(c.regular(root/receipt['path']))['managed_calls'] if receipt else history.managed_calls(root,job))
             matches=[generic_results.identity(call,item) for call in current
                 if call['call_id']==candidate.get('call_id') for item in generic_results.declarations(call)
                 if isinstance(item,dict) and item.get('artifact')==candidate.get('artifact')]
-            if len(matches)==1:row['candidate']=matches[0]
+            if len(matches)==1 and (retained is None or matches[0] in retained):row['candidate']=matches[0]
     return value
 
 

@@ -119,11 +119,23 @@ def record_effect(function):
 
 
 def _require_new_execution(config):
-    """A narrow terminal wake cannot borrow an old client to start fresh work."""
+    """Narrow result repair cannot grant new scientific work through a client."""
     from . import contracts as c, execution, experiment_client
     root=experiment_client.root_for_configuration(config,allow_standalone=True)
     if root is None:return
     step=config['scope']['step']
+    intents=list(execution.accepted_intents(root,step))
+    attempt=config.get('native_attempt')
+    if (not isinstance(attempt,dict) or set(attempt)!={'number','execution_key'}
+            or type(attempt.get('number')) is not int or not 0<=attempt['number']<len(intents)):
+        raise IntegrityError('New scientific work requires its exact accepted native attempt')
+    number=attempt['number'];record,intent=intents[number]
+    if attempt['execution_key']!=c.record_ref(root/'jobs'/f'{step:03d}.json' if number==0 else record/'native-intent.json'):
+        raise IntegrityError('New scientific work differs from its exact accepted native intent')
+    # The current bridge is bound to its own attempt. An old retained client
+    # cannot lend its earlier full-task grant to the latest narrow repair.
+    if intent.get('output_repair') is not None or intents[-1][1].get('output_repair') is not None:
+        raise UnsupportedExecution('Output repair permits original results only; no new scientific execution or compilation')
     job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
     if not (configuration_updates.for_job(root,job).get('resume_policy') or {}).get('output_only'):return
     paths=execution.records(root,step)
@@ -1986,6 +1998,7 @@ def preserved_progress(config):
 @_configuration_effect
 def compile_implementation(config, adapter, source, aliases, output):
     """Optional registered authoring; this does not dispatch or grant execution."""
+    _require_new_execution(config)
     capabilities = [item for item in _public_capabilities(adapter) if item['key'] == 'implementation_authoring']
     if (len(capabilities) != 1 or capabilities[0] not in config['execution_interface'].get('public_capabilities', [])
             or not callable(getattr(adapter, 'compile_implementation', None))):

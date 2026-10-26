@@ -555,8 +555,14 @@ class _Closure:
         raw=Path(proof.get('snapshot',proof.get('source',proof['path'])))
         if raw.is_absolute():
             if not raw.is_relative_to(source.original_root):
-                return  # The exact external locator stays in its typed owner record.
-            raw=raw.relative_to(source.original_root)
+                origins=(source.snapshot.origins if source.inherited else
+                    (o._manifest(source.storage_root) or {}).get('origins',{}))
+                if not any(raw.is_relative_to(origin['original_root']) for origin in origins.values()):
+                    return  # The exact external locator stays in its typed owner record.
+                source,path=o.material_owner(source,dict(source=str(raw)))
+                raw=Path(path)
+            else:
+                raw=raw.relative_to(source.original_root)
         path=o.relative(raw.as_posix())
         if path.startswith('host-runtime/code-versions/exports/'):
             return  # An expired execution view is not a permanent original.
@@ -677,6 +683,8 @@ class _Closure:
                     *job.get('history', {}).get('execution_recovery_materials', [])] if selected else []):
             self.add(source, f'project/nodes/{step:03d}/' + o.relative(row['path']),
                 proof=row, visibility='scientific_input' if selected else 'historical_science')
+            if 'source' in row:
+                self.science_ref(source,row)
         repair = job.get('engineering_repair')
         if repair is not None and selected:
             for name in ('source.py', 'artifact'):

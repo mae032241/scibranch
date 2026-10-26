@@ -252,7 +252,7 @@ def control_payload(job, payload, *, root=None, source=None):
     value=copy.deepcopy(payload)
     if job['role']=='W' and 'candidate_nominations' in value:
         from . import candidate_nominations
-        value['candidate_nominations']=candidate_nominations.resolve(root,job,value['candidate_nominations'])
+        value['candidate_nominations']=candidate_nominations.resolve(root,job,value['candidate_nominations'],source=source)
     if 'candidate_recommendation' in value:value['candidate_recommendation']=resolve(value['candidate_recommendation'])
     if root is not None and isinstance(value.get('candidate_recommendation'),str) and re.fullmatch(r'[HWAE]\d{3,}-I\d{3,}',value['candidate_recommendation']):
         from . import history

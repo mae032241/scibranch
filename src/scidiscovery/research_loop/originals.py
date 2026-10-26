@@ -249,7 +249,13 @@ def _logical_input(root, path, *, source=None, context=None):
         if any(row!=rows[0] for row in rows):raise ValueError('Logical input has conflicting originals')
         if 'source' not in rows[0]:raise ValueError('Legacy logical input original is unavailable')
         selected=Path(rows[0]['source'])
-        if root/selected==root/path:raise ValueError('Selected scientific input original is unavailable')
+        if root/selected==root/path:
+            # Frozen generated pages name their actual original, not an alias.
+            # Only exact scientific membership permits this inherited read.
+            entries=(source._index.get((identity_key(source.origin_identity),path),())
+                if source is not None and source.inherited else ())
+            if len(entries)!=1 or entries[0].get('visibility') not in {'scientific_input','historical_science'}:
+                raise ValueError('Selected scientific input original is unavailable')
         if source is None:return resolve_root_ref(root,rows[0],context=context)
         actual=selected if selected.is_absolute() else Path(source.original_root)/selected
         return _check_identity(files.check_path(actual),rows[0],context=context)

@@ -72,6 +72,23 @@ elif role=='W':
    result=json.loads(outcome.stdout);assert result['status']=='known_success'
    locator_file.write_text(json.dumps(dict(call_id=result['call_id'],artifact=artifacts[0])))
   locator=json.loads(locator_file.read_text())
+  if resume and config.get('output_repair_probe'):
+   import subprocess
+   from scidiscovery.research_loop.worker_execution_bridge import SUBMISSION_DIRECTORY
+   bridge=[sys.executable,'-m','scidiscovery.research_loop.worker_execution_bridge',
+    '--submission-directory',str(work/SUBMISSION_DIRECTORY)]
+   def probe(name,arguments):
+    outcome=subprocess.run([*bridge,*arguments],capture_output=True,text=True)
+    (work/('work/output-repair-'+name+'.json')).write_text(json.dumps(
+     dict(code=outcome.returncode,result=json.loads(outcome.stdout))))
+   probe('query',['query','--call-id',locator['call_id']])
+   probe('collect',['collect','--call-id',locator['call_id']])
+   directory=work/'experiments/repair-probe';directory.mkdir(parents=True)
+   script=work/'code/repair-probe.py'
+   declared=dict(version=1,metrics=[],outputs=[dict(path='artifacts/new-managed-effect.txt')])
+   script.write_text('from pathlib import Path\nPath("artifacts/new-managed-effect.txt").write_text("unexpected new effect")\nPath('+repr(str(work/'artifacts/output-repair-new-effect.txt'))+').write_text("unexpected new effect")\nPath("artifacts/result.json").write_text('+repr(json.dumps(declared))+')\n')
+   probe('run',['run','--experiment-dir',str(directory),'--script',str(script),
+    '--mechanism','Fixture mechanism'])
   payload['mechanism_findings']=[dict(mechanism='Fixture mechanism',basis='observed',finding='One retained fixture observation; target suitability remains for A.')]
   value=dict(representatives=[dict(mechanism_ref=mechanisms[0]['mechanism_ref'],candidate=locator,reason='A retained model for this scientific mechanism.')],extras=[],gaps=[])
   if config['fault']=='completed-experiment':
@@ -119,6 +136,11 @@ else:
   mechanisms=json.loads((work/task['lineage']['indexes']['mechanisms']).read_text())
   payload['search_review']=dict(dispositions=[dict(mechanism_ref=mechanisms['mechanisms'][0]['mechanism_ref'],
    status='pending',reason='The W contribution lacks the requested scientific findings.')],next_focus=None)
+ if config.get('a_screened'):
+  task=json.loads((work/'science-task.json').read_text())
+  mechanisms=json.loads((work/task['lineage']['indexes']['mechanisms']).read_text())
+  payload['search_review']=dict(dispositions=[dict(mechanism_ref=mechanisms['mechanisms'][0]['mechanism_ref'],
+   status='screened',reason='The exact retained W observation supports this bounded scientific assessment.')],next_focus=None)
 if not (config['fault']=='completed-missing-output' and role=='W' and not resume):
  pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))
 if (config['fault']!='unknown' and config['fault']!='nomination-unknown') or role=='H':
@@ -207,7 +229,7 @@ def nomination_diagnostic(root, result, *, fault, fragment=False):
     return rendered
 
 
-def prepare_cli(tmp_path,*,fault='missing',custom=False,explicit_false=False,final=False,fragment=False,automatic=None,max_tokens=None):
+def prepare_cli(tmp_path,*,fault='missing',custom=False,explicit_false=False,final=False,fragment=False,automatic=None,max_tokens=None,a_screened=False,output_repair_probe=False):
     public=tmp_path/'public';public.mkdir();objective=public/'objective.md';objective.write_text('Retain scientific uncertainty.')
     home=tmp_path/'inherited-home';home.mkdir()
     configuration='[sandbox_workspace_write]\nnetwork_access=true\nexclude_tmpdir_env_var=true\n'
@@ -227,7 +249,7 @@ def prepare_cli(tmp_path,*,fault='missing',custom=False,explicit_false=False,fin
         auxiliary.parent.mkdir(parents=True);auxiliary.symlink_to(actual)
     program.write_text('#!'+sys.executable+'\n'+NATIVE);program.chmod(0o755)
     binary=tmp_path/'bin';binary.mkdir();(binary/'codex').symlink_to(program)
-    c.write(program.with_name('launcher-config.json'),dict(fault=fault,home=str(home),configuration=configuration,default_home=not explicit_false))
+    c.write(program.with_name('launcher-config.json'),dict(fault=fault,home=str(home),configuration=configuration,default_home=not explicit_false,a_screened=a_screened,output_repair_probe=output_repair_probe))
     env=dict(os.environ,CODEX_HOME=str(home),PATH=str(binary)+os.pathsep+os.environ.get('PATH',''))
     source=str(Path(__file__).resolve().parents[2]/'src')
     env['PYTHONPATH']=source+os.pathsep+env.get('PYTHONPATH','')
