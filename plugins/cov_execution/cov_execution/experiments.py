@@ -1,4 +1,5 @@
 """Cov public experiment implementation of the registered lifecycle contract."""
+from contextlib import ExitStack
 import json
 import os
 import sys
@@ -301,11 +302,19 @@ class CovExecution(LocalExecution):
         directory=self.records.directory(call_id);accepted=self.records.accepted(call_id)
         result=cov._completed(directory,verify_source='code_version' not in accepted)
         if result is None and (directory/'terminal.json').exists():
-            terminal=json.loads(e.read(directory/'terminal.json'))
-            result=self.completion(directory,accepted,terminal.get('returncode'),
-                terminal.get('cleanup_confirmed'),terminal.get('transport_complete'))
-            self.records.publish(call_id,'completed.json',result)
-            result=cov._completed(directory,verify_source='code_version' not in accepted)
+            with ExitStack() as writer:
+                try:writer.enter_context(self._execution_writer_lease(call_id))
+                except BlockingIOError:
+                    return dict(status='unknown',call_id=call_id,note='Original call has no completion')
+                # The original writer or another recovery reader may have
+                # completed since our first read. Only its saved result wins.
+                result=cov._completed(directory,verify_source='code_version' not in accepted)
+                if result is None:
+                    terminal=json.loads(e.read(directory/'terminal.json'))
+                    result=self.completion(directory,accepted,terminal.get('returncode'),
+                        terminal.get('cleanup_confirmed'),terminal.get('transport_complete'))
+                    self.records.publish(call_id,'completed.json',result)
+                    result=cov._completed(directory,verify_source='code_version' not in accepted)
         return result if result is not None else dict(status='unknown',call_id=call_id,note='Original call has no completion')
 
     @e.record_effect

@@ -202,10 +202,16 @@ class LocalExecution:
         self._lease=None
         if found is None:raise e.IntegrityError('Dispatch has no durable acceptance original')
         directory=self.records.directory(submission.name)
-        if (directory/'process.json').exists() or (directory/'terminal.json').exists():return found
-        accepted=json.loads(e.read(directory/'accepted.json'))
-        self._execute(submission.name,accepted)
+        with self._execution_writer_lease(submission.name):
+            if (directory/'process.json').exists() or (directory/'terminal.json').exists():return found
+            accepted=json.loads(e.read(directory/'accepted.json'))
+            self._execute(submission.name,accepted)
         return submission.name,self._state(submission.name)
+
+    def _execution_writer_lease(self,call_id):
+        # A stopped child does not imply its host output callback has finished.
+        # Recovery uses this same call lease before publishing a completion.
+        return self.records.lease('local-writer-'+call_id+'.lock')
 
     def command(self,accepted):
         if 'code_version' in accepted:return list(accepted['command'])
