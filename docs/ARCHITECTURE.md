@@ -575,22 +575,45 @@ unclassified errors stop. Native failure events additionally support the exact 4
 retry-limit/quota texts and anchored bounded 503 HTTP envelope confirmed with the
 installed Codex CLI and synthetic loopback responses. Other message-only errors
 remain unknown; ordinary agent/tool text grants no retry. This local translation
-evidence is not real-provider outage qualification. A completed turn with incomplete
+evidence includes the full CLI JSON stream: synthetic 429/503 failures follow
+`thread.started` and `turn.started`, and an exact-ID `exec resume` in the same empty
+Codex home reaches the same loopback provider with the original thread ID and no
+Authorization header. Existing-session retries do not require a `not_accepted`
+field. Synthetic permanent quota remains stopped without a resume.
+This proves the selected local CLI failure/session path, not successful real-provider
+reasoning recovery, usage coverage or native permission qualification. Missing-session
+startup still requires explicit non-acceptance evidence. A completed turn with incomplete
 required output uses existing output repair, while legal fragments keep their stage semantics.
+A completed W screen response with valid required JSON can separately need scientific
+work: only an exact `work-evidence.json` assessment of `incomplete` may use the
+independent automatic permission to continue the same original full W task. This
+uses the same session, task and retained observations, binds the original response,
+outcome and evidence snapshot, and consumes `max_continues`. Pure formatting or
+nomination-declaration omissions use narrow output repair; a repaired valid response
+may then need this independently authorized work continuation. Valid partial findings,
+explicit scientific blocks and decision handoffs retain their existing route to A.
+Complete or inapplicable delivery assessments add no recovery action.
+An enforced host review keeps its existing priority over work continuation.
+Exhausting the automatic continue cap or the original budget records a verified partial exit for A; it
+creates neither completed findings nor a scientific screening verdict.
 `output_only` retains its narrow meaning; `automatic_recovery` is an independent
 permission. Explicit older resume policies without it gain no permission; custom
 or multi-argument launchers and the protocol backend are unsupported for this path.
 
-Defaults are two early-stop continuations and three transient retries, separately
-cumulative across one job's original attempt chain, with 30-second initial
+Defaults are two continuations for early stops or incomplete W delivery and three
+transient retries, separately cumulative across one job's original attempt chain, with 30-second initial
 exponential backoff, a 300-second per-backoff limit, 0.1 jitter and 1,800 seconds of
 cumulative service waiting. Progress, restart and configuration edits reset neither
 count nor wait. The existing controller writer owns arbitration and actual
 monotonic waiting; no recovery runs without it. The original attempt retains the
 reason, counters, actual wait and UTC next-attempt time. Downtime adds no service
 wait, and an unmeasured crash tail remains uncertain. UTC expiry permits renewed
-arbitration and budget admission, not launch by itself. Pause stops service waiting
-and preserves its original schedule and recorded consumption.
+arbitration and budget admission, not launch by itself. A service wait takes one
+fresh budget snapshot and derives its shared-time deadline locally; active time uses
+BOOTTIME and elapsed time uses Unix time. The waiting loop still checks pause each
+second, measures service waiting with monotonic time and rechecks admission before
+launch. It does not repeatedly rebuild the full budget snapshot. Pause stops service
+waiting and preserves its original schedule and recorded consumption.
 Server retry hints exceeding the single-backoff or remaining cumulative limit
 stop recovery instead of being shortened to bypass that limit.
 
@@ -600,7 +623,11 @@ for those calls. Recovery preserves the original model/profile, home, permission
 accepted-call identities and consumption. It neither resubmits unknown external
 work nor grants more budget. Formal completion, explicit waits and user pause keep
 their existing boundaries. Automatic recovery is disabled for protected FINAL and
-closeout; their existing finite output repair remains separate. The UI projects
+closeout; their existing finite output repair remains separate. Ordinary closeout
+collects the original live attempt or an already successful original result; a failed
+or unknown original stays unsealed with a specific recovery diagnostic. Unavailable
+fragment continuation and output repair retain their own reason instead of entering
+automatic work recovery or acquiring a new task. The UI projects
 waiting/stopped recovery reason, next attempt, separate counts, service wait and
 limitations without treating service waiting as scientific failure or owning a
 second state ledger. This adds no required scientific output or protocol change

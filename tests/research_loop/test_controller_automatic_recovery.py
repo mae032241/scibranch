@@ -13,8 +13,9 @@ def recovery(tmp_path, monkeypatch):
     record = root / 'native-evidence/001'
     contracts.write(root / 'jobs/001.json', dict(step=1, role='H'))
     contracts.write(record / 'native-intent.json', dict(step=1))
-    now = [1_800_000_000., 100.]
-    sleeps, phases, launches = [], [], []
+    now = [1_800_000_000., 100., 100.]
+    sleeps, phases, launches, snapshots = [], [], [], []
+    limits = dict(seconds_remaining=999., time_budget_basis='active')
     policy = dict(enabled=True, max_continues=2, max_retries=3,
         initial_backoff_seconds=30., max_backoff_seconds=300., jitter_fraction=.1, max_wait_seconds=1800.)
     decision = dict(action='retry', reason='temporary_capacity', source_attempt=0,
@@ -25,6 +26,15 @@ def recovery(tmp_path, monkeypatch):
         sleeps.append(seconds)
         now[0] += seconds
         now[1] += seconds
+        now[2] += seconds
+
+    def stamp():
+        return dict(at_unix=now[0], at_boottime=now[2], boot_id='fixture-boot')
+
+    def snapshot(root, *, sample_stamp):
+        assert sample_stamp == stamp()
+        snapshots.append(dict(sample_stamp))
+        return dict(limits)
 
     def start(actual_root, step, selected, *, recovery_wait):
         saved = contracts.read(record / 'automatic-recovery.json')
@@ -33,17 +43,19 @@ def recovery(tmp_path, monkeypatch):
         assert recovery_wait['waited_seconds'] == saved['local_wait_seconds']
         launches.append(recovery_wait)
 
-    monkeypatch.setattr(controller, 'time', SimpleNamespace(time=lambda: now[0], monotonic=lambda: now[1], sleep=sleep))
+    monkeypatch.setattr(controller, 'time', SimpleNamespace(time=lambda: now[0], monotonic=lambda: now[1],
+        CLOCK_BOOTTIME=7, clock_gettime=lambda clock: now[2], sleep=sleep))
     monkeypatch.setattr(controller, 'require_writer', lambda root: None)
     monkeypatch.setattr(controller.execution, 'record', lambda root, step: record)
     monkeypatch.setattr(controller.configuration_updates, 'for_step',
         lambda root, step: dict(resume_policy=dict(automatic_recovery=policy)))
     monkeypatch.setattr(controller.budget, 'transition', lambda root, phase, reason: phases.append((phase, reason)))
-    monkeypatch.setattr(controller.budget, 'snapshot', lambda root: dict(seconds_remaining=999.))
+    monkeypatch.setattr(controller.budget, 'clock_stamp', stamp)
+    monkeypatch.setattr(controller.budget, 'snapshot', snapshot)
     monkeypatch.setattr(controller.continuation, 'automatic_decision', lambda root, step: dict(decision))
     monkeypatch.setattr(controller.continuation, 'automatic_start', start)
     return SimpleNamespace(root=root, record=record, now=now, sleeps=sleeps, phases=phases,
-        launches=launches, decision=decision, policy=policy)
+        launches=launches, decision=decision, policy=policy, limits=limits, snapshots=snapshots)
 
 
 def test_backoff_counts_only_live_monotonic_wait_and_rearbitrates(recovery):
@@ -55,6 +67,71 @@ def test_backoff_counts_only_live_monotonic_wait_and_rearbitrates(recovery):
     assert saved['retry_count'] == 1 and saved['continue_count'] == 0
     assert saved['status'] == 'started' and len(scene.launches) == 1
     assert [phase for phase, _ in scene.phases] == ['waiting', 'advance']
+    assert len(scene.snapshots) == 1
+
+
+@pytest.mark.parametrize('basis', ['active', 'elapsed'])
+def test_shared_budget_deadline_stops_multi_second_wait_from_one_snapshot(recovery, basis):
+    scene = recovery
+    scene.limits.update(time_budget_basis=basis, seconds_remaining=2.)
+    with pytest.raises(budget.NodeBudgetUnavailable, match='wall_limit'):
+        controller._wait_automatic_recovery(scene.root, 1, scene.decision)
+    saved = contracts.read(scene.record / 'automatic-recovery.json')
+    assert scene.sleeps == [1., 1.] and scene.launches == []
+    assert saved['limitation'] == 'wall_limit' and saved['service_wait_seconds'] == 9.
+    assert len(scene.snapshots) == 1
+
+
+@pytest.mark.parametrize('basis', ['active', 'elapsed'])
+def test_suspend_consumes_shared_time_without_fabricating_actual_service_wait(recovery, monkeypatch, basis):
+    scene = recovery
+    scene.limits.update(time_budget_basis=basis, seconds_remaining=5.)
+    sleep = controller.time.sleep
+
+    def suspend(seconds):
+        sleep(seconds)
+        scene.now[0] += 60.
+        scene.now[2] += 60.  # BOOTTIME advances during suspend; MONOTONIC does not.
+
+    monkeypatch.setattr(controller.time, 'sleep', suspend)
+    with pytest.raises(budget.NodeBudgetUnavailable, match='wall_limit'):
+        controller._wait_automatic_recovery(scene.root, 1, scene.decision)
+    saved = contracts.read(scene.record / 'automatic-recovery.json')
+    assert scene.sleeps == [1.] and scene.launches == []
+    assert saved['local_wait_seconds'] == 1. and saved['service_wait_seconds'] == 8.
+    assert len(scene.snapshots) == 1
+
+
+def test_active_deadline_uses_boottime_when_unix_clock_changes(recovery, monkeypatch):
+    scene = recovery
+    scene.limits['seconds_remaining'] = 5.
+    sleep = controller.time.sleep
+
+    def change_wall_clock(seconds):
+        sleep(seconds)
+        scene.now[0] += 1000.
+
+    monkeypatch.setattr(controller.time, 'sleep', change_wall_clock)
+    controller._wait_automatic_recovery(scene.root, 1, scene.decision)
+    assert scene.sleeps == [1., 1., 1.] and len(scene.launches) == 1
+    assert len(scene.snapshots) == 1
+
+
+def test_expired_backoff_still_uses_fresh_start_admission(recovery, monkeypatch):
+    scene = recovery
+    admissions = []
+
+    def deny(root, step, selected, *, recovery_wait):
+        admissions.append(recovery_wait)
+        raise budget.NodeBudgetUnavailable('token_limit')
+
+    monkeypatch.setattr(controller.continuation, 'automatic_start', deny)
+    with pytest.raises(budget.NodeBudgetUnavailable, match='token_limit'):
+        controller._wait_automatic_recovery(scene.root, 1, scene.decision)
+    saved = contracts.read(scene.record / 'automatic-recovery.json')
+    assert len(admissions) == 1 and scene.launches == []
+    assert saved['status'] == 'stopped' and saved['limitation'] == 'token_limit'
+    assert saved['service_wait_seconds'] == 10. and len(scene.snapshots) == 1
 
 
 def test_restart_keeps_saved_wait_and_does_not_charge_offline_gap(recovery):
@@ -137,7 +214,8 @@ def test_one_controller_helper_consumes_native_recovery_exception(recovery, monk
         calls.append('execute')
         raise controller.continuation.AutomaticRecoveryRequired(scene.decision)
 
-    def collect(root, step):
+    def collect(root, step, *, _reentry_started=False):
+        assert _reentry_started is True
         calls.append('wait_original')
         return dict(sealed=True)
 
@@ -145,6 +223,102 @@ def test_one_controller_helper_consumes_native_recovery_exception(recovery, monk
     monkeypatch.setattr(controller.native, 'wait_native', collect)
     assert controller._native_call(scene.root, 1, launch=True) == dict(sealed=True)
     assert calls == ['execute', 'wait_original'] and len(scene.launches) == 1
+
+
+@pytest.mark.parametrize('newly_started', [False, True])
+def test_collection_startup_receipt_window_never_respawns_an_already_started_recovery(
+        recovery, monkeypatch, newly_started):
+    """Exercise real polling of unknown -> unstarted -> running -> terminal."""
+    scene = recovery
+    contracts.write(scene.record / 'native-intent.json', dict(step=1,
+        continuation_kind='automatic_recovery', attempt=1))
+    states = iter(['unknown', 'unstarted', 'running', 'terminal'])
+    starts, collections = [], []
+    started = [not newly_started]
+    original_start = controller.continuation.automatic_start
+
+    def spawn(root, step, attempt=0):
+        starts.append((root, step, attempt))
+
+    def start(root, step, selected, *, recovery_wait):
+        original_start(root, step, selected, recovery_wait=recovery_wait)
+        controller.runtime.start(root, step, 1)
+        started[0] = True
+
+    def execute(root, step):
+        raise controller.continuation.AutomaticRecoveryRequired(scene.decision)
+
+    def seal(root, step):
+        collections.append((root, step))
+        return dict(sealed=True)
+
+    monkeypatch.setattr(controller.native, 'time', controller.time)
+    monkeypatch.setattr(controller.runtime, 'node_state', lambda root, step: next(states))
+    monkeypatch.setattr(controller.runtime, 'start', spawn)
+    monkeypatch.setattr(controller.native.checkpoint, 'enabled', lambda root, job: False)
+    monkeypatch.setattr(controller.continuation, 'automatic_start', start)
+    monkeypatch.setattr(controller.continuation, 'automatic_decision', lambda root, step:
+        dict(action='none') if started[0] else dict(scene.decision))
+    monkeypatch.setattr(controller.continuation, 'seal_or_repair', seal)
+    monkeypatch.setattr(controller.native, 'execute_native', execute)
+    assert controller._native_call(scene.root, 1, launch=newly_started) == dict(sealed=True)
+    assert starts == [(scene.root, 1, 1)]
+    assert collections == [(scene.root, 1)]
+    assert len(scene.launches) == int(newly_started)
+
+
+@pytest.mark.parametrize('work_repair', [False, True])
+@pytest.mark.parametrize('reason', ['wall_limit', 'token_limit'])
+def test_completed_work_uses_verified_partial_exit_at_wait_or_fresh_admission_budget_boundary(
+        recovery, monkeypatch, work_repair, reason):
+    scene = recovery
+    if work_repair:
+        scene.decision['work_repair'] = dict(code='worker_delivery_incomplete')
+    finished = []
+
+    def execute(root, step):
+        raise controller.continuation.AutomaticRecoveryRequired(scene.decision)
+
+    def finish(root, step, selected, stopped):
+        finished.append((root, step, selected, stopped))
+        return dict(sealed=True, partial=True)
+
+    def deny(*args, **kwargs):
+        raise budget.NodeBudgetUnavailable(reason)
+
+    monkeypatch.setattr(controller.native, 'execute_native', execute)
+    monkeypatch.setattr(controller.native, 'wait_native', lambda *args: pytest.fail('No replacement turn was accepted'))
+    monkeypatch.setattr(controller.continuation, 'finish_automatic_work', finish)
+    if reason == 'wall_limit':
+        scene.limits['seconds_remaining'] = 2.
+    else:
+        monkeypatch.setattr(controller.continuation, 'automatic_start', deny)
+    if work_repair:
+        assert controller._native_call(scene.root, 1, launch=True) == dict(sealed=True, partial=True)
+        assert finished == [(scene.root, 1, scene.decision, reason)]
+    else:
+        with pytest.raises(budget.NodeBudgetUnavailable, match=reason):
+            controller._native_call(scene.root, 1, launch=True)
+        assert finished == []
+    saved = contracts.read(scene.record / 'automatic-recovery.json')
+    assert saved['status'] == 'stopped' and saved['limitation'] == reason
+    assert scene.launches == []
+
+
+def test_paused_completed_work_never_uses_partial_budget_exit(recovery, monkeypatch):
+    scene = recovery
+    scene.decision['work_repair'] = dict(code='worker_delivery_incomplete')
+    (scene.root / 'pause.request').touch()
+
+    def execute(root, step):
+        raise controller.continuation.AutomaticRecoveryRequired(scene.decision)
+
+    monkeypatch.setattr(controller.native, 'execute_native', execute)
+    monkeypatch.setattr(controller.continuation, 'finish_automatic_work',
+        lambda *args: pytest.fail('Pause does not finish or advance completed work'))
+    with pytest.raises(controller._AutomaticRecoveryUnavailable) as caught:
+        controller._native_call(scene.root, 1, launch=True)
+    assert caught.value.status == 'paused' and scene.launches == []
 
 
 def test_controller_route_consumes_recovery_then_continues_exact_task(scene, monkeypatch):
@@ -163,7 +337,8 @@ def test_controller_route_consumes_recovery_then_continues_exact_task(scene, mon
             raise scene.controller.continuation.AutomaticRecoveryRequired(decision)
         return execute(root, step)
 
-    def collect(root, step):
+    def collect(root, step, *, _reentry_started=False):
+        assert _reentry_started is True
         collected.append(step)
         return execute(root, step)
 
@@ -186,7 +361,8 @@ def test_explicit_resume_uses_same_recovery_consumer_without_repeating_start(rec
         starts.append(step)
         raise controller.continuation.AutomaticRecoveryRequired(scene.decision)
 
-    def collect(root, step):
+    def collect(root, step, *, _reentry_started=False):
+        assert _reentry_started is True
         collections.append(step)
         return dict(sealed=True)
 

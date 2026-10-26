@@ -152,6 +152,11 @@ def wait_native(root: Path, step: int, *, _reentry_started=False):
                 # of a bad identity. Waiting never permits another submission.
                 time.sleep(.05)
                 continue
+            # The exact owner can publish while node_state checks receipts.
+            # Collect that same outcome through the normal terminal checks;
+            # this late publication never authorizes another launch.
+            if (record / 'native-outcome.json').exists():
+                continue
             raise RuntimeError("Original native execution is unknown; preserved without replay")
         time.sleep(.1)
 

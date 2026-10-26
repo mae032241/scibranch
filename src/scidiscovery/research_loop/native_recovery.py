@@ -137,6 +137,16 @@ def recoverable_source(outcome):
         and outcome.get('cleanup') == 'observed_group_cleaned')
 
 
+def work_decision(limits, used, *, session_available):
+    """A verified delivery failure spends the same original continue budget."""
+    result = dict(action='stop', reason='automatic_recovery_continue_limit', counters=dict(used))
+    if not limits['enabled']:return dict(result, action='none', reason='automatic_recovery_disabled')
+    if used['continues'] >= limits['max_continues']:return result
+    if not session_available:return dict(result, reason='automatic_recovery_session_unavailable')
+    return dict(result, action='continue', reason='worker_delivery_incomplete', startup_retry=False,
+        delay_seconds=0., retry_after_seconds=None)
+
+
 def decision(outcome, limits, used, *, session_available, activity_observed=False, jitter=0.):
     """Choose one action after lifecycle, exact-process and managed-call gates."""
     result = dict(action='stop', reason='automatic_recovery_unknown_failure', counters=dict(used))

@@ -1170,6 +1170,7 @@ class InstanceUI:
                     'seal_pending': '本次控制请求已停止推进：阶段结论封存待修复（seal_pending）。请核对原任务。',
                     'output_repair_required': '本次控制请求已停止推进：原任务输出待修复（output_repair_required）。请核对原任务。',
                     'output_repair_unavailable': '本次控制请求已停止推进：原任务输出暂无法修复（output_repair_unavailable）。请核对原任务。',
+                    'closeout_native_unsealed': '本次控制请求已停止推进：原收尾任务尚未封存（closeout_native_unsealed）。请核对同一原任务，勿重复提交。',
                     'waiting_execution': '本次控制请求已结束，正在等待原实验执行（waiting_execution）。请核对原任务，勿重复提交。',
                 }
                 notice = stopped.get(result.get('status'), notice)
@@ -1178,6 +1179,22 @@ class InstanceUI:
                 if (result.get('status') == 'native_outcome_unsealed' and result.get('reason') ==
                         'Original execution lost its verified completion; preserved without replay'):
                     notice += ' 停止说明：原任务缺少可验证的完成记录；现有工作已保留，未重新执行。'
+                if result.get('status') == 'closeout_native_unsealed':
+                    explanations = {
+                        'Original closeout native failed; explicit worker-resume required for the same original task':
+                            '原收尾任务已失败，未自动重试。如需续接，请用 worker-resume 精确选择同一原任务；仍须通过原权限与预算核验。',
+                        'Original closeout native execution is unknown; reconcile the same original without replay':
+                            '原收尾任务的完成状态尚未核实；请先核对同一原执行，不要重放或新建替代任务。',
+                        'Original closeout native outcome remains unsealed; reconcile the same original without replay':
+                            '原收尾任务的结果尚未核实；请核对同一原执行与留存记录，不要重复提交。',
+                        'worker_fragment_checkpoint_unavailable':
+                            '原 W 片段的 checkpoint 缺失；请核对同一原任务的留存记录，当前不能自动续接。',
+                    }
+                    explanation = explanations.get(result.get('reason'))
+                    if explanation:
+                        notice += ' 停止说明：' + explanation
+                    if type(result.get('attempt_step')) is int and result['attempt_step'] > 0:
+                        notice += ' 原任务步骤：' + str(result['attempt_step']) + '。'
             notices.append(notice)
         current = snapshot['view']['nodes'][-1] if snapshot['view']['nodes'] else None
         if current and current.get('stop_reason'):

@@ -178,11 +178,22 @@ def capture(root,job,record):
     return validate(root,job,record)
 
 
-def validate(root,job,record):
+def validate(root,job,record,*,source_attempt=None):
     value=c.read(c.regular(record/FACT_NAME,limit=None))
+    if source_attempt is None:source_attempt=execution.records(root,job['step']).index(record)
+    else:
+        if type(source_attempt) is not int or source_attempt<0:
+            raise history.ObserverIntegrityError('Worker fact source attempt changed its accepted original')
+        origin=execution.origin(root,job['step'])
+        expected_record=origin if source_attempt==0 else origin/'continuations'/f'{source_attempt:03d}'
+        intent=c.read(c.regular(record/'native-intent.json'))
+        if (record!=expected_record
+                or type(intent.get('attempt',0)) is not int or intent.get('attempt',0)!=source_attempt
+                or intent.get('task_ref')!=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json')):
+            raise history.ObserverIntegrityError('Worker fact source attempt changed its accepted original')
     expected=dict(job_ref=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json'),
         raw_ref=c.file_ref(c.regular(record/'science-output.json',limit=None)),
-        source_attempt=execution.records(root,job['step']).index(record))
+        source_attempt=source_attempt)
     if value.get('version')!=1 or value.get('binding')!=expected:raise history.ObserverIntegrityError('Worker fact snapshot binding changed')
     inherited=None
     for row in [*value['evidence'],*value['unknown']]:
@@ -208,10 +219,10 @@ def validate(root,job,record):
     return value
 
 
-def assessment(root,job,science,record):
+def assessment(root,job,science,record,*,source_attempt=None):
     """Coverage of this task's own authored findings; no scientific screened verdict."""
     if not applicable(job):return dict(status='not_applicable',missing=[],blocked=[],reason=None)
-    facts=validate(root,job,record)
+    facts=validate(root,job,record,source_attempt=source_attempt)
     expected={row['mechanism_ref'] for row in job['search']['coverage_obligation']}
     mechanisms=job['search']['breadth']['mechanisms'];known={row['mechanism_ref'] for row in facts['evidence']}
     declared=c.scientific_field(job,science,'mechanism_findings')
@@ -232,8 +243,8 @@ def assessment(root,job,science,record):
         facts_ref=c.record_ref(c.regular(record/FACT_NAME)))
 
 
-def require_delivery(root,job,science,record):
-    result=assessment(root,job,science,record)
+def require_delivery(root,job,science,record,*,source_attempt=None):
+    result=assessment(root,job,science,record,source_attempt=source_attempt)
     if result['status']=='incomplete':
         ending=record/'stage-end.json'
         if ending.exists():
@@ -260,6 +271,12 @@ def authorize_exit(root,job,record,reason):
         return dict(value,kind='resume_policy',settings_ref=c.record_ref(root/'settings.json'))
     if reason=='worker_resume_limit' and policy is not None and repairs>=policy['max_attempts']:
         return dict(value,kind='repair_cap',max_attempts=policy['max_attempts'])
+    if reason=='automatic_recovery_continue_limit' and policy is not None:
+        from . import native_recovery
+        limits=native_recovery.policy(policy.get('automatic_recovery') or {})
+        used=native_recovery.counters(c.read(path/'native-intent.json') for path in paths[:number+1])
+        if policy.get('automatic_recovery') is not None and limits['enabled'] and used['continues']>=limits['max_continues']:
+            return dict(value,kind='automatic_continue_cap',max_continues=limits['max_continues'],counters=used)
     if reason.startswith('worker_resume_') and reason not in {'worker_resume_terminal_ineligible','worker_resume_original_running','worker_resume_usage_unknown'}:
         try:continuation.session(root,job['step'],record)
         except continuation.ResumeUnavailable as error:
@@ -273,6 +290,12 @@ def authorize_exit(root,job,record,reason):
             accepted=dict(value,kind='host_review',review=original,sample=sample)
             validate_exit(root,job,record,accepted)
             return accepted
+    if reason in {'wall_limit','token_limit','step_limit'}:
+        tokens,seconds=budget._attempt_consumption(root,job,paths[:number+1])
+        value=dict(value,kind='budget',consumption=dict(tokens=tokens,seconds=seconds),
+            limits=budget.node_limits(root,job),shared=dict(budget.snapshot(root),used_steps=budget.used_steps(root)),meter=native.usage(root))
+        validate_exit(root,job,record,value)
+        return value
     if reason in {'worker_resume_node_exhausted','worker_resume_budget_unavailable'}:
         try:budget.accept_continuation(root,job,paths[:number+1])
         except budget.NodeBudgetUnavailable as error:
@@ -301,6 +324,17 @@ def validate_exit(root,job,record,value):
         repairs=sum(c.read(path/'native-intent.json').get('continuation_kind','repair')=='repair' for path in paths[1:])
         if policy is None or reason!='worker_resume_limit' or value['max_attempts']!=policy['max_attempts'] or repairs<policy['max_attempts']:
             raise history.ObserverIntegrityError('Worker exit has no exhausted original repair cap')
+    elif kind=='automatic_continue_cap':
+        from . import native_recovery
+        supplied=(policy or {}).get('automatic_recovery')
+        if supplied is None:raise history.ObserverIntegrityError('Worker exit has no automatic recovery authorization')
+        limits=native_recovery.policy(supplied)
+        paths=execution.records(root,job['step'])[:number+1]
+        used=native_recovery.counters(c.read(path/'native-intent.json') for path in paths)
+        if (reason!='automatic_recovery_continue_limit' or not limits['enabled']
+                or value.get('max_continues')!=limits['max_continues'] or value.get('counters')!=used
+                or used['continues']<limits['max_continues']):
+            raise history.ObserverIntegrityError('Worker exit has no exhausted original automatic continue cap')
     elif kind=='session':
         from . import continuation
         history._validate_proof(root,value['native_jsonl'])
@@ -343,6 +377,12 @@ def validate_exit(root,job,record,value):
                     or soft and shared['seconds_remaining']<=reserve['seconds']
                     or budget.effective_max_steps(root)-shared.get('used_steps',budget.used_steps(root))<1+reserve['steps']):
                 raise history.ObserverIntegrityError('Worker shared budget did not require exit')
+        elif reason in {'wall_limit','token_limit','step_limit'}:
+            shared=value['shared'];meter=value['meter']
+            exhausted=(shared['seconds_remaining']<=0 if reason=='wall_limit' else
+                shared['max_tokens']-meter.get('accounted_tokens',meter['observed_tokens'])<=0 if reason=='token_limit' else
+                shared['max_steps']-shared['used_steps']<1)
+            if not exhausted:raise history.ObserverIntegrityError('Worker shared budget did not require this exact exit')
         else:raise history.ObserverIntegrityError('Unknown Worker budget exception')
     else:raise history.ObserverIntegrityError('Worker exit lacks original host exception facts')
     return reason

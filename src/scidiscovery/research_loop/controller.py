@@ -9,6 +9,7 @@ import os
 import stat
 import time
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 import uuid
 
@@ -538,14 +539,24 @@ def _wait_automatic_recovery(root, step, decision):
     budget.transition(root, 'waiting', 'automatic_service_backoff')
     until = time.monotonic() + remaining
     try:
+        # The writer excludes concurrent budget amendments during this wait.
+        # Observe the full ledger once, at the same clock sample used to anchor
+        # its local deadline. Fresh acceptance still belongs to automatic_start.
+        stamp = budget.clock_stamp()
+        limits = budget.snapshot(root, sample_stamp=stamp)
+        active = limits['time_budget_basis'] == 'active'
+        shared_until = stamp['at_boottime' if active else 'at_unix'] + limits['seconds_remaining']
         while True:
             if (root / 'pause.request').exists():
                 saved.update(status='paused', limitation='User pause prevents automatic continuation')
                 contracts.write(path, saved)
                 budget.transition(root, 'paused', 'automatic_recovery_paused')
                 raise _AutomaticRecoveryUnavailable('automatic_recovery_paused', paused=True)
-            limits = budget.snapshot(root)
-            if limits['seconds_remaining'] <= 0:
+            # BOOTTIME includes same-boot suspend; service wait below deliberately
+            # uses MONOTONIC and only counts this controller's actual waiting.
+            shared_now = time.clock_gettime(time.CLOCK_BOOTTIME) if active else time.time()
+            shared_left = max(0., shared_until - shared_now)
+            if shared_left <= 0:
                 saved.update(status='stopped', next_attempt_at=None, limitation='wall_limit')
                 contracts.write(path, saved)
                 raise budget.NodeBudgetUnavailable('wall_limit')
@@ -559,7 +570,7 @@ def _wait_automatic_recovery(root, step, decision):
                 raise _AutomaticRecoveryUnavailable('automatic_recovery_wait_limit')
             before = time.monotonic()
             try:
-                time.sleep(min(1., left, allowance, limits['seconds_remaining']))
+                time.sleep(min(1., left, allowance, shared_left))
             finally:
                 # Only this live controller's monotonic wait is added. Offline
                 # gaps and unknown crash tails are never inferred from UTC.
@@ -605,8 +616,16 @@ def _native_call(root, step, *, launch=False, operation=None):
         try:
             return call(root, step)
         except continuation.AutomaticRecoveryRequired as error:
-            _wait_automatic_recovery(root, step, error.decision)
-            call = native.wait_native
+            try:
+                _wait_automatic_recovery(root, step, error.decision)
+            except budget.NodeBudgetUnavailable as stopped:
+                if error.decision.get('work_repair') is not None:
+                    return continuation.finish_automatic_work(root, step, error.decision, stopped.reason)
+                raise
+            # automatic_start has already spawned this accepted attempt. Its
+            # receipts can still be unpublished; collection must not spawn it
+            # again in that window. Ordinary reentry keeps the default flag.
+            call = partial(native.wait_native, _reentry_started=True)
         except (OutputRepairRequired, budget.NodeBudgetUnavailable):
             raise
         except Exception as error:
@@ -1266,6 +1285,15 @@ def _closeout_result(root, status, *, reason=None, step=None, read_only=False):
     return result
 
 
+def _closeout_native_reason(root, step, fallback):
+    """Explain a retained native failure without exposing private diagnostics."""
+    record = execution.record(root, step)
+    outcome = contracts.read(record / 'native-outcome.json') if (record / 'native-outcome.json').exists() else {}
+    if type(outcome.get('returncode')) is int and outcome['returncode'] != 0:
+        return 'Original closeout native failed; explicit worker-resume required for the same original task'
+    return fallback
+
+
 def _closeout_funds(root, *, preparation_seconds=0., step=None, author_required=True, limits=None):
     settings = configuration_updates.current(root)
     policy = settings.get('delivery_policy')
@@ -1718,14 +1746,36 @@ def _run_closeout(root):
             if author_request is not None and corrections > semantic.MAX_AUTHOR_CORRECTIONS:
                 return _closeout_result(root, 'closeout_unresolved', reason='semantic_correction_limit', step=step)
             if (record / 'native-intent.json').exists():
+                state = runtime.node_state(root, step)
+                current = execution.record(root, step)
+                outcome = contracts.read(current / 'native-outcome.json') if (current / 'native-outcome.json').exists() else {}
+                # This gate selects collection only. Raw output identities and
+                # final receipts belong to the formal seal checks below; a
+                # damaged original must not become an ordinary unknown state.
+                collect = state == 'running' or (state == 'terminal'
+                    and type(outcome.get('returncode')) is int and outcome['returncode'] == 0
+                    and not outcome.get('stop_reason'))
+                if not collect:
+                    failed = state == 'terminal' and type(outcome.get('returncode')) is int and outcome['returncode'] != 0
+                    reason = ('Original closeout native failed; explicit worker-resume required for the same original task'
+                        if failed else 'Original closeout native execution is unknown; reconcile the same original without replay')
+                    return _closeout_result(root, 'closeout_native_unsealed', step=step, reason=reason)
                 try:
                     _native_call(root, step)
                 except continuation.ResumeUnavailable as error:
-                    return _closeout_result(root, _recovery_status(error), step=step, reason=str(error))
+                    status = ('output_repair_unavailable' if getattr(error, 'status', None) == 'output_repair_unavailable'
+                        else 'closeout_native_unsealed')
+                    reason = (_closeout_native_reason(root, step, str(error))
+                        if str(error) == 'automatic_recovery_final_boundary' else str(error))
+                    return _closeout_result(root, status, step=step, reason=reason)
                 except OutputRepairRequired as error:
                     return _closeout_result(root, 'output_repair_required', step=step, reason=error.code)
+                except ValueError:
+                    raise
                 except Exception:
-                    return _closeout_result(root, 'closeout_native_unsealed', step=step)
+                    return _closeout_result(root, 'closeout_native_unsealed', step=step,
+                        reason=_closeout_native_reason(root, step,
+                            'Original closeout native outcome remains unsealed; reconcile the same original without replay'))
             else:
                 if repair is not None:
                     successor = root / 'jobs' / f'{step+1:03d}.json'
@@ -1764,11 +1814,19 @@ def _run_closeout(root):
                         return _start_budget_closeout(root, begin['source_cutoff'], step, 'W' if repair else 'A', error.reason)
                     return _closeout_result(root, 'closeout_budget_unavailable', reason=error.reason, step=step)
                 except continuation.ResumeUnavailable as error:
-                    return _closeout_result(root, _recovery_status(error), step=step, reason=str(error))
+                    status = ('output_repair_unavailable' if getattr(error, 'status', None) == 'output_repair_unavailable'
+                        else 'closeout_native_unsealed')
+                    reason = (_closeout_native_reason(root, step, str(error))
+                        if str(error) == 'automatic_recovery_final_boundary' else str(error))
+                    return _closeout_result(root, status, step=step, reason=reason)
                 except OutputRepairRequired as error:
                     return _closeout_result(root, 'output_repair_required', step=step, reason=error.code)
+                except ValueError:
+                    raise
                 except Exception:
-                    return _closeout_result(root, 'closeout_native_unsealed', step=step)
+                    return _closeout_result(root, 'closeout_native_unsealed', step=step,
+                        reason=_closeout_native_reason(root, step,
+                            'Original closeout native outcome remains unsealed; reconcile the same original without replay'))
         job = contracts.read(path)
         result = contracts.validate(contracts.workspace(root, step))
         final = _final_a_result(root, job, result)

@@ -373,22 +373,39 @@ reconcile 再消费；unknown 或不可用事实须核对或明确报告障碍�
 永久认证、配额、配置错误及未分类错误停止；原生失败事件额外支持本机 Codex CLI 连接合成
 loopback 响应实证的 429 retry-limit/quota 完整文本及有界锚定 503 HTTP 信封。其他
 message-only 错误保持 unknown，普通 agent/tool 正文不授重试许可；本机翻译证据不等于
-真实服务商故障恢复资格。已完成 turn 缺少或给出无效必需输出时仍走原输出补填，合法 fragment 保持
-阶段语义。`output_only` 原义不变，`automatic_recovery` 是独立许可；显式旧策略没有该字段
+真实服务商故障恢复资格。完整 CLI JSON 显示合成 429/503 前已有 `thread.started`、
+`turn.started`；同一空 Codex home 以精确 ID 执行 `exec resume` 后仍是原 thread，
+再次到达同一 loopback provider，全部请求均无 Authorization。这是既有 session 重试，
+不要求 `not_accepted` 字段；永久 quota 仍停止且不续接。该证据只验证所选本机 CLI
+失败/session 路径，未验证真实服务商推理恢复、用量覆盖或原生权限资格；无 session 的
+启动重试仍须明确未接受证据。已完成 turn 缺少或给出无效必需输出时仍走原输出补填，合法 fragment 保持
+阶段语义。
+已完成 W screen 的必需 JSON 合法但科学交付仍不足时，只有精确 `work-evidence.json`
+判定为 `incomplete` 才能依靠独立自动许可续接同一 W 的原完整任务。它沿用原 session、
+任务和保留观察，绑定原返回、outcome 与证据快照，并消耗 `max_continues`。单纯格式或
+提名声明缺失走窄输出补填；补成合法返回后，科学不足可另经独立自动许可续工。有效 partial、
+明确科学障碍及 decision 交接仍沿原路交 A；完整或不适用的交付判定不追加恢复动作。
+强制 host review 仍优先沿原路交 A。continue 次数或原预算耗尽记录可核验的 partial 出口，
+不补造已完成 finding 或科学 screened 资格。
+`output_only` 原义不变，`automatic_recovery` 是独立许可；显式旧策略没有该字段
 就不新增许可，自定义、多参数 launcher 及 protocol 后端不支持此自动路径。
 
-默认提前停止 continue 两次、临时故障 retry 三次，在同一 job 原 attempt 链中分别累计；
+默认提前停止或 W 科学交付不足共用 continue 两次、临时故障 retry 三次，在同一 job 原 attempt 链中分别累计；
 服务退避从 30 秒起指数增长，单次上限 300 秒、抖动比例 0.1、累计实际服务等待上限 1800 秒。
 推进、重启或配置修改均不清零次数与等待。既有 controller writer 拥有仲裁及实际单调时间
 等待，没有 controller 就不自行执行；原 attempt 保留原因、分别计数、实际等待及 UTC 下次
 尝试时间。停机不新增服务等待，崩溃时未测尾段保留不确定性；UTC 到期只获得重新仲裁和预算
-准入的资格，不直接启动。暂停停止服务等待，保留原安排及已记录消费。
+准入的资格，不直接启动。每次服务等待只取一次新预算快照，按原 active 的 BOOTTIME
+或 elapsed 的 Unix 时间口径在本地维护共享时间截止；等待循环仍每秒检查暂停，以单调时间
+计实际服务等待，启动前重新准入，不反复重建完整预算快照。暂停停止服务等待，保留原安排及已记录消费。
 服务端 retry hint 超过单次退避或累计剩余等待上限时停止，不截短提示绕过上限。
 
 原 native 尚活或身份未核清、受管调用 running/unknown 时不启动替代 native，仍由既有准确
 原调用入口核对。恢复保留原模型/profile、home、权限、accepted-call 身份及消费，不重新
 提交未知外部工作，也不新增预算。正式完成、显式等待和用户暂停保持原边界。protected
-FINAL 与 closeout 禁用自动接续，原有限输出补填另守原策略。UI 投影等待/停止原因、下次
+FINAL 与 closeout 禁用自动接续，原有限输出补填另守原策略。普通 closeout 只收集仍活着的
+原 attempt 或已成功的原结果；失败或未知原任务保持未封存并给出明确恢复诊断。fragment
+续接或输出补填不可用时保留各自准确原因，不转成自动普通续工或新任务。UI 投影等待/停止原因、下次
 尝试、分别计数、服务等待及限制，服务等待不冒充科学失败，也不建立第二份状态账本。
 本批不新增必填科学输出、不提升协议，也不替换通用科学预算时钟。
 

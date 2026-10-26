@@ -170,14 +170,31 @@ TOML 对应 `[policies.resume.automatic_recovery]`，CLI 通过原
 不能凭缺 session 推断。永久认证、配额、配置错误及未分类原因停止；原生失败 message
 额外支持本机 Codex CLI 连接合成 loopback 响应实证的 429 retry-limit/quota 完整文本及
 有界锚定 503 HTTP 信封，不扫描普通 agent/tool 正文。其他 message-only 错误及未知 CLI
-格式保持 unknown；本机取样不证明真实服务商 429/503 已恢复。正常完成 turn 缺少或给出无效必需输出仍走既有
-输出补填，合法 fragment 保持原阶段接续；正式完成、显式等待和暂停不自动追加普通工作。
-protected FINAL 与 closeout 禁用新自动策略，原有有限输出补填不变。
+格式保持 unknown。完整 CLI JSON 显示合成 HTTP 失败前已有 `thread.started` 和
+`turn.started`；临时 429/503 在同一空 Codex home 用精确 ID 执行 `exec resume` 后仍
+是原 thread，并再次到达同一 loopback provider，全部请求无 Authorization；永久 quota
+只判 permanent 停止，不续接。既有 session 的重试不要求 `not_accepted` 字段；无 session
+启动重试仍须明确未接受证据。本机取样未验证真实服务商推理恢复、用量覆盖或原生权限资格。
+正常完成 turn 缺少或给出无效必需输出仍走既有输出补填，合法 fragment 保持原阶段接续；正式完成、显式等待和暂停不自动追加普通工作。
+已完成 W screen 的必需 JSON 合法但精确 `work-evidence.json` 仍判定 `incomplete` 时，
+可依靠独立自动许可续接同一 W 原完整任务，保留原 session 与观察，绑定原返回、outcome
+及证据快照，与提前停止共用 `max_continues`。单纯格式和提名缺失仍走窄输出补填；补成合法
+返回后，科学不足可另经独立许可续工。有效 partial、明确障碍或 decision 交接仍沿原路交 A；
+完整或不适用的交付判定不追加恢复动作。
+强制 host review 仍优先沿原路交 A。continue 次数或原预算耗尽留下可核验 partial 出口，
+不制造 finding 或科学资格，也不退还已用预算。
+protected FINAL 与 closeout 禁用新自动策略，原有有限输出补填不变。普通收口只收集仍活着的
+原 attempt 或已成功原结果；失败、未知、fragment 续接或输出补填不可用保留准确未封存诊断，
+不自动改派普通任务。`closeout_native_unsealed` 区分已知失败须显式 `worker-resume` 与
+执行未知须核对同一原调用，未知绝不重放；fragment 续接不可用保留原诊断。纯输出补填
+启动被拒绝时报告 `output_repair_unavailable` 及原原因。
 
 continue/retry 在同一任务原 attempt 链中分别累计，推进、重启或配置修订均不清零。
 既有 controller writer 保留原 attempt、原因、分别计数、累计实际服务等待和 UTC 下次尝试
 时间，用单调时间实际等待；没有 controller 就不自行执行。停机及控制程序未运行的空闲
-不增加服务等待，崩溃时未测尾段保持未知。到期只允许重新仲裁，仍须过原预算与权限准入。
+不增加服务等待，崩溃时未测尾段保持未知。每次等待只取一次新预算快照，按原 active 的
+BOOTTIME 或 elapsed 的 Unix 时间口径本地维护共享时间截止，仍每秒检查暂停；启动前
+重新检查原预算与权限准入。到期只允许重新仲裁，不直接启动。
 服务端 retry hint 超过单次退避上限或累计剩余等待时停止，不截短提示绕过上限。
 `pause` 可停止服务等待并保留原安排，不启动替代 native；已接受的活动工作仍按原规则收尾。
 网页显示等待/停止原因、下次尝试、分别计数、服务等待及限制，服务等待不表示科学失败。
@@ -956,7 +973,8 @@ scid-research closeout --root /绝对路径/实例 --export-only
 旧尝试保留中断记录，不伪造完成；恢复后的真实结果仍须正常封存。冻结的输出补填策略
 不阻止原完整任务重入，但不会把已经受限的输出修复、作者收尾或结果唤醒变成普通探索。
 本节的硬停收口转交 A，并不是续跑已停止的 Worker。原线程续接见下节；
-实际 Codex 同线程恢复仍未验证。任意本地 shell 仍是软隔离；
+本机 CLI 对合成 429/503 的精确同线程失败续接已核对，真实服务商的推理恢复仍未验证。
+任意本地 shell 仍是软隔离；
 框架管理的外部执行应按原执行身份恢复，不重发不确定提交。
 
 ## 可选的 Worker 原线程续接
@@ -965,7 +983,9 @@ scid-research closeout --root /绝对路径/实例 --export-only
 `--worker-context` 时，冻结最多两次同任务、同 session 的输出补填或原受管执行唤醒：
 `output_repair: true`、`output_only: true`、`execution_wake: true`。
 补填只修已确认完成的返回；窄唤醒只解释同一原受管调用的已核验终态并完成返回，
-不授权新实验、训练、失败任务续跑、`WorkRepairRequired` 科学修复或 W fragment。
+这两项窄权限本身不授权新实验、训练、失败任务续跑、`WorkRepairRequired` 科学修复或 W fragment。
+新标准配置另有上文的独立 `automatic_recovery` 许可，可在原边界内续接提前停止、临时故障
+和 completed 但科学交付不足的原任务；不借 `output_only` 扩权。
 launcher 的绝对调用路径及其指向的原文件被冻结，保留符号链接调用语义。
 原 `CODEX_HOME`（未设置时为 `~/.codex`）仅在宿主私有策略中绑定，配置、认证和权限来源不变，
 不复制凭据；没有节点预算文件时，各角色软目标引用原全局 token/时间上限，不预扣或增加共享额度。
@@ -1021,6 +1041,8 @@ completed meter 且清理可确认的已知本地故障；缺 session/thread/met
 受管理执行按原 ID 恢复，不重发不确定提交；普通 shell 仍由角色判断 checkpoint，不承诺任意脚本幂等。
 
 本节的恢复边界由上述冻结策略、原件身份、累计用量和拒绝条件共同限定。源码审查与
-合成进程和零模型打包检查仅验证所选本地输运及拒绝路径；实际 Codex 同线程有效性、增量用量
-与权限尚未验证。零模型检查不能授予实际 native 恢复资格，也不证明任意科学工作能够
+合成进程和零模型打包检查仅验证所选本地输运及拒绝路径。本机实际 CLI 对合成 429/503
+已保留完整 JSON，并在同一空 home 用原 ID 续接至同一 loopback provider；永久 quota
+不续接。真实服务商的同线程推理恢复、增量用量与权限尚未验证。这些本地检查不能授予
+实际 native 恢复资格，也不证明任意科学工作能够
 安全续接。具体运行仍须保留原 attempt 记录、失败及未决限制，按该运行的实际证据判断。

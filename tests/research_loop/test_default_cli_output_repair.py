@@ -31,17 +31,23 @@ if not resume:
  session.write_text(json.dumps(dict(type='session_meta',payload=dict(id=thread,cwd=str(work))))+'\n')
  (work/'work/completed-observation').write_text('one retained observation')
 else:
- assert thread in args and 'Repair only your final response' in prompt
+ assert thread in args
+ if config['fault'].startswith('completed-') and not (config['fault']=='completed-missing-output' and (work/'work/launches').read_text().count('resume')==1):
+  assert 'Continue completing the current assigned task' in prompt and 'Repair only your final response' not in prompt
+ else:assert 'Repair only your final response' in prompt
  assert (work/'work/completed-observation').read_text()=='one retained observation'
 payload=dict(summary='Deterministic CLI transport',scientific_result='No scientific qualification is asserted.',
  limitations=['Only native communication is simulated.'],implementation_selection=None)
-nomination=config['fault'].startswith('nomination-')
+completed_work=config['fault'].startswith('completed-')
+nomination=config['fault'].startswith('nomination-') or completed_work
 if role=='H':
  payload.update(next_action='analyze',route_reason='Review retained evidence',search_plan=None)
  if config['fault']=='incomplete_w' or nomination:
   payload.update(next_action='experiment',search_plan=dict(scope='One declared fixture mechanism',
    commitments=[dict(label='Fixture mechanism',minimal_test='Read a bounded observation',existing_ref=None)],
    focus=dict(label=None,action='screen')))
+  if config['fault']=='completed-experiment':
+   payload['search_plan']['commitments'].append(dict(label='Second fixture mechanism',minimal_test='Produce a different bounded observation',existing_ref=None))
 elif role=='W':
  payload.update(stage_intent='review',mechanism_findings=None)
  task=json.loads((work/'science-task.json').read_text())
@@ -68,15 +74,39 @@ elif role=='W':
   locator=json.loads(locator_file.read_text())
   payload['mechanism_findings']=[dict(mechanism='Fixture mechanism',basis='observed',finding='One retained fixture observation; target suitability remains for A.')]
   value=dict(representatives=[dict(mechanism_ref=mechanisms[0]['mechanism_ref'],candidate=locator,reason='A retained model for this scientific mechanism.')],extras=[],gaps=[])
+  if config['fault']=='completed-experiment':
+   value['gaps']=[dict(mechanism_ref=row['mechanism_ref'],reason='No candidate suitability is asserted for the second bounded observation.') for row in mechanisms[1:]]
   if resume:
-   assert locator_file.is_file() and 'do not rerun or resubmit experiments' in prompt
+   assert locator_file.is_file()
+   if not completed_work:assert 'do not rerun or resubmit experiments' in prompt
    payload['candidate_nominations']=value
+  elif completed_work:payload['candidate_nominations']=value
   elif config['fault']=='nomination-extra':
    value['extras']=[dict(candidate=dict(call_id=locator['call_id'],artifact='artifacts/model-'+str(i)+'.bin'),reason='Distinct scientific alternative.') for i in (1,2,3)]
    payload['candidate_nominations']=value
   elif config['fault']=='nomination-locator':
    value['representatives'][0]['candidate']=dict(call_id='unregistered-call',artifact=locator['artifact'])
    payload['candidate_nominations']=value
+  if completed_work:
+   if not resume or config['fault']=='completed-repeat' or (config['fault']=='completed-missing-output' and (work/'work/launches').read_text().count('resume')==1):
+    payload['mechanism_findings']=None
+   if config['fault']=='completed-blocked':payload['mechanism_findings']=[dict(mechanism='Fixture mechanism',basis='blocked',finding='The task requires unavailable scientific input.')]
+   if config['fault']=='completed-decision':payload['stage_intent']='decision'
+   if config['fault']=='completed-unresolved':payload['mechanism_findings']='An explicit narrative partial finding.'
+   if config['fault']=='completed-experiment' and resume:
+    import subprocess
+    from scidiscovery.research_loop.worker_execution_bridge import SUBMISSION_DIRECTORY
+    second=work/'work/second-original-call.json';assert not second.exists()
+    directory=work/'experiments/second';directory.mkdir(parents=True)
+    script=work/'code/second.py'
+    script.write_text('from pathlib import Path\nPath("artifacts/analysis.txt").write_text("A different assigned bounded observation")\nPath("artifacts/result.json").write_text('+repr(json.dumps(dict(version=1,metrics=[],outputs=[dict(path='artifacts/analysis.txt')])))+')\n')
+    outcome=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.worker_execution_bridge',
+     '--submission-directory',str(work/SUBMISSION_DIRECTORY),'run','--experiment-dir',str(directory),
+     '--script',str(script),'--mechanism','Second fixture mechanism'],capture_output=True,text=True)
+    assert outcome.returncode==0,(outcome.stdout,outcome.stderr)
+    result=json.loads(outcome.stdout);assert result['status']=='known_success'
+    second.write_text(json.dumps(dict(call_id=result['call_id'])))
+    payload['mechanism_findings'].append(dict(mechanism='Second fixture mechanism',basis='observed',finding='A different retained assigned observation; scientific suitability remains for A.'))
 else:
  assert role=='A'
  payload.update(next_action='finish',route_reason='The measured scientific objective remains unresolved.',
@@ -89,18 +119,45 @@ else:
   mechanisms=json.loads((work/task['lineage']['indexes']['mechanisms']).read_text())
   payload['search_review']=dict(dispositions=[dict(mechanism_ref=mechanisms['mechanisms'][0]['mechanism_ref'],
    status='pending',reason='The W contribution lacks the requested scientific findings.')],next_focus=None)
-pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))
+if not (config['fault']=='completed-missing-output' and role=='W' and not resume):
+ pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))
 if (config['fault']!='unknown' and config['fault']!='nomination-unknown') or role=='H':
  print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=10,cached_input_tokens=3,output_tokens=4))),flush=True)
 raise SystemExit(7 if config['fault']=='failed' and role=='A' else 0)
 '''
 
 
-def cli(root,*arguments,env):
-    completed=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.cli',*arguments,
-        '--root',str(root)],env=env,capture_output=True,text=True,timeout=40)
+def cli(root,*arguments,env,trace_timeout=False):
+    entry=[sys.executable,'-m','scidiscovery.research_loop.cli']
+    if trace_timeout:
+        # The same CLI under a bounded diagnostic wrapper; no timeout increase.
+        entry=[sys.executable,'-c','''import runpy,sys,traceback
+from scidiscovery.research_loop import native
+original_wait=native.wait_native
+def traced_wait(*args,**kwargs):
+ try:return original_wait(*args,**kwargs)
+ except RuntimeError as error:
+  if type(error) is RuntimeError:traceback.print_exc(limit=40)
+  raise
+native.wait_native=traced_wait
+sys.argv=["scid-research",*sys.argv[1:]]
+runpy.run_module("scidiscovery.research_loop.cli",run_name="__main__")''']
+    try:
+        completed=subprocess.run([*entry,*arguments,'--root',str(root)],
+            env=env,capture_output=True,text=True,timeout=40)
+    except subprocess.TimeoutExpired as error:
+        stderr=error.stderr or b''
+        if isinstance(stderr,bytes):stderr=stderr.decode('utf-8',errors='replace')
+        print(nomination_diagnostic(root,dict(status='cli_timeout',stderr=stderr[-16384:]),fault='cli-timeout'))
+        raise
     # CLI permission/admission rejections remain structured JSON too.
-    assert completed.stdout.strip(),completed.stderr
+    if trace_timeout and completed.stderr:
+        print(nomination_diagnostic(root,dict(status='cli_host_trace',returncode=completed.returncode,
+            stderr=completed.stderr[-24576:]),fault='cli-host-trace'))
+    if not completed.stdout.strip():
+        print(nomination_diagnostic(root,dict(status='cli_empty_output',returncode=completed.returncode,
+            stderr=completed.stderr[-16384:]),fault='cli-empty-output'))
+    assert completed.stdout.strip(),(completed.returncode,completed.stderr)
     return json.loads(completed.stdout)
 
 
@@ -108,8 +165,21 @@ def nomination_diagnostic(root, result, *, fault, fragment=False):
     """Only the failing fake W's exact transport files, at most 128 KiB."""
     record=execution.origin(root,2)
     observed={}
-    for name,limit in (('native-outcome.json',32768),('native.stderr',49152),
-                       ('native.jsonl',16384),('runner.stderr',16384)):
+    for name,limit in (('native-outcome.json',8192),('native.stderr',8192),
+                       ('native.jsonl',4096),('runner.stderr',8192),
+                       ('checkpoint.json',4096),('stage-end.json',4096),
+                       ('continuations/001/native-outcome.json',8192),
+                       ('continuations/001/native.stderr',8192),
+                       ('continuations/001/native.jsonl',4096),
+                       ('continuations/001/runner.stderr',8192),
+                       ('continuations/001/checkpoint.json',4096),
+                       ('continuations/001/stage-end.json',4096),
+                       ('continuations/002/native-outcome.json',8192),
+                       ('continuations/002/native.stderr',8192),
+                       ('continuations/002/native.jsonl',4096),
+                       ('continuations/002/runner.stderr',8192),
+                       ('continuations/002/checkpoint.json',4096),
+                       ('continuations/002/stage-end.json',4096)):
         path=record/name
         if not path.is_file():
             observed[name]='missing'
@@ -117,6 +187,8 @@ def nomination_diagnostic(root, result, *, fault, fragment=False):
         with path.open('rb') as stream:
             stream.seek(max(0,path.stat().st_size-limit))
             observed[name]=stream.read(limit).decode('utf-8',errors='replace')
+    launches=c.workspace(root,2)/'work/launches'
+    if launches.is_file():observed['work/launches']=launches.read_bytes()[:4096].decode('utf-8',errors='replace')
     # Explicitly authorized node-002 host diagnostics only: one directory level,
     # four entries at most. These stay in the test failure log, never science.
     directory=root/'host-runtime/experiment-control/002/execution-diagnostics'
@@ -135,13 +207,13 @@ def nomination_diagnostic(root, result, *, fault, fragment=False):
     return rendered
 
 
-def prepare_cli(tmp_path,*,fault='missing',custom=False,explicit_false=False,final=False,fragment=False):
+def prepare_cli(tmp_path,*,fault='missing',custom=False,explicit_false=False,final=False,fragment=False,automatic=None,max_tokens=None):
     public=tmp_path/'public';public.mkdir();objective=public/'objective.md';objective.write_text('Retain scientific uncertainty.')
     home=tmp_path/'inherited-home';home.mkdir()
     configuration='[sandbox_workspace_write]\nnetwork_access=true\nexclude_tmpdir_env_var=true\n'
     (home/'config.toml').write_text(configuration);(home/'auth.json').write_text('{"fixture":"private authentication marker"}')
     program=tmp_path/'native.py'
-    if fault.startswith('nomination-'):
+    if fault.startswith(('nomination-','completed-')):
         # The model wire is fake; managed local execution still needs the real
         # sandbox auxiliary from the selected native installation, as in the
         # existing default-local transport fixture.
@@ -160,21 +232,23 @@ def prepare_cli(tmp_path,*,fault='missing',custom=False,explicit_false=False,fin
     source=str(Path(__file__).resolve().parents[2]/'src')
     env['PYTHONPATH']=source+os.pathsep+env.get('PYTHONPATH','')
     root=tmp_path/'instance';search=tmp_path/'search.json'
-    c.write(search,dict(search_contract.DEFAULT_POLICY,initial_calls=1) if fault=='incomplete_w' or fault.startswith('nomination-') else None)
-    launcher=[sys.executable,str(program)] if custom else [str(binary/'codex') if explicit_false or fragment else 'codex']
+    c.write(search,dict(search_contract.DEFAULT_POLICY,initial_calls=1) if fault=='incomplete_w' or fault.startswith(('nomination-','completed-')) else None)
+    launcher=[sys.executable,str(program)] if custom else [str(binary/'codex') if explicit_false or fragment or automatic is not None else 'codex']
     arguments=['prepare','--objective',str(objective),'--public-root',str(public),
         '--native-launcher-json',json.dumps(launcher),
-        '--max-tokens','1' if final else '1000','--max-seconds','60','--max-steps','1' if final else '6',
+        '--max-tokens',str(max_tokens) if max_tokens is not None else '1' if final else '1000','--max-seconds','60','--max-steps','1' if final else '6',
         '--search-policy',str(search)]
     if explicit_false:
         policy=tmp_path/'resume.json';c.write(policy,dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn',output_repair=False))
         nodes=tmp_path/'nodes.json';c.write(nodes,{role:dict(max_observed_tokens=1000,max_seconds=60) for role in 'HWAE'})
         arguments+=['--worker-resume-policy',str(policy),'--node-budget-policy',str(nodes)]
-    if fragment:
+    if fragment or automatic is not None:
         policy=tmp_path/'resume.json';c.write(policy,dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn',
-            output_repair=True,output_only=True,native_home=str(home)))
+            output_repair=True,output_only=True,native_home=str(home),
+            **(dict(automatic_recovery=automatic) if automatic is not None else {})))
         nodes=tmp_path/'nodes.json';c.write(nodes,{role:dict(max_observed_tokens=1000,max_seconds=60) for role in 'HWAE'})
-        arguments+=['--worker-resume-policy',str(policy),'--node-budget-policy',str(nodes),'--worker-context','same_session']
+        arguments+=['--worker-resume-policy',str(policy),'--node-budget-policy',str(nodes)]
+        if fragment:arguments+=['--worker-context','same_session']
     prepared=cli(root,*arguments,env=env)
     assert prepared['status']=='prepared',prepared
     return root,home,env
@@ -253,8 +327,8 @@ def test_default_cli_policy_cannot_authorize_scientific_work_repair(tmp_path):
         'native-process.json','native-outcome.json','result-identity.json','continuations'))
 
 
-def test_default_cli_incomplete_w_retains_partial_exit_and_reaches_a(tmp_path):
-    root,_,env=prepare_cli(tmp_path,fault='incomplete_w')
+def test_disabled_automatic_cli_incomplete_w_retains_partial_exit_and_reaches_a(tmp_path):
+    root,_,env=prepare_cli(tmp_path,fault='incomplete_w',automatic=dict(enabled=False))
     result=cli(root,'run',env=env)
     assert result['status']=='finish',result
     job=c.read(root/'jobs/002.json');record=execution.origin(root,2)

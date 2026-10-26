@@ -270,6 +270,36 @@ def test_dashboard_preserves_ordinary_applied_notice(tmp_path, kind):
     assert '本次控制请求已停止推进' not in page
 
 
+@pytest.mark.parametrize('reason, explanation', [
+    ('Original closeout native failed; explicit worker-resume required for the same original task',
+     '原收尾任务已失败，未自动重试'),
+    ('Original closeout native execution is unknown; reconcile the same original without replay',
+     '原收尾任务的完成状态尚未核实'),
+    ('worker_fragment_checkpoint_unavailable', '原 W 片段的 checkpoint 缺失'),
+    ('/private/native-home/token-value', None),
+])
+def test_closeout_stop_notice_keeps_same_original_guidance_and_hides_raw_reason(tmp_path, reason, explanation):
+    from scidiscovery.research_loop import contracts as c
+    root, key = prepare(tmp_path, enabled=False)
+    operation_id = 'd' * 32
+    c.write(root / 'host-control/operations' / (operation_id + '.json'), dict(
+        operation_id=operation_id, kind='controller', sequence=1, status='applied',
+        result=dict(status='closeout_native_unsealed', reason=reason, attempt_step=3)))
+    ui, cookie = session(root, key)
+    page = ui.get('/', host=ui.host, cookie=cookie)[1].decode()
+    live = ui._live_snapshot(ui._browser(cookie), '', force=True)['fragments']['live-hero']
+    for shown in (page, live):
+        assert 'closeout_native_unsealed' in shown and '请核对同一原任务，勿重复提交' in shown
+        assert '原任务步骤：3' in shown
+        assert reason not in shown and '原任务输出暂无法修复' not in shown
+        if explanation:
+            assert explanation in shown
+        else:
+            assert '停止说明：' not in shown
+        if 'failed;' in reason:
+            assert 'worker-resume' in shown and '原权限与预算核验' in shown
+
+
 def test_continue_delegates_to_detached_owner_and_pause_remains_immediate(tmp_path, monkeypatch):
     root, key = prepare(tmp_path, enabled=False)
     ui, cookie = session(root, key)

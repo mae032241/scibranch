@@ -887,12 +887,16 @@ def original_configuration(config,call_id):
         return config
     attempt=accepted.get('native_attempt')
     if (not isinstance(attempt,dict) or set(attempt)!={'number','execution_key'}
-            or type(attempt.get('number')) is not int or not 0<=attempt['number']<10000
-            or not isinstance(attempt.get('execution_key'),str)
-            or not re.fullmatch('[0-9a-f]{64}',attempt['execution_key'])):
+            or type(attempt.get('number')) is not int or not 0<=attempt['number']<10000):
         raise IntegrityError('Original execution native attempt is unavailable')
-    from . import experiment_client
+    from . import experiment_client, execution, contracts as c
     root=experiment_client.root_for_configuration(config)
+    step=config['scope']['step']
+    intents=list(execution.accepted_intents(root,step))
+    number=attempt['number']
+    if (number>=len(intents) or attempt['execution_key']!=c.record_ref(
+            root/'jobs'/f'{step:03d}.json' if number==0 else intents[number][0]/'native-intent.json')):
+        raise IntegrityError('Original execution native attempt differs from its exact accepted intent')
     path=root/'host-runtime/experiment-control'/f'{config["scope"]["step"]:03d}'/'interfaces'/f'{attempt["number"]:03d}.json'
     original=json.loads(read(path))
     if (original.get('scope')!=config['scope'] or original.get('record_dir')!=config['record_dir']

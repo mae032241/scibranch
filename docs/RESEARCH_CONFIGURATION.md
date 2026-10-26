@@ -169,7 +169,7 @@ CLI 的既有 `--worker-resume-policy /absolute/resume.json` 在完整恢复对�
 | Field / 字段 | Default / 默认 | Meaning / 含义 |
 | --- | --- | --- |
 | `enabled` | `true` | Independent recovery permission; boolean. / 独立自动接续许可，布尔值。 |
-| `max_continues` | `2` | Cumulative same-task early-stop continuations; integer 0–100. / 同一任务提前停止后的累计接续次数，整数 0–100。 |
+| `max_continues` | `2` | Cumulative same-task early-stop or incomplete-W continuations; integer 0–100. / 同一任务提前停止或 W 交付不足的累计接续次数，整数 0–100。 |
 | `max_retries` | `3` | Cumulative same-task transient-service retries; integer 0–100. / 同一任务临时服务故障的累计重试次数，整数 0–100。 |
 | `initial_backoff_seconds` | `30` | Initial finite nonnegative service backoff. / 首次有限非负服务退避秒数。 |
 | `max_backoff_seconds` | `300` | Finite nonnegative per-backoff limit. / 每次退避的有限非负秒数上限。 |
@@ -200,21 +200,49 @@ insufficient. Permanent auth/quota/configuration errors and unclassified failure
 stop. Native failure messages support the exact observed 429 retry-limit and quota
 texts, plus the anchored 503 HTTP envelope with a bounded single-line body and URL.
 These translations were checked using the installed Codex CLI against synthetic
-loopback HTTP responses; they do not establish recovery from a real provider outage.
+loopback HTTP responses. Their full JSON streams show `thread.started` and
+`turn.started` before the failures. For temporary 429/503, exact-ID `exec resume`
+in that same empty Codex home reuses the original thread and reaches the loopback
+provider again without Authorization; permanent quota is not resumed. Existing-session
+retry does not require a `not_accepted` field. That evidence is not successful
+real-provider reasoning recovery, usage coverage or native permission qualification;
+a missing-session startup retry still requires explicit non-acceptance evidence.
 Other message-only errors and unrecognized CLI formats remain unknown; ordinary
 agent/tool text is never classified for retry. Permanent quota evidence takes
 precedence over a generic 429 or capacity signal.
 Known completed turns with missing or invalid required output use existing finite
 output repair; legal fragments retain their existing continuation semantics.
+A completed W screen return with valid required JSON may separately continue the
+original full W task when its exact `work-evidence.json` assessment is `incomplete`.
+This uses the independent automatic permission, original session and exact response,
+outcome and evidence bindings, and shares `max_continues` with early-stop recovery.
+Pure formatting and nomination omissions use output repair; that permission alone
+does not authorize scientific work. A repaired valid response can independently
+qualify for work continuation. Valid partial findings, explicit blocks and decision
+handoffs keep their existing route to A. Complete or inapplicable delivery adds no
+recovery action. An enforced host review keeps its existing priority. Exhausting the
+automatic continue cap or the original budget records a verified partial exit rather
+than inventing completed findings or refunding consumption.
 
 恢复依据原生结构化失败字段及窄匹配的原生失败信封：明确未完成的提前停止可续接原 session，
 明确临时限流、容量、连接或服务故障可重试原 session。启动重试必须有原生证据明确证明原请求未被接受，不能凭
 缺 session 身份推断。永久认证、配额、配置错误及无法分类的失败明确停止；原生失败 message
 只额外支持已观察到的 429 retry-limit 与 quota 完整文本，以及具有有界单行正文和 URL 的
 锚定 503 HTTP 信封。这些翻译已用本机安装的 Codex CLI 连接合成 loopback HTTP 响应核对，
-不证明真实服务商故障已恢复。其他 message-only 错误及未知 CLI 格式保持 unknown，不扫描
+完整 JSON 显示失败前已有 `thread.started`、`turn.started`；临时 429/503 在同一空
+Codex home 用精确 ID 执行 `exec resume`，仍沿用原 thread 并再次到达 loopback provider，
+全部请求均无 Authorization；永久 quota 不续接。既有 session 重试不要求 `not_accepted`
+字段；这未证明真实服务商推理恢复、用量覆盖或原生权限资格，无 session 启动重试仍须
+明确未接受证据。其他 message-only 错误及未知 CLI 格式保持 unknown，不扫描
 普通 agent/tool 正文来决定重试；永久 quota 证据优先于泛化的 429 或容量信号。
 已知完成 turn 缺少或给出无效必需输出时，走既有有限输出补填；合法 fragment 保持既有阶段接续语义。
+已完成 W screen 返回的必需 JSON 合法，但精确 `work-evidence.json` 判定仍为 `incomplete` 时，
+可依靠独立自动许可续接原 W 完整任务；沿用原 session，绑定原返回、outcome 和证据快照，
+与提前停止共用 `max_continues`。单纯格式和提名声明缺失走输出补填，该许可本身不授权科学续工；
+补成合法返回后可另行符合独立续工条件。有效 partial、明确障碍和 decision 交接仍沿原路交 A；
+完整或不适用的交付判定不追加恢复动作。
+强制 host review 仍优先沿原路交 A。continue 次数或原预算耗尽记录可核验的 partial 出口，
+不虚构已完成 finding，不退还已用预算。
 
 Both counters and cumulative wait belong to the original task's attempt chain;
 progress, restarts and configuration revisions do not reset them. The existing
@@ -223,7 +251,10 @@ attempt, counters, actual wait and UTC next-attempt time. Downtime and idle time
 without a controller add no service wait; an unmeasured crash tail stays uncertain.
 An elapsed UTC deadline only permits re-arbitration under the original budget,
 identity and permission gates. Pause stops service waiting without launching a
-replacement. The webpage shows recovery reason, scope, next attempt, separate
+replacement. Each wait takes one fresh budget snapshot and maintains the shared-time
+deadline locally using the original active/elapsed clock basis. It still checks pause
+each second, measures service wait monotonically and performs fresh launch admission.
+The webpage shows recovery reason, scope, next attempt, separate
 counts, accumulated wait and limitations; service waiting is not scientific failure.
 Server retry hints are not shortened to bypass a bound: a hint exceeding the
 per-backoff limit or remaining cumulative wait stops recovery.
@@ -232,7 +263,9 @@ per-backoff limit or remaining cumulative wait stops recovery.
 writer 用单调时间等待，持久保存原因、原 attempt、分别计数、实际等待及 UTC 下次尝试时间。
 停机与没有 controller 的空闲不新增服务等待，崩溃时未测尾段不伪造精确计量。UTC 到期只获得
 在原预算、身份和权限门槛下重新仲裁的资格。暂停会停止服务等待，不启动替代工作。网页显示
-原因、范围、下次尝试、分别计数、累计等待及限制；服务等待不表示科学失败。
+原因、范围、下次尝试、分别计数、累计等待及限制；服务等待不表示科学失败。每次等待只取一次
+新预算快照，按原 active/elapsed 时钟口径本地维护共享时间截止；仍每秒检查暂停、用单调时间
+计服务等待，并在启动前重新准入。
 服务端 retry hint 超过单次退避上限或累计剩余等待时停止恢复，不截短提示来绕过上限。
 
 Live or unresolved native processes and running/unknown managed calls prevent a
@@ -240,13 +273,17 @@ replacement native attempt; use the existing original-call reconciliation paths.
 Recovery never resubmits unknown external work or refunds consumption. Formal
 completion and explicit waits retain their existing boundaries. Automatic recovery
 is disabled for protected FINAL/closeout; their existing output-repair and completion
-policies remain binding.
+policies remain binding. Failed or unknown closeout originals remain unsealed with
+a specific same-original recovery diagnostic; unavailable fragment continuation or
+output repair retains its own reason, without acquiring automatic work permission.
 No background recovery runs without a controller. This configuration changes no
 required scientific output or protocol version and adds no general clock repair.
 
 原 native 仍存活或身份未核清、受管调用 running/unknown 时不启动替代 native；须用既有原调用
 核对入口。恢复不重新提交未知外部工作、不退款。正式完成和显式等待保留原边界；protected
-FINAL/closeout 禁用自动接续，原输出补填及完成策略继续有效。没有 controller 就不自行后台执行。
+FINAL/closeout 禁用自动接续，原输出补填及完成策略继续有效。失败或未知收口原任务保持未封存，
+给出核对同一原件的明确诊断；fragment 续接或输出补填不可用保留准确原因，不新增自动续工许可。
+没有 controller 就不自行后台执行。
 本配置不新增必填科学输出或提升协议，也不提供通用科学预算时钟修复。
 
 ## Declared projects / 声明工程

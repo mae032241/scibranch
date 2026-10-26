@@ -343,7 +343,7 @@ def test_default_controller_recovers_one_exact_session_and_keeps_attempt_chain(t
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('status,code', [(429,'rate_limit_exceeded'),(429,'insufficient_quota'),(503,'server_overloaded')])
 def test_installed_codex_http_failure_conformance(tmp_path, status, code):
-    """Actual installed CLI, isolated loopback provider, no authentication/API."""
+    """Actual CLI JSON and exact-session failure resume, isolated from real API/auth."""
     import json
     import os
     import shutil
@@ -353,11 +353,12 @@ def test_installed_codex_http_failure_conformance(tmp_path, status, code):
     program = shutil.which('codex')
     if program is None:pytest.skip('Installed Codex CLI is unavailable')
     requests = []
+    current_launch = 'original'
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
-            requests.append(dict(method='POST',path=self.path,has_authorization=self.headers.get('Authorization') is not None))
-            assert body and self.path == '/v1/responses'
+            requests.append(dict(launch=current_launch,method='POST',path=self.path,
+                has_body=bool(body),has_authorization=self.headers.get('Authorization') is not None))
             encoded = json.dumps(dict(error=dict(code=code, type=code, message='Deterministic loopback native failure.'))).encode()
             self.send_response(status)
             self.send_header('Content-Type','application/json')
@@ -383,32 +384,92 @@ def test_installed_codex_http_failure_conformance(tmp_path, status, code):
     for key,value in configuration.items():args.extend(['-c',key+'='+json.dumps(value)])
     args.append('-')
     env = {key:value for key,value in os.environ.items()
-        if key not in {'OPENAI_API_KEY','CODEX_API_KEY','OPENAI_BASE_URL','OPENAI_ORG_ID','OPENAI_PROJECT_ID'}}
+        if not key.startswith('OPENAI_') and key != 'CODEX_API_KEY'}
     env['CODEX_HOME'] = str(home)
-    try:
-        completed = subprocess.run(args,input='Return a bounded fixture answer.\n',env=env,
+    launches = []
+    def invoke(command, operation, requested_thread=None):
+        nonlocal current_launch
+        current_launch = operation
+        completed = subprocess.run(command,input='Return a bounded fixture answer.\n',env=env,
             cwd=workspace,capture_output=True,text=True,timeout=25)
+        # Keep every native JSON event, including thread.started and turn.started.
+        # Earlier samples filtered these out and cannot establish session absence.
+        events, non_json_stdout = [], []
+        for line in completed.stdout.splitlines():
+            try:value = json.loads(line)
+            except ValueError:
+                non_json_stdout.append(line)
+                continue
+            events.append(value)
+        failures = [projected for event in events
+            if (projected := recovery.classify(event)) is not None]
+        failure = recovery.combine(failures)
+        thread_ids = [event['thread_id'] for event in events if isinstance(event,dict)
+            and event.get('type') == 'thread.started' and isinstance(event.get('thread_id'),str)]
+        terminal = any(isinstance(event,dict) and event.get('type') == 'turn.completed' for event in events)
+        activity = any(isinstance(event,dict) and backends.Codex(dict(native_launcher_argv=[program])).event(event).get('activity')
+            for event in events)
+        unique_threads = list(dict.fromkeys(thread_ids))
+        observed_thread = unique_threads[0] if len(unique_threads) == 1 else None
+        decision = recovery.decision(dict(terminal_observed=terminal,thread_id=observed_thread,native_failure=failure),
+            recovery.policy({}),dict(continues=0,retries=0,wait_seconds=0.),
+            session_available=observed_thread is not None,activity_observed=activity)
+        row = dict(operation=operation,requested_thread_id=requested_thread,returncode=completed.returncode,
+            events=events,non_json_stdout=non_json_stdout,stderr=completed.stderr,thread_ids=thread_ids,
+            observed_thread_id=observed_thread,native_failure=failure,native_failure_decision=decision,
+            requests=[row for row in requests if row['launch'] == operation])
+        launches.append(row)
+        return row
+    try:
+        original = invoke(args,'original')
+        original_thread = original['observed_thread_id']
+        if code != 'insufficient_quota' and original_thread is not None:
+            # Let the actual CLI resolve exactly its own ID in this same empty
+            # home. Do not enumerate session files or synthesize session proof.
+            schema = tmp_path / 'resume-schema.json'
+            schema.write_text(json.dumps(dict(type='object',properties=dict(answer=dict(type='string')),
+                required=['answer'],additionalProperties=False)))
+            backend = backends.Codex(dict(native_launcher_argv=[program],native_options=dict(workspace='read-only')))
+            resume_args, _ = backend.resume(args,dict(model='fixture-model'),workspace,
+                tmp_path / 'resume-output.json',schema,dict(thread_id=original_thread))
+            invoke(resume_args,'resume',original_thread)
     finally:
         server.shutdown();server.server_close();thread.join(timeout=2)
-    events = []
-    for line in completed.stdout.splitlines():
-        try:value = json.loads(line)
-        except ValueError:continue
-        if isinstance(value,dict) and value.get('type') in {'error','turn.failed'}:events.append(value)
-    sample = dict(status=status,code=code,returncode=completed.returncode,events=events,requests=requests)
+    sample = dict(status=status,code=code,returncode=original['returncode'],events=original['events'],
+        launches=launches,requests=requests,session_observation=(
+            'exact_thread_resume_attempted' if len(launches) == 2 else
+            'permanent_failure_not_resumed' if code == 'insufficient_quota' else 'thread_not_observed'),
+        limitation='Synthetic loopback failures only; no real provider recovery, model work, or usage qualification.')
     encoded_sample = json.dumps(sample,ensure_ascii=False,indent=2)+'\n'
-    (tmp_path / 'native-failure-sample.json').write_text(encoded_sample)
     if os.environ.get('SCID_TEST_LOG_DIR'):
         from pathlib import Path
         destination = Path(os.environ['SCID_TEST_LOG_DIR'])
         destination.mkdir(parents=True,exist_ok=True)
         (destination / f'codex-http-{status}-{code}.json').write_text(encoded_sample)
     print('CODEX_HTTP_CONFORMANCE ' + json.dumps(sample,ensure_ascii=False))
-    assert requests, (completed.returncode,completed.stdout,completed.stderr)
+    assert requests
+    assert all(row['has_body'] and row['path'] == '/v1/responses' for row in requests)
     assert all(not row['has_authorization'] for row in requests)
-    assert completed.returncode != 0 and events, (completed.stdout,completed.stderr)
     expected = 'permanent' if code == 'insufficient_quota' else 'temporary'
-    assert recovery.combine([recovery.classify(event) for event in events])['category'] == expected
+    for launch in launches:
+        assert launch['returncode'] != 0 and launch['native_failure'], launch
+        assert launch['native_failure']['category'] == expected, launch
+        assert launch['requests'], launch
+        assert not launch['non_json_stdout'], launch
+    if code == 'insufficient_quota':
+        assert len(launches) == 1
+        assert original['native_failure_decision']['reason'] == 'automatic_recovery_permanent_failure'
+    elif original['observed_thread_id'] is not None:
+        resumed = launches[1]
+        assert resumed['requested_thread_id'] == original['observed_thread_id']
+        assert resumed['observed_thread_id'] == original['observed_thread_id'], resumed
+        assert original['native_failure_decision']['action'] == resumed['native_failure_decision']['action'] == 'retry'
+        assert not original['native_failure_decision']['startup_retry']
+        assert not resumed['native_failure_decision']['startup_retry']
+    else:
+        assert len(launches) == 1
+        assert original['native_failure']['not_accepted'] is False
+        assert original['native_failure_decision']['reason'] == 'automatic_recovery_session_unavailable'
 
 
 @pytest.mark.process_e2e
