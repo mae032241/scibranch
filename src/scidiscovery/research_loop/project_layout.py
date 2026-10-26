@@ -299,14 +299,16 @@ def verify_base(project, *, context=None, exclude=()):
         pass
 
 
-def files(project, *, context=None, exclude=()):
-    """Return exact tracked source rows for initial code seeds, without hashing."""
+def _files(project, *, context, exclude, editable_only):
+    project = _frozen(project)
     exclude = tuple(exclude)
     result = []
     with _base_view(project, context=context, exclude=exclude) as (root, tree, deadline):
         for name, (mode, object_id) in tree.items():
             deadline.remaining_seconds()
             if any(name == item or name.startswith(item + '/') for item in exclude):
+                continue
+            if editable_only and not any(name.startswith(item + '/') for item in project['editable']):
                 continue
             result.append(_source(root, name, mode, object_id))
         # Catch ordinary source/parent replacements while building this seed view.
@@ -316,6 +318,34 @@ def files(project, *, context=None, exclude=()):
             if _signature(row['source'].lstat()) != row['signature']:
                 raise ValueError('Project tracked file changed during verification: ' + row['relative'])
     return result
+
+
+def files(project, *, context=None, exclude=()):
+    """Return exact tracked source rows without opening or hashing file bytes."""
+    return _files(project, context=context, exclude=exclude, editable_only=False)
+
+
+def seed_files(project, *, context=None):
+    """Stat only tracked editable files for the initial writable code draft."""
+    return _files(project, context=context, exclude=(), editable_only=True)
+
+
+def seed_directories(project, records, *, context=None):
+    """Check fixed code limits and return all directories in the draft seed."""
+    from . import code_versions
+    from .storage_policy import Inventory
+    directories = {parent.as_posix() for row in records for parent in Path(row['relative']).parents
+                   if str(parent) != '.'}
+    for name in project['editable']:
+        directories.add(name)
+        directories.update(parent.as_posix() for parent in Path(name).parents if str(parent) != '.')
+    inventory = Inventory(code_versions._limits(None), context=context)
+    for _ in directories:
+        inventory.entry()
+    for row in records:
+        inventory.entry()
+        inventory.file(row['signature'][3])
+    return directories
 
 
 def prepare(value, *, protected, existing=None, context=None):
@@ -352,7 +382,8 @@ def prepare(value, *, protected, existing=None, context=None):
                 if parent.exists() or parent.is_symlink():
                     _lineage(parent)
                     break
-    verify_base(frozen, context=context)
+    records = seed_files(frozen, context=context)
+    seed_directories(frozen, records, context=context)
     return frozen
 
 

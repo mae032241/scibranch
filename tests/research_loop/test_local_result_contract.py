@@ -1,6 +1,9 @@
 """Optional local declarations preserve science without qualifying it."""
 import copy
 import json
+import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import jsonschema
 import pytest
@@ -223,6 +226,52 @@ def test_unreadable_json_has_fixed_bounded_detail(tmp_path):
     original=dict(result,detail='字'*512,private_control=dict(path='/private/control'))
     public=e._run_view(dict(result=original))['result']
     assert len(public['detail'].encode())<=512 and 'private_control' not in public
+
+
+@pytest.mark.parametrize('output_kind',['mutable_alias','frozen_alias','exclusive'])
+def test_code_version_completion_checks_all_mutable_aliases_before_sealing(tmp_path,monkeypatch,output_kind):
+    from scidiscovery.research_loop import experiment_client, local_experiments
+    directory=tmp_path/'call';directory.mkdir()
+    artifacts=tmp_path/'artifacts';artifacts.mkdir()
+    for name in ('accepted.json','process.json','stdout.raw','stderr.raw'):
+        (directory/name).write_text('{}')
+    (directory/'terminal.json').write_text(json.dumps(dict(wall_seconds=1)))
+    script=tmp_path/'source.py';script.write_text('pass')
+    first=artifacts/'a-first.bin';first.write_bytes(b'first');first.chmod(0o640)
+    model=artifacts/'z-model.bin';model.write_bytes(b'model');model.chmod(0o640)
+    value=declaration();value['outputs'][0]['path']='artifacts/z-model.bin'
+    value['candidates'][0]['artifact']='artifacts/z-model.bin'
+    (artifacts/'result.json').write_text(json.dumps(value));(artifacts/'result.json').chmod(0o640)
+    alias=tmp_path/'model-alias'
+    if output_kind!='exclusive':os.link(model,alias)
+    if output_kind=='frozen_alias':model.chmod(0o400)
+    before={path:path.stat().st_mode for path in artifacts.iterdir()}
+    backend=LocalExecution.__new__(LocalExecution)
+    backend.config=dict(max_seconds=10)
+    backend.records=SimpleNamespace(root=tmp_path)
+    monkeypatch.setattr(e,'_code_version_binding',lambda *args:tmp_path)
+    monkeypatch.setattr(e,'_code_export_entry',lambda *args:None)
+    monkeypatch.setattr(experiment_client,'root_for_configuration',lambda *args,**kwargs:None)
+    monkeypatch.setattr(local_experiments,'artifact_directory',lambda *args:artifacts)
+    accepted=dict(call_id='call',scope=dict(step=2),script=e.proof(script),code_version={},
+        parent={},local_observation_version=1,experiment_directory=str(tmp_path))
+    completed=backend.completion(directory,accepted,0,True,True)
+    assert completed['status']=='known_success' and completed['returncode']==0
+    if output_kind=='mutable_alias':
+        assert completed['result']['status']=='unavailable'
+        assert completed['result']['diagnostic']=='managed_output_invalid'
+        assert completed['outputs']==[]
+        assert generic_results.candidates([observed(completed['result'])])==[]
+        assert all(path.stat().st_mode==mode for path,mode in before.items())
+        assert alias.stat().st_mode==before[model]
+    else:
+        assert completed['result']['status']=='available'
+        assert completed['result']['candidates']==value['candidates']
+        assert all(path.stat().st_mode&0o777==0o400 for path in before)
+        retained=next(row for row in completed['outputs'] if row['name']=='z-model.bin')
+        assert Path(retained['path']).samefile(model) and retained['path']==str(model)
+        if output_kind=='frozen_alias':assert alias.samefile(model)
+    assert first.read_bytes()==b'first' and model.read_bytes()==b'model'
 
 
 @pytest.mark.process_e2e

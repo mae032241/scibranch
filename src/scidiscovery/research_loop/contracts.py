@@ -742,7 +742,7 @@ def collect_materials(root: Path, step: int):
     job=read(regular(root/'jobs'/f'{step:03d}.json'))
     policy = settings(root, job)
     work = workspace(root, step)
-    rows, total = [], 0
+    rows, mutable, total = [], [], 0
     from . import execution
     record=execution.record(root,step)
     from . import worker_delivery
@@ -771,7 +771,7 @@ def collect_materials(root: Path, step: int):
                 raise ValueError('Node deliverables must remain in their original owned workspace')
             if path.stat().st_nlink != 1:
                 raise ValueError(f'Mutable deliverable {relative!r} must not have hard-link aliases')
-            if path.stat().st_mode & 0o777 != 0o400:path.chmod(0o400)
+            mutable.append(path)
         elif path.stat().st_mode & 0o777 != 0o400:
             raise ValueError('Managed output has not been sealed by its stopped writer')
         rows.append(dict(source=str(path), original_source=str(path),
@@ -819,6 +819,11 @@ def collect_materials(root: Path, step: int):
                 add(root/item['path'],f'experiments/{call["call_id"]}/artifacts/{item["name"]}',source_kind='managed_frozen')
     if len({row['path'] for row in rows}) != len(rows):
         raise ValueError('Deliverable paths collide with nested experiment outputs')
+    # Inventory, budgets and all original bindings must be valid before the
+    # first permission change. IO failures in the sealing pass can still leave
+    # partially changed modes; this is not a filesystem transaction.
+    for path in mutable:
+        if path.stat().st_mode & 0o777 != 0o400:path.chmod(0o400)
     return sorted(rows, key=lambda row: row['path'])
 
 
@@ -949,17 +954,8 @@ def _seed_project_code(root, job, work, *, context):
             records=[dict(relative=name,source=export/name,signature=signature)
                 for name,signature in observed[0].items()]
         else:
-            records=[row for row in project_layout.files(project,context=context)
-                if any(row['relative'].startswith(name+'/') for name in project['editable'])]
-        directories={parent.as_posix() for row in records for parent in Path(row['relative']).parents
-            if str(parent)!='.'}
-        for name in project['editable']:
-            directories.add(name)
-            directories.update(parent.as_posix() for parent in Path(name).parents if str(parent)!='.')
-        inventory=storage.Inventory(policy,context=context)
-        for _ in directories:inventory.entry()
-        for row in records:
-            inventory.entry();inventory.file(row['signature'][3])
+            records=project_layout.seed_files(project,context=context)
+        directories=project_layout.seed_directories(project,records,context=context)
         actual=storage.Inventory(policy,context=context)
         stage=Path(tempfile.mkdtemp(prefix='.project-seed-',dir=work));created=[];created_directories=[]
         try:

@@ -186,3 +186,77 @@ def test_no_resume_or_node_budget_retains_partial_known_original_without_replace
 def experiments_calls(config):
     from scidiscovery.research_loop import experiments
     return experiments.Records(config).calls()
+
+
+@pytest.fixture
+def stopped_deliverables(tmp_path,monkeypatch):
+    root=tmp_path/'instance';(root/'jobs').mkdir(parents=True)
+    c.write(root/'jobs/001.json',dict(role='H'))
+    work=root/'work';(work/'artifacts').mkdir(parents=True)
+    record=root/'record';record.mkdir()
+    policy={}
+    monkeypatch.setattr(c,'settings',lambda *args:policy)
+    monkeypatch.setattr(c,'workspace',lambda *args:work)
+    monkeypatch.setattr(execution,'record',lambda *args:record)
+    monkeypatch.setattr(worker_delivery,'writers_stopped',lambda *args:None)
+    first=work/'artifacts/a-first.bin';first.write_bytes(b'first');first.chmod(0o640)
+    return root,work,first,policy
+
+
+@pytest.mark.parametrize('fault',['symlink','hardlink','item_budget','total_budget','nested_experiment'])
+def test_collect_materials_rejects_later_invalid_inventory_before_chmod(stopped_deliverables,fault):
+    root,work,first,policy=stopped_deliverables
+    later=work/'artifacts/z-later.bin'
+    if fault=='symlink':later.symlink_to(first)
+    elif fault=='hardlink':
+        later.write_bytes(b'later output');later.chmod(0o640)
+        os.link(later,root/'later-alias')
+    elif fault=='nested_experiment':(work/'experiments').symlink_to(work/'artifacts',target_is_directory=True)
+    else:
+        later.write_bytes(b'later output');later.chmod(0o640)
+        policy['max_output_item_bytes' if fault=='item_budget' else 'max_output_total_bytes']=len(b'first')
+    before=first.stat().st_mode
+    with pytest.raises(ValueError):c.collect_materials(root,1)
+    assert first.stat().st_mode==before and first.read_bytes()==b'first'
+    if fault in {'item_budget','total_budget'}:assert later.stat().st_mode&0o777==0o640
+
+
+def test_collect_materials_seals_original_paths_after_complete_inventory(stopped_deliverables):
+    root,work,first,policy=stopped_deliverables
+    conclusion=work/'experiments/one/conclusion.md';conclusion.parent.mkdir(parents=True)
+    conclusion.write_bytes(b'conclusion');conclusion.chmod(0o640)
+    identity={path:(path.stat().st_dev,path.stat().st_ino) for path in (first,conclusion)}
+    policy.update(max_output_item_bytes=10,max_output_total_bytes=15)
+    rows=c.collect_materials(root,1)
+    assert {row['path'] for row in rows}=={'inputs/parents/001/artifacts/a-first.bin',
+        'inputs/parents/001/artifacts/experiments/one/conclusion.md'}
+    assert {row['source'] for row in rows}=={str(first),str(conclusion)}
+    for path,original in identity.items():
+        assert path.stat().st_mode&0o777==0o400
+        assert (path.stat().st_dev,path.stat().st_ino)==original
+
+
+@pytest.mark.parametrize('managed_kind',['frozen_alias','collision','unavailable'])
+def test_collect_materials_validates_managed_outputs_before_mutable_seal(stopped_deliverables,monkeypatch,managed_kind):
+    from scidiscovery.research_loop import history
+    root,work,first,policy=stopped_deliverables
+    c.write(root/'jobs/001.json',dict(role='W'))
+    managed=root/'retained.bin';managed.write_bytes(b'retained');managed.chmod(0o400)
+    os.link(managed,root/'retained-alias')
+    monkeypatch.setattr(history,'managed_calls',lambda *args:[dict(call_id='call',status='known_success')])
+    monkeypatch.setattr(history,'scientific_outputs',lambda *args:[dict(path='retained.bin',name='data.bin',
+        retention='unavailable' if managed_kind=='unavailable' else 'archived')])
+    if managed_kind=='collision':
+        duplicate=work/'artifacts/experiments/call/artifacts/data.bin'
+        duplicate.parent.mkdir(parents=True);duplicate.write_bytes(b'duplicate');duplicate.chmod(0o640)
+    before=first.stat().st_mode
+    if managed_kind=='frozen_alias':
+        rows=c.collect_materials(root,1)
+        assert first.stat().st_mode&0o777==0o400
+        assert any(row['source']==str(managed) for row in rows)
+        assert managed.samefile(root/'retained-alias')
+    else:
+        with pytest.raises(ValueError,match='collide|unavailable'):c.collect_materials(root,1)
+        assert first.stat().st_mode==before
+        if managed_kind=='collision':assert duplicate.stat().st_mode&0o777==0o640
+    assert managed.stat().st_mode&0o777==0o400 and managed.read_bytes()==b'retained'

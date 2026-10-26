@@ -1,5 +1,7 @@
 """Unified configuration uses real preparation validation without native calls."""
 import json
+import os
+import subprocess
 import sys
 
 import pytest
@@ -229,6 +231,29 @@ approval_secret_file = "private/operator.key"
     assert 'approval_secret_file' not in science
     assert 'operator.key' not in science
     assert job['native_profile']['model'] == research_config.DEFAULT_MODEL
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('command', ['config-check', 'prepare'])
+def test_cli_rejects_oversized_initial_editable_seed_before_instance_creation(tmp_path, capsys, command):
+    from scidiscovery.research_loop import code_versions
+    base = tmp_path / 'base'
+    (base / 'src').mkdir(parents=True)
+    with (base / 'src/main.py').open('wb') as stream:
+        stream.truncate(code_versions.DEFAULT_LIMITS['max_file_bytes'] + 1)
+    environment = dict(PATH=os.defpath, HOME=os.devnull, GIT_CONFIG_NOSYSTEM='1',
+        GIT_CONFIG_GLOBAL=os.devnull, GIT_AUTHOR_NAME='Test', GIT_AUTHOR_EMAIL='test@example.invalid',
+        GIT_COMMITTER_NAME='Test', GIT_COMMITTER_EMAIL='test@example.invalid', LC_ALL='C')
+    for arguments in [('init', '--quiet', '--template='), ('add', '--', 'src/main.py'),
+                      ('commit', '--quiet', '-m', 'oversized editable seed')]:
+        subprocess.run(['git', '-C', str(base), *arguments], env=environment,
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+    config = declaration(tmp_path, '\n[project]\nbase_root = ' + json.dumps(str(base)) + '\neditable = ["src"]\n')
+    original = config.read_bytes()
+    assert cli.main([command, '--config', str(config)]) == 1
+    assert 'max_file_bytes' in output(capsys)['error']
+    assert not (tmp_path / 'instance').exists()
+    assert config.read_bytes() == original
 
 
 def test_toml_and_existing_cli_flags_share_defaults(tmp_path, capsys):

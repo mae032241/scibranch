@@ -405,7 +405,15 @@ class LocalExecution:
                     context=context or storage.Deadline(self.config['max_seconds'])
                     artifacts=(artifact_directory(self.config,accepted['call_id']) if 'code_version' in accepted
                         else directory/'inputs/artifacts')
-                    for item in self.files(artifacts,policy=self.config.get('storage_policy'),context=context):
+                    files=self.files(artifacts,policy=self.config.get('storage_policy'),context=context)
+                    if 'code_version' in accepted:
+                        # Validate the complete mutable inventory before any
+                        # inode permission changes affect another path.
+                        for item in files:
+                            info=Path(item['path']).stat()
+                            if info.st_mode & 0o777 != 0o400 and info.st_nlink != 1:
+                                raise ValueError('Mutable Local output must not have hard-link aliases')
+                    for item in files:
                         source=Path(item['path'])
                         if 'code_version' in accepted:
                             # The original backend wrote this already-bound

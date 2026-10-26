@@ -271,7 +271,7 @@ def test_command_tcad_first_writes_node_science_and_keeps_controls_private(tmp_p
             downloads.append(payload['local_path'])
             result=dict(size_bytes=destination.stat().st_size)
         else:
-            assert operation=='get_archive' and destination.parent==private
+            assert operation=='get_archive' and destination.parent==private/'runs'/run
             assert not destination.is_relative_to(node)
             spools.append(destination)
             with tarfile.open(destination,mode='w',format=tarfile.USTAR_FORMAT) as archive:

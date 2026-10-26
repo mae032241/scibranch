@@ -648,7 +648,7 @@ class TCADManagedExecution:
         directory = self.records.directory(call)
         from scidiscovery.research_loop.local_experiments import artifact_directory
         node_outputs=artifact_directory(self.config,call)
-        retained = []
+        originals = []
         for item in outputs:
             original=_verify_descriptor(item,context)
             source=Path(item.local_path)
@@ -656,6 +656,17 @@ class TCADManagedExecution:
             # An adapter's external output descriptor is verified in place.
             if (source.is_relative_to(directory) or source.is_relative_to(self._stage(call))
                     or source.is_relative_to(node_outputs)):
+                info=source.stat()
+                if info.st_mode&0o777!=0o400 and info.st_nlink!=1:
+                    raise e.IntegrityError('Mutable TCAD output must not have hard-link aliases')
+                owned=True
+            else:
+                owned=False
+            originals.append((item,original,owned))
+        retained = []
+        for item,original,owned in originals:
+            source=Path(item.local_path)
+            if owned:
                 if source.stat().st_mode&0o777!=0o400:source.chmod(0o400)
                 if _proof(source,context)!=original:
                     raise e.IntegrityError('Stopped TCAD output changed during sealing')

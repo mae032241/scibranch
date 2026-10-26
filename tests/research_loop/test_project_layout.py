@@ -83,6 +83,20 @@ def test_existing_metadata_rejects_protected_alias_inside_base(tmp_path):
         layout.prepare(declaration, protected=[protected_alias], existing=frozen)
 
 
+@pytest.mark.parametrize('dimension', ['max_file_bytes', 'max_total_bytes', 'max_files', 'max_scan_entries'])
+def test_seed_inventory_shares_limits_and_counts_implicit_and_empty_directories(monkeypatch, dimension):
+    from scidiscovery.research_loop import code_versions
+    project = dict(editable=['src', 'tools', 'empty/deep'])
+    records = [dict(relative='src/nested/main.py', signature=(0, 0, 0, 7)),
+               dict(relative='tools/helper.py', signature=(0, 0, 0, 5))]
+    limits = dict(max_file_bytes=7, max_total_bytes=12, max_files=2, max_scan_entries=7)
+    monkeypatch.setattr(code_versions, 'DEFAULT_LIMITS', limits)
+    assert layout.seed_directories(project, records) == {'src', 'src/nested', 'tools', 'empty', 'empty/deep'}
+    monkeypatch.setattr(code_versions, 'DEFAULT_LIMITS', {**limits, dimension: limits[dimension] - 1})
+    with pytest.raises(StorageQuotaExceeded, match=dimension):
+        layout.seed_directories(project, records)
+
+
 def test_validate_code_preserves_legacy_file_and_project_boundaries():
     frozen = dict(base_root='/base', editable=['src', 'tools'], scratch=[], outputs=[],
                   base_identity=dict(object_format='sha1', commit='a' * 40))
@@ -228,6 +242,49 @@ def test_untracked_and_ignored_not_in_seed_rows(tmp_path, monkeypatch):
     frozen = layout.prepare(declaration, protected=[])
     assert {row['relative'] for row in layout.files(frozen)} == {
         'data.txt', 'src/main.py', 'tools/helper.py'}
+
+
+@pytest.mark.process_e2e
+def test_prepare_seed_ignores_large_readonly_and_untracked_files_without_python_reads(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import code_versions
+    declaration = project(tmp_path)
+    root = Path(declaration['base_root'])
+    oversized = code_versions.DEFAULT_LIMITS['max_file_bytes'] + 1
+    # Sparse, bounded files exercise the current limit without a large fixture.
+    paths = [root / name for name in ('data.txt', 'src/ignored.py', 'tools/untracked.py')]
+    for path in paths:
+        with path.open('wb') as stream:
+            stream.truncate(oversized)
+    (root / '.git/info').mkdir(exist_ok=True)
+    (root / '.git/info/exclude').write_text('src/ignored.py\n')
+    git(root, 'add', '--', 'data.txt')
+    git(root, 'commit', '--quiet', '-m', 'large readonly base file')
+    source = layout._source
+    original_open, original_path_open = os.open, Path.open
+    base_files = {*paths, root / 'src/main.py', root / 'tools/helper.py'}
+
+    def editable_source(base, name, *args):
+        assert name in {'src/main.py', 'tools/helper.py'}
+        return source(base, name, *args)
+
+    def no_source_open(path, *args, **kwargs):
+        assert not isinstance(path, (str, bytes, os.PathLike)) or Path(os.fsdecode(path)) not in base_files
+        return original_open(path, *args, **kwargs)
+
+    def no_source_path_open(path, *args, **kwargs):
+        assert path not in base_files
+        return original_path_open(path, *args, **kwargs)
+
+    def no_hash(*args, **kwargs):
+        raise AssertionError('Initial seed preflight must not hash base file bytes')
+
+    monkeypatch.setattr(layout, '_source', editable_source)
+    monkeypatch.setattr(os, 'open', no_source_open)
+    monkeypatch.setattr(Path, 'open', no_source_path_open)
+    monkeypatch.setattr(hashlib, 'new', no_hash)
+    frozen = layout.prepare(declaration, protected=[tmp_path / 'instance'])
+    assert {row['relative'] for row in layout.seed_files(frozen)} == {'src/main.py', 'tools/helper.py'}
+    assert not (tmp_path / 'instance').exists()
 
 
 @pytest.mark.process_e2e

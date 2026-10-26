@@ -230,8 +230,14 @@ shared base. Each local project run captures all editable roots in one directory
 exports retain the existing code quotas. All editable roots share fixed limits
 of 1 MiB per file, 50 MiB total, 4,096 files and 8,192 scan entries; `[project]`
 currently offers no override. These code-capture limits do not apply to the
-read-only base contents. Configuration checks and preparation may succeed before
-the first W draft seed exceeds a limit and prevents that node from starting.
+read-only base contents. For a new declared project, `config-check` and `prepare`
+preflight the initial tracked editable seed with file stat metadata and entry
+counts, including editable roots and implicit parent directories, and report limit
+violations during preparation. This quota preflight reads no file contents and
+does not scan untracked/ignored contents. Initial seed retains its limit checks;
+runtime capture checks all actual editable contents, including ordinary
+untracked/ignored entries. Later additions or larger files can still prevent a
+node or call from starting.
 
 W 编辑 `project/<editable>` 草稿，并映射到基础工程原路径。初始草稿只复制追踪的 editable
 代码，全部根共享现有代码额度。唯一明确选中的父 run 或 compiled implementation 提供准确
@@ -240,8 +246,11 @@ W 编辑 `project/<editable>` 草稿，并映射到基础工程原路径。初�
 基础工程。每次本地 project run 将全部 editable 根聚合为一个目录 `code_version`，只含
 声明代码路径；初始 seed、采集及导出继续受现有代码额度约束。全部 editable 根共享
 固定限制：每文件 1 MiB、总计 50 MiB、4096 个文件、8192 个扫描条目；当前 `[project]`
-没有覆盖项。只读 base 内容不受这些代码采集额度限制。配置检查和准备可能通过，但首次
-W 草稿 seed 超额仍会阻止该节点启动。
+没有覆盖项。只读 base 内容不受这些代码采集额度限制。对新声明工程，`config-check` 和
+`prepare` 用文件 stat 及条目计数预检初始 tracked editable seed，目录计数包含 editable
+根及隐含父目录，超额在准备时报告。预检不读取文件内容，也不扫描 untracked/ignored
+内容。首次 seed 仍检查额度；运行期采集检查全部实际 editable 内容，含 untracked/ignored
+普通条目。后续新增或变大的文件仍可能阻止节点或调用启动。
 
 There is no overlay filesystem. W can write only its declared editable, scratch
 and node-output targets in the base view; other roles see the read-only base, not

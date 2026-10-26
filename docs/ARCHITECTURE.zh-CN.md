@@ -206,8 +206,12 @@ W 与 run 的 dirty 检查排除 editable/scratch/outputs，只读角色排除 s
 
 工程草稿只暴露声明的 editable 代码。初始追踪代码 seed 与唯一选中的留存父 commit 使用
 [工程配置主合同](RESEARCH_CONFIGURATION.md#declared-projects--声明工程)中的固定共享代码额度，
-只读 base 内容不受这些额度限制。准备可能通过，但首次 W 草稿 seed 超额仍会阻止该节点
-启动。父选择有歧义或缺失时，说明回退到冻结基础代码。已有 job 保留当前草稿。
+只读 base 内容不受这些额度限制。对新声明工程，`config-check` 和 `prepare` 用文件 stat
+及条目计数预检初始 tracked editable seed，目录计数包含 editable 根及隐含父目录，
+超额在准备时报告。预检不读取文件内容，也不扫描 untracked/ignored 内容。首次 seed
+仍检查额度；运行期采集检查全部实际 editable 内容，含 untracked/ignored 普通条目。
+后续新增或变大的文件仍可能阻止节点或调用启动。
+父选择有歧义或缺失时，说明回退到冻结基础代码。已有 job 保留当前草稿。
 本地 project run 将全部 editable 根聚合为一个以 `project` 为根的 `code_version`，准确导出
 随后只读挂载，空根使用只读 tmpfs。scratch 根为临时 tmpfs；output 根按完整相对路径映射
 到原调用 artifacts。W 在基础视图中只可写准确 editable/scratch/节点输出目标；其他角色

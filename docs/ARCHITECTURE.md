@@ -316,10 +316,15 @@ consumption that needs them, not known terminal records or metadata-only queries
 Project draft exposure is limited to declared editable code. Initial tracked-code seed and a
 uniquely selected retained parent commit use the fixed shared code limits in the
 [project configuration contract](RESEARCH_CONFIGURATION.md#declared-projects--声明工程),
-which do not limit read-only base contents. Preparation can succeed before an
-over-limit first W draft seed prevents that node from starting. Ambiguous or absent
-parent selection reports a frozen-base fallback. Existing jobs keep their current
-drafts. A local project run captures all editable roots into one `code_version`
+which do not limit read-only base contents. For a new declared project, `config-check`
+and `prepare` preflight the initial tracked editable seed with file stat metadata and
+entry counts, including editable roots and implicit parent directories, and report
+limit violations during preparation. This quota preflight reads no file contents and does not scan
+untracked/ignored contents. Initial seed retains its limit checks; runtime capture
+checks all actual editable contents, including ordinary untracked/ignored entries.
+Later additions or larger files can still prevent a node or call from starting.
+Ambiguous or absent parent selection reports a frozen-base fallback. Existing jobs
+keep their current drafts. A local project run captures all editable roots into one `code_version`
 rooted at `project`, then mounts that exact export
 read-only; empty roots use read-only tmpfs. Scratch roots are temporary tmpfs and
 output roots map to the original call's artifacts with full relative paths.
