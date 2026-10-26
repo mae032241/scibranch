@@ -88,6 +88,16 @@ progress.meter{display:block;width:100%;height:8px;margin:8px 0 0;border:0;borde
 .compact-configuration .config-role-matrix input{padding:7px 8px;font-size:.8125rem}
 .compact-configuration .config-role-matrix .check-label{font-size:.8125rem;margin:5px 0 0}
 .compact-configuration .config-role-matrix td:nth-last-child(2),.compact-configuration .config-role-matrix thead tr:first-child th:last-child{border-left:1px solid #d0dfdb}
+/* Installed Skills use their own matrix while sharing horizontal scrolling. */
+.compact-configuration .skill-picker-matrix{table-layout:fixed;min-width:680px;font-size:.8125rem}
+.compact-configuration .skill-picker-matrix th,.compact-configuration .skill-picker-matrix td{padding:10px 8px;vertical-align:middle}
+.compact-configuration .skill-picker-matrix th:first-child{width:44%;overflow-wrap:anywhere}
+.compact-configuration .skill-picker-matrix thead th{background:#f2f7f5;color:#4d6869;line-height:1.5}
+.compact-configuration .skill-picker-matrix td{text-align:center}
+.compact-configuration .skill-picker-matrix .check-label{display:flex;align-items:center;justify-content:center;margin:0;min-height:36px}
+.compact-configuration .skill-picker-matrix input[type=checkbox]{margin:0;width:18px;height:18px;flex-shrink:0}
+.compact-configuration .skill-picker-matrix .note{margin:5px 0 0;font-size:.8125rem;line-height:1.6;font-weight:400;white-space:normal;overflow-wrap:anywhere}
+.compact-configuration .skill-picker-matrix tbody tr:last-child>*{border-bottom:0}
 .compact-configuration .config-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
 .compact-configuration .role-settings-help{margin-top:8px}
 .compact-configuration .summary-note{font-size:.8125rem;margin-left:10px}

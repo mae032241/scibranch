@@ -164,7 +164,7 @@ def test_inline_preview_has_no_writes_create_freezes_exact_original_and_update_m
     assert objective.stat().st_mode & 0o222 == 0
     provenance = contracts.read(root/created['source_provenance']['path'])
     assert [row['origin']['path'] for row in provenance['globals']] == [str(objective),str(update)]
-    assert [row['material']['source'] for row in provenance['globals']] == ['project/global/objective.md','project/global/updates/001.md']
+    assert [row['material']['source'] for row in provenance['globals']] == ['project/global/objective.md',str(update)]
     with pytest.raises(ValueError,match='fresh directory'):
         form.create(draft)
 
@@ -386,7 +386,7 @@ def test_advanced_standard_controls_keep_closed_category_disclosures_and_roundtr
     parsed_controls = DisclosureControls()
     controls = parsed_controls.controls
     categories = ['agent', 'budget', 'executor', 'delivery', 'policies'] if edit else [
-        'research', 'agent', 'budget', 'executor', 'delivery', 'policies', 'ui', 'version']
+        'research', 'project', 'skills', 'agent', 'budget', 'executor', 'delivery', 'policies', 'ui', 'version']
     assert parsed_controls.categories == [('advanced-category', prefix, False) for prefix in categories]
     for path in ('agent.backend', 'agent.native.features.fast_mode', 'budget.breadth.initial_calls',
                  'budget.correction.pause_after', 'budget.max_output_item_bytes',

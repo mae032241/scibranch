@@ -18,6 +18,7 @@ from . import contracts as c
 DIRECTORY = 'host-control/skills'
 MANIFEST = DIRECTORY + '/manifest.json'
 _NAME = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z')
+_CATALOG_LIMIT = 256
 def _name(value):
     if not isinstance(value, str) or not _NAME.fullmatch(value):
         raise ValueError('Skill and set names must be simple directory names')
@@ -89,6 +90,42 @@ def _metadata(directory):
     if _name(metadata['name']) != item:
         raise ValueError(f'Selected Skill directory and native name must match at {directory}')
     return metadata
+
+
+def catalog():
+    """List installed metadata for an explicit configuration view, without selection.
+
+    Only this installation's immediate entries and native SKILL.md files are
+    inspected. Resources, user Skill sources and instance state are untouched.
+    """
+    items, errors = [], []
+    source = None
+    try:
+        source = source_root()
+        if source.is_symlink() or source.resolve() != source or not source.is_dir():
+            raise ValueError('requires an ordinary installation skills directory')
+        with os.scandir(source) as entries:
+            for index, entry in enumerate(entries):
+                if index >= _CATALOG_LIMIT:
+                    errors.append(dict(name='skills', message=(
+                        f'Installed Skill catalog at {source} is limited to {_CATALOG_LIMIT} '
+                        'directory entries; additional entries were not inspected')))
+                    break
+                try:
+                    if entry.is_symlink():
+                        raise ValueError(f'Installed Skill {entry.name!r} at {source / entry.name} '
+                            'requires an ordinary directory; restore the installed bundle')
+                    if entry.is_dir(follow_symlinks=False):
+                        items.append(_metadata(source / entry.name))
+                except (OSError, ValueError, RuntimeError) as error:
+                    errors.append(dict(name=entry.name, message=str(error)))
+    except (OSError, ValueError, RuntimeError) as error:
+        items = []
+        location = f' at {source}' if source is not None else ''
+        errors.append(dict(name='skills', message=f'Installed Skill catalog unavailable{location}: '
+            f'{error}; install or restore the CLI installation skills directory'))
+    return dict(items=sorted(items, key=lambda row: row['name']),
+        errors=sorted(errors, key=lambda row: row['name']))
 
 
 def _selected(sets, role_profiles=None, worker_profiles=None):

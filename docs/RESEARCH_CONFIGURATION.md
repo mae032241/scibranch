@@ -510,6 +510,27 @@ Cov 执行来自独立插件，核心安装不含 Cov；注册提供的新实例
 
 ## Selected framework Skills / 按角色选择框架 Skill
 
+The new-research webpage lists installed Skills by name and description in the
+second step. Check each Skill for the roles that should use it; discovery enables
+no role by default. Existing named sets and Worker inheritance remain available.
+The picker saves the existing set/role declaration format, so TOML import and
+export retain the same selections. Existing-instance settings can select only
+from that instance's frozen sets.
+
+新建研究的第二步自动列出已安装 Skill 的名称与说明，直接按角色勾选；默认均不启用。
+已有具名集合与命名研究者的继承关系继续保留，导入、导出 TOML 后选择保持一致。
+已有实例的配置页只允许选择该实例已冻结的集合。
+
+Listing reads only each installed bundle's `SKILL.md` metadata in the installation
+Skill directory, without traversing bundle resources. A missing or invalid bundle
+is reported alongside usable entries; selecting it still requires normal
+preparation validation. This display-time discovery is separate from preparation's
+selected-bundle checks below.
+
+列表只读取安装目录下一层各 Skill 的 `SKILL.md` 元数据，不遍历资源目录。缺失或格式
+有误的 Skill 显示诊断，不妨碍选择其它可用项；实际选中后仍须通过正常准备检查。
+网页展示时的发现与下述准备阶段的已选资产检查分别进行。
+
 Default role selections are empty. Declare finite named sets, then bind a role or
 named Worker profile explicitly. Assets come from the actual CLI installation's
 single `skills/` tree: beside `src/` in the source release, beside `site/` in the

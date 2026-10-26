@@ -13,7 +13,7 @@ import json
 import math
 from pathlib import Path
 
-from . import research_config
+from . import research_config, skill_supply
 
 
 @dataclass(frozen=True)
@@ -229,13 +229,96 @@ class _Invalid(str):
         return str(self), self.kind
 
 
-def parse(fields, *, base):
+def _role_skill_items(document, role):
+    """Resolve display state only; declaration validation remains authoritative."""
+    profile = _get(document, f'agent.roles.{role}', {})
+    if not isinstance(profile, dict):
+        return []
+    workers = _get(document, 'agent.workers', {})
+    worker_name = profile.get('worker')
+    worker = workers.get(worker_name, {}) if isinstance(workers, dict) and isinstance(worker_name, str) else {}
+    name = profile.get('skill_set', worker.get('skill_set') if isinstance(worker, dict) else None)
+    sets = _get(document, 'skills.sets', {})
+    selected = sets.get(name, {}) if isinstance(sets, dict) and isinstance(name, str) else {}
+    items = selected.get('items', []) if isinstance(selected, dict) else []
+    return items if isinstance(items, list) and all(isinstance(item, str) for item in items) else []
+
+
+def _skill_picker(fields, document, *, fixed_sets=None):
+    """Translate successful controls into the existing named-set schema."""
+    sets = _get(document, 'skills.sets', {}) if fixed_sets is None else fixed_sets
+    available_sets = set(sets) if isinstance(sets, dict) else set()
+    if fixed_sets is None:
+        for section in ('agent.roles', 'agent.workers'):
+            profiles = _get(document, section, {})
+            if isinstance(profiles, dict):
+                available_sets.update(profile['skill_set'] for profile in profiles.values()
+                    if isinstance(profile, dict) and isinstance(profile.get('skill_set'), str))
+    catalog_names = None
+    def bind_items(role, items):
+        nonlocal sets
+        if fixed_sets is not None:
+            raise ValueError('已有实例只能选择已冻结的技能集合，不能增加技能集合')
+        if not isinstance(sets, dict):
+            raise ValueError('研究技能集合必须为对象')
+        name = next((name for name, value in sets.items() if value == dict(items=items)), None)
+        if name is None:
+            prefix = 'web-'+role.lower()
+            name = prefix
+            number = 2
+            while name in available_sets:
+                name = prefix+'-'+str(number)
+                number += 1
+            _put(document, 'skills.sets.'+name, dict(items=items))
+            sets = _get(document, 'skills.sets')
+            available_sets.add(name)
+        _put(document, f'agent.roles.{role}.skill_set', name)
+    for role in 'HWAE':
+        choice = _single(fields, 'skill_picker.choice.'+role, 'keep')
+        baseline_raw = _single(fields, 'skill_picker.baseline.'+role, '[]')
+        try:
+            baseline = json.loads(baseline_raw) if len(baseline_raw) <= 65536 else None
+        except (ValueError, TypeError, RecursionError):
+            baseline = None
+        if (not isinstance(baseline, list) or len(baseline) > 256
+                or any(not isinstance(item, str) for item in baseline) or len(set(baseline)) != len(baseline)):
+            raise ValueError('研究技能：勾选基线无效，请重新打开表单')
+        prefix = 'skill_picker.item.'+role+'.'
+        selected = [_single(fields, name) for name in fields if name.startswith(prefix)]
+        if len(selected) > 256 or len(set(selected)) != len(selected):
+            raise ValueError('研究技能：勾选项不能重复或超过上限')
+        changed = set(selected) != set(baseline)
+        if choice == 'keep' and not changed:
+            continue
+        if choice == 'inherit':
+            _delete(document, f'agent.roles.{role}.skill_set')
+        elif choice.startswith('set:'):
+            name = choice[4:]
+            if name not in available_sets:
+                raise ValueError('研究技能：请选择已有技能集合')
+            _put(document, f'agent.roles.{role}.skill_set', name)
+        elif choice == 'none':
+            bind_items(role, [])
+        elif choice in ('keep', 'custom'):
+            if fixed_sets is not None:
+                raise ValueError('已有实例只能选择已冻结的技能集合，不能重新勾选安装技能')
+            if catalog_names is None:
+                catalog_names = {item['name'] for item in skill_supply.catalog()['items']}
+            if set(selected) - catalog_names:
+                raise ValueError('研究技能：勾选的技能已不可用，请重新打开表单查看安装诊断')
+            bind_items(role, sorted(selected))
+        else:
+            raise ValueError('研究技能：请选择支持的角色分配方式')
+
+
+def parse(fields, *, base, _fixed_skill_sets=None):
     """Parse only typed visible controls, retaining all extra imported data."""
     scalar_fields = FIELDS + [field for group in GROUP_FIELDS.values() for field in group]
     allowed = {'present.'+f.path for f in scalar_fields} | {'cfg.'+f.path for group in GROUP_FIELDS.values() for f in group} | {'task_mode', 'task_text'} | {'cfg.'+f.path for f in FIELDS if f.kind not in ('table', 'array', 'strings')} | {'enabled.'+f.path for f in FIELDS if f.kind in ('table', 'array', 'strings')}
     for name in fields:
         parts = name.split('.')
-        if name not in allowed and not any(name == 'cfg.'+f.path or (name.startswith('cfg.'+f.path+'.') and name[len('cfg.'+f.path+'.'):].isdecimal()) for f in FIELDS if f.kind == 'strings') and not (len(parts) == 3 and parts[0] == 'node' and parts[1].isdecimal() and parts[2] in {'kind','parent','key','value'}):
+        picker = (len(parts) == 3 and parts[0] == 'skill_picker' and parts[1] in {'choice', 'baseline'} and parts[2] in 'HWAE' and len(parts[2]) == 1) or (len(parts) == 4 and parts[:2] == ['skill_picker', 'item'] and parts[2] in 'HWAE' and len(parts[2]) == 1 and parts[3].isdecimal())
+        if name not in allowed and not picker and not any(name == 'cfg.'+f.path or (name.startswith('cfg.'+f.path+'.') and name[len('cfg.'+f.path+'.'):].isdecimal()) for f in FIELDS if f.kind == 'strings') and not (len(parts) == 3 and parts[0] == 'node' and parts[1].isdecimal() and parts[2] in {'kind','parent','key','value'}):
             raise ValueError('不支持的表单字段：'+name)
     result = blank(base=base)
     result['task_mode'] = _single(fields, 'task_mode', 'text')
@@ -331,6 +414,7 @@ def parse(fields, *, base):
                 pending.add(identity)
     if set(nodes) - used - allowed:
         raise ValueError('结构字段没有有效的父对象')
+    _skill_picker(fields, result['document'], fixed_sets=_fixed_skill_sets)
     if errors:
         raise FormError('；'.join(errors), result)
     return result
@@ -341,7 +425,7 @@ def parse_edit(fields, *, base, configuration):
     if any(name in {'task_mode', 'task_text'} for name in fields):
         raise ValueError('任务原件不能在研究配置中修改')
     try:
-        result = parse(fields, base=base)
+        result = parse(fields, base=base, _fixed_skill_sets=_get(configuration, 'skills.sets', {}))
     except FormError as error:
         result = error.draft
         failure = error
@@ -573,6 +657,74 @@ def render(draft, *, edit=False):
     def fields(paths, *, advanced=False):
         return ''.join(control(by_path[path], advanced=advanced) for path in paths)
 
+    def skill_picker():
+        sets = _get(document, 'skills.sets', {})
+        choices = set(sets) if isinstance(sets, dict) else set()
+        if not edit:
+            for section in ('agent.roles', 'agent.workers'):
+                profiles = _get(document, section, {})
+                if isinstance(profiles, dict):
+                    choices.update(profile['skill_set'] for profile in profiles.values()
+                        if isinstance(profile, dict) and isinstance(profile.get('skill_set'), str))
+        if edit:
+            catalog = dict(items=[], errors=[])
+        else:
+            try:
+                catalog = skill_supply.catalog()
+            except (OSError, ValueError, RuntimeError) as error:
+                catalog = dict(items=[], errors=[dict(name='skills', message=str(error))])
+        items = catalog['items']
+        names = {item['name'] for item in items}
+        contents = ['<fieldset class="config-group research-skill-picker" id="research-skill-picker"><legend>研究技能</legend>',
+            '<p class="note">'+('已有实例的技能集合已冻结；可为后续节点选择已有集合，不能添加安装技能。沿用命名研究者时仍可能启用其技能。' if edit else
+            '按列勾选分配给研究角色；默认均不启用。只有明确分配的角色才使用技能，不会自动分配给其他角色。更改勾选将保存为新集合，保留原有集合。')+'</p>']
+        if not edit:
+            if items:
+                contents.append('<div class="config-matrix-scroll" role="region" aria-label="安装的研究技能与角色分配，可横向滚动" tabindex="0"><table class="skill-picker-matrix"><caption class="config-sr-only">按研究角色勾选已安装技能</caption><thead><tr><th scope="col">已安装技能</th>'+
+                    ''.join('<th scope="col">'+role+' · '+ROLE_NAMES[role]+'</th>' for role in 'HWAE')+'</tr></thead><tbody>')
+                for index, item in enumerate(items):
+                    contents.append('<tr><th scope="row"><strong>'+escape(item['name'])+'</strong><p class="note">'+escape(item['description'])+'</p></th>')
+                    for role in 'HWAE':
+                        contents.append('<td><label class="check-label"><input type="checkbox" name="skill_picker.item.'+role+'.'+str(index)+'" value="'+escape(item['name'], quote=True)+'"'+(' checked' if item['name'] in _role_skill_items(document, role) else '')+'><span class="config-sr-only">'+escape(item['name'])+' 分配给 '+role+' · '+ROLE_NAMES[role]+'</span></label></td>')
+                    contents.append('</tr>')
+                contents.append('</tbody></table></div>')
+            else:
+                contents.append('<p class="note">当前没有可勾选的安装技能；已有集合与角色绑定仍会保留。</p>')
+            for error in catalog['errors']:
+                contents.append('<p class="note" data-skill-diagnostic="true">'+escape(error['name'])+'：'+escape(error['message'])+'</p>')
+            if isinstance(sets, dict):
+                for name, value in sets.items():
+                    members = value.get('items', []) if isinstance(value, dict) else []
+                    missing = [item for item in members if isinstance(item, str) and item not in names] if isinstance(members, list) else []
+                    if missing:
+                        contents.append('<p class="note" data-skill-diagnostic="true">集合 '+escape(name)+' 中暂不可勾选的技能：'+escape('、'.join(missing))+'。未修改勾选时保留原绑定；检查配置时验证实际资产。</p>')
+        contents.append('<div class="config-grid config-grid-four">')
+        for role in 'HWAE':
+            path = f'agent.roles.{role}.skill_set'
+            profile = _get(document, f'agent.roles.{role}', {})
+            workers = _get(document, 'agent.workers', {})
+            worker_name = profile.get('worker') if isinstance(profile, dict) else None
+            worker = workers.get(worker_name, {}) if isinstance(workers, dict) and isinstance(worker_name, str) else {}
+            explicit = profile.get('skill_set') if isinstance(profile, dict) else None
+            inherited = worker.get('skill_set') if isinstance(worker, dict) else None
+            current = ('集合 '+str(explicit) if explicit is not None else
+                '继承 '+str(worker_name)+' 的集合 '+str(inherited) if inherited is not None else '未启用技能')
+            # Original scalar controls remain successful, including imported empty
+            # values; the selector only replaces a binding after an explicit edit.
+            contents.append('<div hidden>'+control(by_path[path])+'</div>')
+            if not edit:
+                baseline = sorted(set(_role_skill_items(document, role)) & names)
+                contents.append('<input type="hidden" name="skill_picker.baseline.'+role+'" value="'+escape(json.dumps(baseline, ensure_ascii=False), quote=True)+'">')
+            identity = 'skill-picker-choice-'+role
+            contents.append('<div class="config-field"><label for="'+identity+'">'+role+' · '+ROLE_NAMES[role]+' 技能分配</label><select id="'+identity+'" name="skill_picker.choice.'+role+'"><option value="keep" selected>保持当前：'+escape(current)+'</option>')
+            if not edit:
+                contents.append('<option value="custom">使用本列勾选</option><option value="none">不启用技能（覆盖继承）</option>')
+            contents.append('<option value="inherit">沿用命名研究者（未指定时不启用）</option>')
+            contents.extend('<option value="set:'+escape(name, quote=True)+'">已有集合：'+escape(name)+('（空集合，不启用技能）' if sets.get(name) == dict(items=[]) else '')+'</option>' for name in sorted(choices))
+            contents.append('</select></div>')
+        contents.append('</div></fieldset>')
+        return ''.join(contents)
+
     rows = [] if edit else ['<noscript><p class="note">请依次填写下方任务与资源设置，再点击底部“检查配置”。</p></noscript><section class="setup-panel" data-setup-step="1" aria-labelledby="setup-task-title">'
         '<div class="section-heading"><span class="eyebrow">第一步 / 任务与材料</span><h2 id="setup-task-title" tabindex="-1">你想研究什么？</h2>'
         '<p>写清问题、期望得到的结果，以及需要遵守的限制。先准备任务和文件，再设置研究用量。</p></div>'
@@ -616,6 +768,8 @@ def render(draft, *, edit=False):
         '<div id="role-settings-help"><p>角色模型、推理力度与服务档位留空时沿用统一设置。单次用量留空时不单独声明；若自定义，请填写四个角色的全部八项。单次软目标不能扩大总预算。</p>'
         + ''.join('<p><strong>'+role+' · '+ROLE_NAMES[role]+'</strong>：'+ROLE_HELP[role]+'</p>' for role in 'HWAE')
         + '<p>原调用恢复、预算份额与交付等设置可能要求完整的单次用量配置。</p></div></details></details>')
+    rows.append(skill_picker())
+    used.update(f'agent.roles.{role}.skill_set' for role in 'HWAE')
     rows.append(
         '<details class="permission-settings"><summary>研究助手可以访问什么？<span class="summary-note">权限与联网</span></summary>'
         '<p class="note">'+('以下为后续节点的权限声明；实验仍需满足自身的授权条件。' if edit else
@@ -742,6 +896,12 @@ const invalidate = e => {
   note.textContent='参数已修改，请重新检查并预览。';
 };
 document.addEventListener('input',invalidate); document.addEventListener('change',invalidate);
+document.addEventListener('change', e => {
+  if (!e.target.name?.startsWith('skill_picker.item.')) return;
+  const role = e.target.name.split('.')[2];
+  const selector = document.getElementById('skill-picker-choice-'+role);
+  if (selector) selector.value = 'custom';
+});
 const enableEditedGroup = e => {
   const group = e.target.closest('.structured-setting');
   if (!group || e.target.type === 'checkbox') return;
