@@ -511,13 +511,14 @@ Cov 执行来自独立插件，核心安装不含 Cov；注册提供的新实例
 ## Selected framework Skills / 按角色选择框架 Skill
 
 The new-research webpage lists installed Skills by name and description in the
-second step. Check each Skill for the roles that should use it; discovery enables
+second step's initially collapsed Research Skills section. Expand it to check
+each Skill for the roles that should use it; discovery enables
 no role by default. Existing named sets and Worker inheritance remain available.
 The picker saves the existing set/role declaration format, so TOML import and
 export retain the same selections. Existing-instance settings can select only
 from that instance's frozen sets.
 
-新建研究的第二步自动列出已安装 Skill 的名称与说明，直接按角色勾选；默认均不启用。
+新建研究的第二步在默认折叠的“研究技能”中列出已安装 Skill 的名称与说明，展开后按角色勾选；默认均不启用。
 已有具名集合与命名研究者的继承关系继续保留，导入、导出 TOML 后选择保持一致。
 已有实例的配置页只允许选择该实例已冻结的集合。
 

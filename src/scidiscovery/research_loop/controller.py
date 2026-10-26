@@ -1512,6 +1512,10 @@ def _run_direct_delivery(root, begin):
     if delivered['status']=='delivery_reselect':
         return _closeout_result(root,'delivery_rejected',reason=delivered.get('reason'),step=step)
     if delivered.get('reason')=='final_author_required':
+        final=_start_budget_closeout(root,begin['source_cutoff'],begin['first_step'],'A',
+                                    'original_delivery_budget_unavailable')
+        if final is not None:
+            return final
         return _closeout_result(root,'closeout_budget_unavailable',reason='original_delivery_budget_unavailable',step=step)
     return delivered
 

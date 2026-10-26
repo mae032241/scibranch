@@ -675,7 +675,8 @@ def render(draft, *, edit=False):
                 catalog = dict(items=[], errors=[dict(name='skills', message=str(error))])
         items = catalog['items']
         names = {item['name'] for item in items}
-        contents = ['<fieldset class="config-group research-skill-picker" id="research-skill-picker"><legend>研究技能</legend>',
+        contents = ['<details class="research-skill-settings"><summary>研究技能</summary>'
+            '<fieldset class="config-group research-skill-picker" id="research-skill-picker"><legend class="config-sr-only">研究技能</legend>',
             '<p class="note">'+('已有实例的技能集合已冻结；可为后续节点选择已有集合，不能添加安装技能。沿用命名研究者时仍可能启用其技能。' if edit else
             '按列勾选分配给研究角色；默认均不启用。只有明确分配的角色才使用技能，不会自动分配给其他角色。更改勾选将保存为新集合，保留原有集合。')+'</p>']
         if not edit:
@@ -722,7 +723,7 @@ def render(draft, *, edit=False):
             contents.append('<option value="inherit">沿用命名研究者（未指定时不启用）</option>')
             contents.extend('<option value="set:'+escape(name, quote=True)+'">已有集合：'+escape(name)+('（空集合，不启用技能）' if sets.get(name) == dict(items=[]) else '')+'</option>' for name in sorted(choices))
             contents.append('</select></div>')
-        contents.append('</div></fieldset>')
+        contents.append('</div></fieldset></details>')
         return ''.join(contents)
 
     rows = [] if edit else ['<noscript><p class="note">请依次填写下方任务与资源设置，再点击底部“检查配置”。</p></noscript><section class="setup-panel" data-setup-step="1" aria-labelledby="setup-task-title">'

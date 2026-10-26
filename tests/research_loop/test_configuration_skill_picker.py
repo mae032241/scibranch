@@ -71,9 +71,10 @@ def selected(document, role):
     return document['skills']['sets'][name]['items']
 
 
-def test_catalog_is_visible_in_second_step_and_defaults_enable_no_roles(installed, tmp_path):
+def test_catalog_is_collapsed_in_second_step_and_defaults_enable_no_roles(installed, tmp_path):
     html = form.render(installed)
     assert html.index('data-setup-step="2"') < html.index('id="research-skill-picker"') < html.index('class="advanced-settings"')
+    assert '<details class="research-skill-settings"><summary>研究技能</summary>' in html
     assert 'alpha research guidance' in html
     assert 'beta research guidance' in html
     assert 'alpha 分配给 W · 实验与实现' in html
@@ -182,6 +183,7 @@ def test_existing_instance_uses_only_frozen_sets_and_never_catalogs(installed, t
         raise AssertionError('Existing instances must not expand installed inventory')
     monkeypatch.setattr(skill_supply, 'catalog', forbidden)
     html = form.render(installed, edit=True)
+    assert '<details class="research-skill-settings"><summary>研究技能</summary>' in html
     assert 'skill_picker.item.' not in html
     assert '<option value="none">' not in html
     assert '已有集合：off（空集合，不启用技能）' in html

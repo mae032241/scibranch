@@ -42,6 +42,8 @@ def test_headless_browser_skill_role_selection_roundtrips(tmp_path, monkeypatch)
 document.addEventListener('DOMContentLoaded', async () => {
   const result = document.createElement('output'); result.id = 'browser-result';
   const check = (condition, message) => { if (!condition) throw new Error(message); };
+  // Closed details can retain layout rectangles while their contents are not drawn.
+  const visible = element => Boolean(element?.checkVisibility());
   const checkbox = (role, name) => document.querySelector(
     'input[type="checkbox"][name^="skill_picker.item.' + role + '."][value="' + name + '"]');
   const selected = role => Array.from(document.querySelectorAll(
@@ -55,11 +57,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   };
   try {
     const picker = document.getElementById('research-skill-picker');
-    check(picker && picker.getClientRects().length > 0, 'Skill picker is not visible');
+    const fold = picker?.closest('details');
+    const summary = fold?.querySelector(':scope > summary');
+    check(fold && !fold.open && visible(summary),
+      'Research Skills must be collapsed with a visible summary by default');
     const boxes = picker.querySelectorAll('input[type="checkbox"]');
     check(boxes.length === 8, 'Expected two Skills across four roles');
-    check(Array.from(boxes).every(input => !input.checked && input.getClientRects().length > 0),
-      'Installed Skills must be visible and disabled by default');
+    check(Array.from(boxes).every(input => !visible(input)),
+      'Collapsed Research Skills must hide the selection controls');
+    summary.click();
+    check(fold.open && visible(picker), 'Research Skills did not expand');
+    check(Array.from(boxes).every(input => !input.checked && visible(input)),
+      'Expanded Skills must be visible and unselected by default');
     check(checkbox('W', 'alpha').closest('tr').querySelector('th').innerText.includes('Compare exact alternatives.'),
       'Alpha description is not visible');
     check(checkbox('E', 'beta').closest('tr').querySelector('th').innerText.includes('Retain evidence limitations.'),
@@ -73,8 +82,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       'Production change handler did not select custom role assignment');
     check(document.getElementById('skill-picker-choice-H').value === 'keep' &&
       document.getElementById('skill-picker-choice-A').value === 'keep', 'Untouched role assignment changed');
+    summary.click();
+    check(!fold.open, 'Research Skills did not collapse before submission');
     const imported = await post('/roundtrip');
     document.getElementById('research-config-form').innerHTML = imported.markup;
+    check(!document.getElementById('research-skill-picker').closest('details').open,
+      'Reimported Research Skills must default to collapsed');
     check(JSON.stringify(selected('W')) === '["alpha"]' && JSON.stringify(selected('E')) === '["beta"]',
       'Exported and reimported role selections differ');
     check(selected('H').length === 0 && selected('A').length === 0, 'An unselected role acquired a Skill');
