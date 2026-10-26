@@ -8,15 +8,12 @@ from __future__ import annotations
 import importlib.metadata
 import importlib.util
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
-import stat
 import sys
 
 from . import contracts as c
 
-DIRECTORY = 'host-control/skills'
-MANIFEST = DIRECTORY + '/manifest.json'
 _NAME = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z')
 _CATALOG_LIMIT = 256
 def _name(value):
@@ -228,16 +225,30 @@ def namespace_launcher(settings):
         retained=capabilities['native_launcher_contract'])
 
 
-def prepare(value, *, backend, launcher, existing=None, policy=None, context=None,
+def _current_binding(declared):
+    if (not isinstance(declared, dict) or declared.get('version') != 3
+            or 'manifest' in declared):
+        raise ValueError('Unsupported frozen Skill binding; only version 3 installation sources '
+            'are supported; create a new instance')
+    if (set(declared) - {'version', 'root', 'sets', 'launcher'} or 'sets' not in declared
+            or not isinstance(declared.get('root'), str) or not Path(declared['root']).is_absolute()
+            or configuration(dict(sets=declared['sets']))['sets'] != declared['sets']):
+        raise ValueError('Frozen Skill source binding changed')
+    return declared
+
+
+def prepare(value, *, backend, launcher, existing=None,
             role_profiles=None, worker_profiles=None):
-    declared = configuration(value)
     old = existing.get('skills') if existing is not None else None
+    if old is not None:
+        _current_binding(old)
+    declared = configuration(value)
     if existing is not None:
         if declared['sets'] != (old['sets'] if old is not None else {}):
             raise ValueError('Skill sets and source bindings are frozen; create a new instance to change them')
-        return (dict(old), None) if old is not None else (None, None)
+        return dict(old) if old is not None else None
     if not declared['sets'] and value is None:
-        return None, None
+        return None
     items = _selected(declared['sets'], role_profiles, worker_profiles)
     source = source_root()
     result = dict(version=3, root=str(source), sets=declared['sets'])
@@ -245,119 +256,16 @@ def prepare(value, *, backend, launcher, existing=None, policy=None, context=Non
         result['launcher'] = _launcher_contract(backend, launcher)
     for item in items:
         _metadata(source / item)
-    return result, None
-
-
-def freeze(root, settings, manifest, *, context=None):
-    """New instances retain source bindings only; there are no Skill bytes to freeze."""
-    if manifest is not None:
-        raise ValueError('Per-instance Skill freezing is retired')
-
-
-def _legacy_root(root, declared):
-    """Resolve retained v2 bytes through exact registered original sources only."""
-    from . import originals
-    from .fork_sources import MAX_ANCESTRY
-    current = Path(root)
-    seen = set()
-    for _ in range(MAX_ANCESTRY + 1):
-        expected = current / MANIFEST
-        if expected.exists() or expected.is_symlink():
-            return current
-        if current in seen:
-            raise ValueError('Legacy Skill source ancestry contains a cycle')
-        seen.add(current)
-        parent_root = current
-        try:
-            selected = originals.selected_source(current)
-            if originals.source_settings(selected).get('skills') != declared:
-                raise ValueError('Legacy Skill source settings changed')
-            parent_root = Path(selected.original_root)
-            # Prove actual disappearance before the node reader's missing-job
-            # diagnostic; an existing but changed identity still fails below.
-            parent_root.lstat()
-            parent = originals.node(parent_root, selected.step)
-            if (parent.origin_identity != selected.origin_identity
-                    or parent.original_root != selected.original_root):
-                raise ValueError('Legacy Skill source identity changed at ' + str(parent_root))
-            if originals.source_settings(parent).get('skills') != declared:
-                raise ValueError('Legacy Skill source settings changed at ' + str(parent_root))
-            candidate = parent_root / MANIFEST
-            if candidate.exists() or candidate.is_symlink():
-                resolved = originals.resolve_ref(parent, dict(path=MANIFEST))
-                if resolved != candidate:
-                    raise ValueError('Legacy Skill source manifest location changed')
-                return parent_root
-            current = parent_root
-        except OSError as error:
-            missing = parent_root / MANIFEST
-            raise ValueError(f'Legacy Skill source unavailable at {missing}; '
-                'keep the exact selected parent instance and its retained Skill assets available') from error
-        except ValueError as error:
-            if str(error) == 'Instance has no frozen fork source':
-                raise ValueError(f'Legacy Skill source unavailable at {expected}; '
-                    'keep the exact selected parent instance and its retained Skill assets available') from error
-            raise
-    raise ValueError('Legacy Skill source ancestry exceeds its finite depth bound')
-
-
-def _legacy_validate(root, declared):
-    """Read retained v2 inventories only; never create or migrate their objects."""
-    from scidiscovery import archive_io as files
-    root = _legacy_root(root, declared)
-    path = files.check_path(root / MANIFEST)
-    manifest = c.read(c.regular(path))
-    if (declared.get('manifest') != dict(path=MANIFEST, version=manifest.get('freeze_id'))
-            or manifest.get('version') != 2 or manifest.get('sets') != declared['sets']
-            or stat.S_IMODE(path.stat().st_mode) != 0o400):
-        raise ValueError('Frozen Skill manifest changed')
-    names = {item for row in declared['sets'].values() for item in row['items']}
-    if set(manifest['objects']) != names:
-        raise ValueError('Frozen Skill object inventory changed')
-    for item, tree in manifest['objects'].items():
-        directory = Path(root) / DIRECTORY / 'objects' / _name(item)
-        expected = {}
-        for relative in ['', *tree['directories']]:
-            if relative and (PurePosixPath(relative).is_absolute() or '..' in PurePosixPath(relative).parts
-                    or PurePosixPath(relative).as_posix() != relative or relative == '.'):
-                raise ValueError('Frozen Skill directory path changed')
-            base = files.check_path(directory / relative)
-            if not base.is_dir() or stat.S_IMODE(base.stat().st_mode) != 0o500:
-                raise ValueError('Frozen Skill directory permissions changed')
-            expected[base] = set()
-        for row in tree['files']:
-            relative = PurePosixPath(row['path'])
-            if (relative.is_absolute() or '..' in relative.parts or relative.as_posix() != row['path']
-                    or row['path'] == '.'):
-                raise ValueError('Frozen Skill file path changed')
-            path = files.check_path(directory / row['path'])
-            if (stat.S_IMODE(c.regular(path).stat().st_mode) != 0o400
-                    or path.stat().st_size != row['size_bytes']):
-                raise ValueError('Frozen Skill object permissions or size changed')
-            expected[path.parent].add(path.name)
-        for base in expected:
-            if base != directory:
-                expected[base.parent].add(base.name)
-        for base, children in expected.items():
-            if {child.name for child in base.iterdir()} != children:
-                raise ValueError('Frozen Skill tree gained or lost files')
-        if _metadata(directory) != tree['metadata']:
-            raise ValueError('Frozen Skill metadata changed')
-    return manifest
+    return result
 
 
 def validate(root, settings):
     declared = settings.get('skills')
     if declared is None:
         return None
+    _current_binding(declared)
     if declared.get('launcher') is not None:
         _launcher_contract(settings.get('native_backend', 'codex'), settings['native_launcher_argv'], declared['launcher'])
-    if 'manifest' in declared:
-        return _legacy_validate(root, declared)
-    if (declared.get('version') != 3 or set(declared) - {'version', 'root', 'sets', 'launcher'}
-            or configuration(dict(sets=declared['sets']))['sets'] != declared['sets']
-            or not isinstance(declared.get('root'), str) or not Path(declared['root']).is_absolute()):
-        raise ValueError('Frozen Skill source binding changed')
     items = _selected(declared['sets'], settings.get('role_profiles'), settings.get('worker_profiles'))
     if items and declared.get('launcher') is None:
         # A profile edit may select a previously unused set, but cannot evade the
@@ -372,15 +280,14 @@ def binding(settings, job):
     declared = settings.get('skills')
     if declared is None:
         return None
+    _current_binding(declared)
     from . import profiles
     profile = profiles.normalize(settings.get('role_profiles', {}), settings,
         settings.get('worker_profiles'), declared['sets'])[job['role']]
     name = profile.get('skill_set')
     items = declared['sets'][name]['items'] if name is not None else []
-    result = dict(version=2 if 'manifest' in declared else 3, role=job['role'],
-        worker=profile.get('worker'), skill_set=name, configuration_revision=job.get('configuration_revision'), items=items)
-    result.update(dict(manifest=declared['manifest']) if 'manifest' in declared else dict(root=declared['root']))
-    return result
+    return dict(version=3, root=declared['root'], role=job['role'], worker=profile.get('worker'),
+        skill_set=name, configuration_revision=job.get('configuration_revision'), items=items)
 
 
 def for_job(settings, job):
@@ -391,14 +298,13 @@ def for_job(settings, job):
 
 
 def _targets(root, settings, job):
-    manifest = validate(root, settings)
+    declared = validate(root, settings)
     for_job(settings, job)
-    if manifest is None:
+    if declared is None:
         return None
     name = job['skill_binding']['skill_set']
-    source = (_legacy_root(root, settings['skills']) / DIRECTORY / 'objects'
-        if 'manifest' in settings['skills'] else Path(settings['skills']['root']))
-    return {item: source / item for item in (manifest['sets'][name]['items'] if name is not None else [])}
+    source = Path(declared['root'])
+    return {item: source / item for item in (declared['sets'][name]['items'] if name is not None else [])}
 
 
 def project(root, settings, job, *, rebuild=True):

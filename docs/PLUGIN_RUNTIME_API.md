@@ -80,9 +80,9 @@ logical code directory, including for a single-file selection, so draft siblings
 cannot supply uncaptured code. Local's independent experiment cwd and outputs do
 not enter Git. Same-call query/result/collect/cleanup do not require a deleted
 export; actual code consumption still requires the retained commit and original
-call pin. New compiler records use `code_version` without an `author` snapshot,
-while retaining their original UUID identity; older records keep their saved
-interpretation. Ordinary host execution fingerprints do not change
+call pin. Code-bound compiler records use `code_version`; current opaque scientific
+packets retain their exact author-input binding and UUID identity. The old public
+author-client bridge and old fork compilation-order metadata are not supported. Ordinary host execution fingerprints do not change
 `LocalFileDescriptor`, global scientific references or qualification contracts.
 Authorization, consumed budgets, deadlines and recovery authority remain unchanged.
 
@@ -119,19 +119,20 @@ loader contract.
 
 The supported module invocation is `python [-B] [-I] -m <declared-module>
 --config <exact-operator-file> [--]`. A copied script or arbitrary wrapper cannot claim
-support through a prompt or a JSON flag. `cov_execution.launcher` implements this
-contract: it obtains verified `skill_supply.native_mounts(root, job)` on the host,
+support through a prompt or a JSON flag. A declared provider implementing this
+contract obtains verified `skill_supply.native_mounts(root, job)` on the host,
 mounts only the current role's discovery directory and selected installation
 directories read-only in place, and grants the corresponding native file reads.
 No whole Skill library, private manifest or unselected objects are supplied.
-Retained Skill schema v2 uses existing objects; a fork may depend on its exact
-registered parent's original store, with identity checks and precise missing-source
-diagnostics. No new Skill bytes are copied or hardlinked, including across filesystems.
+Only Skill schema v3 installation bindings are accepted; older manifest/object
+formats are rejected before reading assets. Current forks retain the exact
+installation binding without copying or hardlinking Skill bytes.
 Scientific backend subprocesses receive no Skill mounts. Native permission settings
 retain their declared semantics; this selection does not suppress other native
-user/system/plugin sources or establish a same-user security sandbox. Cov's
-configured authentication is still copied to its separate native home; shared
-authentication, refresh and logout are outside this Skill loading contract.
+user/system/plugin sources or establish a same-user security sandbox. Standard
+Codex retains its frozen native home and authentication. The Cov adapter no longer
+declares or ships a dedicated native launcher; its executor, observer, delivery
+and same-call recovery remain separate contracts.
 
 Git-bound Local artifacts publish
 directly at existing `work/retained-experiments/<call>/outputs`, with in-place sealing
@@ -141,8 +142,8 @@ destinations and saved proofs; actual content consumption strictly verifies sele
 originals without copying or refreshing them. Checkpoints do not seal current drafts.
 Ordinary catalogue/status/provenance reads check retained controls without reopening
 unselected scientific bodies or Git pins. Output errors preserve known
-terminal status. Local calls without `code_version`, including old `entry` calls, keep
-their existing copy branch. External global/declaration and cross-node inputs use
+terminal status. Current standalone Local calls without `code_version` retain
+their declared input contract. External global/declaration and cross-node inputs use
 their exact actual originals through existing logical read-only mappings, without
 node body copies or external-source chmod; a host file alias need not exist. History
 bodies reuse their first existing destinations. Private `file_stat` in

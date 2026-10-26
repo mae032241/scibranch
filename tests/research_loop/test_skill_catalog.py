@@ -161,7 +161,6 @@ def test_catalog_does_not_enable_or_bind_discovered_skills(tmp_path, monkeypatch
         pytest.fail('Catalog must not select roles, launch Workers, or prepare instance state')
     monkeypatch.setattr(skill_supply, '_selected', unexpected)
     monkeypatch.setattr(skill_supply, '_launcher_contract', unexpected)
-    monkeypatch.setattr(skill_supply, 'freeze', unexpected)
     assert skill_supply.catalog()['items'] == [dict(name='alpha', description='alpha fixture')]
     assert skill_supply.configuration() == dict(sets={})
-    assert skill_supply.prepare(None, backend='protocol', launcher=['custom']) == (None, None)
+    assert skill_supply.prepare(None, backend='protocol', launcher=['custom']) is None

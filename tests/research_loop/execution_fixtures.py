@@ -49,6 +49,12 @@ class DifferentExternalIdentity:
         return payload
     def acceptance_metadata(self,payload,**options):return dict(parent=dict(candidate_id=None),change_intent=None)
     def dispatch_lease(self,accepted):self.accepted=accepted
+    def artifact_path(self,call):
+        from scidiscovery.research_loop import contracts as c, experiment_client, shared_input_views
+        root=experiment_client.root_for_configuration(self.config,allow_standalone=True)
+        if root is None:return self.records.root/'synthetic-backend-outputs'/call/'original'
+        work=c.workspace(root,self.config['scope']['step'])
+        return shared_input_views.dynamic_root(root,work,'retained-experiments')/call/'outputs/original'
     def remote_path(self,call):
         if self.config.get('proof_directory'):
             root=Path(self.config['proof_directory']);root.mkdir(exist_ok=True)
@@ -59,6 +65,15 @@ class DifferentExternalIdentity:
         found=self.lookup_submission(descriptor)
         if found:return found
         assert self.accepted['call_id']==call
+        assert self.accepted['prepared']==descriptor.model_dump(mode='json')
+        # This synthetic backend produces its own scientific output while the
+        # exact submitted payload is available, including Git-bound inputs.
+        data=e.read(descriptor.local_path)
+        assert len(data)==descriptor.size_bytes
+        artifact=self.artifact_path(call)
+        artifact.parent.mkdir(parents=True,exist_ok=True)
+        with artifact.open('xb') as stream:stream.write(data)
+        artifact.chmod(0o400)
         status=self.config.get('outcome','known_success')
         remote=dict(call_id=call,scope=self.config['scope'],external_run_id='remote-'+call,
             mechanism_binding=self.accepted.get('mechanism_binding'),status=status)
@@ -95,7 +110,7 @@ class DifferentExternalIdentity:
     def cancel_original(self,call_id):return self.cancel(self.records.external(call_id))
     def collect(self,external_run_id):
         assert external_run_id.startswith('remote-')
-        path=self.records.directory(external_run_id.removeprefix('remote-'))/'source.py';item=e.proof(path)
+        path=self.artifact_path(external_run_id.removeprefix('remote-'));item=e.proof(path)
         descriptor=LocalFileDescriptor(name=self.config.get('collect_name','original'),local_path=str(path),
             size_bytes=item['size_bytes'],media_type='application/octet-stream')
         return (descriptor,descriptor) if self.config.get('duplicate_collection') else (descriptor,)

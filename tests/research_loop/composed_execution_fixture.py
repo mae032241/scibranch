@@ -25,13 +25,30 @@ class Remote:
         return payload
     def acceptance_metadata(self, payload, **kwargs): return dict(parent=dict(candidate_id=None), change_intent=None)
     def dispatch_lease(self, accepted): self.accepted = accepted
+    def artifact_path(self, call):
+        from scidiscovery.research_loop import contracts as c, experiment_client, shared_input_views
+        root = experiment_client.root_for_configuration(self.config, allow_standalone=True)
+        if root is None: return self.records.root / 'synthetic-backend-outputs' / call / 'original'
+        work = c.workspace(root, self.config['scope']['step'])
+        return shared_input_views.dynamic_root(root, work, 'retained-experiments') / call / 'outputs/original'
     def lookup_submission(self, descriptor):
         if not (self.records.directory(descriptor.name) / 'backend-accepted.json').exists(): return None
         return 'remote-' + descriptor.name, self.status_details(descriptor.name)['state']
     def submit(self, descriptor):
         assert self.accepted['call_id'] == descriptor.name
+        assert self.accepted['prepared'] == descriptor.model_dump(mode='json')
+        found = self.lookup_submission(descriptor)
+        if found: return found
+        # Retain a backend-produced output from this exact submitted input;
+        # later collection never reopens mutable task code or old snapshots.
+        data = e.read(descriptor.local_path)
+        assert len(data) == descriptor.size_bytes
+        artifact = self.artifact_path(descriptor.name)
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        with artifact.open('xb') as stream: stream.write(data)
+        artifact.chmod(0o400)
         e.write(self.records.directory(descriptor.name) / 'backend-accepted.json', dict(external_run_id='remote-' + descriptor.name,
-            call_id=descriptor.name,scope=self.accepted['scope'],prepared_sha256=descriptor.sha256,state=self.config.get('query_state','running')))
+            call_id=descriptor.name,scope=self.accepted['scope'],prepared=descriptor.model_dump(mode='json'),state=self.config.get('query_state','running')))
         if self.config.get('synchronous') or self.config.get('synchronous_first') and len(self.records.calls())==1: self.complete(descriptor.name)
         return 'remote-' + descriptor.name, self.status_details(descriptor.name)['state']
     def complete(self, call):
@@ -65,7 +82,7 @@ class Remote:
         accepted=self.records.accepted(call)
         backend=json.loads(e.read(self.records.directory(call)/'backend-accepted.json'))
         if (backend.get('call_id')!=call or backend.get('scope')!=accepted['scope']
-                or backend.get('prepared_sha256')!=accepted['prepared']['sha256']
+                or backend.get('prepared')!=accepted['prepared']
                 or backend.get('external_run_id')!='remote-'+call):
             raise e.IntegrityError('Original backend acceptance binding changed')
         value = self.result(call)
@@ -75,9 +92,9 @@ class Remote:
         if not self.config.get('collect', True): raise e.UnsupportedExecution('Backend does not declare collection')
         call = external.removeprefix('remote-')
         assert execution_status(self.status(external)) in {'known_success','known_failed'}
-        path = self.records.directory(call) / 'source.py'
+        path = self.artifact_path(call)
         proof = e.proof(path)
-        return (LocalFileDescriptor(name='original', local_path=str(path), sha256=proof['sha256'], size_bytes=proof['size_bytes'], media_type='application/octet-stream'),)
+        return (LocalFileDescriptor(name='original', local_path=str(path), size_bytes=proof['size_bytes'], media_type='application/octet-stream'),)
     def collect_original(self, call): return self.collect(self.records.external(call))
     def cancel(self, external): raise e.UnsupportedExecution('Cancellation is not declared')
     def cancel_original(self, call): return self.cancel(self.records.external(call))

@@ -89,6 +89,9 @@ def _configuration_effect(function):
     def guarded(*args, **kwargs):
         first = args[0] if args else kwargs['config']
         config = first.config if isinstance(first, Records) else first
+        if config.get('scope') is not None:
+            from .protocol import require_scope
+            require_scope(config['scope'])
         from . import contracts as c, storage_policy as storage, experiment_client
         root = experiment_client.root_for_configuration(config, allow_standalone=True)
         if root is not None:
@@ -102,6 +105,9 @@ def _configuration_effect(function):
 def record_effect(function):
     @wraps(function)
     def guarded(self,*args,**kwargs):
+        if self.config.get('scope') is not None:
+            from .protocol import require_scope
+            require_scope(self.config['scope'])
         from . import contracts as c, storage_policy as storage, experiment_client
         root = experiment_client.root_for_configuration(self.config, allow_standalone=True)
         if root is not None:
@@ -688,12 +694,6 @@ def _collected_view(config, call_id, observation, adapter, *, operation_context=
     accepted=json.loads(read(directory/'accepted.json'));completed=json.loads(read(directory/'completed.json'))
     direct=_local_original_observation(config,observation)
     output_root=shared_input_views.dynamic_root(root,work,'retained-experiments')/call_id/'outputs'
-    old_slots=Records(config).directory(call_id)/'observed-originals'
-    legacy=any(Path(item['path']).parent==old_slots
-        and re.fullmatch(r'[0-9]{6}',Path(item['path']).name) is not None
-        for item in observation.get('scientific_outputs',observation['outputs']))
-    legacy=legacy or accepted.get('script',{}).get('path')==str(directory/'source.py')
-    if isinstance(completed.get('model'),dict):legacy=legacy or completed['model']['path']==str(directory/'model.pkl')
     for descriptor in scientific_outputs(config,observation,adapter=adapter,include_logs=True,operation_context=context):
         inventory.entry();inventory.file(descriptor.size_bytes)
         target=output_root/descriptor.name
@@ -721,11 +721,7 @@ def _collected_view(config, call_id, observation, adapter, *, operation_context=
             if actual.is_relative_to(output_root) or public_run:
                 target=actual
             else:
-                # Existing aliases retain their exact inode meaning. New
-                # results require their producer's declared public source.
-                if (not legacy or not target.exists() or target.is_symlink() or not actual.samefile(target)
-                        or target.stat().st_size!=descriptor.size_bytes):
-                    raise UnsupportedExecution('Scientific output has no readable original in its exact call public output directory')
+                raise UnsupportedExecution('Scientific output has no readable original in its exact call public output directory')
         result.append(dict(name=descriptor.name,path=str(target),media_type=descriptor.media_type,
             size_bytes=descriptor.size_bytes,retention='retained_original'))
     return dict(status='collected', call_id=call_id, outputs=result)
@@ -1650,6 +1646,8 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
 
 
 def dispatch_descriptor(config, payload, *, parent=None, new=False, change=None, mechanism=None, command_options=None,_source_script=None):
+    from .protocol import require_scope
+    require_scope(config.get('scope'))
     from . import execution_authority, experiment_client, storage_policy as storage
     root=experiment_client.root_for_configuration(config,allow_standalone=True)
     with instance_owner.lease_for_configuration(config), storage.bind(root,config.get('storage_policy')):

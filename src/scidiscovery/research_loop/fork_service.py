@@ -133,7 +133,7 @@ def _inspect(request):
     # scientific file contents or temporary source locators. Later parent
     # growth, changed permissions, and a changed scientific cut require preview.
     closure_fields = ('source', 'cut', 'entries', 'origins', 'native_records',
-        'legacy_compilations', 'directory_inventory', 'bootstrap', 'ancestry',
+        'directory_inventory', 'bootstrap', 'ancestry',
         'public_snapshots', 'selected_globals', 'source_declarations')
     closure = {key: plan[key] for key in closure_fields if key in plan}
     result['preview_id'] = request_digest(dict(request=request, preview=result, closure=closure))

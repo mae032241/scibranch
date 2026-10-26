@@ -81,7 +81,7 @@ def test_client_binding_proof_is_mandatory_and_same_bytes_do_not_select_another_
 def test_generic_payload_fallback_still_checks_exact_material_bytes(tmp_path):
     path = tmp_path / 'ordinary-package.json'
     path.write_bytes(b'{"schema_version":2,"scientific_payload":true}')
-    identity = e.proof(path)
+    identity = c.file_ref(path)
     material = dict(source=str(path), size_bytes=identity['size_bytes'])
     assert inputs.compiled_payload(tmp_path, material) == identity
     path.write_bytes(path.read_bytes() + b' ')

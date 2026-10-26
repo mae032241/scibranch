@@ -602,30 +602,27 @@ intent 保持准确原选择，执行/续接不重取插件默认值。fork 同�
 启用 Skill 的状态，不引入插件后来新增的可选声明。
 
 Standard Codex supports this projection directly. A provider-declared module
-launcher may implement the same exact contract; Cov uses
-`python -m cov_execution.launcher --config /exact/operator.json`.
+launcher may implement the same exact contract. The Cov execution adapter no
+longer supplies a dedicated native launcher.
 Other script/protocol/custom launchers reject nonempty selected sets without a
 verified loading contract. Empty or unselected sets preserve existing behavior.
 This framework selection does not suppress native user/system/plugin sources or
 change native home, sandbox, shell, network, web or subagent permissions. A Skill
 grants no execution permission, independent-review verdict or scientific qualification.
-Cov still copies its configured `auth.json` into its separate native home; this
-Skill supply contract does not establish shared authentication, refresh or logout.
+Standard Codex retains its frozen native home and authentication; Skill selection
+does not create another authentication copy.
 
-标准 Codex 直接发现投影；适配器声明的模块 launcher 可实现相同合同，Cov 使用上述模块入口。
+标准 Codex 直接发现投影；适配器声明的模块 launcher 可实现相同合同。Cov 执行适配器
+不再提供专用原生启动器。
 缺少可核实加载合同的任意脚本、protocol 或自定义 launcher 对实际选中的非空集合明确拒绝；
 空集合或未选集合维持原行为。框架选择不屏蔽原生用户、系统、插件来源，不改变原生 home、
 sandbox、shell、网络、web 或子代理权限。Skill 不授执行权限、独审结论或科学资格。
-Cov 仍把配置的 `auth.json` 复制到独立 native home；此 Skill 合同未实现共享认证、刷新或登出。
+标准 Codex 保留冻结的原生 home 与认证；Skill 选择不会创建另一份认证副本。
 
-Retained Skill schema v2 records keep their existing read-only manifest/object
-interpretation. A fork without its own legacy store reads the exact registered
-parent original after identity checks; it creates no new Skill copies. That parent
-store must remain available, and a missing source reports its exact manifest path.
-This compatibility does not migrate scientific protocols or restore retired
-archive/cold-package operations. Read-only mounts remain a soft boundary for
-trusted same-user processes.
+Only Skill schema v3 installation bindings are supported. Schema v2 manifest/object
+bindings are rejected before asset access, including during fork preparation.
+No compatibility reader or migration is provided. Read-only mounts remain a soft
+boundary for trusted same-user processes.
 
-保留的 Skill schema v2 记录继续按原只读 manifest/对象解释。fork 若无本地旧库，则核对身份后
-读取准确登记的父原件，不创建新的 Skill 副本；父库须继续存在，来源缺失时明确报告准确
-manifest 路径。这不迁移科学协议，也不恢复已退役的归档/cold 包入口。只读挂载仍属同用户软边界。
+仅支持 Skill schema v3 安装来源绑定。v2 manifest/对象绑定在读取资产前拒绝，fork 准备也
+遵守同一条件；不提供兼容读取或迁移。只读挂载仍属同用户软边界。

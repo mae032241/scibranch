@@ -14,9 +14,9 @@ on selected evidence; that is separate from control identity. Protocol 26 uses
 `*_ref` fields; paths, producers and lifecycle identities replace content digests.
 Legacy retained object paths use UUIDs, without content deduplication or hash caches.
 Fork manifest v2 retains this reference contract. Independent archive and whole-instance
-cold checkpoint packages are retired; historical packages remain read-only without
-automatic migration, restoration or owner reactivation. Earlier protocol originals
-are preserved without migration. Read-only Linux mounts protect selected
+cold checkpoint packages are retired. Only current protocol 26 instances with
+worker/lineage view 1, soft budgets and final-A policy v1 are supported. Earlier
+formats are rejected without compatibility reading, migration or owner reactivation. Read-only Linux mounts protect selected
 inputs in the scientific namespace; trusted same-UID code remains a soft boundary,
 without protection against deliberate same-UID rewrites or content-tamper detection.
 
@@ -138,7 +138,7 @@ Budget choices use current ordinary-work availability and the runtime
 `work/budget-status.json`. With protected FINAL, provider-reported consumption
 determines the token balance; missing billing remains unknown without an estimated
 charge or an old closeout reserve. Unresolved execution still requires exact-call
-reconciliation. Older bounded-closeout instances retain their frozen reserves. Call
+reconciliation. Earlier bounded-closeout formats are unsupported. Call
 opportunities do not reserve resources or guarantee coverage. Bound expensive calls
 with the existing execution configuration and W stage targets; no automatic breadth
 share, minimum mechanism count or new execution permission is introduced.
@@ -237,9 +237,10 @@ and history views preserve first destinations and saved proofs; actual content
 consumption verifies the selected original without copying or refreshing it.
 Checkpoints do not seal current drafts. Fragment checkpoints neither retain draft contents nor
 restore deleted or lost drafts; continuation depends on drafts still present in the existing workspace.
-Required selected-control checks and saved older records
-remain, and output errors do not rewrite a known terminal outcome. Local calls without
-`code_version`, including the old `entry` branch, retain their existing copy behavior.
+Required selected-control checks remain, and output errors do not rewrite a known
+terminal outcome. Current standalone Local calls without `code_version` retain
+their declared input contract; absence of a Git code binding alone does not make
+a call an older protocol.
 
 External global/declaration inputs and cross-node inputs resolve their exact actual
 originals and are mapped read-only at existing logical task paths, without node body
@@ -569,14 +570,14 @@ exact identity checks and independent execution authorization still apply.
 Shared budget checks for new nodes remain unchanged. Author
 closeout token permits are also soft targets; their finite time limits remain
 enforced. Actual usage remains accounted without creating a new shared allowance.
-Protocol 26 accepts only soft node settings. Older protocols remain read-only;
-frozen hard settings are never silently changed to soft. A denied start
+Protocol 26 accepts only soft node settings and final-A policy v1. Older protocols,
+hard settings and missing final-A policies are rejected without migration. A denied start
 advances the existing control journal to durable `FINAL` (`closeout_begin` mode
 `final`); it never reclassifies an ordinary A as final from the remaining balance.
 An H `wait` with no pending or unknown external execution enters the existing
 durable FINAL phase; pending originals retain their waiting mechanism. This
-requires the frozen final-A completion capability; its absence is reported as
-`final_unavailable`, without inventing a completion grant.
+uses the required frozen final-A completion capability; it does not invent a
+scientific conclusion or execution grant.
 An ordinary A's explicit `finish` ends the run without delivery. Without a frozen
 delivery policy, `deliver` has the same stop behavior as `finish`, while its sealed
 scientific choice remains unchanged. With that policy, `deliver` consumes only
@@ -624,7 +625,7 @@ Missing W, candidate originals or delivery permission produce an explicit
 unsubmitted result, with the final A still reporting its evidence limitations.
 Without an optional node policy, the original frozen global token/time settings
 supply the final call's advisory token target and finite duration. Shared ceilings
-stay unchanged. An explicit later threshold increase may reopen the saved pending normal route when its admission is affordable and all original effects are known and quiescent. `budget-amend` records the increase; the next run resumes with a new monotone physical step ID. Prior final A outputs, submissions and all consumption remain immutable; a later budget denial starts a new FINAL cycle with its own single A. A decrease or insufficient increase cannot reopen or repeat the final A. Operator closeout without a pending normal route remains terminal. Older frozen instances without this policy retain prior behavior.
+stay unchanged. An explicit later threshold increase may reopen the saved pending normal route when its admission is affordable and all original effects are known and quiescent. `budget-amend` records the increase; the next run resumes with a new monotone physical step ID. Prior final A outputs, submissions and all consumption remain immutable; a later budget denial starts a new FINAL cycle with its own single A. A decrease or insufficient increase cannot reopen or repeat the final A. Operator closeout without a pending normal route remains terminal. Frozen settings missing this required policy are unsupported.
 
 Actual provider-reported usage, cached input, consumed time and steps
 remain accounted; unknown billing remains explicitly unknown without an estimated charge; original ceilings stay unchanged, and `final_overrun` records
@@ -961,15 +962,14 @@ metadata are checked during preparation. Resources remain live installation asse
 updates at the frozen source path are visible to later consumers. Missing or linked
 selected directories/manuals identify the Skill and exact expected repair path.
 
-Retained Skill schema v2 manifests and objects remain read-only consumers. A fork
-with no local legacy store resolves the exact registered parent Source, validates
-its identity and original manifest binding, then reads that parent's objects without
-copying. Parent removal makes those consumers unavailable with a precise source
-path; no automatic migration or retired archive/cold restoration is provided.
+Skill bindings accept only schema v3 installation sources. Older manifest/object
+bindings are rejected before reading their assets; no compatibility reader,
+per-instance freezing hook or migration is provided. Current forks retain the
+installation source and exact selection without copying Skill bytes.
 
 This selection does not suppress native user/system/plugin Skill sources or change
 declared native permissions. Scientific backend subprocesses receive no Skill
-mounts. Cov still copies configured authentication into its separate native home;
-shared credentials, refresh and logout are not established by this change.
+mounts. Standard Codex retains its frozen native home and authentication. The
+Cov adapter no longer supplies a dedicated native launcher or auth-copy path.
 Read-only mounts remain a soft boundary for trusted same-user processes. See
 [configuration](RESEARCH_CONFIGURATION.md#selected-framework-skills--按角色选择框架-skill).

@@ -1,4 +1,4 @@
-"""Current write authority and bounded archive reads; no legacy execution replay."""
+"""Current format admission; old instances and job views are unsupported."""
 import copy
 import json
 from pathlib import Path
@@ -13,6 +13,7 @@ from scidiscovery.research_loop import (
 )
 from scidiscovery.operations.execution import LocalFileDescriptor
 from execution_fixtures import execution_registry
+from test_history_handoff import scene
 
 
 def tree(root):
@@ -83,6 +84,8 @@ def test_current_instance_cannot_accept_old_retained_job_from_current_caller_cop
     root, job, _ = archive
     settings = c.settings(root)
     settings['handoff_protocol'] = protocol.CURRENT
+    settings['node_budget_mode'] = 'soft'
+    settings['final_a_completion_policy'] = dict(version=1)
     c.write(root / 'settings.json', settings)
     c.write(root / 'settings-identity.json', dict(path='settings.json'))
     caller = dict(job, handoff_protocol=protocol.CURRENT)
@@ -140,70 +143,52 @@ def test_archived_cli_write_rejects_without_clearing_pause_or_creating_locks(arc
     assert tree(root) == before
 
 
-def test_archive_status_reads_exact_originals_without_schema_observer_or_cache_rebuild(archive, monkeypatch, capsys):
+@pytest.mark.parametrize('reader', ['direct', 'cli'])
+def test_old_instance_status_rejects_before_reading_jobs_or_rebuilding_views(
+        archive, monkeypatch, capsys, reader):
     root, _, _ = archive
+    from scidiscovery.research_loop import instance_control
+    original_read = c.read
+    def read(path):
+        if Path(path).is_relative_to(root / 'jobs'):
+            pytest.fail('Unsupported instance status opened an old scientific job')
+        return original_read(path)
     def forbidden(*args, **kwargs):
-        raise AssertionError('Archive reads must not replay current scientific schemas or build derived history')
-    monkeypatch.setattr(c, 'science_payload', forbidden)
-    monkeypatch.setattr(c, 'result_schema', forbidden)
-    monkeypatch.setattr(history, 'refresh', forbidden)
-    monkeypatch.setattr(history, 'rebuild', forbidden)
-    monkeypatch.setattr(history, 'read_adapter', forbidden)
+        pytest.fail('Unsupported instance status interpreted old scientific originals')
+    monkeypatch.setattr(c, 'read', read)
+    for name in ('science_payload', 'result_schema'):
+        monkeypatch.setattr(c, name, forbidden)
+    for name in ('refresh', 'rebuild', 'read_adapter'):
+        monkeypatch.setattr(history, name, forbidden)
     before = tree(root)
-    direct = protocol.archive_status(root)
-    assert direct['status'] == 'preserved_read_only' and direct['current_protocol'] == protocol.CURRENT
-    assert direct['nodes'] == [dict(step=1, role='W', state='seal_present_originals_verified', scientific_qualification='not_reinterpreted')]
-    assert direct['usage']['observed_tokens'] == 14 and direct['usage']['coverage'] == 'complete'
-    assert cli.main(['status', '--root', str(root)]) == 0
-    assert json.loads(capsys.readouterr().out) == direct
-    assert tree(root) == before
-    assert not (root / 'host-history/cache.json').exists()
-
-
-def test_archive_node_truncation_is_explicit_partial_without_regeneration(archive):
-    root, _, _ = archive
-    for step in range(2, 258):
-        archived_job(root, step)
-    before = tree(root)
-    result = protocol.archive_status(root)
-    assert len(result['nodes']) == 256 and result['omitted_nodes'] == 1
-    assert result['partial_usage'] and result['usage']['coverage'] == 'partial'
-    assert result['goal_completion'] == 'not_asserted'
+    if reader == 'direct':
+        with pytest.raises(protocol.UnsupportedProtocol, match='Instance'):
+            instance_control.status(root)
+    else:
+        assert cli.main(['status', '--root', str(root)]) == 1
+        result = json.loads(capsys.readouterr().out)
+        assert result['status'] == 'error' and result['code'] == 'unsupported_protocol'
     assert tree(root) == before
 
 
-def test_archive_native_record_truncation_is_explicit_partial(archive):
-    root, _, record = archive
-    # This is a bounded archive-reader fixture, not a claim that 257 old native
-    # continuations were admissible under an old execution budget.
-    for number in range(1, 258):
-        child = record / 'continuations' / f'{number:03d}'
-        c.write(child / 'native-intent.json', dict(preserved_attempt=number))
-        c.write(child / 'usage.json', dict(input_tokens=1, cached_input_tokens=0, output_tokens=0))
+@pytest.mark.parametrize('field,value', [
+    ('worker_view_version', None), ('worker_view_version', 0), ('worker_view_version', True),
+    ('lineage_projection_version', None), ('lineage_projection_version', 0),
+])
+def test_retained_old_job_view_rejects_without_upgrade(scene, field, value):
+    root = scene
+    job = c.build_job(root, 1, 'H', [])
+    if value is None:
+        job.pop(field)
+    else:
+        job[field] = value
+    c.write(root / 'jobs/001.json', job)
     before = tree(root)
-    result = protocol.archive_status(root)
-    assert result['omitted_native_records'] == 1 and result['omitted_nodes'] == 0
-    assert result['partial_usage'] and result['usage']['coverage'] == 'partial'
-    assert tree(root) == before
-
-
-def test_archive_missing_usage_is_unknown_not_zero_or_complete(archive):
-    root, _, record = archive
-    (record / 'usage.json').unlink()
-    before = tree(root)
-    result = protocol.archive_status(root)
-    assert result['usage']['unknown_steps'] == [1]
-    assert result['usage']['coverage'] == 'partial' and result['partial_usage']
-    assert tree(root) == before
-
-
-def test_archive_original_tamper_is_reported_without_schema_repair_or_cache_write(archive):
-    root, _, record = archive
-    (record / 'science-output.json').write_text('{"changed_original":true}')
-    before = tree(root)
-    with pytest.raises(ValueError, match='Preserved scientific originals changed'):
-        protocol.archive_status(root)
-    assert tree(root) == before
+    for operation in (lambda: protocol.require_current(root, job),
+            lambda: protocol.stage_scope(root, job), lambda: c.build_job(root, 1, 'H', [])):
+        with pytest.raises(protocol.UnsupportedProtocol, match='Scientific job view'):
+            operation()
+        assert tree(root) == before
 
 
 def test_registered_scope_guard_precedes_factory_load_and_original_acceptance(archive, execution_registry, monkeypatch):

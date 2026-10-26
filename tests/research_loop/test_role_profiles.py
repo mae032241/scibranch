@@ -7,10 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts as c, controller, continuation, execution, native, profiles, runtime
+from scidiscovery.research_loop import budget, contracts as c, controller, continuation, execution, native, profiles
 from scidiscovery.research_loop.cli import main
 import test_worker_resume as resume
-from test_rootless_fragments import accepted, launcher, arguments, next_session, resume_arguments, spec
 
 
 OVERRIDES = {'H': {'model': 'gpt-6.1-sol'}, 'W': {'model': 'gpt-6.1-sol'},
@@ -106,6 +105,7 @@ def test_changed_profile_rejected_before_native_submission(tmp_path,monkeypatch,
     with pytest.raises(ValueError,match='profile changed'):native.run_native(root,1)
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('role,overrides,tier',[(role,OVERRIDES,'default') for role in 'HWAE'] +
     [('A',{'A':dict(model='gpt-5.6-sol',reasoning_effort='medium',service_tier='priority')},'default'),
      ('H',None,'default'),('H',None,'priority')])
@@ -142,6 +142,7 @@ def test_actual_fresh_and_resumed_argv_keep_original_role_profile(tmp_path,monke
         assert 'service_tier='+json.dumps(expected['service_tier']) in args
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('tier',['default','priority'])
 @pytest.mark.parametrize('kind',['raw_codex','wrapper'])
 def test_global_configuration_reaches_actual_launcher_without_role_profiles(tmp_path,kind,tier):
@@ -161,7 +162,16 @@ print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=7,output_tok
     root=tmp_path/'instance'
     controller.prepare(root,goal,public,launcher,max_tokens=1000,max_seconds=60,max_steps=2,
         model='no-model',reasoning_effort='medium',service_tier=tier,search_policy=None)
-    assert controller.run(root)['status']=='wait'
+    job=c.build_job(root,1,'H',[])
+    record=execution.record(root,1)
+    intent=dict(step=1,task_ref=c.record_ref(root/'jobs/001.json'),**profiles.binding(c.settings(root),job))
+    c.write(root/'host-started.json',budget.clock_stamp())
+    budget.transition(root,'advance','profile_fixture')
+    anchor=budget.accept_node(root,job)
+    if anchor is not None:intent['budget_slice']=anchor
+    c.write(record/'native-intent.json',intent)
+    native.run_native(root,1)
+    assert not (root/'jobs/002.json').exists()
     assert 'role_profiles' not in c.settings(root)
     args=c.read(c.workspace(root,1)/'work/argv.json')
     configs=[args[i+1] for i,value in enumerate(args) if value=='-c']
@@ -170,65 +180,3 @@ print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=7,output_tok
     assert configs.count('service_tier='+json.dumps(tier))==1
     assert ('--output-schema' in args)==(kind=='raw_codex')
     assert not any(config.startswith('mcp_servers.') for config in configs)
-
-
-def test_launcher_rejects_configuration_mismatch_before_writes(launcher,accepted):
-    root,job,record=accepted
-    before={p:p.read_bytes() for p in root.rglob('*') if p.is_file()}
-    args=arguments(root,record)
-    with pytest.raises(ValueError,match='launcher_role_profiles_mismatch'):
-        launcher.native_args(dict(spec(root),role_profiles={'A':{'model':'different'}}),c.workspace(root,1),args)
-    assert before=={p:p.read_bytes() for p in root.rglob('*') if p.is_file()}
-
-
-def test_launcher_generated_config_uses_same_profile(launcher,tmp_path,monkeypatch):
-    root=prepare(tmp_path,role_profiles={'A':dict(model='gpt-5.6-sol',reasoning_effort='medium',service_tier='priority')})
-    job=c.build_job(root,1,'A',[]);w=c.workspace(root,1);h=root/'native-homes/001'
-    monkeypatch.setenv('THIN_HWA_ROLE','A');monkeypatch.setenv('THIN_HWA_JOB_MANIFEST',str(root/'jobs/001.json'))
-    s=dict(c.settings(root),scene_root=str(root),runs_dir=str(root/'runs'),submission_dir=str(root/'submission'),
-        native='/usr/bin/true',code_mode_host={'path':'/usr/bin/true'},runtime_paths=[],profile='isolated',
-        task_python=sys.executable,scid_python=sys.executable)
-    launcher.prepare_home(s,w,h)
-    import tomllib
-    generated=tomllib.loads((h/'config.toml').read_text())
-    profile=job['native_profile']
-    assert generated['model']==profile['model']
-    assert generated['model_reasoning_effort']==profile['reasoning_effort']
-    assert generated['service_tier']==profile['service_tier']
-    assert generated['permissions']['isolated']['network']['enabled'] is False
-
-
-@pytest.fixture
-def profiled_accepted(tmp_path,monkeypatch,request):
-    original=controller.prepare
-    def configured(*args,**kwargs):
-        return original(*args,**dict(kwargs,role_profiles={'W':dict(model='gpt-6.1-sol',reasoning_effort='medium',service_tier='priority')}))
-    monkeypatch.setattr(controller,'prepare',configured)
-    root,job,record=accepted.__wrapped__(tmp_path,monkeypatch,request)
-    intent=c.read(record/'native-intent.json')
-    c.write(record/'native-intent.json',dict(intent,native_profile=job['native_profile']))
-    return root,job,record
-
-
-@pytest.mark.parametrize('profiled_accepted',[None,'fragment'],indirect=True)
-def test_launcher_accepts_exact_profile_argv_for_fresh_and_resume(launcher,profiled_accepted,monkeypatch,request):
-    root,job,first=profiled_accepted
-    if request.node.callspec.params['profiled_accepted']:
-        record=next_session(root,job,first,monkeypatch)
-        intent=c.read(record/'native-intent.json')
-        c.write(record/'native-intent.json',dict(intent,native_profile=job['native_profile']))
-        binding=execution.identity(root,1,1)
-        c.write(record/'runner-process.json',runtime.process_identity(os.getppid(),binding))
-        c.write(record/'native-process.json',runtime.process_identity(os.getpid(),binding))
-        args=resume_arguments(root,record)
-    else:
-        record=first;args=arguments(root,record)
-    declared=dict(spec(root),role_profiles={'W':job['native_profile']})
-    result=launcher.native_args(declared,c.workspace(root,1),args)
-    assert result[result.index('--model')+1]=='gpt-6.1-sol'
-    assert 'service_tier="priority"' in result and 'model_reasoning_effort="medium"' in result
-    for wrong in ('model_reasoning_effort="high"','service_tier="default"'):
-        changed=list(args);key=wrong.split('=')[0]
-        index=next(i for i,v in enumerate(changed) if v.startswith(key+'='));changed[index]=wrong
-        with pytest.raises(ValueError,match='native_config_override_rejected'):
-            launcher.native_args(declared,c.workspace(root,1),changed)

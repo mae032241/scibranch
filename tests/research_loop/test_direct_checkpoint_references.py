@@ -57,6 +57,25 @@ def test_checkpoint_rejects_changed_terminal_control(fragment, observed_local, m
     assert (record / 'checkpoint.json').read_bytes() == saved
 
 
+@pytest.mark.parametrize('field', ['size_bytes', 'file_stat'])
+def test_checkpoint_rejects_old_native_original_shape(fragment, observed_local, monkeypatch, field):
+    root, job, record = fragment
+    observed_local()
+    science(record)
+    stopped_attempt(root, job, record, monkeypatch)
+    value = checkpoint.capture(root, job, record)
+    assert value['originals']
+    value['originals'][0].pop(field)
+    path = record / 'checkpoint.json'
+    path.chmod(0o600)
+    c.write(path, value)
+    saved = path.read_bytes()
+    for read in (checkpoint.validate, checkpoint.capture):
+        with pytest.raises(ValueError, match='Fragment native original changed'):
+            read(root, job, record)
+    assert path.read_bytes() == saved
+
+
 def test_checkpoint_refuses_a_live_original_writer(fragment, observed_local, monkeypatch):
     root, job, record = fragment
     row = observed_local()

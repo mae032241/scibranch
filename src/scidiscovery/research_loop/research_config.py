@@ -342,11 +342,12 @@ def inspect(*, config=None, root=None, view='frozen'):
     if (config is None) == (root is None):
         raise ValueError('Select exactly one config file or existing instance root')
     if root is not None:
+        from .protocol import require_settings_format
+        root = Path(root).expanduser().resolve()
+        settings = require_settings_format(contracts.settings(root))
         if view == 'current':
             from . import configuration_updates
-            root = Path(root).expanduser().resolve()
             state = configuration_updates.status(root)
-            settings = contracts.settings(root)
             from . import budget
             active = copy.deepcopy(state['active_settings'])
             active.update(budget.ceilings(root))
@@ -362,7 +363,7 @@ def inspect(*, config=None, root=None, view='frozen'):
                 active=to_document(root, active),
                 pending=state['configuration'] if state['pending'] else None)
         return dict(status='config_inspected', source='frozen_instance',
-                    instance=str(Path(root).expanduser().resolve()), settings=contracts.settings(Path(root).expanduser().resolve()))
+                    instance=str(root), settings=settings)
     settings = prepare(config, validate_only=True)
     settings.pop('goal_id', None)
     return dict(status='config_checked', source='research_config', settings=settings)
@@ -370,8 +371,9 @@ def inspect(*, config=None, root=None, view='frozen'):
 
 def to_document(root, settings=None):
     """Reconstruct an editable declaration without changing frozen provenance."""
+    from .protocol import require_settings_format
     root = Path(root).resolve()
-    value = contracts.settings(root) if settings is None else settings
+    value = require_settings_format(contracts.settings(root) if settings is None else settings)
     research = dict(root=str(root), public_root=value['public_root'], objective_text=value['objective'])
     updates = [str(root / row['source']) for row in value.get('global_materials', [])
                if row['source'] != 'project/global/objective.md']

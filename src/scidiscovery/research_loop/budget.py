@@ -532,10 +532,6 @@ def execution_available(root, job, limits, usage):
         if begin is None:
             raise ValueError('Closeout execution has no original boundary')
         reserve = closeout_floor(settings, preparation_seconds=begin['preparation_seconds'])
-        if job.get('engineering_repair') and _final_a_policy(settings) is None:
-            author = settings['delivery_policy']['closeout_a']
-            reserve = dict(reserve, seconds=reserve['seconds'] + author['max_seconds'],
-                           tokens=reserve['tokens'] + author['max_observed_tokens'])
     else:
         reserve = delivery_reserve(settings) or dict(seconds=0, tokens=0)
     return dict(seconds=max(0., limits['seconds_remaining'] - reserve['seconds']),
@@ -1084,10 +1080,9 @@ class NodeBudgetUnavailable(ValueError):
 
 
 def node_mode(root, *, settings=None):
-    mode = (contracts.settings(root) if settings is None else settings).get('node_budget_mode')
-    if mode != 'soft':
-        raise ValueError('Preserved hard or missing node budget mode is read-only; prepare a new soft instance')
-    return mode
+    from .protocol import require_settings_format
+    settings = require_settings_format(contracts.settings(root) if settings is None else settings)
+    return settings['node_budget_mode']
 
 
 def node_policy(value):
@@ -1105,8 +1100,10 @@ def node_policy(value):
 
 def node_limits(root, job, *, settings=None):
     from . import configuration_updates
+    from .protocol import require_settings_format
     if settings is None:
         settings = configuration_updates.for_new_job(root, job['step']) if 'configuration_revision' not in job else contracts.settings(root, job)
+    require_settings_format(settings)
     policy = settings.get('node_budget_policy')
     if policy is None:
         if job.get('final_only') and job.get('role') == 'A':
@@ -1120,8 +1117,7 @@ def node_limits(root, job, *, settings=None):
         if delivery is None or job['role'] != 'A':
             raise ValueError('Unconfigured closeout node budget')
         limits = dict(delivery['closeout_a'])
-    elif job['role'] in ('H', 'A') and settings.get('role_budget_policy') is not None and settings.get('node_budget_mode', 'hard') == 'soft':
-        # Retained hard-mode settings remain readable, but never executable.
+    elif job['role'] in ('H', 'A') and settings.get('role_budget_policy') is not None:
         limits['max_observed_tokens'] = min(limits['max_observed_tokens'], settings['role_budget_policy']['thinking_node_target_tokens'])
     if job['role'] == 'W' and settings.get('search_policy') is not None:
         limits['max_seconds'] = min(limits['max_seconds'], settings['search_policy']['max_w_seconds'])
@@ -1130,17 +1126,15 @@ def node_limits(root, job, *, settings=None):
 
 
 def _final_a_policy(settings):
-    value = settings.get('final_a_completion_policy')
-    if value is not None and (not isinstance(value, dict) or set(value) != {'version'}
-            or type(value['version']) is not int or value['version'] != 1):
-        raise ValueError('Frozen final A completion policy changed')
-    return value
+    from .protocol import require_settings_format
+    return require_settings_format(settings)['final_a_completion_policy']
 
 
 def protected_final_report(settings):
     """The frozen completion policy protects one explicitly configured final A."""
+    _final_a_policy(settings)
     policy = settings.get('delivery_policy')
-    if (_final_a_policy(settings) is None or settings.get('node_budget_policy') is None
+    if (settings.get('node_budget_policy') is None
             or policy is not None and policy['adapter'] is not None):
         return False
     return True
@@ -1402,8 +1396,7 @@ def scientific_steps(root, before_step, *, resume=None):
 def final_a_admission(root, job, *, final_report=None, events=None):
     """Final eligibility comes only from the persisted phase, never its balance."""
     settings = contracts.settings(root, job)
-    if _final_a_policy(settings) is None:
-        return None
+    _final_a_policy(settings)
     if events is None:
         events, _ = _events(root)
     boundary = _final_boundary(events, job)
@@ -1415,7 +1408,8 @@ def _validate_final_a_event(root, settings, event, previous):
     """Replay only the original admission facts; never sample live budget here."""
     fields = {'seq', 'parent_ref', 'settings_ref', 'at_unix', 'at_boottime', 'boot_id',
               'kind', 'version', 'step', 'attempt', 'basis', 'anchor', 'selection', 'reserve'}
-    if (_final_a_policy(settings) is None or set(event) - {'uptime_accounting', 'observed_advance_seconds'} != fields
+    _final_a_policy(settings)
+    if (set(event) - {'uptime_accounting', 'observed_advance_seconds'} != fields
             or type(event['version']) is not int or event['version'] != 2
             or type(event['step']) is not int or event['step'] <= 0
             or type(event['attempt']) is not int or event['attempt'] != 0
@@ -1499,7 +1493,7 @@ def final_a_return(root, job, intent, *, events=None):
         # ceilings, task and final-return marker while advancing this call's clock.
         expected_anchor.update({key:intent['budget_slice'].get(key) for key in
             ('boot_id','advance_seconds','previous_tokens','previous_seconds')})
-    if (accepted is None or _final_a_policy(settings) is None or ('attempt' in intent and not (startup or repair or reentry))
+    if (accepted is None or ('attempt' in intent and not (startup or repair or reentry))
             or intent.get('continuation_kind') is not None and not (startup or repair or reentry) or intent.get('step') != job['step']
             or job['role'] != 'A' or job.get('formal_review') is not None
             or intent.get('task_ref') != accepted['anchor']['task_ref']
@@ -1524,8 +1518,7 @@ def final_a_barrier(root, *, before_step=None, events=None):
 
 def _accept_final_a(root, job, anchor, limits, *, final_report=None):
     settings = contracts.settings(root, job)
-    if _final_a_policy(settings) is None:
-        return anchor
+    _final_a_policy(settings)
     with _ledger_writer(root):
         events, parent = _events(root)
         active = _active_final(events)
@@ -1809,13 +1802,10 @@ def node_admission(root, job, *, ignore_step=None, intent=None, final_report=Non
     if final_report is None and limits['max_tokens'] - meter.get('accounted_tokens', meter['observed_tokens']) <= 0:
         return 'node_budget_unavailable_tokens'
     if job.get('purpose') == 'closeout':
-        delivery = settings['delivery_policy']
         begin = closeout_state(root, events=events)['begin']
         if begin is None or begin['mode'] not in {'model', 'final'} or begin['source_cutoff'] != job['source_cutoff']:
             raise ValueError('Closeout node has no exact model boundary')
         floor = closeout_floor(settings, preparation_seconds=begin['preparation_seconds'])
-        if job.get('engineering_repair') and _final_a_policy(settings) is None:
-            floor=dict(tokens=floor['tokens']+delivery['closeout_a']['max_observed_tokens'],seconds=floor['seconds']+delivery['closeout_a']['max_seconds'],steps=floor['steps']+1)
         additional = 0 if (root / 'jobs' / f'{job["step"]:03d}.json').exists() else 1
         seconds_unavailable = limits['seconds_remaining'] <= floor['seconds']
         tokens_unavailable = limits['max_tokens'] - meter.get('accounted_tokens', meter['observed_tokens']) <= floor['tokens']
@@ -1914,10 +1904,6 @@ def accept_continuation(root, job, paths, *, output_repair=None):
     node_mode(root)
     reserve = (closeout_floor(settings, preparation_seconds=closeout_state(root)['begin']['preparation_seconds'])
         if job.get('purpose') == 'closeout' else delivery_reserve(settings)) or dict(tokens=0, seconds=0, steps=0)
-    if job.get('purpose') == 'closeout' and job.get('engineering_repair') and _final_a_policy(settings) is None:
-        author = settings['delivery_policy']['closeout_a']
-        reserve = dict(tokens=reserve['tokens'] + author['max_observed_tokens'],
-                       seconds=reserve['seconds'] + author['max_seconds'], steps=reserve['steps'] + 1)
     if (meter.get('blocking_unknown_steps', meter['unknown_steps'])
             or limits['max_tokens'] - meter.get('accounted_tokens', meter['observed_tokens']) <= reserve['tokens']
             or limits['seconds_remaining'] <= reserve['seconds']
@@ -1974,32 +1960,16 @@ def closeout_state(root, *, events=None):
 
 
 def delivery_reserve(settings):
-    if _final_a_policy(settings) is not None:
-        # The durable FINAL grant owns its one completion and finite delivery
-        # windows independently of shared tokens, time and steps. Ordinary work
-        # uses reported shared usage without estimating missing billing.
-        return dict(tokens=0, seconds=0., steps=0)
-    policy = settings.get('delivery_policy')
-    if policy is None:
-        return None
-    external = policy['adapter'] is not None
-    authors = 1
-    return dict(tokens=authors * policy['closeout_a']['max_observed_tokens'] + policy['inflight_tokens'],
-                seconds=authors * policy['closeout_a']['max_seconds'] + policy['cleanup_seconds']
-                        + (policy['submit_seconds'] + policy['confirm_seconds'] if external else 0),
-                steps=authors + (2 if external else 0))
+    # FINAL owns its finite completion/delivery windows independently of shared
+    # consumption; ordinary work does not prepay a second author allowance.
+    _final_a_policy(settings)
+    return dict(tokens=0, seconds=0., steps=0)
 
 
 def closeout_floor(settings, *, preparation_seconds=0.):
-    """After exploration: retain execution allowance, not another whole A target."""
-    if _final_a_policy(settings) is not None:
-        return dict(tokens=0, seconds=0., steps=0)
-    policy = settings['delivery_policy']
-    external = policy['adapter'] is not None
-    return dict(tokens=policy['inflight_tokens'],
-                seconds=max(0., policy['cleanup_seconds'] - preparation_seconds)
-                    + (policy['submit_seconds'] + policy['confirm_seconds'] if external else 0),
-                steps=2 if external else 0)
+    """FINAL reserves no shared balance for its independent finite windows."""
+    _final_a_policy(settings)
+    return dict(tokens=0, seconds=0., steps=0)
 
 
 def used_steps(root, *, events=None):

@@ -9,8 +9,7 @@ def status(root: Path, *, after=0, limit=None, live_feedback=True):
     root = root.resolve()
     settings = contracts.settings(root)
     from . import protocol
-    if type(settings.get('handoff_protocol')) is not int or settings['handoff_protocol']!=protocol.CURRENT:
-        return protocol.archive_status(root)
+    protocol.require_settings_format(settings)
     if type(after) is not int or after < 0 or (limit is not None and (type(limit) is not int or limit <= 0)):
         raise ValueError('Exact positive node page and continuation required')
     nodes = []
@@ -28,9 +27,11 @@ def status(root: Path, *, after=0, limit=None, live_feedback=True):
         job_path = root / 'jobs' / f'{step:03d}.json'
         if step not in local:
             job = originals.source_job(originals.node(root, step))
+            protocol.require_job_format(job)
             nodes.append(dict(step=step, role=job['role'], state='seal_present_unverified', inherited=True))
             continue
         job = contracts.read(job_path)
+        protocol.require_job_format(job)
         state = runtime.node_state(root, step)
         state = {'sealed': 'seal_present_unverified', 'terminal': 'native_outcome_unsealed',
                  'unstarted': 'prepared'}.get(state, state)

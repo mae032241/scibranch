@@ -7,7 +7,7 @@ from scidiscovery.research_loop import budget, contracts as c, controller, execu
 from test_history_handoff import finish
 
 
-def prepare(tmp_path, *, max_steps=2, legacy=False):
+def prepare(tmp_path, *, max_steps=2):
     public = tmp_path / 'public'
     public.mkdir()
     objective = public / 'objective.md'
@@ -18,12 +18,6 @@ def prepare(tmp_path, *, max_steps=2, legacy=False):
         model='fixture-no-model', reasoning_effort='high', node_budget_mode='soft',
         node_budget_policy={role: dict(max_observed_tokens=100, max_seconds=10)
                             for role in 'HWAE'})
-    if legacy:
-        # Construct a historical frozen configuration before any ledger event.
-        settings = c.settings(root)
-        settings.pop('final_a_completion_policy')
-        c.write(root / 'settings.json', settings)
-        c.write(root / 'settings-identity.json', dict(path='settings.json'))
     finish(root, 1, 'H', [], action='analyze')
     return root
 
@@ -295,16 +289,3 @@ def test_ordinary_nodes_keep_soft_token_target_and_have_no_final_grant(tmp_path,
     assert budget.final_a_barrier(root) is None
     meter = dict(input_tokens=100, cached_input_tokens=99, output_tokens=1)
     assert budget.stop_node(root, job, intent, budget.snapshot(root), meter) is None
-
-
-def test_settings_without_final_policy_keep_soft_target_without_final_grant(tmp_path):
-    root = prepare(tmp_path, legacy=True)
-    settings = (root / 'settings.json').read_bytes()
-    job, intent = accept(root, final=False)
-    assert 'final_return' not in intent['budget_slice']
-    assert budget.final_a_return(root, job, intent) is None
-    assert budget.final_a_barrier(root) is None
-    assert budget.delivery_reserve(c.settings(root)) is None
-    meter = dict(input_tokens=100, cached_input_tokens=99, output_tokens=1)
-    assert budget.stop_node(root, job, intent, budget.snapshot(root), meter) is None
-    assert (root / 'settings.json').read_bytes() == settings

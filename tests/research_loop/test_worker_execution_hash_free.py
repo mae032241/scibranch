@@ -12,9 +12,24 @@ from test_composed_execution_results import composed_registry
 from scidiscovery.research_loop import contracts as c, execution, experiments as e
 
 
-def invoke(capsys, path, *arguments, expected=0):
-    assert e.main(['--config', str(path), *map(str, arguments)]) == expected
+pytestmark = pytest.mark.process_e2e
+
+
+def _code_payload(work, *, name='source.json', data=b'{}'):
+    directory = work / 'code'
+    directory.mkdir(exist_ok=True)
+    source = directory / name
+    source.write_bytes(data)
+    return source
+
+
+def invoke(capsys, path, *arguments, expected=0, diagnostics=None):
+    code = e.main(['--config', str(path), *map(str, arguments)])
     captured = capsys.readouterr()
+    if code != expected and diagnostics:
+        pytest.fail('\n'.join(diagnostics) + '\nPublic response: ' + captured.out, pytrace=False)
+    assert code == expected, dict(code=code, expected=expected, public_response=captured.out,
+                                 host_diagnostics=diagnostics)
     value = json.loads(captured.out)
     # Test fixtures use UUID operation handles; no mechanical checksum belongs
     # in these framework-produced response objects.
@@ -23,41 +38,51 @@ def invoke(capsys, path, *arguments, expected=0):
 
 
 def test_real_main_client_contracts_and_retained_outputs(tmp_path, monkeypatch, remote_registry, capsys):
+    import traceback
+    from functools import partial
+    diagnostics=[]
+    diagnostic=e._diagnostic
+    def record_diagnostic(error, fallback, *, config=None):
+        diagnostics.append(''.join(traceback.format_exception(type(error),error,error.__traceback__)))
+        return diagnostic(error,fallback,config=config)
+    monkeypatch.setattr(e,'_diagnostic',record_diagnostic)
     root, job, config, _ = case(tmp_path, monkeypatch)
     work = c.workspace(root, 2)
     path = work / 'work/experiment-config.json'
+    run_cli = partial(invoke,capsys,path,diagnostics=diagnostics)
     assert c.read(path) == dict(worker_view_version=1, step=2, attempt=0)
     assert c.read(execution.origin(root, 2) / 'experiment-config.json') == config
     assert not (work/'work/lineage/calls').exists()
     assert not Path(config['record_dir']).is_relative_to(work)
     assert 'config_record' in config['execution_interface']
-    capabilities = invoke(capsys, path, 'capabilities')
+    capabilities = run_cli('capabilities')
     assert capabilities['contracts'][0]['key'] == 'opaque_input'
     assert 'sha256' not in capabilities['contracts'][0]
     for metadata in (False, True):
         target = work / 'work' / ('metadata.json' if metadata else 'contract.json')
-        result = invoke(capsys, path, 'describe', '--key', 'opaque_input', '--output', target,
+        result = run_cli('describe', '--key', 'opaque_input', '--output', target,
             *(['--metadata'] if metadata else []))
         assert set(result['contract']) == {'path', 'size_bytes'}
         assert 'sha256' not in c.read(target)
     # A legitimate scientist original can implement/use a hash. View handling
     # must preserve its bytes rather than recursively scrub scientific data.
     original = b'{"algorithm":"sha256","sha256":"' + b'a' * 64 + b'"}'
-    source = work / 'work/scientific-source.json'
-    source.write_bytes(original)
-    result = invoke(capsys, path, 'run', '--payload', source, '--new-plan', '--mechanism', 'P')
+    source = _code_payload(work, name='scientific-source.json', data=original)
+    result = run_cli('run', '--payload', source, '--new-plan', '--mechanism', 'P')
     call = result['call_id']
     for command in ('query', 'lookup'):
-        assert invoke(capsys, path, command, '--call-id', call)['state'] == 'succeeded'
-    collected = invoke(capsys, path, 'collect', '--call-id', call)
+        assert run_cli(command, '--call-id', call)['state'] == 'succeeded'
+    collected = run_cli('collect', '--call-id', call)
     output = collected['outputs'][0]
     assert output['name'] == 'original' and output['retention'] == 'retained_original'
     assert Path(output['path']).is_relative_to(work)
     assert Path(output['path']).read_bytes() == original == source.read_bytes()
-    assert invoke(capsys, path, 'reconcile', '--call-id', call)['status'] == 'known_success'
-    assert invoke(capsys, path, 'lineage-status')['counts']['known_success'] == 1
+    assert run_cli('reconcile', '--call-id', call)['status'] == 'known_success'
+    assert run_cli('lineage-status')['counts']['known_success'] == 1
     accepted = e.Records(config).accepted(call)
-    assert accepted['prepared']['local_path'] == str(source)
+    assert accepted['source_script'] == str(source)
+    assert accepted['code_version']['logical_root'] == 'code'
+    assert accepted['code_version']['entry'] == source.name
     assert 'sha256' not in c.read(e.Records(config).directory(call) / 'execution-observation.json')['outputs'][0]
 
 
@@ -135,7 +160,7 @@ def test_private_capability_comparison_still_rejects_change(tmp_path, monkeypatc
 def test_unknown_original_cli_does_not_replay(tmp_path, monkeypatch, remote_registry, capsys):
     root, _, config, _ = case(tmp_path, monkeypatch, outcome='unknown')
     work = c.workspace(root, 2);path = work / 'work/experiment-config.json'
-    source = work / 'work/source.json';source.write_text('{}')
+    source = _code_payload(work)
     result = invoke(capsys, path, 'run', '--payload', source, '--new-plan', '--mechanism', 'P', expected=2)
     call = result['call_id']
     before = {item:item.read_bytes() for item in e.Records(config).directory(call).rglob('*') if item.is_file()}
@@ -157,7 +182,7 @@ def test_fixed_host_bridge_rejects_authority_and_preserves_originals(tmp_path, m
                 ['describe','--key','opaque_input','--output','/tmp/not-task-output'],
                 ['run','--payload',str(root/'jobs/002.json')]):
             assert bridge.client(endpoint,arguments)['code']==2
-        source=work/'work/source.json';source.write_text('{}')
+        source=_code_payload(work)
         result=bridge.client(endpoint,['run','--payload',str(source),'--new-plan','--mechanism','P'])
         assert result['code']==0 and result['result']['status']=='known_success'
         assert len(e.Records(config).calls())==1
@@ -174,7 +199,7 @@ def test_ordinary_submission_claims_do_not_replay_or_rebind(tmp_path,monkeypatch
     from scidiscovery.research_loop import worker_execution_bridge as bridge
     root,_,config,_=case(tmp_path,monkeypatch)
     work=c.workspace(root,2);slot=work/bridge.SUBMISSION_DIRECTORY;slot.mkdir()
-    source=work/'work/source.json';source.write_text('{}')
+    source=_code_payload(work)
     arguments=['run','--payload',str(source),'--new-plan','--mechanism','P']
     def no_local_launch(*args):raise AssertionError('Remote fixture has no local process')
     def wait(reference):
@@ -227,12 +252,12 @@ def wait_submission(slot,reference,*,code=None):
     raise AssertionError('Ordinary submission response did not arrive')
 
 
-@pytest.mark.parametrize('filename',['accepted.json','completed.json','source.py'])
-def test_cached_submission_revalidates_canonical_originals(tmp_path,monkeypatch,remote_registry,filename):
+@pytest.mark.parametrize('mutation',['accepted.json','completed.json','code_version'])
+def test_cached_submission_revalidates_canonical_originals(tmp_path,monkeypatch,remote_registry,mutation):
     from scidiscovery.research_loop import worker_execution_bridge as bridge
     root,_,config,_=case(tmp_path,monkeypatch)
     work=c.workspace(root,2);slot=work/bridge.SUBMISSION_DIRECTORY
-    source=work/'work/source.json';source.write_text('{}')
+    source=_code_payload(work)
     def no_local_launch(*args):raise AssertionError('Remote fixture has no local process')
     with bridge.serve(slot,work/'work/experiment-config.json',work,launch=no_local_launch):
         result=bridge.client(slot,['run','--payload',str(source),'--new-plan','--mechanism','P'])
@@ -240,8 +265,15 @@ def test_cached_submission_revalidates_canonical_originals(tmp_path,monkeypatch,
         original=(slot/'submit.json').read_bytes()
         reference=json.loads(original)['submission_ref']
         assert bridge.client(slot,['capabilities'])['code']==0
-        target=e.Records(config).directory(result['result']['call_id'])/filename
-        target.chmod(0o600);target.write_bytes(target.read_bytes()+b' ')
+        directory=e.Records(config).directory(result['result']['call_id'])
+        target=directory/('accepted.json' if mutation=='code_version' else mutation)
+        target.chmod(0o600)
+        if mutation=='code_version':
+            accepted=c.read(target)
+            assert accepted['code_version']['entry']==source.name
+            accepted['code_version']['entry']='unbound.json'
+            c.write(target,accepted)
+        else:target.write_bytes(target.read_bytes()+b' ')
         # Reuse is pure retained verification; any factory/backend invocation fails.
         def forbidden(*args,**kwargs):raise AssertionError('Cached result queried a backend')
         monkeypatch.setattr(e,'load',forbidden)
@@ -371,7 +403,7 @@ def test_file_submission_preserves_async_handle_and_terminal_append(tmp_path,mon
     root,_,config,_=case(tmp_path,monkeypatch,executor='composed_execution:fixture',
         extra=dict(collect=False,query_state=state))
     work=c.workspace(root,2);slot=work/bridge.SUBMISSION_DIRECTORY
-    source=work/'work/source.json';source.write_text('{}')
+    source=_code_payload(work)
     def forbidden(*args):raise AssertionError('Async fixture has no local scientific process')
     with bridge.serve(slot,work/'work/experiment-config.json',work,launch=forbidden):
         started=bridge.client(slot,['run','--payload',str(source),'--new-plan','--mechanism','P'])
@@ -437,191 +469,3 @@ def main():
  sys.exit(0 if rec.get('ok') else 1)
 if __name__=='__main__':main()
 '''
-
-NAMESPACE_CHECKER = r'''import json,os,re,subprocess,sys,time
-from pathlib import Path
-from scidiscovery.research_loop.worker_execution_bridge import SUBMISSION_DIRECTORY
-work=Path.cwd();root=work.parents[2]
-assert (work/'work/task-science.txt').read_text()=='this task scientific input remains readable'
-for name in ('A-conclusion.json','score.json'):
- try:(root.parent.parent/'sibling-run'/name).read_bytes()
- except OSError:pass
- else:raise AssertionError('Sibling comparison evidence became readable')
-slot=work/SUBMISSION_DIRECTORY;assert slot.is_dir()
-# A scientist can write this ordinary submission directly; no IPC, checksum,
-# configuration manifest, package or extra agent is involved.
-(slot/'submit.json').write_text(json.dumps(dict(submission_ref='S001',arguments=['capabilities'])))
-assert re.search(rb'[0-9a-f]{64}',(slot/'submit.json').read_bytes()) is None
-deadline=time.monotonic()+15
-while time.monotonic()<deadline:
- try:
-  direct=json.loads((slot/'response.json').read_text())
-  if direct.get('submission_ref')=='S001':break
- except FileNotFoundError:pass
- time.sleep(.05)
-else:raise AssertionError('Ordinary scientific submission was not processed')
-assert direct['code']==0 and direct['result']['contracts'],direct
-for name in ('settings.json','settings-identity.json','jobs/'+work.name+'.json','native-evidence/'+work.name+'/native-intent.json'):
- try:(root/name).read_bytes()
- except OSError:pass
- else:raise AssertionError('Host control original was mounted: '+name)
-assert not (work/'work/lineage/calls').exists()
-assert not (root/'host-runtime/experiment-control').exists()
-def exp(*arguments):
- reply=subprocess.run([str(work/'bin/exp'),*map(str,arguments)],capture_output=True,text=True)
- assert reply.returncode==0,(reply.stdout,reply.stderr)
- assert re.search(r'[0-9a-f]{64}',reply.stdout) is None
- return json.loads(reply.stdout)
-contracts=exp('capabilities');assert contracts['contracts']
-exp('describe','--key','cov_single_source','--metadata','--output',work/'work/contract.json')
-source=work/'inert-source.py'
-science=[
- 'import json,os,socket',
- 'from pathlib import Path',
- 'work=Path.cwd();root=work.parents[2]',
- 'assert not (root/"settings.json").exists()',
- 'assert not (root/"native-evidence").exists()',
- 'assert (work/"work/task-science.txt").read_text()=="this task scientific input remains readable"',
- 'for name in ("A-conclusion.json","score.json"):',
- ' try:(root.parent.parent/"sibling-run"/name).read_bytes()',
- ' except OSError:pass',
- ' else:raise AssertionError("Sibling comparison evidence was mounted")',
- 'assert not (work/"work/experiment/submit.json").exists()',
- 'assert not (work/"work/experiment/response.json").exists()',
- 'assert not Path("/task-result/science-result.schema.json").exists()',
- 'probe=json.loads((work/"work/network-probe.json").read_text())',
- 'blocked={}',
- 'for name in ("inputs",".git",".agents",".codex",".aws"):',
- ' try:(work/name/"backend-forbidden.txt").write_text("forbidden")',
- ' except OSError:blocked[name]=True',
- ' else:blocked[name]=False',
- 'assert all(blocked.values()),blocked',
- '(work/"artifacts/backend-scratch.txt").write_text("authorized scratch")',
- 'connected=False',
- 'try:',
- ' with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as connection:',
- '  connection.settimeout(1);connected=connection.connect_ex(("127.0.0.1",probe["port"]))==0',
- 'except OSError:pass',
- 'same_netns=os.stat("/proc/self/ns/net").st_ino==probe["host_netns"]',
- 'evidence=dict(loopback_matches_profile=connected==probe["network_enabled"],network_namespace_matches_profile=same_netns==probe["network_enabled"],readonly_inputs=blocked["inputs"],protected_metadata=all(blocked[name] for name in (".git",".agents",".codex",".aws")),scratch_writable=True,agent_submission_unavailable=True)',
- 'assert all(evidence.values()),evidence',
- '(work/"artifacts/backend-permissions.json").write_text(json.dumps(evidence))',
- 'print("inert-scientific-process")']
-source.write_text('\n'.join(science)+'\n')
-result=exp('run','--script',source,'--new-plan','--mechanism','Fixture mechanism');assert result['status']=='known_success'
-call=result['call_id'];assert exp('query','--call-id',call)['state']=='succeeded'
-exp('collect','--call-id',call)
-backend=json.loads((work/'artifacts/backend-permissions.json').read_text());assert all(backend.values()),backend
-for path in work.rglob('*'):
- assert path.name not in {'accepted.json','completed.json','execution-observation.json','compiler.json','author-closeout-facts.json'},str(path)
- if path.is_file() and path.suffix=='.json':
-  assert re.search(rb'[0-9a-f]{64}',path.read_bytes()) is None,str(path)
-print(json.dumps(dict(provider_calls=0,actual_codex_sandbox=True,managed_status=result['status'],call_id=call,
- host_originals_unreadable=True,sibling_evidence_unreadable=True,task_science_readable=True,science_directory_has_no_control_receipts=True,backend_permissions=backend)))
-'''
-
-
-@pytest.mark.parametrize('network_enabled',[False,True],ids=['configured-network-denied','configured-network-allowed'])
-def test_actual_nested_codex_sandbox_uses_host_bridge(tmp_path, execution_registry, monkeypatch, network_enabled):
-    """Real outer bwrap + installed inner sandbox + ordinary files; zero provider calls.
-
-    The sole helper substitution points the test's codex-linux-sandbox alias at
-    the actual installed native, while the outer native protocol is a fixture.
-    A separate new allowed-network fixture changes its own named profile before
-    first configuration. Neither accepted configurations nor production defaults
-    change. No namespace, managed execution, or original verifier is mocked.
-    """
-    import os
-    import shutil
-    import subprocess
-    import sys
-    from scidiscovery.research_loop import budget,controller,native
-    from test_author_closeout_e2e import source_python
-    monkeypatch.delenv('THIN_HWA_AUTH_SOURCE',raising=False)
-    if shutil.which('bwrap') is None:pytest.skip('Actual bwrap is unavailable')
-    entry=shutil.which('codex')
-    package=Path(entry).resolve().parent.parent if entry else Path('/unavailable')
-    vendor=package/'node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl'
-    actual=Path(os.environ.get('SCID_TEST_CODEX_NATIVE',str(vendor/'bin/codex')))
-    if not actual.is_file():pytest.skip('Explicit installed Codex native is unavailable')
-    repo=Path(__file__).resolve().parents[2];launcher=repo/'scripts/acceptance/rootless_cov_launcher.py'
-    python,scid_python,runtime_paths=source_python(tmp_path,repo)
-    bootstrap='import runpy,sys;runpy.run_path(sys.argv.pop(1),run_name="__main__")'
-    comparison=tmp_path/'.trial/current-task';comparison.mkdir(parents=True)
-    sibling=tmp_path/'.trial/sibling-run';sibling.mkdir()
-    c.write(sibling/'A-conclusion.json',dict(conclusion='unrelated comparison canary'))
-    c.write(sibling/'score.json',dict(score='unrelated private scoring canary'))
-    public=comparison/'public';harness=public/'environment/harness';harness.mkdir(parents=True)
-    (public/'instruction.md').write_text('Engineering namespace and transport fixture only; no scientific qualification.')
-    (public/'task.toml').write_text('fixture=true\n');(public/'environment/Dockerfile').write_text('FROM fixture\n')
-    (harness/'exp_cli.py').write_text(PUBLIC_CLI);(harness/'runner.py').write_text(PUBLIC_RUNNER)
-    for name in ('train.csv','val.csv','meta.json'):(harness/name).write_text('{}')
-    manifest=tmp_path/'public-manifest.json'
-    c.write(manifest,dict(task_revision='d78f5eb52ad754c5ee9154741af73130a85a65b8',
-        public_files=[p.relative_to(public).as_posix() for p in public.rglob('*') if p.is_file()]))
-    profile_name='namespace-network-allowed' if network_enabled else 'namespace-no-model'
-    network_section=f'[permissions.{profile_name}.network]\nenabled=false'
-    host_wrapper=tmp_path/'host-launcher.py'
-    host_wrapper.write_text('import importlib.util\nfrom pathlib import Path\n'
-        f'spec=importlib.util.spec_from_file_location("actual_launcher",{str(launcher)!r})\n'
-        'module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)\n'
-        'original=module.prepare_home\n'
-        'def prepare(s,w,h,auth_source=None):\n'
-        ' original(s,w,h,auth_source)\n'
-        + (f' config=h/"config.toml";text=config.read_text();old={network_section!r}\n'
-            ' assert text.count(old)==1;config.write_text(text.replace(old,old.replace("enabled=false","enabled=true")))\n' if network_enabled else '') +
-        ' alias=Path(s["scene_root"])/"host-runtime/native-bin/codex-linux-sandbox"\n'
-        f' alias.unlink();alias.symlink_to({str(actual)!r})\n'
-        'module.prepare_home=prepare\nmodule.main()\n')
-    fake=tmp_path/'fake-native'
-    fake.write_text('#!'+sys.executable+'\nimport json,os,pathlib,subprocess,sys\n'
-        'args=sys.argv[1:];sys.stdin.read();work=pathlib.Path(args[args.index("-C")+1])\n'
-        'checker=work/"namespace-check.py"\n'
-        f'checker.write_text({NAMESPACE_CHECKER!r})\n'
-        'inner=pathlib.Path("/task-tmp/inner-runtime");inner.mkdir(mode=0o700);os.chmod("/task-tmp",0o700)\n'
-        'os.environ.update(TMPDIR=str(inner),XDG_RUNTIME_DIR=str(inner))\n'
-        f'command=[{str(actual)!r},"sandbox","-P",{profile_name!r},"-C",str(work),"--",{scid_python!r},"-B","-I","-c",{bootstrap!r},str(checker)]\n'
-        'reply=subprocess.run(command,capture_output=True,text=True)\n'
-        'assert reply.returncode==0,(reply.stdout,reply.stderr)\n'
-        '(work/"artifacts/namespace-check.json").write_text(reply.stdout)\n'
-        'print(json.dumps(dict(type="thread.started",thread_id="11111111-1111-4111-8111-111111111111")),flush=True)\n'
-        'print(json.dumps(dict(type="turn.completed",usage=dict(input_tokens=1,cached_input_tokens=0,output_tokens=0))),flush=True)\n'
-        'payload=dict(summary="Engineering transport fixture",scientific_result="No scientific efficacy measured.",limitations=["No model/provider/TCAD run."],implementation_selection=None,stage_intent="review",mechanism_findings=[dict(mechanism="Fixture mechanism",basis="observed",finding="The inert process transport completed; no scientific efficacy was measured.")])\n'
-        'task=json.loads((work/"science-task.json").read_text())\n'
-        'if task.get("candidate_nomination_mechanisms"):\n'
-        ' payload["candidate_nominations"]=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row["mechanism_ref"],reason="This inert transport fixture declares no scientifically suitable candidate.") for row in task["candidate_nomination_mechanisms"] if row["status"]!="waived"])\n'
-        'pathlib.Path(args[args.index("--output-last-message")+1]).write_text(json.dumps(payload))\n')
-    fake.chmod(0o555)
-    root=comparison/'instance';operator=comparison/'operator.json'
-    c.write(operator,dict(scene_root=str(root),public_root=str(public),public_manifest=str(manifest),runs_dir=str(root/'runs'),
-        submission_dir=str(root/'submission'),native=str(fake),
-        code_mode_host=dict(path=str(actual.parent/'codex-code-mode-host')),
-        task_python=python,scid_python=scid_python,model='no-model',reasoning_effort='high',profile=profile_name,
-        runtime_paths=list(dict.fromkeys([*runtime_paths,str(actual.parent.parent)])),
-        cov_engineering_check_reserve_seconds=0))
-    controller.prepare(root,public/'instruction.md',public,[scid_python,'-B','-I','-c',bootstrap,str(host_wrapper),'--config',str(operator),'--'],
-        max_tokens=10000,max_seconds=120,max_steps=4,model='no-model',reasoning_effort='high',experiment_mode='external',
-        node_budget_policy={role:dict(max_observed_tokens=1000,max_seconds=90) for role in 'HWAE'})
-    c.write(root/'host-started.json',budget.clock_stamp());budget.transition(root,'advance','Zero-provider actual namespace check')
-    from test_history_handoff import finish
-    finish(root,1,'H',[],action='experiment',search_choice=dict(scope='Engineering transport only',
-        commitments=[dict(label='Fixture mechanism',minimal_test='One inert process through the declared namespace',existing_ref=None)],
-        focus=dict(label='Fixture mechanism',action='screen')))
-    c.build_job(root,2,'W',[1])
-    (c.workspace(root,2)/'work/task-science.txt').write_text('this task scientific input remains readable')
-    import socket
-    with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as host_listener:
-        host_listener.bind(('127.0.0.1',0));host_listener.listen(2)
-        address=host_listener.getsockname()
-        with socket.create_connection(address,timeout=1):pass
-        c.write(c.workspace(root,2)/'work/network-probe.json',dict(port=address[1],host_netns=os.stat('/proc/self/ns/net').st_ino,network_enabled=network_enabled))
-        native.execute_native(root,2)
-    work=c.workspace(root,2);proof=c.read(work/'artifacts/namespace-check.json')
-    assert proof['provider_calls']==0 and proof['actual_codex_sandbox'] is True
-    assert proof['managed_status']=='known_success' and proof['host_originals_unreadable'] is True
-    assert all(proof['backend_permissions'].values())
-    assert proof['sibling_evidence_unreadable'] and proof['task_science_readable']
-    config=c.read(execution.origin(root,2)/'experiment-config.json')
-    accepted=e.Records(config).accepted(proof['call_id'])
-    assert accepted['prepared']['local_path']==str(work/'inert-source.py')
-    assert not (work/'work/lineage/calls').exists()

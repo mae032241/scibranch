@@ -61,14 +61,12 @@ class SourceSnapshot:
     index: dict
     origins: dict
     native_records: dict
-    legacy_compilations: dict
 
 
 def _snapshot(manifest):
     index = _entry_index(manifest['entries'])
     entries = tuple(row for row in manifest['entries'] if row.get('visibility') != 'private_snapshot')
-    return SourceSnapshot(entries, index, manifest['origins'], manifest.get('native_records', {}),
-        manifest.get('legacy_compilations', {}))
+    return SourceSnapshot(entries, index, manifest['origins'], manifest.get('native_records', {}))
 
 
 def _entry_index(entries):
@@ -205,33 +203,6 @@ def at_step(source, step):
     if source.inherited:
         return _snapshot_source(source.storage_root, source.snapshot, source.origin_identity, step)
     return NodeSource(source.origin_identity, step, source.original_root, source.storage_root)
-
-
-def legacy_compilation(source):
-    """The frozen complete legacy compiler namespace; never infer missing facts."""
-    if source.snapshot is None:
-        raise ValueError('Legacy compilation inventory is only retained for inherited originals')
-    key = f'{identity_key(source.origin_identity)}:{source.step}'
-    value = source.snapshot.legacy_compilations.get(key)
-    if value is None:
-        raise ValueError('Original legacy compiler inventory is not retained')
-    if set(value) != {'compiler_paths', 'author_successor', 'output_upgrade'}:
-        raise ValueError('Original legacy compiler inventory is malformed')
-    paths = value['compiler_paths']
-    if not isinstance(paths, list) or paths != sorted(set(paths)):
-        raise ValueError('Original legacy compiler index is ambiguous')
-    base = f'native-evidence/{source.step:03d}/compiled-implementations/'
-    for path in paths:
-        if not path.startswith(base) or len(PurePosixPath(path).parts) != 5 or not path.endswith('/compiler.json'):
-            raise ValueError('Original legacy compiler escaped its namespace')
-        resolve_ref(source, dict(path=path))
-    for name, suffix in [('author_successor', 'successor'), ('output_upgrade', 'output-upgrade')]:
-        ref = value[name]
-        if ref is not None:
-            if ref.get('path') != f'host-recovery/author-closeout/{source.step:03d}-{suffix}.json':
-                raise ValueError('Original legacy author chain escaped its namespace')
-            resolve_ref(source_for_ref(source, ref), ref)
-    return value
 
 
 def _check_identity(path, ref, *, context=None):

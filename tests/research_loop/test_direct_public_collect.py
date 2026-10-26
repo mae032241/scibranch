@@ -380,3 +380,32 @@ def test_collect_returns_the_declared_actual_public_original(fragment, terminal_
     selected['descriptor']['local_path'] = str(private)
     with pytest.raises((e.IntegrityError, e.UnsupportedExecution), match='public|original|projection'):
         e._collected_view(config, call_id, tampered, adapter)
+
+
+def test_collect_rejects_old_private_slots_even_with_existing_same_inode_aliases(fragment, observed_local):
+    root, job, _ = fragment
+    row = observed_local()
+    config, adapter = row['config'], row['adapter']
+    call_id = row['accepted']['call_id']
+    observed = deepcopy(row['observation'])
+    slots = row['directory'] / 'observed-originals'
+    slots.mkdir()
+    references = [item for field in ('proofs', 'outputs', 'scientific_outputs')
+        for item in observed.get(field, [])]
+    if observed.get('scientific_source') is not None:
+        references.append(observed['scientific_source'])
+    for number, item in enumerate(references):
+        actual = Path(item['path'])
+        slot = slots / f'{number:06d}'
+        slot.hardlink_to(actual)
+        item['path'] = str(slot)
+    public = shared_input_views.dynamic_root(root, c.workspace(root, job['step']), 'retained-experiments')
+    assert observed['scientific_outputs']
+    for item in observed['scientific_outputs']:
+        assert Path(item['path']).samefile(public / call_id / 'outputs' / item['name'])
+    # Original terminal controls still verify. Existing inode aliases alone
+    # cannot turn these old private publication paths into declared originals.
+    e.verify_observation(observed, lambda item: Path(item['path']),
+        interface=config['execution_interface'], verify_files=False)
+    with pytest.raises(e.UnsupportedExecution, match='exact call public output directory'):
+        e._collected_view(config, call_id, observed, adapter)

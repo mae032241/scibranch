@@ -63,7 +63,7 @@ def finish(root, step, role, parents, text='A bounded scientific finding', actio
         contracts.write(record / 'native-intent.json', dict(task_ref=task_ref))
     contracts.write(record / 'science-output.json', payload)
     contracts.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
-    contracts.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None,
+    contracts.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, native_started=False,
         usage=native.usage(root), raw_ref=contracts.file_ref(record / 'science-output.json')))
     contracts.seal_result(root, step)
     return job, work, record

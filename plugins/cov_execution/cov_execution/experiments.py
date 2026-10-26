@@ -404,7 +404,7 @@ REGISTRATION=ExecutionInterfaceRegistration('cov_execution','1',RuntimePluginFac
     scientific_outputs=CovExecution.scientific_outputs,
     scientific_source=LocalExecution.scientific_source,
     context_validator=validate_context,research_defaults=research_defaults,engineering_feedback=engineering_feedback,
-    projection_contract='cov.public-projections.v1', native_launcher_module='cov_execution.launcher')
+    projection_contract='cov.public-projections.v1')
 
 
 def _replay_roles(accepted):

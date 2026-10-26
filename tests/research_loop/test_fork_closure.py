@@ -31,7 +31,6 @@ def _copy_closure(root, closure, child):
     plan['entries'] = list(entries.values())
     plan['source_paths'].update(closure.paths)
     plan['origins'].update(closure.origins)
-    plan['legacy_compilations'].update(closure.legacy_compilations)
     plan['native_records'].update(closure.records)
     fork_sources.copy_source(plan, child / originals.FORK_DIRECTORY)
     shutil.rmtree(root)

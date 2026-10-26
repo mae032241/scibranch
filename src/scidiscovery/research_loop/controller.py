@@ -128,8 +128,8 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     if native_backend != 'codex' and resume_policy is not None:
         raise ValueError('The selected backend does not support Codex continuation policies')
     from . import profiles, skill_supply
-    frozen_skills, skill_manifest = skill_supply.prepare(skills, backend=native_backend,
-        launcher=launcher, existing=_existing_settings, policy=storage_limits, context=storage_context,
+    frozen_skills = skill_supply.prepare(skills, backend=native_backend,
+        launcher=launcher, existing=_existing_settings,
         role_profiles=role_profiles, worker_profiles=worker_profiles)
     frozen_profiles = profiles.normalize(role_profiles if role_profiles is not None else {}, dict(model=model, reasoning_effort=reasoning_effort,
         service_tier=service_tier), worker_profiles, (frozen_skills or {}).get('sets', {})) if role_profiles is not None or worker_profiles is not None else None
@@ -368,7 +368,6 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
                 settings['formal_review_policy']=formal_review.freeze_contract(root)
             if authority_policy is not None:
                 settings['execution_authority_policy']=execution_authority.freeze_configuration(root)
-            skill_supply.freeze(root, settings, skill_manifest,context=storage_context)
             skill_supply.validate(root, settings)
             contracts.write(root / "settings.json", settings)
             contracts.write(root / "settings-identity.json",
@@ -792,9 +791,7 @@ def _run(root, *, continue_wait=None):
                     return _finish(root, settings, 'output_repair_required', completed, last, reason=error.code, next_role=role)
                 except budget.NodeBudgetUnavailable as error:
                     if _budget_denied(error.reason):
-                        final = start_final(completed, step, role, error.reason)
-                        if final is not None:
-                            return final
+                        return start_final(completed, step, role, error.reason)
                     return _finish(root, settings, error.reason, completed, last, next_role=role)
                 except Exception as error:
                     return _finish(root, settings, "seal_pending", completed, last,
@@ -804,10 +801,7 @@ def _run(root, *, continue_wait=None):
             # Accepted originals above a later reduced ceiling were collected
             # above; no new native turn may consume that historical allowance.
             if not budget.task_step_available(root, step):
-                final = start_final(completed, step, role, 'bounded_steps_exhausted')
-                if final is not None:
-                    return final
-                return _finish(root, settings, 'bounded_steps_exhausted', completed, last, next_role=role)
+                return start_final(completed, step, role, 'bounded_steps_exhausted')
             stopped = correction.gate(root, completed)
             if stopped is not None:
                 return _finish(root, settings, 'correction_paused', completed, last,
@@ -822,33 +816,18 @@ def _run(root, *, continue_wait=None):
             if role=='W' and parents:
                 pending_repair=engineering.request(root,max(parents))
                 if pending_repair is not None and not _repair_funds(root):
-                    final = start_final(completed, step, role, 'engineering_repair_budget_unavailable')
-                    if final is not None:
-                        return final
-                    return _finish(root,settings,'engineering_repair_budget_unavailable',completed,last,next_role='W')
+                    return start_final(completed, step, role, 'engineering_repair_budget_unavailable')
             reserve_stop = budget.exploration_admission(root, dict(step=step, role=role))
             if reserve_stop:
-                final = start_final(completed, step, role, reserve_stop)
-                if final is not None:
-                    return final
-                delivery = settings.get('delivery_policy')
-                if budget.protected_final_report(settings):
-                    return _start_final_report(root, completed, step, role, reserve_stop)
-                if delivery is not None:
-                    return _start_closeout(root, completed, step, reserve_stop)
+                return start_final(completed, step, role, reserve_stop)
             budget.transition(root, 'advance', 'controller_launch_boundary')
             limit = _launch_limit(root, settings)
             if limit:
-                final = start_final(completed, step, role, limit)
-                if final is not None:
-                    return final
-                return _finish(root, settings, limit, completed, last, next_role=role)
+                return start_final(completed, step, role, limit)
             node_limit = budget.node_admission(root, dict(step=step, role=role))
             if node_limit:
                 if _budget_denied(node_limit):
-                    final = start_final(completed, step, role, node_limit)
-                    if final is not None:
-                        return final
+                    return start_final(completed, step, role, node_limit)
                 return _finish(root, settings, node_limit, completed, last, next_role=role)
             if (root / 'jobs' / f'{step:03d}.json').exists():
                 try:
@@ -875,19 +854,14 @@ def _run(root, *, continue_wait=None):
                 return _finish(root, settings, "paused", completed, last, next_role=role)
             limit = _launch_limit(root, settings)
             if limit:
-                final = start_final(completed, step, role, limit)
-                if final is not None:
-                    return final
-                return _finish(root, settings, limit, completed, last, next_role=role)
+                return start_final(completed, step, role, limit)
             try:
                 native.execute_native(root, step)
             except managed_wait.ExecutionWaiting as error:
                 return _finish(root,settings,'waiting_execution',completed,last,reason=error.reason,next_role=role)
             except budget.NodeBudgetUnavailable as error:
                 if _budget_denied(error.reason):
-                    final = start_final(completed, step, role, error.reason)
-                    if final is not None:
-                        return final
+                    return start_final(completed, step, role, error.reason)
                 return _finish(root, settings, error.reason, completed, last, next_role=role)
             except continuation.ResumeUnavailable as error:
                 return _finish(root, settings, 'output_repair_unavailable', completed, last, reason=str(error), next_role=role)
@@ -907,10 +881,8 @@ def _run(root, *, continue_wait=None):
                     known_budget_stop = (known and stopped.get('cleanup') == 'observed_group_cleaned'
                         and reason in {'closeout_protected_time_limit', 'wall_limit', 'token_limit', 'closeout_protected_token_limit'})
                     if budget.final_a_barrier(root) is None:
-                        if settings.get('final_a_completion_policy') is not None and (token_report or known_budget_stop):
+                        if token_report or known_budget_stop:
                             return start_final(completed, step, role, reason)
-                        if budget.protected_final_report(settings) and (token_report or known_budget_stop):
-                            return _start_final_report(root, completed, step+1, role, reason, stopped_step=step)
                         if delivery is not None and delivery['adapter'] is not None and (str(reason).startswith('closeout_protected_') or known_budget_stop):
                             if known_budget_stop:
                                 budget.stopped_report_original(root, step)
@@ -943,9 +915,7 @@ def _run(root, *, continue_wait=None):
                     return _finish(root,settings,audit_status,step,result,reason=detail,next_role='A')
                 receipt=candidate_audit._outcome(root,step)['result']
                 if receipt['note'] == 'candidate_audit_reserve_unavailable':
-                    final = start_final(step, step+1, 'A', receipt['note'])
-                    if final is not None:
-                        return final
+                    return start_final(step, step+1, 'A', receipt['note'])
                 repair=engineering.request(root,step)
                 if repair is not None or receipt['status'] in {'engineering_error','unclassified'}:
                     if repair is None:
@@ -982,11 +952,7 @@ def _run(root, *, continue_wait=None):
                 share_stop)
         if next_role is None:
             if role == 'H' and result.get('next_action') == 'wait' and not budget.execution_blocked(root):
-                final = _start_budget_closeout(root, completed, step + 1, 'H', 'scientific_wait')
-                if final is not None:
-                    return final
-                return _finish(root, settings, 'final_unavailable', completed, last,
-                    reason='No frozen final-A completion policy; H wait has no pending external call')
+                return _start_budget_closeout(root, completed, step + 1, 'H', 'scientific_wait')
             if settings.get('delivery_policy') is not None and result.get('next_action') == 'deliver':
                 return _start_closeout(root, completed, step + 1, 'scientific_deliver', authorization_step=step)
             action = 'finish' if result.get('next_action') == 'deliver' else result["next_action"]
@@ -994,10 +960,7 @@ def _run(root, *, continue_wait=None):
                 reason="Scientific role suggestion; overall goal success is not asserted")
         role, parents, instruction, evidence_return, correction_request = next_role, next_parents, next_instruction, next_return, next_correction
         author_correction = next_author
-    final = start_final(completed, completed + 1, role, 'bounded_steps_exhausted')
-    if final is not None:
-        return final
-    return _finish(root, settings, "bounded_steps_exhausted", completed, last, next_role=role)
+    return start_final(completed, completed + 1, role, 'bounded_steps_exhausted')
 
 
 def _closeout_result(root, status, *, reason=None, step=None, read_only=False):
@@ -1136,10 +1099,8 @@ def _closeout_funds(root, *, preparation_seconds=0., step=None, author_required=
     floor = budget.closeout_floor(settings, preparation_seconds=preparation_seconds)
     additional = int(author_required and not (step is not None and (root / 'jobs' / f'{step:03d}.json').exists()))
     author = policy['closeout_a'] if author_required else dict(max_observed_tokens=0,max_seconds=0)
-    required_tokens=0 if settings.get('final_a_completion_policy') is not None else author['max_observed_tokens']+floor['tokens']
     return (not meter.get('blocking_unknown_steps',meter['unknown_steps'])
         and limits['max_tokens'] - meter.get('accounted_tokens',meter['observed_tokens']) > 0
-        and limits['max_tokens'] - meter.get('accounted_tokens',meter['observed_tokens']) >= required_tokens
         and limits['seconds_remaining'] >= author['max_seconds'] + floor['seconds']
         and budget.effective_max_steps(root) - budget.used_steps(root) >= additional + floor['steps'])
 
@@ -1212,9 +1173,8 @@ def _budget_denied(reason):
 
 def _start_budget_closeout(root, cutoff, step, blocked_role, reason, *, resume_cursor=None):
     """One durable FINAL phase, followed only by its exact A and host delivery."""
-    settings = configuration_updates.current(root)
-    if settings.get('final_a_completion_policy') is None:
-        return None
+    from .protocol import require_settings_format
+    require_settings_format(configuration_updates.current(root))
     begin = budget.closeout_state(root)['begin']
     if begin is not None and begin['mode'] == 'final':
         return _run_final(root, begin)
@@ -1364,8 +1324,7 @@ def _start_closeout(root, cutoff, first_step, reason, *, export_only=False, auth
     from . import delivery
     if budget.closeout_state(root)['begin'] is not None:
         return _run_closeout(root)
-    settings = configuration_updates.current(root)
-    if not export_only and authorization_step is None and settings.get('final_a_completion_policy') is not None:
+    if not export_only and authorization_step is None:
         return _start_budget_closeout(root, cutoff, first_step, 'A', reason)
     if (root / 'jobs' / f'{first_step:03d}.json').exists():
         return _closeout_result(root, 'retained_job_conflict', reason='Closeout cannot replace a prepared scientific task', step=first_step)
@@ -1396,9 +1355,7 @@ def _start_closeout(root, cutoff, first_step, reason, *, export_only=False, auth
             return _closeout_result(root, 'closeout_preparation_unavailable', reason=error.code)
         preparation = budget.snapshot(root)['advance_seconds'] - at
         use_model = (authorization_step is not None
-                     or _closeout_funds(root, preparation_seconds=preparation, author_required=authorization_step is None)
-                     or settings.get('final_a_completion_policy') is not None
-                        and _closeout_funds(root, preparation_seconds=preparation))
+                     or _closeout_funds(root, preparation_seconds=preparation, author_required=authorization_step is None))
     budget.begin_closeout(root, cutoff, first_step, reason, export_only=not configured,
                           delivery_sources=sources, preparation_seconds=preparation, authorization_step=authorization_step)
     if not use_model:
@@ -1433,7 +1390,6 @@ def _run_delivery_actions(root, job, result):
         kind = 'submit'
     successor = root / 'jobs' / f'{job["step"]+1:03d}.json'
     if (not actions and budget.final_a_barrier(root) is None
-            and contracts.settings(root, job).get('final_a_completion_policy') is not None
             and successor.exists() and contracts.read(successor).get('role') == 'A'
             and contracts.read(successor).get('purpose') == 'closeout'):
         return _closeout_result(root, 'closeout_budget_unavailable', reason='final_author_required')
@@ -1446,7 +1402,6 @@ def _run_delivery_actions(root, job, result):
             accepted_actions = [row for row in budget.closeout_state(root)['actions']
                                 if row['intent']['decision'] == binding['decision']]
             if (not accepted_actions and budget.final_a_barrier(root) is None
-                    and contracts.settings(root, job).get('final_a_completion_policy') is not None
                     and not meter.get('blocking_unknown_steps', meter['unknown_steps'])
                     and not budget.execution_blocked(root)):
                 return _closeout_result(root, 'closeout_budget_unavailable', reason='final_author_required')
@@ -1475,23 +1430,10 @@ def _repair_funds(root, *, limits=None):
     if budget.execution_blocked(root) or meter.get('blocking_unknown_steps',meter['unknown_steps']):return False
     worker=(settings.get('node_budget_policy') or {}).get('W')
     if worker is None:return False
-    if settings.get('final_a_completion_policy') is not None:
-        available=budget.execution_available(root,dict(role='W'),limits,meter)
-        soft=budget.node_mode(root)=='soft'
-        return (available['tokens']>0
-            and (available['seconds']>0 if soft else available['seconds']>=worker['max_seconds'])
-            and budget.effective_max_steps(root)-budget.used_steps(root)>=1)
-    policy=settings['delivery_policy'];author=policy['closeout_a']
-    floor=budget.closeout_floor(settings)
-    if budget.node_mode(root)=='soft':
-        # W targets are advice: protect the subsequent A and execution floor,
-        # while allowing repair to use the positive balance above that reserve.
-        return (limits['max_tokens']-meter.get('accounted_tokens',meter['observed_tokens']) > author['max_observed_tokens']+floor['tokens']
-            and limits['seconds_remaining'] > author['max_seconds']+floor['seconds']
-            and budget.effective_max_steps(root)-budget.used_steps(root) >= 2+floor['steps'])
-    return (limits['max_tokens']-meter.get('accounted_tokens',meter['observed_tokens']) >= worker['max_observed_tokens']+author['max_observed_tokens']+floor['tokens']
-        and limits['seconds_remaining'] >= worker['max_seconds']+author['max_seconds']+floor['seconds']
-        and budget.effective_max_steps(root)-budget.used_steps(root) >= 2+floor['steps'])
+    available=budget.execution_available(root,dict(role='W'),limits,meter)
+    budget.node_mode(root)
+    return (available['tokens']>0 and available['seconds']>0
+        and budget.effective_max_steps(root)-budget.used_steps(root)>=1)
 
 
 def _run_direct_delivery(root, begin):
@@ -1512,11 +1454,8 @@ def _run_direct_delivery(root, begin):
     if delivered['status']=='delivery_reselect':
         return _closeout_result(root,'delivery_rejected',reason=delivered.get('reason'),step=step)
     if delivered.get('reason')=='final_author_required':
-        final=_start_budget_closeout(root,begin['source_cutoff'],begin['first_step'],'A',
-                                    'original_delivery_budget_unavailable')
-        if final is not None:
-            return final
-        return _closeout_result(root,'closeout_budget_unavailable',reason='original_delivery_budget_unavailable',step=step)
+        return _start_budget_closeout(root,begin['source_cutoff'],begin['first_step'],'A',
+                                      'original_delivery_budget_unavailable')
     return delivered
 
 
@@ -1581,9 +1520,8 @@ def _run_closeout(root):
         original_route = fork['route']
         parents, instruction = original_route['parents'], original_route['instruction']
         author_request = original_route['author_correction']
-    last_step = max(begin['first_step'], budget.historical_step_limit(root))
-    if contracts.settings(root).get('final_a_completion_policy') is not None:
-        last_step += 1  # A preserved unused repair may occupy the last granted slot.
+    # A preserved unused repair may occupy the last granted slot.
+    last_step = max(begin['first_step'], budget.historical_step_limit(root)) + 1
     if fork_runtime.is_fork(root):
         # Include a denial boundary so exhaustion can journal FINAL. Logical
         # labels cannot determine how many new closeout actions fit.
@@ -1624,21 +1562,12 @@ def _run_closeout(root):
                         and contracts.read(successor).get('purpose') == 'closeout'
                         and contracts.read(successor).get('source_cutoff') == begin['source_cutoff'])
                     if not _repair_funds(root) or prepared_author:
-                        if contracts.settings(root).get('final_a_completion_policy') is None:
-                            return _closeout_result(root,'engineering_repair_budget_unavailable',step=step)
                         return _start_budget_closeout(root, begin['source_cutoff'], step, 'W', 'engineering_repair_budget_unavailable')
 
                 if not budget.task_step_available(root, step):
-                    final = _start_budget_closeout(root, begin['source_cutoff'], step, 'W' if repair else 'A', 'bounded_steps_exhausted')
-                    if final is not None:
-                        return final
-                    return _closeout_result(root, 'closeout_budget_unavailable', step=step,
-                        reason='original_steps_exhausted')
+                    return _start_budget_closeout(root, begin['source_cutoff'], step, 'W' if repair else 'A', 'bounded_steps_exhausted')
                 if budget.execution_blocked(root) or repair is None and not _closeout_funds(root, preparation_seconds=begin['preparation_seconds'], step=step):
-                    final = _start_budget_closeout(root, begin['source_cutoff'], step, 'W' if repair else 'A', 'closeout_budget_unavailable')
-                    if final is not None:
-                        return final
-                    return _closeout_result(root, 'closeout_budget_unavailable', step=step)
+                    return _start_budget_closeout(root, begin['source_cutoff'], step, 'W' if repair else 'A', 'closeout_budget_unavailable')
                 budget.transition(root, 'advance', 'closeout_engineering_repair_admission' if repair else 'closeout_author_admission')
                 if path.exists():
                     prior = contracts.read(path)
@@ -1661,9 +1590,7 @@ def _run_closeout(root):
                     native.execute_native(root, step)
                 except budget.NodeBudgetUnavailable as error:
                     if _budget_denied(error.reason):
-                        final = _start_budget_closeout(root, begin['source_cutoff'], step, 'W' if repair else 'A', error.reason)
-                        if final is not None:
-                            return final
+                        return _start_budget_closeout(root, begin['source_cutoff'], step, 'W' if repair else 'A', error.reason)
                     return _closeout_result(root, 'closeout_budget_unavailable', reason=error.reason, step=step)
                 except continuation.ResumeUnavailable as error:
                     return _closeout_result(root, 'output_repair_unavailable', step=step, reason=str(error))
@@ -1691,9 +1618,7 @@ def _run_closeout(root):
                 return _closeout_result(root,audit_status,reason=detail,step=step)
             receipt=candidate_audit._outcome(root,step)['result']
             if receipt['note'] == 'candidate_audit_reserve_unavailable':
-                final = _start_budget_closeout(root, begin['source_cutoff'], step+1, 'A', receipt['note'])
-                if final is not None:
-                    return final
+                return _start_budget_closeout(root, begin['source_cutoff'], step+1, 'A', receipt['note'])
             repair=engineering.request(root,step)
             if repair is not None or receipt['status'] in {'engineering_error','unclassified'}:
                 if repair is None:return _closeout_result(root,'candidate_audit_'+receipt['status'],reason=receipt['note'],step=step)
@@ -1744,8 +1669,7 @@ def _run_closeout(root):
             + str(candidate_refs.public_reference(root,job,result.get('candidate_recommendation'))) + ': ' + delivered.get('reason', '')
             + '. Select an alternative candidate with deliver, request audit, decline with finish or wait. '
             'No unknown external operation may be repeated; original science and budget remain binding.')
-    final = _start_budget_closeout(root, begin['source_cutoff'], last_step + 1, 'A', 'bounded_steps_exhausted')
-    return final if final is not None else _closeout_result(root, 'closeout_budget_unavailable', reason='original_steps_exhausted')
+    return _start_budget_closeout(root, begin['source_cutoff'], last_step + 1, 'A', 'bounded_steps_exhausted')
 
 
 def closeout(root, *, export_only=False):

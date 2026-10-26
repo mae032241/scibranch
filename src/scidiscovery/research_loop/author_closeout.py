@@ -57,14 +57,10 @@ def _context_compiler(root, job, item, *, controls_only=True):
     from . import execution_inputs
     if item['source'] != item['compiler']:
         raise ValueError('Author compiler source is not its exact frozen input')
-    if item['material'] in job['direct_materials']:
-        compiler = execution_inputs.verify_compilation(root, item['compiler'], material=item['material'],
-            client_binding=item.get('client_binding'), controls_only=controls_only)
-    else:
-        binding, compiler = execution_inputs.verify_legacy_author_client(root, job, item['client_binding'])
-        grant = binding['legacy_authorization']
-        if grant['compiler'] != item['compiler'] or grant['material'] != item['material']:
-            raise ValueError('Author compiler source changed its existing authorization')
+    if item['material'] not in job['direct_materials']:
+        raise ValueError('Author compiler source is not a frozen input')
+    compiler = execution_inputs.verify_compilation(root, item['compiler'], material=item['material'],
+        client_binding=item.get('client_binding'), controls_only=controls_only)
     if item.get('code_version') != compiler.get('code_version') or 'code_version' not in compiler:
         raise ValueError('Author compiler scientific code version changed')
     owner = c.read(_check(root, compiler['job']))
@@ -173,54 +169,12 @@ def science_context(root, job, record, *, permit=None, attempt=None):
             c.write(target,_context_projection(name,c.read(source),references,texts));target.chmod(0o400)
         entries.append(dict(kind=kind,source=original,display=(_ref(root,target) if kind=='framework' else
             dict(path=target.relative_to(root).as_posix(),size_bytes=row['size_bytes']))))
-    own=[];masks=[];implementations=[]
-    if job.get('worker_view_version')!=1 and permit is not None:
-        for number,compiler_path in enumerate(sorted(execution_inputs._directory(root,job['step']).glob('*/compiler.json')),1):
-            compiler_ref=_ref(root,compiler_path);compiler=qualification._read(root,compiler_ref)
-            output=compiler['output'];source=Path(output['path'])
-            if not source.is_relative_to(work/'artifacts'):raise ValueError('Legacy compiler output is not an original task artifact')
-            relative=source.relative_to(work/'artifacts')
-            material=dict(source=str(source),path=f'inputs/parents/{job["step"]:03d}/artifacts/{relative.as_posix()}',size_bytes=output['size_bytes'])
-            client=work/'artifacts/scientific-implementations'/f'I{number:03d}.json'
-            binding_ref=execution_inputs.create_legacy_author_client(root,job,compiler_ref,material,permit,attempt,client)
-            binding,compiler=execution_inputs.verify_legacy_author_client(root,job,binding_ref,require_intent=False)
-            own.append(binding_ref)
-            source_name=f'work/retained-implementations/I{number:03d}/implementation.json'
-            scientific=public/source_name
-            if 'code_version' in compiler:
-                entries.append(dict(kind='compiler_author',source=compiler_ref,
-                    display=dict(path=scientific.relative_to(root).as_posix()),material=material,
-                    compiler=compiler_ref,client_binding=binding_ref,code_version=compiler['code_version']))
-            else:
-                author=_check(root,compiler['author'])
-                entries.append(dict(kind='source',source=_context_reference(root,author,compiler['author']['size_bytes']),
-                    display=dict(path=scientific.relative_to(root).as_posix(),size_bytes=compiler['author']['size_bytes'])))
-            owner=qualification._read(root,compiler['job']);aliases=[]
-            for item in compiler['inputs']:
-                original=execution_inputs.resolve_native_original(root,item['original'],compiler_job=owner)
-                input_source=originals.material_path(root,original);display=public/item['alias'];aliases.append(item['alias'])
-                entries.append(dict(kind='source',source=dict(original,source=str(input_source)),
-                    display=dict(path=display.relative_to(root).as_posix(),size_bytes=original['size_bytes'])))
-            note=public/'artifact-notes'/f'I{number:03d}.txt'
-            note.parent.mkdir(parents=True,exist_ok=True)
-            note.write_text('The native execution package is retained privately. Read '+source_name+
-                ' and use '+client.relative_to(work).as_posix()+' as the scientific implementation reference.\n')
-            note.chmod(0o400)
-            masks.append(dict(original=_ref(root,source),display=_ref(root,note),client=str(client)))
-            implementations.append(dict(reference=f'I{number:03d}',source=source_name,
-                scientific_inputs=aliases,implementation=client.relative_to(work).as_posix(),
-                qualification='Unreviewed scientific implementation; no execution permission'))
-    if implementations:
-        task['retained_implementations']=implementations
-        target=public/'science-task.json';target.chmod(0o600);c.write(target,task);target.chmod(0o400)
-        entries[0]['display']=_ref(root,target)
     if permit is not None:
         science_facts(root, job['step'], context_entries=entries, context_directory=public)
     manifest=record/'author-science-context.json'
     c.write(manifest,dict(version=1,step=job['step'],directory=public.relative_to(root).as_posix(),
-        candidate_references=references,entries=entries,own_compiled_clients=own,artifact_masks=masks,
-        retained_implementations=implementations,
-        omissions=[dict(category='Legacy control receipts and private recovery bindings',
+        candidate_references=references,entries=entries,
+        omissions=[dict(category='Private control receipts and recovery bindings',
             scope='Original retained task',reason='Retained and verified privately; available scientific inputs are listed by the task.')]))
     manifest.chmod(0o400)
     return _ref(root,manifest)
@@ -234,11 +188,6 @@ def validate_science_context(root, job, proof):
     references,texts=_context_sources(root,job)
     if references!=manifest['candidate_references']:raise ValueError('Author scientific references changed')
     from . import candidate_refs
-    from . import execution_inputs
-    for binding in manifest.get('own_compiled_clients',[]):
-        execution_inputs.verify_legacy_author_client(root,job,binding)
-    for item in manifest.get('artifact_masks',[]):
-        _check(root,item['original']);_check(root,item['display'])
     for item in manifest['entries']:
         if 'code_version' in item:
             display=Path(root)/item['display']['path']
@@ -267,8 +216,6 @@ def validate_science_context(root, job, proof):
             name=display.relative_to(directory).as_posix()
             expected=(candidate_refs.public_fields(c.read(source),references) if item['kind']=='task' else
                 _context_projection(name,c.read(source),references,texts))
-            if item['kind']=='task' and manifest.get('retained_implementations'):
-                expected=dict(expected,retained_implementations=manifest['retained_implementations'])
             if c.read(display)!=expected:raise ValueError('Author scientific display differs from its exact original')
     return directory
 
@@ -310,17 +257,12 @@ def _optional_original(root, path, source):
     if source is None or not source.inherited:
         return path.exists()
     from . import originals
-    retained=originals.legacy_compilation(source)
-    field=('author_successor' if path==successor_path(root,source.step) else 'output_upgrade')
-    proof=retained[field]
-    if proof is None:
+    relative = Path(path).relative_to(root).as_posix()
+    if not source._index.get((originals.identity_key(source.origin_identity), relative)):
         return False
-    if proof.get('origin_identity',source.origin_identity)!=source.origin_identity:
-        raise ValueError('Author closeout optional original changed its origin')
-    proof={key:proof[key] for key in ('path','size_bytes')}
-    _declared_ref(root,proof,path)
-    _check(root,proof,source=source)
+    originals.resolve_ref(source, dict(path=relative))
     return True
+
 
 
 def _calls(root, step):

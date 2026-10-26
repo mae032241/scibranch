@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, execution_authority, execution_inputs, experiment_client
+from scidiscovery.research_loop import contracts as c, execution_authority, execution_inputs, experiment_client, protocol
 
 
 class BuilderReached(Exception):
@@ -13,7 +13,8 @@ class BuilderReached(Exception):
 @pytest.fixture
 def compiler(tmp_path, monkeypatch):
     root = tmp_path / 'instance'
-    job = dict(step=2, role='W', worker_view_version=1, direct_materials=[], selected_inputs=[])
+    job = dict(step=2, role='W', handoff_protocol=protocol.CURRENT,
+        worker_view_version=1, lineage_projection_version=1, direct_materials=[], selected_inputs=[])
     (root / 'jobs').mkdir(parents=True)
     (root / 'jobs/002.json').write_text(json.dumps(job))
     work = c.workspace(root, 2)
@@ -22,10 +23,19 @@ def compiler(tmp_path, monkeypatch):
     source.write_text('{"scientific_source": "exact author content"}')
     host = execution_inputs.NativeInputHost.__new__(execution_inputs.NativeInputHost)
     host.root, host.job = root, job
-    host.config = dict(worker_view_version=1, record_dir=str(experiment_client.record_directory(root, 2)))
-    monkeypatch.setattr(execution_authority, '_remaining', lambda *args: None)
+    host.intent = c.record_ref(root/'jobs/002.json')
+    host.config = dict(worker_view_version=1, record_dir=str(experiment_client.record_directory(root, 2)),
+        native_attempt=dict(number=0), scope=dict(step=2), execution_interface={})
+    c.write(root/'host-runtime/experiment-control/002/interfaces/000.json', host.config)
+    monkeypatch.setattr(execution_authority, '_remaining', lambda *args: (None, 1.))
     monkeypatch.setattr(c, 'settings', lambda root, job=None: {})
     monkeypatch.setattr(c, 'output_quota_exceeded', lambda *args: False)
+    # This output-boundary fixture supplies the trusted exact opaque-packet
+    # source port. Actual source admission and compiler provenance have separate
+    # integration coverage; these ports grant no scientific qualification.
+    monkeypatch.setattr(experiment_client, 'code_path', lambda config, path: path)
+    monkeypatch.setattr(experiment_client, 'code_selection', lambda config, path: None)
+    monkeypatch.setattr(experiment_client, 'input_reference', lambda config, path: c.file_ref(path))
 
     def compile(output):
         def builder(raw, resolved):
@@ -87,11 +97,11 @@ def test_future_compile_cannot_retarget_configuration_record_directory(compiler,
         compile(tmp_path / 'forged/implementations/I001/package.json')
 
 
-def test_legacy_compile_keeps_artifacts_guard(compiler, tmp_path):
+def test_old_job_cannot_publish_a_public_compile_package(compiler, tmp_path):
     host, work, compile = compiler
     host.job.pop('worker_view_version')
     host.config.pop('worker_view_version')
-    with pytest.raises(BuilderReached):
+    with pytest.raises(protocol.UnsupportedProtocol, match='Scientific job view'):
         compile(work / 'artifacts/package.json')
-    with pytest.raises(ValueError, match='task and artifacts'):
+    with pytest.raises(protocol.UnsupportedProtocol, match='Scientific job view'):
         compile(tmp_path / 'implementations/I001/package.json')

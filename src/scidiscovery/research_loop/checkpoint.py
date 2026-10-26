@@ -69,7 +69,7 @@ def _science(root, job, originals):
     if not isinstance(receipt, dict) or receipt.get('raw_ref') != dict(path=str(Path(root)/row['path']),size_bytes=row['size_bytes']):
         return dict(status='unverified', diagnostic='unbound_final_output'), None
     try:
-        payload = c.science_payload(root / row['path'], 'W', job.get('handoff_protocol', 1))
+        payload = c.science_payload(root / row['path'], 'W', job['handoff_protocol'])
     except OutputRepairRequired as error:
         return dict(status='invalid', diagnostic=error.code), None
     return dict(status='present', diagnostic=None), payload
@@ -116,8 +116,7 @@ def capture(root, job, record):
             if not isinstance(attempt,dict) or type(attempt.get('number')) is not int:
                 raise history.ObserverIntegrityError('Checkpoint output has no exact accepted native attempt')
             if attempt['number']>binding['attempt'] or call['status'] not in {'known_success','known_failed'}:continue
-            outputs=(history.scientific_outputs(root,job,call)
-                if job.get('worker_view_version')==1 else call.get('outputs',[]))
+            outputs=history.scientific_outputs(root,job,call)
             for output in outputs:
                 history._validate_proof(root,output)
                 row=dict(source=str(root/output['snapshot']),
@@ -145,6 +144,8 @@ def capture(root, job, record):
 
 def validate(root, job, record):
     """Verify this stopped attempt and saved originals without reading drafts."""
+    from .protocol import require_current
+    require_current(root,job)
     root, record = Path(root), Path(record)
     from . import worker_delivery,experiments
     worker_delivery.writers_stopped(root,job,record)
@@ -156,7 +157,7 @@ def validate(root, job, record):
         if path.parent != record or path.name not in NATIVE_ORIGINALS:
             raise ValueError('Fragment native original changed')
         actual=experiments.proof(c.regular(path))
-        if any(actual.get(key)!=row[key] for key in ('size_bytes','file_stat') if key in row):
+        if any(actual[key]!=row.get(key) for key in ('size_bytes','file_stat')):
             raise ValueError('Fragment native original changed')
     expected, _ = _science(root, job, value['originals'])
     if value['science'] != expected:
@@ -181,8 +182,7 @@ def validate(root, job, record):
         if (not isinstance(attempt,dict) or type(attempt.get('number')) is not int
                 or attempt['number']>value['binding']['attempt'] or call['status'] not in {'known_success','known_failed'}):
             raise ValueError('Fragment terminal output lost its original native attempt')
-        outputs=(history.scientific_outputs(root,job,call)
-            if job.get('worker_view_version')==1 else call.get('outputs',[]))
+        outputs=history.scientific_outputs(root,job,call)
         for row in selected[call['call_id']]:
             name=row['name'].split('/',3)[3]
             matches=[output for output in outputs if output['name']==name]

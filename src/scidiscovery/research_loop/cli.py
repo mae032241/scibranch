@@ -407,7 +407,7 @@ def main(argv=None):
         if args.maintenance in {'query', 'cancel'}:
             recognized.update(PENDING_EXECUTION_STATES)
         return 0 if state in recognized else 2
-    return 0 if result.get('status') in {None, 'fork_preview_ready', 'fork_created', 'preserved_read_only', 'prepared', 'finish', 'final_a_completed', 'wait', 'paused', 'pause_requested', 'budget_amended', 'delivery_confirmed', 'execution_recovered', 'execution_resume_recorded', 'exported_unsubmitted', 'ui_stopped','execution_maintained','config_checked','config_inspected','accepted','running','applied','operations','guidance_listed','pending','revoked','progress_read','progress_unavailable','artifact_downloaded'} else 2
+    return 0 if result.get('status') in {None, 'fork_preview_ready', 'fork_created', 'prepared', 'finish', 'final_a_completed', 'wait', 'paused', 'pause_requested', 'budget_amended', 'delivery_confirmed', 'execution_recovered', 'execution_resume_recorded', 'exported_unsubmitted', 'ui_stopped','execution_maintained','config_checked','config_inspected','accepted','running','applied','operations','guidance_listed','pending','revoked','progress_read','progress_unavailable','artifact_downloaded'} else 2
 
 
 if __name__ == '__main__':

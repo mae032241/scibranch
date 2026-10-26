@@ -243,7 +243,6 @@ class _Closure:
         self.tasks = {}
         self.task_active = set()
         self.seals = {}
-        self.legacy_compilations = {}
         self.directory_inventory = []
         self.code_transfers = {}
         self.control_active = set()
@@ -713,7 +712,7 @@ class _Closure:
                 records = experiments.Records(dict(record_dir=str(experiment_client.record_directory(source.storage_root, step))))
                 for directory in records.calls():
                     self.control(source, dict(path=directory.relative_to(source.storage_root).as_posix() + '/accepted.json'))
-            self.compilation_inventory(source)
+            self.compilations(source)
             seal=f'native-evidence/{step:03d}/result-identity.json'
             if o.has_original(source,seal):
                 # This private original closes exact prior calls/compilers. It
@@ -747,37 +746,30 @@ class _Closure:
             self.reference(owner, path, proof=material)
         self.control(source, seal_ref)
         self.attempts(source, selected=False)
-        if seal.get('compiled_implementations'):
-            self.compilation_inventory(source)
         self.seals[key] = dict(step=step, origin_identity=source.origin_identity, job_ref=job_ref, seal_ref=seal_ref)
         return self.seals[key]
 
-    def compilation_inventory(self, source):
-        """Freeze the complete legacy index and exact optional author chain."""
-        key = f'{o.identity_key(source.origin_identity)}:{source.step}'
-        if key in self.legacy_compilations:
-            return
+    def compilations(self, source):
+        """Retain current selected-task compiler controls without a second index."""
+        base = f'native-evidence/{source.step:03d}/compiled-implementations/'
         if source.inherited:
-            inventory = source.snapshot.legacy_compilations.get(key)
-            if inventory is None:
-                # Old snapshots cannot prove absence or directory completeness.
-                return
-            inventory = copy.deepcopy(inventory)
+            paths = sorted(row['path'] for row in source.entries
+                if row['origin_identity'] == source.origin_identity
+                and row['path'].startswith(base) and len(Path(row['path']).parts) == 5
+                and row['path'].endswith('/compiler.json'))
         else:
-            base = f'native-evidence/{source.step:03d}/compiled-implementations'
             paths = sorted(path.relative_to(source.storage_root).as_posix()
                 for path in (source.storage_root / base).glob('*/compiler.json'))
-            def optional(path):
-                return o.original_ref(source, path) if (source.storage_root / path).exists() else None
-            inventory = dict(compiler_paths=paths,
-                author_successor=optional(f'host-recovery/author-closeout/{source.step:03d}-successor.json'),
-                output_upgrade=optional(f'host-recovery/author-closeout/{source.step:03d}-output-upgrade.json'))
-        self.legacy_compilations[key] = inventory
-        for path in inventory['compiler_paths']:
+        for path in paths:
             self.control(source, dict(path=path))
-        for name in ('author_successor', 'output_upgrade'):
-            if inventory[name] is not None:
-                self.control(source, inventory[name])
+        # Current original author controls keep their exact presence in the cut;
+        # they do not need a legacy compiler ordering/absence projection.
+        for suffix in ('successor', 'output-upgrade'):
+            path = f'host-recovery/author-closeout/{source.step:03d}-{suffix}.json'
+            present = (bool(source._index.get((o.identity_key(source.origin_identity), path)))
+                if source.inherited else (source.storage_root / path).exists())
+            if present:
+                self.control(source, dict(path=path))
 
     def _logical_path(self, source, actual):
         if source.entries is None:
@@ -855,6 +847,8 @@ def inspect_source(parent_root, selected_job_ref):
     # Source N must belong to the selected parent; nested prefix N must be forked
     # through its original producer rather than silently selecting a different task.
     source = o.node(root, step)
+    from .protocol import require_job_format
+    require_job_format(o.source_job(source))
     closure = _Closure()
     closure.blocked.extend(_parent_state(root))
     job, job_ref, task_ref = closure.task(source, selected=True)
@@ -928,7 +922,7 @@ def inspect_source(parent_root, selected_job_ref):
             execution_recoveries=[dict(ref, origin_identity=ref.get('origin_identity', history_owner.origin_identity))
                 for ref in o.recovery_refs(source,job)]),
         prefix_entries=prefix, entries=list(closure.entries.values()), origins=closure.origins,
-        native_records=closure.records, legacy_compilations=closure.legacy_compilations,
+        native_records=closure.records,
         directory_inventory=closure.directory_inventory, bootstrap=boot, ancestry=ancestry,
         selected_settings=selected_settings, public_snapshots=public_snapshots,
         selected_globals=[dict(material=copy.deepcopy(material),
@@ -1032,6 +1026,8 @@ def selected_task(child_root, *, full=False):
     manifest = validate_manifest(child_root, full=full)
     source = o.selected_source(child_root)
     job = o.source_job(source)
+    from .protocol import require_job_format
+    require_job_format(job)
     task = _json(o.resolve_ref(source, manifest['source']['science_task_ref']))
     fields = ('global_materials', 'direct_refs', 'direct_originals', 'direct_materials', 'selected_inputs', 'history')
     return dict(source=source, job=job, science_task=task, settings=o.source_settings(source),

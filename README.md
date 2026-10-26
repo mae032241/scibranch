@@ -108,7 +108,7 @@ commands are retired. Historical packages remain read-only; they are not automat
 migrated, restored or reactivated. Ordinary execution checkpoints and original-call
 recovery remain supported; checkpoints do not retain or restore lost drafts.
 
-All H/W/A/E node token budgets and W stage targets are advisory: reaching a target requests a bounded conclusion without rejecting new managed experiments or forcing A review. Actual input plus output is fully accounted; no whole-node token allocation is prepaid. Current protocol 26 accepts only soft node settings; older instances remain read-only without rewriting their frozen settings. Shared budget checks for new nodes, finite execution time, permissions and cleanup limits remain enforced.
+All H/W/A/E node token budgets and W stage targets are advisory: reaching a target requests a bounded conclusion without rejecting new managed experiments or forcing A review. Actual input plus output is fully accounted; no whole-node token allocation is prepaid. Current protocol 26 accepts only soft node settings and the frozen final-A completion policy. Earlier instance formats are unsupported; no compatibility reader or migration is provided. Shared budget checks for new nodes, finite execution time, permissions and cleanup limits remain enforced.
 
 New instances freeze a final-A completion policy with one A per FINAL cycle: insufficient, zero or
 exceeded shared token, time or step budgets do not deny the final A's admission,

@@ -6,7 +6,7 @@ import sys
 import pytest
 
 from scidiscovery.research_loop import budget, cli, contracts as c, controller, execution, experiments, native
-from scidiscovery.research_loop.protocol import CURRENT, UnsupportedProtocol
+from scidiscovery.research_loop.protocol import CURRENT
 from test_history_handoff import finish
 from test_soft_node_budget import FAKE, scene, start_clock
 
@@ -87,25 +87,6 @@ def test_cli_and_prepare_cannot_create_hard_token_nodes(tmp_path):
                            node_budget_mode='hard')
     assert not other.exists()
     assert c.settings(root)['node_budget_mode'] == 'soft'
-
-
-@pytest.mark.parametrize('mode', ['hard', 'missing'])
-def test_old_hard_or_missing_mode_is_preserved_without_execution(tmp_path, mode):
-    root = scene(tmp_path)
-    settings = c.read(root / 'settings.json')
-    settings['handoff_protocol'] = 22
-    if mode == 'missing':
-        settings.pop('node_budget_mode')
-    else:
-        settings['node_budget_mode'] = mode
-    c.write(root / 'settings.json', settings)
-    c.write(root / 'settings-identity.json', dict(path='settings.json'))
-    originals = {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
-    with pytest.raises(UnsupportedProtocol, match='preserved without migration'):
-        controller.run(root)
-    with pytest.raises(ValueError, match='read-only'):
-        budget.node_mode(root)
-    assert originals == {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
 
 
 def test_w_token_crossing_requests_review_without_stopping_original_node(tmp_path):

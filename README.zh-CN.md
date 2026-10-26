@@ -2,7 +2,7 @@
 
 简体中文 | [English](README.md)
 
-当前框架仅支持 Linux，依赖 POSIX 文件/锁语义及 Linux namespace；原生 Windows 不支持，WSL2 未验证。Skill 冻结和角色选择是通用合同，只读 namespace 挂载是 Linux backend 实现。
+当前框架仅支持 Linux，依赖 POSIX 文件/锁语义及 Linux namespace；原生 Windows 不支持，WSL2 未验证。Skill 来源绑定与角色选择是通用合同，只读 namespace 挂载是 Linux backend 实现。
 
 SciDiscovery 是以 CLI 为核心、提供 Codex 与显式 Agent 协议后端的科研框架。
 它围绕明确目标与冻结输入运行 H/W/A/E 线程，提供有限共享预算、科学结果封存及原调用恢复。科学 Worker 负责模型选择与结论；
@@ -70,7 +70,7 @@ session 中从该任务首次输入重跑，显式声明新的有限预算。必
 不授权新对象。语义见[架构](docs/ARCHITECTURE.zh-CN.md#历史任务分支)，操作见
 [CLI 指南](docs/ROOTLESS_CLI.zh-CN.md#从历史任务创建分支)。
 
-H/W/A/E 单节点 token 预算统一为软目标：触线时提示收口，不仅因达线拒绝新受管实验或强制转 A，原节点可以完成原结果。实际 input+output 完整记账，不预付整个节点 token 额度。当前协议 26 仅接受 soft 节点设置；旧实例只读，冻结设置不改写。单次执行的有限时间、权限与清理限制仍有效。
+H/W/A/E 单节点 token 预算统一为软目标：触线时提示收口，不仅因达线拒绝新受管实验或强制转 A，原节点可以完成原结果。实际 input+output 完整记账，不预付整个节点 token 额度。当前协议 26 仅接受 soft 节点设置及冻结的最终 A 完成策略。旧实例格式不受支持，不提供兼容读取或迁移。单次执行的有限时间、权限与清理限制仍有效。
 
 新实例冻结一次最终 A 完成策略：共享 token、总时间或步数预算不足、为零或已经超出，
 均不据此拒绝最终 A 的进入、完成及其自身明确授权的交付。仅计费用量缺失或未对齐也不阻挡

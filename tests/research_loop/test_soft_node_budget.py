@@ -89,30 +89,6 @@ def test_soft_w_old_search_threshold_does_not_kill_but_identity_still_does(tmp_p
     with pytest.raises(ValueError):budget.stop_node(root,job,intent,budget.snapshot(root),dict(input_tokens=15,output_tokens=0))
 
 
-def test_legacy_soft_reserve_cannot_kill_current_node_but_blocks_next_admission(tmp_path):
-    delivery=dict(closeout_a=dict(max_observed_tokens=10,max_seconds=1),inflight_tokens=0,cleanup_seconds=0,submit_seconds=0,confirm_seconds=0,adapter=None)
-    root=scene(tmp_path,mode='reserve',tokens=10,total_tokens=25,delivery=delivery)
-    # This original soft contract predates final-report protection. Keep its
-    # frozen behavior explicit; new-policy live reserve/report has its own real
-    # controller integration coverage in test_final_a_completion.py.
-    settings=c.read(root/'settings.json');settings.pop('final_a_completion_policy')
-    c.write(root/'settings.json',settings)
-    c.write(root/'settings-identity.json',dict(path='settings.json'))
-    assert 'final_a_completion_policy' not in c.settings(root)
-    assert not list((root/'control-ledger').glob('*.json')) and not list((root/'jobs').glob('*.json'))
-    result=controller.run(root)
-    assert result['status']=='exported_unsubmitted'
-    begin=budget.closeout_state(root)['begin']
-    assert begin['source_cutoff']==1 and begin['stop_reason']=='closeout_reserve_tokens'
-    assert not (root/'jobs/002.json').exists()
-    assert c.validate(c.workspace(root,1))['summary']=='Original bounded finding'
-    assert budget.snapshot(root)['max_tokens']-native.usage(root)['observed_tokens']==10
-    assert budget.exploration_stop(root,c.read(root/'jobs/001.json'),budget.snapshot(root)) is None
-    assert budget.node_admission(root,dict(step=2,role='W'))=='closeout_reserve_tokens'
-
-
-
-
 def test_known_failure_above_soft_target_resumes_same_node_without_refund(tmp_path):
     root=scene(tmp_path,mode='known_failure',resume=True)
     assert controller.run(root)['status']=='native_stopped';first=wait_runner(root)

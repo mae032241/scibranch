@@ -407,6 +407,8 @@ def material_name(work, row):
 
 def artifact_entry_points(work, payload, materials, protocol=CURRENT, unresolved=None):
     """Resolve explicit inline scientific links, never infer paths from prose."""
+    from .protocol import _current
+    _current(protocol, 'Scientific artifact links')
     targets={}
     for row in materials:
         local=material_name(work,row)
@@ -435,7 +437,7 @@ def artifact_entry_points(work, payload, materials, protocol=CURRENT, unresolved
         decoded = unquote(url.path)
         normalized = PurePosixPath(decoded)
         if not normalized.parts or normalized.parts[0] not in {'artifacts', 'experiments'}:
-            if protocol >= 7 and (normalized.is_absolute() or '..' in normalized.parts
+            if (normalized.is_absolute() or '..' in normalized.parts
                     or '\\' in decoded or decoded.startswith('.') or url.fragment == REUSE_FRAGMENT):
                 unavailable(label, target, 'unmanaged_or_legacy_link')
             continue
@@ -468,6 +470,8 @@ def _public_materials(root, materials, *, source=None):
 
 def selected_inputs(work, payload, job, diagnostics=None):
     """Resolve explicit reuse intent against this role's already frozen inputs."""
+    from .protocol import require_job_format
+    require_job_format(job)
     root = work.parents[2]
     policy = settings(root, job)
     bound = {row['path']: row for row in job['direct_materials']}
@@ -479,7 +483,7 @@ def selected_inputs(work, payload, job, diagnostics=None):
         if diagnostics is not None:diagnostics.append(dict(code='implementation_unresolved',subject='unparseable explicit selection'))
         return []  # Invalid explicit choice never inherits or partly applies.
     if choice is None:
-        if job.get('handoff_protocol', 1) >= 8 and job.get('input_selection_status') == 'unresolved':
+        if job.get('input_selection_status') == 'unresolved':
             if diagnostics is not None:
                 diagnostics.append(dict(code='implementation_unresolved', subject='inherited unresolved choice'))
             return []
@@ -509,7 +513,7 @@ def selected_inputs(work, payload, job, diagnostics=None):
             return []  # No partial selection or fallback to a former choice.
     material_seen = set()
     for label, row in choices:
-        if job.get('handoff_protocol', 1) >= 7 and row['path'] in material_seen:
+        if row['path'] in material_seen:
             continue
         material_seen.add(row['path'])
         source = Path(row['source'])
@@ -551,7 +555,7 @@ def _decision_context(root, job):
         return None
     from . import originals
     source_job = originals.source_job(originals.node(root, previous))
-    source = science_payload(_execution_raw(root, previous), source_job['role'], source_job.get('handoff_protocol', 1), 'selection' in source_job,**response_options(source_job))
+    source = science_payload(_execution_raw(root, previous), source_job['role'], source_job['handoff_protocol'], 'selection' in source_job,**response_options(source_job))
     action = 'continue_w' if job['role'] == 'W' else 'revise_h'
     if (source_job['role'] != 'A' or source.get('next_action') != action
             or job['instruction'] != source.get('route_reason')):
@@ -586,6 +590,8 @@ def _role_lineage(job):
 
 
 def science_view(job, root=None):
+    from .protocol import require_job_format
+    require_job_format(job)
     if job.get('fork_source') is not None:
         from . import fork_runtime
         return fork_runtime.selected_science_view(root, job)
@@ -594,7 +600,7 @@ def science_view(job, root=None):
         view = dict(formal_review.public(root,job), **user_guidance.public(job))
         view['review'] = {key: value for key, value in view['review'].items() if key != 'instruction'}
         return view
-    protocol = job.get('handoff_protocol', 1)
+    protocol = job['handoff_protocol']
     context = job.get('decision_context')
     question = job['instruction']
     if context is not None:
@@ -602,11 +608,10 @@ def science_view(job, root=None):
                     if job['role'] == 'W' else "Revise the qualitative mechanism matrix and discriminating design in light of A's global assessment; preserve original constraints.")
     if job.get('scientific_work_unit'):
         question += '\nWork unit: ' + job['scientific_work_unit']
-    unified = job.get('lineage_projection_version') == 1
-    if unified and job.get('selection_protocol', 0) != job['history']['view']['candidates'].get('selection_protocol', 0):
+    if job.get('selection_protocol', 0) != job['history']['view']['candidates'].get('selection_protocol', 0):
         raise ValueError('Frozen selection projection differs from its task marker')
     request = None
-    if protocol >= 8 and job.get('author_correction'):
+    if job.get('author_correction'):
         from . import semantic
         request = semantic.public_request(root, job)
     audit = None
@@ -699,20 +704,13 @@ def science_view(job, root=None):
             }.get(job['role'])) if 'configured_delivery' in job else {}),
         'parents': parents,
         'reading_order':reading[job['role']]+' Preserve listed limitations. Parents are authored statements, not execution facts. Verify relevant originals as needed, delegating when native permissions allow; omissions use conclusion/index/next_page.',
-        **(dict(reused_implementations=[dict(label=row['label'], path=row['material']['path'])
+        **dict(reused_implementations=[dict(label=row['label'], path=row['material']['path'])
                                        for row in job.get('selected_inputs', [])],
-                 implementation_reuse='Choose only listed scientific objects; control resolves their originals.')
-           if job.get('handoff_protocol', 1) >= 2 else {}),
-        **(dict(implementation_options=job.get('implementation_options', []),
-                implementation_options_omitted_count=job.get('implementation_options_omitted_count', 0),
-                scientific_links='Ordinary citations are scientific prose. Only listed bound files are available; '
-                'unresolved links do not select inputs or acquire evidence qualification.') if protocol >= 7 and not unified else {}),
-        **(dict(lineage=_role_lineage(job)) if unified else {}),
-        **(dict(history=job['history']['view']) if job.get('handoff_protocol', 1) >= 3 and not unified else {}),
-        **(dict(input_selection_status=job['input_selection_status'], control_diagnostics=job['control_diagnostics'])
-           if job.get('handoff_protocol', 1) >= 8 else {}),
+                 implementation_reuse='Choose only listed scientific objects; control resolves their originals.'),
+        'lineage': _role_lineage(job),
+        'input_selection_status': job['input_selection_status'], 'control_diagnostics': job['control_diagnostics'],
         **(dict(control_request=request)
-           if job.get('handoff_protocol', 1) >= 8 and job.get('author_correction') else {}),
+           if job.get('author_correction') else {}),
         **(dict(closeout=closeout) if closeout is not None else {}),
         **(dict(candidate_audit=audit) if audit is not None else {}),
         **(dict(audit_capability=audit_capability) if audit_capability is not None else {}),
@@ -720,19 +718,14 @@ def science_view(job, root=None):
            if job['role'] == 'A' and root is not None and settings(Path(root), job).get('selection_policy') is not None else {}),
         **(dict(delivery_comparison=shortlist.public_table(root,job['selection']))
            if job['role']=='A' and job.get('purpose') is None and job.get('selection') is not None else {}),
-        **(dict(search=job['search']['view']) if job.get('search') and not unified else {}),
         **(dict(progress_assessment=('Judge the current assessed work as progress/no_progress/unknown; '
                 'null means unknown. Explain scientific support and limitations in ordinary science. '
-                'The host binds the exact assessed task for counting, not scientific verification. Do not write evidence paths.' if protocol >= 7 else
-                'Judge global contribution as progress/no_progress/unknown with '
-                'few exact bound prior conclusion/history-page paths; null means unknown. Never use '
-                'your own new prose or unsealed files as progress evidence. Scientific explanations '
-                'belong in scientific_result and limitations; the host counts sealed decisions.'))
+                'The host binds the exact assessed task for counting, not scientific verification. Do not write evidence paths.'))
            if 'progress_assessment' in result_schema(job['role'],protocol,'selection' in job,**response_options(job))['properties'] else {}),
         **(dict(decision_request='For scientific continuation, declare the decision, question and result that would change it. '
                 'Exact completed requests without new bound evidence require clarification; this is not a scientific value judgment.')
            if 'decision_request' in result_schema(job['role'],protocol,'selection' in job,**response_options(job))['properties'] else {}),
-        'final_response': list(result_schema(job['role'], job.get('handoff_protocol', 1), 'selection' in job,**response_options(job))['properties']),
+        'final_response': list(result_schema(job['role'], job['handoff_protocol'], 'selection' in job,**response_options(job))['properties']),
         **(dict(experiment_execution=('Host-configured registered W execution is available; only calls through the provided experiment command are recorded. Native scratch shell remains available.'
             if job['experiment_mode'] == 'local' else 'External launcher owns experiment configuration; native shell commands are not automatically recorded.'))
             if 'experiment_mode' in job else {}),
@@ -750,7 +743,6 @@ def collect_materials(root: Path, step: int):
     policy = settings(root, job)
     work = workspace(root, step)
     rows, total = [], 0
-    private_packages=set()
     from . import execution
     record=execution.record(root,step)
     from . import worker_delivery
@@ -762,13 +754,10 @@ def collect_materials(root: Path, step: int):
             job=read(regular(root/'jobs'/f'{step:03d}.json'))
             proof=intent['author_closeout_science_context']
             author_closeout.validate_science_context(root,job,proof)
-            context=read(author_closeout._check(root,proof))
-            private_packages={author_closeout._check(root,item['original']) for item in context.get('artifact_masks',[])}
 
     def add(path, relative, *, source_kind='mutable'):
         nonlocal total
         path = regular(path)
-        if path in private_packages:return  # Explicit compiler/author grant; never infer from a filename.
         size = path.stat().st_size
         if policy.get('max_output_item_bytes') is not None and size > policy['max_output_item_bytes']:
             raise ValueError(f'Deliverable {relative!r} exceeds item byte budget '
@@ -824,7 +813,7 @@ def collect_materials(root: Path, step: int):
         from . import history
         for call in history.managed_calls(root,job):
             if call['status'] not in {'known_success','known_failed'}:continue
-            outputs=history.scientific_outputs(root,job,call) if job.get('worker_view_version')==1 else call.get('outputs',[])
+            outputs=history.scientific_outputs(root,job,call)
             for item in outputs:
                 if item.get('retention')!='archived':raise ValueError('Managed deliverable original unavailable')
                 add(root/item['path'],f'experiments/{call["call_id"]}/artifacts/{item["name"]}',source_kind='managed_frozen')
@@ -1050,9 +1039,8 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     from . import configuration_updates
     revision = configuration_updates.bind_new_job(root, step)
     policy = configuration_updates.for_new_job(root, step)
-    worker_view_version=1 if retained is None or retained.get('worker_view_version')==1 else 0
     protocol=CURRENT
-    authority_version=projection_version=selection_protocol=1
+    selection_protocol=1
     audit_projection_version=1 if policy.get('candidate_audit_policy') else 0
     review_binding=None
     if (evidence_return or {}).get('kind')=='formal_review':
@@ -1082,8 +1070,6 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         # references. Historical lineage remains in the host-owned node tree.
         source = _execution_raw(root, parent)
         ref = dict(path=f'inputs/parents/{parent:03d}/conclusion.json', size_bytes=source.stat().st_size)
-        if worker_view_version!=1 and (work/ref['path']).exists():
-            regular(work/ref['path'])
         (work / Path(ref['path']).parent / 'artifacts').mkdir(parents=True,exist_ok=True)
         refs.append(ref)
         from . import originals
@@ -1092,7 +1078,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         entry_points.extend(parent_seal.get('entry_points', []))
         # Reuse is an instruction to the immediate next node, not persistent
         # baggage on a retained H ancestor in every later scientific cycle.
-        if protocol >= 2 and parent == step - 1:
+        if parent == step - 1:
             selected.extend(parent_seal.get('selected_inputs', []))
     unique = {}
     for item in [*materials, *[row['material'] for row in selected]]:
@@ -1100,7 +1086,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
             raise ValueError('Selected input paths conflict')
         unique[item['path']] = item
     materials = list(unique.values())
-    if protocol >= 2 and output_quota_exceeded(policy,(row['size_bytes'] for row in materials)):
+    if output_quota_exceeded(policy,(row['size_bytes'] for row in materials)):
         raise ValueError('Combined input materials exceed the frozen handoff bound')
     reused = {}
     for row in selected:
@@ -1116,7 +1102,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     job = dict(step=step, role=role, goal_text=policy['objective'], public_root=policy['public_root'],
                instruction=instruction, direct_refs=refs, direct_materials=materials, direct_entry_points=entry_points, global_materials=globals_,
                evidence_return=evidence_return, **(dict(selected_inputs=selected) if selected else {}),
-               **(dict(handoff_protocol=protocol) if protocol >= 2 else {}))
+               handoff_protocol=protocol, worker_view_version=1, lineage_projection_version=1)
     if retained is not None:
         if retained.get('project') != policy.get('project'):
             raise ValueError('Frozen scientific project changed')
@@ -1148,10 +1134,6 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     if (retained is None and ((purpose == 'closeout' and begin['mode'] == 'final') or final_report is not None)
             or retained is not None and retained.get('final_only')):
         job['final_only'] = True
-    # New views are frozen with the task; rebuilding a legacy task must retain
-    # its original bytes and projection rather than silently upgrade it.
-    if worker_view_version == 1:
-        job['worker_view_version'] = 1
     if policy.get('formal_review_policy') is not None:
         from . import formal_review
         job['formal_review_version']=1
@@ -1177,17 +1159,13 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     advice = retained.get('role_guidance') if retained is not None else policy.get('role_guidance', {}).get(role)
     if advice is not None:
         job['role_guidance'] = advice
-    if authority_version == 1:
-        job['handoff_authority_version'] = 1
-        from . import guidance
-        job['native_role_instruction'] = (retained['native_role_instruction'] if retained is not None
-                                          else advice if advice is not None else (guidance.OPPORTUNITY if protocol >= 12 else guidance.DEFAULT)[role])
+    job['handoff_authority_version'] = 1
+    from . import guidance
+    job['native_role_instruction'] = (retained['native_role_instruction'] if retained is not None
+                                      else advice if advice is not None else guidance.OPPORTUNITY[role])
     if audit_projection_version == 1:
         job['audit_projection_version'] = 1
-    if selection_protocol == 1:
-        job['selection_protocol'] = 1
-    if projection_version == 1:
-        job['lineage_projection_version'] = 1
+    job['selection_protocol'] = selection_protocol
     if engineering_repair is not None:
         job['engineering_repair']=engineering_repair
         engineering.bind_inputs(root,job)
@@ -1205,7 +1183,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     if role=='W':job['worker_fragment_policy']=policy.get('worker_fragment_policy')
     if author_correction is not None:
         job['author_correction'] = author_correction
-    if protocol >= 9 and role == 'A' and step - 1 in parents and review_binding is None:
+    if role == 'A' and step - 1 in parents and review_binding is None:
         from . import candidate_audit
         receipt = candidate_audit.receipt_ref(root, step - 1)
         if receipt is not None:
@@ -1220,39 +1198,38 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     else:
         job['history'],state=lineage.bind(root,step,role,protocol,source_cutoff=final_report['source_cutoff'] if final_report else source_cutoff,extra_steps=extra_steps,selection_protocol=selection_protocol,
             audit_projection_version=audit_projection_version,adjacent_audit=job.get('candidate_audit'),
-            worker_view_version=job.get('worker_view_version',0))
+            worker_view_version=1)
         options = [item for parent in parents for item in history.implementation_options(root, parent)]
-    if worker_view_version==1:
-        from . import candidate_refs
-        job['direct_originals']=refs
-        job['direct_refs']=[]
-        for original in refs:
-            parent=int(Path(original['path']).parts[2]);source=regular(_execution_raw(root,parent))
-            if source.stat().st_size!=original['size_bytes']:raise ValueError('Direct producer original changed')
-            reported=candidate_refs.public_science_fields(read(source),candidate_refs.for_job(job))
-            original_path=str(Path(original['path']).parent/'scientific-original.json')
-            public=scientific_projection(reported,original_path)
-            # A logical raw link resolves to the sealed parent original.
-            if public!=reported and not any(row['path']==original_path for row in job['history']['files']):
-                job['history']['files'].append(dict(path=original_path,source=str(source),
-                    size_bytes=original['size_bytes'],kind='scientific_original'))
-            target=work/original['path']
-            if target.exists():
-                if read(regular(target))!=public:raise ValueError('Frozen parent scientific view changed')
-            elif public!=read(source):
-                write(target,public);target.chmod(0o400)
-            if source.stat().st_size!=original['size_bytes']:raise ValueError('Direct producer original changed')
-            job['direct_refs'].append(dict(path=original['path'],
-                size_bytes=target.stat().st_size if target.exists() else original['size_bytes']))
+    from . import candidate_refs
+    job['direct_originals']=refs
+    job['direct_refs']=[]
+    for original in refs:
+        parent=int(Path(original['path']).parts[2]);source=regular(_execution_raw(root,parent))
+        if source.stat().st_size!=original['size_bytes']:raise ValueError('Direct producer original changed')
+        reported=candidate_refs.public_science_fields(read(source),candidate_refs.for_job(job))
+        original_path=str(Path(original['path']).parent/'scientific-original.json')
+        public=scientific_projection(reported,original_path)
+        # A logical raw link resolves to the sealed parent original.
+        if public!=reported and not any(row['path']==original_path for row in job['history']['files']):
+            job['history']['files'].append(dict(path=original_path,source=str(source),
+                size_bytes=original['size_bytes'],kind='scientific_original'))
+        target=work/original['path']
+        if target.exists():
+            if read(regular(target))!=public:raise ValueError('Frozen parent scientific view changed')
+        elif public!=read(source):
+            write(target,public);target.chmod(0o400)
+        if source.stat().st_size!=original['size_bytes']:raise ValueError('Direct producer original changed')
+        job['direct_refs'].append(dict(path=original['path'],
+            size_bytes=target.stat().st_size if target.exists() else original['size_bytes']))
     job['implementation_options'] = options[:16]
     job['implementation_options_omitted_count'] = max(0, len(options) - 16)
-    if projection_version == 1 and review_binding is None:
+    if review_binding is None:
         job['history']['view']['implementation_options'] = [dict(id=row['id'], label=row['label'].encode()[:80].decode('utf-8',errors='ignore')) for row in options[:2]]
         job['history']['view']['implementation_options_omitted_count'] = max(0,len(options)-2)
         lineage.bounded_brief(job['history']['view'])
-    if purpose is None and not job.get('formal_review') and final_report is None and engineering_repair is None and protocol >= 5 and policy.get('search_policy') is not None:
+    if purpose is None and not job.get('formal_review') and final_report is None and engineering_repair is None and policy.get('search_policy') is not None:
         from . import search
-        job['search'] = search.bind(root, step, role, protocol, state=state, unified=projection_version == 1)
+        job['search'] = search.bind(root, step, role, protocol, state=state, unified=True)
     if role=='A' and purpose is None and review_binding is None and final_report is None and policy.get('selection_policy') is not None:
         from . import shortlist
         job['selection']=shortlist.bind_normal(root,job)
@@ -1276,10 +1253,9 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         job['correction_request'] = correction_request
         from . import correction
         correction.validate_job(root, job)
-    if authority_version == 1:
-        context = _decision_context(root, job)
-        if context is not None:
-            job['decision_context'] = context
+    context = _decision_context(root, job)
+    if context is not None:
+        job['decision_context'] = context
     if purpose == 'closeout' and delivery_sources.get('catalogue'):
         catalogue_path = work / 'inputs/delivery-candidates.json'
         catalogue = dict(items=delivery_sources['items'], omitted_count=delivery_sources['omitted_count'])
@@ -1338,8 +1314,7 @@ def _native_output_identity(root, step, native_record, intent, outcome, *, sourc
     from . import budget
     if source is None:
         job = read(regular(Path(root) / 'jobs' / f'{step:03d}.json'))
-        if settings(root, job).get('final_a_completion_policy') is not None or outcome.get('final_a_completion') is not None or (intent.get('budget_slice') or {}).get('final_return') is not None:
-            budget.validate_final_a_receipt(root, job, intent, outcome)
+        budget.validate_final_a_receipt(root, job, intent, outcome)
     # The original stopped outcome remains byte-exact. Only a separate explicit
     # completed-return receipt can provide its exceptional final raw identity.
     if outcome.get('stop_reason')=='author_closeout_token_limit' and intent.get('attempt')==2:
@@ -1367,7 +1342,7 @@ def _sealed_science(job, seal, raw, result, *, root=None, source=None):
         if experiments.proof(raw)['file_stat']!=seal['raw_ref']['file_stat']:
             raise ValueError('Sealed scientific original changed')
     payload = candidate_refs.control_payload(job, science_payload(raw, job['role'],
-        job.get('handoff_protocol', 1), 'selection' in job, **response_options(job)), root=root, source=source)
+        job['handoff_protocol'], 'selection' in job, **response_options(job)), root=root, source=source)
     if read(result) != result_projection(job, payload):
         raise ValueError('Result envelope differs from author science')
     return payload
@@ -1390,6 +1365,8 @@ def validate_original(source, *, _active=None, _memo=None, controls_only=False):
     policy = originals.source_settings(source)
     if policy.get('handoff_protocol') != CURRENT or job.get('handoff_protocol') != CURRENT:
         raise ValueError('Fork original requires the current frozen protocol')
+    from .protocol import require_job_format
+    require_job_format(job)
     job_path = originals.resolve_ref(source, dict(path=f'jobs/{source.step:03d}.json'))
     seal = read(originals.source_record(source, 'result-identity.json'))
     if seal['job_ref'] != dict(path=str(Path(source.original_root)/'jobs'/f'{source.step:03d}.json')):
@@ -1455,6 +1432,8 @@ def validate(work: Path):
         return validate_original(originals.node(root, int(work.name)))
     job_path = root / 'jobs' / f'{int(work.name):03d}.json'
     job = read(regular(job_path))
+    from .protocol import require_current
+    require_current(root, job)
     record = host_record(work)
     seal = read(regular(record / 'result-identity.json'))
     from . import execution
@@ -1491,9 +1470,9 @@ def validate(work: Path):
     if read(result) != result_projection(job, payload):
         raise ValueError('Result envelope differs from author science')
     unresolved = dict(items=[], omitted_count=0)
-    if seal.get('entry_points', []) != artifact_entry_points(work, payload, seal['materials'], job.get('handoff_protocol', 1), unresolved):
+    if seal.get('entry_points', []) != artifact_entry_points(work, payload, seal['materials'], job['handoff_protocol'], unresolved):
         raise ValueError('Scientific deliverable entry points changed')
-    if job.get('handoff_protocol', 1) >= 7 and seal.get('unresolved_links') != unresolved:
+    if seal.get('unresolved_links') != unresolved:
         raise ValueError('Scientific unresolved link receipt changed')
     if seal.get('selected_inputs', []) != selected_inputs(work, payload, job):
         raise ValueError('Selected implementation receipts changed')
@@ -1611,13 +1590,13 @@ def _validate_inputs(root, work, job):
     correction.validate_job(root, job)
     from . import semantic
     semantic.validate_job(root, job)
-    if job.get('purpose') is None and not job.get('final_report') and not job.get('engineering_repair') and job.get('handoff_protocol', 1) >= 5 and policy.get('search_policy') is not None:
+    if job.get('purpose') is None and not job.get('final_report') and not job.get('engineering_repair') and policy.get('search_policy') is not None:
         from . import search
-        if job.get('search') != search.bind(root, job['step'], job['role'], job['handoff_protocol'], unified=job.get('lineage_projection_version') == 1):
+        if job.get('search') != search.bind(root, job['step'], job['role'], job['handoff_protocol'], unified=True):
             raise ValueError('Frozen scientific search binding changed')
     from . import history
     history.validate(root, work, job['history'])
-    if job.get('handoff_protocol', 1) >= 2 and output_quota_exceeded(policy,(row['size_bytes'] for row in job['direct_materials'])):
+    if output_quota_exceeded(policy,(row['size_bytes'] for row in job['direct_materials'])):
         raise ValueError('Combined input materials exceed the frozen handoff bound')
     expected = []
     previous = f'inputs/parents/{job["step"] - 1:03d}/conclusion.json'
@@ -1644,24 +1623,23 @@ def _validate_inputs(root, work, job):
             raise ValueError('The global context read by this role changed')
     for ref in job['direct_refs']:
         originals.resolve_root_ref(root,dict(ref,path=str(work/ref['path'])))
-    if job.get('worker_view_version')==1:
-        from . import candidate_refs
-        if [row['path'] for row in job.get('direct_originals',[])]!=[row['path'] for row in job['direct_refs']]:
-            raise ValueError('Scientific parent view lost its exact original')
-        for ref in job['direct_originals']:
-            source=regular(_execution_raw(root,int(Path(ref['path']).parts[2])))
-            if source.stat().st_size!=ref['size_bytes']:
-                raise ValueError('Direct producer original changed')
-            reported=candidate_refs.public_science_fields(read(source),candidate_refs.for_job(job))
-            original_path=str(Path(ref['path']).parent/'scientific-original.json')
-            public=scientific_projection(reported,original_path)
-            if public!=reported:
-                originals.resolve_ref(originals.node(root,int(Path(ref['path']).parts[2])),
-                    read(originals.source_record(originals.node(root,int(Path(ref['path']).parts[2])),
-                        'result-identity.json'))['raw_ref'])
-            if read(originals.resolve_root_ref(root,dict(next(row for row in job['direct_refs']
-                    if row['path']==ref['path']),path=str(work/ref['path']))))!=public:
-                raise ValueError('Scientific parent view differs from its verified original')
+    from . import candidate_refs
+    if [row['path'] for row in job.get('direct_originals',[])]!=[row['path'] for row in job['direct_refs']]:
+        raise ValueError('Scientific parent view lost its exact original')
+    for ref in job['direct_originals']:
+        source=regular(_execution_raw(root,int(Path(ref['path']).parts[2])))
+        if source.stat().st_size!=ref['size_bytes']:
+            raise ValueError('Direct producer original changed')
+        reported=candidate_refs.public_science_fields(read(source),candidate_refs.for_job(job))
+        original_path=str(Path(ref['path']).parent/'scientific-original.json')
+        public=scientific_projection(reported,original_path)
+        if public!=reported:
+            originals.resolve_ref(originals.node(root,int(Path(ref['path']).parts[2])),
+                read(originals.source_record(originals.node(root,int(Path(ref['path']).parts[2])),
+                    'result-identity.json'))['raw_ref'])
+        if read(originals.resolve_root_ref(root,dict(next(row for row in job['direct_refs']
+                if row['path']==ref['path']),path=str(work/ref['path']))))!=public:
+            raise ValueError('Scientific parent view differs from its verified original')
     for ref in job['direct_materials']:
         path = regular(originals.material_path(root, ref))
         if path.stat().st_size != ref['size_bytes']:
@@ -1724,7 +1702,7 @@ def seal_result(root: Path, step: int):
         from .startup_recovery import validate_intent
         validate_intent(root,job,intent)
     from . import candidate_refs
-    value = envelope(job, candidate_refs.control_payload(job,science_payload(raw, job['role'], job.get('handoff_protocol', 1), 'selection' in job,**response_options(job)),root=root))
+    value = envelope(job, candidate_refs.control_payload(job,science_payload(raw, job['role'], job['handoff_protocol'], 'selection' in job,**response_options(job)),root=root))
     if intent.get('continuation_kind') == 'startup_successor' and value.get('next_action') not in {'deliver','finish'}:
         from .output_repair import OutputRepairRequired
         raise OutputRepairRequired('invalid_final_action','Return the final conclusion with deliver or an explicit unsubmitted finish; no new scientific turn is authorized.')
@@ -1746,7 +1724,7 @@ def seal_result(root: Path, step: int):
     correction.validate_payload(root, job, value)
     materials = collect_materials(root, step)
     unresolved = dict(items=[], omitted_count=0)
-    entry_points = artifact_entry_points(work, value, materials, job.get('handoff_protocol', 1), unresolved)
+    entry_points = artifact_entry_points(work, value, materials, job['handoff_protocol'], unresolved)
     selected = selected_inputs(work, value, job)
     observations = None
     from . import history
@@ -1768,7 +1746,7 @@ def seal_result(root: Path, step: int):
           **(dict(completed_output_acceptance=accepted['receipt'],completed_output_limitation=accepted['facts']) if accepted is not None else {}),
           **(dict(execution_ref=execution.reference(root, step)) if execution.reference(root, step) is not None else {}),
           **(dict(control_outcome=control) if control is not None else {}),
-          **(dict(unresolved_links=unresolved) if job.get('handoff_protocol', 1) >= 7 else {}),
+          unresolved_links=unresolved,
           **(dict(selected_inputs=selected) if selected else {}),
           **(dict(observations=observations) if observations else {}))
     final_completion = _final_a_seal(native_record, outcome)

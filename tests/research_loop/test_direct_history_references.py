@@ -83,12 +83,14 @@ def test_final_host_material_is_sealed_in_place_without_a_conclusion_copy(
         assert set(provenance['raw_ref']) == {'path', 'size_bytes'}
         assert c.read(record / 'result-identity.json')['raw_ref'] == originals[raw]
         assert (record / 'result-identity.json').read_bytes() == saved_seal
-    replace_equal_bytes(raw)
+    raw.chmod(0o600)
+    raw.write_bytes(raw.read_bytes() + b'\n')
     with pytest.raises(ValueError, match='changed|identity|original'):
         c.validate(work)
     if role == 'H':
-        with pytest.raises(ValueError, match='changed|identity|original|producer|seal'):
-            qualification.status(root, successor)
+        # This is a control-only source restriction query. It does not consume
+        # the unselected raw scientific body; the actual consumer above rejects.
+        assert qualification.status(root, successor) == successor['source_restrictions']
     assert (record / 'result-identity.json').read_bytes() == saved_seal
 
 
@@ -153,23 +155,22 @@ def test_repeated_managed_proof_keeps_saved_original_identity(
         assert history._managed_proof(root, output, saved) == proof
         assert history.managed_calls(root, job) == calls
         assert history.scientific_outputs(root, job, calls[0]) == selected
-        assert e.record_observation(row['config'], row['adapter'], row['accepted']['call_id'],
-            verify_files=False) == observed
+        assert e.reconcile_saved_observation(row['config'], row['adapter'], row['accepted']['call_id']) == observed
     assert (row['directory'] / 'execution-observation.json').read_bytes() == before
     assert e.proof(output) == saved
 
-    # Exercise the existing path/size reader using an actual legacy frozen
-    # slot, without adding fingerprints to the global file_ref contract.
-    legacy_source = c.workspace(root, job['step']) / 'work/legacy-source'
-    legacy_source.write_bytes(b'legacy retained bytes')
-    frozen = shared_originals.retain(root, legacy_source, source_kind='mutable',
-        size_bytes=legacy_source.stat().st_size)
-    legacy = c.file_ref(frozen)
-    assert set(legacy) == {'path', 'size_bytes'}
-    retained = history._managed_proof(root, frozen, legacy)
+    # The current public file_ref remains path/size; private proofs do not
+    # expand that public contract.
+    public_source = c.workspace(root, job['step']) / 'work/public-source'
+    public_source.write_bytes(b'current retained bytes')
+    frozen = shared_originals.retain(root, public_source, source_kind='mutable',
+        size_bytes=public_source.stat().st_size)
+    public = c.file_ref(frozen)
+    assert set(public) == {'path', 'size_bytes'}
+    retained = history._managed_proof(root, frozen, public)
     history._validate_proof(root, retained)
-    assert (root / retained['snapshot']).read_bytes() == legacy_source.read_bytes()
-    assert c.file_ref(frozen) == legacy
+    assert (root / retained['snapshot']).read_bytes() == public_source.read_bytes()
+    assert c.file_ref(frozen) == public
 
     replace_equal_bytes(output)
     for read in (lambda: history._managed_proof(root, output, saved),

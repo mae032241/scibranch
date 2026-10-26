@@ -367,9 +367,12 @@ def public_relations(graph, sources):
 
 
 def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), selection_protocol=0,
-         audit_projection_version=0, adjacent_audit=None, worker_view_version=0):
-    from .protocol import require_current
+         audit_projection_version=0, adjacent_audit=None, worker_view_version=1):
+    from .protocol import require_current, _current, UnsupportedProtocol
     require_current(root)
+    _current(protocol, 'Scientific lineage')
+    if type(worker_view_version) is not int or worker_view_version != 1:
+        raise UnsupportedProtocol('Scientific job view')
     projection=project(root,step,source_cutoff=source_cutoff,extra_steps=extra_steps,include_details=False)
     records,state=projection['records'],projection['search_state']
     from . import storage_policy as storage
@@ -383,7 +386,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
             source=str(source),size_bytes=original_reference['size_bytes'])
     add,paged,files=history.page_writer(c.workspace(root,step),root=root,policy=frozen.get('storage_policy'),context=context)
     from . import candidate_refs
-    references=candidate_refs.references(records) if worker_view_version==1 else {}
+    references=candidate_refs.references(records)
     if references:
         original_add,original_paged=add,paged
         def add(path,value):return original_add(path,candidate_refs.public_fields(value,references))
@@ -396,7 +399,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
         previous=None
         for prior in previous_jobs:
             binding=prior.get('history',{})
-            if prior.get('worker_view_version',0)!=worker_view_version:continue
+            if prior.get('worker_view_version')!=1:continue
             if any(references.get(key)!=value for key,value in binding.get('candidate_references',{}).items()):continue
             body=[row for row in binding.get('files',[]) if row['path'].startswith(prefix)
                 and Path(row['path']).parent.as_posix()==prefix[:-1]
@@ -419,7 +422,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                 files.append(descriptor)
             record['view']['conclusion_pages']=[row['path'] for row in body if Path(row['path']).stem.isdecimal()]
             continue
-        reported=candidate_refs.public_science_fields(source[1],references) if worker_view_version==1 else source[1]
+        reported=candidate_refs.public_science_fields(source[1],references)
         original_path=prefix+'scientific-original.json'
         public=c.scientific_projection(reported,original_path)
         if public!=reported:
@@ -514,26 +517,13 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
         for call in (record.get('observation') or {}).get('managed_calls',[]):
             if call.get('retirement') is not None:
                 original=c.read(archive_path(call['retirement']))
-                prefix=f'inputs/recovered/{record["step"]:03d}/{call["call_id"]}'
-                retained=[(call['retirement'],'retirement.json')]
                 native=[original[key] for key in ('request','response','protocol')]
                 if original.get('dispatch_intent') is not None:native.append(original['dispatch_intent'])
-                for number,proof in enumerate(native,1):
+                for proof in native:
                     matches=[item for item in call['originals'] if Path(owner.original_root)/item['path']==Path(proof['path'])
                              and item==proof and item['size_bytes']==proof['size_bytes']]
                     if len(matches)!=1:raise ValueError('Retirement native original is unavailable')
-                    retained.append((matches[0],f'originals/{number:03d}'))
-                for item,name in retained:
-                    if worker_view_version == 1:
-                        continue  # Exact receipts remain in the private verified archive.
-                    limits=configuration_updates.for_new_job(root,step)
-                    if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
-                        raise ValueError('Retirement proof materials exceed the original input bound')
-                    target=f'{prefix}/{name}'
-                    recovery_materials.append(bind_original(archive_path(item),c.workspace(root,step)/target,item))
                 experiments.append(dict(step=record['step'],call_id=call['call_id'],execution_status='not_submitted',
-                    **(dict(retirement_proof=f'{prefix}/retirement.json',native_originals=[f'{prefix}/{name}' for _,name in retained[1:]])
-                       if worker_view_version != 1 else {}),
                     limitation='Permanent non-submission of the original call only; no scientific verdict, candidate or new execution allowance.'))
                 continue
             if 'execution' not in call:
@@ -542,8 +532,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                     limitation='Original accepted execution is pending or unverified; preserve its identity and reservation.'))
                 continue
             details=call.get('execution') or {};result=details.get('result') or {}
-            scientific_outputs=(history.scientific_outputs(root,source_jobs[record['step']],call,verify_files=False)
-                if worker_view_version==1 else call.get('outputs',[]))
+            scientific_outputs=history.scientific_outputs(root,source_jobs[record['step']],call,verify_files=False)
             outputs=[dict(path=f'inputs/parents/{record["step"]:03d}/artifacts/experiments/{call["call_id"]}/artifacts/{item["name"]}',
                           historical=f'history/nodes/{record["step"]:03d}/artifacts/experiments/{call["call_id"]}/artifacts/{item["name"]}',
                           retention=item['retention']) for item in scientific_outputs]
@@ -555,21 +544,11 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                     if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
                         raise ValueError('Execution recovery materials exceed the original input bound')
                     recovery_materials.append(bind_original(archive_path(item),c.workspace(root,step)/output['path'],item))
-            native_originals=[]
             if call['call_id'] in record.get('recovered_calls',[]):
                 observed=c.read(archive_path(call['observation']))
-                for number,proof in enumerate(observed['proofs'],1):
+                for proof in observed['proofs']:
                     matches=[item for item in call['originals'] if Path(owner.original_root)/item['path']==Path(proof['path']) and item==proof]
                     if len(matches)!=1 or matches[0]['retention']!='archived':raise ValueError('Recovered native original is unavailable')
-                    if worker_view_version == 1:
-                        continue  # Do not publish host control proofs as scientific inputs.
-                    item=matches[0];target=f'inputs/recovered/{record["step"]:03d}/{call["call_id"]}/originals/{number:03d}'
-                    limits=configuration_updates.for_new_job(root,step)
-                    if c.output_quota_exceeded(limits,(row['size_bytes'] for row in [*recovery_materials,item])):
-                        raise ValueError('Execution recovery originals exceed the original input bound')
-                    recovery_materials.append(bind_original(archive_path(item),c.workspace(root,step)/target,item))
-                    native_originals.append(dict(path=target))
-            native_pages=paged(native_originals,16,'originals',f'inputs/history/recoveries/{record["step"]:03d}/{call["call_id"]}','recovered-native-originals') if native_originals else []
             metrics=result.get('metrics',[])
             experiments.append(dict(step=record['step'],call_id=call['call_id'],execution_status=call['status'],
                 returncode=details.get('returncode'),wall_seconds=details.get('wall_seconds'),
@@ -578,9 +557,8 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                 **(dict(public_result=details['public_result']) if 'public_result' in details else {}),
                 metrics=metrics[:8],metrics_omitted_count=max(0,len(metrics)-8),
                 outputs=outputs[:8],outputs_omitted_count=max(0,len(outputs)-8),
-                **(dict(native_originals_index=native_pages[0],recovery_note='Appended original terminal facts; the prior sealed scientific conclusion is unchanged.') if native_pages else {}),
                 **(dict(recovery_note='Retained terminal observations; the prior sealed scientific conclusion is unchanged. Exact control receipts remain private.')
-                   if worker_view_version == 1 and call['call_id'] in record.get('recovered_calls',[]) else {}),
+                   if call['call_id'] in record.get('recovered_calls',[]) else {}),
                 limitation='Declared metrics and retained files; candidate ranking, scientific validity and external submission are not established. Direct-parent paths are mounted only for bound parents; use historical handles for other nodes.'))
     experiment_pages=paged(experiments,2,'experiments','inputs/history/experiments','managed-local-observations')
     if experiment_pages:indexes['experiments']=experiment_pages[0]
@@ -648,5 +626,5 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
     return dict(**(dict(execution_recoveries=projection['recovery_refs'],execution_recovery_materials=recovery_materials) if projection['recovery_refs'] else {}),**(dict(audit_projection_version=1, audit_receipts=audit_refs, adjacent_audit=adjacent_audit) if audit_projection_version == 1 else {}), nodes=[dict(step=row['step'],seal_ref=row['seal_ref']) for row in records],files=files,
                 candidate_ids=[row['id'] for row in candidate_rows],
                 **(dict(candidate_nomination_ids=nomination_ids) if nomination_ids is not None else {}),
-                **(dict(candidate_references=references) if worker_view_version==1 else {}),
+                candidate_references=references,
                 view=bounded_brief(candidate_refs.public_fields(view,references))),state

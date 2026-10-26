@@ -356,8 +356,7 @@ def test_inherited_git_observer_uses_copied_controls_and_keeps_science_stat_chec
         if entry['visibility'] in {'host_proof','effect_only'}:
             key=f'{originals.identity_key(entry["origin_identity"])}:{entry["path"]}'
             archive_io.copy_original(closure.paths[key],store/entry['storage_path'],dict(entry,kind='file'))
-    snapshot=originals._snapshot(dict(entries=entries,origins=closure.origins,native_records=closure.records,
-        legacy_compilations=closure.legacy_compilations))
+    snapshot=originals._snapshot(dict(entries=entries,origins=closure.origins,native_records=closure.records))
     inherited=originals._snapshot_source(store,snapshot,source.origin_identity,job['step'])
     science=[row['output'],row['directory']/'stdout.raw',row['directory']/'stderr.raw']
     saved={path:e.proof(path) for path in science}

@@ -1,4 +1,4 @@
-"""One current write protocol; archive readers do not call these guards.
+"""One current research-loop protocol, with no old-instance interpretation.
 
 Advance CURRENT when frozen scientific interpretation changes. A protocol marker
 is compatibility information, never permission or scientific qualification.
@@ -10,18 +10,42 @@ CURRENT = 26
 
 
 class UnsupportedProtocol(ValueError):
-    """An archive or incompatible request cannot enter a current write path."""
+    """An incompatible instance or request cannot enter the current runtime."""
 
     code = 'unsupported_protocol'
 
     def __init__(self, subject):
         self.subject = subject
-        super().__init__(f'{subject} requires current research-loop protocol {CURRENT}; preserved without migration')
+        super().__init__(f'{subject} requires current research-loop protocol {CURRENT}; unsupported format, no migration')
 
 
 def _current(value, subject):
     if type(value) is not int or value != CURRENT:
         raise UnsupportedProtocol(subject)
+
+
+def require_settings_format(settings):
+    """Reject unsupported frozen budgets without supplying missing policies."""
+    if not isinstance(settings, dict):
+        raise UnsupportedProtocol('Instance')
+    _current(settings.get('handoff_protocol'), 'Instance')
+    policy = settings.get('final_a_completion_policy')
+    if (settings.get('node_budget_mode') != 'soft'
+            or not isinstance(policy, dict) or set(policy) != {'version'}
+            or type(policy['version']) is not int or policy['version'] != 1):
+        raise UnsupportedProtocol('Instance budget policy')
+    return settings
+
+
+def require_job_format(job):
+    """Only the current scientific view can enter retained-job consumers."""
+    if not isinstance(job, dict):
+        raise UnsupportedProtocol('Scientific job')
+    _current(job.get('handoff_protocol'), 'Scientific job')
+    for field in ('worker_view_version', 'lineage_projection_version'):
+        if type(job.get(field)) is not int or job[field] != 1:
+            raise UnsupportedProtocol('Scientific job view')
+    return job
 
 
 def require_scope(scope):
@@ -41,10 +65,9 @@ def require_current(root, job=None):
     from . import contracts as c
 
     root = Path(root)
-    settings = c.settings(root)
+    settings = require_settings_format(c.settings(root))
     from .instance_owner import require_owner
     require_owner(root)
-    _current(settings.get('handoff_protocol'), 'Instance')
     if job is not None:
         if not isinstance(job, dict):
             raise UnsupportedProtocol('Scientific job')
@@ -56,7 +79,8 @@ def require_current(root, job=None):
         _current(retained.get('handoff_protocol'), 'Retained scientific job')
         if retained != job:
             raise ValueError('Scientific job differs from its frozen original')
-    return c.settings(root, job) if job is not None else settings
+        require_job_format(job)
+    return require_settings_format(c.settings(root, job)) if job is not None else settings
 
 
 
@@ -68,8 +92,7 @@ def stage_scope(root,job):
     without reading private settings or traversing the native attempt policy.
     """
     from . import contracts as c
-    if not isinstance(job,dict):raise UnsupportedProtocol('Scientific job')
-    _current(job.get('handoff_protocol'),'Scientific job')
+    require_job_format(job)
     if (type(job.get('step')) is not int or job['step']<=0
             or job.get('role') not in {'H','W','A','E'}):
         raise ValueError('An exact frozen scientific job is required')
@@ -85,55 +108,3 @@ def stage_scope(root,job):
         job_ref=reference,execution_key=reference,
         mechanism_ref=(None if (job.get('search') or {}).get('breadth') is not None
             else ((job.get('search') or {}).get('focus') or {}).get('mechanism_ref')))
-
-def archive_status(root):
-    """Preserved original facts only; no schema replay, observer, cache or page writes."""
-    from . import contracts as c
-    import json
-    root=Path(root)
-    settings=c.settings(root)
-    nodes=[];usage=dict(input_tokens=0,cached_input_tokens=0,output_tokens=0)
-    unknown=[];omitted_native_records=0
-    jobs=sorted((root/'jobs').glob('*.json'))
-    omitted_nodes=max(0,len(jobs)-256)
-    for path in jobs[:256]:
-        job=c.read(c.regular(path,limit=None))
-        step=job['step'];record=c.host_record(c.workspace(root,step))
-        state='prepared';seal=record/'result-identity.json'
-        if seal.exists():
-            identity=c.read(c.regular(seal,limit=None))
-            attempt=(identity.get('execution_ref') or {}).get('attempt',0)
-            if type(attempt) is not int or attempt<0:raise ValueError('Preserved native reference is malformed')
-            terminal=record/'continuations'/f'{attempt:03d}' if attempt else record
-            if (c.record_ref(c.regular(path))!=identity['job_ref']
-                    or c.file_ref(c.regular(record/'result.json'))!=identity['result_ref']
-                    or c.file_ref(c.regular(terminal/'science-output.json',limit=None))!=identity['raw_ref']):
-                raise ValueError('Preserved scientific originals changed')
-            state='seal_present_originals_verified'
-        elif (record/'native-outcome.json').exists():state='native_outcome_unsealed'
-        elif (record/'native-intent.json').exists():state='native_intent_present_unknown'
-        chain=[record]
-        directory=record/'continuations'
-        if directory.exists():
-            if directory.resolve()!=directory:raise ValueError('Preserved continuation directory changed')
-            continuations=sorted(directory.iterdir())
-            omitted_native_records+=max(0,len(continuations)-256)
-            chain+=continuations[:256]
-        for native_record in chain:
-            if native_record.resolve()!=native_record or not native_record.is_dir():raise ValueError('Preserved native record changed')
-            if not (native_record/'native-intent.json').exists():continue
-            meter=native_record/'usage.json'
-            if not meter.exists():
-                if step not in unknown:unknown.append(step)
-                continue
-            value=c.read(c.regular(meter,limit=16_000))
-            if not isinstance(value,dict) or any(type(value.get(key)) is not int or value[key]<0 for key in usage):
-                raise ValueError('Preserved usage original is malformed')
-            for key in usage:usage[key]+=value[key]
-        nodes.append(dict(step=step,role=job['role'],state=state,scientific_qualification='not_reinterpreted'))
-    return dict(status='preserved_read_only',protocol=settings.get('handoff_protocol'),current_protocol=CURRENT,
-        goal_id=settings.get('goal_id'),paused=(root/'pause.request').exists(),nodes=nodes,
-        omitted_nodes=omitted_nodes,omitted_native_records=omitted_native_records,partial_usage=bool(unknown or omitted_nodes or omitted_native_records),
-        usage=dict(**usage,observed_tokens=usage['input_tokens']+usage['output_tokens'],unknown_steps=unknown,
-            coverage='partial' if unknown or omitted_nodes or omitted_native_records else 'complete'),
-        goal_completion='not_asserted',history='Existing original pages retained; absent pages are not regenerated.')

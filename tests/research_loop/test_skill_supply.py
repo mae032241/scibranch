@@ -79,7 +79,7 @@ def test_readonly_installation_projects_only_explicit_role_and_worker_sets(tmp_p
     settings = c.settings(root)
     assert settings['skills']['version'] == 3
     assert 'manifest' not in settings['skills']
-    assert not (root / skill_supply.DIRECTORY).exists()
+    assert not (root / 'host-control/skills').exists()
     for job, item in ((h, 'alpha'), (w, 'beta')):
         projection = c.workspace(root, job['step']) / '.agents/skills'
         assert {path.name for path in projection.iterdir()} == {item}
@@ -112,7 +112,7 @@ def test_two_instances_share_one_installation_without_copying_or_hardlinking(tmp
     for root in roots:
         job = c.build_job(root, 1, 'H', [])
         targets.append(skill_supply.project(root, c.settings(root), job)['alpha'])
-        assert not (root / skill_supply.DIRECTORY).exists()
+        assert not (root / 'host-control/skills').exists()
     assert targets == [source / 'alpha', source / 'alpha']
 
 
@@ -323,97 +323,58 @@ def test_toml_declaration_keeps_source_installation_owned_and_worker_selection_e
         research_config.from_document(declaration, base=tmp_path)
 
 
-def test_retained_v2_manifest_and_job_bindings_remain_readonly(tmp_path):
-    root = tmp_path / 'legacy'; root.mkdir()
-    directory = root / skill_supply.DIRECTORY / 'objects/alpha'
-    directory.mkdir(parents=True)
-    manual = directory / 'SKILL.md'
-    manual.write_text('---\nname: alpha\ndescription: Retained fixture\n---\n')
-    manual.chmod(0o400); directory.chmod(0o500)
+@pytest.mark.parametrize('format', ['v2', 'manifest', 'manifest-with-v3'])
+@pytest.mark.parametrize('consumer', ['prepare', 'validate', 'binding', 'project', 'inherit'])
+def test_retired_skill_bindings_fail_before_reading_assets_or_launcher(tmp_path, monkeypatch, format, consumer):
     sets = dict(first=dict(items=['alpha']))
-    manifest = dict(version=2, freeze_id='retained', sets=sets, objects=dict(alpha=dict(
-        files=[dict(path='SKILL.md', size_bytes=manual.stat().st_size)], directories=[],
-        metadata=dict(name='alpha', description='Retained fixture'))))
-    c.write(root / skill_supply.MANIFEST, manifest); (root / skill_supply.MANIFEST).chmod(0o400)
-    declared = dict(root='/old/deployment/skills', sets=sets, manifest=dict(path=skill_supply.MANIFEST, version='retained'),
+    declared = dict(root=str(tmp_path / 'missing-installation'), sets=sets,
         launcher=dict(kind='codex_node_cwd', version=1))
-    settings = dict(skills=declared, native_launcher_argv=['codex'], role_profiles={'H': dict(skill_set='first')}, **DEFAULTS)
-    assert skill_supply.validate(root, settings) == manifest
-    retained, pending = skill_supply.prepare(dict(sets=sets), backend='codex', launcher=['codex'], existing=settings)
-    assert retained == declared and pending is None
+    if format == 'v2':
+        declared['version'] = 2
+    else:
+        declared['manifest'] = dict(path='host-control/skills/manifest.json', version='retained')
+        if format == 'manifest-with-v3':
+            declared['version'] = 3
+    settings = dict(skills=declared, native_launcher_argv=['codex'],
+        role_profiles={'H': dict(skill_set='first')}, **DEFAULTS)
+    root = tmp_path / 'missing-instance'
     job = dict(role='H', step=1)
-    job['skill_binding'] = skill_supply.binding(settings, job)
-    assert job['skill_binding']['version'] == 2 and job['skill_binding']['manifest'] == declared['manifest']
-    assert 'root' not in job['skill_binding']
-    assert skill_supply.project(root, settings, job)['alpha'] == directory
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Unsupported Skill bindings must fail before inspecting sources or launcher')
+    monkeypatch.setattr(skill_supply, '_metadata', forbidden)
+    monkeypatch.setattr(skill_supply, '_launcher_contract', forbidden)
+    with pytest.raises(ValueError, match='only version 3 installation sources.*create a new instance'):
+        if consumer == 'prepare':
+            skill_supply.prepare(dict(sets=sets), backend='codex', launcher=['codex'], existing=settings)
+        elif consumer == 'binding':
+            skill_supply.binding(settings, job)
+        elif consumer == 'project':
+            skill_supply.project(root, settings, job)
+        else:
+            getattr(skill_supply, consumer)(root, settings)
+    assert not root.exists()
 
 
-def _legacy_fork(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import fork_service
-    root, source = prepare(tmp_path, sets=dict(first=dict(items=['alpha'])))
-    settings = c.settings(root)
-    directory = root / skill_supply.DIRECTORY / 'objects/alpha'
-    directory.mkdir(parents=True)
-    manual = directory / 'SKILL.md'
-    manual.write_bytes((source / 'alpha/SKILL.md').read_bytes())
-    manual.chmod(0o400); directory.chmod(0o500)
-    sets = settings['skills']['sets']
-    manifest = dict(version=2, freeze_id='retained-fork', sets=sets, objects=dict(alpha=dict(
-        files=[dict(path='SKILL.md', size_bytes=manual.stat().st_size)], directories=[],
-        metadata=dict(name='alpha', description='Selected alpha fixture'))))
-    c.write(root / skill_supply.MANIFEST, manifest); (root / skill_supply.MANIFEST).chmod(0o400)
-    settings['skills'] = dict(root=str(source), sets=sets,
-        manifest=dict(path=skill_supply.MANIFEST, version='retained-fork'),
-        launcher=dict(kind='codex_node_cwd', version=1))
-    c.write(root / 'settings.json', settings)
-    _finish(monkeypatch, root, 1, 'H', [], action='analyze')
-    _finish(monkeypatch, root, 2, 'A', [1], action='finish')
+def test_current_fork_preserves_installation_binding_without_instance_skill_bytes(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import fork_runtime, fork_service
+    parent, source = prepare(tmp_path, sets=dict(first=dict(items=['alpha'])))
+    _finish(monkeypatch, parent, 1, 'H', [], action='analyze')
+    _finish(monkeypatch, parent, 2, 'A', [1], action='finish')
     child = tmp_path / 'child'
     limits = dict(max_tokens=200, max_seconds=30, max_steps=2)
-    preview = fork_service.preview(root, 1, child, budget=limits)
+    preview = fork_service.preview(parent, 1, child, budget=limits)
     assert preview['status'] == 'fork_preview_ready'
-    from scidiscovery import archive_io as files
-    original_copy, original_link = files.copy_original, files.link_original
-    def forbid_skill_copy(original, target, *args, **kwargs):
-        assert not Path(original).is_relative_to(root / skill_supply.DIRECTORY)
-        return original_copy(original, target, *args, **kwargs)
-    def forbid_skill_link(original, target, *args, **kwargs):
-        assert not Path(original).is_relative_to(root / skill_supply.DIRECTORY)
-        return original_link(original, target, *args, **kwargs)
-    monkeypatch.setattr(files, 'copy_original', forbid_skill_copy)
-    monkeypatch.setattr(files, 'link_original', forbid_skill_link)
-    fork_service.create(root, 1, child, budget=limits,
-        expected_preview_id=preview['preview_id'], operation_id='legacy-shared-skills')
-    return root, child, directory
-
-
-def test_legacy_fork_uses_exact_parent_original_without_new_skill_bytes(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import fork_runtime
-    parent, child, directory = _legacy_fork(tmp_path, monkeypatch)
-    assert not (child / skill_supply.DIRECTORY).exists()
+    fork_service.create(parent, 1, child, budget=limits,
+        expected_preview_id=preview['preview_id'], operation_id='installation-skills')
+    assert not (parent / 'host-control/skills').exists()
+    assert not (child / 'host-control/skills').exists()
     assert c.settings(child)['skills'] == c.settings(parent)['skills']
     job = fork_runtime.build_selected_job(child, 1)
-    assert skill_supply.project(child, c.settings(child), job)['alpha'] == directory
+    assert skill_supply.project(child, c.settings(child), job)['alpha'] == source / 'alpha'
     projected = c.workspace(child, 1) / '.agents/skills/alpha/SKILL.md'
-    assert projected.samefile(directory / 'SKILL.md')
-    assert projected.read_bytes() == (directory / 'SKILL.md').read_bytes()
+    assert projected.samefile(source / 'alpha/SKILL.md')
     manifest = c.read(child / 'host-runtime/fork/manifest.json')
-    assert not any(row['path'].startswith(skill_supply.DIRECTORY + '/') for row in manifest['entries'])
-
-
-@pytest.mark.parametrize('damage', ['missing_parent', 'identity'])
-def test_legacy_fork_rejects_missing_or_replaced_registered_parent(tmp_path, monkeypatch, damage):
-    parent, child, directory = _legacy_fork(tmp_path, monkeypatch)
-    if damage == 'missing_parent':
-        directory.chmod(0o700)
-        shutil.rmtree(parent)
-        expected = 'Legacy Skill source unavailable'
-    else:
-        settings = c.settings(parent); settings['goal_id'] = 'replaced-parent'
-        c.write(parent / 'settings.json', settings)
-        expected = 'Legacy Skill source identity changed'
-    with pytest.raises(ValueError, match=expected):
-        skill_supply.validate(child, c.settings(child))
+    assert not any(row['path'].startswith('host-control/skills/') for row in manifest['entries'])
 
 
 @pytest.mark.process_e2e
@@ -434,5 +395,5 @@ def test_real_installation_science_skill_clis_use_original_assets(tmp_path, monk
         assert result.returncode == 0, result.stdout + result.stderr
         assert json.loads(output.read_bytes())
     assert before == {item: (source / item / 'SKILL.md').read_bytes() for item in items}
-    assert not (root / skill_supply.DIRECTORY).exists()
+    assert not (root / 'host-control/skills').exists()
     assert profiles.validate_intent(settings, job, profiles.binding(settings, job)) == job['native_profile']

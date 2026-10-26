@@ -36,6 +36,13 @@ def test_git_release_builder_emits_clean_manifested_source(tmp_path: Path) -> No
     assert (output / "docs/INSTALL.zh-CN.md").is_file()
     assert (output / "docs/TCAD_QUALIFICATION_STATUS.md").is_file()
     assert not (output / "plugins/table_observation").exists()
+    for relative in ("plugins/cov_execution/cov_execution/launcher.py",
+                     "scripts/acceptance/rootless_cov_launcher.py",
+                     "scripts/acceptance/rootless_public_selection_replay.py",
+                     "scripts/acceptance/prelive_gate.py",
+                     "scripts/acceptance/cov_receipt_smoke.py",
+                     "scripts/acceptance/selection_replay.py"):
+        assert not (output / relative).exists()
     assert {path.name for path in (output / "plugins").iterdir() if path.is_dir()} == {
         "tcad_artifact", "cov_execution",
     }
@@ -111,9 +118,7 @@ def test_git_release_builder_emits_clean_manifested_source(tmp_path: Path) -> No
         "docs/ROOTLESS_CLI.zh-CN.md",
         "scripts/acceptance/fixtures/rootless_selection/selection.json",
         "scripts/acceptance/fixtures/rootless_selection/actions.json",
-        "scripts/acceptance/rootless_cov_launcher.py",
-        "scripts/acceptance/rootless_public_selection_replay.py",
-        "scripts/acceptance/behavior_card.py", "scripts/acceptance/prelive_gate.py",
+                "scripts/acceptance/behavior_card.py",
         "plugins/cov_execution/cov_execution/observer.py",
         "scripts/acceptance/fixtures/search_mvp/native-payloads.json",
          "scripts/prepare_covshift_local.py",

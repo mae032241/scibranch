@@ -42,7 +42,7 @@ def publish(root, job, *, action='finish', tokens=10):
     return record
 
 
-def direct_scene(tmp_path, monkeypatch, *, legacy=False):
+def direct_scene(tmp_path, monkeypatch):
     public = tmp_path/'public'
     public.mkdir()
     objective = public/'objective.md'
@@ -60,11 +60,6 @@ def direct_scene(tmp_path, monkeypatch, *, legacy=False):
             adapter=dict(adapter=str(adapter), launcher_argv=[str(Path(sys.executable).resolve())],
                 config={}, target={}, inputs=[], source_roots=[str(tmp_path)],
                 readonly_inputs_version=1, capabilities=[])))
-    if legacy:
-        settings = c.settings(root)
-        settings.pop('final_a_completion_policy')
-        c.write(root/'settings.json', settings)
-        c.write(root/'settings-identity.json', dict(path='settings.json'))
     c.write(root/'host-started.json', budget.clock_stamp())
     publish(root, c.build_job(root, 1, 'H', []), action='analyze')
     ordinary = c.build_job(root, 2, 'A', [1])
@@ -129,21 +124,6 @@ def test_budget_refusal_upgrades_direct_delivery_to_one_final(tmp_path, monkeypa
     assert [row for row in repeated if row['kind'] == 'final_a_return'] == claims
     assert executed == [final_step]
     assert all(path.read_bytes() == raw for path, raw in originals.items())
-
-
-def test_direct_delivery_without_final_policy_keeps_budget_unavailable(tmp_path, monkeypatch):
-    root, begin, _, _ = direct_scene(tmp_path, monkeypatch, legacy=True)
-
-    def forbidden(*args, **kwargs):
-        pytest.fail('Historical settings grant no FINAL author')
-
-    monkeypatch.setattr(native, 'execute_native', forbidden)
-    result = controller.closeout(root)
-    assert result['status'] == 'closeout_budget_unavailable'
-    assert budget.closeout_state(root)['begin'] == begin
-    assert budget.final_a_barrier(root) is None
-    assert not (root/'jobs/003.json').exists()
-    assert budget.closeout_state(root)['actions'] == []
 
 
 @pytest.mark.parametrize('outcome', [

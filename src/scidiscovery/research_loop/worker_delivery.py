@@ -334,7 +334,7 @@ def validate_exit(root,job,record,value):
             # and policy are checked above. Later amendments never rewrite it.
             shared=value['shared'];meter=value['meter'];soft=budget.node_mode(root)=='soft'
             reserve=budget.delivery_reserve(configuration_updates.for_job(root, job)) or dict(tokens=0,seconds=0,steps=0)
-            actual_only=configuration_updates.for_job(root, job).get('final_a_completion_policy') is not None
+            actual_only=True
             needed_tokens=0 if soft or actual_only else max(0,value['limits']['max_observed_tokens']-tokens)
             needed_seconds=0. if soft else max(0.,value['limits']['max_seconds']-seconds)
             if not (meter.get('blocking_unknown_steps', meter['unknown_steps']) or shared['max_tokens']-meter.get('accounted_tokens', meter['observed_tokens'])<needed_tokens+reserve['tokens']
