@@ -150,6 +150,130 @@ local 实验，在原生原 home 最多执行两次仅输出补填，并启用�
 protocol 必须显式提供 launcher 和 model，不套用 Codex 推理或服务档位默认值。
 自定义 launcher 默认由 external 路径拥有实验执行，除非另行配置。
 
+## Scientific Python dependencies / 科学 Python 依赖
+
+The control interpreter running `scid-research` and the scientific interpreter
+running experiments can be different existing environments. For Local or Cov,
+declare task dependencies inside the existing executor configuration:
+
+控制框架和运行科学实验的 Python 可以是不同的既有环境。Local 或 Cov 的任务依赖在既有
+执行器配置中声明，例如：
+
+```toml
+[executor]
+mode = "local"
+[executor.config]
+executor = "local_execution:command"
+[executor.config.configuration]
+run_argv = ["/absolute/existing/scientific-env/bin/python"]
+max_seconds = 120
+python_requirements = [
+  { requirement = "numpy>=1.26,<3", import_name = "numpy" },
+  { requirement = "scikit-learn>=1.4,<2", import_name = "sklearn" },
+]
+```
+
+`config-check`, `config-inspect --config` and `prepare` check these declarations
+through the selected factory's configure callback. The interpreter is exactly
+`run_argv[0]`, not the control Python; it must be an absolute Python executable
+path. Local accepts only supported interpreter flags after it (`-B`, `-I`, `-E`,
+`-s`, `-u`, `-S`), without a script or wrapper. Cov accepts its supported Python
+runner invocation. The distribution name and import name are separate: for example,
+`scikit-learn` installs the `sklearn` module.
+
+这些声明由所选 factory 的配置入口在 `config-check`、`config-inspect --config`、
+`prepare` 时检查。解释器准确取自 `run_argv[0]`，须为 Python 可执行文件的绝对路径，
+不会改用控制 Python。Local 后续只接受上述解释器参数，不接受脚本或包装器；
+Cov 使用其支持的 Python runner 调用。发行包名与导入名分别填写，例如
+`scikit-learn` 对应 `sklearn`。
+
+The declaration permits at most 32 entries; each requirement is a PEP 508 string
+of at most 512 characters and each import name is a module path of at most 128
+characters. Version constraints and environment markers use the target Python.
+Extras, direct URLs and extra markers are unsupported. The bounded probe shares a
+20-second deadline, limits each output stream to 32 KiB, and checks installed
+metadata plus imports in isolated mode with numerical thread counts set to one.
+It reads no task datasets and runs no task script. Missing distributions, version
+mismatches and failed imports produce field-specific configuration errors. It
+does not install packages, create an environment or change the interpreter.
+
+最多声明 32 项；每项 PEP 508 requirement 最多 512 字符，import_name 为最多 128 字符的
+模块路径。版本及环境 marker 按目标 Python 判定；不支持 extras、直接 URL 和 extra marker。
+探针共用 20 秒时限，每路输出最多 32 KiB，数值库线程设为 1，通过隔离模式检查已安装元数据和导入。
+它不读任务数据、不运行任务脚本；缺包、版本不符、导入失败会报到具体配置字段，
+不会安装包、建环境或换解释器。
+
+This is an installed-package preflight, not qualification of native permissions,
+mounts, task-relative imports or scientific execution. Packages available only
+through user-site or `PYTHONPATH` do not satisfy this isolated check. A standard
+Local native attempt records the selected Python's prefix and base prefix once
+in its private permission snapshot and mounts the necessary directories read-only,
+subject to the existing private-path overlap rules. Querying retained results and
+resuming an existing attempt do not rerun the dependency probe. Omitting the
+declaration or using an empty list performs no dependency probe; other executors
+retain their own preflight contracts. Installation checks only application/plugin
+dependencies, so installing Cov alone does not declare arbitrary task libraries.
+
+该预检只检查隔离模式下的已安装库；用户 site 或 `PYTHONPATH` 独有的包不算通过。
+原生权限、挂载、任务相对导入及科学执行仍须各自成立。标准 Local 的新 native attempt
+会把所选 Python 的 prefix 和 base prefix 一次记录在既有私有权限快照中，
+按原有私有路径重叠规则只读挂载所需目录。读取保留结果、恢复已有 attempt 不重新检查依赖。
+省略声明或使用空数组不做依赖探测；其他执行器沿用各自的预检合同。
+应用安装只检查框架和插件依赖，安装 Cov 本身不会声明任意任务的科学库。
+
+## Response schema transport / 输出 Schema 传输
+
+Ordinary Codex tasks request one JSON final response through a short prompt from
+the first attempt, including tasks with an older frozen strict schema. They do not
+send `--output-schema` or append that old schema. Protocol requests carry the current
+minimal response schema. The original task and schema files remain unchanged;
+outbound instructions state the current required fields and conditional breadth
+rules. Other scientific content stays open. Exact inputs, execution permissions,
+budgets and delivery qualification retain their own checks.
+
+This is a prompt instruction, not a provider JSON-mode guarantee; Codex `--json`
+describes its event stream. Invalid required output uses finite output-only repair.
+An actual formal independent-review task retains its separate strict contract;
+schema shape alone never makes an ordinary task a formal review.
+`native_schema_transport` records the actual invocation mode separately from frozen
+launcher capabilities.
+
+普通 Codex 任务首轮就通过简短提示要求一个 JSON 最终回答，已有旧严格 Schema 的普通任务也
+一样，不发送 `--output-schema`，不追加旧 Schema 全文。Protocol 请求携带当前最小回答
+Schema。原 task 和 Schema 文件保持不变；实际出站说明明确当前必填项和条件广度规则，
+其余科学内容开放。准确输入、执行权限、预算和交付资格仍分别校验。
+
+这是提示约束，不是服务端 JSON-mode 保证；Codex `--json` 描述事件流。
+必需输出不合格走有限的仅输出补填。真正的正式独审任务保持独立严格合同，不能根据
+Schema 形状把普通任务当作正式独审。`native_schema_transport` 单独记录实际调用方式，
+不改写冻结的 launcher 能力。
+
+For an already-recorded native format rejection, the existing enabled recovery
+policy can negotiate once only when the complete original stream positively proves
+rejection before model or tool activity. It consumes one `max_retries` slot without
+service backoff and retains the exact task, profile, home, permissions and budgets.
+The ordinary retry uses the current short JSON instructions. Unknown external
+execution, other HTTP 400 errors, ordinary prose, authentication/quota errors,
+incomplete streams or scientific activity do not authorize resubmission.
+
+对于已记录的原生格式拒绝，只有完整原流明确证明拒绝发生在模型与工具活动之前，才可按
+已启用的恢复策略协商一次，消费一个 `max_retries` 名额，不加服务退避；原任务、profile、
+home、权限和预算保持。普通任务随后使用当前简短 JSON 说明。未知外部执行、其他 400、
+普通文字、认证/配额错误、不完整流或已有科学活动均不授予重提许可。
+
+Protected FINAL and closeout may negotiate only this same-task format failure,
+retaining their exact original claim and finite limits. Their ordinary scientific
+work-recovery exclusions remain. Special author-closeout/startup-successor/wake
+grants do not acquire broad automatic retry, nor does an already-started narrow
+output/work repair acquire a new full-task recovery grant. Original receipts,
+missing meters and stopped schedules remain traceable; positive format facts are
+rechecked from the original stream rather than rewriting an old failure diagnosis.
+
+protected FINAL 与 closeout 仅可协商同一任务的这一格式失败，保留精确原 claim 与有限上限，
+普通科学续工限制不变。专用 author-closeout/startup-successor/wake 授权不因此取得广泛自动重试；
+已经启动的窄输出/工作补填也不获得新的完整任务续工许可。原回执、缺失计量与停止安排保持可追溯；
+格式拒绝事实从完整原始流重新核对，不改写原失败诊断。
+
 ## Automatic recovery / 自动接续
 
 The standard single-executable Codex preparation path supplies
@@ -170,7 +294,7 @@ CLI 的既有 `--worker-resume-policy /absolute/resume.json` 在完整恢复对�
 | --- | --- | --- |
 | `enabled` | `true` | Independent recovery permission; boolean. / 独立自动接续许可，布尔值。 |
 | `max_continues` | `2` | Cumulative same-task early-stop or incomplete-W continuations; integer 0–100. / 同一任务提前停止或 W 交付不足的累计接续次数，整数 0–100。 |
-| `max_retries` | `3` | Cumulative same-task transient-service retries; integer 0–100. / 同一任务临时服务故障的累计重试次数，整数 0–100。 |
+| `max_retries` | `3` | Cumulative same-task service retries, including at most one format fallback; integer 0–100. / 同一任务服务重试累计次数，含至多一次格式降级，整数 0–100。 |
 | `initial_backoff_seconds` | `30` | Initial finite nonnegative service backoff. / 首次有限非负服务退避秒数。 |
 | `max_backoff_seconds` | `300` | Finite nonnegative per-backoff limit. / 每次退避的有限非负秒数上限。 |
 | `jitter_fraction` | `0.1` | Jitter fraction, 0–1. / 退避抖动比例，0–1。 |
@@ -207,7 +331,12 @@ provider again without Authorization; permanent quota is not resumed. Existing-s
 retry does not require a `not_accepted` field. That evidence is not successful
 real-provider reasoning recovery, usage coverage or native permission qualification;
 a missing-session startup retry still requires explicit non-acceptance evidence.
-Other message-only errors and unrecognized CLI formats remain unknown; ordinary
+Qualified native `error` and `turn.failed` messages may also contain a complete
+JSON error envelope. The bounded decoder reads recognized error codes and HTTP
+statuses from it; an `invalid_json_schema`/400 rejection is a permanent configuration
+failure for ordinary retry. Only the separately verified format negotiation above
+may downgrade transport. Decoded acceptance flags do not grant startup-replay
+permission. Other unstructured message-only errors and unrecognized CLI formats remain unknown; ordinary
 agent/tool text is never classified for retry. Permanent quota evidence takes
 precedence over a generic 429 or capacity signal.
 Known completed turns with missing or invalid required output use existing finite
@@ -233,7 +362,10 @@ than inventing completed findings or refunding consumption.
 Codex home 用精确 ID 执行 `exec resume`，仍沿用原 thread 并再次到达 loopback provider，
 全部请求均无 Authorization；永久 quota 不续接。既有 session 重试不要求 `not_accepted`
 字段；这未证明真实服务商推理恢复、用量覆盖或原生权限资格，无 session 启动重试仍须
-明确未接受证据。其他 message-only 错误及未知 CLI 格式保持 unknown，不扫描
+明确未接受证据。原生 `error`、`turn.failed` 的 message 若为完整 JSON 错误信封，
+有界解析器会读取其中已识别的错误码和 HTTP 状态；`invalid_json_schema`/400 对普通重试属于永久配置错误，
+仅上述单独核对的格式协商可降级传输，解析出的 acceptance 字段也不授予启动重放许可。
+其他非结构化 message-only 错误及未知 CLI 格式保持 unknown，不扫描
 普通 agent/tool 正文来决定重试；永久 quota 证据优先于泛化的 429 或容量信号。
 已知完成 turn 缺少或给出无效必需输出时，走既有有限输出补填；合法 fragment 保持既有阶段接续语义。
 已完成 W screen 返回的必需 JSON 合法，但精确 `work-evidence.json` 判定仍为 `incomplete` 时，
@@ -272,8 +404,9 @@ Live or unresolved native processes and running/unknown managed calls prevent a
 replacement native attempt; use the existing original-call reconciliation paths.
 Recovery never resubmits unknown external work or refunds consumption. Formal
 completion and explicit waits retain their existing boundaries. Automatic recovery
-is disabled for protected FINAL/closeout; their existing output-repair and completion
-policies remain binding. Failed or unknown closeout originals remain unsealed with
+of scientific work is disabled for protected FINAL/closeout; their existing output-repair and completion
+policies remain binding. Their exact original claim may use the bounded format
+negotiation described above. Other failed or unknown closeout originals remain unsealed with
 a specific same-original recovery diagnostic; unavailable fragment continuation or
 output repair retains its own reason, without acquiring automatic work permission.
 No background recovery runs without a controller. This configuration changes no
@@ -281,7 +414,8 @@ required scientific output or protocol version and adds no general clock repair.
 
 原 native 仍存活或身份未核清、受管调用 running/unknown 时不启动替代 native；须用既有原调用
 核对入口。恢复不重新提交未知外部工作、不退款。正式完成和显式等待保留原边界；protected
-FINAL/closeout 禁用自动接续，原输出补填及完成策略继续有效。失败或未知收口原任务保持未封存，
+FINAL/closeout 禁用自动科学续工，原输出补填及完成策略继续有效；精确原 claim 可使用上述有限格式协商。
+其他失败或未知收口原任务保持未封存，
 给出核对同一原件的明确诊断；fragment 续接或输出补填不可用保留准确原因，不新增自动续工许可。
 没有 controller 就不自行后台执行。
 本配置不新增必填科学输出或提升协议，也不提供通用科学预算时钟修复。

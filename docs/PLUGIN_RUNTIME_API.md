@@ -27,6 +27,14 @@ is mandatory. Relative paths are resolved against that explicit configuration
 file. Host identities, gate services and admission facts cannot be supplied in
 operator JSON. The configuration reference owns public error behavior.
 
+The Local and Cov factories accept optional `python_requirements` in their
+existing configuration object. Their configure callbacks check declared installed
+distributions and imports in the Python selected by `run_argv[0]`; they never run
+the task or construct an execution adapter. See the
+[declaration and bounds](RESEARCH_CONFIGURATION.md#scientific-python-dependencies--科学-python-依赖).
+Other providers own any equivalent environment preflight. Retained result, query
+and recovery paths do not recall configure or requalify an environment.
+
 `research_defaults(configuration, *, root)` may return only `history_observer`,
 `delivery_adapter` and `optional_skill_sets`. It is called for the explicitly
 selected `executor.config.executor`, not every installed provider. Optional Skill

@@ -135,12 +135,13 @@ def test_completed_delivery_cannot_promote_special_original_scope(tmp_path,job,p
 
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('fault', ['completed-findings', 'completed-missing-output'])
-def test_default_completed_work_continues_original_full_task_and_never_replays_call(tmp_path,execution_registry,fault):
+def test_default_completed_work_continues_real_gap_to_explicit_decision_without_replaying_call(tmp_path,execution_registry,fault):
     root,home,env=prepare_cli(tmp_path,fault=fault)
     originals={path:path.read_bytes() for path in (root/'settings.json',home/'config.toml',home/'auth.json')}
     result=cli(root,'run',env=env)
     assert result['status']=='finish',nomination_diagnostic(root,result,fault=fault)
     job=c.read(root/'jobs/002.json');chain=execution.records(root,2)
+    assert [row['mechanism_ref'] for row in job['search']['coverage_obligation']]==['h001.m1','h001.m2']
     assert len(chain)==(3 if fault=='completed-missing-output' else 2)
     initial,current=chain[0],chain[-1]
     intent=c.read(current/'native-intent.json')
@@ -164,9 +165,17 @@ def test_default_completed_work_continues_original_full_task_and_never_replays_c
         assert c.read(initial/'science-output.json')['mechanism_findings'] is None
         assert c.read(initial/'native-outcome.json')['terminal_observed'] is True
     science=c.validate(c.workspace(root,2))
-    assert worker_delivery.assessment(root,job,science,current)['status']=='complete'
+    assessment=worker_delivery.assessment(root,job,science,current)
+    assert assessment['status']=='partial' and assessment['reason']=='worker_decision'
+    assert assessment['missing']==['h001.m2'] and science['stage_intent']=='decision'
+    previous=chain[-2]
+    previous_science=c.read(previous/'science-output.json')
+    previous_gap=worker_delivery.assessment(root,job,previous_science,previous,source_attempt=len(chain)-2)
+    assert previous_gap['status']=='incomplete' and previous_gap['missing']==['h001.m2']
+    assert len(c.read(previous/'work-evidence.json')['evidence'])==1
     seal=c.read(initial/'result-identity.json')
-    assert seal['control_outcome']['worker_delivery']['status']=='complete'
+    assert seal['control_outcome']['worker_delivery']['status']=='partial'
+    assert seal['control_outcome']['worker_delivery']['reason']=='worker_decision'
     assert c.settings(root)['resume_policy']['output_only'] is True
     assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'+'resume\n'*(len(chain)-1)
     calls=experiment_client.record_directory(root,2)/'calls'
@@ -182,7 +191,7 @@ def test_default_completed_work_continues_original_full_task_and_never_replays_c
     assert all(path.read_bytes()==raw for path,raw in {**originals,**retained}.items())
     continuation.validate_automatic(root,2,intent)
     forged=dict(intent,work_repair=dict(intent['work_repair'],source_attempt=99))
-    with pytest.raises(ValueError,match='exact original delivery failure'):
+    with pytest.raises(ValueError,match='exact original delivery failure|exact completed source'):
         continuation.validate_automatic(root,2,forged)
     with pytest.raises(ValueError,match='source attempt changed'):
         worker_delivery.validate(root,job,current,source_attempt=0)
@@ -226,7 +235,9 @@ def test_completed_work_continue_cap_retains_partial_and_original_call(tmp_path,
     exit=c.read(current/'stage-end.json')['work_exit']
     assert exit['kind']=='automatic_continue_cap' and exit['counters']==used
     assert worker_delivery.validate_exit(root,job,current,exit)=='automatic_recovery_continue_limit'
-    assert worker_delivery.require_delivery(root,job,c.validate(c.workspace(root,2)),current)['status']=='partial'
+    retained_delivery=worker_delivery.require_delivery(root,job,c.validate(c.workspace(root,2)),current)
+    assert retained_delivery['status']=='partial' and retained_delivery['missing']==['h001.m2']
+    assert len(c.read(current/'work-evidence.json')['evidence'])==1
     assert len(list((experiment_client.record_directory(root,2)/'calls').iterdir()))==1
     assert (c.workspace(root,2)/'work/launches').read_text()=='exec\nresume\nresume\n'
     assert c.read(root/'jobs/003.json')['role']=='A'
@@ -248,7 +259,8 @@ def test_completed_work_budget_denial_keeps_original_call_and_verified_partial_w
     assert exit['consumption']['tokens']==14
     assert exit['shared']['max_tokens']==28 and exit['meter']['observed_tokens']>=28
     assert worker_delivery.validate_exit(root,job,origin,exit)==exit['reason']
-    assert worker_delivery.require_delivery(root,job,c.validate(c.workspace(root,2)),origin)['status']=='partial'
+    retained_delivery=worker_delivery.require_delivery(root,job,c.validate(c.workspace(root,2)),origin)
+    assert retained_delivery['status']=='partial' and retained_delivery['missing']==['h001.m2']
     assert budget.used_steps(root)>=2 and native.usage(root)['observed_tokens']>=28
     calls=experiment_client.record_directory(root,2)/'calls'
     assert len(list(calls.iterdir()))==1
@@ -273,13 +285,15 @@ def test_completed_work_without_independent_automatic_grant_preserves_output_onl
     chain=execution.records(root,2);assert len(chain)==1
     exit=c.read(chain[0]/'stage-end.json')['work_exit']
     assert exit['kind']=='resume_policy' and exit['reason']=='worker_resume_output_only'
+    job=c.read(root/'jobs/002.json')
+    assert worker_delivery.assessment(root,job,c.validate(c.workspace(root,2)),chain[0])['missing']==['h001.m2']
     assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
     assert len(list((experiment_client.record_directory(root,2)/'calls').iterdir()))==1
 
 
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('fault,reason',[('completed-blocked','scientific_blocked'),
-    ('completed-decision','worker_decision'),('completed-unresolved','scientific_findings_unresolved')])
+    ('completed-decision','worker_decision'),('completed-unresolved','worker_decision')])
 def test_completed_valid_partial_or_decision_never_authorizes_more_work(tmp_path,execution_registry,fault,reason):
     root,_,env=prepare_cli(tmp_path,fault=fault)
     result=cli(root,'run',env=env)
@@ -287,5 +301,11 @@ def test_completed_valid_partial_or_decision_never_authorizes_more_work(tmp_path
     chain=execution.records(root,2);assert len(chain)==1
     result=c.read(chain[0]/'result-identity.json')['control_outcome']['worker_delivery']
     assert result['status']=='partial' and result['reason']==reason
+    assert len(c.read(chain[0]/'work-evidence.json')['evidence'])==1
+    if fault=='completed-blocked':assert result['blocked']==['h001.m2']
+    else:
+        science=c.validate(c.workspace(root,2))
+        assert science['stage_intent']=='decision' and result['missing']==['h001.m2']
+        if fault=='completed-unresolved':assert isinstance(science['mechanism_findings'],str)
     assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
     assert len(list((experiment_client.record_directory(root,2)/'calls').iterdir()))==1

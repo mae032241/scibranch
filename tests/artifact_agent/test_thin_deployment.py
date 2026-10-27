@@ -240,7 +240,7 @@ def test_retired_service_deployment_is_rejected_before_any_mutation(tmp_path, sc
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('mode, forwarded', [('reinstall', 'install'), ('install', 'install'),
+@pytest.mark.parametrize('mode, forwarded', [(None, 'reinstall'), ('reinstall', 'reinstall'), ('install', 'install'),
                                             ('--dry-run', '--dry-run'), ('status', 'status')])
 def test_reinstaller_forwards_settings_and_mode_without_sudo(tmp_path, mode, forwarded):
     environment, originals = scene(tmp_path)
@@ -258,7 +258,7 @@ def test_reinstaller_forwards_settings_and_mode_without_sudo(tmp_path, mode, for
     installer.write_text('#!/bin/sh\nprintf "%s\\n" "$@" "$SCID_PYTHON" '
                          '"$SCID_PLUGINS" "$SCID_INSTALL_ROOT" "$SCID_BIN_ROOT" "$SCID_BACKUP_ROOT"\n')
     installer.chmod(0o755)
-    result = subprocess.run(['bash', str(wrapper), mode],
+    result = subprocess.run(['bash', str(wrapper), *([] if mode is None else [mode])],
         env=environment, capture_output=True, text=True, timeout=10, check=False)
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [forwarded, sys.executable, 'tcad_artifact',

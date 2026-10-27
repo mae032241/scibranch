@@ -16,6 +16,12 @@ readonly SKILL_ROOT="${INSTALL_ROOT}/skills"
 readonly BACKUP_ROOT="${SCID_BACKUP_ROOT:-${HOME}/.local/state/scidiscovery/install}"
 PACKAGE_STAGE=""
 SKILL_STAGE=""
+SOURCE_STAGE=""
+SITE_ROLLBACK=""
+SKILL_ROLLBACK=""
+INSTALL_MODE=install
+REINSTALL_SITE_PUBLISHED=0
+REINSTALL_SKILLS_PUBLISHED=0
 TRANSACTION_ROOT=""
 ROLLBACK_ARMED=0
 declare -a SELECTED_PLUGINS=()
@@ -41,7 +47,7 @@ validate_thin_paths() {
 require_thin_sources() {
     local path plugin_ids plugin_distributions
     validate_thin_paths
-    for path in pyproject.toml README.md deploy/plugin_selection.py deploy/install_transaction.py src/scidiscovery/research_loop/cli.py skills/sentaurus-tcad-code/SKILL.md skills/curve-analysis/SKILL.md skills/scientific-paper-evidence/SKILL.md; do
+    for path in pyproject.toml README.md deploy/plugin_selection.py deploy/python_dependencies.py deploy/install_transaction.py src/scidiscovery/research_loop/cli.py skills/sentaurus-tcad-code/SKILL.md skills/curve-analysis/SKILL.md skills/scientific-paper-evidence/SKILL.md; do
         [[ -f "$SOURCE_ROOT/$path" ]] || die "missing thin source: ${path}"
     done
     if [[ -n "$PLUGIN_SPECIFICATION" ]]; then
@@ -53,8 +59,19 @@ require_thin_sources() {
 }
 
 validate_thin_targets() {
-    local path
-    # No inference about live writers: code is published only into a new prefix.
+    local path name module
+    if [[ "$INSTALL_MODE" == reinstall ]]; then
+        for path in "$SITE_ROOT" "$SKILL_ROOT"; do
+            [[ -d "$path" && ! -L "$path" ]] || die "reinstall requires the original ordinary package and skill directories: ${path}"
+        done
+        [[ -f "$SITE_ROOT/runtime-identity.json" && ! -L "$SITE_ROOT/runtime-identity.json" && -d "$SITE_ROOT/scidiscovery" && ! -L "$SITE_ROOT/scidiscovery" ]] || die "reinstall requires the original package layout"
+        for name in scid-research scid-experiment; do
+            module=scidiscovery.research_loop.cli
+            [[ "$name" != scid-experiment ]] || module=scidiscovery.research_loop.experiments
+            [[ -f "$CLI_ROOT/$name" && ! -L "$CLI_ROOT/$name" ]] && cmp -s <(thin_cli_wrapper "$module") "$CLI_ROOT/$name" || die "reinstall refuses a missing or foreign command: ${name}"
+        done
+        return
+    fi
     for path in "$SITE_ROOT" "$SKILL_ROOT" "$CLI_ROOT/scid-research" "$CLI_ROOT/scid-experiment"; do
         [[ ! -e "$path" && ! -L "$path" ]] || die "thin target already exists; preserve the existing deployment: ${path}"
     done
@@ -81,34 +98,8 @@ validate_source() {
 
 validate_base_python() {
     "$PYTHON" -m pip --version
-    "$PYTHON" - "$SOURCE_ROOT/pyproject.toml" <<'PY'
-from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
-from packaging.requirements import Requirement
-import sys
-try:
-    import tomllib
-except ModuleNotFoundError:
-    try:
-        import tomli as tomllib
-    except ModuleNotFoundError:
-        raise SystemExit("missing base Python dependency: tomli>=2; required for Python <3.11") from None
-
-project = tomllib.loads(Path(sys.argv[1]).read_text())
-requirements = [*project['project'].get('dependencies', ()), *project['build-system']['requires']]
-for raw in requirements:
-    requirement = Requirement(raw)
-    if requirement.marker is not None and not requirement.marker.evaluate({'extra': ''}):
-        continue
-    try:
-        observed = version(requirement.name)
-    except PackageNotFoundError:
-        raise SystemExit(f'missing base Python dependency: {requirement}; install it before --no-deps deployment') from None
-    if requirement.specifier and observed not in requirement.specifier:
-        raise SystemExit(f'incompatible base Python dependency: {requirement}; found {observed}')
-    print(f'base dependency: {requirement.name}={observed}')
-print('base Python dependency check: pass')
-PY
+    "$PYTHON" "$SOURCE_ROOT/deploy/python_dependencies.py" \
+        --source-root "$SOURCE_ROOT" --plugins "$PLUGIN_SPECIFICATION"
 }
 
 preview() {
@@ -167,13 +158,14 @@ PY
 install_packages() {
     local stage source_stage source_root plugin plugin_root selected_distributions
     local -a package_roots
-    stage="${INSTALL_ROOT}/.site.new.$$"
-    source_stage="$(mktemp -d)"
-    source_root="${source_stage}/scidiscovery"
     if [[ ! -d "$INSTALL_ROOT" ]]; then
         install -d -m 0755 "$INSTALL_ROOT"
     fi
-    rm -rf "$stage"
+    PACKAGE_STAGE="$(mktemp -d "${INSTALL_ROOT}/.site.new.XXXXXX")"
+    stage="$PACKAGE_STAGE"
+    SOURCE_STAGE="$(mktemp -d)"
+    source_stage="$SOURCE_STAGE"
+    source_root="${source_stage}/scidiscovery"
     install -d "$source_root/src"
     cp -a "$SOURCE_ROOT/pyproject.toml" "$SOURCE_ROOT/README.md" \
         "$SOURCE_ROOT/deploy" "$SOURCE_ROOT/skills" \
@@ -196,6 +188,7 @@ install_packages() {
         --progress-bar off --upgrade \
         --target "$stage" "${package_roots[@]}"
     rm -rf "$source_stage"
+    SOURCE_STAGE=""
     selected_distributions="$(IFS=,; printf '%s' "${SELECTED_PLUGIN_DISTRIBUTIONS[*]}")"
     validate_distribution_cohort "$stage"
     probe_thin_package "$stage"
@@ -205,10 +198,8 @@ install_packages() {
     PYTHONNOUSERSITE=1 PYTHONPATH="$stage" "$PYTHON" -m \
         scidiscovery.runtime_identity verify \
         --manifest "$stage/runtime-identity.json"
-    PACKAGE_STAGE="$stage"
-    SKILL_STAGE="${INSTALL_ROOT}/.skills.new.$$"
-    [[ ! -e "$SKILL_STAGE" && ! -L "$SKILL_STAGE" ]] || die "skill stage already exists"
-    cp -a "$SOURCE_ROOT/skills" "$SKILL_STAGE"
+    SKILL_STAGE="$(mktemp -d "${INSTALL_ROOT}/.skills.new.XXXXXX")"
+    cp -a "$SOURCE_ROOT/skills/." "$SKILL_STAGE/"
     find "$SKILL_STAGE" -type d -name __pycache__ -prune -exec rm -rf {} +
     find "$SKILL_STAGE" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
     [[ -z "$(find "$SKILL_STAGE" ! -type d ! -type f -print -quit)" ]] || die "skill assets must be ordinary files and directories"
@@ -260,14 +251,23 @@ activate_packages() {
     [[ -n "$PACKAGE_STAGE" && -d "$PACKAGE_STAGE" ]] || die "validated package stage is unavailable"
     validate_thin_targets
     [[ -n "$SKILL_STAGE" && -d "$SKILL_STAGE" ]] || die "validated skill stage is unavailable"
+    if [[ "$INSTALL_MODE" == reinstall ]]; then
+        # Same-parent renames preserve even read-only directory roots unchanged.
+        SITE_ROLLBACK="$(mktemp -d "${INSTALL_ROOT}/.site.old.XXXXXX")"
+        SKILL_ROLLBACK="$(mktemp -d "${INSTALL_ROOT}/.skills.old.XXXXXX")"
+        mv -T -- "$SITE_ROOT" "$SITE_ROLLBACK"
+        mv -T -- "$SKILL_ROOT" "$SKILL_ROLLBACK"
+        rm -- "$CLI_ROOT/scid-research" "$CLI_ROOT/scid-experiment"
+    fi
     mv -T -n -- "$SKILL_STAGE" "$SKILL_ROOT"
     [[ ! -e "$SKILL_STAGE" ]] || die "skill source appeared during publication; preserve it: ${SKILL_ROOT}"
+    REINSTALL_SKILLS_PUBLISHED=1
     SKILL_STAGE=""
     mv -T -n -- "$PACKAGE_STAGE" "$SITE_ROOT"
     [[ ! -e "$PACKAGE_STAGE" ]] || die "thin prefix appeared during publication; preserve it: ${SITE_ROOT}"
+    REINSTALL_SITE_PUBLISHED=1
     PACKAGE_STAGE=""
-    chmod -R a-w "$SITE_ROOT"
-    find "$SITE_ROOT" -type d -exec chmod a+rx {} +
+    chmod -R a+rX,a-w -- "$SITE_ROOT"
     publish_thin_cli scid-research scidiscovery.research_loop.cli
     publish_thin_cli scid-experiment scidiscovery.research_loop.experiments
 }
@@ -280,9 +280,35 @@ begin_install_transaction() {
     "$PYTHON" "${SOURCE_ROOT}/deploy/install_transaction.py" begin --root "$TRANSACTION_ROOT" \
         --target "scid-research=${CLI_ROOT}/scid-research" \
         --target "scid-experiment=${CLI_ROOT}/scid-experiment"
+    arm_install_rollback
+}
+
+arm_install_rollback() {
     ROLLBACK_ARMED=1
     trap 'rollback_install $?' ERR
     trap 'rollback_install 130' INT TERM
+}
+
+remove_install_tree() {
+    local path="$1"
+    [[ ! -e "$path" && ! -L "$path" ]] && return 0
+    [[ -d "$path" && ! -L "$path" ]] || return 1
+    chmod -R u+rwX -- "$path" || return
+    rm -rf -- "$path"
+}
+
+restore_install_tree() {
+    local holder="$1" target="$2" published="$3" stage="$4"
+    [[ -n "$holder" ]] || return 0
+    if [[ "$published" -eq 1 || ( -n "$stage" && ! -e "$stage" && ! -L "$stage" ) ]]; then
+        remove_install_tree "$target" || return
+    fi
+    if [[ ! -e "$target" && ! -L "$target" ]]; then
+        mv -T -- "$holder" "$target"
+    else
+        # A failed old-tree move leaves only the reserved empty sibling.
+        rmdir -- "$holder"
+    fi
 }
 
 rollback_install() {
@@ -291,6 +317,8 @@ rollback_install() {
     set +e
     ROLLBACK_ARMED=0
     local name module safe=1
+    restore_install_tree "$SITE_ROLLBACK" "$SITE_ROOT" "$REINSTALL_SITE_PUBLISHED" "$PACKAGE_STAGE" || printf 'Package rollback needs inspection: %s\n' "$SITE_ROLLBACK" >&2
+    restore_install_tree "$SKILL_ROLLBACK" "$SKILL_ROOT" "$REINSTALL_SKILLS_PUBLISHED" "$SKILL_STAGE" || printf 'Skill rollback needs inspection: %s\n' "$SKILL_ROLLBACK" >&2
     for name in scid-research scid-experiment; do
         module=scidiscovery.research_loop.cli
         [[ "$name" != scid-experiment ]] || module=scidiscovery.research_loop.experiments
@@ -305,26 +333,38 @@ rollback_install() {
             printf 'Thin rollback incomplete: an unexpected command owner was preserved; inspect transaction %s.\n' "$TRANSACTION_ROOT" >&2
         fi
     fi
-    [[ -z "$PACKAGE_STAGE" ]] || rm -rf "$PACKAGE_STAGE"
-    [[ -z "$SKILL_STAGE" ]] || rm -rf "$SKILL_STAGE"
+    [[ -z "$PACKAGE_STAGE" ]] || remove_install_tree "$PACKAGE_STAGE"
+    [[ -z "$SKILL_STAGE" ]] || remove_install_tree "$SKILL_STAGE"
+    [[ -z "$SOURCE_STAGE" ]] || remove_install_tree "$SOURCE_STAGE"
     printf 'Thin rollback retained the package prefix; instance data was untouched.\n' >&2
     exit "$status"
 }
 
 complete_install_transaction() {
-    local destination
+    local destination holder cleanup_pending=0
     destination="${BACKUP_ROOT}/transactions/${TRANSACTION_ROOT##*/.transaction-}"
     "$PYTHON" "${SOURCE_ROOT}/deploy/install_transaction.py" seal \
         --root "$TRANSACTION_ROOT" --destination "$destination"
     ROLLBACK_ARMED=0
     trap - ERR INT TERM
     printf 'Install transaction evidence: %s\n' "$destination"
+    for holder in "$SITE_ROLLBACK" "$SKILL_ROLLBACK"; do
+        [[ -n "$holder" ]] || continue
+        if ! remove_install_tree "$holder"; then
+            printf 'Update committed; old package cleanup is pending at %s.\n' "$holder" >&2
+            cleanup_pending=1
+        fi
+    done
+    [[ "$cleanup_pending" -eq 0 ]] || return 1
+    SITE_ROLLBACK=""
+    SKILL_ROLLBACK=""
 }
 
 install_all() {
     [[ -d "$CLI_ROOT" ]] || install -d -m 0755 "$CLI_ROOT"
     thin_deployment_lock
     validate_thin_targets
+    arm_install_rollback
     validate_base_python
     validate_source
     install_packages
@@ -369,13 +409,14 @@ uninstall_services() {
 }
 
 main() {
-    [[ "$#" -le 1 ]] || die "usage: $0 [--dry-run|install|status|uninstall]"
+    [[ "$#" -le 1 ]] || die "usage: $0 [--dry-run|install|reinstall|status|uninstall]"
     case "${1:---dry-run}" in
         --dry-run) require_sources; validate_base_python; validate_source; preview ;;
         install) require_sources; install_all ;;
+        reinstall) INSTALL_MODE=reinstall; require_sources; install_all ;;
         status) status ;;
         uninstall) uninstall_services ;;
-        *) die "usage: $0 [--dry-run|install|status|uninstall]" ;;
+        *) die "usage: $0 [--dry-run|install|reinstall|status|uninstall]" ;;
     esac
 }
 

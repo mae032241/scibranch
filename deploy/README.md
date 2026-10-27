@@ -1,16 +1,19 @@
 # Application deployment
 
 `install.sh` publishes `scid-research` and `scid-experiment` from local source and
-selected plugins. It requires a fresh prefix and creates no instance, budget or
-service. `SCID_DEPLOY_MODE` accepts only `thin`.
+selected plugins. `install` requires absent targets; `reinstall` updates the same
+existing paths. Neither creates an instance, budget or service.
+`SCID_DEPLOY_MODE` accepts only `thin`.
 The defaults are `$HOME/.local/share/scidiscovery` for `site/` and `skills/`,
 `$HOME/.local/bin` for commands, and `$HOME/.local/state/scidiscovery/install`
 for installation transactions. Installation needs no sudo or root and creates
 the command directory if needed; `--dry-run` writes nothing. Add
 `export PATH="$HOME/.local/bin:$PATH"` to your shell configuration as needed.
 See [installation](../docs/INSTALL.md) for dependencies, settings, prefix protection,
-transaction rollback and removal. `reinstall.sh` calls the same fresh-install
-entry point without sudo and retains the fresh-prefix requirement.
+transaction rollback and removal. `reinstall.sh` defaults to same-path `reinstall`
+without sudo. Stop existing controllers, Workers and UI before updating. New
+packages are staged and checked before replacing managed directories; failed
+publication restores the original directories and matching wrappers.
 
 `install_ssh_tcad_runner.sh` deploys the independent domain execution backend.
 It requires separate administrator configuration and deployment authorization;

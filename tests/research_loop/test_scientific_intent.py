@@ -4,6 +4,7 @@ import copy
 import pytest
 
 from scidiscovery.research_loop.scientific_intent import resolve_intent
+from scidiscovery.research_loop.scientific_intent import resolve_discriminating_work
 
 
 def plan():
@@ -69,6 +70,17 @@ def test_ambiguous_label_and_empty_plan_have_scientific_diagnostics():
 def test_internal_state_damage_is_host_error_not_scientific_clarification():
     state=plan();del state['order']
     with pytest.raises(KeyError):resolve_intent(state,dict(role='H'),dict(next_action='experiment'))
+
+
+def test_optional_work_details_cannot_replace_the_actual_author_identity():
+    state = plan()
+    state['order']['discriminating_work'] = [dict(work_ref='A003-D001', status='deferred', updates=[], executions=[])]
+    result = resolve_discriminating_work(state, dict(role='A', step=5), dict(next_action='continue_w',
+        portfolio_review=dict(work_updates=[dict(work_ref='A003-D001', action='defer',
+            reason='Revisit after the missing input arrives.', source_a='optional scientific detail')])) )
+    assert result[0]['updates'][0]['source_a'] == 5
+    assert result[0]['status'] == 'deferred'
+    assert not state['order']['discriminating_work'][0]['updates']
 
 
 @pytest.mark.parametrize('role,action,choice_key,focus_key',[('H','experiment','search_plan','focus'),('A','continue_w','search_review','next_focus')])

@@ -69,8 +69,9 @@ The defaults are `$HOME/.local/share/scidiscovery` for code and Skills,
 for installation transactions. Installation creates the command directory if needed;
 `--dry-run` writes nothing.
 
-Installation publishes `scid-research` and `scid-experiment` and requires a fresh
-installation prefix. Choose optional plugins explicitly with `SCID_PLUGINS`;
+Installation publishes `scid-research` and `scid-experiment`. Use `install` for
+absent targets and `reinstall` to update the existing paths after stopping their
+controllers, Workers and UI. Choose optional plugins explicitly with `SCID_PLUGINS`;
 see [installation](docs/INSTALL.md) for dependencies, settings and removal.
 
 To start research, copy [research.example.toml](research.example.toml), declare the
@@ -126,18 +127,14 @@ and confirmed cleanup remain required. Observed usage remains accounted without
 raising the shared ceilings; original finite per-call time, permissions and other
 execution limits still apply. After an explicit threshold increase, the next run may resume the saved pending normal route when its full admission is affordable and original effects are known and quiescent. New physical IDs preserve prior final outputs, submissions and all consumption; a later budget denial begins another FINAL cycle. See the [architecture](docs/ARCHITECTURE.md).
 
-Search now requires a compact `portfolio_review` for each substantive A assessment
-of a completed W, with exact competing evidence and tracked discriminating work.
-Final A reports declare every mechanism's coverage and unanswered questions in
-`final_coverage`. Participation counts and token-only round advice remain hints;
-control imposes no route quota or forced switch. See the [architecture](docs/ARCHITECTURE.md).
-
-A candidate choice requires `selection_explanation`: its comparison criteria and
-whether they changed. Revised criteria explicitly acknowledge the prior rule,
-changes, locatable evidence explaining why, and accepted tradeoffs. Missing details
-use the frozen same-session output repair, including FINAL with its original
-completion protection and cumulative usage. Control checks completeness; A owns
-scientific sufficiency. Planning without a candidate choice needs no explanation.
+Scientific responses require only `summary`, `scientific_result`, `limitations`,
+plus H/A routing (`next_action`, `route_reason`) or W's `stage_intent`.
+Other scientific content stays open. Search retains mechanism declarations,
+explicit dispositions and focus, real call opportunities and independent W→A
+investment counts. A explains competing routes, candidate criteria and unanswered
+questions in ordinary scientific prose; no separate portfolio, coverage or criteria
+checklist is required. Exact candidate identity and delivery qualification still
+apply. See the [architecture](docs/ARCHITECTURE.md).
 Standard `codex` CLI preparation defaults to at most two output-only repairs in
 the original native home, preserving configuration, permissions and authentication.
 Explicit policies take precedence; custom launchers and direct controller API

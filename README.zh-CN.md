@@ -51,7 +51,8 @@ scid-research --help
 默认代码与 Skill 前缀为 `$HOME/.local/share/scidiscovery`，命令目录为 `$HOME/.local/bin`，
 安装事务目录为 `$HOME/.local/state/scidiscovery/install`。安装按需创建命令目录；`--dry-run` 不写文件。
 
-安装发布 `scid-research`、`scid-experiment`，要求使用新安装前缀。通过 `SCID_PLUGINS`
+安装发布 `scid-research`、`scid-experiment`；`install` 用于目标尚不存在的首次安装，
+`reinstall` 在停止原控制进程、Worker 和 UI 后更新原路径。通过 `SCID_PLUGINS`
 明确选择可选插件；依赖、路径设置与卸载见[安装指南](docs/INSTALL.zh-CN.md)。
 
 开始研究时，复制 [research.example.toml](research.example.toml)，声明目标、公开输入、后端权限及有限预算，
@@ -84,12 +85,11 @@ H/W/A/E 单节点 token 预算统一为软目标：触线时提示收口，不�
 原单次调用的有限时间、执行权限及其他执行限制仍有效，详见[当前架构](docs/ARCHITECTURE.zh-CN.md)。
 显式提高额度阈值后，下一次 run 可在完整准入足够、原执行及外部效果已知且静止时，从 FINAL 前保存的待执行 normal 路由恢复。新物理编号保留先前最终 A、提交和全部消费；再次预算不足时进入新的 FINAL 周期，各周期只运行一次最终 A。降低阈值或增加后仍不足不会恢复。
 
-启用 search 时，每次普通 A 实质评估已完成 W 都须提交紧凑的 `portfolio_review`，引用竞争证据并处置已声明判别工作。最终 A 用 `final_coverage` 逐机制说明覆盖程度和未答问题。投入计数及按 token 参考轮数仅作提示，不新增路线配额或强制换路；详见[架构](docs/ARCHITECTURE.zh-CN.md)。
-
-A 选择候选时须提供 `selection_explanation`，声明当前比较准则及是否修订。
-修订须明确承接原准则、修改内容、可定位的证据理由与接受的代价。缺项通过冻结的
-同 session 输出修复退回补填，FINAL 仍保留原完成保护与累计用量。
-控制只检查完整性，科学充分性由 A 负责；没有候选选择的规划不需要编造说明。
+科学回答只必填 `summary`、`scientific_result`、`limitations`，H/A 另填路由
+`next_action`、`route_reason`，W 另填 `stage_intent`；其余科学内容开放。
+广度优先保留机制声明、明确处置和焦点、真实调用机会及独立 W→A 投入计数。
+A 在普通科学正文中说明竞争路线、候选准则及未答问题，不再另填组合、覆盖或准则清单。
+精确候选身份和交付资格仍须核对，详见[架构](docs/ARCHITECTURE.zh-CN.md)。
 标准 `codex` 的 CLI prepare 默认最多两次仅输出补填，保留原 native home、配置、权限与认证。
 显式策略优先；自定义 launcher 与直接 controller API 调用仍须显式修复策略。
 该默认值不授权失败任务或科学工作的续跑。

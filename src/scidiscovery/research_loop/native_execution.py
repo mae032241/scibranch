@@ -161,6 +161,17 @@ def _public_root(public, root, work, home, runtime_roots):
         raise UnsupportedExecution('Declared public root overlaps private control or a scientific namespace mount')
 
 
+def _experiment_python(root, job, control_python):
+    """Capture the exact node's alternate Python once, in host-only state."""
+    from . import configuration_updates, python_environment
+    selected=configuration_updates.for_job(root,job).get('execution_config')
+    if selected is None or selected['executor']!='local_execution:command':return None
+    argv=selected['configuration'].get('run_argv')
+    if (not isinstance(argv,list) or not argv or argv[0]==control_python
+            or not python_environment.is_python_interpreter(argv[0])):return None
+    return dict(run_argv=list(argv),runtime_roots=python_environment.runtime_roots(argv[0]))
+
+
 def prepare(root, step, record, work, home, args, *, standard, resume_position=None, native_options=None):
     """Freeze one host-only attempt; unsupported launchers still support reads."""
     from . import contracts as c, execution, experiments as e
@@ -200,9 +211,16 @@ def prepare(root, step, record, work, home, args, *, standard, resume_position=N
         if bwrap is None:raise e.UnsupportedExecution('The native scientific namespace wrapper is unavailable')
         value.update(policy=policy,permission_sources=originals,native=dict(path=str(helper)),bwrap=dict(path=str(Path(bwrap).resolve())),
             python=str(Path(sys.executable).absolute()),runtime_roots=list(dict.fromkeys((sys.base_prefix,sys.prefix))))
+        from scidiscovery.plugin_configuration import PluginConfigurationError
+        try:
+            experiment_python=_experiment_python(root,job,value['python'])
+        except PluginConfigurationError:
+            raise e.UnsupportedExecution('The selected experiment Python runtime could not be captured for this native attempt') from None
+        if experiment_python is not None:value['experiment_python']=experiment_python
         _public_root(public,root,work,home,[Path(path) for path in
             ('/usr','/bin','/lib','/lib64','/etc/resolv.conf','/etc/hosts','/etc/ssl/certs',
-             *value['runtime_roots'],value['native']['path'],value['python'])])
+             *value['runtime_roots'],*(experiment_python or {}).get('runtime_roots',[]),
+             value['native']['path'],value['python'])])
         backend=record/'scientific-native-home';backend.mkdir(mode=0o700)
         tmpdir=os.environ.get('TMPDIR')
         from . import shared_input_views
@@ -349,11 +367,21 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
     runtime_roots=[Path(path) for path in ('/usr','/bin','/lib','/lib64')]
     for path in ('/usr','/bin','/lib','/lib64','/etc/resolv.conf','/etc/hosts','/etc/ssl/certs'):
         if Path(path).exists():wrapped.extend(['--ro-bind',path,path])
-    if command[0]==value['python']:
-        for path in value['runtime_roots']:
+    python_roots=[]
+    experiment_python=value.get('experiment_python')
+    if experiment_python is not None:
+        argv=experiment_python['run_argv']
+        if config.get('run_argv')!=argv or command[:len(argv)]!=argv:
+            raise e.IntegrityError('Scientific Python command differs from its frozen native attempt')
+        python_roots=experiment_python['runtime_roots']
+    elif command[0]==value['python']:
+        python_roots=value['runtime_roots']
+    if python_roots:
+        for path in python_roots:
             if not Path(path).is_relative_to('/usr'):
                 if (Path(path) in (Path('/'),Path.home()) or Path(value['home']).is_relative_to(path)
-                        or directory.is_relative_to(path)):
+                        or directory.is_relative_to(path) or Path(path).is_relative_to(root)
+                        or root.is_relative_to(path)):
                     raise e.UnsupportedExecution('Python runtime overlaps private native control')
                 wrapped.extend(['--ro-bind',path,path])
                 runtime_roots.append(Path(path))

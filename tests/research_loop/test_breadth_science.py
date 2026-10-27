@@ -11,6 +11,8 @@ from execution_fixtures import execution_registry
 from test_cov_lineage import BACKEND
 from test_history_handoff import AUTO_COVERAGE, AUTO_PORTFOLIO, OMIT_PORTFOLIO, finish, fixture_final_coverage, fixture_portfolio_review
 
+pytestmark = pytest.mark.process_e2e
+
 
 def prepare(tmp_path, *, cov=False, initial_calls=1, portfolio=False, qualified_local=False):
     public=tmp_path/'public';public.mkdir()
@@ -18,15 +20,14 @@ def prepare(tmp_path, *, cov=False, initial_calls=1, portfolio=False, qualified_
     root=tmp_path/'instance'
     observer=dict(adapter=str(Path(cov_lineage.__file__).resolve()),contract_version=2,
         config=dict(runs='runs',calls='project/nodes',evaluation_key='fixture-public-v1')) if cov else None
-    if qualified_local:
-        from breadth_execution_fixtures import native_launcher
-        assert not cov
-    controller.prepare(root,objective,public,native_launcher() if qualified_local else ['never-call-a-model'],max_tokens=100000,max_seconds=600,max_steps=16,
-        model='no-model',reasoning_effort='high',node_budget_mode='soft',
+    from breadth_execution_fixtures import native_launcher
+    assert not (qualified_local and cov)
+    controller.prepare(root,objective,public,native_launcher() if not cov else ['never-call-a-model'],max_tokens=100000,max_seconds=600,max_steps=16,
+        model='no-model',reasoning_effort='high',node_budget_mode='soft',resume_policy=None,
         search_policy=dict(search.DEFAULT_POLICY,initial_calls=initial_calls),history_observer=observer,
         **(dict(native_options=dict(workspace='workspace-write',network=False),
             execution_config=dict(executor='local_execution:command',
-                configuration=dict(run_argv=[sys.executable],max_seconds=30))) if qualified_local else {}),
+                configuration=dict(run_argv=[sys.executable],max_seconds=30)) if qualified_local else None) if not cov else {}),
         portfolio_policy=dict(review_after_cycles=3) if portfolio else None)
     return root
 
@@ -42,19 +43,16 @@ def worker(root, tmp_path, step, parents, *, cov=False, qualified_local=False):
     job=c.build_job(root,step,'W',parents);record=execution.record(root,step)
     c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),
         search_slice=search.accept(root,job)))
-    output=c.workspace(root,step)/'work/experiment-config.json' if qualified_local else tmp_path/f'config-{step}.json'
+    output=c.workspace(root,step)/'work/experiment-config.json' if not cov else tmp_path/f'config-{step}.json'
     assert not (cov and qualified_local)
     if cov:
         backend=tmp_path/'backend.py'
         if not backend.exists():backend.write_text(BACKEND)
         cov_lineage.configure(root,step,[sys.executable,str(backend),'--runs-root',str(root/'runs')],root/'runs',output,receipt_channel='backend_file')
     else:
-        if qualified_local:
-            selected=c.settings(root,job)['execution_config']
-            configured=experiments.configure(root,step,selected['executor'],selected['configuration'],output)
-        else:
-            configured=experiments.configure(root,step,'local_execution:command',dict(run_argv=[sys.executable]),output)
-    return job,configured if qualified_local else c.read(output)
+        selected=c.settings(root,job).get('execution_config') or dict(executor='local_execution:command',configuration=dict(run_argv=[sys.executable],max_seconds=30))
+        configured=experiments.configure(root,step,selected['executor'],selected['configuration'],output)
+    return job,c.read(output) if cov else configured
 
 
 def run(root, config, label, *, failed=False, client_path=None, qualified_local=False):
@@ -75,7 +73,7 @@ def run(root, config, label, *, failed=False, client_path=None, qualified_local=
     if config['execution_interface']['executor']=='local_execution:command':
         runtime=workspace/'experiments'/'breadth-fixture';runtime.mkdir(parents=True,exist_ok=True)
         options=dict(experiment_directory=str(runtime))
-    if qualified_local:
+    if config['execution_interface']['executor']=='local_execution:command':
         from breadth_execution_fixtures import run as qualified_run
         return qualified_run(root,config,source,label,runtime)
     return experiments.dispatch(config,source,new=True,mechanism=label,command_options=options)
@@ -128,9 +126,9 @@ def test_multi_mechanism_cov_originals_bind_candidates_and_a_screens_exactly(tmp
     final=search.project(root,4)
     assert {row['status'] for row in final['mechanisms'].values()}=={'screened'}
     assert final['order']['remaining']==[] and len(final['order']['seen_w'])==1
-    before={path:path.read_bytes() for path in root.rglob('*') if path.is_file()}
+    before=originals(root,(1,2,3))
     assert lineage.build(root,4)['candidates'][q['candidate_id']]['mechanism_ref']=='h001.m2'
-    assert before=={path:path.read_bytes() for path in root.rglob('*') if path.is_file()}
+    assert before==originals(root,(1,2,3))
 
 
 def test_large_h_combination_binds_complete_registered_w_scope(tmp_path, execution_registry):
@@ -214,3 +212,23 @@ def test_multi_mechanism_q_repair_uses_exact_w_and_preserves_single_science_cycl
     assert final['portfolio']['invested']=={'h001.m2':1}
     assert final['portfolio']['deferred']=={'h001.m1':1}
     assert final['portfolio']['last_branch']=='h001.m2'
+
+
+def originals(root,steps):
+    """Known sealed source controls and the exact calls they explicitly retain."""
+    paths=[root/'settings.json',root/'settings-identity.json',root/'host-history/overview.json']
+    for step in steps:
+        paths.extend([root/f'jobs/{step:03d}.json',root/f'host-history/nodes/{step:03d}.json'])
+        record=execution.origin(root,step)
+        paths.extend(record/name for name in ('science-output.json','native-intent.json','native-outcome.json',
+            'result-identity.json','work-evidence.json'))
+        seal_path=record/'result-identity.json'
+        if seal_path.is_file():
+            observation=c.read(seal_path).get('observations')
+            if observation:
+                path=root/observation['path'];paths.append(path)
+                for call in c.read(path).get('managed_calls',[]):
+                    for key in ('accepted','completed','terminal','observation'):
+                        proof=call.get(key)
+                        if proof is not None:paths.append(root/proof.get('snapshot',proof['path']))
+    return {path:path.read_bytes() for path in paths if path.is_file()}

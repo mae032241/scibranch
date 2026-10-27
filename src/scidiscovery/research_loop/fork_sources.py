@@ -453,7 +453,11 @@ class _Closure:
                 follow(proof)
         for proof in value.get('control_cut', {}).get('correction_events', []):
             follow(proof)
-        for proof in value.get('history', {}).get('execution_recoveries', []):
+        recoveries=value.get('history',{}).get('execution_recoveries',[])
+        if (type(value.get('step')) is int and path==f'jobs/{value["step"]:03d}.json'
+                and value.get('role') in {'H','W','A','E'}):
+            recoveries=o.recovery_refs(o.at_step(source,value['step']),value)
+        for proof in recoveries:
             follow(proof)
         for row in value.get('compiled_implementations', []):
             follow(row['compiler']); follow(row.get('client_binding'))

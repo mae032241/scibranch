@@ -27,6 +27,9 @@ def proof(record):
 
 
 def _skill_intent(root, step, intent):
+    if ((intent.get('automatic_recovery') or {}).get('format_fallback') is not None
+            and intent.get('continuation_kind') != 'automatic_recovery'):
+        raise ValueError('Native format fallback requires a validated recovery intent')
     if 'skill_binding' not in intent and c.settings(Path(root)).get('skills') is None:
         return
     settings = configuration_updates.for_step(root, step)
@@ -141,9 +144,11 @@ def records(root, step):
         intent = c.read(c.regular(path / 'native-intent.json'))
         _skill_intent(root, step, intent)
         output_repair=intent.get('continuation_kind')=='repair' and isinstance(intent.get('output_repair'),dict) and 'work_repair' not in intent
-        if (original_intent.get('budget_slice') or {}).get('final_return') is not None and intent.get('continuation_kind') not in {'startup_successor','reentry'} and not output_repair:
+        format_retry=(intent.get('continuation_kind')=='automatic_recovery'
+            and (intent.get('automatic_recovery') or {}).get('format_fallback') is True)
+        if (original_intent.get('budget_slice') or {}).get('final_return') is not None and intent.get('continuation_kind') not in {'startup_successor','reentry'} and not (output_repair or format_retry):
             raise ValueError('Final A return cannot acquire another native attempt')
-        if output_repair and (original_intent.get('budget_slice') or {}).get('final_return') is not None and (intent.get('budget_slice') or {}).get('final_return') != original_intent['budget_slice']['final_return']:
+        if (output_repair or format_retry) and (original_intent.get('budget_slice') or {}).get('final_return') is not None and (intent.get('budget_slice') or {}).get('final_return') != original_intent['budget_slice']['final_return']:
             raise ValueError('Final A output repair must retain its original completion authorization')
         if (intent.get('budget_slice') or {}).get('final_return') is not None:
             budget.final_a_return(root, job, intent)
@@ -244,6 +249,15 @@ def home(root, step, attempt=0):
              or not selected.name[8:].isdigit())):
         raise ValueError('Native home differs from its exact stage namespace')
     return selected
+
+
+def schema_transport(root, step, attempt=0):
+    """One accepted negotiation stays with this exact scientific task lineage."""
+    chain=records(root,step)
+    if type(attempt) is not int or not 0 <= attempt < len(chain):
+        raise ValueError('Unknown exact native schema transport attempt')
+    return 'prompt' if any((c.read(c.regular(path/'native-intent.json')).get('automatic_recovery') or {}).get('format_fallback') is True
+        for path in chain[:attempt+1]) else None
 
 
 def _terminal(root, step, chain, outcome):

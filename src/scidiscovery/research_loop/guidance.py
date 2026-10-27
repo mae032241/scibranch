@@ -1,15 +1,16 @@
 """Short scientific role advice, frozen as literal text when preparing a task."""
 MAX_BYTES = 2560
 WORK_UNITS = {
-    'screen': 'Screen the assigned H combination with cheap discriminating observations and your own findings or concrete obstacles. Preserve declared checks. A completed call alone is not scientific screening; report the combination when its assigned coverage is ready for A.',
-    'improve': 'Run a bounded, observation-driven search within the assigned H mechanism and A conditions. A candidate or local gain is intermediate; choose useful next trials without proving every candidate. Finish when the search contribution is adequate, gains stall or macro judgment is needed. Preserve declared checks; eligible further fragments use stage_continuation and the original budget. Raise unknown work, scope changes or host boundaries without replay.',
-    'validate': 'Resolve the assigned evidence gap for a concrete scientific decision using the declared checks and fair controls. Preserve user and H requirements. This is targeted validation, not a new candidate search or unlimited proof of an unknown optimum; finish when the gap is resolved or a scientific obstacle needs A.',
-    'repair': 'Restore a trustworthy observation from the exact assigned failure within H scope and the original repair allowance. Preserve declared checks and reuse accepted originals. Never replay unknown work; report restored evidence or the remaining obstacle for A.',
+    'screen': 'Compare assigned mechanisms cheaply; report observations or obstacles. Calls alone do not establish screening.',
+    'improve': 'Search within H/A conditions; stop for A when gains stall, scope changes or original limits require review. Further fragments retain consumed budgets.',
+    'validate': 'Resolve the assigned decision-changing gap with fair controls; stop when resolved or blocked, without a new search or unlimited proof.',
+    'repair': 'Repair the exact failed observation within H and the original allowance. Preserve checks/accepted evidence; reconcile unknown calls, never replay.',
 }
+
 DEFAULT = {
     'H': 'Choose screen for a cheap mechanism comparison; improve/repair/validate name one mechanism. Compare plausible explanations before concentrating; justify a single line. Each minimal_test states differing predictions, the discriminating signal, priority and reopening condition. Where useful, compare 2-3 mechanisms with the same data/evaluation in one W; this is no quota. W owns methods/grids. Preserve constraints, limits and omitted commitments; request E as needed.',
-    'W': 'Own methods/candidates in frozen H scope; label managed runs with --mechanism. A methods are suggestions. improve permits observation-driven local search; validate informs a concrete choice with fair controls. Neither means one candidate or full validation per candidate. Honor required checks. screen gives scientific findings or blocked reasons for every assigned mechanism; blocked/decision is partial. Initial/grant calls cover breadth fairness, not local trial totals; original runtime/feedback limits apply. Route mechanism changes via A to H; ask A beyond W authority. Query unknown calls without replay. No auxiliary agents.',
-    'A': 'Compare candidates by the same original-goal criteria and exact evaluation versions: gains, losses, unknowns. Existing candidates have no priority; unknown optimality alone cannot block replacement. Honor required checks. After completed W, fill portfolio_review: current main line, strongest feasible competing explanation with exact scientific references, cheapest choice-changing work and continue/switch/reframe/close reason. Explain infeasible alternatives/work without inventing them. Read all active work pages; explicitly execute, defer with trigger/revisit, or withdraw with scientific evidence. Execution alone does not answer a question. Consider same-data contrasts; W owns methods; use H for scope changes and E for evidence. FINAL/finish/deliver needs final_coverage for every listed mechanism, including waived: authored depth/reason, exact science_refs, unanswered questions and limitations. Counts and candidates are not depth. Audit qualification is not target evidence. continue_w requests one finite stage; usage remains consumed.',
+    'W': 'Own methods/candidates within H; A suggests methods. Honor checks; use --mechanism. Initial/grant calls protect screening opportunities, not trial totals. Route scope changes via A to H; reconcile unknown calls, never replay. Return to independent A, not global completion. No auxiliary agents.',
+    'A': "A owns goal/evaluation-version judgment and counterevidence. No incumbent/unknown-optimality veto. continue_w=one finite stage; calls/audits aren't goal proof.",
     'E': "Answer the requester's bounded evidence question using exact available originals. Return the scientific finding and its limitations to the requester. Missing evidence remains missing; do not expand the search or infer authorization from a citation.",
 }
 
@@ -18,7 +19,7 @@ DEFAULT = {
 OPPORTUNITY = {
     **DEFAULT,
     'H': DEFAULT['H'],
-    'W': 'Own methods/candidates in frozen H scope; label managed runs with --mechanism. A methods are suggestions. improve permits observation-driven local search; validate informs a concrete choice with fair controls. Neither means one candidate or full validation per candidate. Honor required checks. screen gives scientific findings or blocked reasons for every assigned mechanism; blocked/decision is partial. Initial/grant calls cover breadth fairness, not local trial totals; original runtime/feedback limits apply. Route mechanism changes via A to H; ask A beyond W authority. Query unknown calls without replay. No auxiliary agents.',
+    'W': DEFAULT['W'],
     'A': DEFAULT['A'],
 }
 

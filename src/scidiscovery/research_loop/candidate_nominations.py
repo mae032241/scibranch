@@ -1,6 +1,6 @@
 """Authored W comparison previews over the complete retained candidate pool.
 
-Only identity, declaration coverage and counts are checked here. Mechanism
+Recognizable preview entries resolve existing candidate identities. Mechanism
 membership, suitability and reasons remain scientific judgments for W and A.
 """
 from __future__ import annotations
@@ -8,13 +8,9 @@ from __future__ import annotations
 import copy
 
 from . import contracts as c
-from .output_repair import OutputRepairRequired
 
 
-SCOPE_GUIDANCE = (
-    "Use only this job's candidate_nomination_mechanisms: cover each unwaived entry with one representative "
-    "or explained gap, including deferred and screened. Screen covers its full list; improve/repair/validate "
-    "keep other mechanisms' prior declarations and gaps.")
+SCOPE_GUIDANCE = 'Optional candidate previews do not replace the complete retained candidate pool.'
 
 
 def configuration(extra_slots):
@@ -24,22 +20,27 @@ def configuration(extra_slots):
 
 
 def schema():
-    text=dict(type='string',pattern=r'\S')
-    original=dict(type='object',properties=dict(call_id=text,artifact=text),
-        required=['call_id','artifact'],additionalProperties=False)
-    candidate=dict(anyOf=[text,original])
-    def rows(properties):
-        return dict(type='array',items=dict(type='object',properties=properties,
-            required=list(properties),additionalProperties=False))
-    fields=dict(representatives=rows(dict(mechanism_ref=text,candidate=candidate,reason=text)),
-        extras=rows(dict(candidate=candidate,reason=text)),gaps=rows(dict(mechanism_ref=text,reason=text)))
-    return dict(type=['object','null'],properties=fields,required=list(fields),additionalProperties=False,
-        description='W scientific comparison preview, separate from the complete result.candidates retention pool. '
-        'Each unwaived mechanism in the frozen candidate_nomination_mechanisms needs one representative or an explicit gap. Local tasks do not reassess other mechanisms; their prior declarations and gaps remain visible to A. '
-        'Use a listed historical candidate reference, or {call_id,artifact} for an exact candidate declared in your current managed call. '
-        'Explain retention and mechanism coverage; repeated use of one model across mechanisms needs a scientific reason for each. '
-        'Extras are distinct alternatives within the frozen extra_slots allowance. Never invent a model to fill a gap. '
-        'A can read and choose any registered pool candidate without a new experiment or changing this declaration.')
+    return dict(type=['object','null'],description='Optional scientific candidate preview; the complete retained candidate pool remains selectable.')
+
+
+def _preview(declaration):
+    """Read recognizable preview entries without imposing a scientific contract."""
+    if not isinstance(declaration,dict):return None
+    result={key:[] for key in ('representatives','extras','gaps')}
+    for kind in result:
+        rows=declaration.get(kind,[])
+        if not isinstance(rows,list):continue
+        for row in rows:
+            if not isinstance(row,dict):continue
+            if kind!='extras' and not isinstance(row.get('mechanism_ref'),str):continue
+            candidate=row.get('candidate')
+            if kind!='gaps' and not (isinstance(candidate,str) or isinstance(candidate,dict)
+                    and all(isinstance(candidate.get(key),str) for key in ('call_id','artifact'))):continue
+            item=dict(reason=row.get('reason') if isinstance(row.get('reason'),str) else '')
+            if kind!='extras':item['mechanism_ref']=row['mechanism_ref']
+            if kind!='gaps':item['candidate']=copy.deepcopy(candidate)
+            result[kind].append(item)
+    return result
 
 
 def applicable(job):
@@ -48,16 +49,16 @@ def applicable(job):
 
 def resolve(root, job, declaration, *, source=None):
     """Resolve only the declared candidate slots, preserving unresolvable advice."""
-    import jsonschema
-    if not isinstance(declaration,dict) or not jsonschema.Draft202012Validator(schema()).is_valid(declaration):return declaration
+    value=_preview(declaration)
+    if value is None:return None
     from . import candidate_refs, generic_results, history, originals
-    value=copy.deepcopy(declaration);current=None;retained=None
+    value=copy.deepcopy(value);current=None;retained=None
     for row in [*value.get('representatives',[]),*value.get('extras',[])]:
         if not isinstance(row,dict):continue
         candidate=row.get('candidate')
         if isinstance(candidate,str):
             try:row['candidate']=candidate_refs.resolve_reference(root,job,candidate,source=source)
-            except ValueError:pass
+            except ValueError:row['candidate']=None
         elif isinstance(candidate,dict) and (root is not None or source is not None and source.inherited):
             if current is None:
                 if source is not None and source.inherited:
@@ -80,52 +81,25 @@ def resolve(root, job, declaration, *, source=None):
 
 
 def require(root, job, payload):
-    """Repair missing declarations, never require a scientifically successful model."""
-    if not applicable(job):return
-    from . import generic_results, history
-    value=c.scientific_field(job,payload,'candidate_nominations')
-    def repair(message):
-        raise OutputRepairRequired('candidate_nominations_incomplete','Correct candidate_nominations: '+message+
-            '. '+SCOPE_GUIDANCE+' Reuse retained originals; do not rerun or resubmit experiments.')
-    if value is None:repair('declare representatives, extras and explicit gaps')
-    required={row['mechanism_ref'] for row in job['candidate_nomination_mechanisms'] if row['status']!='waived'}
-    known=set(job['history']['candidate_ids'])
-    known.update(row['id'] for row in generic_results.candidates(history.managed_calls(root,job)))
-    seen=set();representatives=set()
-    for row in value['representatives']:
-        ref=row['mechanism_ref'];candidate=row['candidate']
-        if ref not in required or ref in seen:repair('use each assigned unwaived mechanism exactly once as representative or gap')
-        if not isinstance(candidate,str) or candidate not in known:repair('locate each representative in the exact retained candidate pool')
-        seen.add(ref);representatives.add(candidate)
-    for row in value['gaps']:
-        ref=row['mechanism_ref']
-        if ref not in required or ref in seen:repair('use each assigned unwaived mechanism exactly once as representative or gap')
-        seen.add(ref)
-    if seen!=required:repair('cover every assigned unwaived mechanism with a representative or an explained gap')
-    extras=[]
-    for row in value['extras']:
-        candidate=row['candidate']
-        if not isinstance(candidate,str) or candidate not in known:repair('locate each extra in the exact retained candidate pool')
-        if candidate in representatives or candidate in extras:repair('extras must be distinct from representatives and other extras')
-        extras.append(candidate)
-    if len(extras)>job['candidate_nomination_policy']['extra_slots']:
-        repair('keep extras within the frozen extra_slots allowance; the complete pool remains available to A')
+    """Candidate previews are optional advice, never an output-repair gate."""
+    return None
 
 
 def project(records, state):
     """Latest sealed declaration per mechanism, retaining each original author."""
-    workers=[row for row in records if row['role']=='W'
-        and isinstance(row.get('candidate_nominations'),dict)]
+    workers=[dict(row,candidate_nominations=value) for row in records if row['role']=='W'
+        and (value:=_preview(row.get('candidate_nominations'))) is not None]
     latest=workers[-1] if workers else None
     mechanisms=state['mechanisms'] if state else {}
     declared={};sources={}
     for worker in workers:
         for kind in ('representatives','gaps'):
             for row in worker['candidate_nominations'][kind]:
+                if kind=='representatives' and not isinstance(row.get('candidate'),str):continue
                 ref=row['mechanism_ref']
                 declared[ref]=(kind,copy.deepcopy(row))
                 sources[ref]=worker['step']
-    value=dict(representatives=[],extras=copy.deepcopy(latest['candidate_nominations']['extras']) if latest else [],gaps=[])
+    value=dict(representatives=[],extras=[copy.deepcopy(row) for row in latest['candidate_nominations']['extras'] if isinstance(row.get('candidate'),str)] if latest else [],gaps=[])
     for kind,row in declared.values():value[kind].append(row)
     pending=[ref for ref,item in mechanisms.items() if item['status']!='waived' and ref not in declared]
     waived=[dict(mechanism_ref=ref,reason=item['disposition']['reason'],source_a=item['disposition']['source_a'])
@@ -162,35 +136,31 @@ def preview(value, index):
         scope='Latest W scientific declaration per mechanism, with each original source retained. Other mechanisms keep their prior declarations or explicit pending gaps; no new global judgment is inferred. Read nomination pages for reasons; the complete candidate index remains selectable by A.')
 
 
-def final_coverage_schema():
-    """A owns coverage depth; control checks exact declaration and citations."""
-    text=dict(type='string',pattern=r'\S')
-    ref=dict(type='object',properties=dict(source_step=dict(type='integer',minimum=1),
-        pointer=dict(type='string',pattern=r'^/(?:[^~]|~[01])*$')),required=['source_step','pointer'],additionalProperties=False)
-    fields=dict(mechanism_ref=text,status=dict(type='string',enum=['deep','screened_pending','ruled_out','unexplored']),
-        reason=text,science_refs=dict(type='array',minItems=1,items=ref),
-        unanswered_questions=dict(type='array',items=text))
-    return dict(type=['array','null'],items=dict(type='object',properties=fields,required=list(fields),additionalProperties=False),
-        description='Required when ending with finish/deliver or returning FINAL. Cover every frozen final_coverage_mechanisms entry exactly once, including waived. Author the depth, reasons and exact visible scientific references; explicitly list unanswered questions (empty if none). State input/resource limits in limitations. Candidate existence and calls do not establish depth. Null for nonfinal turns. No new experiment is authorized.')
 
 
 def require_final_coverage(root,job,payload):
+    """Require a brief authored account of every frozen final mechanism."""
     if (job['role']!='A' or job.get('formal_review') or job.get('purpose')=='formal_review'
             or not job.get('final_coverage_mechanisms')):return
-    final=bool(job.get('final_report') or job.get('final_only') or job.get('purpose')=='closeout')
     if payload.get('next_action') in {'wait','audit','formal_review'}:return
+    final=bool(job.get('final_report') or job.get('final_only') or job.get('purpose')=='closeout')
     if not final and payload.get('next_action') not in {'finish','deliver'}:return
-    import jsonschema
+    from .output_repair import OutputRepairRequired
     from . import search
-    def repair(detail):
+    def reject(detail):
         raise OutputRepairRequired('final_coverage_incomplete','Correct final_coverage in this same A output: '+detail+
-            '. Preserve originals and report limitations; do not rerun experiments or start new scientific work.')
+            '. Preserve originals and report limitations; no new scientific work is authorized.')
     value=payload.get('final_coverage')
-    if value is None or not c.json_field_representable('final_coverage',value) or not jsonschema.Draft202012Validator(final_coverage_schema()).is_valid(value):
-        repair('declare authored coverage, reason, scientific references and explicit unanswered_questions for every frozen mechanism')
-    expected={row['mechanism_ref'] for row in job['final_coverage_mechanisms']}
-    names=[row['mechanism_ref'] for row in value]
-    if len(names)!=len(set(names)) or set(names)!=expected:repair('cover exactly the complete frozen mechanism list, including waived, without unknown or duplicate rows')
-    try:search.validate_science_refs(root,job,[ref for row in value for ref in row['science_refs']])
-    except ValueError:repair('science_refs must resolve within exact visible scientific originals')
+    if not isinstance(value,list):reject('give mechanism_ref, status and a nonblank reason for every frozen mechanism')
+    expected={row['mechanism_ref'] for row in job['final_coverage_mechanisms']};seen=set();refs=[]
+    for row in value:
+        if (not isinstance(row,dict) or not isinstance(row.get('mechanism_ref'),str) or row['mechanism_ref'] not in expected
+                or row['mechanism_ref'] in seen or not isinstance(row.get('status'),str)
+                or row['status'] not in {'deep','screened_pending','ruled_out','unexplored'}
+                or not isinstance(row.get('reason'),str) or not row['reason'].strip()):
+            reject('cover each exact mechanism once with its authored status and reason')
+        seen.add(row['mechanism_ref']);refs.extend(search._evidence_refs(row.get('science_refs')))
+    if seen!=expected:reject('cover the complete frozen mechanism list, including waived routes')
+    try:search.validate_science_refs(root,job,refs)
+    except ValueError:reject('provided scientific references must resolve inside exact visible originals')
     return value

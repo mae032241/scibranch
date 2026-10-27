@@ -618,7 +618,12 @@ def build(context):
         frozen_interface=context.frozen_execution_interface)})
 
 
-REGISTRATION=ExecutionInterfaceRegistration('local_execution','1',RuntimePluginFactory(build),
+def configure(configuration, source, *, binding):
+    from .python_environment import check_python_requirements
+    return check_python_requirements(configuration, plugin_id='local_execution')
+
+
+REGISTRATION=ExecutionInterfaceRegistration('local_execution','1',RuntimePluginFactory(build, configure=configure),
     scientific_source=LocalExecution.scientific_source,projection_contract='scidiscovery.local-projections.v1')
 
 

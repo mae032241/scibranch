@@ -59,6 +59,16 @@ mode = "local"
 # Optional [executor.config] accepts the existing executor/configuration contract.
 # Its default is local_execution:command using this same Python environment.
 # Execution resources still need explicit review, authority and exact-call gates.
+# For task-specific Python dependencies, explicitly select the scientific Python:
+# [executor.config]
+# executor = "local_execution:command"
+# [executor.config.configuration]
+# run_argv = ["/absolute/existing/scientific-env/bin/python"]
+# max_seconds = 120
+# python_requirements = [
+#   { requirement = "scikit-learn>=1.4,<2", import_name = "sklearn" },
+# ]
+# config-check/prepare check these in run_argv[0], independently of control Python.
 
 # Optional [delivery] accepts the existing frozen delivery policy. Omitting it
 # grants no external delivery adapter. Scientific artifacts remain in the instance.

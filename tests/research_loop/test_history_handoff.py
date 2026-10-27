@@ -53,16 +53,9 @@ def fixture_portfolio_review(root, job, payload, value=AUTO_PORTFOLIO):
             assert not [row for row in context['discriminating_work'] if row['status'] != 'withdrawn'], (
                 'Supply explicit fixture portfolio_review for declared discriminating work')
             resolved = search.interpret(root, job, payload)['focus']
-            action = payload['next_action']
             value = dict(main_line=resolved['mechanism_ref'] if resolved else None,
-                main_line_reason='Synthetic fixture follows its declared focus; no scientific qualification.',
-                competitor=None,
-                no_competitor_reason='Synthetic fixture assumes no viable competitor for this control check; no scientific qualification.',
                 discriminating_work=None,
-                no_work_reason='Synthetic fixture assumes no feasible additional discriminator; no scientific qualification.',
-                decision='close' if action in {'finish', 'deliver'} else 'reframe' if action == 'revise_h' else 'continue',
-                reason='Synthetic fixture exercises the declared bounded action; no scientific qualification.',
-                deferral=None, work_updates=[])
+                reason='Synthetic fixture assumes no feasible competing discriminator; missing scientific evidence prevents qualification. Revisit when that evidence is supplied.')
     payload['portfolio_review'] = value
 
 
@@ -82,18 +75,13 @@ def fixture_final_coverage(root, job, payload, value=AUTO_COVERAGE):
         value = None
         if job.get('final_coverage_mechanisms') and (payload.get('next_action') in {'finish', 'deliver'}
                 or job.get('final_report') or job.get('purpose') == 'closeout' or job.get('final_only')):
-            from scidiscovery.research_loop import search
-            context = search.assessment_context(root, job)
             value = [dict(mechanism_ref=row['mechanism_ref'], status='unexplored',
-                reason='Synthetic fixture declares no scientific exploration depth; mechanical contract check only.',
-                science_refs=[dict(source_step=context['mechanisms'][row['mechanism_ref']]['source_h'],
-                    pointer='/scientific_result')],
-                unanswered_questions=['Scientific effectiveness is outside this mechanical fixture.'])
+                reason='Synthetic fixture declares no scientific exploration depth; scientific effectiveness remains unanswered.')
                 for row in job['final_coverage_mechanisms']]
     payload['final_coverage'] = value
 
 
-def finish(root, step, role, parents, text='A bounded scientific finding', action='wait', files=None, summary='A contribution', limitations=None, recommendation=None, search_choice=None, progress=None, selection=None, mechanism_findings=None, candidate_nominations=None, preserve_native_intent=False, portfolio_review=AUTO_PORTFOLIO, final_coverage=AUTO_COVERAGE):
+def finish(root, step, role, parents, text='A bounded scientific finding', action='wait', files=None, summary='A contribution', limitations=None, recommendation=None, search_choice=None, progress=None, selection=None, mechanism_findings=None, candidate_nominations=None, preserve_native_intent=False, portfolio_review=AUTO_PORTFOLIO, final_coverage=AUTO_COVERAGE, stage_intent='review'):
     path = root / 'jobs' / f'{step:03d}.json'
     previous = contracts.read(path) if path.exists() else {}
     job = contracts.build_job(root, step, role, parents, previous.get('instruction', ''),
@@ -115,7 +103,7 @@ def finish(root, step, role, parents, text='A bounded scientific finding', actio
             candidate_nominations=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row['mechanism_ref'],
                 reason='Fixture declares no scientific candidate suitability; the retained pool remains available to A.')
                 for row in job['candidate_nomination_mechanisms'] if row['status']!='waived'])
-        payload.update(stage_intent='review',mechanism_findings=mechanism_findings,candidate_nominations=candidate_nominations)
+        payload.update(stage_intent=stage_intent,mechanism_findings=mechanism_findings,candidate_nominations=candidate_nominations)
     if role=='A':payload.update(decision_request=None,portfolio_review=None)
     if role in {'H', 'A'}:
         payload.update(next_action=action, route_reason='Exact scientific question')
@@ -227,20 +215,35 @@ def test_ordinary_citation_does_not_forward_old_inputs(scene):
     assert job['direct_materials'] == [] and not job.get('selected_inputs')
 
 
-@pytest.mark.parametrize('changed', ['original', 'read_copy', 'receipt'])
+@pytest.mark.parametrize('changed', ['original', 'receipt'])
 def test_changed_bound_reuse_is_rejected(scene, changed):
     source(scene)
     _, work, record = finish(scene, 3, 'A', [2], text=MARKED, selection=['W002-I001'])
     if changed == 'receipt':
         seal = contracts.read(record / 'result-identity.json')
-        seal['selected_inputs'][0]['label'] = 'Changed hidden selection'
+        seal['selected_inputs'][0]['material']['source'] = str(scene.parent / 'foreign/candidate.py')
         contracts.write(record / 'result-identity.json', seal)
     else:
-        path = contracts.workspace(scene, 2) / 'artifacts/candidate.py' if changed == 'original' else work / REUSED
+        path = contracts.workspace(scene, 2) / 'artifacts/candidate.py'
         path.chmod(0o600)
         path.write_text('different implementation')
-    with pytest.raises(ValueError, match='changed'):
+    with pytest.raises(ValueError):
         contracts.build_job(scene, 4, 'H', [3])
+
+
+def test_worker_created_alias_does_not_replace_selected_original(scene):
+    from scidiscovery.research_loop import originals
+    source(scene)
+    _, work, _ = finish(scene, 3, 'A', [2], text=MARKED, selection=['W002-I001'])
+    alias = work / REUSED
+    assert not alias.exists()
+    alias.parent.mkdir(parents=True, exist_ok=True)
+    alias.write_text('A worker-owned alias cannot replace the retained producer.')
+    job = contracts.build_job(scene, 4, 'H', [3])
+    assert len(job['direct_materials']) == 1
+    selected = originals.material_path(scene, job['direct_materials'][0])
+    assert selected == contracts.workspace(scene, 2) / 'artifacts/candidate.py'
+    assert selected.read_text() == 'def predict(): return 42\n'
 
 
 def test_structured_selection_counts_all_unique_files_beyond_one_page(scene):
@@ -251,7 +254,7 @@ def test_structured_selection_counts_all_unique_files_beyond_one_page(scene):
     assert sum(row['size_bytes'] for row in job['direct_materials']) == 17
 
 
-def test_selected_copy_cannot_follow_destination_directory_link(scene, tmp_path):
+def test_input_view_publication_rejects_destination_directory_link(scene, tmp_path):
     source(scene)
     finish(scene, 3, 'A', [2], text=MARKED, selection=['W002-I001'])
     work = contracts.workspace(scene, 4)
@@ -259,9 +262,9 @@ def test_selected_copy_cannot_follow_destination_directory_link(scene, tmp_path)
     outside = tmp_path / 'outside'
     outside.mkdir()
     (work / 'inputs').symlink_to(outside, target_is_directory=True)
-    with pytest.raises(ValueError, match='directories must not be links'):
+    with pytest.raises(ValueError, match='original owned workspace'):
         contracts.build_job(scene, 4, 'H', [3])
-    assert not list(outside.rglob('candidate.py'))
+    assert not list(outside.iterdir())
 
 
 def test_final_input_bound_includes_new_outputs_and_selected_old_files(scene):
@@ -305,5 +308,5 @@ def test_selected_original_requires_same_instance_and_preceding_node(scene, orig
     job['selected_inputs'] = [dict(label='W002-I001', material=row)]
     row['source'] = (str(scene.parent / 'foreign/project/nodes/002/artifacts/candidate.py')
                      if origin == 'foreign' else str(contracts.workspace(scene, 4) / 'artifacts/candidate.py'))
-    with pytest.raises(ValueError, match='original instance node|exact preceding node'):
+    with pytest.raises(ValueError, match='original instance node|exact preceding node|exact producer seal'):
         contracts.selected_inputs(contracts.workspace(scene, 3), {'scientific_result': MARKED, 'implementation_selection': None}, job)

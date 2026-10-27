@@ -17,6 +17,9 @@ def schema():
 def _key(job, payload, focus):
     request = c.scientific_field(job,payload,'decision_request')
     mechanism = focus.get('mechanism_ref') if focus else None
+    if request is None and 'decision_request' not in payload:
+        return ('route', payload['next_action'], payload['route_reason'].strip(),
+                mechanism, payload.get('candidate_recommendation'))
     candidate = payload.get('candidate_recommendation') if request['decision'] == 'candidate' else None
     return (payload['next_action'], request['decision'], request['question'].strip(),
             request['change_criterion'].strip(), mechanism, candidate)
@@ -48,7 +51,7 @@ def assess(root, job, payload, *, focus=None):
     if payload['next_action'] not in ACTIONS:
         return []  # Necessary audit, pause and delivery choices are independent.
     request = c.scientific_field(job,payload,'decision_request')
-    if request is None or any(not request[key].strip() for key in ('question', 'change_criterion')):
+    if 'decision_request' in payload and (request is None or any(not request[key].strip() for key in ('question', 'change_criterion'))):
         return [dict(code='a_decision_request_missing', subject=payload['next_action'])]
     key, basis = _key(job, payload, focus), _basis(root, job)
     sources = {}
@@ -65,7 +68,8 @@ def assess(root, job, payload, *, focus=None):
                 or control.get('search_status') == 'unresolved'
                 or control.get('selection_status') == 'unresolved'):
             continue
-        if (prior.get('decision_request') is not None and _completed(original, prior, sources)
+        if (('decision_request' not in prior or c.scientific_field(original,prior,'decision_request') is not None)
+                and _completed(original, prior, sources)
                 and _key(original, prior, control.get('resolved_focus')) == key and basis <= _basis(root, original)):
             return [dict(code='a_decision_request_repeated', subject=payload['next_action'])]
     return []

@@ -139,7 +139,8 @@ def actual_native():
     return actual.resolve()
 
 
-def _default_local_case(tmp_path, monkeypatch, directory, network_enabled, *, exclude_tmpdir=False,lifecycle_exit=False):
+def _default_local_case(tmp_path, monkeypatch, directory, network_enabled, *, exclude_tmpdir=False,lifecycle_exit=False,
+        scientific_python=None):
     actual=actual_native()
     home=tmp_path/'codex-home';home.mkdir()
     # Frozen framework permissions take precedence over a conflicting native home.
@@ -166,7 +167,8 @@ def _default_local_case(tmp_path, monkeypatch, directory, network_enabled, *, ex
     controller.prepare(root,objective,public,[str(fake)],max_tokens=10000,max_seconds=90,max_steps=4,
         model='no-model',reasoning_effort='high',search_policy=None,node_budget_mode='soft',
         execution_config=(dict(executor='local_execution:command',
-            configuration=dict(run_argv=[sys.executable],max_seconds=3)) if lifecycle_exit else None),
+            configuration=dict(run_argv=[str(scientific_python or sys.executable)],max_seconds=3 if lifecycle_exit else 30))
+            if lifecycle_exit or scientific_python is not None else None),
         native_options=dict(network=network_enabled,
             sandbox_workspace_write=dict(exclude_tmpdir_env_var=exclude_tmpdir)))
     assert c.settings(root)['experiment_mode']=='local'
@@ -204,6 +206,9 @@ def _default_local_case(tmp_path, monkeypatch, directory, network_enabled, *, ex
             os.link(slot,target/'input.txt')
         code=work/'code';code.mkdir()
         source=code/'run.py';source.write_text(SLEEPING_SOURCE if lifecycle_exit else SCIENTIFIC_SOURCE)
+        if scientific_python is not None:
+            source.write_text('import scid_alternate_runtime_sentinel\n'
+                'assert scid_alternate_runtime_sentinel.VALUE == "alternate-only"\n'+source.read_text())
         if lifecycle_exit:
             _check_active_backend_shutdown(root,work,target)
             return
@@ -235,6 +240,9 @@ def _default_local_case(tmp_path, monkeypatch, directory, network_enabled, *, ex
         assert not (target/'artifacts/sentinel.txt').exists()
     else:assert (work/'artifacts/sentinel.txt').read_text()=='real generic backend completed'
     snapshot=c.read(record/'native-execution-permissions.json')
+    if scientific_python is not None:
+        assert snapshot['experiment_python']['run_argv']==[str(scientific_python)]
+        assert str(scientific_python.parent.parent) in snapshot['experiment_python']['runtime_roots']
     assert snapshot['policy']['network_access']==network_enabled
     assert snapshot['permission_profile']['configuration']['network']['enabled']==network_enabled
     assert snapshot['permission_profile']['configuration']['extends']==':workspace'
@@ -262,6 +270,19 @@ def test_execute_native_default_local_owns_real_generic_backend(tmp_path,monkeyp
 
 def test_real_backend_excluded_tmpdir_keeps_native_workspace_grant(tmp_path,monkeypatch):
     _default_local_case(tmp_path,monkeypatch,False,False,exclude_tmpdir=True)
+
+
+def test_real_backend_imports_only_alternate_venv_module(tmp_path,monkeypatch):
+    """One lightweight stdlib-only venv, with real sandbox and fake model I/O."""
+    import importlib.util
+    import venv
+    actual_native()  # Missing real sandbox prerequisites remain an explicit skip.
+    assert importlib.util.find_spec('scid_alternate_runtime_sentinel') is None
+    environment=tmp_path/'scientific-env'
+    venv.EnvBuilder(with_pip=False,symlinks=True).create(environment)
+    packages=environment/'lib'/f'python{sys.version_info.major}.{sys.version_info.minor}'/'site-packages'
+    (packages/'scid_alternate_runtime_sentinel.py').write_text('VALUE="alternate-only"\n')
+    _default_local_case(tmp_path,monkeypatch,False,False,scientific_python=environment/'bin/python')
 
 
 def _process_tree(identity):

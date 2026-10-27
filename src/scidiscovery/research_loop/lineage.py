@@ -526,9 +526,11 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                 native=[original[key] for key in ('request','response','protocol')]
                 if original.get('dispatch_intent') is not None:native.append(original['dispatch_intent'])
                 for proof in native:
-                    matches=[item for item in call['originals'] if Path(owner.original_root)/item['path']==Path(proof['path'])
-                             and item==proof and item['size_bytes']==proof['size_bytes']]
-                    if len(matches)!=1:raise ValueError('Retirement native original is unavailable')
+                    matches=[item for item in call['originals']
+                        if history._same_original(Path(owner.original_root),proof,item)
+                        and item.get('origin_identity',owner.origin_identity)==proof.get('origin_identity',owner.origin_identity)]
+                    if len(matches)!=1 or matches[0]['retention']!='archived':raise ValueError('Retirement native original is unavailable')
+                    archive_path(matches[0])
                 experiments.append(dict(step=record['step'],call_id=call['call_id'],execution_status='not_submitted',
                     limitation='Permanent non-submission of the original call only; no scientific verdict, candidate or new execution allowance.'))
                 continue
@@ -553,8 +555,11 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
             if call['call_id'] in record.get('recovered_calls',[]):
                 observed=c.read(archive_path(call['observation']))
                 for proof in observed['proofs']:
-                    matches=[item for item in call['originals'] if Path(owner.original_root)/item['path']==Path(proof['path']) and item==proof]
+                    matches=[item for item in call['originals']
+                        if history._same_original(Path(owner.original_root),proof,item)
+                        and item.get('origin_identity',owner.origin_identity)==proof.get('origin_identity',owner.origin_identity)]
                     if len(matches)!=1 or matches[0]['retention']!='archived':raise ValueError('Recovered native original is unavailable')
+                    archive_path(matches[0])
             metrics=result.get('metrics',[])
             experiments.append(dict(step=record['step'],call_id=call['call_id'],execution_status=call['status'],
                 returncode=details.get('returncode'),wall_seconds=details.get('wall_seconds'),

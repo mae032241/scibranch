@@ -13,6 +13,8 @@ from execution_fixtures import execution_registry
 from test_history_handoff import AUTO_COVERAGE, AUTO_PORTFOLIO, OMIT_PORTFOLIO, finish, fixture_final_coverage, fixture_portfolio_review
 from test_breadth_science import worker as configure_worker, run as run_command, findings
 
+pytestmark = pytest.mark.process_e2e
+
 
 def plan(label='Mechanism', existing_ref=None, action='screen', other=False):
     rows = [dict(label=label, minimal_test='A bounded discriminating measurement', existing_ref=existing_ref)]
@@ -35,8 +37,11 @@ def scene(tmp_path, execution_registry):
     public = tmp_path / 'public';public.mkdir()
     objective = public / 'objective.md';objective.write_text('Resolve mechanisms without assuming proxy optimality.')
     root = tmp_path / 'instance'
-    controller.prepare(root, objective, public, ['fake'], max_tokens=10_000_000,
-        max_seconds=3600, max_steps=24, model='fake', reasoning_effort='high', node_budget_mode='soft')
+    from breadth_execution_fixtures import native_launcher
+    controller.prepare(root, objective, public, native_launcher(), max_tokens=10_000_000,
+        max_seconds=3600, max_steps=24, model='fake', reasoning_effort='high', node_budget_mode='soft',resume_policy=None,
+        native_options=dict(workspace='workspace-write',network=False),
+        execution_config=dict(executor='local_execution:command',configuration=dict(run_argv=[sys.executable],max_seconds=30)))
     return root
 
 
@@ -48,9 +53,9 @@ def worker(root, step, parents, *, observed=None, cov=False, qualified_local=Fal
         assert job['role'] == 'W' and [int(row['path'].split('/')[2]) for row in job['direct_refs']] == parents
         c.write(execution.record(root, step) / 'native-intent.json',
             dict(task_ref=c.record_ref(path), search_slice=search.accept(root, job)))
-        output = root.parent / f'config-{step}.json'
-        experiments.configure(root, step, 'local_execution:command', dict(run_argv=[sys.executable]), output)
-        config = c.read(output)
+        output = c.workspace(root,step)/'work/experiment-config.json'
+        selected=c.settings(root,job)['execution_config']
+        config=experiments.configure(root,step,selected['executor'],selected['configuration'],output)
     else:
         job, config = configure_worker(root, root.parent, step, parents, cov=cov, qualified_local=qualified_local)
     mechanisms = config['breadth']['mechanisms']
@@ -304,7 +309,7 @@ def test_retired_write_schema_is_rejected_without_changing_current_packets(scene
     c.validate(c.workspace(scene, 3))
 
 
-def test_reopened_pending_cannot_be_screened_by_a_claim_without_new_w_observation(scene):
+def test_reopened_pending_can_reuse_same_h_exact_retained_observation(scene):
     start(scene)
     assess(scene, 3, [1, 2], search_choice=review(next_focus=focus()))
     worker(scene, 4, [1, 2, 3])
@@ -312,8 +317,8 @@ def test_reopened_pending_cannot_be_screened_by_a_claim_without_new_w_observatio
     worker(scene, 6, [1, 4, 5], observed=[])
     assert search.project(scene, 7)['mechanisms']['h001.m1']['status'] == 'pending'
     assess(scene, 7, [1, 6], action='finish', search_choice=review())
-    assert control(scene, 7)['search_status'] == 'unresolved'
-    assert search.project(scene, 8)['mechanisms']['h001.m1']['status'] == 'pending'
+    assert control(scene, 7)['search_status'] == 'applied'
+    assert search.project(scene, 8)['mechanisms']['h001.m1']['status'] == 'screened'
 
 
 def test_null_review_stops_w_intent_without_forcing_recommendation(scene):
@@ -339,11 +344,20 @@ def test_exact_requested_repair_chain_is_bounded_and_restart_deduplicated(scene)
     assert search.project(scene, 8)['mechanisms']['h001.m1']['status'] == 'pending'
 
 
-def test_current_dispositions_and_repair_requests_do_not_accept_authored_paths():
-    schema = c.result_schema('A', protocol.CURRENT)
-    review_schema = schema['properties']['search_review']['properties']
-    assert set(review_schema['dispositions']['items']['properties']) == {'mechanism_ref', 'status', 'reason'}
-    assert set(review_schema['next_focus']['properties']) == {'mechanism_ref', 'action'}
+def test_search_consumption_ignores_extensions_and_defaults_optional_keys(monkeypatch):
+    monkeypatch.setattr(c,'scientific_field',lambda job,payload,field:payload.get(field))
+    job=dict(role='A')
+    value=dict(dispositions=[dict(mechanism_ref='h001.m1',status='pending',reason='Reopen',note={'scientific':'detail'})],
+        next_focus=dict(mechanism_ref='h001.m1',action='screen',detail=['unrestricted']))
+    normalized=search._choice(job,dict(search_review=value))
+    assert normalized==dict(dispositions=[dict(mechanism_ref='h001.m1',status='pending',reason='Reopen')],
+        next_focus=dict(mechanism_ref='h001.m1',action='screen'))
+
+
+@pytest.mark.parametrize('value',[{'commitments':[{}]},{'focus':{'action':'unsupported'}},{'commitments':'prose'}])
+def test_malformed_consumed_search_keys_do_not_crash_or_grant_focus(value,monkeypatch):
+    monkeypatch.setattr(c,'scientific_field',lambda job,payload,field:payload.get(field))
+    with pytest.raises(search.UnresolvedSearch):search._choice(dict(role='H'),dict(search_plan=value))
 
 
 def test_same_boot_slice_anchor_paused_time_and_cached_tokens(scene, monkeypatch):
@@ -386,9 +400,12 @@ elif role=='W':
    for row in manifest['candidate_nomination_mechanisms'] if row['status']!='waived'])
    if manifest.get('candidate_nomination_mechanisms') else None)
 elif role=='A':
+ manifest=json.loads(pathlib.Path(os.environ['THIN_HWA_JOB_MANIFEST']).read_text())
  active=bool(job.get('lineage',{}).get('mechanisms',{}).get('count'))
  again=active and step==3
- payload.update(next_action='continue_w' if again else 'finish',route_reason='Ask a distinct followup without claiming completed screening',candidate_recommendation=None,progress_assessment=None,portfolio_review=None,
+ payload.update(next_action='continue_w' if again else 'finish',route_reason='Ask a distinct followup without claiming completed screening',candidate_recommendation=None,progress_assessment=None,
+  portfolio_review=dict(discriminating_work=None,main_line='h001.m1',reason='No target observations establish a viable comparison. Retain the blocked route and revisit when its missing input is supplied.') if active else None,
+  final_coverage=[dict(mechanism_ref=row['mechanism_ref'],status='unexplored',reason='This transport fixture does not measure target performance; the original target question remains unanswered.') for row in manifest.get('final_coverage_mechanisms',[])],
   search_review=dict(dispositions=[dict(mechanism_ref='h001.m1',status='deferred',reason='Blocked fixture is not screened')],next_focus=dict(mechanism_ref='h001.m1',action='improve')) if again else None,
   decision_request=dict(decision='mechanism',question='Can a followup resolve the declared obstacle?',change_criterion='A trustworthy discriminating observation would change the mechanism choice') if again else None)
 (work/'artifacts/observation.txt').write_text('Retained mechanical fixture limitation')

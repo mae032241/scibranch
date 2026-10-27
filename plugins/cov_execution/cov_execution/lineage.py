@@ -90,6 +90,7 @@ def _config(path):
     if 'engineering_repair' in value:keys.add('engineering_repair')
     if 'receipt_channel' in value:keys.add('receipt_channel')
     if 'engineering_check_reserve_seconds' in value:keys.add('engineering_check_reserve_seconds')
+    if 'python_requirements' in value:keys.add('python_requirements')
     if 'worker_view_version' in value:
         if type(value['worker_view_version']) is not int or value['worker_view_version']!=1:
             raise ValueError('Explicit scientific worker view version required')

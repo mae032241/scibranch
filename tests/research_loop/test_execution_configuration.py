@@ -388,12 +388,15 @@ def test_accepted_package_upgrade_allows_query_reconcile_and_submit(tmp_path,mon
 def test_source_metadata_upgrade_keeps_task_configuration_and_permission_checks(tmp_path,execution_registry,changed):
     import copy
     _,config=frozen_fixture(tmp_path,'local_execution:command',dict(run_argv=[sys.executable]))
+    # Persisted JSON has independent copies of the scope and frozen config
+    # record; the in-memory freeze return may share those nested dictionaries.
+    config=json.loads(e.encoded(config))
     # Existing accepted configurations may retain proofs for a removed installation.
     config['execution_interface']['code']=[dict(path=str(tmp_path/'retired-tool.py'),size_bytes=1)]
     config['execution_interface']['plugin_version']='previous-installed-version'
     assert e.load(config) is not None
     altered=copy.deepcopy(config)
-    if changed=='task':altered['scope']['job_ref']='f'*64
+    if changed=='task':altered['scope']['job_ref']={'path':'/other-fixture/jobs/002.json'}
     elif changed=='configuration':altered['run_argv']=[sys.executable,'-I']
     else:altered['execution_interface']['capabilities']['query']=False
     with pytest.raises(e.IntegrityError,match='contract or configuration'):

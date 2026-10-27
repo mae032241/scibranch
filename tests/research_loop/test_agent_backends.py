@@ -180,6 +180,106 @@ def test_codex_native_schema_flag_requires_qualified_launcher_capability(tmp_pat
     assert independent['native_capabilities']['response_schema_transport']=='protocol_request'
 
 
+@pytest.mark.parametrize('role',['H','W','A','E'])
+def test_codex_prompt_json_transport_keeps_scientific_content_open_and_native_configuration(tmp_path,role):
+    settings=backends.configuration('codex',['codex'],dict(
+        workspace='workspace-write',network=True,web='cached',subagents=False,
+        sandbox_workspace_write=dict(writable_roots=[str(tmp_path/'extra')],network_access=True)))
+    profile=dict(model='chosen',reasoning_effort='high',service_tier='fast')
+    original_settings=json.loads(json.dumps(settings))
+    original_profile=dict(profile)
+    schema=tmp_path/'schema.json'
+    c.write(schema,c.result_schema(role,c.HANDOFF_PROTOCOL))
+    original=schema.read_text()
+    prompt='Complete the original scientific task with its retained limitations.'
+    native_backend=backends.selected(settings)
+    fallback=backends.selected(settings,schema_transport='prompt')
+    assert native_backend.active_schema_transport=='native_flag'
+    assert fallback.active_schema_transport=='prompt'
+    assert fallback.schema_transport==settings['native_capabilities']['response_schema_transport']=='native_flag'
+    args=native_backend.launch(profile,tmp_path,tmp_path/'out',schema,'independent rules')
+    fallback_args=fallback.launch(profile,tmp_path,tmp_path/'out',schema,'independent rules')
+    schema_position=args.index('--output-schema')
+    assert fallback_args==args[:schema_position]+args[schema_position+2:]
+    request=fallback.request(prompt,profile=profile,work=tmp_path,schema=schema).decode()
+    assert native_backend.request(prompt,profile=profile,work=tmp_path,schema=schema).decode()==request
+    assert request.startswith(prompt+'\n') and original not in request
+    assert request.count('Return only one JSON object as your final response')==1
+    assert 'no Markdown fences or surrounding prose' in request
+    assert request.endswith(backends.JSON_RESPONSE_INSTRUCTION)
+    assert schema.read_text()==original
+
+    # A previously accepted prompt-mode lineage must also resume without the
+    # rejected flag, retaining its native model, permission and instruction argv.
+    session=dict(thread_id='original')
+    native_resume,_=native_backend.resume(args,profile,tmp_path,tmp_path/'out',schema,session)
+    fallback_resume,_=fallback.resume(args,profile,tmp_path,tmp_path/'out',schema,session)
+    schema_position=native_resume.index('--output-schema')
+    assert fallback_resume==native_resume[:schema_position]+native_resume[schema_position+2:]
+    assert '--output-schema' not in fallback_resume
+    for adapter in (native_backend,fallback):
+        assert adapter.request(prompt,profile=profile,work=tmp_path,schema=schema).decode()==request
+        repair=adapter.request('Repair the final scientific response.',profile=profile,work=tmp_path,schema=schema).decode()
+        assert original not in repair
+        assert repair.partition('\n')[2]==request.partition('\n')[2]
+    assert schema.read_text()==original
+    assert settings==original_settings and profile==original_profile
+
+
+@pytest.mark.parametrize('transport',['native_flag','prompt'])
+def test_strict_schema_shape_never_makes_an_ordinary_request_formal(tmp_path,transport):
+    settings=backends.configuration('codex',['codex'],{})
+    backend=backends.selected(settings,schema_transport=transport)
+    schema=tmp_path/'retained-strict.schema.json'
+    c.write(schema,c.result_schema('A',formal_review=True))
+    original=schema.read_text()
+    ordinary=backend.request('Retain the original task.',schema=schema,formal_review=False).decode()
+    assert original not in ordinary
+    assert ordinary.endswith(backends.JSON_RESPONSE_INSTRUCTION)
+    assert schema.read_text()==original
+    independent=backend.request('Assess the exact subject independently.',schema=schema,formal_review=True).decode()
+    assert independent.count(original)==(1 if transport=='prompt' else 0)
+    assert schema.read_text()==original
+
+
+def test_ordinary_protocol_projects_current_schema_over_retained_strict_original(tmp_path):
+    from scidiscovery.research_loop import native
+    job=dict(role='A',handoff_protocol=c.HANDOFF_PROTOCOL,native_role_instruction='Exact retained scientific scope',
+        scientific_response_fields=['portfolio_review','final_coverage'],search={},portfolio_context={},
+        final_coverage_mechanisms=[dict(mechanism_ref='h001.m1')])
+    task=dict(final_response=['summary','legacy_large_required_table'])
+    original=dict(type='object',properties=dict(legacy_large_required_table=dict(type='object')),
+        required=['legacy_large_required_table'],additionalProperties=False)
+    schema=tmp_path/'frozen-schema.json';c.write(schema,original);before=schema.read_bytes()
+    backend=backends.selected(backends.configuration('protocol',['independent'],{}))
+    prompt,instruction,current=native.render_scientific_request(job,task,{},backend_name='protocol',instruction_transport='prompt')
+    packet=json.loads(backend.request(prompt,profile={},work=tmp_path,schema=schema,response_schema=current))
+    assert packet['response_schema']==c.result_schema('A',**c.response_options(job))
+    assert 'legacy_large_required_table' not in packet['prompt']
+    assert 'Current response rules replace older output shapes' in packet['prompt']
+    assert instruction.startswith(job['native_role_instruction']+'\n')
+    assert schema.read_bytes()==before and task['final_response']==['summary','legacy_large_required_table']
+
+
+@pytest.mark.parametrize('backend,launcher',[
+    ('codex',[sys.executable,'operator-wrapper.py']),('protocol',['independent'])])
+def test_custom_transports_do_not_gain_implicit_schema_fallback(tmp_path,backend,launcher):
+    settings=backends.configuration(backend,launcher,{})
+    adapter=backends.selected(settings)
+    assert adapter.active_schema_transport==adapter.schema_transport
+    with pytest.raises(ValueError,match='response schema transport'):
+        backends.selected(settings,schema_transport='prompt')
+    schema=tmp_path/'schema.json';c.write(schema,c.result_schema('A',c.HANDOFF_PROTOCOL))
+    prompt='Keep this exact operator prompt.'
+    request=adapter.request(prompt,profile=dict(model='chosen'),work=tmp_path,schema=schema,response_schema=c.result_schema('A'))
+    if backend=='codex':
+        assert request==prompt.encode()
+    else:
+        packet=json.loads(request)
+        assert packet['prompt']==prompt
+        assert packet['response_schema']==c.read(schema)
+
+
 @pytest.mark.parametrize('mode,requested,effective,enforcement',[
     ('workspace-write',False,False,'native_sandbox'),
     ('workspace-write',True,True,'native_sandbox'),
@@ -304,15 +404,29 @@ def test_role_rules_have_one_actual_launch_transport_and_task_data_remains(tmp_p
         native_backend='protocol' if transport=='protocol' else 'codex',
         native_options={} if transport in {'options','protocol'} else None,
         model='fixture',reasoning_effort='high',max_tokens=1000,max_seconds=60,max_steps=4,search_policy=None,experiment_mode='external')
-    intent(root, role)
+    record=intent(root, role)
+    retained_schema=None
+    if transport=='standard':
+        # A retained ordinary strict schema remains an original input, never
+        # an implicit request to send a large legacy contract to the model.
+        retained=c.read(record/'science-result.schema.json')
+        retained['additionalProperties']=False
+        c.write(record/'science-result.schema.json',retained)
+        retained_schema=(record/'science-result.schema.json').read_bytes()
     native.run_native(root,1)
     work=c.workspace(root,1);captured=c.read(work/'work/captured.json');task=c.read(work/'science-task.json')
     job=c.read(root/'jobs/001.json')
     rules=job.get('native_role_instruction',c.ROLE_INSTRUCTIONS[role])
     if role=='A':rules+='\n'+c.AUTHOR_EVIDENCE_GUIDANCE
     assert sum(text.count(rules) for text in [captured['prompt'],*captured['developer']])==1
+    if transport=='standard':
+        assert '--output-schema' not in captured['args']
+        assert c.read(record/'native-outcome.json')['native_schema_transport']=='prompt'
+        assert (record/'science-result.schema.json').read_bytes()==retained_schema
+        assert retained_schema.decode() not in captured['prompt']
     if transport in {'standard','options'}:
-        assert captured['developer']==[rules] and rules not in captured['prompt']
+        _,actual_instruction,_=native.render_scientific_request(job,task,{},backend_name='codex',instruction_transport='developer')
+        assert captured['developer']==[actual_instruction] and rules not in captured['prompt']
         assert 'approval_policy="never"' in captured['args']
     else:
         assert not captured['developer'] and rules in captured['prompt']

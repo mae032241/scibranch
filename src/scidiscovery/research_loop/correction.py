@@ -196,7 +196,7 @@ def project(root, before_step=None):
         if (intent.get('task_ref') != c.record_ref(originals.resolve_ref(source, dict(path=f'jobs/{step:03d}.json')))
                 or type(outcome.get('returncode')) is not int or outcome['returncode'] != 0
                 or outcome.get('stop_reason') or outcome.get('usage', {}).get('blocking_unknown_steps', outcome.get('usage', {}).get('unknown_steps')) != []
-                or outcome.get('raw_ref') != seal['raw_ref']):
+                or outcome.get('raw_ref') != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}):
             raise ValueError('Correction replay requires verified original terminal nodes')
         if c.read(record / 'result.json') != c.result_projection(job, payload):
             raise ValueError('Correction result differs from original scientific fields')
@@ -215,6 +215,8 @@ def project(root, before_step=None):
             continue
         seal_digest = c.record_ref(record / 'result-identity.json')
         eligible.append(dict(step=step, seal_ref=seal_digest))
+        if 'progress_assessment' not in payload:
+            continue
         sticky, consumed_pause = False, None
         if pause is not None:
             ack = acks.get(pause['trigger_id'])

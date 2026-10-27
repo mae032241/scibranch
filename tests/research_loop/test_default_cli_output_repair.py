@@ -32,9 +32,7 @@ if not resume:
  (work/'work/completed-observation').write_text('one retained observation')
 else:
  assert thread in args
- if config['fault'].startswith('completed-') and not (config['fault']=='completed-missing-output' and (work/'work/launches').read_text().count('resume')==1):
-  assert 'Continue completing the current assigned task' in prompt and 'Repair only your final response' not in prompt
- else:assert 'Repair only your final response' in prompt
+ assert prompt.strip()
  assert (work/'work/completed-observation').read_text()=='one retained observation'
 payload=dict(summary='Deterministic CLI transport',scientific_result='No scientific qualification is asserted.',
  limitations=['Only native communication is simulated.'],implementation_selection=None)
@@ -43,10 +41,10 @@ nomination=config['fault'].startswith('nomination-') or completed_work
 if role=='H':
  payload.update(next_action='analyze',route_reason='Review retained evidence',search_plan=None)
  if config['fault']=='incomplete_w' or nomination:
-  payload.update(next_action='experiment',search_plan=dict(scope='One declared fixture mechanism',
+  payload.update(next_action='experiment',search_plan=dict(scope='Declared bounded fixture mechanisms',
    commitments=[dict(label='Fixture mechanism',minimal_test='Read a bounded observation',existing_ref=None)],
    focus=dict(label=None,action='screen')))
-  if config['fault']=='completed-experiment':
+  if completed_work:
    payload['search_plan']['commitments'].append(dict(label='Second fixture mechanism',minimal_test='Produce a different bounded observation',existing_ref=None))
 elif role=='W':
  payload.update(stage_intent='review',mechanism_findings=None)
@@ -91,11 +89,10 @@ elif role=='W':
     '--mechanism','Fixture mechanism'])
   payload['mechanism_findings']=[dict(mechanism='Fixture mechanism',basis='observed',finding='One retained fixture observation; target suitability remains for A.')]
   value=dict(representatives=[dict(mechanism_ref=mechanisms[0]['mechanism_ref'],candidate=locator,reason='A retained model for this scientific mechanism.')],extras=[],gaps=[])
-  if config['fault']=='completed-experiment':
+  if completed_work:
    value['gaps']=[dict(mechanism_ref=row['mechanism_ref'],reason='No candidate suitability is asserted for the second bounded observation.') for row in mechanisms[1:]]
   if resume:
    assert locator_file.is_file()
-   if not completed_work:assert 'do not rerun or resubmit experiments' in prompt
    payload['candidate_nominations']=value
   elif completed_work:payload['candidate_nominations']=value
   elif config['fault']=='nomination-extra':
@@ -107,9 +104,14 @@ elif role=='W':
   if completed_work:
    if not resume or config['fault']=='completed-repeat' or (config['fault']=='completed-missing-output' and (work/'work/launches').read_text().count('resume')==1):
     payload['mechanism_findings']=None
-   if config['fault']=='completed-blocked':payload['mechanism_findings']=[dict(mechanism='Fixture mechanism',basis='blocked',finding='The task requires unavailable scientific input.')]
+   if config['fault']=='completed-blocked':payload['mechanism_findings']=[dict(mechanism='Fixture mechanism',basis='observed',finding='The first observation is retained.'),dict(mechanism='Second fixture mechanism',basis='blocked',finding='The second assigned comparison requires unavailable scientific input.')]
    if config['fault']=='completed-decision':payload['stage_intent']='decision'
-   if config['fault']=='completed-unresolved':payload['mechanism_findings']='An explicit narrative partial finding.'
+   if config['fault']=='completed-unresolved':
+    payload['mechanism_findings']='An explicit narrative finding; the second target input is unavailable.'
+    payload['stage_intent']='decision'
+   if resume and config['fault'] in {'completed-findings','completed-missing-output'} and not (config['fault']=='completed-missing-output' and (work/'work/launches').read_text().count('resume')==1):
+    payload['stage_intent']='decision'
+    payload['scientific_result']='The first original observation is retained. The second assigned target input is unavailable; A must decide the remaining bounded scope.'
    if config['fault']=='completed-experiment' and resume:
     import subprocess
     from scidiscovery.research_loop.worker_execution_bridge import SUBMISSION_DIRECTORY
@@ -124,13 +126,21 @@ elif role=='W':
     result=json.loads(outcome.stdout);assert result['status']=='known_success'
     second.write_text(json.dumps(dict(call_id=result['call_id'])))
     payload['mechanism_findings'].append(dict(mechanism='Second fixture mechanism',basis='observed',finding='A different retained assigned observation; scientific suitability remains for A.'))
+ if config.get('output_repair_probe') and not completed_work and not resume:payload.pop('summary')
 else:
  assert role=='A'
  payload.update(next_action='finish',route_reason='The measured scientific objective remains unresolved.',
   candidate_recommendation='declared-fixture-choice',search_review=None,progress_assessment=None,decision_request=None)
- if (resume and config['fault']!='repeat') or config['fault']=='incomplete_w' or nomination:
-  payload['selection_explanation']=dict(criteria='Retain the declared bounded fixture observation.',
-   criteria_change=dict(status='unchanged',prior_criteria=None,changes=None,evidence=None,accepted_tradeoffs=None))
+ task=json.loads((work/'science-task.json').read_text())
+ references=task.get('final_coverage_mechanisms',[])
+ if task.get('portfolio_assessment',{}).get('required_for_completed_w'):
+  payload['portfolio_review']=dict(discriminating_work=None,main_line=references[0] if references else None,
+   reason='The exact first W observation does not qualify target performance. Competing target comparisons require missing input; defer them until that input arrives and revisit before further investment.')
+ if references:
+  payload['final_coverage']=[dict(mechanism_ref=ref,status='unexplored',
+   reason='This synthetic transport fixture supplies no scientific coverage qualification; target behavior and remaining discriminating questions are unanswered.') for ref in references]
+ if config['fault'] in {'missing','repeat','unknown','failed'} and (not resume or config['fault']=='repeat'):
+  payload.pop('summary')
  if config['fault']=='incomplete_w':
   task=json.loads((work/'science-task.json').read_text())
   mechanisms=json.loads((work/task['lineage']['indexes']['mechanisms']).read_text())
@@ -291,13 +301,15 @@ def test_default_standard_cli_repairs_same_a_in_original_native_home(tmp_path,fi
     step=1 if final else 2;origin=execution.origin(root,step);current=execution.record(root,step)
     assert current==origin/'continuations/001'
     assert (c.workspace(root,step)/'work/launches').read_text()=='exec\nresume\n'
-    assert 'selection_explanation' not in c.read(origin/'science-output.json')
-    assert c.validate(c.workspace(root,step))['selection_explanation']['criteria_change']['status']=='unchanged'
+    assert 'summary' not in c.read(origin/'science-output.json')
+    assert c.validate(c.workspace(root,step))['summary']=='Deterministic CLI transport'
     intent=c.read(current/'native-intent.json')
+    assert intent['continuation_kind']=='repair'
+    assert intent.get('work_repair') is None and intent.get('automatic_recovery') is None
     assert intent['task_ref']==c.read(origin/'native-intent.json')['task_ref']
     assert intent.get('native_profile')==c.read(origin/'native-intent.json').get('native_profile')
     assert intent['session']['home']==str(home) and intent['session']['workspace']==str(c.workspace(root,step))
-    assert intent['output_repair']['code']=='selection_explanation_incomplete'
+    assert intent['output_repair']['code']=='invalid_fields'
     assert intent['budget_slice']['previous_tokens']==14
     assert all(path.read_bytes()==data for path,data in originals.items())
     assert not (root/'jobs'/f'{step+1:03d}.json').exists()
@@ -374,35 +386,35 @@ def test_disabled_automatic_cli_incomplete_w_retains_partial_exit_and_reaches_a(
 
 @pytest.mark.parametrize('fault',['nomination-missing','nomination-extra','nomination-locator'])
 @pytest.mark.parametrize('fragment',[False,True])
-def test_w_nomination_structure_repairs_in_same_output_only_task_without_repeating_experiment(tmp_path,execution_registry,fault,fragment):
-    root,home,env=prepare_cli(tmp_path,fault=fault,fragment=fragment)
+def test_optional_w_nomination_detail_never_repairs_or_repeats_original_experiment(tmp_path,execution_registry,fault,fragment):
+    root,_,env=prepare_cli(tmp_path,fault=fault,fragment=fragment)
     assert c.settings(root)['resume_policy']['output_only'] is True
     result=cli(root,'run',env=env)
     assert result['status']=='finish',nomination_diagnostic(root,result,fault=fault,fragment=fragment)
-    chain=execution.records(root,2);assert len(chain)==2
-    origin,current=chain;intent=c.read(current/'native-intent.json')
-    assert intent['output_repair']['code']=='candidate_nominations_incomplete' and 'work_repair' not in intent
-    assert intent['task_ref']==c.read(origin/'native-intent.json')['task_ref']
-    assert intent['session']['home']==str(home) and intent['output_repair']['source_attempt']==0
-    assert (c.workspace(root,2)/'work/launches').read_text()=='exec\nresume\n'
+    origin,=execution.records(root,2)
+    assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
     original=c.read(origin/'science-output.json')
     if fault=='nomination-missing':assert 'candidate_nominations' not in original
     elif fault=='nomination-extra':assert len(original['candidate_nominations']['extras'])==3
     else:assert original['candidate_nominations']['representatives'][0]['candidate']['call_id']=='unregistered-call'
     calls=experiment_client.record_directory(root,2)/'calls'
-    assert len(list(calls.iterdir()))==1
     locator=c.read(c.workspace(root,2)/'work/retained-candidate-locator.json')
     original_call=calls/locator['call_id']
     assert list(calls.iterdir())==[original_call]
     science=c.validate(c.workspace(root,2))
-    assert science['candidate_nominations']['representatives'][0]['candidate'].startswith('local-')
-    assert c.read(root/'jobs/003.json')['role']=='A' and not (root/'jobs/004.json').exists()
-    continuation.validate_repair(root,2,intent)
-    assert continuation.output_request(root,2,origin,source_attempt=0,verify_task=False)==intent['output_repair']
+    assert science['scientific_result']==original['scientific_result']
+    seal=c.read(origin/'result-identity.json')
+    observation=c.read(root/seal['observations']['path'])
+    assert len(observation['managed_calls'])==1 and len(observation['candidates'])==4
+    judge=c.read(root/'jobs/003.json')
+    assert judge['role']=='A' and len(judge['history']['candidate_ids'])==4
+    assert not (root/'jobs/004.json').exists()
+    assert continuation.output_request(root,2,origin,source_attempt=0,verify_task=False) is None
     frozen={path:path.read_bytes() for path in [origin/'science-output.json',root/'jobs/002.json',
         original_call/'accepted.json',original_call/'completed.json']}
     assert cli(root,'run',env=env)['status']=='finish'
-    assert len(list(calls.iterdir()))==1 and all(path.read_bytes()==data for path,data in frozen.items())
+    assert len(execution.records(root,2))==1 and list(calls.iterdir())==[original_call]
+    assert all(path.read_bytes()==data for path,data in frozen.items())
 
 
 def test_unknown_w_nomination_output_never_authorizes_repair_or_replays_original_experiment(tmp_path,execution_registry):

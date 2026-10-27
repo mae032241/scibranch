@@ -29,32 +29,28 @@ ACTIONS = {
     'H': ('experiment', 'analyze', 'extract', 'wait'),
     'A': ('continue_w', 'revise_h', 'extract', 'wait', 'finish', 'deliver'),
 }
+MAX_FIXED_RESPONSE_BYTES = 3072
 AUTHOR_EVIDENCE_GUIDANCE = (
-    'Assess each original objective and authorized scope requirement against the available evidence; state what is supported, unsupported or unresolved. '
-    'Tie key claims to locatable observations and their experiment conditions, distinguishing measurements, inferences and assumptions. '
-    'Separate target metrics from proxies and sensitivity checks, and limit generalization to tested conditions. '
-    'Compare candidates by the same goal criteria, addressing conflicting evidence, uncertainty and missing inputs without inventing facts. '
-    'Compare plausible mechanisms before concentrating; justify any single-mechanism scope. Distinct parameter trials alone do not establish evidence across mechanisms. '
-    'At each global judgment, compare relevant unexcluded routes, including screened, using the full mechanism index, original A reasons, observed investment and unresolved discriminating questions. Explain concentration, postponement and exclusion in scientific_result or route_reason. '
-    'Budget for useful breadth before deep local work: read work/budget-status.json for current exploration availability, retain declared finite call and stage limits, and explain when resources or missing evidence prevent a comparison. Call and cycle counts are not scientific coverage or resource costs. '
-    'For each waived mechanism, give an evidence-supported scientific negative or infeasibility reason tied to the original goal and constraints. '
-    'Temporary relative underperformance or missing evidence calls for deferral rather than scientific rejection; explain concentration and remaining alternatives in the existing scientific result and disposition reasons. '
-    'Scientific choice and conclusions belong to A; control supplies no candidate ranking or default. Explicit delivery requires your exact candidate and scientific rationale. '
-    'When recommending a candidate, fill selection_explanation with the comparison criteria and an explicit unchanged/revised declaration against prior H/W design and report conditions, thresholds and fallback rules. Relaxing a predeclared condition or fallback is revised, even if a report already adopted it. If revised, acknowledge the prior criteria, what changed, locatable evidence explaining why, and accepted tradeoffs. A first selection may honestly state that no prior criteria were declared. '
-    'Completed workflow, audit qualification, budget exhaustion, finish and delivery do not establish an unmeasured goal. State unmet objectives when stopping; no mechanical proof or hash work is required.')
+    'Cite evidence/conditions; separate measurement/inference/proxy. State uncertainty/gaps/unmet goals and '
+    'criteria changes/tradeoffs. Waive only supported negatives/infeasibility; else defer.')
+NATIVE_TASK_INSTRUCTION = (
+    'Read science-task.json/exact inputs. Honor goal/checks, scope/permissions and budget. '
+    'Follow task rules; return JSON, no hashes/manifests/validators.')
+PORTFOLIO_RESPONSE = (
+    'After completed W except wait: portfolio_review={main_line:ref|null,reason,discriminating_work:null|{mechanism_refs,question,next_action}}. '
+    'reason=strongest rival/cheapest test/decision/defer-revisit or infeasibility; next_action=continue_w|revise_h|extract. '
+    'All active lineage.indexes.portfolio refs need nested work_updates[{work_ref,action:execute|defer|withdraw,reason}].')
+FINAL_COVERAGE_RESPONSE = (
+    'finish/deliver/FINAL: cover all refs in final_coverage[{mechanism_ref,status:deep|screened_pending|ruled_out|unexplored,reason}]. '
+    'reason=depth/evidence/open questions; limitations=input/resource gaps.')
+
+
 ROLE_INSTRUCTIONS = {
     'H': 'Own the scientific direction toward the original global goal. Propose or revise mechanisms, '
          'distinguishing hypotheses from implementation choices. Decide whether evidence extraction is needed, '
          'then choose experiment or independent analysis. Preserve original constraints and unmet questions.',
-    'W': 'Work within the bound hypothesis scope. Choose implementation and bounded experiments yourself. '
-         'Preserve observations, failures, candidate files and limitations. A new mechanism belongs to H. '
-         'Return your contribution for independent A; do not declare global completion.',
-    'A': 'Independently judge the contribution to the original global goal, not only local improvement. '
-         'Check evaluation blind spots, contrary evidence and unexplored mechanisms. Request further W experiments '
-         'within H, return to H for a mechanism revision, request evidence, wait or support a scoped conclusion. '
-         'A self-built proxy alone does not establish performance under unobserved target conditions. '
-         'deliver explicitly authorizes adapter delivery; finish ends scientific exploration. Neither asserts global completion. '
-         'extract requests scientific evidence only; control resolves, packages and submits exact originals.',
+    'W': 'Own methods/candidates within H; A suggests methods. Honor checks; use --mechanism. Initial/grant calls protect screening opportunities, not trial totals. Route scope changes via A to H; reconcile unknown calls, never replay. Return to independent A, not global completion. No auxiliary agents.',
+    'A': "A owns goal/evaluation-version judgment and counterevidence. No incumbent/unknown-optimality veto. continue_w=one finite stage; calls/audits aren't goal proof.",
     'E': 'Answer the exact evidence question from the requesting H or A. Retrieve or extract only needed materials '
          'using available functional tools. Preserve original sources, locators, conflicts and missing evidence. '
          'Return to the requester; do not choose the research direction or assert qualification. '
@@ -202,22 +198,8 @@ def response_fields(job, policy):
     return fields
 
 
-def selection_explanation_schema():
-    """Require an accountable declaration, never a machine scientific verdict."""
-    text=dict(type='string',pattern=r'\S')
-    variants=[]
-    for status in ('unchanged','revised'):
-        fields=dict(status=dict(type='string',enum=[status]))
-        fields.update({field:dict(text) if status=='revised' else dict(type='null')
-            for field in ('prior_criteria','changes','evidence','accepted_tradeoffs')})
-        variants.append(dict(type='object',properties=fields,required=list(fields),additionalProperties=False))
-    properties=dict(criteria=text,criteria_change=dict(anyOf=variants))
-    return dict(type=['object','null'],properties=properties,required=list(properties),additionalProperties=False,
-        description='Required for an explicit candidate recommendation, including final A. Compare adopted criteria with prior H/W design/report conditions, thresholds and fallback rules. Relaxing any such rule is revised even if the report already adopted it. Revised requires prior criteria, changes, locatable evidence explaining why, and accepted tradeoffs. Unchanged uses null change details. Control checks completeness, not scientific sufficiency or truth.')
-
-
 def result_schema(role: str,protocol=CURRENT,comparison=False,*,formal_review=False,review_enabled=False,final_only=False,final_delivery=False,auxiliary_fields=None):
-    """comparison: an A bound to a frozen candidate catalogue (job['selection'])."""
+    """Required transport fields only; authored scientific content stays open."""
     from .protocol import _current
     _current(protocol,'Scientific result schema')
     if role not in ROLE_INSTRUCTIONS:raise ValueError('Unknown scientific role')
@@ -225,71 +207,65 @@ def result_schema(role: str,protocol=CURRENT,comparison=False,*,formal_review=Fa
         from . import formal_review as review
         return review.schema()
     properties=dict(summary=dict(type='string'),scientific_result=dict(type='string'),
-        limitations=dict(type='array',items=dict(type='string')),
-        implementation_selection=dict(type=['array','null'],
-            items=dict(type='string'),
-            description='Null retains the selected implementation; [] clears it; listed scientific object IDs replace it. No paths, hashes or handoff markers.'))
+        limitations=dict(type='array',items=dict(type='string')))
     if role in ACTIONS:
-        properties.update(next_action=dict(type='string',enum=list(actions(role,review_enabled=review_enabled))),route_reason=dict(type='string'))
-        if role == 'A':
-            properties['next_action']['description'] = ('deliver explicitly authorizes adapter delivery of candidate_recommendation; '
-                'finish ends scientific exploration without granting delivery or asserting global completion. '
-                'extract requests scientific evidence from E, never copying, packaging, path resolution or submission. '
-                'audit is optional: check audit_capability.available; a disabled request returns unavailable without execution. '
-                'formal_review, when enabled, is conditional: unchanged unavailable subject/identity is rejected before sealing for same-session output repair, not another A turn. A changed exact selection or newly verifiable identity may request it again. '
-                'During closeout use deliver, audit, finish or wait; other actions receive bounded clarification because exploration is closed.')
-    if final_only:
-        properties['next_action']['enum'] = ['deliver'] if final_delivery else ['finish']
-        properties['next_action']['description'] = ('Submit one explicit existing candidate through the host; no further scientific role, audit, wait or correction is authorized.' if final_delivery else
-            'Return the final conclusion and explicit unsubmitted reason because candidate originals or delivery permission are unavailable.')
-        properties['scientific_result']['description'] = 'Give your final evidence-based conclusion, exact selection or missing input, and explain unmet objectives. Never claim a host submission result; control supplies its actual receipt.'
-    if role=='W':
-        from . import worker_delivery, candidate_nominations
-        properties['mechanism_findings']=worker_delivery.schema()
-        properties['candidate_nominations']=candidate_nominations.schema()
-        properties['stage_intent']=dict(type='string',enum=['continue','review','decision'],
-        description='Continue the same scientific stage, report completed work for review, or request an A scientific decision with partial work. This does not grant budget or execution. Control may end the stage at a review or shared boundary.')
-    if role in {'H','A'}:
-        from . import search
-        properties['search_plan' if role=='H' else 'search_review']=search.schema(role)
-    if role=='A':
-        from . import correction,decision
-        from . import search
-        properties['portfolio_review']=search.portfolio_review_schema()
-        from . import candidate_nominations
-        properties['final_coverage']=candidate_nominations.final_coverage_schema()
-        properties.update(candidate_recommendation=dict(type=['string','null'],
-                description='Choose an exact candidate reference from the frozen candidate index, or its listed implementation reference when both identify that same registered object. Null supplies no recommendation. No default or host selection. Explain scientific rationale and evidence in scientific_result.'),
-            progress_assessment=correction.schema(),decision_request=decision.schema())
-        properties['selection_explanation']=selection_explanation_schema()
-        if final_only and final_delivery:
-            properties['candidate_recommendation'].update(type='string',minLength=1)
-        if comparison:
-            from . import shortlist
-            properties['candidate_comparison']=shortlist.schema()
-    if auxiliary_fields is not None:
-        for field in ('mechanism_findings','candidate_nominations','search_plan','search_review','portfolio_review','final_coverage','progress_assessment',
-                'decision_request','candidate_comparison'):
-            if field not in auxiliary_fields:properties.pop(field,None)
-    return dict(type='object',properties=properties,required=list(properties),additionalProperties=False)
+        choices=list(actions(role,review_enabled=review_enabled))
+        if final_only:choices=['deliver'] if final_delivery else ['finish']
+        properties.update(next_action=dict(type='string',enum=choices),route_reason=dict(type='string'))
+    if role=='W':properties['stage_intent']=dict(type='string',enum=['continue','review','decision'])
+    return dict(type='object',properties=properties,required=list(properties),additionalProperties=True)
+
+
+def response_instructions(job):
+    """The actual fixed output instructions shown in the scientific task."""
+    fields=dict(final_response=list(result_schema(job['role'],job['handoff_protocol'],
+        'selection' in job,**response_options(job))['properties']),
+        implementation_reuse='implementation_selection: null keeps; [] clears; IDs replace.')
+    if job.get('search') is not None and job['role'] in {'H','A'}:
+        fields['breadth_response']=(
+            'search_plan: commitments[{label,minimal_test,existing_ref?}], focus?{label,action}; action=screen|improve|repair|validate; omissions retain.'
+            if job['role']=='H' else
+            'search_review: dispositions[{mechanism_ref,status,reason}],next_focus?{mechanism_ref,action}; status=pending|screened|deferred|waived; action=screen|improve|repair|validate; omitted=keep.')
+    if job.get('portfolio_context') is not None and 'portfolio_review' in job.get('scientific_response_fields',[]):
+        fields['portfolio_response']=PORTFOLIO_RESPONSE
+    if job.get('final_coverage_mechanisms'):fields['final_coverage_response']=FINAL_COVERAGE_RESPONSE
+    if job['role']=='A':
+        fields['delivery_selection']='deliver: exact candidate_recommendation+rationale; output/receipt gaps; partial OK.'
+        if job.get('purpose')=='closeout':
+            fields['closeout_response']=('FINAL: follow action options; no new work/audit.' if job.get('final_only') else 'Closeout: deliver/audit/finish/wait; no exploration.')
+    elif job['role']=='W':
+        fields['delivery_requirements']='Retain required outputs/receipts before scratch disappears; report gaps.'
+        fields['stage_response']='stage_intent: review=A-ready; decision=partial obstacle; continue=authorized same-stage work.'
+        fields['stage_continuation']=dict(status='configured' if job.get('worker_fragment_policy') else 'unavailable',
+            context=(job.get('worker_fragment_policy') or {}).get('context'),
+            permission='Original terminal/session, known usage and remaining authorization required.')
+    return fields
 
 
 def scientific_field(job, payload, field):
-    """Consume one optional field with the task's sole model-visible rule."""
-    import jsonschema
-    schema=result_schema(job['role'],job.get('handoff_protocol',CURRENT),'selection' in job,**response_options(job))
-    rule=schema['properties'].get(field)
-    if rule is None:return None
+    """Read only enabled consumer input; extra authored keys remain untouched."""
+    enabled=job.get('scientific_response_fields')
+    if enabled is not None and field not in enabled:return None
     value=payload.get(field)
-    if not json_field_representable(field,value) or not jsonschema.Draft202012Validator(rule).is_valid(value):return None
+    if value is None or not json_field_representable(field,value):return None
+    if field=='progress_assessment':
+        return dict(verdict=value['verdict']) if (isinstance(value,dict) and isinstance(value.get('verdict'),str)
+            and value['verdict'] in {'progress','no_progress','unknown'}) else None
+    if field=='decision_request':
+        return value if (isinstance(value,dict) and isinstance(value.get('decision'),str)
+            and value['decision'] in {'candidate','mechanism','compliance'}
+            and all(isinstance(value.get(key),str) for key in ('question','change_criterion'))) else None
+    if field in {'search_plan','search_review','candidate_nominations','candidate_comparison','portfolio_review','selection_explanation'}:
+        return value if isinstance(value,dict) else None
+    if field in {'mechanism_findings','final_coverage'}:
+        return value if isinstance(value,list) else None
     return value
 
 
 def scientific_diagnostics(job, payload):
-    schema=result_schema(job['role'],job.get('handoff_protocol',CURRENT),'selection' in job,**response_options(job))
-    return [dict(code='scientific_field_unresolved',subject=field) for field,rule in schema['properties'].items()
-        if isinstance(rule.get('type'),list) and 'null' in rule['type']
-        and payload.get(field) is not None and scientific_field(job,payload,field) is None]
+    return [dict(code='scientific_field_unresolved',subject=field)
+        for field in job.get('scientific_response_fields',[])
+        if payload.get(field) is not None and scientific_field(job,payload,field) is None]
 
 
 def science_payload(path: Path, role: str, protocol=CURRENT, comparison=False,*,formal_review=False,review_enabled=False,final_only=False,final_delivery=False,auxiliary_fields=None):
@@ -300,26 +276,17 @@ def science_payload(path: Path, role: str, protocol=CURRENT, comparison=False,*,
         value = read(original)
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise OutputRepairRequired('invalid_json', 'Return one valid JSON object matching final_response; completed experiments remain retained.') from error
+    schema=result_schema(role,protocol,comparison,formal_review=formal_review,review_enabled=review_enabled,
+        final_only=final_only,final_delivery=final_delivery,auxiliary_fields=auxiliary_fields)
     try:
-        schema=result_schema(role,protocol,comparison,formal_review=formal_review,review_enabled=review_enabled,
-            final_only=final_only,final_delivery=final_delivery,auxiliary_fields=auxiliary_fields)
-        projection={key:item for key,item in value.items() if key in schema['properties']} if isinstance(value,dict) and not formal_review else value
-        if isinstance(projection,dict) and not formal_review:
-            if role=='A':
-                explanation=projection.get('selection_explanation')
-                rule=schema['properties']['selection_explanation']
-                if (isinstance(projection.get('candidate_recommendation'),str) and explanation is None
-                        or not jsonschema.Draft202012Validator(rule).is_valid(explanation)):
-                    raise OutputRepairRequired('selection_explanation_incomplete',
-                        'Fill selection_explanation: state criteria and unchanged/revised status; revised requires prior_criteria, changes, evidence with locators explaining why, and accepted_tradeoffs. Keep the same A task and completed evidence; do not repeat experiments.')
-            for field,rule in schema['properties'].items():
-                if isinstance(rule.get('type'),list) and 'null' in rule['type']:
-                    if not jsonschema.Draft202012Validator(rule).is_valid(projection.get(field)):projection[field]=None
-                    else:projection.setdefault(field,None)
-        jsonschema.Draft202012Validator(schema).validate(projection)
+        jsonschema.Draft202012Validator(schema).validate(value)
     except jsonschema.ValidationError as error:
         location = '.'.join(map(str, error.absolute_path))[:128] or 'final response'
         raise OutputRepairRequired('invalid_fields', 'Correct required fields and types in ' + location + ' using final_response; do not repeat experiments.') from error
+    if final_only and final_delivery and (not isinstance(value.get('candidate_recommendation'),str)
+            or not value['candidate_recommendation'].strip()):
+        raise OutputRepairRequired('candidate_recommendation_missing',
+            'FINAL delivery requires an explicit existing candidate_recommendation. Keep the same task and retained evidence; do not run new work.')
     return value
 
 
@@ -636,17 +603,13 @@ def science_view(job, root=None):
     if job.get('purpose') == 'closeout' and job['role']=='A':
         from . import delivery
         closeout = dict(source_cutoff=job['source_cutoff'],
-            selection='Choose a frozen candidate ID for delivery; null means no decision, not retention. Report scientific reasoning and limitations.',
             sources=delivery.public_sources(job['delivery_sources'], job['history']['view']['candidates'].get('adapter_audits', []),
-                nominated_ids=job['history'].get('candidate_nomination_ids')),
-            actions=('Select an existing candidate and authorize its original host submission. Give the final conclusion and unmet objectives; control supplies the actual submission receipt. No further scientific work.' if job.get('final_only') else
-                'deliver authorizes delivery; audit obtains qualification; finish declines delivery; wait pauses. No new H/W/E work during closeout.'))
+                nominated_ids=job['history'].get('candidate_nomination_ids')))
         if job['delivery_sources'].get('catalogue'):
             closeout['sources']['catalogue'] = 'inputs/delivery-candidates.json'
         if job.get('selection') is not None:
             from . import shortlist
-            closeout.update(selection='Compare scientifically relevant alternatives by the same goal criteria. Explicitly name the exact candidate and give scientific rationale and evidence steps; null supplies no choice.',
-                            comparison=shortlist.public_table(root, job['selection']))
+            closeout['comparison']={key:value for key,value in shortlist.public_table(root,job['selection']).items() if key!='fields'}
     priorities={
         'H':('A','E','H','W'), 'W':('H','A','W','E'),
         'A':('W','E','H','A'), 'E':('A','H','W','E')}
@@ -666,16 +629,14 @@ def science_view(job, root=None):
         'role': job['role'], 'question': question,
         **user_guidance.public(job),
         **(dict(formal_review_capability=dict(enabled=True,
-            choices=formal_review.public_choices(root,job),
-            instruction='formal_review requests an independent assessment of the single implementation selected through the existing scientific selection. Check formal_review_feedback for the current restriction and ordinary alternatives. The schema retains formal_review for a changed exact subject or newly verifiable identity; unchanged failure requires same-session output repair without sealing or dispatching another A. Control binds subject and identity; an unavailable response grants no qualification.'),
+            choices=formal_review.public_choices(root,job)),
             formal_review_feedback=formal_review.feedback(root,job))
            if job.get('formal_review_version')==1 else {}),
         **(dict(source_restrictions=job['source_restrictions']) if 'source_restrictions' in job else {}),
         **(dict(execution_authority=dict(status='trusted_gate_required' if settings(Path(root), job).get('execution_resource_policy') else 'authority_only_production_gate_unavailable',
             qualified_materials=[read(Path(root) / ref['path'])['subject']['material']['path']
                                  for ref in job.get('execution_qualifications', [])[:3]],
-            qualified_materials_omitted_count=max(0, len(job.get('execution_qualifications', [])) - 3),
-            instruction='Choose scientific materials through the existing selection. Control binds exact review and execution identities; ordinary pass text grants nothing. Decisions alone do not dispatch or add budget.'))
+            qualified_materials_omitted_count=max(0, len(job.get('execution_qualifications', [])) - 3)))
            if job.get('execution_authority') is not None else {}),
         **(dict(engineering_repair=engineering.public(job['engineering_repair'])) if job.get('engineering_repair') else {}),
         **(dict(repair_observation=dict(mechanism_ref=job['search']['focus']['mechanism_ref'],
@@ -683,14 +644,10 @@ def science_view(job, root=None):
             authorization_step=job['search']['repair_authorization']['step'],
             scope='Restore this exact observation under the current H scope. Old findings retain their original H version and limitations.'))
            if (job.get('search') or {}).get('repair_source') is not None else {}),
-        **(dict(stage_continuation=dict(status='configured' if job.get('worker_fragment_policy') else 'unavailable',
-            context=(job.get('worker_fragment_policy') or {}).get('context'),
-            permission='Configured context is not permission: control verifies original terminal, cleanup, usage, session and remaining shared authorization before accepting another fragment.',
-            intent='review reports completed assigned work; decision sends a scientific obstacle to A as partial; continue requests another fragment only when configured; otherwise control ends the stage with an explicit unavailable reason.')) if job['role']=='W' else {}),
         **(dict(candidate_nomination_policy=job['candidate_nomination_policy'],
             candidate_nomination_mechanisms=job['candidate_nomination_mechanisms'])
            if job.get('candidate_nomination_mechanisms') else {}),
-        **(dict(final_coverage_mechanisms=job['final_coverage_mechanisms']) if job.get('final_coverage_mechanisms') else {}),
+
         **(dict(decision_context=context) if context is not None else {}),
         'global': dict(objective='inputs/global/objective.md',
                        updates=[row['path'] for row in job['global_materials'][1:]]),
@@ -705,16 +662,10 @@ def science_view(job, root=None):
                       job.get('project_code_seed',{}).get('source')),
             writes='Use declared scratch for temporary files and outputs for retained results. Other project paths are readonly; move failed writes into the declared directories.'))
            if job.get('project') is not None else {}),
-        **(dict(configured_delivery=job['configured_delivery'],
-            delivery_requirements={
-                'W':'Identify the actual deliverables and native evidence required by the original task. Preserve the needed evaluated objects and original receipts in existing declared outputs before temporary work is removed; source code or a metric alone may not satisfy the task. Retain necessary results, not every intermediate, and report missing items without manufacturing them. Do not write hashes or mechanical inventories.',
-                'A':'Compare the original task deliverables with the retained outputs and native receipts, and with configured_delivery.effect_scope. A configured adapter can perform only its declared effects; unknown scope provides no assurance. Do not expect directory copying to train or perform task-native submission or audit. Scientific completion is your judgment. You may deliver the best existing partial result, including in FINAL, while explicitly explaining missing deliverables, unsupported requirements and actual submission evidence. Scope descriptions grant no execution permission or scientific qualification.'
-            }.get(job['role'])) if 'configured_delivery' in job else {}),
+        **(dict(configured_delivery=job['configured_delivery']) if 'configured_delivery' in job else {}),
         'parents': parents,
         'reading_order':reading[job['role']]+' Preserve listed limitations. Parents are authored statements, not execution facts. Verify relevant originals as needed, delegating when native permissions allow; omissions use conclusion/index/next_page.',
-        **dict(reused_implementations=[dict(label=row['label'], path=row['material']['path'])
-                                       for row in job.get('selected_inputs', [])],
-                 implementation_reuse='Choose only listed scientific objects; control resolves their originals.'),
+        'reused_implementations':[dict(label=row['label'],path=row['material']['path']) for row in job.get('selected_inputs',[])],
         'lineage': _role_lineage(job),
         'input_selection_status': job['input_selection_status'], 'control_diagnostics': job['control_diagnostics'],
         **(dict(control_request=request)
@@ -722,19 +673,13 @@ def science_view(job, root=None):
         **(dict(closeout=closeout) if closeout is not None else {}),
         **(dict(candidate_audit=audit) if audit is not None else {}),
         **(dict(audit_capability=audit_capability) if audit_capability is not None else {}),
-        **(dict(delivery_selection='Read the frozen candidate catalogue and compare relevant alternatives by the original goal criteria. Your deliver authorizes only your exact candidate; finish declines delivery. Null supplies no delivery choice.')
-           if job['role'] == 'A' and root is not None and settings(Path(root), job).get('selection_policy') is not None else {}),
-        **(dict(delivery_comparison=shortlist.public_table(root,job['selection']))
+        **(dict(delivery_comparison={key:value for key,value in shortlist.public_table(root,job['selection']).items() if key!='fields'})
            if job['role']=='A' and job.get('purpose') is None and job.get('selection') is not None else {}),
-        **(dict(progress_assessment=('Judge the current assessed work as progress/no_progress/unknown; '
-                'null means unknown. Explain scientific support and limitations in ordinary science. '
-                'The host binds the exact assessed task for counting, not scientific verification. Do not write evidence paths.'))
-           if 'progress_assessment' in result_schema(job['role'],protocol,'selection' in job,**response_options(job))['properties'] else {}),
-        **(dict(decision_request='For scientific continuation, declare the decision, question and result that would change it. '
-                'Exact completed requests without new bound evidence require clarification; this is not a scientific value judgment.')
-           if 'decision_request' in result_schema(job['role'],protocol,'selection' in job,**response_options(job))['properties'] else {}),
-        **(dict(portfolio_assessment=job['portfolio_context']) if job.get('portfolio_context') is not None else {}),
-        'final_response': list(result_schema(job['role'], job['handoff_protocol'], 'selection' in job,**response_options(job))['properties']),
+        **(dict(portfolio_assessment={key:value for key,value in job['portfolio_context'].items() if key!='instruction'})
+           if job.get('portfolio_context') is not None else {}),
+        **(dict(final_coverage_mechanisms=[row['mechanism_ref'] for row in job['final_coverage_mechanisms']])
+           if job.get('final_coverage_mechanisms') else {}),
+        **response_instructions(job),
         **(dict(experiment_execution=('Host-configured registered W execution is available; only calls through the provided experiment command are recorded. Native scratch shell remains available.'
             if job['experiment_mode'] == 'local' else 'External launcher owns experiment configuration; native shell commands are not automatically recorded.'))
             if 'experiment_mode' in job else {}),
@@ -1055,6 +1000,8 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         audit_projection_version=0
     work = workspace(root, step)
     work.mkdir(parents=True, exist_ok=True)
+    if (work/'inputs').is_symlink() or (work/'inputs').resolve()!=(work/'inputs').absolute():
+        raise ValueError('Scientific inputs must remain in their original owned workspace')
     (work / 'work').mkdir(exist_ok=True)
     (work / 'artifacts').mkdir(exist_ok=True)
     globals_ = global_materials(root)
@@ -1198,7 +1145,11 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     history_cutoff = final_report['source_cutoff'] if final_report else source_cutoff
     extra_steps = [parent for parent in parents if history_cutoff is not None and parent > history_cutoff]
     from . import lineage
-    if review_binding is not None:
+    if retained is not None:
+        job['history']=retained['history']
+        history.validate(root,work,job['history'])
+        options=retained.get('implementation_options',[])
+    elif review_binding is not None:
         job['history']=review_binding['history'];options=[]
     else:
         job['history'],state=lineage.bind(root,step,role,protocol,source_cutoff=final_report['source_cutoff'] if final_report else source_cutoff,extra_steps=extra_steps,selection_protocol=selection_protocol,
@@ -1227,22 +1178,25 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         job['direct_refs'].append(dict(path=original['path'],
             size_bytes=target.stat().st_size if target.exists() else original['size_bytes']))
     job['implementation_options'] = options[:16]
-    job['implementation_options_omitted_count'] = max(0, len(options) - 16)
-    if review_binding is None:
+    job['implementation_options_omitted_count'] = retained.get('implementation_options_omitted_count',0) if retained is not None else max(0, len(options) - 16)
+    if review_binding is None and retained is None:
         job['history']['view']['implementation_options'] = [dict(id=row['id'], label=row['label'].encode()[:80].decode('utf-8',errors='ignore')) for row in options[:2]]
         job['history']['view']['implementation_options_omitted_count'] = max(0,len(options)-2)
         lineage.bounded_brief(job['history']['view'])
-    if purpose is None and not job.get('formal_review') and final_report is None and engineering_repair is None and policy.get('search_policy') is not None:
+    if retained is not None:
+        for field in ('search','portfolio_context','final_coverage_mechanisms','selection','candidate_nomination_policy','candidate_nomination_mechanisms'):
+            if field in retained:job[field]=retained[field]
+    elif purpose is None and not job.get('formal_review') and final_report is None and engineering_repair is None and policy.get('search_policy') is not None:
         from . import search
         job['search'] = search.bind(root, step, role, protocol, state=state, unified=True)
     if role=='A' and state is not None and not job.get('formal_review'):
         job['portfolio_context']=job['history']['portfolio_assessment']
         if policy.get('search_policy') is not None:
             job['final_coverage_mechanisms']=[dict(mechanism_ref=ref,label=item['label'],status=item['status']) for ref,item in state['mechanisms'].items()]
-    if role=='A' and purpose is None and review_binding is None and final_report is None and policy.get('selection_policy') is not None:
+    if retained is None and role=='A' and purpose is None and review_binding is None and final_report is None and policy.get('selection_policy') is not None:
         from . import shortlist
         job['selection']=shortlist.bind_normal(root,job)
-    if role=='W' and job.get('search') is not None and policy.get('candidate_nomination_policy') is not None:
+    if retained is None and role=='W' and job.get('search') is not None and policy.get('candidate_nomination_policy') is not None:
         job['candidate_nomination_policy']=policy['candidate_nomination_policy']
         if (job['search'].get('focus') or {}).get('action')=='screen':
             job['candidate_nomination_mechanisms']=[dict(mechanism_ref=ref,status=item['status'])
@@ -1250,8 +1204,10 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         else:
             job['candidate_nomination_mechanisms']=[dict(mechanism_ref=row['mechanism_ref'],status=row['status'])
                 for row in (job['search'].get('breadth') or {}).get('mechanisms',[])]
-    if retained is None or 'scientific_response_fields' in retained:
+    if retained is None:
         job['scientific_response_fields']=response_fields(job,policy)
+    elif 'scientific_response_fields' in retained:
+        job['scientific_response_fields']=retained['scientific_response_fields']
     if retained is not None:
         if 'scientific_work_unit' in retained:job['scientific_work_unit']=retained['scientific_work_unit']
     elif role=='W':
@@ -1302,8 +1258,8 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         if statements:
             job['user_guidance'] = statements
         for path, value in ((root / 'jobs' / f'{step:03d}.json', job),
-                            (work / 'science-task.json', science_view(job, root)),
-                            (host_record(work) / 'science-result.schema.json', result_schema(role, protocol, 'selection' in job,**response_options(job)))):
+                            (work / 'science-task.json', read(regular(work / 'science-task.json')) if retained is not None else science_view(job, root)),
+                            (host_record(work) / 'science-result.schema.json', read(regular(host_record(work) / 'science-result.schema.json')) if retained is not None else result_schema(role, protocol, 'selection' in job,**response_options(job)))):
             if path.exists():
                 if read(regular(path)) != value:
                     raise ValueError('Frozen scientific task changed')
@@ -1403,8 +1359,6 @@ def validate_original(source, *, _active=None, _memo=None, controls_only=False):
             or (seal.get('completed_output_acceptance') is not None and accepted is None)):
         raise ValueError('Source terminal lost its exact original task/output')
     payload = read(result) if controls_only else _sealed_science(job,seal,raw,result,source=source)
-    if job.get('scientific_response_fields') != response_fields(job, policy):
-        raise ValueError('Source response differs from its exact original settings')
     if not controls_only:
         for ref in [*job.get('global_materials', []), *job.get('direct_refs', []),
                     *job.get('direct_materials', []), *job.get('history', {}).get('files', []),
@@ -1422,6 +1376,9 @@ def validate_original(source, *, _active=None, _memo=None, controls_only=False):
             raise ValueError('Source direct original changed its exact producer')
     qualification.validate_original(source,job,seal,controls_only=controls_only)
     history.validate_observation_original(source,job,seal,controls_only=controls_only)
+    if ((seal.get('control_outcome') or {}).get('worker_delivery') or {}).get('facts_ref') is not None:
+        from . import worker_delivery
+        worker_delivery.validate_original(Path(source.storage_root),source,job,seal,controls_only=controls_only)
     execution_inputs.validate_original(source,job,seal,controls_only=controls_only)
     formal_review.validate_original(source,job,seal,payload,controls_only=controls_only)
     if not controls_only:
@@ -1461,19 +1418,22 @@ def validate(work: Path):
         raise ValueError('Completed-output acceptance seal identity changed')
     if (seal['job_ref'] != record_ref(job_path) or intent['task_ref'] != record_ref(job_path)
             or {key:seal['raw_ref'][key] for key in ('path','size_bytes')} != file_ref(raw) or seal['result_ref'] != file_ref(result)
-            or native_raw_ref != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}
-            or read(regular(work / 'science-task.json')) != science_view(job, root)):
+            or native_raw_ref != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}):
         raise ValueError('Scientific node identity changed')
     if (conclusion.exists() or conclusion.is_symlink()) and regular(conclusion).stat().st_size!=seal['raw_ref']['size_bytes']:
         raise ValueError('Saved scientific conclusion projection changed')
     from . import candidate_refs
     payload = _sealed_science(job, seal, raw, result, root=root)
-    if seal.get('control_outcome') is not None:
-        from . import semantic
-        if seal['control_outcome'] != semantic.outcome(root, job, payload):
-            raise ValueError('Control outcome differs from its original scientific attempt')
-    else:
+    # The sealed interpretation belongs to this exact accepted attempt. New
+    # optional-field readers cannot reinterpret already sealed scientific work.
+    if not isinstance(seal.get('control_outcome'),dict):
         raise ValueError('Current scientific attempt has no control outcome')
+    delivery_facts=(seal['control_outcome'].get('worker_delivery') or {}).get('facts_ref')
+    if delivery_facts is not None:
+        from . import worker_delivery
+        if delivery_facts!=record_ref(regular(native_record/worker_delivery.FACT_NAME)):
+            raise ValueError('Final W scientific evidence differs from its seal')
+        worker_delivery.validate(root,job,native_record,source_attempt=intent.get('attempt',0))
     from . import correction
     correction.validate_payload(root, job, payload)
     if read(result) != result_projection(job, payload):
@@ -1504,19 +1464,35 @@ def validate(work: Path):
     return read(result)
 
 
+def _validate_task_view(root, work, job):
+    """Check frozen scientific input bindings, not a later prompt generator."""
+    view=read(regular(work/'science-task.json'))
+    if job.get('formal_review'):
+        if view!=science_view(job,root):raise ValueError('Frozen formal review task changed')
+        return
+    expected_global=dict(objective='inputs/global/objective.md',
+        updates=[row['path'] for row in job['global_materials'][1:]])
+    parents=view.get('parents',[]) if isinstance(view,dict) else None
+    if (not isinstance(view,dict) or view.get('role')!=job['role']
+            or view.get('global')!=expected_global or view.get('public_root')!=job['public_root']
+            or not isinstance(parents,list) or any(not isinstance(row,dict) for row in parents)):
+        raise ValueError('Frozen scientific task changed its input binding')
+    expected={row['path'] for row in job['direct_refs']}
+    actual=[row.get('conclusion') for row in parents]
+    if (any(not isinstance(path,str) for path in actual) or len(actual)!=len(expected)
+            or set(actual)!=expected):
+        raise ValueError('Frozen scientific task changed its exact parents')
+
+
 def _validate_inputs(root, work, job):
     if job.get('fork_source') is not None:
         from . import fork_runtime, qualification, formal_review, engineering, execution_authority
         fork_runtime.validate_selected_job(root, work, job)
-        if job.get('scientific_response_fields') != response_fields(job, settings(root, job)):
-            raise ValueError('Frozen scientific response consumers changed')
         qualification.validate_inputs(root, job)
         execution_authority.validate_job(root, job)
         formal_review.validate_job(root, job)
         engineering.validate_job(root, job)
         return
-    if 'scientific_response_fields' in job and job['scientific_response_fields']!=response_fields(job,settings(root, job)):
-        raise ValueError('Frozen scientific response consumers changed')
     from . import budget
     report = budget.validate_final_report_inputs(root, job)
     report_steps = ([*budget.scientific_steps(root,report['source_cutoff']+1), *sorted(int(Path(ref['path']).parts[2])
@@ -1555,8 +1531,7 @@ def _validate_inputs(root, work, job):
             raise ValueError('Scientific handoff source authority changed')
         if job.get('role_guidance') and job.get('native_role_instruction') != job['role_guidance']:
             raise ValueError('Native role instruction differs from its frozen scientific guidance')
-    if read(regular(work / 'science-task.json')) != science_view(job, root):
-        raise ValueError('Frozen scientific task changed')
+    _validate_task_view(root,work,job)
     if job['global_materials'] != global_materials(root):
         raise ValueError('Bound global context changed')
     policy = settings(root, job)

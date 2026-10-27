@@ -1462,6 +1462,8 @@ def final_a_return(root, job, intent, *, events=None):
         return None
     startup = intent.get('continuation_kind') == 'startup_successor'
     reentry = intent.get('continuation_kind') == 'reentry'
+    format_retry = (intent.get('continuation_kind') == 'automatic_recovery'
+        and (intent.get('automatic_recovery') or {}).get('format_fallback') is True)
     repair = intent.get('continuation_kind') == 'repair' and isinstance(intent.get('output_repair'),dict) and 'work_repair' not in intent
     if startup:
         from . import startup_recovery
@@ -1470,6 +1472,20 @@ def final_a_return(root, job, intent, *, events=None):
     if reentry and accepted is not None:
         # An administrative reattachment completes this same final return.
         # Its historical chain and cumulative consumption are checked below.
+        expected_anchor.update({key:intent['budget_slice'].get(key) for key in
+            ('boot_id','advance_seconds','previous_tokens','previous_seconds')})
+    if format_retry and accepted is not None:
+        from . import continuation, execution
+        number=intent.get('attempt')
+        if type(number) is not int or number < 1:
+            raise ValueError('Final A format fallback changed its exact attempt')
+        first=execution.origin(root,job['step'])
+        prior_paths=[first,*(first/'continuations'/f'{previous:03d}' for previous in range(1,number))]
+        if (intent.get('root_intent_ref')!=contracts.record_ref(contracts.regular(first/'native-intent.json'))
+                or intent.get('previous')!=execution.proof(prior_paths[-1])):
+            raise ValueError('Final A format fallback changed its exact source')
+        continuation.validate_automatic(root,job['step'],intent,prior_record=prior_paths[-1],
+            prior_intents=[contracts.read(contracts.regular(path/'native-intent.json')) for path in prior_paths])
         expected_anchor.update({key:intent['budget_slice'].get(key) for key in
             ('boot_id','advance_seconds','previous_tokens','previous_seconds')})
     if repair and accepted is not None:
@@ -1481,8 +1497,11 @@ def final_a_return(root, job, intent, *, events=None):
         from . import continuation, execution
         first=execution.origin(root,job['step'])
         prior=first if number==1 else first/'continuations'/f'{number-1:03d}'
-        repairs = 1 + sum(contracts.read(contracts.regular(first/'continuations'/f'{previous:03d}'/'native-intent.json'))
-            .get('continuation_kind', 'repair') not in {'fragment','reentry'} for previous in range(1,number))
+        prior_intents=[contracts.read(contracts.regular(first/'continuations'/f'{previous:03d}'/'native-intent.json'))
+            for previous in range(1,number)]
+        repairs = 1 + sum(item.get('continuation_kind', 'repair') not in {'fragment','reentry'}
+            and not (item.get('continuation_kind')=='automatic_recovery'
+                and (item.get('automatic_recovery') or {}).get('format_fallback') is True) for item in prior_intents)
         if repairs > limits.get('max_attempts',0):
             raise ValueError('Final A return has no bounded output repair authorization')
         if (intent.get('root_intent_ref')!=contracts.record_ref(contracts.regular(first/'native-intent.json'))
@@ -1493,8 +1512,8 @@ def final_a_return(root, job, intent, *, events=None):
         # ceilings, task and final-return marker while advancing this call's clock.
         expected_anchor.update({key:intent['budget_slice'].get(key) for key in
             ('boot_id','advance_seconds','previous_tokens','previous_seconds')})
-    if (accepted is None or ('attempt' in intent and not (startup or repair or reentry))
-            or intent.get('continuation_kind') is not None and not (startup or repair or reentry) or intent.get('step') != job['step']
+    if (accepted is None or ('attempt' in intent and not (startup or repair or reentry or format_retry))
+            or intent.get('continuation_kind') is not None and not (startup or repair or reentry or format_retry) or intent.get('step') != job['step']
             or job['role'] != 'A' or job.get('formal_review') is not None
             or intent.get('task_ref') != accepted['anchor']['task_ref']
             or accepted['step'] != job['step']
@@ -1696,7 +1715,11 @@ def _attempt_consumption(root, job, paths, *, automatic_recovery=None, automatic
             automatic = ((automatic_recovery is not None and number == len(paths) - 1)
                          or successor.get('continuation_kind') == 'automatic_recovery')
             from . import native_recovery
-            if not automatic or not native_recovery.recoverable_source(continuation.automatic_source(root, job['step'], path)):
+            negotiation = ((automatic_recovery or {}).get('format_fallback') is True and number == len(paths)-1
+                or (successor.get('automatic_recovery') or {}).get('format_fallback') is True)
+            eligible = (continuation.format_source(root,job['step'],path) is not None if negotiation else
+                automatic and native_recovery.recoverable_source(continuation.automatic_source(root, job['step'], path)))
+            if not automatic or not eligible:
                 raise ValueError('Missing billing has no known original completion')
         # An absent meter contributes no reported tokens to the lower bound;
         # retain its absence and unknown coverage, never publish a zero meter.
@@ -1895,10 +1918,11 @@ def accept_continuation(root, job, paths, *, output_repair=None, automatic_recov
     from .protocol import require_current
     require_current(root,job)
     final=final_a_barrier(root)
+    format_retry = automatic_recovery is not None and automatic_recovery.get('format_fallback') is True
     if final is not None:
         from . import continuation
-        if (output_repair is None or final['step']!=job['step'] or
-                output_repair!=continuation.output_request(root,job['step'],paths[-1])):
+        if (final['step']!=job['step'] or not format_retry and
+                (output_repair is None or output_repair!=continuation.output_request(root,job['step'],paths[-1]))):
             raise NodeBudgetUnavailable('final_a_return_consumed')
     from . import native
     if automatic_recovery is not None:

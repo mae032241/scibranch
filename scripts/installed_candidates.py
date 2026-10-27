@@ -41,7 +41,7 @@ def _copy_runtime_distribution(name: str, destination: Path) -> None:
 
 def _supply_runtime_dependencies(site_packages: Path) -> None:
     for package_name in (
-        "annotated-types", "attrs", "jsonschema",
+        "annotated-types", "attrs", "jsonschema", "packaging",
         "jsonschema-specifications", "pydantic", "pydantic_core",
         "referencing", "rpds-py", "typing-extensions", "typing-inspection",
         "cryptography", "cffi", "pycparser",

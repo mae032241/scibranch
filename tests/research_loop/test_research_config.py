@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import cli, contracts as c, research_config
+from scidiscovery.research_loop import cli, contracts as c, protocol, research_config
 
 
 def declaration(tmp_path, extra='', *, root='instance'):
@@ -37,7 +37,9 @@ def test_project_declaration_roundtrip_preserves_frozen_identity(tmp_path):
     assert parsed['project'] == project
     frozen = {**project, 'base_identity': dict(object_format='sha256', commit='a' * 64)}
     settings = dict(objective='Original task', public_root=str(tmp_path / 'public'),
-        native_launcher_argv=['never-launched'], model='model', project=frozen)
+        native_launcher_argv=['never-launched'], model='model', project=frozen,
+        handoff_protocol=protocol.CURRENT, node_budget_mode='soft', final_a_completion_policy=dict(version=1),
+        max_tokens=1000, max_seconds=120, max_steps=8)
     document = research_config.to_document(tmp_path / 'instance', settings)
     assert document['project'] == project
     assert 'base_identity' not in document['project']
@@ -50,7 +52,9 @@ def test_project_is_immutable_before_operational_revalidation(tmp_path, monkeypa
     frozen = dict(base_root='/exact/base', editable=['src'], scratch=[], outputs=[],
         base_identity=dict(object_format='sha1', commit='a' * 40))
     settings = dict(objective='Original task', public_root=str(tmp_path / 'public'),
-                    native_launcher_argv=['never-launched'], model='model')
+        native_launcher_argv=['never-launched'], model='model',
+        handoff_protocol=protocol.CURRENT, node_budget_mode='soft', final_a_completion_policy=dict(version=1),
+        max_tokens=1000, max_seconds=120, max_steps=8)
     if change != 'add':
         settings['project'] = frozen
     monkeypatch.setattr(c, 'settings', lambda root: settings)

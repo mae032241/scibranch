@@ -121,7 +121,8 @@ def pending_three(root):
 
 
 def mechanism_rows(root, step, view):
-    rows=[];page=view['index']
+    task=c.read(c.workspace(root,step)/'science-task.json')
+    rows=[];page=task['lineage']['indexes']['mechanisms']
     while page:
         path=c.workspace(root,step)/page
         assert path.stat().st_mode & 0o222 == 0
@@ -135,10 +136,8 @@ def test_controller_requires_comparison_without_forced_author_correction(tmp_pat
     job,payload=author(root,7,[1,6])
     record=execution.record(root,7);raw=(record/'science-output.json').read_bytes()
     public=c.science_view(job,root)
-    assessment=public['portfolio_assessment']
-    assert assessment['required_for_completed_w'] is True
-    assert assessment['assessed_w']==[dict(source_step=6,pointer='/scientific_result')]
-    assert payload['portfolio_review'] is not None and 'portfolio_review' in public['final_response']
+    assert 'portfolio_review' not in public['final_response']
+    assert 'final_coverage' not in public['final_response']
     # The compact public brief may omit inline excerpts; its index retains the
     # complete mechanism facts. The advisory reminder does not add a route.
     view=public['lineage']
@@ -284,7 +283,6 @@ def test_many_mechanisms_bounded_default_complete_index_and_page_tamper(tmp_path
     assert len((json.dumps(view,ensure_ascii=False,indent=2)+'\n').encode()) <= history.MAX_BRIEF_BYTES
     assert view['mechanisms']['count']==20
     assert view['mechanisms']['availability']=='available'
-    assert c.science_view(job,root)['portfolio_assessment']['required_for_completed_w'] is False
     # Dense navigation may shed inline excerpts; the public portfolio index
     # still locates exact prefix counts, pending state and authored main line.
     summary_path=c.workspace(root,8)/view['indexes']['portfolio']
@@ -312,7 +310,7 @@ def test_many_mechanisms_bounded_default_complete_index_and_page_tamper(tmp_path
 def test_default_portfolio_preserves_frozen_tasks_without_extra_report_field(tmp_path):
     root = prepare(tmp_path, enabled=False)
     job, _ = author(root, 3, [1, 2], action='wait')
-    assert job['handoff_protocol'] == CURRENT and 'portfolio_review' in c.result_schema('A')['properties']
+    assert job['handoff_protocol'] == CURRENT and 'portfolio_review' not in c.result_schema('A')['properties']
     paths=[root/'settings.json',root/'jobs/003.json',c.workspace(root,3)/'science-task.json',
            c.host_record(c.workspace(root,3))/'science-result.schema.json',c.host_record(c.workspace(root,3))/'result-identity.json']
     original={path:path.read_bytes() for path in paths}
@@ -324,7 +322,7 @@ def test_default_portfolio_preserves_frozen_tasks_without_extra_report_field(tmp
     view=c.science_view(job,root)['lineage']['mechanisms']
     assert view['portfolio']['review_after_cycles'] is None and view['portfolio']['review_reminder'] is False
     assert 'portfolio_review' in job['scientific_response_fields']
-    assert 'portfolio_review' in c.result_schema('A',final_only=True)['properties']
+    assert 'portfolio_review' not in c.result_schema('A',final_only=True)['properties']
     assert len(mechanism_rows(root,3,view))==4
 
 
@@ -349,7 +347,8 @@ def test_screened_alternative_remains_visible_after_local_improvement(tmp_path):
     assert rows[P]['status']=='screened' and rows[P]['accepted_calls']==1
     assert rows[P]['unserved_cycles_if_assessed']==1
     assert rows[P]['disposition']['original'].endswith('/003/scientific-original.json')
-    assert view['portfolio']['review_reminder'] is True
+    portfolio_path = c.science_view(job,root)['lineage']['indexes']['portfolio']
+    assert c.read(c.workspace(root,5)/portfolio_path)['review_reminder'] is True
     state=search.project(root,6)['portfolio']
     assert state['invested']=={P:1,Q:1} and state['deferred'][P]==1
     assert search.project(root,6)['focus']==dict(mechanism_ref=Q,action='improve')
@@ -366,28 +365,21 @@ def test_three_w_mechanical_comparison_tracks_overlap_work_and_authored_final(tm
             assert run(root,config,label,qualified_local=True)['status']=='known_success'
         finish(root,step,'W',parents,mechanism_findings=findings(*labels),preserve_native_intent=True)
     measured(2,[1],('P','Q','R'))
-    review=comparison(action='continue_w',main=P)
-    review.update(discriminating_work=dict(existing_ref=None,mechanism_refs=[Q,R],
-        question='Which unobserved target condition would distinguish the two alternatives?',
-        change_criterion='A contradictory target observation changes the scientific choice.',next_action='extract'),
-        no_work_reason=None,deferral=dict(reason='Synthetic A defers the missing target evidence while refining P.',
-            trigger='P proxy ceases to predict the bounded observation.',revisit='At the next independent A assessment.'))
+    review=dict(main_line=P,reason='P is the current line; Q/R remain viable. The cheapest target evidence is deferred until it becomes available; revisit at the next A.',
+        discriminating_work=dict(mechanism_refs=[Q,R],question='Which target condition distinguishes Q/R? A contradictory target observation changes the choice.',next_action='extract'))
     choice=dict(dispositions=[dict(mechanism_ref=ref,status='screened',reason='Synthetic A assesses the retained mechanical observation, without scientific qualification.') for ref in (P,Q,R)],
         next_focus=dict(mechanism_ref=P,action='improve'))
     finish(root,3,'A',[1,2],action='continue_w',search_choice=choice,portfolio_review=review)
     measured(4,[1,3],('P',))
-    review2=comparison(action='continue_w',main=P)
-    review2.update(discriminating_work=dict(existing_ref='A003-D001'),no_work_reason=None,
-        work_updates=[dict(work_ref='A003-D001',action='defer',reason='Synthetic A retains this unresolved evidence question.',
-            trigger='A new target observation becomes available.',revisit='At the final A assessment.',evidence=[])])
+    review2=dict(discriminating_work=None,main_line=P,reason='Keep P while Q/R remain unresolved; their cheapest target evidence is still unavailable.',
+        work_updates=[dict(work_ref='A003-D001',action='defer',reason='Await a new target observation; revisit at the final A assessment.')])
     finish(root,5,'A',[1,4],action='continue_w',search_choice=dict(dispositions=[],next_focus=dict(mechanism_ref=P,action='improve')),
         portfolio_review=review2)
     before=search.project(root,6)
     assert len(before['portfolio']['seen_w'])==2 and before['order']['discriminating_work'][0]['status']=='deferred'
     measured(6,[1,5],('P',))
-    final=copy.deepcopy(review2);final['decision']='close';final['reason']='Synthetic A stops within the declared finite scope.'
-    final['work_updates'][0].update(reason='This target evidence question remains unanswered at the bounded stop.',
-        trigger='A later explicitly authorized study supplies the missing input.',revisit='Only in a new authorized study.')
+    final=copy.deepcopy(review2);final['reason']='Synthetic A stops within the finite scope; Q/R remain viable without the missing target input.'
+    final['work_updates'][0]['reason']='The target question remains unanswered; revisit only in an authorized study with the missing input.'
     coverage=[dict(mechanism_ref=ref,status='deep' if ref==P else 'screened_pending',
         reason='Synthetic authored depth for the bounded fixture; no model or scientific effectiveness qualification.',
         science_refs=[dict(source_step=6 if ref==P else 2,pointer='/scientific_result')],
@@ -400,3 +392,21 @@ def test_three_w_mechanical_comparison_tracks_overlap_work_and_authored_final(tm
     saved=c.read(root/'host-history/overview.json')['portfolio_metrics']
     assert saved['source_step']==7 and saved['portfolio']['completed_cycle_count']==3
     assert c.validate(c.workspace(root,7))['final_coverage']==coverage
+
+
+def test_compact_work_executes_competitor_and_keeps_exact_response_before_withdrawal(tmp_path):
+    root=prepare(tmp_path)
+    review=dict(main_line=P,reason='P remains the main explanation; Q is the strongest viable competitor. The cheapest Q observation is now feasible.',
+        discriminating_work=dict(mechanism_refs=[Q],question='Does the exact Q observation contradict P under the target condition?',next_action='continue_w'))
+    author(root,3,[1,2],branch=Q,mode='improve',portfolio=review)
+    worker(root,4,[1,2,3],observed=Q)
+    pending=search.project(root,5)['order']['discriminating_work']
+    assert len(pending)==1 and pending[0]['source_a']==3 and pending[0]['status']=='executed'
+    assert pending[0]['executions']==[dict(source_a=3,response=dict(source_step=4,role='W',pointer='/scientific_result'))]
+    ending=dict(discriminating_work=None,main_line=P,reason='The exact Q response informs this bounded stop; target generalization is still unanswered.',
+        work_updates=[dict(work_ref='A003-D001',action='withdraw',reason='W4 answered the declared bounded comparison; a new study needs fresh target evidence.')])
+    author(root,5,[1,4],action='finish',portfolio=ending)
+    state=search.project(root,6)
+    assert state['order']['discriminating_work'][0]['status']=='withdrawn'
+    assert state['order']['discriminating_work'][0]['executions']==pending[0]['executions']
+    assert search.portfolio_view(state,2)['mainline_streak']==2

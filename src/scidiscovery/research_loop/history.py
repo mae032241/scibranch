@@ -1488,6 +1488,13 @@ def _validate_proof(root, proof, *, context=None):
     if proof.get('snapshot')!=expected:raise ObserverIntegrityError('Archived observer original changed')
     from . import experiments
     from . import originals
+    if 'origin_identity' in proof:
+        source=originals.for_origin(root,proof['origin_identity'])
+        if source.inherited:
+            # The typed resolver checks copied-control custody and preserves
+            # original scientific-file identity; copied control inodes differ.
+            originals.resolve_ref(source,dict(proof,path=expected),context=context)
+            return
     path = originals.resolve_root_ref(root, dict(proof, path=expected)) if (Path(root) / originals.MANIFEST).exists() else root / expected
     actual=experiments.proof(path,context=context)
     if any(actual[key]!=proof[key] for key in ('size_bytes','file_stat') if key in proof):

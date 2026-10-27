@@ -12,8 +12,8 @@ not contact a model, create a research instance or start services.
 Install as the current user, without `sudo` or root. Python 3.12 is recommended;
 the package supports Python 3.10+. Provide a Python with pip, the runtime dependencies
 in [pyproject.toml](../pyproject.toml) (`cryptography>=42,<47`, `jsonschema>=4,<5`,
-`pydantic>=2,<3`, and `tomli>=2` on Python 3.10), and the installer/build tools
-`setuptools>=68`, `packaging` and `wheel` beforehand.
+`pydantic>=2,<3`, `packaging>=23,<27`, and `tomli>=2` on Python 3.10), and the
+installer/build tools `setuptools>=68` and `wheel` beforehand.
 
 For example, prepare one reusable user environment once. This preparation may
 download dependencies; use your prepared local packages if operating offline:
@@ -22,7 +22,7 @@ download dependencies; use your prepared local packages if operating offline:
 python3.12 -m venv "$HOME/.local/share/scidiscovery-python"
 "$HOME/.local/share/scidiscovery-python/bin/python" -m pip install \
   'cryptography>=42,<47' 'jsonschema>=4,<5' 'pydantic>=2,<3' \
-  'setuptools>=68' packaging wheel
+  'packaging>=23,<27' 'setuptools>=68' wheel
 ```
 
 Then, from the source checkout, install the application offline. The optional Cov
@@ -52,6 +52,13 @@ instance's scientific state or usage. Clean-package installation checks use an
 isolated installation to validate distribution contents, independently of this
 scientific runtime policy.
 
+The control Python selected by `SCID_PYTHON` and the scientific Python in an
+executor's `run_argv[0]` may be different existing environments. Installing a
+plugin checks that plugin's declared application dependencies; it does not supply
+an arbitrary task's numerical or ML libraries. Declare those libraries with
+[`python_requirements`](RESEARCH_CONFIGURATION.md#scientific-python-dependencies--科学-python-依赖)
+and run `config-check` before preparing the research instance.
+
 The defaults are `SCID_INSTALL_ROOT=$HOME/.local/share/scidiscovery` (containing
 `site/` and `skills/`), `SCID_BIN_ROOT=$HOME/.local/bin`, and
 `SCID_BACKUP_ROOT=$HOME/.local/state/scidiscovery/install`. Installation creates
@@ -63,9 +70,13 @@ The core supplies `local_execution:command` without installing Cov. Select
 `scidiscovery-cov-execution` adapter and its `cov_execution:experiment` entry point.
 Its observer, receipt and delivery providers ship in the same package.
 `SCID_PLUGINS=tcad_artifact` selects TCAD; it no longer depends on a curve plugin.
-The installer checks every active core dependency version and marker, including
-cryptography and Python 3.10 tomli, before publication; it imports the browser/UI
-entry points during package probing. It fetches no external dependencies.
+The installer checks active runtime and build dependency versions and markers for
+the core and selected plugins using `SCID_PYTHON` before publication. Requirements
+between packages being installed use their source versions; external requirements
+use that interpreter's installed metadata. Active extras and direct URL dependencies
+are rejected because this offline check cannot validate their closure or origin.
+Package probing also imports the browser/UI entry points. No external dependencies
+are fetched.
 All bundled Skills are copied as ordinary files to `$SCID_INSTALL_ROOT/skills`,
 independently of pip's temporary build tree. Skill discovery locates this directory
 from the actual CLI installation prefix; neither `[skills].root` nor
@@ -78,13 +89,27 @@ licenses or real solvers. See the [transport contract](tcad_transport_contract.m
 for the independently deployed remote runner.
 
 Installation publishes only `scid-research` and `scid-experiment`. It creates no
-instance, budget, credential, platform profile or service. Existing sites or either
-command wrapper cause refusal; this is not an in-place upgrade tool.
-`deploy/reinstall.sh` calls the same fresh-install entry point without sudo and
-does not bypass the fresh-prefix rule.
-For an implementation upgrade, install to a new `SCID_INSTALL_ROOT` and a separate
-`SCID_BIN_ROOT`, validate that deployment, stop or reconcile old writers,
-then explicitly switch command paths. Retain the old prefix for rollback.
+instance, budget, credential, platform profile or service. Fresh `install` refuses
+existing package roots or command wrappers. To update the existing installation,
+stop its research controllers, Workers and UI processes, then use `reinstall`
+with the same Python, installation paths and explicit plugin selection:
+
+```sh
+SCID_PYTHON="$HOME/.local/share/scidiscovery-python/bin/python" \
+  SCID_PLUGINS=cov_execution bash deploy/install.sh reinstall
+```
+
+`bash deploy/reinstall.sh` defaults to this same update mode; its explicit
+`install` argument still requests a fresh install. Reinstall builds and validates
+temporary package and Skill stages before replacing the original `site/`,
+`skills/` and matching command wrappers. Publication failures restore the old
+directories and wrappers. Success removes temporary old package trees; the
+existing installation transaction retains small wrapper evidence. No new permanent
+installation prefix is required. Unknown files beside the managed trees, scientific
+Python environments and research instances are preserved. An incomplete deployment,
+symlink target or command owned by another configuration is refused.
+The installer does not discover or stop live writers; stopping them is an operator
+step, not a guarantee supplied by the deployment lock.
 Scientific configuration, original identities and frozen Skill selections and
 source bindings remain instance-owned; Skill assets remain in the installation.
 Changing shared implementation code is a separate upgrade and provides no
@@ -92,8 +117,8 @@ compatibility guarantee for old protocols.
 
 `bash deploy/install.sh status` checks wrapper ownership. `bash deploy/install.sh uninstall`
 removes only the two matching wrappers, retaining code and instance originals.
-Publication failure rolls back new wrappers using the existing transaction; foreign
-command owners are preserved and reported. These commands do not stop or modify
+Publication failure uses the existing transaction; foreign command owners are
+preserved and reported. These commands do not stop or modify
 leftover host services or delete databases and historical results.
 
 See the [CLI guide](ROOTLESS_CLI.zh-CN.md) for research, UI, approval and recovery.

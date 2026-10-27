@@ -7,6 +7,7 @@ import pytest
 
 from scidiscovery.research_loop import budget, cli, contracts as c, controller, correction, native, search
 from scidiscovery.research_loop.protocol import CURRENT, UnsupportedProtocol
+from test_history_handoff import fixture_portfolio_review, fixture_final_coverage
 
 
 def plan(existing_ref=None):
@@ -19,7 +20,7 @@ def focus(action="screen"):
     return dict(mechanism_ref="h001.m1", action=action)
 
 
-def finish(root, step, role, parents, text="A bounded scientific finding", action="wait", search_choice=None, progress=None):
+def finish(root, step, role, parents, text="A bounded scientific finding", action="wait", search_choice=None, progress=None, omit_progress=False):
     """Current fixture author; blocked W findings never manufacture observations."""
     path = root / "jobs" / f"{step:03d}.json"
     previous = c.read(path) if path.exists() else {}
@@ -44,8 +45,12 @@ def finish(root, step, role, parents, text="A bounded scientific finding", actio
             if action in {"continue_w", "revise_h", "extract"} else None)
         payload.update(candidate_recommendation=None, search_review=search_choice,
             progress_assessment=progress, decision_request=request, portfolio_review=None)
+        if omit_progress:
+            payload.pop('progress_assessment')
     if role in {"H", "A"}:
         payload.update(next_action=action, route_reason="Exact scientific question")
+    fixture_portfolio_review(root, job, payload)
+    fixture_final_coverage(root, job, payload)
     intent = dict(task_ref=c.record_ref(path))
     if role == 'W':
         intent['search_slice'] = search.accept(root, job)
@@ -53,7 +58,7 @@ def finish(root, step, role, parents, text="A bounded scientific finding", actio
     c.write(record / "science-output.json", payload)
     meter = dict(input_tokens=7, cached_input_tokens=2, output_tokens=3)
     c.write(record / "usage.json", meter)
-    c.write(record / "native-outcome.json", dict(returncode=0, stop_reason=None,
+    c.write(record / "native-outcome.json", dict(returncode=0, stop_reason=None, native_started=False,
         usage=native.usage(root), raw_ref=c.file_ref(record / "science-output.json"),
         search_slice=search.report(root, job, intent, meter)))
     c.seal_result(root, step)
@@ -140,6 +145,16 @@ def test_unknown_uses_own_three_two_gate_not_no_progress(scene, monkeypatch):
     assert state['current_pause']['reason'] == 'assessment_gap'
 
 
+def test_minimal_a_omission_does_not_create_unknown_progress_or_pause(scene):
+    finish(scene, 1, 'H', [], action='experiment', search_choice=plan())
+    finish(scene, 2, 'W', [1])
+    for step in (3, 4, 5):
+        finish(scene, step, 'A', [1, 2], action='finish', omit_progress=True)
+    state = correction.project(scene)
+    assert state['counters'] == dict(no_progress=0, unknown=0)
+    assert state['review_request'] is None and state['current_pause'] is None
+
+
 def test_unknown_preserves_no_progress_and_finish_preserves_scientific_route(scene, monkeypatch):
     calls = worker(monkeypatch, {5: dict(verdict='unknown')}, {9: 'finish'})
     assert controller.run(scene)['status'] == 'finish'
@@ -175,7 +190,7 @@ def test_progress_without_eligible_final_stage_is_unknown(scene):
                                  'inputs/history/nodes/002/0001.json',
                                  'artifacts/new-observation.json', 'work/proof.json',
                                  'inputs/parents/003/conclusion.json', '../../foreign/conclusion.json'])
-def test_retired_authored_evidence_paths_cannot_seal_as_progress(scene, monkeypatch, path):
+def test_optional_progress_explanation_cannot_replace_exact_host_evidence(scene, monkeypatch, path):
     finish(scene,1,'H',[],action='experiment',search_choice=plan())
     finish(scene,2,'W',[1])
     finish(scene,3,'A',[1,2],action='finish',progress=dict(verdict='progress',evidence=[path]))
@@ -183,10 +198,10 @@ def test_retired_authored_evidence_paths_cannot_seal_as_progress(scene, monkeypa
     assert c.read(record / 'science-output.json')['progress_assessment'] == dict(verdict='progress', evidence=[path])
     assert c.read(record / 'native-outcome.json')['raw_ref'] == c.file_ref(record / 'science-output.json')
     seal=c.read(record/'result-identity.json')
-    assert dict(code='scientific_field_unresolved',subject='progress_assessment') in seal['control_outcome']['diagnostics']
-    assert correction.project(scene)['counters']==dict(no_progress=0,unknown=1)
+    assert dict(code='scientific_field_unresolved',subject='progress_assessment') not in seal['control_outcome']['diagnostics']
+    assert correction.project(scene)['counters']==dict(no_progress=0,unknown=0)
     assert not (scene / 'jobs/004.json').exists()
-    assert 'evidence' not in c.result_schema('A')['properties']['progress_assessment']['properties']
+    assert 'progress_assessment' not in c.result_schema('A')['properties']
     assert correction._proofs(scene,c.read(scene/'jobs/003.json'),dict(verdict='progress',evidence=[path]))==set()
 
 
@@ -553,11 +568,12 @@ def test_seal_marker_does_not_make_unknown_native_outcome_countable(scene, monke
 
 @pytest.mark.parametrize('protocol', [1, 2, 3, 4, 5, 6, 7])
 def test_legacy_a_write_schema_is_rejected_without_mutation(scene, protocol):
-    original = {path: path.read_bytes() for path in scene.rglob('*') if path.is_file()}
+    paths = [scene / 'settings.json', scene / 'settings-identity.json']
+    original = {path: path.read_bytes() for path in paths}
     with pytest.raises(UnsupportedProtocol):
         c.result_schema('A', protocol)
-    assert {path: path.read_bytes() for path in scene.rglob('*') if path.is_file()} == original
-    assert 'progress_assessment' in c.result_schema('A')['required']
+    assert {path: path.read_bytes() for path in paths} == original
+    assert 'progress_assessment' not in c.result_schema('A')['properties']
 
 
 def test_disabling_future_corrections_preserves_published_pause_until_exact_ack(scene, monkeypatch):

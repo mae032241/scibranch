@@ -62,37 +62,35 @@ def rewrite(record,payload):
     c.write(record/'native-outcome.json',dict(outcome,raw_ref=c.file_ref(record/'science-output.json')))
 
 
-@pytest.mark.parametrize('bad',['missing','null','malformed','blank','main','ref','action','focus'])
-@pytest.mark.parametrize('search_value',['valid','null','malformed'])
-def test_real_seal_rejects_raw_comparison_before_publication(tmp_path,bad,search_value):
-    root=prepared(tmp_path);review=comparison()
-    if bad=='null':review=None
-    elif bad=='malformed':review={'main_line':MAIN}
-    elif bad=='blank':review['reason']=' \t\n'
-    elif bad=='main':review['main_line']='h999.m1'
-    elif bad=='ref':review['competitor']['evidence'][0]['source_step']=3
-    elif bad=='action':review['decision']='continue'
-    elif bad=='focus':review=comparison(action='continue_w')
-    job,payload,record=raw_author(root,review=review,action='continue_w' if bad=='focus' else 'finish')
-    if bad=='missing':payload.pop('portfolio_review')
-    if search_value=='null':payload['search_review']=None
-    elif search_value=='malformed':payload['search_review']={'dispositions':'bad'}
-    rewrite(record,payload)
-    with pytest.raises(OutputRepairRequired,match='portfolio_review'):
-        c.seal_result(root,3)
-    assert not (record/'result-identity.json').exists()
-    assert not (record/'result.json').exists()
-    assert not (root/'host-history/nodes/003.json').exists()
-
-
-def test_single_line_can_honestly_declare_no_viable_competitor_or_work(tmp_path):
+@pytest.mark.parametrize('review',[None,{},'A concise comparison',{'main_line':MAIN,'reason':'  '},
+    {'main_line':'h999.m1','reason':'An unknown route'}])
+def test_substantive_completed_worker_review_still_has_a_real_small_gate(tmp_path,review):
     root=prepared(tmp_path)
-    review=comparison();review.update(competitor=None,no_competitor_reason='No feasible competing explanation under current inputs.')
-    job,payload,record=raw_author(root,review=review)
-    c.seal_result(root,3)
+    _,_,record=raw_author(root,review=review)
+    with pytest.raises(OutputRepairRequired,match='portfolio_review'):c.seal_result(root,3)
+    assert not (record/'result-identity.json').exists()
+
+
+def test_compact_comparison_and_three_key_final_coverage_preserve_breadth(tmp_path):
+    root=prepared(tmp_path)
+    review=dict(discriminating_work=None,main_line=MAIN,reason='The competitor has no decisive target evidence; its cheapest test is unavailable. Stop with this gap, revisiting when the target input arrives.')
+    _,payload,record=raw_author(root,review=review)
+    payload['final_coverage']=[dict(mechanism_ref=ref,status='unexplored',reason='No target evidence establishes this route; the target response remains unanswered.') for ref in (MAIN,OTHER)]
+    rewrite(record,payload);c.seal_result(root,3)
     assert c.validate(c.workspace(root,3))['portfolio_review']==review
-    assert (record/'result-identity.json').exists()
-    assert search.project(root,4)['order']['discriminating_work']==[]
+    state=search.project(root,4)
+    assert state['order']['discriminating_work']==[]
+    assert state['portfolio']['mainline_reviews'][0]['main_line']==MAIN
+    assert len(state['portfolio']['seen_w'])==1
+
+
+def test_missing_final_mechanism_cannot_be_published_as_complete_coverage(tmp_path):
+    root=prepared(tmp_path)
+    _,payload,record=raw_author(root,review=dict(discriminating_work=None,main_line=MAIN,reason='The second route remains unresolved at this bounded stop.'))
+    payload['final_coverage']=[dict(mechanism_ref=MAIN,status='unexplored',reason='Target performance remains unmeasured.')]
+    rewrite(record,payload)
+    with pytest.raises(OutputRepairRequired,match='final_coverage'):c.seal_result(root,3)
+    assert not (record/'result-identity.json').exists()
 
 
 @pytest.mark.parametrize('pointer',['/role','/direct_refs/0/path','/implementation_selection','/control_outcome','/scientific_result/missing','/summary/~2'])
@@ -104,38 +102,51 @@ def test_science_reference_cannot_access_control_or_invalid_pointer(tmp_path,poi
 
 
 @pytest.mark.parametrize('boundary',['wait','no_search','no_completed_w'])
-def test_legitimate_exemptions_allow_null_without_inventing_judgment(tmp_path,boundary):
+def test_no_duplicate_comparison_declaration_is_required(tmp_path,boundary):
     root=prepared(tmp_path,search_enabled=boundary!='no_search',completed=boundary!='no_completed_w')
     step=2 if boundary=='no_completed_w' else 3
-    job,_,record=raw_author(root,step,parents=(1,) if step==2 else (1,2),
+    _,payload,record=raw_author(root,step,parents=(1,) if step==2 else (1,2),
         action='wait' if boundary=='wait' else 'finish')
+    payload.pop('portfolio_review');rewrite(record,payload)
     c.seal_result(root,step)
-    assert c.read(record/'science-output.json')['portfolio_review'] is None
+    assert (record/'result-identity.json').exists()
 
 
-@pytest.mark.parametrize('action',['audit','extract','formal_review'])
-def test_intermediate_action_is_not_a_comparison_exemption(tmp_path,action):
-    root=prepared(tmp_path);job,payload,_=raw_author(root,action=action)
-    # The ordinary A request is distinct from an actual independent review job.
-    with pytest.raises(OutputRepairRequired):
-        search.require_portfolio_review(root,job,payload,interpretation=dict(focus=None))
+def test_active_work_updates_are_small_but_each_remains_explicit():
+    context=dict(applicable=True,mechanisms={MAIN:{},OTHER:{}},final=False,
+        discriminating_work=[dict(work_ref='A003-D001',status='deferred',mechanism_refs=[OTHER],next_action='continue_w')])
+    job=dict(role='A');payload=dict(next_action='continue_w',portfolio_review=dict(discriminating_work=None,main_line=MAIN,
+        reason='Keep the main line while testing its viable competitor.',
+        work_updates=[dict(work_ref='A003-D001',action='execute',reason='The discriminating target input is now available.')]))
+    # A main line may differ from the next exact discriminating W focus.
+    assert search.require_portfolio_review(None,job,payload,context=context,
+        interpretation=dict(focus=dict(mechanism_ref=OTHER,action='improve')))==payload['portfolio_review']
+    payload['portfolio_review'].pop('work_updates')
+    with pytest.raises(OutputRepairRequired):search.require_portfolio_review(None,job,payload,context=context)
 
 
-def test_nullable_scientific_field_cannot_silently_erase_required_comparison(tmp_path):
-    root=prepared(tmp_path);job,payload,record=raw_author(root,review={'reason':'incomplete'})
-    assert c.scientific_field(job,payload,'portfolio_review') is None
-    assert c.science_payload(record/'science-output.json','A',**c.response_options(job))['portfolio_review']==payload['portfolio_review']
-    with pytest.raises(OutputRepairRequired):c.seal_result(root,3)
+@pytest.mark.parametrize('action',['defer','withdraw'])
+def test_work_reason_is_free_text_without_null_slots_or_deep_evidence_table(action):
+    context=dict(applicable=True,mechanisms={MAIN:{}},final=False,
+        discriminating_work=[dict(work_ref='A003-D001',status='deferred',mechanism_refs=[MAIN],next_action='extract')])
+    payload=dict(next_action='finish',portfolio_review=dict(discriminating_work=None,main_line=MAIN,reason='Bounded scientific comparison and unmet conditions.',
+        work_updates=[dict(work_ref='A003-D001',action=action,reason='Exact retained W evidence changes feasibility; revisit only when missing conditions are supplied.')]))
+    search.require_portfolio_review(None,dict(role='A'),payload,context=context)
 
 
-def test_final_context_only_uses_exact_pending_or_direct_w(tmp_path):
+def test_completed_worker_review_must_explicitly_declare_no_new_work_or_a_real_work(tmp_path):
     root=prepared(tmp_path)
-    _,_,record=raw_author(root,review=comparison());c.seal_result(root,3)
-    job=c.build_job(root,4,'A',[1,3])
-    final=dict(job,final_report=dict(source_cutoff=3),search=None)
-    assert not search.assessment_context(root,final)['applicable']
-    # Context-level identity is exercised against the original task inputs,
-    # whose source W remains assessable despite the completed-cycle de-dup set.
-    original=c.read(root/'jobs/003.json')
-    context=search.assessment_context(root,dict(original,final_report=dict(source_cutoff=2),search=None))
-    assert context['applicable'] and [row['step'] for row in context['completed_w']]==[2]
+    _,payload,record=raw_author(root,review=dict(main_line=MAIN,reason='No feasible additional comparison exists under the missing target input.'))
+    with pytest.raises(OutputRepairRequired,match='discriminating_work'):c.seal_result(root,3)
+    assert not (record/'result-identity.json').exists()
+    payload['portfolio_review']['discriminating_work']=None
+    rewrite(record,payload);c.seal_result(root,3)
+    assert c.validate(c.workspace(root,3))['portfolio_review']['discriminating_work'] is None
+
+
+def test_minimal_new_discriminating_work_is_accepted_without_extra_null_fields():
+    context=dict(applicable=True,mechanisms={MAIN:{},OTHER:{}},final=False,discriminating_work=[])
+    work=dict(mechanism_refs=[OTHER],question='Which target observation would distinguish the competitor? Revisit when the missing target input arrives.',next_action='extract')
+    payload=dict(next_action='continue_w',portfolio_review=dict(main_line=MAIN,
+        reason='Keep the current main line; defer the cheapest competitor test until its target input arrives.',discriminating_work=work))
+    assert search.require_portfolio_review(None,dict(role='A'),payload,context=context)==payload['portfolio_review']

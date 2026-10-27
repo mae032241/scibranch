@@ -21,7 +21,88 @@ from . import configuration_updates
 from . import budget as control_budget, execution, runtime, search, checkpoint, profiles, backends
 from .output_repair import OutputRepairRequired
 from .contracts import (ACTIONS, actions, ROLE_INSTRUCTIONS, record_ref, file_ref, host_record, read,
-                        seal_result, workspace, write)
+                        seal_result, workspace, write, NATIVE_TASK_INSTRUCTION)
+
+
+RESUME_INSTRUCTION = 'Resume this exact task within original scope/permissions/budget; never replay unknown calls.'
+OUTPUT_REPAIR_INSTRUCTION = 'Fix final JSON only; keep results, no rerun/resubmit. Diagnosis: '
+WORK_REPAIR_INSTRUCTION = 'Complete missing assigned work under original authorization; reuse exact calls/results, never resubmit. Report obstacles/limits. Diagnosis: '
+FRAGMENT_INSTRUCTION = 'Read work/science-resume.json; continue per stage_response.'
+
+
+def render_scientific_request(job, task, intent, *, backend_name, instruction_transport,
+        budget_status=None, remaining=None, execution_interface=None, managed_command=None,
+        output_only_wake=False, author=None, final_return=False, startup=False):
+    """Pure rendering of the complete request; no later response-format appends."""
+    from . import contracts as c
+    formal=bool(job.get('formal_review'))
+    schema=c.result_schema(job['role'],job.get('handoff_protocol',c.HANDOFF_PROTOCOL),
+        'selection' in job,**c.response_options(job))
+    instruction=job.get('native_role_instruction',ROLE_INSTRUCTIONS[job['role']])
+    if formal:
+        instruction=task['review_instruction']
+        prompt=('Read science-task.json and exact reviewed inputs. Assess evidence independently before requester explanations. '
+            'Do not edit the subject. Return one JSON object with the four final_response verdict/findings fields. '
+            'A pass grants no execution permission; reading is not blinded or isolated.')
+    else:
+        if job['role']=='A':instruction+='\n'+c.AUTHOR_EVIDENCE_GUIDANCE
+        rules=c.response_instructions(job)
+        if all(task.get(key)==value for key,value in rules.items()):
+            format_rule='Task response rules override old formats; extras optional.'
+        else:
+            format_rule=('Current response rules replace older output shapes only; scientific scope stays binding: '
+                +json.dumps(rules,ensure_ascii=False,separators=(',',':')))
+        if backend_name=='codex':
+            properties=schema['properties']
+            text_fields=[name for name,rule in properties.items() if rule.get('type')=='string' and 'enum' not in rule]
+            menu=['/'.join(text_fields)+':text','limitations:text[]']
+            menu.extend(name+':'+ '|'.join(rule['enum']) for name,rule in properties.items() if 'enum' in rule)
+            format_rule+='\n'+'; '.join(menu)
+        # The same developer layer follows the complete frozen scientific literal.
+        instruction+='\n'+format_rule
+        prompt=('Read science-task.json/inputs; honor goal/checks/scope/permissions. JSON object only. '
+            'Originals read-only; edit declared code/ or work/ copies. No control wrappers/hashes. '
+            'work/budget-status.json: unknown!=0; cached input once.')
+        if final_return:
+            prompt+=(' Protected FINAL: conclude now; no new role/audit/experiment. '
+                'Reference token/time/step ceilings do not revoke this accepted return; original call limits, '
+                'permissions and delivery qualification still apply.')
+        else:
+            prompt+=' Soft targets keep accepted work; finite call limits/permissions stand.'
+    if budget_status:prompt+='\n'+json.dumps(budget_status,ensure_ascii=False,separators=(',',':'))
+    if execution_interface is not None and not author and not output_only_wake:
+        prompt+='\nManaged execution: '+json.dumps(dict(command=managed_command,
+            lifecycle=execution_interface['capabilities'],result_protocol=execution_interface['result_protocol']),
+            ensure_ascii=False,separators=(',',':'))
+        prompt+=(' Read capabilities/describe before run; use original IDs, never replay unknowns. '
+            'Pause code/ edits during capture; logs/outputs stay outside code/.')
+    if job['role']=='W' and ('managed_execution_wait' in job or execution_interface is not None or intent.get('execution_wake')):
+        prompt+=' Follow handoff.action: poll the pending original; return on return_control.'
+    if job['role']=='W' and not output_only_wake and not author:
+        prompt+=' engineering_check covers its sample only, not training/audit.'
+    if remaining is not None:
+        prompt+='\n'+json.dumps(remaining,separators=(',',':'))
+        if not intent.get('output_repair') and not intent.get('work_repair'):
+            prompt+='\n'+RESUME_INSTRUCTION
+    if intent.get('output_repair') or intent.get('work_repair'):
+        request=intent.get('work_repair') or intent['output_repair']
+        prompt+='\n'+(WORK_REPAIR_INSTRUCTION if intent.get('work_repair') else OUTPUT_REPAIR_INSTRUCTION)
+        prompt+=json.dumps({key:request[key] for key in ('code','diagnostic')},ensure_ascii=False,separators=(',',':'))
+    if intent.get('execution_wake'):
+        prompt+=' Read work/execution-results.json and original outputs; interpret without rerun/resubmission.'
+        if output_only_wake:prompt+=' Output-only: no experiment/training/fragment/work repair.'
+    if intent.get('continuation_kind')=='fragment':prompt+='\n'+FRAGMENT_INSTRUCTION
+    if author:
+        prompt+=(' Author-only closeout: read '+author['facts']+'. Completed originals only; '
+            'no experiment/training/refinement/submission/replay/backend query/collection. '
+            'Original calls are read-only; stage_intent=review/decision, never continue. '
+            'Assess original goals, evidence and limitations; write only needed artifacts/. ')
+        prompt+=json.dumps(author['limits'],separators=(',',':'))
+    if startup:
+        prompt+=' Single final A successor: deliver an existing authorized candidate or finish with unsupported reason; no wait/audit/new work/correction.'
+    if instruction_transport=='prompt':prompt=instruction+'\n'+prompt
+    return prompt,instruction,schema
+
 
 
 def usage(root: Path, *, budget_events=None):
@@ -298,19 +379,13 @@ def run_native(root: Path, step: int, attempt=0):
     # W statistics reuse this exact node anchor, never a second acceptance clock.
     search_intent = dict(intent, search_slice=intent['budget_slice']) if intent.get('budget_slice') is not None and job.get('search') and job['role'] == 'W' else intent
     pending = record / 'result.pending.json'
-    backend = backends.selected(settings)
+    schema_path = execution.origin(root, step) / 'science-result.schema.json'
+    backend = backends.selected(settings, schema_transport=execution.schema_transport(root, step, attempt))
+    if backend.standard and not job.get('formal_review'):
+        backend = backends.selected(settings, schema_transport='prompt')
     standard_native = backend.standard
     resume_position = None
-    role_instruction = job.get('native_role_instruction', ROLE_INSTRUCTIONS[job['role']])
-    if job['role']=='A' and not job.get('formal_review'):
-        from .contracts import AUTHOR_EVIDENCE_GUIDANCE
-        role_instruction += '\n' + AUTHOR_EVIDENCE_GUIDANCE
-    if job.get('formal_review'):
-        from . import formal_review
-        role_instruction=formal_review.public(root,job)['review']['instruction']
-    schema_path = execution.origin(root, step) / 'science-result.schema.json'
-    args = backend.launch(profile, work, pending, schema_path, role_instruction)
-    prompt_instruction = role_instruction + '\n' if backend.instruction_transport == 'prompt' else ''
+    resume_session=None
     if settings.get('resume_policy') is not None:
         from . import continuation
         continuation.validate_launcher(root, step)
@@ -333,279 +408,59 @@ def run_native(root: Path, step: int, attempt=0):
         with regular(Path(session['path'])).open('rb') as stream:
             header = stream.readline()
         continuation.validate_session_header(header, session['thread_id'], work)
-        args, resume_position = backend.resume(args, profile, work, pending, schema_path, session)
+        resume_session=session
     (work / 'artifacts').mkdir(exist_ok=True)
     (work / 'work').mkdir(exist_ok=True)
     budget = usage(root)
     limits = control_budget.snapshot(root, settings)
-    links_instruction = ('and limitations. Ordinary scientific citations and useful deliverable links are optional; unresolved links '
-              'do not select files or acquire evidence qualification. Do not write handoff markers or mechanical '
-              'evidence/repair paths. implementation_selection is a scientific choice: null keeps the already '
-              'selected inputs, [] clears them, and listed object IDs replace them; do not restate unchanged choices. '
-              if job.get('handoff_protocol', 1) >= 7 else
-              'and Markdown links to the few needed deliverables, such as [comparison](artifacts/comparison.csv); '
-              'the host resolves these links for the next role. ')
-    completion = ("Complete your role's scientific work within the budget, preserving necessary validation. Report findings, uncertainties "
-                  if job.get('handoff_authority_version') == 1 else
-                  'Conclude once you have a decision-relevant scientific contribution. Report findings, uncertainties ')
-    if job.get('scientific_work_unit'):
-        completion=job['scientific_work_unit']+' Report findings, uncertainties '
-    verification = '' if job.get('handoff_authority_version') == 1 else 'Leave further scientific verification requests to A. '
-    prompt = (prompt_instruction + 'Read science-task.json, then the global files and direct '
-              'parent conclusions it names. Read particular parent artifacts only as scientifically needed. '
-              'Use work/ for scratch code, logs, diagnostics and intermediate models; artifacts/ contains only '
-              'necessary deliverables for the next role. Experiments may use experiments/<name>/work for native '
-              'authoring scratch and experiments/<name>/artifacts for managed outputs, with an optional brief '
-              'scientific conclusion.md. Those are directories, not extra role agents. '
-              + completion + links_instruction + verification
-              + 'The controller collects deliverables, records original paths, validates and seals your final response. '
-              'Do not build attachment indexes, manifests, provenance inventories, hash lists, packaging scripts, '
-              'or schema validators. Do not duplicate final responses in files or copy every model for handoff. '
-              'Read configured_delivery and any delivery_requirements in science-task.json. The effect scope is a configured '
-              'capability description, not execution permission, scientific qualification or a promise to complete missing work. '
-              'Historical cross-node delivery uses A next_action=deliver within that adapter scope; native exp submit '
-              'uses declared run paths and does not resolve archived historical originals. '
-              'Scientific checks required by the task remain your work. Return the small scientific JSON described '
-              'by final_response, directly as your final answer. Routing, when needed, uses next_action with a '
-              'separate route_reason. The controller dispatches the next role; functional tools retain their permissions.\n'
-              + json.dumps(dict(
-                  next_action_options=read(execution.origin(root,step) / 'science-result.schema.json')['properties']['next_action']['enum'] if job.get('final_only') else actions(job['role'], job.get('handoff_protocol', 1),
-                      audit_enabled=settings.get('candidate_audit_policy') == {'version': 1},
-                      review_enabled=job.get('formal_review_version')==1),
-                  shared_seconds_remaining=max(0, int(limits['seconds_remaining'])),
-                  shared_observed_tokens_remaining=max(0, limits['max_tokens']-budget.get('accounted_tokens',budget['observed_tokens'])),
-                  metering='Reported input plus output is an observed lower bound; unknown coverage is not zero usage or a billing cap.',
-                  **(dict(node_budget=intent['budget_slice']['limits']) if intent.get('budget_slice') else {})), ensure_ascii=False))
+    task=read(work/'science-task.json')
     if job.get('formal_review'):
-        prompt=(prompt_instruction+'Read science-task.json, its exact reviewed material and global inputs. '
-            'Assess the evidence before requester explanations; no favorable verdict is presumed. '
-            'Requester conclusions and full historical arguments are not default inputs. On-demand file reading is not completely observed; this is not blinded review or access isolation. '
-            'Do not edit the subject. Return only the four scientific verdict/findings fields in final_response; '
-            'the host binds subject, participants, qualification and return route. A pass grants no execution permission. '
-            'No IDs, hashes, manifests or mechanical receipts are your work. '
-            +json.dumps(dict(shared_seconds_remaining=max(0,int(limits['seconds_remaining'])),
-                shared_observed_tokens_remaining=max(0,limits['max_tokens']-budget.get('accounted_tokens',budget['observed_tokens']))),ensure_ascii=False))
-    if experiment_config is not None:
-        selected=experiment_config['execution_interface']
-        if job.get('worker_view_version') == 1:
-            from .worker_execution_bridge import SUBMISSION_DIRECTORY
-            managed_command=[sys.executable,'-m','scidiscovery.research_loop.worker_execution_bridge',
-                '--submission-directory',SUBMISSION_DIRECTORY]
-        else:
-            managed_command=[sys.executable,'-m','scidiscovery.research_loop.experiments',
-                '--config','work/experiment-config.json']
-        prompt += ('\nManaged registered experiments: '+json.dumps(dict(
-            command=managed_command,
-            actions=['capabilities','describe --key <key> --output <new scratch file>','run --payload <original>','lineage-status'],
-            lifecycle=selected['capabilities'],result_protocol=selected['result_protocol']),ensure_ascii=False)
-            +'. First read capabilities and the relevant complete public input contract with describe; do not invent an opaque payload format. '
-            'If no input contract is declared, use an already bound original payload or report unsupported. '
-            'Keep new W-authored code under code/ and pause edits while submission captures it; after acceptance, drafts may be revised for a later version. '
-            'Use only declared lifecycle operations on original call IDs. Unavailable optional capabilities are unsupported, never a passing verdict. '
-            'Native shell remains available for scratch; only managed calls are recorded. Never repeat an unknown submission.\n')
-    if experiment_config is not None and experiment_config['execution_interface']['executor']=='local_execution:command':
-        prompt += ('\nManaged local experiments: run '+json.dumps([*managed_command,
-            'run','--experiment-dir','experiments/<name>','--script','code/run.py','--','<script args>'])
-            +'. Use real paths/arguments. Submission fixes the selected code version in Git. '
-            'The chosen experiment directory is the runtime cwd; keep outputs, logs and scratch outside code/. '
-            'The fixed code runs with that cwd and writes its writable artifacts/. '
-            'The default native backend also exposes the task public_root read-only at its declared absolute path; '
-            'that live public tree is outside the input snapshot and does not prove all dynamic reads were frozen. '
-            'Control retains exit/time/logs/inputs/outputs. Optional artifacts/result.json is version 1 JSON with metrics '
-            '(name,value; optional unit,evaluation_key,direction) and outputs (path relative to the experiment root, label). '
-            'unit, evaluation_key and direction retain your scientific explanation; control does not classify or infer their meaning. Read describe for the complete optional result contract and field diagnostics. '
-            'An optional candidates array declares every retained model available for A to choose. Each member names one distinct exact declared artifact output; label and a metric reference are optional. A missing or unresolved metric does not discard a retained candidate. Control binds each identity to its original call and artifact, and delivers its retained inputs/results only after A explicitly chooses it. '
-            'Preserve the actual task-required deliverables, including needed evaluated objects and native receipts, in these declared outputs before temporary files disappear. The adapter cannot reconstruct missing results from source code or metrics. '
-            'Use finite metric values; control does not infer metric meaning, candidate ranking or qualification. '
-            'Do not write hashes or identities. Native shell remains available for scratch. Query lineage-status for original calls; never repeat an unknown call.\n')
-    output_only_wake = bool(intent.get('execution_wake') and (settings.get('resume_policy') or {}).get('output_only'))
-    # External W can configure its managed call after receiving this prompt.
-    # A wake may consume an external original without configuring a new run.
-    if job['role'] == 'W' and ('managed_execution_wait' in job or experiment_config is not None or intent.get('execution_wake')):
-        prompt += ('\nFollow the latest executor response\'s host-generated handoff.action and instruction. '
-            'Polling instructions supersede older query-count advice only; frozen wake permission, original identity and budget remain binding. '
-            'return_control: return scientific JSON now with pending limitations. '
-            'poll_original: wait and query only that original call in this turn at poll_interval_seconds while pending and queryable, '
-            'until handoff changes or an actual original budget, time or host-stop limit is reached; no query-count cap. '
-            'consume_terminal: read original outputs and interpret the verified terminal result. '
-            'reconcile_or_stop: reconcile the same call once or report the obstacle; never blindly poll or resubmit.\n')
-    if job['role'] == 'W' and not output_only_wake:
-        prompt += ('\nAn optional engineering_check may follow a confirmed managed call while you remain in this task. Read its compact feedback and repair source in this same session when useful. '
-            'sample_replay_ok covers only its declared sample path, never full training or audit qualification. Small-sample or bounded-check failures may be inconclusive. '
-            'An isolated replay sees only frozen submitted source and declared public inputs plus the task runtime dependencies; sibling scratch helpers and your home are absent. '
-            'Do not package dependencies or write hashes/manifests; make the submitted implementation self-contained or use an explicitly supported dependency input.\n')
-    if checkpoint.enabled(root, job) and not output_only_wake:
-        prompt += ('\nA native turn can be a fragment of this same scientific stage. Give your current understanding, '
-                   'unresolved questions and scientific next intent. stage_intent=continue requests more work in the assigned task; '
-                   'review reports its completed scientific delivery, while decision requests A with partial work. The host can require review at the original investment boundary. '
-                   'The host creates checkpoints and counts attempts; do not write mechanical checkpoint or budget fields.\n')
+        from . import formal_review
+        task=dict(task,review_instruction=formal_review.public(root,job)['review']['instruction'])
+    status=dict(shared_seconds_remaining=max(0,int(limits['seconds_remaining'])),
+        shared_observed_tokens_remaining=max(0,limits['max_tokens']-budget.get('accounted_tokens',budget['observed_tokens'])))
+    if intent.get('budget_slice'):status['node_budget']=intent['budget_slice']['limits']
+    remaining=None
     if attempt and startup is None:
-        remaining = dict(observed_tokens=max(0, intent['budget_slice']['limits']['max_observed_tokens'] - intent['budget_slice']['previous_tokens']),
-                         active_seconds=max(0., intent['budget_slice']['limits']['max_seconds'] - control_budget._node_duration(root, job, intent, limits)))
-        control_budget.node_mode(root)
-        remaining.update(mode='soft_targets',previous_observed_tokens=intent['budget_slice']['previous_tokens'])
-        label = 'Original soft-target gaps (zero is not a new grant): '
-        context = ('task/workspace after its explicitly unaccepted original request' if startup_retry else
-                   'new context for this same task/workspace' if intent.get('context_mode') == 'new_context' else 'same task/session/workspace')
-        recovery = ('Read the retained original execution results and complete only your final response. '
-                    if output_only_wake else
-                    'collect or recover managed executions by their original IDs rather than resubmitting. '
-                    'Use scientific judgment for ordinary native shell checkpoints; no new mechanical registry is required. ')
-        prompt = (label + json.dumps(remaining) + '\nContinue this ' + context + '. Read existing checkpoints and confirmed results; '
-                  + recovery + '\n' + prompt)
-        if intent.get('continuation_kind') == 'automatic_recovery':
-            prompt = ('Continue completing the current assigned task. First check retained results and any '
-                'original managed calls, then continue from the current state within the original '
-                'permissions and budget. Never repeat an unknown submission.\n' + prompt)
-        if intent.get('output_repair'):
-            prompt = ('Repair only your final response for this same completed task. Preserve completed experiments and '
-                      'their results; do not rerun or resubmit them. Return corrected scientific JSON using the frozen '
-                      'final_response contract. Controller diagnosis: '
-                      + json.dumps({key: intent['output_repair'][key] for key in ('code', 'diagnostic')}, ensure_ascii=False)
-                      + '\n' + prompt)
+        remaining=dict(observed_tokens=max(0,intent['budget_slice']['limits']['max_observed_tokens']-intent['budget_slice']['previous_tokens']),
+            active_seconds=max(0.,intent['budget_slice']['limits']['max_seconds']-control_budget._node_duration(root,job,intent,limits)),
+            mode='soft_targets',previous_observed_tokens=intent['budget_slice']['previous_tokens'])
+    command=None;interface=None
+    if experiment_config is not None:
+        interface=experiment_config['execution_interface']
+        if job.get('worker_view_version')==1:
+            from .worker_execution_bridge import SUBMISSION_DIRECTORY
+            command=[sys.executable,'-m','scidiscovery.research_loop.worker_execution_bridge','--submission-directory',SUBMISSION_DIRECTORY]
+        else:command=[sys.executable,'-m','scidiscovery.research_loop.experiments','--config','work/experiment-config.json']
+    output_only_wake=bool(intent.get('execution_wake') and (settings.get('resume_policy') or {}).get('output_only'))
     if intent.get('execution_wake'):
-        from . import managed_wait
-        from . import continuation
+        from . import managed_wait,continuation
         continuation.validate_wake(root,step,intent,execution.record(root,step,attempt-1))
         managed_wait.wake_packet(root,job,intent)
-        wake_scope = ('This output-only wake permits interpreting and preserving the original terminal results and completing your final response only. '
-            'Do not start new experiments or training, request a fragment continuation or WorkRepair. '
-            if output_only_wake else '')
-        prompt=('The original managed execution has finished. Read work/execution-results.json and its exact retained outputs. '
-            + wake_scope +
-            'Continue this same task/session from its checkpoint, interpret the results, and return your own scientific findings. '
-            'Do not rerun or resubmit the completed execution.\n'+prompt)
-    if intent.get('work_repair'):
-        request=intent['work_repair']
-        prompt=('Complete the missing scientific delivery for this same assigned task/session. Keep the original task action. '
-            'Reuse confirmed observations and query existing original calls; never resubmit completed experiments. '
-            'Add experiments only for scientifically unresolved assigned mechanisms within original authorization. '
-            'Return your own mechanism findings, obstacles and limitations; require A decision if science cannot proceed. '
-            'Controller diagnosis: '+json.dumps({key:request[key] for key in ('code','diagnostic')},ensure_ascii=False)+'\n'+prompt)
-    if intent.get('continuation_kind') == 'fragment':
-        prior = execution.record(root, step, attempt - 1)
-        saved = intent['fragment_checkpoint']
-        if saved['path'] != (prior / 'checkpoint.json').relative_to(root).as_posix():
+    if intent.get('continuation_kind')=='fragment':
+        prior=execution.record(root,step,attempt-1)
+        if intent['fragment_checkpoint']['path']!=(prior/'checkpoint.json').relative_to(root).as_posix():
             raise ValueError('Native fragment checkpoint changed before launch')
-        packet = checkpoint.brief(root, job, prior)
-        write(work / 'work/science-resume.json', packet)
-        prompt += ('\nRead work/science-resume.json for the bounded prior fragment preview. Continue within the original scientific scope; '
-                   'the host retains exact execution and candidate identities. Return current understanding, remaining questions '
-                   'and stage_intent (continue this mechanism or review by A). Do not write checkpoint IDs, counters or file manifests.\n')
-    author_limits=None
+        write(work/'work/science-resume.json',checkpoint.brief(root,job,prior))
+    author_limits=None;author=None
     if intent.get('continuation_kind')=='author_closeout':
         from . import author_closeout
         permit=author_closeout.require_intent_eligibility(root,job,intent)
         author_limits=dict(max_observed_tokens=permit['max_tokens'],max_seconds=permit['max_seconds'])
-        scientific_facts=intent.get('worker_view_version') == 1
-        facts_name='author-closeout-science.json' if scientific_facts else 'author-closeout-facts.json'
-        prompt=('This is one fresh, explicitly authorized author-closeout turn for the original stopped W. '
-            f'Read work/{facts_name}, retained source/results and your existing scientific draft artifacts. '
-            'Interpret only the completed original experiments and return your own final scientific JSON. '
-            'No new experiment, training, submission, model refinement or replay is authorized. '
-            'Managed tools and original execution destinations are read-only. Do not query a backend or collect into old records. '
-            'Use existing facts directly; put only necessary scientific deliverables in artifacts/. '
-            'Choose stage_intent=review or decision, never continue. The controller will hand your conclusion to A. '
-            'Assess the exact original objective against the retained evidence yourself; state which requirements are supported, '
-            'unsupported or unresolved and report actual limitations. '
-            f'This author turn has a soft target of {permit["max_tokens"]} observed tokens and a finite limit of {permit["max_seconds"]} active seconds. Finish your original scientific response when the token target is reached.\n'
-            +prompt)
-        if attempt==2:
-            # This explicitly authorized successor needs preserved facts, not the
-            # normal experiment/engineering workflow or a broad directory dump.
-            prompt=(prompt_instruction+'This is the single explicitly authorized second author-only closeout for the exact original W. '
-                +(f'First read work/{facts_name}, then science-task.json and the exact objective. '
-                  if scientific_facts else f'First read {facts_name} beside the designated final-output file, then science-task.json and the exact objective. ')
-                +('The scientific view includes every retained terminal call, available results and limitations. Control retains original machine receipts privately. '
-                  if scientific_facts else 'The compact index includes every retained call and points to complete originals. ')
-                +'Read particular source/results or draft artifacts only as scientifically needed. '
-                'Do not dump the directory tree, full observation logs, all source files or repeated reports into context. '
-                'This reduces transport overhead; it does not restrict consideration of failures, counterevidence or scientific uncertainty. '
-                'No new experiment, training, refinement, submission, replay, backend query or collection into old records is authorized. '
-                'Original calls/models and prior native attempts are read-only; write necessary scientific deliverables only in artifacts/. '
-                'Interpret the completed experiments yourself and return the final scientific JSON described in science-task.json. '
-                'Choose stage_intent=review or decision, never continue. The controller will give your own conclusion to A. '
-                'Assess the exact original objective against the retained evidence yourself; state which requirements are supported, '
-                'unsupported or unresolved and report actual limitations. '
-                'Do not write mechanical inventories, source/model hashes, private control metadata or duplicate final responses. '
-                f'This turn has a soft target of {permit["max_tokens"]} cumulative observed input plus output tokens (cached input included) and a finite limit of {permit["max_seconds"]} active seconds. Finish your original scientific response when the token target is reached. '
-                'Each model request counts its entire input again; prioritize a bounded reading pass and your final scientific response.\n')
+        author=dict(facts='work/author-closeout-science.json' if intent.get('worker_view_version')==1 else ('author-closeout-facts.json' if attempt==2 else 'work/author-closeout-facts.json'),limits=author_limits)
     mode=control_budget.node_mode(root)
     if (final_return is None and job.get('purpose') is None and not job.get('formal_review')
             and intent.get('continuation_kind')!='author_closeout'):
-        # Ordinary execution_available reads frozen reserve configuration only;
-        # reuse these observations without reentering current-node admission.
         available=control_budget.execution_available(root,job,limits,budget)
-        prompt += ('\nOrdinary exploration budget advice: '+json.dumps(dict(
-            observed_tokens_remaining_upper_bound=available['tokens'],active_seconds_available=available['seconds'],
-            basis='shared_authorization_minus_existing_final_or_closeout_reserve',
-            observed_usage_is_lower_bound=True,unknown_usage=bool(budget.get('unknown_steps')),
-            inflight_usage_unknown=True),ensure_ascii=False)+'\n')
-    prompt += ('\nManaged inputs/, materials, retained experiment outputs and execution-results are read-only shared originals. '
-        'To edit an input, copy only the specific files you need into work/ and edit those working files. '
-        'Do not chmod or write retained originals. Same-user access remains a soft trust boundary.\n')
-    prompt += ('\nBudget mode: '+mode+'. Node/search limits are soft targets, not renewed grants. '+
-        'Between bounded actions read work/budget-status.json when available; some read-only author views do not expose dynamic updates. '
-        'This small advisory is not a grant, execution permission or scientific evidence. '
-        'Each model request counts its entire input again; cached input is already included in input, counted once. '
-        'Unknown usage is not zero. In-flight requests and reporting delay are unmeasured; current-work remaining values are upper bounds. '
-        'There is no per-request budget admission or guaranteed final-response allowance. '
-        'Near limits, targets or the existing delivery reserve, finish bounded actions and return your own scientific JSON promptly, '
-        'preserving necessary evidence, uncertainty and limitations. '
-        + ('The original finite call duration and resource boundaries still apply; the exact final completion exception follows.\n' if final_return is not None else
-           'Shared quotas are checked before the next node; shared soft targets do not terminate this accepted node. Finish this accepted node and report all usage, including overage. Original finite external execution and resource limits still apply.\n'))
-    if final_return is not None:
-        prompt += ('\nThis is your final scientific return; no further scientific role or correction turn will be dispatched. '
-            'Complete and submit your own final scientific JSON in this same execution. In summary, scientific_result and limitations, '
-            'explain what you completed, what remains unfinished, the evidence-supported gap to the objective (if any), and why. '
-            'Do not assume success or invent a gap. Reuse the available evidence; do not start new experiments or request another role. '
-            'For this exact final return only, local token figures are targets; token usage exceeding the local or shared '
-            'reference ceiling will be recorded in full and will not terminate this return. Shared time and step exhaustion do not revoke this return. Original per-call time, resources and '
-            'execution permissions remain finite and enforced. Prioritize completing the response. '
-            'An external deliver choice still requires the configured adapter and the original qualification and authorization; '
-            'it does not assert that delivery or the scientific objective succeeded.\n')
-    # Append after every branch that replaces the assignment, including formal
-    # review and the bounded successor author turn.
-    if job['role']=='W' and job.get('candidate_nomination_mechanisms'):
-        from .candidate_nominations import SCOPE_GUIDANCE
-        prompt += ('\nReturn candidate_nominations as your scientific comparison preview. '+SCOPE_GUIDANCE+' '
-            'Use each actual H mechanism_ref. Choose each model and explain its applicability yourself; a call binding '
-            'does not classify its models. A model may explicitly represent multiple mechanisms when each reason '
-            'explains that coverage. Use historical candidate references or {call_id,artifact} for one exact '
-            'candidate in a current retained result.candidates declaration. Preserve the full candidate pool and '
-            'original experiment materials independently. Add at most '+str(job['candidate_nomination_policy']['extra_slots'])+
-            ' distinct extras beyond the representatives; do not truncate the retained pool to this preview size. '
-            'No available model means an explicit scientific gap, never a fabricated candidate. '
-            'Explain an unavailable or unsuitable old representative; temporary relative low score alone is '
-            'insufficient to discard a mechanism. Only an explicit A waived disposition with its scientific '
-            'negative or infeasibility reason removes mechanism coverage. Missing evidence and deferral retain it.\n')
-    if job['role']=='A' and not job.get('formal_review'):
-        if job.get('history',{}).get('candidate_nomination_ids') is not None:
-            prompt += ('\nStart candidate comparison with the W scientific nominations and their reasons/gaps in '
-                'lineage.indexes.nominations. They are a limited comparison preview, not a ranked or exhaustive '
-                'candidate pool. Read lineage.indexes.candidates and next_page plus original experiment materials '
-                'as needed. You may select any registered candidate, including an alternative outside the preview, '
-                'using the existing candidate_recommendation and selection_explanation. Do not request another '
-                'experiment or registration merely to bring in a retained model, and do not rewrite W nominations. '
-                'Keep deferred and screened mechanisms in the comparison; only your explicit waived disposition '
-                'with a scientific negative or infeasibility reason exempts mechanism coverage. Temporary relative '
-                'low score alone is insufficient; preserve gaps and original limitations.\n')
-        prompt += ('\nAny explicit candidate_recommendation requires selection_explanation: give criteria and '
-            'criteria_change.status as unchanged or revised. For revised criteria, name prior_criteria, changes, '
-            'evidence with locators explaining why, and accepted_tradeoffs. For unchanged criteria, use null '
-            'for those change details. Compare with prior H/W design and report comparison conditions, thresholds '
-            'and fallback rules: relaxing any such rule is revised even if a report already adopted it. '
-            'If no prior criteria exist, say so honestly. No candidate choice requires '
-            'no invented comparison: selection_explanation may be null. Control checks declaration completeness '
-            'and returns missing details to this same A for output repair; it does not judge scientific truth '
-            'or sufficiency, rank candidates or choose a default. This applies to the final A return too.\n')
-    prompt += ('\nDo not independently compute, compare, or revalidate file/evidence hashes or checksums, '
-        'generate hash inventories, or perform redundant mechanical integrity checks. '
-        'Control automatically owns integrity verification; use scientific names/references and verified tool results. '
-        'If a tool reports an integrity failure, retain and report it for control repair; '
-        'do not run your own checksum verification or alter bindings. '
-        'These restrictions cover extra mechanical integrity work, not hash algorithms required by the scientific task itself. '
-        'Any helper receiving this assignment must follow the same restrictions.\n')
+        status['exploration']=dict(observed_tokens_remaining_upper_bound=available['tokens'],
+            active_seconds_available=available['seconds'],unknown_usage=bool(budget.get('unknown_steps')))
+    prompt,role_instruction,response_schema=render_scientific_request(job,task,intent,backend_name=backend.name,
+        instruction_transport=backend.instruction_transport,budget_status=status,remaining=remaining,
+        execution_interface=interface,managed_command=command,output_only_wake=output_only_wake,
+        author=author,final_return=final_return is not None,startup=startup is not None)
+    args=backend.launch(profile,work,pending,schema_path,role_instruction)
+    if resume_session is not None:
+        args,resume_position=backend.resume(args,profile,work,pending,schema_path,resume_session)
     home = execution.home(root, step, attempt)
     home.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, 'THIN_HWA_ROLE': job['role'], 'THIN_HWA_WORKSPACE': str(work),
@@ -614,9 +469,6 @@ def run_native(root: Path, step: int, attempt=0):
     if startup is not None:
         env['CODEX_HOME'] = startup['native_home']
         args[0] = startup['native_program']['path']
-        prompt += ('\nThis is the only final A model submission for this exact scientific task. Give your final evidence-based conclusion and unmet objectives. '
-            'Select an existing candidate with deliver for original host submission, or finish with the explicit reason submission is unsupported. '
-            'No wait, new scientific role, dedicated audit, experiment or correction turn is authorized. The host supplies the actual submission receipt.\n')
     meter_home = home
     if settings.get('resume_policy') is None and standard_native:
         # Raw Codex keeps its inherited credentials/configuration and writes its
@@ -694,7 +546,7 @@ def run_native(root: Path, step: int, attempt=0):
                                            stderr=err, env=env, start_new_session=True, pass_fds=pass_fds)
             process_id = runtime.process_identity(process.pid, execution.identity(root, step, attempt))
             write(record / "native-process.json", process_id)
-            process.stdin.write(backend.request(prompt, profile=profile, work=work, schema=schema_path))
+            process.stdin.write(backend.request(prompt, profile=profile, work=work, schema=schema_path,formal_review=bool(job.get('formal_review')),response_schema=response_schema))
             process.stdin.close()
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
@@ -866,6 +718,7 @@ def run_native(root: Path, step: int, attempt=0):
           native_activity_observed=native_activity_observed,
           native_identity=backend.identity(live_meter, thread_id),
           native_backend=backend.name,
+          native_schema_transport=backend.active_schema_transport,
           native_permissions=backends.permission_summary(settings),
           metering=live_meter.snapshot() if process is None else observation,
           limitation='Observed token metadata only; running requests and reporting delay are unmeasured.')

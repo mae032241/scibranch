@@ -44,7 +44,8 @@ def case(tmp_path,options,observer=None):
     c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),
         search_slice=search.accept(root,job)))
     path=c.workspace(root,2)/'work/config.json';config=e.configure(root,2,'composed_execution:fixture',options,path)
-    package=c.workspace(root,2)/'work/package';package.write_bytes(b'opaque original job package')
+    package=c.workspace(root,2)/'code/package';package.parent.mkdir(exist_ok=True)
+    package.write_bytes(b'opaque original job package')
     def cli(*args,expected=0):
         reply=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(path),*map(str,args)],capture_output=True,text=True)
         assert reply.returncode==expected,(reply.stdout,reply.stderr)

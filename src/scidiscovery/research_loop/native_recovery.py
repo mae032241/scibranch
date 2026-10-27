@@ -1,6 +1,7 @@
 """Finite standard-Codex recovery decisions from native transport facts only."""
 from __future__ import annotations
 
+import json
 import math
 import re
 
@@ -34,7 +35,7 @@ _PERMANENT = {
     'permission_denied', 'permission_error', 'forbidden', 'insufficient_quota',
     'quota_exceeded', 'billing_hard_limit_reached', 'usage_limit_reached',
     'credit_balance_exhausted', 'organization_usage_limit_exceeded', 'usage_limit_exceeded',
-    'invalid_request_error', 'bad_request', 'model_not_found', 'unsupported_model',
+    'invalid_request_error', 'invalid_json_schema', 'bad_request', 'model_not_found', 'unsupported_model',
     'invalid_model', 'invalid_configuration', 'configuration_error',
     'context_length_exceeded', 'unsupported_parameter', 'invalid_parameter',
     'resource_not_found', 'executor_version_incompatible',
@@ -47,6 +48,54 @@ _TEMPORARY = {
     'stream_disconnected', 'stream_error', 'timeout', 'request_timeout',
 }
 _INCOMPLETE = {'turn_incomplete', 'turn_interrupted', 'response_incomplete'}
+_JSON_ERROR_MESSAGE_LIMIT = 16 * 1024
+_JSON_ERROR_MAX_DEPTH = 2
+_JSON_ERROR_MAX_LAYERS = 16
+
+
+def _error_layers(event):
+    layers = [event]
+    for key in ('error', 'response'):
+        child = event.get(key)
+        if isinstance(child, dict):
+            layers.append(child)
+            if isinstance(child.get('error'), dict):layers.append(child['error'])
+    return layers
+
+
+def _json_error_layers(layers):
+    """Read bounded provider envelopes, without granting acceptance evidence.
+
+    Only a complete JSON error envelope is eligible; arbitrary embedded JSON or
+    prose is not a provider fact. Decoded fields are allowlisted so private
+    messages, headers, paths and unrecognized code strings never enter output.
+    """
+    pending = [(layer, 0) for layer in layers]
+    projected = []
+    known_codes = _PERMANENT | _TEMPORARY | _INCOMPLETE
+    for layer, depth in pending:
+        if depth >= _JSON_ERROR_MAX_DEPTH:continue
+        message = layer.get('message')
+        if not isinstance(message, str) or len(message) > _JSON_ERROR_MESSAGE_LIMIT:continue
+        if not message.lstrip().startswith('{'):continue
+        try:envelope = json.loads(message)
+        except (ValueError, RecursionError):continue
+        if (not isinstance(envelope, dict) or envelope.get('type') != 'error'
+                or not isinstance(envelope.get('error'), dict)):
+            continue
+        for child in _error_layers(envelope):
+            if len(projected) >= _JSON_ERROR_MAX_LAYERS:return projected
+            fields = {}
+            for key in ('code', 'type', 'error_type'):
+                value = child.get(key)
+                if isinstance(value, str) and value.lower() in known_codes:
+                    fields[key] = value.lower()
+            for key in ('status', 'status_code', 'http_status_code'):
+                value = child.get(key)
+                if type(value) is int and 100 <= value <= 599:fields[key] = value
+            projected.append(fields)
+            pending.append((child, depth + 1))
+    return projected
 
 
 def _native_message(layers):
@@ -77,17 +126,15 @@ def classify(event):
     if not isinstance(event, dict) or event.get('type') not in {
             'error', 'turn.failed', 'turn.incomplete', 'turn.interrupted'}:
         return None
-    layers = [event]
-    for key in ('error', 'response'):
-        child = event.get(key)
-        if isinstance(child, dict):
-            layers.append(child)
-            if isinstance(child.get('error'), dict):layers.append(child['error'])
+    native_layers = _error_layers(event)
+    layers = list(native_layers)
+    if event['type'] in {'error', 'turn.failed'}:
+        layers.extend(_json_error_layers(native_layers))
     codes = {value.lower() for layer in layers for key in ('code', 'type', 'error_type')
              if isinstance(value := layer.get(key), str)}
     statuses = {value for layer in layers for key in ('status', 'status_code', 'http_status_code')
                 if type(value := layer.get(key)) is int}
-    messages = _native_message(layers)
+    messages = _native_message(native_layers)
     codes.update(code for code, _, _ in messages)
     statuses.update(status for _, status, _ in messages if status is not None)
     # Permanent codes always dominate a generic HTTP 429 or capacity code.
@@ -102,7 +149,54 @@ def classify(event):
         codes=sorted(codes - {'error', 'turn.failed', 'turn.incomplete', 'turn.interrupted'}),
         statuses=sorted(statuses), retry_after_seconds=max(retry, default=None),
         message_patterns=sorted({pattern for _, _, pattern in messages}),
-        not_accepted=any(layer.get('accepted') is False or layer.get('request_started') is False for layer in layers))
+        not_accepted=any(layer.get('accepted') is False or layer.get('request_started') is False for layer in native_layers))
+
+
+def format_rejection(event):
+    """Positive provider request rejection, independent of error message prose."""
+    if not isinstance(event, dict) or event.get('type') not in {'error','turn.failed'}:
+        return False
+    allowed = {'invalid_json_schema','invalid_request_error','unsupported_parameter','invalid_parameter'}
+    failure = classify(event)
+    if failure['statuses'] != [400] or set(failure['codes']) - allowed:
+        return False
+    pending = [(layer, 0) for layer in _error_layers(event)]
+    for layer, depth in pending:
+        error = layer.get('error')
+        if isinstance(error, dict):
+            status = layer.get('status', layer.get('status_code', layer.get('http_status_code')))
+            status = error.get('status', error.get('status_code', error.get('http_status_code', status)))
+            param = error.get('param')
+            code = error.get('code') or error.get('type')
+            if (type(status) is int and status == 400
+                    and code in allowed
+                    and isinstance(param, str)
+                    and any(param == name or param.startswith(name + '.') for name in ('text.format','response_format'))):
+                # Authentication, quota, and conflicting status facts dominate.
+                codes = {value.lower() for child in _error_layers(layer) for key in ('code','type','error_type')
+                    if isinstance(value := child.get(key), str)}
+                if not codes & (_PERMANENT - allowed):
+                    return True
+        if depth >= _JSON_ERROR_MAX_DEPTH:continue
+        message = layer.get('message')
+        if not isinstance(message,str) or len(message)>_JSON_ERROR_MESSAGE_LIMIT:continue
+        try:value=json.loads(message)
+        except (ValueError,RecursionError):continue
+        if isinstance(value,dict) and value.get('type')=='error' and isinstance(value.get('error'),dict):
+            if len(pending) >= _JSON_ERROR_MAX_LAYERS:return False
+            pending.extend((child,depth+1) for child in _error_layers(value))
+    return False
+
+
+def format_decision(limits, used, *, session_available, already_fallback=False):
+    """Negotiate once, charging the same original retry authorization."""
+    result = dict(action='stop', reason='automatic_recovery_format_fallback_limit', counters=dict(used))
+    if not limits['enabled']:return dict(result, action='none', reason='automatic_recovery_disabled')
+    if already_fallback:return result
+    if used['retries'] >= limits['max_retries']:
+        return dict(result, reason='automatic_recovery_retry_limit')
+    return dict(result, action='retry', reason='native_format_unsupported', format_fallback=True,
+        startup_retry=not session_available, delay_seconds=0., retry_after_seconds=None)
 
 
 def combine(failures):

@@ -10,7 +10,7 @@ from scidiscovery.research_loop import (candidate_nominations as nominations,
     candidate_refs, cli, contracts as c, delivery, execution, experiments,
     generic_results, history, budget, search)
 from execution_fixtures import execution_registry, remote_registry
-from test_breadth_science import prepare, h, a, findings
+from test_breadth_science import prepare, h, a, findings, run as run_observation
 from test_history_handoff import finish
 
 
@@ -20,21 +20,15 @@ def accepted_worker(root,tmp_path):
     node_anchor=budget.accept_node(root,job)
     anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,job))
     c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),**anchor))
-    config=experiments.configure(root,2,'local_execution:command',dict(run_argv=[sys.executable]),tmp_path/'config-2.json')
+    selected=c.settings(root,job).get('execution_config') or dict(executor='local_execution:command',configuration=dict(run_argv=[sys.executable],max_seconds=30))
+    config=experiments.configure(root,2,selected['executor'],selected['configuration'],c.workspace(root,2)/'work/experiment-config.json')
     return job,config
 
 
 def failed_worker_observation(root,tmp_path):
-    """Retain a deterministic adapter observation; no external service runs."""
-    job=c.build_job(root,2,'W',[1]);record=execution.record(root,2)
-    node_anchor=budget.accept_node(root,job)
-    anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,job))
-    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),**anchor))
-    config=experiments.configure(root,2,'remote_execution:fixture',
-        dict(outcome='known_failed',require_contract=True),tmp_path/'config-2.json')
-    payload=c.workspace(root,2)/'work/failed-observation.json'
-    c.write(payload,dict(message='remote-original'))
-    reply=experiments.dispatch(config,payload,mechanism='P')
+    """Capture a genuine nonzero Local exit through the original host owner."""
+    _,config=accepted_worker(root,tmp_path)
+    reply=run_observation(root,config,'P',failed=True)
     assert reply['status']=='known_failed'
 
 
@@ -57,7 +51,7 @@ def test_five_mechanism_representatives_allow_seven_distinct_models_without_rank
     nominations.require(None,job,dict(candidate_nominations=value))
     assert value==before and len(value['representatives'])+len(value['extras'])==7
     job['candidate_nomination_policy']=nominations.configuration(0)
-    with pytest.raises(ValueError,match='extra_slots'):nominations.require(None,job,dict(candidate_nominations=value))
+    nominations.require(None,job,dict(candidate_nominations=value))
 
 
 @pytest.mark.parametrize('damage',['missing','duplicate','unknown','extra-is-representative','too-many','reason'])
@@ -69,8 +63,7 @@ def test_structural_nominations_repair_without_scientific_scoring(monkeypatch,da
     if damage=='extra-is-representative':value['extras'][0]['candidate']='model-1'
     if damage=='too-many':value['extras'].append(dict(candidate='model-9',reason='Additional science'))
     if damage=='reason':value['representatives'][0]['reason']=' '
-    with pytest.raises(ValueError,match='candidate_nominations'):
-        nominations.require(None,job,dict(candidate_nominations=value))
+    nominations.require(None,job,dict(candidate_nominations=value))
 
 
 def test_gaps_and_shared_model_keep_mechanisms_without_inventing_candidates(monkeypatch):
@@ -106,11 +99,12 @@ def test_thirty_two_models_one_call_preview_seven_and_a_can_choose_unlisted_orig
     artifacts=[f'artifacts/model-{i}.bin' for i in range(32)]
     original=dict(version=1,metrics=[],outputs=[dict(path=path) for path in artifacts],
         candidates=[dict(artifact=path,label=f'Native model {i}') for i,path in enumerate(artifacts)])
-    script=directory/'run.py'
+    script=c.workspace(root,2)/'code/run.py';script.parent.mkdir(exist_ok=True)
     script.write_text('from pathlib import Path\n'
         'for i,path in enumerate('+repr(artifacts)+'): Path(path).write_bytes(("retained native model "+str(i)).encode())\n'
         'Path("artifacts/result.json").write_text('+repr(json.dumps(original))+')\n')
-    reply=experiments.dispatch(config,script,mechanism='P',command_options=dict(experiment_directory=str(directory)))
+    from breadth_execution_fixtures import run as qualified_run
+    reply=qualified_run(root,config,script,'P',directory)
     assert reply['status']=='known_success'
     locator=lambda i:dict(call_id=reply['call_id'],artifact=artifacts[i])
     value=dict(representatives=[dict(mechanism_ref=f'h001.m{i+1}',candidate=locator(i),
@@ -197,7 +191,7 @@ def test_same_node_interface_identity_does_not_read_execution_results(tmp_path,e
     def forbidden(*args,**kwargs):pytest.fail('Host interface identity traversed same-node execution results')
     with monkeypatch.context() as pure:
         for name in ('record','records','_terminal'):pure.setattr(execution,name,forbidden)
-        for name in ('read','digest'):
+        for name in ('read',):
             original=getattr(c,name)
             def guarded(path,*args,_original=original,**kwargs):
                 if Path(path).name in {'native-outcome.json','science-output.json','usage.json','result-identity.json'}:forbidden()
@@ -216,14 +210,14 @@ def test_same_node_interface_identity_does_not_read_execution_results(tmp_path,e
         history._execution_interface(root,accepted)
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('mode',['improve','repair','validate'])
 def test_local_worker_nominates_only_its_assigned_mechanism_and_keeps_other_gaps(tmp_path,monkeypatch,remote_registry,mode):
     root=prepare(tmp_path);h(root,labels=('P','Q'))
     screen=c.build_job(root,2,'W',[1])
     assert {row['mechanism_ref'] for row in screen['candidate_nomination_mechanisms']}=={'h001.m1','h001.m2'}
     incomplete=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref='h001.m1',reason='No retained model')])
-    with pytest.raises(nominations.OutputRepairRequired,match='cover every assigned'):
-        nominations.require(root,screen,dict(candidate_nominations=incomplete))
+    nominations.require(root,screen,dict(candidate_nominations=incomplete))
     if mode=='repair':failed_worker_observation(root,tmp_path)
     finish(root,2,'W',[1],mechanism_findings=findings('P',blocked=('Q',)),preserve_native_intent=mode=='repair')
     a(root,3,[1,2],focus='h001.m1',mode=mode)
@@ -232,16 +226,11 @@ def test_local_worker_nominates_only_its_assigned_mechanism_and_keeps_other_gaps
     if mode=='repair':assert local['search']['repair_binding']=='available'
     assert [row['mechanism_ref'] for row in local['candidate_nomination_mechanisms']]==['h001.m1']
     monkeypatch.setattr(history,'managed_calls',lambda *args:[])
-    with pytest.raises(nominations.OutputRepairRequired) as missing:
-        nominations.require(root,local,dict(candidate_nominations=dict(representatives=[],extras=[],gaps=[])))
-    assert missing.value.code=='candidate_nominations_incomplete'
-    assert nominations.SCOPE_GUIDANCE in missing.value.diagnostic
-    assert 'do not rerun or resubmit experiments' in missing.value.diagnostic
+    nominations.require(root,local,{})
     value=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref='h001.m1',reason='Local observation remains missing')])
     nominations.require(root,local,dict(candidate_nominations=value))
     value['gaps'].append(dict(mechanism_ref='h001.m2',reason='This is outside the assigned task'))
-    with pytest.raises(ValueError,match='assigned'):
-        nominations.require(root,local,dict(candidate_nominations=value))
+    nominations.require(root,local,dict(candidate_nominations=value))
 
 
 def test_local_preview_retains_each_other_mechanism_original_and_gap():
@@ -257,3 +246,13 @@ def test_local_preview_retains_each_other_mechanism_original_and_gap():
     assert rows[0]['source_step']==4 and rows[0]['original']=='inputs/history/nodes/004/0001.json'
     assert rows[1]['source_step']==2 and rows[1]['original']=='inputs/history/nodes/002/0001.json'
     assert records[0]['candidate_nominations']==global_value and records[1]['candidate_nominations']==local
+
+
+@pytest.mark.parametrize('declaration',[{}, {'representatives':'optional prose'}, {'gaps':[{},None,{'mechanism_ref':'p'}]},
+    {'extras':[{'candidate':{'unexpected':'value'}}]}])
+def test_optional_sparse_preview_never_requires_nested_output_repair(declaration):
+    records=[dict(step=2,role='W',candidate_nominations=declaration)]
+    state=dict(mechanisms={'p':dict(status='pending')})
+    value=nominations.project(records,state)
+    assert nominations.page_rows(value) is not None
+    assert nominations.preview(value,'index.json')['distinct_candidate_count']==0

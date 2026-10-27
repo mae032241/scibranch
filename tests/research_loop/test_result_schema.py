@@ -6,31 +6,235 @@ from scidiscovery.research_loop.output_repair import OutputRepairRequired
 from test_history_handoff import finish, scene, source, selection_explanation
 
 
-def tree(root):
-    return {path.relative_to(root): (path.lstat().st_mode, path.read_bytes() if path.is_file() else None)
-            for path in [root, *root.rglob('*')]}
+def snapshot(paths):
+    return {path: (path.lstat().st_mode, path.read_bytes() if path.is_file() else None)
+            for path in paths}
 
 
-@pytest.mark.parametrize('role', ['H', 'W', 'A', 'E'])
-def test_current_native_schema_requires_every_declared_property(role):
-    schema = c.result_schema(role, c.HANDOFF_PROTOCOL)
+def native_strict_schema(schema):
     # Native strict response_format requires this equality, beyond JSON Schema validity.
-    def strict(value):
-        if not isinstance(value, dict):
-            return
-        if 'properties' in value:
-            assert set(value['required']) == set(value['properties'])
-            assert value['additionalProperties'] is False
-        for nested in value.values():
-            if isinstance(nested, dict):
-                strict(nested)
-            elif isinstance(nested, list):
-                for item in nested:
-                    strict(item)
-    strict(schema)
+    if 'properties' in schema:
+        assert set(schema['required']) == set(schema['properties'])
+        assert schema['additionalProperties'] is False
+    # Visit schema-bearing positions, not property names or enum/default data.
+    for keyword in ('properties', '$defs', 'definitions'):
+        for nested in schema.get(keyword, {}).values():
+            native_strict_schema(nested)
+    for keyword in ('items', 'additionalProperties'):
+        if isinstance(schema.get(keyword), dict):
+            native_strict_schema(schema[keyword])
+    for keyword in ('anyOf', 'oneOf', 'allOf', 'prefixItems'):
+        for nested in schema.get(keyword, []):
+            native_strict_schema(nested)
+
+
+@pytest.mark.parametrize(('role', 'options'), [
+    ('H', {}), ('W', {}), ('A', {}), ('E', {}),
+    ('A', dict(comparison=True)), ('A', dict(review_enabled=True)),
+    ('A', dict(final_only=True)), ('A', dict(final_only=True, final_delivery=True)),
+    ('A', dict(formal_review=True)),
+])
+def test_current_scientific_contract_requires_only_transport_fields(role, options):
+    schema=c.result_schema(role, c.HANDOFF_PROTOCOL, **options)
+    if options.get('formal_review'):
+        native_strict_schema(schema)
+    else:
+        expected={'summary','scientific_result','limitations'}
+        if role in {'H','A'}:expected|={'next_action','route_reason'}
+        if role=='W':expected.add('stage_intent')
+        assert set(schema['required'])==set(schema['properties'])==expected
+        assert schema['additionalProperties'] is True
     if role not in {'H', 'A'}:
         with pytest.raises(protocol.UnsupportedProtocol, match='Scientific result schema'):
             c.result_schema(role, 3)
+
+
+def test_base_payload_retains_extra_scientific_content_without_nested_schema(tmp_path):
+    raw=tmp_path/'science-output.json'
+    payload=dict(summary='Bounded result',scientific_result='Evidence remains incomplete',limitations=[],
+        next_action='continue_w',route_reason='A contrasting observation is needed',
+        selection_explanation={'free_form':'Scientific criteria are authored here'},
+        portfolio_review={'extra':[{'unconstrained':'authored science'}]},
+        search_review={'dispositions':[],'scientific_note':'Retain alternatives'},
+        candidate_nominations='Additional prose may be retained')
+    c.write(raw,payload)
+    assert c.science_payload(raw,'A')==payload
+    assert c.read(raw)==payload
+    payload['next_action']='invented_action'
+    c.write(raw,payload)
+    with pytest.raises(OutputRepairRequired):c.science_payload(raw,'A')
+
+
+def test_breadth_consumers_are_enabled_without_expanding_base_schema():
+    job=dict(role='A',search={},final_coverage_mechanisms=[dict(mechanism_ref='h001.m1')])
+    fields=c.response_fields(job,dict(search_policy={}))
+    assert {'portfolio_review','final_coverage'}<=set(fields)
+    assert not {'portfolio_review','final_coverage'}&set(c.result_schema('A')['properties'])
+    assert c.response_fields(dict(role='A'),dict(search_policy=None))==[]
+
+
+@pytest.mark.parametrize(('role','scope'),[('H','ordinary'),('W','ordinary'),('A','ordinary'),('A','closeout'),('A','final'),('E','ordinary')])
+@pytest.mark.parametrize('backend_name',['codex','protocol'])
+@pytest.mark.parametrize('branch',['ordinary','automatic','repair','fragment'])
+def test_complete_fixed_model_response_contract_fits_three_kib(tmp_path,role,scope,backend_name,branch):
+    """Measure the production's final renderer and transport, never an AST slice.
+
+    Dynamic goals/original references/budget observations and transport settings
+    remain complete and are reported separately. Formal independent review has
+    its existing separate contract. The 512-byte diagnostic is part of the wire.
+    """
+    import json
+    from scidiscovery.research_loop import backends,guidance,native
+    job=dict(role=role,handoff_protocol=c.HANDOFF_PROTOCOL,search={},
+        scientific_response_fields=['portfolio_review','final_coverage'],formal_review_version=1,
+        native_role_instruction=max((guidance.OPPORTUNITY[role],c.ROLE_INSTRUCTIONS[role]),key=lambda value:len(value.encode())))
+    if role=='A':job.update(portfolio_context={},final_coverage_mechanisms=[dict(mechanism_ref='h001.m1')])
+    if scope in {'closeout','final'}:job.update(purpose='closeout',search=None)
+    if scope=='final':job.update(final_only=True,delivery_sources=dict(items=[{}]))
+    if role=='W':job['scientific_work_unit']=max(guidance.WORK_UNITS.values(),key=lambda value:len(value.encode()))
+    task=c.response_instructions(job)
+    intent={};remaining=None
+    diagnosis=OutputRepairRequired('candidate_recommendation_missing','D'*512).request()
+    if branch=='automatic':intent['continuation_kind']='automatic_recovery';remaining={}
+    elif branch=='repair':intent['work_repair' if role=='W' else 'output_repair']=diagnosis;remaining={}
+    elif branch=='fragment':
+        if role!='W':pytest.skip('Scientific fragments belong only to W')
+        intent['continuation_kind']='fragment';remaining={}
+    backend=backends.selected(dict(native_backend=backend_name,native_launcher_argv=['codex'] if backend_name=='codex' else ['independent']),
+        schema_transport='prompt' if backend_name=='codex' else None)
+    interface=dict(capabilities={},result_protocol='local-result-v1',executor='local_execution:command') if role=='W' else None
+    prompt,instruction,projection=native.render_scientific_request(job,task,intent,backend_name=backend_name,
+        instruction_transport=backend.instruction_transport,remaining=remaining,final_return=scope=='final',
+        execution_interface=interface,managed_command=['experiment'] if role=='W' else None,
+        budget_status=dict(shared_seconds_remaining=0,shared_observed_tokens_remaining=0))
+    schema=tmp_path/'schema.json';c.write(schema,projection)
+    packet=backend.request(prompt,schema=schema,profile={},work=tmp_path,response_schema=projection)
+    contract_wire=packet if backend_name=='codex' else json.dumps({key:value for key,value in json.loads(packet).items()
+        if key in {'prompt','response_schema'}},ensure_ascii=False,separators=(',',':')).encode()
+    chunks=[contract_wire,json.dumps(task,ensure_ascii=False,indent=2).encode()]
+    if backend.instruction_transport=='developer':chunks.append(instruction.encode())
+    if role=='W':chunks.append(job['scientific_work_unit'].encode())
+    size=sum(map(len,chunks));diagnostic_bytes=len(diagnosis['diagnostic'].encode()) if branch=='repair' else 0
+    fixed_size=size-diagnostic_bytes
+    import os
+    if os.environ.get('SCID_TEST_LOG_DIR'):
+        from pathlib import Path
+        report=Path(os.environ['SCID_TEST_LOG_DIR'])/'response-contract-sizes.jsonl'
+        report.parent.mkdir(parents=True,exist_ok=True)
+        with report.open('a') as stream:stream.write(json.dumps(dict(role=role,scope=scope,backend=backend_name,branch=branch,
+            fixed_bytes=fixed_size,with_diagnostic_allowance=fixed_size+512,rendered_bytes=size,
+            final_prompt_bytes=len(prompt.encode()),instruction_bytes=len(instruction.encode()),transport_packet_bytes=len(packet)))+'\n')
+    assert fixed_size<=2560,(role,scope,backend_name,branch,fixed_size)
+    assert fixed_size+512<=c.MAX_FIXED_RESPONSE_BYTES==3072,(role,scope,backend_name,branch,fixed_size)
+    assert size<=c.MAX_FIXED_RESPONSE_BYTES,(role,scope,backend_name,branch,size)
+
+
+@pytest.mark.parametrize('backend_name',['codex','protocol'])
+@pytest.mark.parametrize('scope',['wake','output_only_wake','author_closeout','startup'])
+def test_full_renderer_special_suffixes_fit_same_contract(tmp_path,backend_name,scope):
+    import json
+    from scidiscovery.research_loop import backends,guidance,native
+    role='A' if scope=='startup' else 'W'
+    job=dict(role=role,handoff_protocol=c.HANDOFF_PROTOCOL,native_role_instruction=guidance.OPPORTUNITY[role])
+    if scope=='startup':job.update(final_only=True,delivery_sources=dict(items=[{}]),purpose='closeout',
+        portfolio_context={},final_coverage_mechanisms=[dict(mechanism_ref='h001.m1')],
+        scientific_response_fields=['portfolio_review','final_coverage'])
+    else:
+        job['managed_execution_wait']={}
+        job['scientific_work_unit']=max(guidance.WORK_UNITS.values(),key=lambda value:len(value.encode()))
+    intent=dict(execution_wake={}) if 'wake' in scope else {}
+    if 'wake' in scope:intent['execution_wake']=dict(original='retained')
+    if scope=='author_closeout':intent['continuation_kind']='author_closeout'
+    task=c.response_instructions(job)
+    backend=backends.selected(dict(native_backend=backend_name,native_launcher_argv=['codex'] if backend_name=='codex' else ['independent']),schema_transport='prompt' if backend_name=='codex' else None)
+    prompt,instruction,projection=native.render_scientific_request(job,task,intent,backend_name=backend_name,
+        instruction_transport=backend.instruction_transport,remaining={},output_only_wake=scope=='output_only_wake',
+        author=dict(facts='work/author-closeout-science.json',limits={}) if scope=='author_closeout' else None,
+        final_return=scope=='startup',startup=scope=='startup',
+        execution_interface=dict(capabilities={},result_protocol='local-result-v1',executor='local_execution:command') if scope=='wake' else None,
+        managed_command=['experiment'] if scope=='wake' else None)
+    schema=tmp_path/'schema.json';c.write(schema,projection)
+    packet=backend.request(prompt,schema=schema,profile={},work=tmp_path,response_schema=projection)
+    wire=packet if backend_name=='codex' else json.dumps({key:value for key,value in json.loads(packet).items() if key in {'prompt','response_schema'}},ensure_ascii=False,separators=(',',':')).encode()
+    size=len(wire)+len(json.dumps(task,ensure_ascii=False,indent=2).encode())
+    if backend.instruction_transport=='developer':size+=len(instruction.encode())
+    if role=='W':size+=len(job['scientific_work_unit'].encode())
+    assert size+512<=3072,(backend_name,scope,size)
+
+
+@pytest.mark.parametrize('choice',[None,'', '   ',[],42])
+def test_protected_final_delivery_repairs_missing_explicit_candidate(tmp_path,choice):
+    raw=tmp_path/'science-output.json'
+    c.write(raw,dict(summary='Final',scientific_result='Retained evidence',limitations=[],
+        next_action='deliver',route_reason='Authorized final delivery',candidate_recommendation=choice))
+    with pytest.raises(OutputRepairRequired) as error:
+        c.science_payload(raw,'A',final_only=True,final_delivery=True)
+    assert error.value.code=='candidate_recommendation_missing'
+
+
+@pytest.mark.parametrize('gate',['portfolio','coverage'])
+def test_same_task_output_repair_runs_conditional_breadth_gates(tmp_path,monkeypatch,gate):
+    from scidiscovery.research_loop import continuation,candidate_refs,formal_review,candidate_nominations,search
+    root=tmp_path/'instance';record=c.host_record(c.workspace(root,1))
+    job=dict(role='A',handoff_protocol=c.HANDOFF_PROTOCOL)
+    raw=record/'science-output.json'
+    c.write(raw,dict(summary='Finding',scientific_result='Retained evidence',limitations=[],next_action='finish',route_reason='Stop'))
+    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=dict(unknown_steps=[]),raw_ref=c.file_ref(raw)))
+    monkeypatch.setattr(continuation,'validate_task',lambda *args:job)
+    monkeypatch.setattr(candidate_refs,'control_payload',lambda job,science,**kwargs:science)
+    monkeypatch.setattr(formal_review,'validate_choice',lambda *args:None)
+    def required(*args,**kwargs):raise OutputRepairRequired(gate+'_incomplete','Fill the conditional scientific declaration in this same task.')
+    monkeypatch.setattr(search,'require_portfolio_review',required if gate=='portfolio' else lambda *args,**kwargs:None)
+    monkeypatch.setattr(candidate_nominations,'require_final_coverage',required if gate=='coverage' else lambda *args,**kwargs:None)
+    request=continuation.output_request(root,1,record,source_attempt=0)
+    assert request['code']==gate+'_incomplete'
+    assert request['raw_ref']==c.file_ref(raw) and request['source_attempt']==0
+
+
+def test_accepted_output_repair_keeps_original_diagnostic_but_checks_raw_identity(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import continuation
+    root=tmp_path/'instance';prior=c.host_record(c.workspace(root,1))
+    c.write(root/'jobs/001.json',dict(role='A'))
+    raw=prior/'science-output.json';c.write(raw,dict(scientific_result='Retained original'))
+    outcome=dict(returncode=0,stop_reason=None,usage=dict(unknown_steps=[]),raw_ref=c.file_ref(raw))
+    c.write(prior/'native-outcome.json',outcome)
+    request=dict(code='selection_explanation_incomplete',diagnostic='The original accepted diagnostic',
+        source_attempt=0,outcome_ref=c.record_ref(prior/'native-outcome.json'),raw_ref=c.file_ref(raw))
+    intent=dict(attempt=1,continuation_kind='repair',output_repair=request)
+    c.write(prior/'continuations/001/native-intent.json',intent)
+    monkeypatch.setattr(continuation.configuration_updates,'for_step',lambda *args:dict(resume_policy={}))
+    monkeypatch.setattr(continuation,'validate_launcher',lambda *args:dict(output_repair=True))
+    def no_rejudgment(*args,**kwargs):raise AssertionError('Accepted diagnostics must not be recomputed')
+    monkeypatch.setattr(continuation,'output_request',no_rejudgment)
+    continuation.validate_repair(root,1,intent,prior_record=prior)
+    raw.write_text('Changed original bytes')
+    with pytest.raises(ValueError,match='raw original changed'):
+        continuation.validate_repair(root,1,intent,prior_record=prior)
+
+
+def test_inherited_original_context_uses_child_storage_not_unavailable_parent(tmp_path):
+    from scidiscovery.research_loop import originals
+    child=tmp_path/'child';parent=tmp_path/'unavailable-parent'
+    identity=dict(goal_id='origin',settings_ref=dict(path=str(parent/'settings.json')))
+    source=originals.NodeSource(identity,2,str(parent),child/originals.FORK_DIRECTORY,entries=())
+    assert originals.context_root(source)==child
+    local=originals.NodeSource(identity,2,str(parent),parent)
+    assert originals.context_root(local)==parent
+    misplaced=originals.NodeSource(identity,2,str(parent),child/'other-storage',entries=())
+    with pytest.raises(ValueError,match='declared fork storage'):
+        originals.context_root(misplaced)
+
+
+def test_optional_progress_and_decision_read_only_consumer_keys():
+    job=dict(role='A',scientific_response_fields=['progress_assessment','decision_request'])
+    payload=dict(progress_assessment=dict(verdict='progress',explanation='Extra scientific detail'),
+        decision_request=dict(decision='candidate',question='Which candidate?',change_criterion='A contrasting finding',extra=True))
+    assert c.scientific_field(job,payload,'progress_assessment')==dict(verdict='progress')
+    assert c.scientific_field(job,payload,'decision_request')['extra'] is True
+    payload['progress_assessment']['verdict']=[]
+    payload['decision_request']['question']=None
+    assert c.scientific_field(job,payload,'progress_assessment') is None
+    assert c.scientific_field(job,payload,'decision_request') is None
 
 
 @pytest.mark.parametrize('recommendation', [None, 'run-33'])
@@ -54,13 +258,14 @@ def test_legacy_a_schema_and_raw_validation_reject_without_rewriting_original(tm
     payload = dict(summary='Legacy finding', scientific_result='Original science', limitations=[],
                    next_action='wait', route_reason='Bounded uncertainty')
     c.write(raw, payload)
-    before = tree(tmp_path)
+    originals = (tmp_path, raw)
+    before = snapshot(originals)
     with pytest.raises(protocol.UnsupportedProtocol, match='Scientific result schema'):
         c.result_schema('A', retired)
-    assert tree(tmp_path) == before
+    assert snapshot(originals) == before
     with pytest.raises(protocol.UnsupportedProtocol, match='Scientific result schema'):
         c.science_payload(raw, 'A', retired)
-    assert tree(tmp_path) == before
+    assert snapshot(originals) == before
 
 
 def test_current_a_seals_without_any_scientific_recommendation(scene):
@@ -69,9 +274,15 @@ def test_current_a_seals_without_any_scientific_recommendation(scene):
     assert job['handoff_protocol'] == protocol.CURRENT
     assert c.read(record / 'science-output.json')['candidate_recommendation'] is None
     assert c.validate(work)['next_action'] == 'wait'
-    before = tree(scene)
+    originals = (scene, scene / 'settings.json', scene / 'settings-identity.json',
+                 scene / 'jobs', scene / 'jobs/003.json', work, work / 'science-task.json',
+                 record, record / 'science-result.schema.json', record / 'science-output.json',
+                 record / 'result-identity.json', record / 'native-intent.json',
+                 record / 'native-outcome.json', record / 'usage.json')
+    before = snapshot(originals)
     assert c.build_job(scene, 3, 'A', [2]) == job
-    assert tree(scene) == before
+    assert snapshot(originals) == before
+    assert not (scene / 'jobs/004.json').exists()
 
 
 @pytest.mark.parametrize('retired', [3, 4])
@@ -89,11 +300,14 @@ def test_legacy_a_packet_cannot_seal_or_rebuild_without_changing_originals(tmp_p
     if retired == 4:
         payload['candidate_recommendation'] = None
     c.write(record / 'science-output.json', payload)
-    before = tree(root)
+    originals = (root, root / 'settings.json', root / 'settings-identity.json',
+                 root / 'jobs', root / 'jobs/003.json', work, work / 'science-task.json',
+                 record, record / 'science-result.schema.json', record / 'science-output.json')
+    before = snapshot(originals)
     for write in (lambda: c.seal_result(root, 3), lambda: c.build_job(root, 3, 'A', [2]),
                   lambda: c.build_job(root, 4, 'H', [3])):
         with pytest.raises(protocol.UnsupportedProtocol, match='Instance'):
             write()
-        assert tree(root) == before
+        assert snapshot(originals) == before
         assert not (record / 'result-identity.json').exists()
         assert not (root / 'jobs/004.json').exists()

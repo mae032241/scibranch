@@ -27,6 +27,25 @@ platform-profile generator and legacy systemd deployment are retired.
 
 `research_config.py` owns the shared TOML, CLI and host preparation, defaulting and validation path. New instances freeze effective settings; editing a declaration does not amend an existing instance. `backends.py` separates Codex and explicit protocol transport from scientific judgment, budgets and execution authority. Protocol permissions are launcher hints, not isolation; native resume and complete authorship attestation are unsupported, so formal independent review is unavailable. Enabling subagents also establishes neither complete authorship nor complete usage. See the [configuration and backend reference](RESEARCH_CONFIGURATION.md).
 
+Ordinary scientific responses require only summary, scientific_result and limitations,
+plus H/A next_action and route_reason or W stage_intent. Standard Codex requests JSON
+in the prompt; local validation checks required fields and the explicit control choices
+actually consumed. Other scientific content stays open, without nested optional-field
+Schemas. Formal independent review retains its separate strict contract. Frozen schema
+inputs remain unchanged. Ordinary tasks use current minimal outbound instructions
+even with an older frozen strict schema; protocol carries the current minimal schema
+projection. Recorded pre-work format failures retain bounded original-call recovery.
+Actual invocation transport is recorded separately from capability. Custom launcher
+permissions retain their own contracts.
+
+Regression checks limit new default fixed ordinary final-response instructions to 3 KiB across
+Codex/protocol and the actual ordinary, resume, repair and W-fragment branches,
+including a 512-byte repair-diagnostic allowance. Scientific originals, exact dynamic
+references, budgets and user instructions remain complete and are measured separately.
+Retained frozen scientific guidance and historical task inputs are also measured
+separately; their actual total may exceed this new default limit.
+Formal review and the Local execution result-file interface have separate contracts.
+
 Frozen permission summaries distinguish requested and effective policy, enforcement and limitations. Standard Codex danger-full-access cannot enforce offline intent; read-only remains offline despite a network request. Protocol/custom-launcher access remains unknown with hint-only declarations.
 
 The CLI is the application core; the optional webpage uses the same public controls and read views. `control_operations.py` records durable detached advancement and scientific budget amendments. The independent controller retains the original writer lock and survives webpage service exit. Pause prevents the next node while accepted work finishes under original limits. Amendments apply at safe boundaries without resetting consumption or unknown usage; unknown original calls require reconciliation, never automatic resubmission.
@@ -74,20 +93,16 @@ that cannot enter strict JSON receive local diagnostics while other valid result
 and artifact-bound candidates survive. Original `result.json` bytes remain unchanged;
 compact previews and omitted-field diagnostics refer back to that retained file.
 
-With H search commitments, `prepare --candidate-extra-slots N` freezes the W
-nomination allowance (default 2). W's scientific `candidate_nominations` response
-declares one representative or an explained gap for each unwaived mechanism in
-the frozen task scope, plus at most N distinct extra alternatives. Local W tasks
-cover only their assigned mechanisms; screen retains the global scope.
-Each representative names the actual H mechanism reference, exact registered
-candidate and scientific reason; sharing one model across mechanisms needs an
-explicit reason for each. Current-call originals use `{call_id, artifact}`;
-historical candidates use their existing scientific references. Control checks
-identity, declaration coverage, duplicate extras and the allowance, without
-inferring mechanism membership from a call, ranking or judging scientific truth.
-No usable model is an explicit gap and does not prohibit partial or final results.
-Only A's explicit waived disposition with a scientific negative or infeasibility
-reason exempts a mechanism; relative underperformance alone calls for deferral.
+With H search commitments, `prepare --candidate-extra-slots N` freezes optional
+preview guidance for extra nominations (default 2). W may declare representatives,
+extra alternatives or gaps in `candidate_nominations`, without repeating a complete
+mechanism table. Representatives use mechanism_ref, candidate and reason; extras
+use candidate and reason; gaps use mechanism_ref and reason. Current-call candidates
+may use `{call_id, artifact}`; historical candidates use existing scientific references.
+The preview resolves recognizable entries and candidate identities. Omitted or
+unreadable nominations do not trigger output repair or restrict the full candidate
+pool. Mechanism membership, suitability and gaps remain scientific judgments;
+A's separate final_coverage accounts for final mechanism coverage.
 
 The latest sealed W declaration for each mechanism supplies the comparison
 preview and paginated nomination index with its own original source. Local
@@ -96,8 +111,8 @@ remain pending without a synthesized global judgment. Extra alternatives come
 from the latest W declaration. The
 retained candidate pool, experiments and exact materials remain in their existing
 paginated indexes and delivery catalogue, without a nomination count limit.
-A may inspect and select any registered model using the existing recommendation
-and selection explanation; this neither changes the sealed W declaration nor
+A may inspect and recommend any registered model, explaining the choice in its
+scientific response; this neither changes the sealed W declaration nor
 requires another experiment or registration. Tasks without H search commitments
 do not invent mechanism coverage.
 
@@ -130,44 +145,37 @@ not erase the global view. Explanations and H revisions do not reset investment.
 All unexcluded routes, including screened, accrue unserved cycles; only waived routes
 are excluded. `search_policy.initial_calls` configures initial registered-call
 opportunities. The optional portfolio interval controls an additional reminder.
-Every ordinary A substantively assessing a completed W supplies a top-level
-`portfolio_review`: the current main line, strongest viable competitor with exact
-scientific references, cheapest feasible discriminator, and its decision and reason.
-A may explain that no viable competitor or feasible discriminator exists. Missing or
-invalid required declarations use the same task's bounded output repair before sealing;
-a nullable `search_review` cannot waive this contract. Legitimate waiting, missing
-completed W, explicit no-search tasks and actual independent review retain their own
-contracts. FINAL also supplies this judgment when it assesses a completed W in its
-exact frozen inputs. Control validates structure and exact identities; A owns merit.
+Every substantive A assessment of a completed W supplies a compact portfolio_review:
+main_line (an exact mechanism reference or null), reason (free scientific text), and
+an explicit discriminating_work (null or a compact declaration).
+The reason compares the strongest feasible alternative, cheapest discriminating work,
+the actual decision and any deferral trigger/revisit condition, or explains why none
+is feasible. Promised new work names mechanism_refs, question and next_action; null
+means no new feasible work, explained in reason. Missing required content uses bounded same-task output repair. Waiting,
+no completed W, explicit no-search tasks and independent formal review are exempt.
+FINAL applies this judgment when it actually assesses a completed W.
 
-An A disposition of `pending` restores the mechanism to the unfinished plan once,
-without resetting accepted calls, consumed authorizations or investment. Declared
-discriminating work stays in the existing derived scientific intent with its original
-A reference. Later A judgments execute it, defer it with updated reason and revisit
-conditions, or withdraw it with evidence. Execution records a response, without
-claiming the scientific question is resolved. H can revise or reopen an exact route;
-no forced rotation, new mechanism quota or per-route resource reserve is introduced.
+A pending disposition restores unfinished work without resetting consumption.
+Declared discriminating_work retains its exact A source and later response. New work
+names mechanism_refs, question and next_action; active work_updates need only work_ref,
+action (execute/defer/withdraw) and reason. Reasons contain the relevant conditions
+and evidence; other scientific details are optional. Execution does not resolve the
+question automatically. A may retain one main line while assigning the next experiment
+to a competitor; actual focus and execution authorization remain explicit.
 
 Completed investment counts distinct W→A assessment cycles, with pending W separate.
-H/A read the bounded `lineage.indexes.portfolio` page for cycle, pending and
-authored-main-line summaries; full participation stays in mechanism pages.
-Several mechanisms may participate in one cycle, so participation percentages can
-sum above 100%. Repeated native attempts and output repair do not create new cycles.
-The consecutive-main-line count follows independent authored A judgments. Forks keep
-only the exact cut's scientific history; the child's finite budget accounts its own
-new work. Token-based round advice requires at least two completely reported local
-cycles and a known current balance; missing, delayed or inflight usage makes it
-unavailable. It is a token-only reference, without a promise of time, steps or new
-execution admission. Node advance seconds are not an estimate of complete shared time.
-Current native session counters leave reporting delay unmeasured, so they do not
-qualify a numeric reference-cycle estimate. The UI reports this as unavailable.
+The portfolio index retains actual participation, unserved cycles, explicit A main-line
+streaks and active discriminating work. Several mechanisms can share one cycle;
+participation percentages may exceed 100% in total. Recovery and output repair add no
+cycles. Fork uses the exact cut. Token round estimates require sufficient completely
+reported local samples and a known balance; missing or delayed usage remains unavailable.
+These observations grant no resources, force no rotation and judge no scientific merit.
 
-A ending or delivering the research also supplies `final_coverage` over every
-mechanism in its frozen portfolio, including waived routes: `deep`, `screened_pending`,
-`ruled_out` or `unexplored`, with reasons, exact scientific references and explicit
-unanswered questions. Report limitations retain resource and input gaps. The same
-requirement applies to ordinary finish/deliver and protected FINAL/closeout, without
-new experiments. Candidate presence or call success never determines coverage depth.
+Final A coverage lists every frozen mechanism with mechanism_ref, status (deep,
+screened_pending, ruled_out or unexplored) and reason. The reason explains evidence
+and unanswered questions; limitations retains missing inputs and resources. The same
+gate applies to finish/deliver and protected FINAL, without authorizing new experiments.
+Neither candidate presence nor successful calls imply scientific depth.
 
 Budget choices use current ordinary-work availability and the runtime
 `work/budget-status.json`. With protected FINAL, provider-reported consumption
@@ -194,14 +202,16 @@ refunded. Within unchanged H scope, A may use `continue_w` and an explicit local
 focus to request the next finite W stage after review. Prior stage usage remains
 consumed; H revision changes scientific commitments and cannot reset budgets.
 
-Each task freezes the auxiliary fields its configured consumers actually use.
-Unconsumed auxiliary fields are absent from the required native response contract;
-extra scientific content remains in the sealed original. An enabled optional field
-with an unreadable shape supplies a local diagnostic and no inferred progress or
-scope. Explicitly malformed W findings go to A as partial evidence without a
-scientific screening proof; missing or valid-but-incomplete findings retain the
-existing mechanism-coverage checks. Actual action, final-only routing, input
-selection, independent qualification and execution permission remain explicit.
+Each task freezes actual optional consumers. Extra scientific content stays in the
+original; optional explanations do not create format-repair gates. W delivery uses
+exact retained observation facts, with explicit blocked/decision and host exceptions
+preserving partial results. Missing real work can still require bounded continuation;
+missing a repetitive findings table does not. A alone declares screened, backed by
+known exact observations for the same H version. Actual actions, final routing,
+input selection, independent qualification and execution permission remain explicit.
+Omitted optional progress advice neither invents progress nor accumulates an unknown
+pause; an explicit unknown retains its configured meaning.
+
 For input selection, null retains, `[]` clears and a valid list replaces the exact
 bound objects; an unresolved list is never partially applied or silently inherited.
 A registered candidate and its exact sealed implementation may share a readable
@@ -550,20 +560,11 @@ criteria, and explains conflict, uncertainty and missing inputs. Workflow comple
 audit qualification, exhausted budgets, `finish` and delivery do not establish an
 unmeasured goal; A reports unmet objectives when stopping.
 
-An explicit A `candidate_recommendation`, including FINAL, requires
-`selection_explanation`: the adopted `criteria` and `criteria_change.status`
-(`unchanged` or `revised`). A revision names `prior_criteria`, `changes`, locatable
-`evidence` explaining why, and `accepted_tradeoffs`; unchanged details are null.
-A compares against prior H/W design and report conditions, thresholds and fallback
-rules; relaxing any is a revision even if the report already adopted it.
-A first selection may state that no prior criteria were declared. Planning with
-no candidate recommendation may use null. Control checks declaration completeness,
-not scientific truth, sufficiency or candidate ranking. Missing details return to
-the same A through the frozen output-repair policy before sealing. FINAL repairs
-retain one task, session and final-return authorization, cumulative consumption,
-finite attempt limits and original call duration; depleted shared balances do not
-revoke that completion or its original authorized delivery. They authorize no new
-experiment, scientific node or retry of unknown execution.
+A explains candidate criteria, any revisions, supporting evidence and tradeoffs in
+ordinary scientific prose. selection_explanation is optional and has no nested
+completeness gate. Exact candidate identity, frozen inputs, audit qualification and
+delivery authorization remain required. Output repair addresses genuinely required
+fields while retaining the same task, cumulative usage and FINAL completion protection.
 
 Standard single-command `codex` CLI preparation freezes up to two output-only
 repairs or original managed-execution wakes and a separate bounded automatic-recovery
@@ -624,8 +625,8 @@ A completed W screen response with valid required JSON can separately need scien
 work: only an exact `work-evidence.json` assessment of `incomplete` may use the
 independent automatic permission to continue the same original full W task. This
 uses the same session, task and retained observations, binds the original response,
-outcome and evidence snapshot, and consumes `max_continues`. Pure formatting or
-nomination-declaration omissions use narrow output repair; a repaired valid response
+outcome and evidence snapshot, and consumes `max_continues`. Missing required format or
+conditional breadth declarations use narrow output repair; a repaired valid response
 may then need this independently authorized work continuation. Valid partial findings,
 explicit scientific blocks and decision handoffs retain their existing route to A.
 Complete or inapplicable delivery assessments add no recovery action.
@@ -658,10 +659,13 @@ replacement native attempt; existing exact-call reconciliation remains responsib
 for those calls. Recovery preserves the original model/profile, home, permissions,
 accepted-call identities and consumption. It neither resubmits unknown external
 work nor grants more budget. Formal completion, explicit waits and user pause keep
-their existing boundaries. Automatic recovery is disabled for protected FINAL and
-closeout; their existing finite output repair remains separate. Ordinary closeout
+their existing boundaries. Automatic scientific-work recovery is disabled for
+protected FINAL and closeout; their existing finite output repair remains separate.
+The same bounded output-format negotiation may retain their exact original final
+claim, without adding a role, claim or scientific allowance. Ordinary closeout
 collects the original live attempt or an already successful original result; a failed
-or unknown original stays unsealed with a specific recovery diagnostic. Unavailable
+or unknown original stays unsealed with a specific recovery diagnostic, except for
+an independently rechecked eligible output-format negotiation. Unavailable
 fragment continuation and output repair retain their own reason instead of entering
 automatic work recovery or acquiring a new task. The UI projects
 waiting/stopped recovery reason, next attempt, separate counts, service wait and

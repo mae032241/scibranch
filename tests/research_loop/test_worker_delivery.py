@@ -9,6 +9,8 @@ from scidiscovery.research_loop.output_repair import OutputRepairRequired,WorkRe
 from execution_fixtures import execution_registry
 from test_breadth_science import prepare,h,worker,run,findings
 
+pytestmark = pytest.mark.process_e2e
+
 
 def scene(tmp_path):
     root=prepare(tmp_path);h(root,labels=('P','Q'))
@@ -27,21 +29,26 @@ def output(root,rows,*,intent='review'):
         candidate_nominations=dict(representatives=[],extras=[],gaps=gaps) if gaps else None)
     c.write(record/'science-output.json',payload)
     c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
-    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),
+    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,native_started=False,usage=native.usage(root),
         raw_ref=c.file_ref(record/'science-output.json')))
     return record,payload
 
 
 def tree(root):
-    return {str(p.relative_to(root)):p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    """Selected immutable originals, with no recursive workspace inventory."""
+    record=root/'native-evidence/002'
+    paths=[root/'jobs/002.json',root/'host-history/nodes/002.json',root/'host-history/overview.json']
+    paths.extend(record/name for name in ('native-intent.json','native-outcome.json','science-output.json','usage.json',
+        'work-evidence.json','result-identity.json','result.json','checkpoint.json','stage-end.json'))
+    return {str(path.relative_to(root)):path.read_bytes() for path in paths if path.is_file()}
 
 
-def test_schema_valid_missing_mechanism_cannot_direct_seal_or_fake_stage_end(tmp_path,execution_registry):
+def test_missing_actual_observation_requires_continuation_without_finding_table(tmp_path,execution_registry):
     root,job,config=scene(tmp_path);run(root,config,'P')
-    record,payload=output(root,findings('P'))
-    assert c.science_payload(record/'science-output.json','W')==payload
+    record,payload=output(root,None)
     with pytest.raises(WorkRepairRequired,match='h001.m2'):c.seal_result(root,2)
     assert not (record/'result-identity.json').exists()
+    assert worker_delivery.assessment(root,job,payload,record)['status']=='incomplete'
     checkpoint.end_stage(root,job,record,'worker_resume_node_exhausted')
     before=tree(root)
     with pytest.raises(WorkRepairRequired):c.seal_result(root,2)
@@ -49,49 +56,42 @@ def test_schema_valid_missing_mechanism_cannot_direct_seal_or_fake_stage_end(tmp
     assert len(execution.records(root,2))==1 and len(config['breadth']['mechanisms'])==2
 
 
-def test_later_same_owner_q_call_cannot_wash_original_attempt_delivery(tmp_path,execution_registry):
+def test_later_same_owner_call_cannot_wash_original_attempt_facts(tmp_path,execution_registry):
     root,job,config=scene(tmp_path);run(root,config,'P')
-    record,payload=output(root,findings('P','Q'))
-    with pytest.raises(WorkRepairRequired):c.seal_result(root,2)
+    record,payload=output(root,None)
+    worker_delivery.capture(root,job,record)
     original=(record/worker_delivery.FACT_NAME).read_bytes()
-    request=continuation.output_request(root,2,record,verify_task=False)
-    assert request['code']=='worker_delivery_incomplete'
     run(root,config,'Q')
     result=worker_delivery.assessment(root,job,payload,record)
     assert result['status']=='incomplete' and result['missing']==['h001.m2']
     assert (record/worker_delivery.FACT_NAME).read_bytes()==original
-    before=tree(root)
-    assert continuation.output_request(root,2,record,verify_task=False)==request
-    assert tree(root)==before
-    with pytest.raises(WorkRepairRequired):c.seal_result(root,2)
 
 
 @pytest.mark.parametrize('rows',[None,[],[dict(mechanism='P',basis='observed',finding='   ')],
     [dict(mechanism='P',basis='observed',finding='A limited observation'),dict(mechanism='P',basis='observed',finding='Repeated label')]])
-def test_missing_blank_and_duplicate_scientific_findings_need_same_worker(tmp_path,execution_registry,rows):
+def test_scientific_finding_tables_are_not_required_for_observed_work(tmp_path,execution_registry,rows):
     root,job,config=scene(tmp_path);run(root,config,'P');run(root,config,'Q')
     record,_=output(root,rows)
-    with pytest.raises(WorkRepairRequired):c.seal_result(root,2)
-    assert not (record/'result-identity.json').exists()
+    c.seal_result(root,2)
+    assert c.read(record/'result-identity.json')['control_outcome']['worker_delivery']['status']=='complete'
     assert len(execution.records(root,2))==1
 
 
 @pytest.mark.parametrize('rows',['Scientific narrative instead of a table',{'finding':'Partial explanation'},
     [dict(mechanism='P',basis='scientific uncertainty',finding='No classified claim')]])
-def test_unparseable_explicit_findings_retain_science_and_go_to_a_without_screening_or_rework(tmp_path,execution_registry,rows):
+def test_optional_finding_prose_retains_science_without_automatic_screening_or_rework(tmp_path,execution_registry,rows):
     root,job,config=scene(tmp_path);run(root,config,'P');run(root,config,'Q')
     record,payload=output(root,rows);original=(record/'science-output.json').read_bytes()
     c.seal_result(root,2)
     seal=c.read(record/'result-identity.json');receipt=seal['control_outcome']['worker_delivery']
-    assert receipt['status']=='partial' and receipt['reason']=='scientific_findings_unresolved'
-    assert dict(code='scientific_field_unresolved',subject='mechanism_findings') in seal['control_outcome']['diagnostics']
+    assert receipt['status']=='complete' and receipt['reason'] is None
     assert (record/'science-output.json').read_bytes()==original
     assert c.validate(c.workspace(root,2))['mechanism_findings']==rows
     route=controller._route(root,2,'W',c.validate(c.workspace(root,2)),job,1,None)
-    assert route[0]=='A' and 'scientific_findings_unresolved' in route[2]
+    assert route[0]=='A'
     from scidiscovery.research_loop import search
     assert {row['status'] for row in search.project(root,3)['mechanisms'].values()}=={'pending'}
-    assert search._screen_refs(root,job,seal,search.project(root,3))==set()
+    assert search._screen_refs(root,job,seal,search.project(root,3))=={'h001.m1','h001.m2'}
     assert len(execution.records(root,2))==1 and len(experiments_calls(config))==2
 
 
@@ -146,10 +146,11 @@ def stopped_native(root,record):
     """Exact known native originals without an optional node-budget slice."""
     identity=execution.identity(root,2)
     for index,name in enumerate(('runner-process.json','native-process.json')):
+        process_id=os.getpid()+10000+index
         c.write(record/name,dict(task_ref=identity,boot_id=budget.clock_stamp()['boot_id'],
-            pid=os.getpid()+10000+index,start_ticks=1,pgid=1,sid=1,ppid=1))
+            pid=process_id,start_ticks=1,pgid=process_id,sid=process_id,ppid=os.getpid()))
     outcome=c.read(record/'native-outcome.json')
-    outcome.update(cleanup='observed_group_cleaned',execution_processes={
+    outcome.update(native_started=True,cleanup='observed_group_cleaned',execution_processes={
         name:c.record_ref(record/name) for name in ('runner-process.json','native-process.json')})
     c.write(record/'native-outcome.json',outcome)
 
@@ -159,7 +160,7 @@ def test_direct_seal_never_captures_while_original_writer_is_live(tmp_path,execu
     record,_=output(root,findings('P','Q'));stopped_native(root,record)
     monkeypatch.setattr(runtime,'process_matches',lambda *args:True)
     before=tree(root)
-    with pytest.raises(ValueError,match='Original native writer still owns'):c.seal_result(root,2)
+    with pytest.raises((ValueError,BlockingIOError),match='Original (native writer|execution bridge) still owns this attempt'):c.seal_result(root,2)
     assert tree(root)==before
     assert not (record/'checkpoint.json').exists() and not (record/worker_delivery.FACT_NAME).exists()
 

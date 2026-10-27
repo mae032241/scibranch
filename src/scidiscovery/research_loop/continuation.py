@@ -51,6 +51,52 @@ def automatic_source(root, step, record):
     return outcome
 
 
+def format_source(root, step, record):
+    """Verify pre-science format rejection from originals, not saved diagnostics.
+
+    Older receipts may retain an unknown error projection. That projection is
+    never authority for negotiation; the complete raw native stream supplies
+    the positive request rejection, with every other retained fact checked.
+    """
+    from . import backends, native_recovery
+    backend = backends.selected(configuration_updates.for_step(root, step))
+    if backend.name != 'codex' or not backend.standard:return None
+    outcome = c.read(c.regular(record / 'native-outcome.json'))
+    if (outcome.get('terminal_observed') is not False or type(outcome.get('returncode')) is not int
+            or outcome['returncode'] == 0 or outcome.get('stop_reason') not in {None,'native_failure_event'}
+            or outcome.get('cleanup') != 'observed_group_cleaned'
+            or outcome.get('native_schema_transport', 'native_flag') != 'native_flag'):
+        return None
+    original = c.read(c.regular(record / 'native-intent.json'))
+    thread = (original.get('session') or {}).get('thread_id')
+    activity = rejected = False
+    raw=c.regular(record / 'native.jsonl', limit=None)
+    if raw.stat().st_size > 256 * 1024:return None
+    with raw.open('rb') as stream:
+        for number in range(65):
+            line=stream.readline(32 * 1024 + 1)
+            if not line:break
+            if number >= 64 or len(line) > 32 * 1024:return None
+            try:event=json.loads(line)
+            except (ValueError,RecursionError):return None
+            if not isinstance(event,dict):return None
+            kind=event.get('type')
+            if kind in {'error','turn.failed'}:
+                if not native_recovery.format_rejection(event):return None
+                rejected=True
+            elif kind not in {'thread.started','turn.started'} or rejected:
+                return None
+            projected=backend.event(event)
+            activity=activity or projected.get('activity',False)
+            if 'session' in projected:
+                if thread is not None and thread != projected['session']:return None
+                thread=projected['session']
+    if not rejected:return None
+    if outcome.get('native_activity_observed') is not activity or outcome.get('thread_id') != thread:
+        raise ValueError('Automatic recovery native format evidence changed')
+    return dict(outcome, format_rejected=True)
+
+
 def _automatic_session(root, step, record, outcome):
     identity = outcome.get('native_identity') or {}
     path = identity.get('path')
@@ -136,12 +182,19 @@ def automatic_decision(root, step):
             if review['requested'] and review['enforced']:
                 return dict(base, reason='worker_fragment_review_requested')
     original = c.read(c.regular(last / 'native-intent.json'))
+    format_outcome = (format_source(root, step, last)
+        if not completed and (last / 'native.jsonl').exists() else None)
     if (original.get('continuation_kind') in {'author_closeout','startup_successor','execution_wake'}
             or not completed and (original.get('output_repair')
                 or original.get('work_repair') and original.get('continuation_kind')!='automatic_recovery')):
         return stop('automatic_recovery_special_scope_unavailable')
-    if (job.get('final_only') or job.get('purpose') == 'closeout'
-            or budget.final_a_barrier(root) is not None or budget.closeout_state(root)['begin'] is not None):
+    final=budget.final_a_barrier(root)
+    closeout=budget.closeout_state(root)['begin']
+    boundary=(job.get('final_only') or job.get('purpose')=='closeout' or final is not None or closeout is not None)
+    same_scope=(final is not None and final['step']==step
+        and (original.get('budget_slice') or {}).get('final_return') is not None
+        or final is None and job.get('purpose')=='closeout')
+    if boundary and (format_outcome is None or not same_scope):
         return stop('automatic_recovery_final_boundary')
     if (root / 'pause.request').exists():return stop('worker_resume_paused_or_closeout')
     from . import correction
@@ -166,9 +219,14 @@ def automatic_decision(root, step):
     if job['role'] == 'W' and any(row['status'] not in {'known_success','known_failed','not_submitted'}
             for row in history.managed_calls(root, job)):
         return stop('automatic_recovery_managed_execution_pending')
-    outcome = automatic_source(root, step, last)
+    outcome = format_outcome or automatic_source(root, step, last)
     try:_automatic_session(root, step, last, outcome);available = True
     except ResumeUnavailable:available = False
+    if format_outcome is not None:
+        decided = native_recovery.format_decision(limits, used, session_available=available,
+            already_fallback=any((c.read(c.regular(path / 'native-intent.json')).get('automatic_recovery') or {}).get('format_fallback')
+                for path in paths))
+        return dict(base, **decided)
     if work_request is not None:
         decided = native_recovery.work_decision(limits, used, session_available=available)
         return dict(base, **decided, work_repair=work_request)
@@ -190,17 +248,27 @@ def validate_automatic(root, step, intent, *, prior_record=None, prior_intents=N
         prior_record = chain[intent['attempt']-1]
         prior_intents = [c.read(c.regular(path / 'native-intent.json')) for path in chain[:intent['attempt']]]
     if prior_intents is None:raise ValueError('Automatic recovery requires its exact prior attempt chain')
-    outcome = automatic_source(root, step, prior_record)
+    format_fallback = isinstance(request,dict) and request.get('format_fallback') is True
+    if isinstance(request,dict) and 'format_fallback' in request and not format_fallback:
+        raise ValueError('Automatic format fallback marker changed')
+    outcome = (format_source(root, step, prior_record) if format_fallback else
+        automatic_source(root, step, prior_record))
+    if outcome is None:raise ValueError('Automatic format fallback has no positive original rejection')
     job = c.read(c.regular(Path(root) / 'jobs' / f'{step:03d}.json'))
     prior_intent = prior_intents[-1]
-    work_request = (_completed_work_request(root, step, prior_record, intent['attempt']-1, prior_intents)
-        if outcome.get('terminal_observed') is True else None)
+    work_request = (_accepted_repair_request(root,step,intent,prior_record) if intent.get('work_repair') is not None else None)
+    if work_request is None and outcome.get('terminal_observed') is True:
+        work_request=_completed_work_request(root,step,prior_record,intent['attempt']-1,prior_intents)
     if work_request is not None:
+        if (outcome.get('terminal_observed') is not True or (prior_record/'stage-end.json').exists()
+                or any(item.get('continuation_kind') in {'author_closeout','startup_successor','execution_wake'}
+                    or item.get('execution_wake') for item in prior_intents)):
+            raise ValueError('Automatic work recovery cannot reopen a closed or special task')
         expected = native_recovery.work_decision(limits, native_recovery.counters(prior_intents),
             session_available=bool(intent.get('session')))
         if intent.get('work_repair') != work_request or intent.get('output_repair') is not None:
             raise ValueError('Automatic work recovery differs from its exact original delivery failure')
-    elif (job.get('final_only') or job.get('purpose') == 'closeout'
+    elif not format_fallback and (job.get('final_only') or job.get('purpose') == 'closeout'
             or prior_intent.get('continuation_kind') in {'author_closeout','startup_successor','execution_wake'}
             or prior_intent.get('output_repair')
             or prior_intent.get('work_repair') and prior_intent.get('continuation_kind')!='automatic_recovery'
@@ -208,7 +276,16 @@ def validate_automatic(root, step, intent, *, prior_record=None, prior_intents=N
             or not native_recovery.recoverable_source(outcome)):
         raise ValueError('Automatic recovery source is not an eligible unfinished task')
     used = native_recovery.counters(prior_intents)
-    if work_request is None:
+    if format_fallback:
+        if (prior_intent.get('continuation_kind') in {'author_closeout','startup_successor','execution_wake'}
+                or prior_intent.get('output_repair') or prior_intent.get('work_repair')
+                or intent.get('work_repair') or intent.get('output_repair')):
+            raise ValueError('Automatic format fallback changed its original scope')
+        try:_automatic_session(root,step,prior_record,outcome);available=True
+        except ResumeUnavailable:available=False
+        expected = native_recovery.format_decision(limits, used, session_available=available,
+            already_fallback=any((item.get('automatic_recovery') or {}).get('format_fallback') for item in prior_intents))
+    elif work_request is None:
         expected = native_recovery.decision(outcome, limits, used,
             session_available=bool(intent.get('session')), activity_observed=outcome.get('native_activity_observed', False),
             jitter=((intent['attempt'] * 37 % 101) / 50. - 1))
@@ -251,6 +328,7 @@ def _automatic_start_locked(root, step, decision, *, recovery_wait=None):
     if current['delay_seconds'] and recovery_wait is None:
         raise ResumeUnavailable('automatic_recovery_wait_required')
     request = {key:current[key] for key in ('action','reason','source_attempt','counters','startup_retry')}
+    if current.get('format_fallback') is True:request['format_fallback'] = True
     request['wait_seconds'] = waited
     if recovery_wait is not None:
         state_path = last / 'automatic-recovery.json'
@@ -341,15 +419,9 @@ def validate_wake_policy(root, step):
 def validate_task(root, step):
     job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
     c._validate_inputs(root, c.workspace(root, step), job)
-    schema = c.read(c.regular(execution.origin(root, step) / 'science-result.schema.json', limit=None))
-    expected = c.result_schema(job['role'], job.get('handoff_protocol', 1), 'selection' in job,**c.response_options(job))
-    if schema != expected:
-        # The previous same-protocol schema included this framework storage cap.
-        # Accept only that exact prior shape; retain the frozen schema bytes.
-        prior = json.loads(json.dumps(expected))
-        prior['properties']['implementation_selection']['maxItems'] = 16
-        if schema != prior:
-            raise ValueError('Original native output schema changed')
+    # This is the original call's frozen transport input. Rebuilding it with a
+    # later scientific contract would change a retained task during recovery.
+    c.regular(execution.origin(root, step) / 'science-result.schema.json', limit=None)
     return job
 
 def validate_session_header(line, thread, workspace):
@@ -637,6 +709,11 @@ def output_request(root, step, record, *, source_attempt=None, verify_task=True)
             science=candidate_refs.control_payload(job,science,root=root)
             from . import formal_review
             formal_review.validate_choice(root,job,science)
+            if job['role']=='A' and not job.get('formal_review'):
+                from . import search,candidate_nominations
+                interpretation=search.interpret(root,job,science) if job.get('search') is not None else None
+                search.require_portfolio_review(root,job,science,interpretation=interpretation)
+                candidate_nominations.require_final_coverage(root,job,science)
             if job['role']=='W':
                 from . import worker_delivery, candidate_nominations
                 worker_delivery.require_delivery(root,job,science,record,source_attempt=source_attempt)
@@ -648,6 +725,43 @@ def output_request(root, step, record, *, source_attempt=None, verify_task=True)
     return dict(**error.request(), source_attempt=source_attempt,
                 outcome_ref=c.record_ref(record / 'native-outcome.json'), raw_ref=outcome.get('raw_ref'),
                 **(dict(work_evidence_ref=c.record_ref(record/'work-evidence.json')) if isinstance(error,WorkRepairRequired) else {}))
+
+
+def _accepted_repair_request(root,step,intent,prior):
+    """Validate a saved repair's exact source, without rejudging old diagnostics."""
+    attempt=intent.get('attempt')
+    if type(attempt) is not int or attempt<1:raise ValueError('Repair lost its original attempt')
+    accepted=execution.origin(root,step)/'continuations'/f'{attempt:03d}'/'native-intent.json'
+    if not accepted.exists():return None  # Admission still uses today's gates.
+    request=intent.get('work_repair') or intent.get('output_repair')
+    outcome=c.read(c.regular(prior/'native-outcome.json'))
+    job=c.read(c.regular(Path(root)/'jobs'/f'{step:03d}.json'))
+    if (c.read(c.regular(accepted))!=intent or not isinstance(request,dict)
+            or type(request.get('source_attempt')) is not int or request['source_attempt']!=attempt-1
+            or not isinstance(request.get('code'),str) or not request['code']
+            or not isinstance(request.get('diagnostic'),str)
+            or request.get('outcome_ref')!=c.record_ref(prior/'native-outcome.json')
+            or request.get('raw_ref')!=outcome.get('raw_ref')
+            or type(outcome.get('returncode')) is not int or outcome['returncode']!=0
+            or outcome.get('stop_reason')
+            or outcome['usage']['unknown_steps'] and not budget.native_completion_known(outcome,configuration_updates.for_step(root,step))):
+        raise ValueError('Accepted repair changed its exact completed source')
+    raw=prior/'science-output.json'
+    if outcome.get('output_status')=='missing':
+        if (outcome.get('raw_ref') is not None or raw.exists() or raw.is_symlink()
+                or (prior/'result.pending.json').exists() or (prior/'result.pending.json').is_symlink()):
+            raise ValueError('Accepted missing output source changed')
+    elif c.file_ref(c.regular(raw,limit=None))!=outcome.get('raw_ref'):
+        raise ValueError('Accepted repair raw original changed')
+    if intent.get('work_repair') is not None:
+        if (job['role']!='W' or job.get('formal_review') or job.get('final_only') or job.get('purpose')=='closeout'
+                or outcome.get('output_status')=='missing' or request.get('code')!='worker_delivery_incomplete'
+                or request.get('work_evidence_ref')!=c.record_ref(prior/'work-evidence.json')
+                or c.read(raw).get('stage_intent')=='continue'):
+            raise ValueError('Accepted work repair changed its original scope')
+    elif request.get('work_evidence_ref') is not None:
+        raise ValueError('Output repair cannot acquire scientific work scope')
+    return request
 
 
 def validate_repair(root, step, intent, *, prior_record=None, prior_intents=None, verify_task=True):
@@ -663,7 +777,9 @@ def validate_repair(root, step, intent, *, prior_record=None, prior_intents=None
     if intent.get('work_repair') is None and not validate_launcher(root, step).get('output_repair', False):
         raise ValueError('Output repair is not authorized by the frozen policy')
     prior = prior_record if prior_record is not None else execution.records(root, step)[intent['attempt'] - 1]
-    expected = output_request(root, step, prior, source_attempt=intent['attempt'] - 1, verify_task=verify_task)
+    expected=_accepted_repair_request(root,step,intent,prior)
+    if expected is None:
+        expected=output_request(root,step,prior,source_attempt=intent['attempt']-1,verify_task=verify_task)
     if request != expected:
         raise ValueError('Accepted output repair differs from its original response failure')
 

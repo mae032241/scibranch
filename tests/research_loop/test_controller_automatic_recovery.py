@@ -148,6 +148,21 @@ def test_restart_keeps_saved_wait_and_does_not_charge_offline_gap(recovery):
     assert scene.launches[0]['waited_seconds'] == 1.
 
 
+def test_format_rejection_reuses_stopped_schedule_without_new_backoff(recovery,monkeypatch):
+    scene=recovery
+    scene.decision.update(reason='native_format_unsupported',format_fallback=True,delay_seconds=0.)
+    path,saved=controller._recovery_state(scene.root,1,scene.decision)
+    saved.update(status='stopped',next_attempt_at=None,local_wait_seconds=1.,service_wait_seconds=8.)
+    contracts.write(path,saved)
+    def no_capacity_wait(*_):
+        raise AssertionError('Positive format negotiation must not invent capacity backoff')
+    monkeypatch.setattr(controller,'_recovery_remaining',no_capacity_wait)
+    controller._wait_automatic_recovery(scene.root,1,scene.decision)
+    assert scene.sleeps==[] and scene.launches[0]['waited_seconds']==1.
+    after=contracts.read(path)
+    assert after['service_wait_seconds']==8. and after['status']=='started'
+
+
 def test_pause_retains_schedule_and_prevents_recovery_launch(recovery):
     scene = recovery
     (scene.root / 'pause.request').touch()

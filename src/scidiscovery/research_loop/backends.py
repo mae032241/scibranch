@@ -13,6 +13,8 @@ from pathlib import Path
 
 from .native_usage import SessionUsage, tokens
 
+JSON_RESPONSE_INSTRUCTION = 'Return only one JSON object as your final response, with no Markdown fences or surrounding prose.'
+
 
 def configuration(backend='codex', launcher=None, native_options=None, *, existing=None):
     if not isinstance(backend,str) or backend not in {'codex', 'protocol'}:
@@ -98,10 +100,14 @@ def permission_summary(settings):
     return dict(requested=requested,effective=effective,enforcement=enforcement,limitations=limitations)
 
 
-def selected(settings):
+def selected(settings, *, schema_transport=None):
     backend=settings.get('native_backend','codex')
     if not isinstance(backend,str) or backend not in {'codex','protocol'}:raise ValueError('Unsupported frozen native backend')
-    return Codex(settings) if backend == 'codex' else Protocol(settings)
+    if backend == 'codex':return Codex(settings,schema_transport=schema_transport)
+    adapter=Protocol(settings)
+    if schema_transport is not None and schema_transport!=adapter.schema_transport:
+        raise ValueError('Protocol backend owns its response schema transport')
+    return adapter
 
 
 def _toml(value):
@@ -119,13 +125,17 @@ class Codex:
     terminal_source = 'turn.completed'
     supports_resume = True
 
-    def __init__(self, settings):
+    def __init__(self, settings, *, schema_transport=None):
         self.settings = settings
         self.launcher = settings['native_launcher_argv']
         self.options = settings.get('native_options')
         self.standard = len(self.launcher)==1 and Path(self.launcher[0]).name=='codex'
         self.supports_native_schema_flag = self.standard
         self.schema_transport = 'native_flag' if self.supports_native_schema_flag else 'scientific_task'
+        self.active_schema_transport = self.schema_transport if schema_transport is None else schema_transport
+        supported = ('native_flag','prompt') if self.standard else ('scientific_task',)
+        if self.active_schema_transport not in supported:
+            raise ValueError('Unsupported response schema transport for the native launcher')
 
     @property
     def instruction_transport(self):
@@ -147,7 +157,7 @@ class Codex:
                      '-c','project_doc_max_bytes=0','-c','features.multi_agent='+str((self.options or {}).get('subagents',False)).lower(),
                      '-c','features.fast_mode='+str((self.options or {}).get('features',{}).get('fast_mode',False)).lower(),
                      '-c','approval_policy="never"','-c','developer_instructions='+json.dumps(instruction)]
-            if self.supports_native_schema_flag:extra.extend(['--output-schema',str(schema)])
+            if self.active_schema_transport=='native_flag':extra.extend(['--output-schema',str(schema)])
             if self.options is not None:
                 # Framework settings are one declaration; auth remains in the
                 # inherited home. Native user config cannot override this run.
@@ -166,11 +176,15 @@ class Codex:
         for flag in ('--skip-git-repo-check','--ignore-user-config'):
             if flag in args:global_args.append(flag)
         position = len(self.launcher)+1+len(global_args)
-        schema_args = ['--output-schema',str(schema)] if self.supports_native_schema_flag else []
+        schema_args = ['--output-schema',str(schema)] if self.active_schema_transport=='native_flag' else []
         return ([*self.launcher,'exec',*global_args,'resume','--json','--model',profile['model'],
                  *schema_args,'--output-last-message',str(pending),session['thread_id'],'-'],position)
 
     def request(self, prompt, **context):
+        if self.standard:
+            if context.get('response_schema') is None:prompt += '\n'+JSON_RESPONSE_INSTRUCTION
+            if self.active_schema_transport=='prompt' and context.get('formal_review') is True:
+                prompt += '\n'+context['schema'].read_text(encoding='utf-8')
         return prompt.encode()
 
     def meter(self, home, work, session=None):
@@ -252,18 +266,22 @@ class Protocol:
     complete_authorship = False
     supports_native_schema_flag = False
     schema_transport = 'protocol_request'
+    active_schema_transport = 'protocol_request'
     instruction_transport = 'prompt'
 
     def __init__(self, settings):self.settings=settings
     def launch(self, *args):return list(self.settings['native_launcher_argv'])
-    def request(self, prompt, *, profile, work, schema):
+    def request(self, prompt, *, profile, work, schema, formal_review=False, response_schema=None):
         permissions = permission_summary(self.settings)
+        if response_schema is None:
+            if not formal_review:raise ValueError('Ordinary protocol request requires the current response schema')
+            response_schema=json.loads(schema.read_text())
         return (json.dumps(dict(protocol='scidiscovery-agent-v1',prompt=prompt,workspace=str(work),
-            profile={k:v for k,v in profile.items() if v is not None},response_schema=json.loads(schema.read_text()),
+            profile={k:v for k,v in profile.items() if v is not None},response_schema=response_schema,
             permissions=dict(declaration=self.settings.get('native_options') or {},enforcement='hint_only',
                 requested=permissions['requested'],effective=permissions['effective'],
                 limitation='The protocol launcher owns actual access controls; this declaration is not isolation.')),
-            ensure_ascii=False)+'\n').encode()
+            ensure_ascii=False,separators=(',',':'))+'\n').encode()
     def meter(self, home, work, session=None):
         if session is not None:raise ValueError('Protocol backend does not support resume')
         return EventUsage()

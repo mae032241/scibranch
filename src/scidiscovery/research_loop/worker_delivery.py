@@ -12,16 +12,6 @@ from .output_repair import WorkRepairRequired
 FACT_NAME = 'work-evidence.json'
 
 
-def schema():
-    return dict(type=['array','null'],items=dict(type='object',additionalProperties=False,
-        properties=dict(mechanism=dict(type='string'),
-            basis=dict(type='string',enum=['observed','blocked']),
-            finding=dict(type='string')),required=['mechanism','basis','finding']),
-        description='For a screen task, give your own scientific finding and limitations for each assigned mechanism. '
-            'observed uses exact available observations; blocked states a concrete scientific obstacle and goes to A as partial. '
-            'Names are scientific labels or listed mechanism refs. Do not write hashes, call IDs, paths or counts. Local tasks may use null.')
-
-
 def applicable(job):
     return job['role']=='W' and ((job.get('search') or {}).get('focus') or {}).get('action')=='screen'
 
@@ -219,31 +209,74 @@ def validate(root,job,record,*,source_attempt=None):
     return value
 
 
+def validate_original(root,owner,job,seal,*,controls_only=False):
+    """Validate a sealed fact original and its producers, never its assessment."""
+    from . import originals
+    receipt=(seal.get('control_outcome') or {}).get('worker_delivery') or {}
+    native_record=Path(seal['raw_ref']['path']).parent.relative_to(Path(owner.original_root)).as_posix()
+    fact_relative=native_record+'/'+FACT_NAME
+    if receipt.get('facts_ref')!=history.source_control_ref(owner,fact_relative):
+        raise history.ObserverIntegrityError('Final W scientific evidence differs from its seal')
+    fact_path=originals.resolve_ref(owner,receipt['facts_ref'])
+    facts=c.read(c.regular(fact_path))
+    intent=c.read(originals.resolve_ref(owner,dict(path=str(Path(owner.original_root)/native_record/'native-intent.json'))))
+    raw_ref={key:seal['raw_ref'][key] for key in ('path','size_bytes')}
+    if not controls_only:
+        raw=originals.resolve_ref(owner,seal['raw_ref'])
+        if raw.stat().st_size!=raw_ref['size_bytes']:
+            raise history.ObserverIntegrityError('Worker fact raw original changed')
+    if (facts.get('version')!=1 or facts.get('binding')!=dict(job_ref=seal['job_ref'],
+            raw_ref=raw_ref,source_attempt=intent.get('attempt',0))):
+        raise history.ObserverIntegrityError('Inherited W evidence changed its exact attempt')
+    if not owner.inherited and not controls_only:
+        return validate(Path(owner.storage_root),job,fact_path.parent,source_attempt=intent.get('attempt',0))
+    from . import execution_recovery
+    recovered=execution_recovery.resolved(originals.context_root(owner),originals.recovery_refs(owner,job))
+    for row in facts['evidence']:
+        accepted=accepted_original(root,row['accepted'],source=owner)
+        producer=(originals.at_step(originals.source_for_ref(owner,row['accepted']),accepted['scope']['step'])
+            if 'origin_identity' in row['accepted'] else originals.dependency(owner,accepted['scope']['step']))
+        producer_job=originals.source_job(producer)
+        producer_seal=c.read(originals.source_record(producer,'result-identity.json'))
+        observed=c.read(originals.resolve_ref(producer,producer_seal['observations']))
+        calls=[recovered.get((producer.step,call['call_id']),call) for call in observed.get('managed_calls',[])]
+        proofs={}
+        for key in ('accepted','completed','terminal','observation'):
+            proof=row.get(key)
+            if proof is not None and proof.get('origin_identity',producer.origin_identity)!=producer.origin_identity:
+                raise history.ObserverIntegrityError('Inherited W evidence changed its exact observation origin')
+            proofs[key]=({field:value for field,value in proof.items() if field!='origin_identity'}
+                if proof is not None else None)
+        matches=[call for call in calls if all(call.get(key)==proofs[key] for key in proofs)]
+        if len(matches)!=1 or matches[0]['status'] not in {'known_success','known_failed'}:
+            raise history.ObserverIntegrityError('Inherited W evidence lacks its exact known observation')
+        history.validate_managed_original(producer,producer_job,matches,controls_only=controls_only)
+    return facts
+
+
 def assessment(root,job,science,record,*,source_attempt=None):
     """Coverage of this task's own authored findings; no scientific screened verdict."""
     if not applicable(job):return dict(status='not_applicable',missing=[],blocked=[],reason=None)
     facts=validate(root,job,record,source_attempt=source_attempt)
     expected={row['mechanism_ref'] for row in job['search']['coverage_obligation']}
-    mechanisms=job['search']['breadth']['mechanisms'];known={row['mechanism_ref'] for row in facts['evidence']}
-    declared=c.scientific_field(job,science,'mechanism_findings')
-    unresolved=science.get('mechanism_findings') is not None and declared is None
-    findings=declared or [];seen=set();missing=[];blocked=[]
-    for row in findings:
+    known={row['mechanism_ref'] for row in facts['evidence']}
+    blocked=set();findings=science.get('mechanism_findings')
+    mechanisms=job['search']['breadth']['mechanisms']
+    for row in findings if isinstance(findings,list) else []:
+        if (not isinstance(row,dict) or row.get('basis')!='blocked' or not isinstance(row.get('finding'),str)
+                or not row['finding'].strip() or not isinstance(row.get('mechanism'),str)):continue
         matches=[item['mechanism_ref'] for item in mechanisms if row['mechanism'] in (item['mechanism_ref'],item['label'])]
-        if len(matches)!=1 or matches[0] not in expected or matches[0] in seen or not row['finding'].strip():
-            missing.append(row['mechanism']);continue
-        ref=matches[0];seen.add(ref)
-        if row['basis']=='blocked':blocked.append(ref)
-        elif ref not in known:missing.append(ref)
-    missing=sorted(set(missing)|(expected-seen))
+        if len(matches)==1 and matches[0] in expected:blocked.add(matches[0])
+    missing=sorted(expected-known-blocked)
     reason=('work_evidence_capacity' if facts['capacity'] else 'original_execution_unknown' if facts['unknown'] or facts['prior_unknown']
-        else 'scientific_findings_unresolved' if unresolved else 'worker_decision' if science.get('stage_intent')=='decision'
+        else 'worker_decision' if science.get('stage_intent')=='decision'
         else 'scientific_blocked' if blocked else None)
-    return dict(status='partial' if reason else 'incomplete' if missing else 'complete',missing=missing,blocked=blocked,reason=reason,
+    return dict(status='partial' if reason else 'incomplete' if missing else 'complete',missing=missing,blocked=sorted(blocked),reason=reason,
         facts_ref=c.record_ref(c.regular(record/FACT_NAME)))
 
 
 def require_delivery(root,job,science,record,*,source_attempt=None):
+    """Missing actual work can continue; no finding table is required."""
     result=assessment(root,job,science,record,source_attempt=source_attempt)
     if result['status']=='incomplete':
         ending=record/'stage-end.json'
@@ -254,7 +287,8 @@ def require_delivery(root,job,science,record,*,source_attempt=None):
                 reason=validate_exit(root,job,record,value['work_exit'])
                 if value['reason']!=reason:raise history.ObserverIntegrityError('Stage ending changed its verified Worker exception')
                 return dict(result,status='partial',reason=reason)
-        raise WorkRepairRequired('Complete your scientific findings for assigned mechanisms: '+', '.join(result['missing'])+'. Reuse retained observations; do not resubmit completed experiments.')
+        raise WorkRepairRequired('Complete the missing assigned observations: '+', '.join(result['missing'])+
+            '. Reuse retained results and reconcile original calls; do not resubmit completed experiments.')
     return result
 
 

@@ -1,5 +1,6 @@
 """Automatic recovery is a bounded transport grant, never scientific success."""
 import copy
+import json
 import math
 from types import SimpleNamespace
 
@@ -73,6 +74,90 @@ def test_confirmed_exec_native_http_translations_have_narrow_message_patterns(co
 def test_confirmed_quota_message_dominates_generic_http_429():
     event = dict(type='turn.failed',error=dict(status=429,message=CODEX_HTTP_FAILURE_MESSAGES['insufficient_quota']))
     assert recovery.classify(event)['category'] == 'permanent'
+
+
+def json_error_message(code='invalid_json_schema', *, status=400, **fields):
+    return json.dumps(dict(type='error', error=dict(code=code, **fields), status=status))
+
+
+@pytest.mark.parametrize('kind', ['error', 'turn.failed'])
+def test_json_native_schema_error_is_permanent_without_startup_replay(kind):
+    message = json_error_message(type='invalid_request_error', param='text.format.schema',
+        message="Invalid schema for response_format 'codex_output_schema': "
+        "'schema.properties.portfolio_review.properties.discriminating_work.anyOf.1.properties.mechanism_refs.uniqueItems' "
+        'is not permitted when strict is true.')
+    event = dict(type=kind, **({'message':message} if kind == 'error' else {'error':dict(message=message)}))
+    original = copy.deepcopy(event)
+    projected = recovery.classify(event)
+    assert projected['category'] == 'permanent'
+    assert projected['codes'] == ['invalid_json_schema', 'invalid_request_error']
+    assert projected['statuses'] == [400] and projected['not_accepted'] is False
+    stopped = decide(dict(outcome(), native_failure=projected, thread_id=None), available=False)
+    assert stopped['action'] == 'stop' and stopped['reason'] == 'automatic_recovery_permanent_failure'
+    assert event == original
+
+
+def test_json_native_temporary_error_cannot_supply_startup_acceptance_authority():
+    message = json_error_message('rate_limit_exceeded', status=429,
+        accepted=False, request_started=False)
+    event = dict(type='turn.failed', error=dict(message=message))
+    projected = recovery.classify(event)
+    assert projected['category'] == 'temporary'
+    assert projected['not_accepted'] is False
+    value = dict(outcome(), native_failure=projected, thread_id=None)
+    assert decide(value, available=False)['reason'] == 'automatic_recovery_session_unavailable'
+    for flag in ('accepted', 'request_started'):
+        projected = recovery.classify(dict(event, **{flag:False}))
+        assert projected['not_accepted'] is True
+        assert decide(dict(value, native_failure=projected), available=False)['startup_retry'] is True
+
+
+def test_nested_json_permanent_error_dominates_temporary_code_and_http_429():
+    message = json_error_message('rate_limit_exceeded', status=429,
+        message=json_error_message(status=429))
+    projected = recovery.classify(dict(type='turn.failed', error=dict(status=429, message=message)))
+    assert projected['category'] == 'permanent'
+    assert projected['codes'] == ['invalid_json_schema', 'rate_limit_exceeded']
+    assert decide(dict(outcome(), native_failure=projected))['action'] == 'stop'
+
+
+@pytest.mark.parametrize('kind', ['message', 'item.completed', 'tool', 'turn.completed'])
+def test_json_provider_envelope_in_agent_or_tool_events_is_ignored(kind):
+    message = json_error_message()
+    assert recovery.classify(dict(type=kind, message=message, error=dict(message=message))) is None
+
+
+@pytest.mark.parametrize('message', [
+    '{"type":"error","error":',
+    'Reported: ' + json_error_message(),
+    json_error_message() + ' Extra ordinary text',
+    json.dumps([dict(type='error', error=dict(code='invalid_json_schema'), status=400)]),
+    json.dumps(dict(type='message', error=dict(code='invalid_json_schema'), status=400)),
+    json.dumps(dict(type='error', code='invalid_json_schema', status=400)),
+    json_error_message(message='x' * (16 * 1024)),
+    '{"error":' * 1100 + '0' + '}' * 1100,
+    json_error_message(None, status=None, message=json_error_message(None, status=None,
+        message=json_error_message())),
+], ids=['malformed', 'prefixed-prose', 'trailing-prose', 'array', 'wrong-type',
+    'missing-error-object', 'oversize', 'excessive-json-depth', 'excessive-envelope-depth'])
+def test_json_provider_envelope_requires_bounded_complete_error_object(message):
+    projected = recovery.classify(dict(type='error', message=message))
+    assert projected['category'] == 'unknown'
+    assert projected['codes'] == [] and projected['statuses'] == []
+    assert projected['not_accepted'] is False
+
+
+def test_json_provider_projection_excludes_private_prose_headers_and_code_strings():
+    secret = '/private/native/request?token=fixture-private-secret'
+    message = json_error_message(secret, type='invalid_request_error',
+        message=secret, headers=dict(Authorization='Bearer ' + secret), param=secret)
+    event = dict(type='error', message=message)
+    backend = backends.Codex(dict(native_launcher_argv=['codex']))
+    projected = recovery.classify(event)
+    assert projected['category'] == 'permanent'
+    assert projected['codes'] == ['invalid_request_error']
+    assert secret not in str(projected) and secret not in str(backend.event(event))
+    assert backend.public_events(event) == []
 
 
 def test_generic_terminal_wrapper_preserves_structured_permanent_failure():
@@ -256,8 +341,84 @@ def test_raw_failure_projection_is_rechecked_without_reading_agent_text(tmp_path
         continuation.automatic_source(root, 1, record)
 
 
+def test_retained_unknown_json_schema_failure_is_rejected_without_rewriting_originals(tmp_path, monkeypatch):
+    record = tmp_path / 'record';record.mkdir()
+    backend = backends.Codex(dict(native_launcher_argv=['codex']))
+    monkeypatch.setattr(configuration_updates, 'for_step', lambda *_:{})
+    monkeypatch.setattr(backends, 'selected', lambda *_:backend)
+    c.write(record / 'native-intent.json', {})
+    event = dict(type='turn.failed', error=dict(message=json_error_message()))
+    (record / 'native.jsonl').write_text(json.dumps(event) + '\n')
+    old_projection = recovery.classify(dict(type='turn.failed'))
+    c.write(record / 'native-outcome.json', dict(native_failure=old_projection,
+        terminal_observed=False, native_activity_observed=False, thread_id=None))
+    retained = {name:(record / name).read_bytes() for name in ('native.jsonl', 'native-outcome.json')}
+    with pytest.raises(ValueError, match='failure evidence changed'):
+        continuation.automatic_source(tmp_path, 1, record)
+    assert all((record / name).read_bytes() == raw for name, raw in retained.items())
+    saved = c.read(record / 'native-outcome.json')
+    assert decide(saved, available=False)['reason'] == 'automatic_recovery_unknown_failure'
+
+
+def format_error(**changes):
+    fields=dict(code='invalid_json_schema',type='invalid_request_error',param='text.format.schema',
+        message='The provider rejected a constraint in its native response format.')
+    fields.update(changes)
+    return dict(type='error',message=json_error_message(**fields))
+
+
+@pytest.mark.parametrize('change', [dict(param='model'),dict(code='insufficient_quota'),
+    dict(type='authentication_error'),dict(param=None)])
+def test_format_negotiation_requires_structured_format_parameter(change):
+    assert recovery.format_rejection(format_error())
+    assert not recovery.format_rejection(format_error(**change))
+    assert not recovery.format_rejection(dict(type='error',message='400 invalid_json_schema text.format.schema'))
+    assert not recovery.format_rejection(dict(type='error',message=json_error_message(status=429,
+        code='invalid_json_schema',param='text.format.schema')))
+
+
+@pytest.mark.parametrize('activity', [None,dict(type='item.started',item=dict(type='agent_message')),
+    dict(type='item.completed',item=dict(type='mcp_tool_call')),dict(type='turn.completed'),
+    dict(type='unknown.event'),'malformed'])
+def test_positive_original_format_rejection_is_separate_from_immutable_old_diagnostic(tmp_path, monkeypatch, activity):
+    record=tmp_path/'record';record.mkdir()
+    backend=backends.Codex(dict(native_launcher_argv=['codex']))
+    monkeypatch.setattr(configuration_updates,'for_step',lambda *_:{})
+    monkeypatch.setattr(backends,'selected',lambda *_:backend)
+    c.write(record/'native-intent.json',{})
+    events=[dict(type='thread.started',thread_id='original'),dict(type='turn.started')]
+    if activity is not None:events.append(activity)
+    events.extend([format_error(),dict(type='turn.failed',error=dict(message=format_error()['message']))])
+    (record/'native.jsonl').write_text('\n'.join(json.dumps(event) if event!='malformed' else '{'
+        for event in events)+'\n')
+    c.write(record/'native-outcome.json',dict(returncode=7,stop_reason='native_failure_event',
+        cleanup='observed_group_cleaned',native_failure=recovery.classify(dict(type='error')),
+        terminal_observed=False,native_activity_observed=True,thread_id='original'))
+    originals={name:(record/name).read_bytes() for name in ('native.jsonl','native-outcome.json','native-intent.json')}
+    value=continuation.format_source(tmp_path,1,record)
+    assert (value is not None) is (activity is None)
+    if value is not None:
+        assert value['format_rejected'] is True and value['native_failure']['category']=='unknown'
+    assert all((record/name).read_bytes()==raw for name,raw in originals.items())
+    with pytest.raises(ValueError,match='failure evidence changed'):
+        continuation.automatic_source(tmp_path,1,record)
+
+
+def test_format_fallback_is_once_and_spends_existing_retry_budget():
+    used=dict(continues=0,retries=0,wait_seconds=0.)
+    limits=recovery.policy({})
+    value=recovery.format_decision(limits,used,session_available=False)
+    assert value['action']=='retry' and value['format_fallback'] is True and value['startup_retry'] is True
+    assert value['delay_seconds']==0
+    assert recovery.format_decision(limits,used,session_available=True,already_fallback=True)['action']=='stop'
+    assert recovery.format_decision(dict(limits,max_retries=0),used,session_available=False)['reason']=='automatic_recovery_retry_limit'
+    assert recovery.format_decision(dict(limits,enabled=False),used,session_available=False)['action']=='none'
+
+
 AUTOMATIC_NATIVE = r'''import json,os,pathlib,sys
 args=sys.argv[1:];prompt=sys.stdin.read();resume='resume' in args
+assert '--output-schema' not in args
+assert prompt.strip() and '"additionalProperties"' not in prompt
 work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE']);home=pathlib.Path(os.environ['CODEX_HOME'])
 role=os.environ['THIN_HWA_ROLE'];thread='11111111-2222-4333-8444-'+('%012d'%int(work.name))
 configuration=json.loads(pathlib.Path(__file__).resolve().with_name('launcher-config.json').read_text())
@@ -280,17 +441,13 @@ if role=='H' and not resume:
  else:print(json.dumps(dict(type='turn.incomplete')),flush=True)
  raise SystemExit(7)
 if resume:
- assert thread in args and 'Continue completing the current assigned task' in prompt
- assert 'Repair only your final response' not in prompt
+ assert thread in args and prompt.strip()
  assert (work/'work/retained-observation').read_text()=='one exact observation'
-schema=json.loads(pathlib.Path(args[args.index('--output-schema')+1]).read_text())
-payload={name:None for name in schema['properties']}
+task=json.loads((work/'science-task.json').read_text())
+payload={name:None for name in task['final_response']}
 payload.update(summary='Recovered bounded transport',scientific_result='Retained observations, no scientific qualification.',
- limitations=['Only native transport is simulated.'],implementation_selection=None,
+ limitations=['Only native transport is simulated.'],
  next_action='analyze' if role=='H' else 'finish',route_reason='Review the retained bounded observation.')
-if role=='A':
- payload['selection_explanation']=dict(criteria='Retain the available bounded observation.',
-  criteria_change=dict(status='unchanged',prior_criteria=None,changes=None,evidence=None,accepted_tradeoffs=None))
 pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))
 print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=10,cached_input_tokens=3,output_tokens=4))),flush=True)
 '''
@@ -519,6 +676,8 @@ def test_second_controller_never_replaces_still_living_default_native(tmp_path):
 
 STARTUP_NATIVE = r'''import json,os,pathlib,sys
 args=sys.argv[1:];prompt=sys.stdin.read();resume='resume' in args
+assert '--output-schema' not in args
+assert prompt.strip() and '"additionalProperties"' not in prompt
 work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE']);home=pathlib.Path(os.environ['CODEX_HOME'])
 role=os.environ['THIN_HWA_ROLE']
 configuration=json.loads(pathlib.Path(__file__).resolve().with_name('launcher-config.json').read_text())
@@ -532,19 +691,16 @@ if role=='H' and launches.read_text()=='exec\n':
  raise SystemExit(7)
 if role=='H':
  assert launches.read_text()=='exec\nexec\n'
- assert 'Continue completing the current assigned task' in prompt
+ assert prompt.strip()
 thread='11111111-2222-4333-8444-'+('%012d'%int(work.name))
 print(json.dumps(dict(type='thread.started',thread_id=thread)),flush=True)
 session=home/'sessions'/('rollout-'+thread+'.jsonl');session.parent.mkdir(parents=True,exist_ok=True)
 session.write_text(json.dumps(dict(type='session_meta',payload=dict(id=thread,cwd=str(work))))+'\n')
-schema=json.loads(pathlib.Path(args[args.index('--output-schema')+1]).read_text())
-payload={name:None for name in schema['properties']}
+task=json.loads((work/'science-task.json').read_text())
+payload={name:None for name in task['final_response']}
 payload.update(summary='Bounded request startup',scientific_result='No scientific qualification is asserted.',
- limitations=['Only native transport is simulated.'],implementation_selection=None,
+ limitations=['Only native transport is simulated.'],
  next_action='analyze' if role=='H' else 'finish',route_reason='Review the retained bounded observation.')
-if role=='A':
- payload['selection_explanation']=dict(criteria='Retain the available bounded observation.',
-  criteria_change=dict(status='unchanged',prior_criteria=None,changes=None,evidence=None,accepted_tradeoffs=None))
 pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))
 print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=10,cached_input_tokens=3,output_tokens=4))),flush=True)
 '''
@@ -612,3 +768,207 @@ def test_missing_thread_without_positive_rejection_never_starts_another_request(
     assert len(execution.records(root,1)) == 1 and not (root / 'jobs/002.json').exists()
     assert (c.workspace(root,1) / 'work/launches').read_text() == 'exec\n'
     assert all((first / name).read_bytes() == data for name,data in retained.items())
+
+
+FORMAT_NATIVE = r'''import json,os,pathlib,sys
+args=sys.argv[1:];prompt=sys.stdin.read();resume='resume' in args
+work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE']);home=pathlib.Path(os.environ['CODEX_HOME'])
+role=os.environ['THIN_HWA_ROLE']
+config=json.loads(pathlib.Path(__file__).resolve().with_name('launcher-config.json').read_text())
+assert '--output-schema' not in args
+assert prompt.strip() and '"additionalProperties"' not in prompt
+task=json.loads((work/'science-task.json').read_text())
+launches=work/'work/format-launches.jsonl'
+prior=launches.read_text().splitlines() if launches.exists() else []
+number=len(prior)+1
+with launches.open('a') as stream:stream.write(json.dumps(dict(native=False,resume=resume,role=role))+'\n')
+thread='11111111-2222-4333-8444-'+('%012d'%int(work.name))
+print(json.dumps(dict(type='thread.started',thread_id=thread)),flush=True)
+session=home/'sessions'/('rollout-'+thread+'.jsonl')
+if not resume:
+ session.parent.mkdir(parents=True,exist_ok=True)
+ session.write_text(json.dumps(dict(type='session_meta',payload=dict(id=thread,cwd=str(work))))+'\n')
+else:
+ assert thread in args
+ assert (work/'work/retained-format-observation').read_text()=='one exact observation'
+if role==config['format_role']:
+ if number==1:(work/'work/retained-format-observation').write_text('one exact observation')
+ fault=config['fault']
+ temporary=fault=='format-always-transient' or fault in {'format-transient','format-repeat'} and number==1
+ if temporary:
+  print(json.dumps(dict(type='turn.failed',error=dict(code='rate_limit_exceeded',status=429))),flush=True)
+  raise SystemExit(7)
+ permanent=fault in {'format-other400','format-activity','format-prose'} or fault=='format-repeat' and number==2
+ if permanent:
+  print(json.dumps(dict(type='turn.started')),flush=True)
+  if fault=='format-activity':print(json.dumps(dict(type='item.started',item=dict(type='agent_message',text='started science'))),flush=True)
+  error=dict(type='error',error=dict(code='invalid_json_schema',type='invalid_request_error',param='text.format.schema',message='A provider request is invalid.'),status=400)
+  if fault=='format-other400':error['error']['param']='model'
+  message=json.dumps(error)
+  if fault=='format-prose':message='Provider says '+message
+  print(json.dumps(dict(type='error',message=message)),flush=True)
+  print(json.dumps(dict(type='turn.failed',error=dict(message=message))),flush=True)
+  raise SystemExit(7)
+payload={name:None for name in task['final_response']}
+payload.update(summary='Bounded ordinary prompt transport',scientific_result='Only native transport is simulated.',
+ limitations=['No scientific qualification is asserted.'],
+ next_action='analyze' if role=='H' else 'finish',route_reason='Retain the exact bounded transport evidence.')
+if role==config['format_role'] and config['fault']=='format-repair' and number==1:payload.pop('summary')
+pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))
+print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=10,cached_input_tokens=3,output_tokens=4))),flush=True)
+'''
+
+
+def retained_strict_contract(monkeypatch):
+    """Keep an old strict schema original while ordinary launches use prompt."""
+    build=c.build_job;retained={}
+    def prepare(*args,**kwargs):
+        job=build(*args,**kwargs)
+        record=execution.origin(args[0],job['step'])
+        if not (record/'native-intent.json').exists():
+            path=record/'science-result.schema.json'
+            schema=c.read(path);schema['additionalProperties']=False;c.write(path,schema)
+            retained.setdefault(path,path.read_bytes())
+        return job
+    monkeypatch.setattr(c,'build_job',prepare)
+    return retained
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('role,fault,final',[('H','format',False),('A','format',False),
+    ('A','format-repair',False),('A','format-transient',False),('A','format',True),('A','format-repair',True)])
+def test_production_ordinary_prompt_preserves_strict_original_budget_home_and_sticky_mode(tmp_path,monkeypatch,role,fault,final):
+    import sys
+    from test_default_cli_output_repair import prepare_cli
+    from scidiscovery.research_loop import controller,native
+    schemas=retained_strict_contract(monkeypatch)
+    root,home,env=prepare_cli(tmp_path,fault=fault,final=final)
+    (tmp_path/'native.py').write_text('#!'+sys.executable+'\n'+FORMAT_NATIVE)
+    config=c.read(tmp_path/'launcher-config.json');config['format_role']=role;c.write(tmp_path/'launcher-config.json',config)
+    for key in ('CODEX_HOME','PATH','PYTHONPATH'):monkeypatch.setenv(key,env[key])
+    monkeypatch.setattr(controller,'_recovery_remaining',lambda *_:0.)
+    originals={path:path.read_bytes() for path in (root/'settings.json',home/'config.toml',home/'auth.json')}
+    result=controller.closeout(root) if final else controller.run(root)
+    assert result['status']==('final_a_completed' if final else 'finish'),result
+    step=1 if final or role=='H' else 2
+    paths=execution.records(root,step);first=paths[0]
+    original_intent=c.read(first/'native-intent.json')
+    launches=[json.loads(line) for line in (c.workspace(root,step)/'work/format-launches.jsonl').read_text().splitlines()]
+    expected_attempts=2 if fault in {'format-repair','format-transient'} else 1
+    assert len(paths)==len(launches)==expected_attempts
+    assert launches==[dict(native=False,resume=number>0,role=role) for number in range(expected_attempts)]
+    assert all(execution.home(root,step,number)==home for number in range(len(paths)))
+    assert all(c.read(path/'native-outcome.json')['native_schema_transport']=='prompt' for path in paths)
+    assert schemas and all(c.read(path)['additionalProperties'] is False for path in schemas)
+    assert all(path.read_bytes()==raw for path,raw in schemas.items())
+    if expected_attempts==2:
+        recovered=paths[1];intent=c.read(recovered/'native-intent.json');old=c.read(first/'native-outcome.json')
+        assert intent['previous']==execution.proof(first) and intent['task_ref']==original_intent['task_ref']
+        assert intent.get('native_profile')==original_intent.get('native_profile')
+        assert intent['session']['home']==str(home) and intent['session']['thread_id']==old['thread_id']
+        assert (c.workspace(root,step)/'work/retained-format-observation').read_text()=='one exact observation'
+        if fault=='format-repair':
+            assert intent['continuation_kind']=='repair' and intent['output_repair']['code']=='invalid_fields'
+            assert intent.get('automatic_recovery') is None and intent.get('work_repair') is None
+            assert 'summary' not in c.read(first/'science-output.json')
+            assert intent['budget_slice']['previous_tokens']==14
+            assert c.read(recovered/'native-outcome.json')['budget_slice']['observed_tokens']==28
+            assert step not in native.usage(root)['unknown_steps']
+        else:
+            assert intent['continuation_kind']=='automatic_recovery'
+            assert intent['automatic_recovery']['action']=='retry' and intent['automatic_recovery']['reason']=='native_temporary'
+            assert not intent['automatic_recovery'].get('format_fallback',False)
+            assert not intent['automatic_recovery']['startup_retry']
+            assert recovery.counters([intent])==dict(continues=0,retries=1,wait_seconds=0.)
+            assert old['native_failure']['category']=='temporary' and not (first/'usage.json').exists()
+            assert intent['budget_slice']['previous_tokens']==0
+            assert native.usage(root)['unknown_steps']==[step]
+        if final:assert intent['budget_slice']['final_return']==original_intent['budget_slice']['final_return']
+    else:
+        assert native.usage(root)['unknown_steps']==[]
+        assert not (first/'continuations').exists()
+    assert native.usage(root)['observed_tokens']==(14*expected_attempts if final else 14*(expected_attempts+1) if fault!='format-transient' else 28)
+    if final:assert not (root/'jobs/002.json').exists()
+    elif role=='A':assert len(execution.records(root,1))==1 and c.read(execution.origin(root,1)/'result-identity.json')
+    retained={path:path.read_bytes() for path in (first/'native-outcome.json',first/'native-intent.json',first/'native.jsonl')}
+    assert (controller.closeout(root) if final else controller.run(root))['status']==result['status']
+    assert len(execution.records(root,step))==len(paths)
+    assert all(path.read_bytes()==raw for path,raw in {**originals,**schemas,**retained}.items())
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('fault',['format-other400','format-activity','format-prose'])
+def test_production_prompt_permanent_failure_does_not_start_schema_negotiation(tmp_path,monkeypatch,fault):
+    import sys
+    from test_default_cli_output_repair import prepare_cli
+    from scidiscovery.research_loop import controller
+    schemas=retained_strict_contract(monkeypatch)
+    root,_,env=prepare_cli(tmp_path,fault=fault)
+    (tmp_path/'native.py').write_text('#!'+sys.executable+'\n'+FORMAT_NATIVE)
+    config=c.read(tmp_path/'launcher-config.json');config['format_role']='H';c.write(tmp_path/'launcher-config.json',config)
+    for key in ('CODEX_HOME','PATH','PYTHONPATH'):monkeypatch.setenv(key,env[key])
+    assert controller.run(root)['status']!='finish'
+    first,=execution.records(root,1)
+    assert not (root/'jobs/002.json').exists()
+    launches=[json.loads(line) for line in (c.workspace(root,1)/'work/format-launches.jsonl').read_text().splitlines()]
+    assert launches==[dict(native=False,resume=False,role='H')]
+    assert c.read(first/'native-outcome.json')['native_schema_transport']=='prompt'
+    assert all(path.read_bytes()==raw for path,raw in schemas.items())
+    retained={path:path.read_bytes() for path in (first/'native-intent.json',first/'native-outcome.json',first/'native.jsonl')}
+    assert controller.run(root)['status']!='finish'
+    assert execution.records(root,1)==[first]
+    assert all(path.read_bytes()==raw for path,raw in retained.items())
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('cap,fault,attempts,success',[(0,'format',1,True),(0,'format-transient',1,False),
+    (1,'format-always-transient',2,False),(3,'format-repeat',2,False)])
+def test_production_ordinary_prompt_obeys_retry_cap_without_schema_requests(tmp_path,monkeypatch,cap,fault,attempts,success):
+    import sys
+    from test_default_cli_output_repair import prepare_cli
+    from scidiscovery.research_loop import controller,native
+    schemas=retained_strict_contract(monkeypatch)
+    root,_,env=prepare_cli(tmp_path,fault=fault,automatic=dict(max_retries=cap))
+    (tmp_path/'native.py').write_text('#!'+sys.executable+'\n'+FORMAT_NATIVE)
+    config=c.read(tmp_path/'launcher-config.json');config['format_role']='H';c.write(tmp_path/'launcher-config.json',config)
+    for key in ('CODEX_HOME','PATH','PYTHONPATH'):monkeypatch.setenv(key,env[key])
+    monkeypatch.setattr(controller,'_recovery_remaining',lambda *_:0.)
+    result=controller.run(root)
+    assert (result['status']=='finish') is success,result
+    paths=execution.records(root,1)
+    assert len(paths)==attempts
+    if not success:assert not (root/'jobs/002.json').exists() and native.usage(root)['unknown_steps']==[1]
+    launches=[json.loads(line) for line in (c.workspace(root,1)/'work/format-launches.jsonl').read_text().splitlines()]
+    assert launches==[dict(native=False,resume=number>0,role='H') for number in range(attempts)]
+    if attempts>1:
+        intent=c.read(paths[1]/'native-intent.json')
+        assert intent['session']['thread_id']==c.read(paths[0]/'native-outcome.json')['thread_id']
+        assert intent['automatic_recovery']['action']=='retry' and not intent['automatic_recovery'].get('format_fallback',False)
+        assert recovery.counters([intent])['retries']==1
+    assert all(path.read_bytes()==raw for path,raw in schemas.items())
+
+
+@pytest.mark.process_e2e
+def test_final_ordinary_prompt_failure_preserves_protected_scope_and_exact_original(tmp_path,monkeypatch):
+    import sys
+    from test_default_cli_output_repair import prepare_cli
+    from scidiscovery.research_loop import controller,native
+    schemas=retained_strict_contract(monkeypatch)
+    root,home,env=prepare_cli(tmp_path,fault='format-transient',final=True)
+    (tmp_path/'native.py').write_text('#!'+sys.executable+'\n'+FORMAT_NATIVE)
+    config=c.read(tmp_path/'launcher-config.json');config['format_role']='A';c.write(tmp_path/'launcher-config.json',config)
+    for key in ('CODEX_HOME','PATH','PYTHONPATH'):monkeypatch.setenv(key,env[key])
+    result=controller.closeout(root)
+    assert result['status']!='final_a_completed',result
+    first,=execution.records(root,1)
+    intent=c.read(first/'native-intent.json');outcome=c.read(first/'native-outcome.json')
+    assert intent['budget_slice']['final_return'] and execution.home(root,1,0)==home
+    assert outcome['native_schema_transport']=='prompt' and outcome['native_failure']['category']=='temporary'
+    assert not (first/'usage.json').exists() and native.usage(root)['unknown_steps']==[1]
+    assert not (root/'jobs/002.json').exists()
+    assert [json.loads(line) for line in (c.workspace(root,1)/'work/format-launches.jsonl').read_text().splitlines()]==[dict(native=False,resume=False,role='A')]
+    retained={path:path.read_bytes() for path in (root/'settings.json',home/'config.toml',home/'auth.json',
+        first/'native-intent.json',first/'native-outcome.json',first/'native.jsonl')}
+    assert controller.closeout(root)['status']!='final_a_completed'
+    assert execution.records(root,1)==[first] and not (root/'jobs/002.json').exists()
+    assert all(path.read_bytes()==raw for path,raw in {**schemas,**retained}.items())

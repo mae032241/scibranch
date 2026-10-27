@@ -23,11 +23,13 @@ export PATH="$HOME/.local/bin:$PATH"
 模型/bootstrap 访问、Cov 训练数据与科学执行环境须另行准备。
 
 薄安装不要求旧 `SCID_WORKSPACE`/`SCID_CODEX_LAUNCH_ROOT`，不初始化旧 SQL、密钥、
-MCP/Root 角色、systemd 服务或默认实例。已有 site 或任一薄 wrapper 会拒绝覆盖，
-不停止旧 live 服务，也不更新已冻结实例。`status` 只核本配置 wrapper 归属；
+MCP/Root 角色、systemd 服务或默认实例。首次 `install` 拒绝已有 site 或薄 wrapper；
+`reinstall` 在原路径先暂存验证后替换包和 Skill，发布失败恢复旧目录及命令。
+更新前须停止使用该安装的控制进程、Worker 和 UI；安装器不停止旧 live 服务，
+也不更新已冻结实例。`status` 只核本配置 wrapper 归属；
 `uninstall` 仅删除匹配本配置的两个 wrapper，保留代码 prefix、实例及旧状态，
-不能把卸载命令等同于所有 native/外部作业已停止。`reinstall.sh` 无 sudo 调用同一
-fresh install 入口，不提供原位升级。升级/旧代码回收须另行确认原写者。
+不能把卸载命令等同于所有 native/外部作业已停止。`reinstall.sh` 默认无 sudo 执行原目录更新，
+无需更换 HOME 安装目录；参数、归属检查和失败回退见[安装指南](INSTALL.zh-CN.md)。
 
 `SCID_DEPLOY_MODE=legacy` 已退役并在修改文件前拒绝。当前不提供旧 SQL reader 或协议迁移。安装不会自动运行以下命令或增加任何预算。
 
@@ -176,15 +178,22 @@ TOML 对应 `[policies.resume.automatic_recovery]`，CLI 通过原
 只判 permanent 停止，不续接。既有 session 的重试不要求 `not_accepted` 字段；无 session
 启动重试仍须明确未接受证据。本机取样未验证真实服务商推理恢复、用量覆盖或原生权限资格。
 正常完成 turn 缺少或给出无效必需输出仍走既有输出补填，合法 fragment 保持原阶段接续；正式完成、显式等待和暂停不自动追加普通工作。
+普通 Codex 任务从首轮起以简短提示要求 JSON，不发送原生 schema 参数，也不追加旧 Schema
+全文；Protocol 携带当前最小回答 Schema。旧 task 和 Schema 原件保留，实际输出说明明确当前
+必填项和条件广度规则。真正正式独审另用其严格合同。已有格式失败只有在完整原生流明确证明
+工作开始前被接口拒绝时，才可按原自动策略消费一个 retry 名额协商一次。其他 400、普通文字、
+未知外部执行或已有科学活动不因此重放。原失败回执、未知计量和消费保留；`--json` 仅指 Codex
+事件流，详见[输出传输](RESEARCH_CONFIGURATION.md#response-schema-transport--输出-schema-传输)。
 已完成 W screen 的必需 JSON 合法但精确 `work-evidence.json` 仍判定 `incomplete` 时，
 可依靠独立自动许可续接同一 W 原完整任务，保留原 session 与观察，绑定原返回、outcome
-及证据快照，与提前停止共用 `max_continues`。单纯格式和提名缺失仍走窄输出补填；补成合法
+及证据快照，与提前停止共用 `max_continues`。必需格式和条件广度声明缺失走窄输出补填；补成合法
 返回后，科学不足可另经独立许可续工。有效 partial、明确障碍或 decision 交接仍沿原路交 A；
 完整或不适用的交付判定不追加恢复动作。
 强制 host review 仍优先沿原路交 A。continue 次数或原预算耗尽留下可核验 partial 出口，
 不制造 finding 或科学资格，也不退还已用预算。
-protected FINAL 与 closeout 禁用新自动策略，原有有限输出补填不变。普通收口只收集仍活着的
-原 attempt 或已成功原结果；失败、未知、fragment 续接或输出补填不可用保留准确未封存诊断，
+protected FINAL 与 closeout 禁用自动科学续工，原有有限输出补填不变；上述格式协商仅沿用同一
+原 final claim 与上限，不新增科学任务。普通收口只收集仍活着的
+原 attempt 或已成功原结果，或核对合格后协商同一任务的格式降级；其他失败、未知、fragment 续接或输出补填不可用保留准确未封存诊断，
 不自动改派普通任务。`closeout_native_unsealed` 区分已知失败须显式 `worker-resume` 与
 执行未知须核对同一原调用，未知绝不重放；fragment 续接不可用保留原诊断。纯输出补填
 启动被拒绝时报告 `output_repair_unavailable` 及原原因。
@@ -603,20 +612,12 @@ Codex/命名空间、replay/model、solver 及 SSH 验收留到 G3 后由用户�
 坏指标或成果声明只诊断相关条目；坏 artifact 只阻该候选登记，不清空其他有效指标或成果。无法写入严格 JSON 的说明（例如嵌套数字指数溢出）只在投影中省略相关字段并链接原 `result.json`，原始字节仍保留。摘要超长时给预览和原件引用。
 指标名不赋予目标含义，同口径比较不代替 A 的科学判断；A 的推荐可为 null，null 不授权交付。
 
-启用 H search 时，`prepare --candidate-extra-slots N` 明确冻结 W 分类提名的额外名额，默认 2。
-W 在科学返回的 `candidate_nominations` 填写 `representatives`、`extras`、`gaps`：
-代表项为 `{mechanism_ref,candidate,reason}`，额外项为 `{candidate,reason}`，缺口项为
-`{mechanism_ref,reason}`。`candidate` 使用历史科学引用，或当前原调用的 `{call_id,artifact}`。
-本次冻结 `candidate_nomination_mechanisms` 内每个未 waived 的机制须有一个代表或明确缺口。
-局部 improve/repair/validate 只负责指定机制；screen 保留全局范围。同模型代表多个
-机制须逐项说明科学含义。额外备选不得与代表或其他额外项重复，至多 N 项。
-五个机制各有不同代表且额外名额为 2 时，可提名七个模型；框架不固定总数为五，
-不按分数排序或自动截断。无成功适用模型应写缺口，仍可交回 partial 或最终结果。
-暂时相对低分不足以取消机制，只有 A 明确 waived 并给科学否定或不可行理由才免覆盖。
-默认视图及 `lineage.indexes.nominations` 按机制展示最近封存 W 的分类提名，逐项链接各自原结论；局部返回保留其他机制既有代表和缺口，新机制仍显示 pending，不产生新的全局科学决定。额外备选展示最近 W 的声明。
-完整候选池仍在 `lineage.indexes.candidates` 通过 `next_page` 读取，所有已登记原件继续可选。
-A 可直接选择预览外的已有模型，并按原 `selection_explanation` 说明，不用重跑实验、
-新增登记步骤或覆写 W 原结论。无 search 承诺的任务不强迫填写机制。
+启用 H search 时，prepare --candidate-extra-slots N 冻结可选 W 提名预览的额外数量建议，默认 2。
+candidate_nominations 可选；代表项只需 mechanism_ref、candidate、reason，额外项
+candidate、reason，缺口项 mechanism_ref、reason。候选沿现有科学引用或准确当前调用
+的 call_id/artifact 定位。省略提名不触发补填，全部已登记候选仍在候选池可选。
+默认预览及 lineage.indexes.nominations 保留有效声明及原结论入口；A 可直接选择预览外
+已有模型，在普通科学正文解释准则和限制，不必重跑或覆写 W 原结论。
 
 执行状态与结果状态分别显示：退出码0只表示命令成功；结果文件缺失为 `missing`，JSON或协议基础形状无法解析为 `invalid`，采集失败为 `unavailable`。个别条目或说明不可用时，其余声明仍为 `available` 并带局部 `diagnostics`。
 原件、cleanup或外部结果未知时保留 `unknown`，不得重发以代替查明原调用。
@@ -635,11 +636,23 @@ H 提出竞争机制和最小判别依据，决定是否请求 E。W 在用户�
 
 H 应先比较可信的竞争机制，再说明集中深挖的理由；单机制范围的合理性由科学作者解释，不设机制数量下限。参数扫描次数不能代替不同机制的判别证据。A 的 `screened` 只表示已评价精确 W 证据，仍可深挖；`deferred` 暂缓并保留未决路线，`waived` 才明确排除。每个排除须在既有 reason/scientific_result 中给出针对原目标与约束、由证据支持的科学否定或不可行理由；暂时相对落后、缺输入或缺证据应说明暂缓，控制不按关键词、分数或运行次数判理由质量。
 
-后继角色可从 `lineage.indexes.mechanisms` 读取所有机制；已采纳的 A 处置提供理由预览、截断标记及完整科学 JSON 原件入口，长原文不受导航页大小上限省略。同状态重述或遗漏不替换已采纳依据，H 修订会清掉当前旧依据，历史原件保留。所有 search 实例默认向 H/A 持续展示完整组合，包括 screened；局部 improve/repair/validate 不抹去全局视野。机制页展示实际 accepted 调用、初始/额外剩余机会、独立完整 W→A 投入及未服务周期；它们不代表科学覆盖或每机制资源成本。按稳定身份展示，不按指标或欠服务周期排序；说明理由与 H 修订不清零投入。`--search-policy` JSON 可用正整数 `initial_calls` 配置每机制初始受管调用机会；`--portfolio-review-after-cycles N` 控制额外提醒间隔。每次普通 A 实质评估已完成 W 时，顶层 `portfolio_review` 声明主线、最强可行竞争解释与准确引用、最低成本的可行判别工作及动作理由；没有可行竞争解释或工作可明确说明。缺失或无效先走同任务的有限输出补填，不能用 null `search_review` 绕过。合法等待、无完成 W、明确无 search、真正独立审查保持对应合同。FINAL 恰评估已完成 W 时也须满足组合判断。
+后继角色可从 `lineage.indexes.mechanisms` 读取所有机制；已采纳的 A 处置提供理由预览、截断标记及完整科学 JSON 原件入口，长原文不受导航页大小上限省略。同状态重述或遗漏不替换已采纳依据，H 修订会清掉当前旧依据，历史原件保留。所有 search 实例默认向 H/A 持续展示完整组合，包括 screened；局部 improve/repair/validate 不抹去全局视野。机制页展示实际 accepted 调用、初始/额外剩余机会、独立完整 W→A 投入及未服务周期；它们不代表科学覆盖或每机制资源成本。按稳定身份展示，不按指标或欠服务周期排序；说明理由与 H 修订不清零投入。`--search-policy` JSON 可用正整数 `initial_calls` 配置每机制初始受管调用机会；`--portfolio-review-after-cycles N` 控制额外提醒间隔。每次实质评估已完成 W 的 A，portfolio_review 只必填 main_line（准确机制引用或 null）、
+reason（一段自由说明）、discriminating_work（null 或三键新工作声明），合并最强可行竞争解释、最低成本判别工作、本轮动作和暂缓
+触发/再议条件；没有可行替代时说明理由。真正适用的缺项走同任务有限输出补填；
+等待、无完成 W、明确无 search、正式独审豁免，FINAL 实际评估 W 时仍适用。
 
-A 的 `pending` 幂等重入 unfinished 计划，调用、已用授权和投入不清零。已声明判别工作保留原 A 引用，后续 A 明确执行、暂缓并更新触发/再议条件，或凭准确证据撤回；响应不自动等于问题解决。机制页与概览提供独立 W→A 完成周期、逐机制参与比例、待评估 W、A 主线连续次数和有效待办；H/A 的 `lineage.indexes.portfolio` 指向有界摘要，压缩默认视图仍保留该入口；同周期可涉及多个机制，比例合计可超过 100%。默认折叠的投入提示仅显示准确快照，并标明缺失或滞后。按 token 参考轮数须至少两个完整已报告本地周期和已知余额，否则不可估；不代表时间、步数或新执行承诺。当前原生 session 计量未测上报延迟，界面会如实显示不可估。
+pending 幂等重入 unfinished，不清零调用、授权和投入。新 discriminating_work 只填
+mechanism_refs、question、next_action；后续活跃 work_updates 每项只需 work_ref、
+action（execute/defer/withdraw）、reason，保留原问题、A 来源和准确后继响应。
+执行不自动解决问题。当前主线可以不同于下一次判别实验的机制，实际 focus 和权限仍检查。
+portfolio 索引持续显示独立 W→A 周期、机制参与、待评估 W、未服务周期、明确主线连续次数
+及活跃判别待办。恢复和补填不增周期；同周期多机制比例可重叠，fork 只取准确 cut。
+token 参考轮数须有足够完整样本及已知余额；缺失或滞后如实不可估，不保证资源或强制轮换。
 
-普通结束/交付和 protected FINAL/closeout 的 A 以 `final_coverage` 逐机制（含 waived）声明已深入、已筛查待再议、已排除或从未探索，附理由、准确科学引用、显式未答问题，并在 limitations 保留输入与资源限制。控制核声明完整性，不以候选或调用次数判深度，不新增实验、强制换路、路线额度或保留额。当前协议 27 冻结这些输出与谱系合同，明确拒绝旧协议（包括 26）；旧实例使用原版本入口，不提供兼容读取或迁移。
+普通结束/交付和 protected FINAL 的 final_coverage，每机制只必填 mechanism_ref、
+status（deep/screened_pending/ruled_out/unexplored）、reason，理由合并深度依据和未答问题；
+limitations 保留输入与资源缺口。准确覆盖完整冻结机制集合，不从候选或调用成功推断科学深度，
+也不授权新实验。当前协议 27 不支持更早协议的隐式读取或迁移。
 
 广度预算应依据普通探索可用量及 `work/budget-status.json`；当前 protected FINAL 模式按 provider 已报告消费计算 token 余额，未知账单继续列为未知，不估算扣费，也不扣旧收口预留。旧预算内收口格式不受支持。真实执行未知仍须先按原调用核对。初始调用机会不预留实际资源，首次昂贵调用仍可能耗尽余额；使用已有执行配置 `max_seconds` 和 W 阶段时间/token 目标约束，控制不自动分配广度比例或强制科学机制数。
 H 只重写需要变更的 commitment；遗漏保留原承诺及已采纳 A 处置。修订同一 `existing_ref`
@@ -652,7 +665,10 @@ terminal 仍以原 H seal 校验。来源须为精确直接 W，或通过已有 
 旧筛选资格不继承，原投入不退款。H scope 未变时，A 可在 review 后通过 `continue_w` 加显式
 局部 focus 请求下一有限 W stage，无需为了续配而重述 H；各 stage 原消费与总额度继续累计。
 
-任务只把实际启用且被配置消费的辅助字段放进原生回答合同；额外科学字段保留原文。启用的可选说明形状无法读取时局部诊断并保留 unknown，不猜 progress 或机制范围。W 的显式非空 findings 若形状损坏则以 partial 交 A，不产生 screened 证明；正常缺失、合法但漏机制、空 finding 或重复绑定仍执行机制覆盖约束。
+普通回答只必填 summary、scientific_result、limitations，H/A 另填 next_action、route_reason，
+W 另填 stage_intent。条件广度内容按上文最小合同，其他科学内容开放，额外说明不套嵌套校验。
+W 的真实缺交付仍走有界续工；不要求重复 finding 表。A 明确 screened 仍须同 H 版本的
+准确已知观察。可选进展声明省略不制造进展，也不累计缺声明的 unknown 暂停。
 真实 action、FINAL 路由、资格与权限继续校验。输入选择的 null 保留、`[]` 清空、有效列表替换；坏列表保持 unresolved，不部分应用或静默继承。已登记候选和其精确封存实现可在原 call/output/material 绑定一致时互用可读引用；相同字节而不同来源不合并，任意实现不自动登记为候选。
 
 新实例将 A→W/H 的路由原话标为带来源的决策背景；具体执行方法是建议，用户原文和 H 的真实约束仍有效。控制层不判定科学语义，不删改原始路由；旧已冻结任务保持原投影。证据提取、控制补正和收口指令保留各自含义。新任务把原生角色指引冻结，启动与恢复使用同一份文字。
@@ -922,17 +938,9 @@ A 可在新协议最终科学 JSON 可选填写 `candidate_recommendation`（已
 收口先冻结完整候选目录，`science-task.json` 给出目录文件；启用分类提名时默认只预览 W 提名并注明其余数量，完整目录保留全部精确候选 ID 和来源节点，不按紧凑摘要容量截断。控制层仅为 A 明确选择的操作解析并冻结原件；候选目录本身不启动 smoke、审计或自动排除候选。可用性与审计资格分别展示；精确原件的审计结果、工件匹配和适用范围沿历史传递，不额外制造未知泄漏待办。A 选择不等于审计通过。原生 `exp submit` 保留公共命令，但只使用 run 声明的路径，不解析历史跨节点原件；受管 wrapper 的 submit/help 会提示历史交付使用 A `deliver`，不会阻断或改写命令。
 普通 A 已封存的 `deliver` 可直接进入控制交付；预算准入拒绝时进入既有 FINAL。预算耗尽进入的 FINAL 周期保留独立的一次最终 A；普通 A 的明确结束或交付不触发该周期。显式 `selection_policy` 版本 2 仅含 `{"version":2}`，冻结全部候选事实目录，再由精确 closeout A 负责比较。真实 audit/deliver 的 `candidate_recommendation` 必须命名目录中的精确可用候选（或绑定到同一已登记成果的实现引用）；普通科学建议的坏引用保留原文并诊断，不能成为执行选择。`candidate_comparison` 是可选科学说明，不以 `keep`、非空 `rationale`、`key_risk` 或 `evidence_steps` 格式决定提交准入；A 在 `scientific_result` 说明选择与证据。null 不授权交付。旧 `shortlist_k`、`evaluation_key`、`smoke_seconds` 配置拒绝接受。交付策略要求的公开审计必须完整通过才能更新实际提交；失败、跳过或未知不能冒充审计通过。未提供可选 audit/smoke 能力保持中性，不绕过已冻结的必需审计策略。普通研究中的审计、作者补填与精确工程修复按当前冻结策略及准入执行。FINAL 只接受一个最终 A，并消费其明确的现有候选选择，不追加科学角色或实验。A 必须逐项对照原目标和授权范围，区分直接测量、推断与假设、目标指标与代理及敏感性检查；按同一目标准则解释相关候选、冲突证据、不确定性和缺失输入。预算耗尽、finish、审计资格与交付均不证明未测量的目标已经完成。正常审计往返及提交前完整审计明确拒绝后的改选只消耗原总预算，不消耗错误补正次数。完整审计拒绝的同一候选工件不能再次提交；工程故障、未运行和未分类回执不冒充科学拒绝。未知操作绝不改选或重放。
 未知提交始终只核对同一原操作，绝不重复提交；FINAL 的一次同操作确认不受共享余额否决。
-A 明确填写 `candidate_recommendation` 时，普通与最终 A 都须提供 `selection_explanation`。
-`criteria` 写明当前比较准则，`criteria_change.status` 明确为 `unchanged` 或 `revised`。
-修订时 `prior_criteria` 承接原设计/报告准则，`changes` 声明改了什么，`evidence`
-给出可定位的证据与修订理由，`accepted_tradeoffs` 声明接受的代价；未修订时这些详情为 null。
-A 须对照此前 H/W 设计与报告的比较条件、门槛和回退规则；放宽任一条件即应标记为
-`revised`，不能因当前报告已经换用新规则就称为 `unchanged`。
-首次选择没有前序准则可如实声明；没有候选推荐的规划 A 可填写 null。
-框架只检查声明是否完整，不能以非空文字证明科学充分性或真伪，也不自动排序、决定默认候选。
-缺项在封存前通过已冻结的 `resume_policy.output_repair` 退回同一 A 补填，不另开 A 或重做实验。
-FINAL 补填继续绑定同一最终返回授权、session 与累计用量，保留原有限次数及单次时长；
-共享余额不足不撤销其完成与原授权提交，未知执行不会因此自动重试。
+A 在 scientific_result 说明候选准则、修订、证据及代价，selection_explanation 可选，
+不再有独立嵌套补填门槛。准确候选身份、原件、审计资格与交付权限仍必须核对。
+缺真正必填内容时，输出补正保留同一任务、累计用量和 FINAL 完成保护。
 
 `adapter: null` 时 `submit_seconds` 和 `confirm_seconds` 必须为零，不授权外部交付；FINAL 仍由一次 A 给最终结论与未提交原因。
 

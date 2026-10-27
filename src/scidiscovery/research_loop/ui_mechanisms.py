@@ -5,7 +5,7 @@ verdict. Only explicit findings and observed bindings associate W evidence.
 """
 from __future__ import annotations
 
-from . import contracts as c, generic_results, ui_components as ui, ui_view
+from . import contracts as c, generic_results, search as scientific_search, ui_components as ui, ui_view
 
 MAX_RENDER_BYTES = 64 * 1024
 
@@ -53,7 +53,8 @@ def project(reader, steps, clean, *, partial=False):
             errors.append(dict(step=step, **ui_view.failure(error, clean)))
             continue
         if role == 'H':
-            plan = c.scientific_field(job, payload, 'search_plan')
+            try:plan = scientific_search._choice(job,payload)
+            except scientific_search.UnresolvedSearch:plan = None
             if plan is None and payload.get('search_plan') is not None:
                 unresolved.append(dict(step=step, field='H 机制声明'))
             for index, row in enumerate((plan or {}).get('commitments') or [], 1):
@@ -74,6 +75,9 @@ def project(reader, steps, clean, *, partial=False):
             if declared_findings is None and payload.get('mechanism_findings') is not None:
                 unresolved.append(dict(step=step, field='W 逐机制发现'))
             for row in declared_findings or []:
+                if not isinstance(row,dict) or any(not isinstance(row.get(key),str) for key in ('mechanism','basis','finding')):
+                    if dict(step=step,field='W 逐机制发现') not in unresolved:unresolved.append(dict(step=step,field='W 逐机制发现'))
+                    continue
                 matches = [item['mechanism_ref'] for item in declared
                     if row['mechanism'] in (item['mechanism_ref'], item['label'])]
                 if len(matches) == 1:
@@ -121,7 +125,8 @@ def project(reader, steps, clean, *, partial=False):
                     calls=counts, sources=sorted(source for source in sources if type(source) is int and source > 0),
                     metrics=_metrics(candidates.get(ref, []), clean)))
         elif role == 'A' and not job.get('formal_review'):
-            review = c.scientific_field(job, payload, 'search_review')
+            try:review = scientific_search._choice(job,payload)
+            except scientific_search.UnresolvedSearch:review = None
             if review is None and payload.get('search_review') is not None:
                 unresolved.append(dict(step=step, field='A 机制处置'))
             for row in (review or {}).get('dispositions') or []:

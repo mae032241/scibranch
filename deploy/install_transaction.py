@@ -82,10 +82,15 @@ def seal_transaction(root: Path | str, destination: Path | str) -> None:
     manifest = _load_manifest(transaction, expected_state="prepared")
     if destination_path.exists():
         raise RuntimeError("completed transaction destination already exists")
+    prepared = _canonical(manifest)
     manifest["state"] = "complete"
     (transaction / "manifest.json").write_bytes(_canonical(manifest))
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(transaction, destination_path)
+    try:
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(transaction, destination_path)
+    except OSError:
+        (transaction / "manifest.json").write_bytes(prepared)
+        raise
 
 
 def mark_managed_directory(path: Path | str, *, name: str) -> None:

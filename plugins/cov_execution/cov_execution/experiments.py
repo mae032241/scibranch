@@ -400,7 +400,12 @@ def research_defaults(configuration, *, root):
         launcher_argv=[sys.executable,str(Path(delivery.__file__).resolve()),'--isolate']))
 
 
-REGISTRATION=ExecutionInterfaceRegistration('cov_execution','1',RuntimePluginFactory(build),
+def configure(configuration, source, *, binding):
+    from scidiscovery.research_loop.python_environment import check_python_requirements
+    return check_python_requirements(configuration, plugin_id='cov_execution', allow_script=True)
+
+
+REGISTRATION=ExecutionInterfaceRegistration('cov_execution','1',RuntimePluginFactory(build, configure=configure),
     scientific_outputs=CovExecution.scientific_outputs,
     scientific_source=LocalExecution.scientific_source,
     context_validator=validate_context,research_defaults=research_defaults,engineering_feedback=engineering_feedback,

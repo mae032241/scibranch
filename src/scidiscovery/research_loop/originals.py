@@ -111,6 +111,17 @@ class NodeSource:
         return Path(self.original_root) / 'project/nodes' / f'{self.step:03d}'
 
 
+def context_root(source):
+    """Return the consuming instance from its declared original-storage binding."""
+    root=Path(source.storage_root)
+    if source.inherited:
+        for component in reversed(PurePosixPath(FORK_DIRECTORY).parts):
+            if root.name!=component:
+                raise ValueError('Inherited source escaped its declared fork storage namespace')
+            root=root.parent
+    return root
+
+
 def _source(root, manifest, identity, step, *, snapshot=None):
     snapshot = _snapshot(manifest) if snapshot is None else snapshot
     return _snapshot_source(Path(root) / FORK_DIRECTORY, snapshot, identity, step)

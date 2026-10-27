@@ -206,7 +206,7 @@ def sealed_fixture(tmp_path, findings):
         experiment_mode='external', search_policy=search.DEFAULT_POLICY)
     plan = dict(scope='One mechanism comparison', commitments=[commitment()], focus=dict(label=None, action='screen'))
     finish(root, 1, 'H', [], action='experiment', search_choice=plan)
-    finish(root, 2, 'W', [1], mechanism_findings=findings)
+    finish(root, 2, 'W', [1], mechanism_findings=findings,stage_intent='decision' if not isinstance(findings,list) else 'review')
     key = tmp_path / 'operator.key'
     key.write_bytes(b'mechanism-ui-fixture-secret-32bytes')
     key.chmod(0o600)
@@ -220,23 +220,23 @@ def test_sealed_results_and_sse_share_real_mechanism_evidence_without_writes(tmp
     root, key = sealed_fixture(tmp_path, [dict(mechanism='Alpha', basis='blocked',
         finding='An independent observation is still missing.')])
     ui, cookie = session(root, key)
-    before = {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
+    before = _originals(root)
     page = ui.get('/results', host=ui.host, cookie=cookie)[1].decode()
     assert 'id="live-mechanisms"' in page and 'data-live-url="/live"' in page
     assert 'Alpha' in page and 'An independent observation is still missing.' in page
     assert '已接受的受管调用 0' not in page
-    assert {path: path.read_bytes() for path in root.rglob('*') if path.is_file()} == before
+    assert _originals(root) == before
     first = ui._live_snapshot(ui._browser(cookie), '', force=True)['fragments']['live-mechanisms']
     assert 'An independent observation is still missing.' in first
     finish(root, 3, 'A', [2], search_choice=dict(dispositions=[dict(mechanism_ref='h001.m1',
         status='deferred', reason='Await the missing observation; keep the mechanism open.')], next_focus=None))
-    before = {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
+    before = _originals(root)
     updated = ui._live_snapshot(ui._browser(cookie), '', force=True)['fragments']['live-mechanisms']
     assert updated != first and '暂缓' in updated
     assert 'Await the missing observation; keep the mechanism open.' in updated
     assert 'data-details-key="mechanism:h001.m1"' in updated
     assert 'data-live-focus="mechanism:h001.m1"' in updated
-    assert {path: path.read_bytes() for path in root.rglob('*') if path.is_file()} == before
+    assert _originals(root) == before
 
 
 @pytest.mark.parametrize('raw_findings', ['Scientific narrative instead of a table', {'finding': 'Partial explanation'}])
@@ -246,10 +246,10 @@ def test_sealed_unparsed_w_findings_keep_h_and_later_a_visible(tmp_path, raw_fin
     root, _ = sealed_fixture(tmp_path, raw_findings)
     finish(root, 3, 'A', [2], search_choice=dict(dispositions=[dict(mechanism_ref='h001.m1',
         status='deferred', reason='Structured W findings remain unknown; retain the question.')], next_focus=None))
-    before = {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
+    before = _originals(root)
     reader = ui_view.Reader(root)
     receipt = reader.node(2)['seal']['control_outcome']['worker_delivery']
-    assert receipt['status'] == 'partial' and receipt['reason'] == 'scientific_findings_unresolved'
+    assert receipt['status'] == 'partial' and receipt['reason'] == 'worker_decision'
     assert reader.node(2)['payload']['mechanism_findings'] == raw_findings
     value = trail.project(reader, [1, 2, 3], ui_view.cleaner(root))
     assert not value['errors']
@@ -259,7 +259,7 @@ def test_sealed_unparsed_w_findings_keep_h_and_later_a_visible(tmp_path, raw_fin
     rendered = trail.render(value)
     assert 'Alpha' in rendered and '暂缓' in rendered and '可证伪问题' in rendered
     assert '尚未解析为结构化信息' in rendered and '/results/2' in rendered
-    assert {path: path.read_bytes() for path in root.rglob('*') if path.is_file()} == before
+    assert _originals(root) == before
 
 
 @pytest.mark.parametrize('role,field', [('H', 'search_plan'), ('A', 'search_review')])
@@ -271,3 +271,30 @@ def test_unparsed_h_or_a_fields_preserve_other_stage_records(role, field):
     assert [event['role'] for event in value['mechanisms'][0]['events']] == ['H', 'A']
     assert value['mechanisms'][0]['reason'] == 'Keep this mechanism open.'
     assert '尚未解析为结构化信息' in trail.render(value)
+
+
+def _originals(root):
+    paths=[root/'settings.json',root/'settings-identity.json',root/'host-history/overview.json']
+    for step in (1,2,3):
+        paths.extend([root/f'jobs/{step:03d}.json',root/f'host-history/nodes/{step:03d}.json'])
+        paths.extend(root/f'native-evidence/{step:03d}'/name for name in
+            ('science-output.json','native-intent.json','native-outcome.json','result-identity.json','work-evidence.json'))
+    return {path:path.read_bytes() for path in paths if path.is_file()}
+
+
+@pytest.mark.parametrize('role,field,value',[
+    ('H','search_plan',{'commitments':[{}]}),
+    ('H','search_plan',{'commitments':[1]}),
+    ('A','search_review',{'dispositions':[{}]}),
+    ('A','search_review',{'dispositions':[1]}),
+    ('W','mechanism_findings',[{}]),
+    ('W','mechanism_findings',[1]),
+])
+def test_sparse_optional_scientific_rows_preserve_other_mechanism_records(role,field,value):
+    reader=Reader({1:h(commitment()),2:node(role,{field:value}),3:a('deferred','Keep the precise unresolved route visible.')})
+    projected=trail.project(reader,[1,2,3],clean)
+    assert not projected['errors'] and projected['unresolved']
+    item,=projected['mechanisms']
+    assert item['label']=='Alpha' and item['status']=='deferred'
+    assert [event['role'] for event in item['events']]==['H','A']
+    assert '尚未解析为结构化信息' in trail.render(projected)

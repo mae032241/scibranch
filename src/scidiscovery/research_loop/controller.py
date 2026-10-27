@@ -529,7 +529,9 @@ def _wait_automatic_recovery(root, step, decision):
     require_writer(root)
     path, saved = _recovery_state(root, step, decision)
     policy = configuration_updates.for_step(root, step)['resume_policy']['automatic_recovery']
-    remaining = _recovery_remaining(saved, policy)
+    # A positively verified format rejection needs no capacity backoff. Keep
+    # any consumed wait from an older stopped schedule without inventing more.
+    remaining = 0. if decision.get('format_fallback') is True and decision.get('delay_seconds') == 0 else _recovery_remaining(saved, policy)
     if saved['service_wait_seconds'] + remaining > policy['max_wait_seconds']:
         saved.update(status='stopped', next_attempt_at=None, limitation='automatic_recovery_wait_limit')
         contracts.write(path, saved)
@@ -544,6 +546,15 @@ def _wait_automatic_recovery(root, step, decision):
         # its local deadline. Fresh acceptance still belongs to automatic_start.
         stamp = budget.clock_stamp()
         limits = budget.snapshot(root, sample_stamp=stamp)
+        final_transport=False
+        if decision.get('format_fallback') is True and remaining <= 0:
+            # Only negotiation of this already accepted final return can pass
+            # its consumed shared clock; the original per-call clock remains.
+            current=continuation.automatic_decision(root,step)
+            original=contracts.read(contracts.regular(execution.origin(root,step)/'native-intent.json'))
+            if current == decision and (original.get('budget_slice') or {}).get('final_return') is not None:
+                job=contracts.read(contracts.regular(root/'jobs'/f'{step:03d}.json'))
+                final_transport=budget.final_a_return(root,job,original) is not None
         active = limits['time_budget_basis'] == 'active'
         shared_until = stamp['at_boottime' if active else 'at_unix'] + limits['seconds_remaining']
         while True:
@@ -556,7 +567,7 @@ def _wait_automatic_recovery(root, step, decision):
             # uses MONOTONIC and only counts this controller's actual waiting.
             shared_now = time.clock_gettime(time.CLOCK_BOOTTIME) if active else time.time()
             shared_left = max(0., shared_until - shared_now)
-            if shared_left <= 0:
+            if shared_left <= 0 and not final_transport:
                 saved.update(status='stopped', next_attempt_at=None, limitation='wall_limit')
                 contracts.write(path, saved)
                 raise budget.NodeBudgetUnavailable('wall_limit')
@@ -607,6 +618,12 @@ def _wait_automatic_recovery(root, step, decision):
     finally:
         if saved['status'] != 'paused':
             budget.transition(root, 'advance', 'automatic_recovery_arbitration')
+
+
+def _format_fallback_ready(root, step):
+    """Collection may negotiate only a freshly verified rejected format."""
+    decision=continuation.automatic_decision(root,step)
+    return decision.get('action')=='retry' and decision.get('format_fallback') is True
 
 
 def _native_call(root, step, *, launch=False, operation=None):
@@ -1484,7 +1501,7 @@ def _run_final(root, begin):
     try:
         record = _record(root, step)
         if (record / 'native-intent.json').exists():
-            if runtime.node_state(root, step) == 'running' or _terminal_success(root, record):
+            if runtime.node_state(root, step) == 'running' or _terminal_success(root, record) or _format_fallback_ready(root,step):
                 _native_call(root, step)
             else:
                 return _closeout_result(root, 'closeout_native_unsealed', reason='exact_final_original_unverified', step=step)
@@ -1511,7 +1528,7 @@ def _collect_final_a(root, accepted):
                     and not (current/'native-outcome.json').exists())
                 if runtime.node_state(root, step) == 'running' or startup_pending:
                     _native_call(root, step)
-                elif _terminal_success(root, current):
+                elif _terminal_success(root, current) or _format_fallback_ready(root,step):
                     _native_call(root, step)
                 else:
                     raise RuntimeError('The exact final A has no verified terminal output')
@@ -1755,6 +1772,8 @@ def _run_closeout(root):
                 collect = state == 'running' or (state == 'terminal'
                     and type(outcome.get('returncode')) is int and outcome['returncode'] == 0
                     and not outcome.get('stop_reason'))
+                if not collect and state == 'terminal':
+                    collect=_format_fallback_ready(root,step)
                 if not collect:
                     failed = state == 'terminal' and type(outcome.get('returncode')) is int and outcome['returncode'] != 0
                     reason = ('Original closeout native failed; explicit worker-resume required for the same original task'

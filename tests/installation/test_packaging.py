@@ -27,10 +27,11 @@ from scidiscovery.research_loop import ui_errors
 import jsonschema
 import pydantic
 import cryptography
+import packaging
 
 prefix = Path(sys.prefix).resolve()
 assert "include-system-site-packages = false" in (prefix / "pyvenv.cfg").read_text()
-for module in (scidiscovery, plugin_configuration, ui_errors, jsonschema, pydantic, cryptography):
+for module in (scidiscovery, plugin_configuration, ui_errors, jsonschema, pydantic, cryptography, packaging):
     assert Path(module.__file__).resolve().is_relative_to(prefix), module.__file__
 package = distribution("scidiscovery")
 for script, target in {
@@ -105,6 +106,21 @@ elif cohort == "cov":
     assert all(Path(module.__file__).resolve().is_relative_to(prefix)
                for module in (cov, lineage, delivery, receipt, observer))
     assert callable(observer.observe) and callable(delivery.leaf)
+    # Check the installed selected Python through real entry point discovery,
+    # without creating an instance, constructing an adapter, or running science.
+    selected = dict(executor="cov_execution:experiment", configuration=dict(
+        run_argv=[sys.executable], python_requirements=[dict(requirement="packaging>=23,<27", import_name="packaging")]))
+    assert experiments.operator_configuration(selected) == selected
+    missing = dict(executor="cov_execution:experiment", configuration=dict(
+        run_argv=[sys.executable], python_requirements=[dict(
+            requirement="scidiscovery-absent-installation-dependency-fixture>=1", import_name="absent_module")]))
+    try:
+        experiments.operator_configuration(missing)
+    except plugin_configuration.PluginConfigurationError as error:
+        assert error.code == "python_dependency_missing"
+        assert error.field_path.endswith("python_requirements.0.requirement")
+    else:
+        raise AssertionError("installed Cov admitted a missing declared Python dependency")
 else:
     # Installed TCAD discovers the real execution registration without curve plugins.
     tcad = distribution("tcad-artifact")
