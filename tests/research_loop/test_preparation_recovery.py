@@ -205,10 +205,10 @@ def _unbound_cli(root, snapshot, action):
 
 
 @contextmanager
-def _local_writer(root, config, boundary='partial'):
+def _local_writer(root, config, boundary='partial', *, payload=None):
     original = execution.record(root, 2, config['native_attempt']['number']) / 'experiment-config.json'
     counter = root.parent / 'local-preparation-counters'
-    with _child(LOCAL_CRASH_WRITER, original, _local_payload(root), boundary, counter) as (process, ready):
+    with _child(LOCAL_CRASH_WRITER, original, payload or _local_payload(root), boundary, counter) as (process, ready):
         materialized = Path(ready['ready'])
         assert materialized.is_file() and materialized.parent.name.startswith('.prepared-')
         yield process, materialized.parent, counter
@@ -371,7 +371,7 @@ def test_live_local_cleanup_failure_residual_can_be_explicitly_removed(tmp_path,
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('kind', ['accepted', 'bound', 'thirdparty', 'mixed', 'missing_projection'])
+@pytest.mark.parametrize('kind', ['bound', 'thirdparty', 'mixed', 'missing_projection'])
 def test_unbound_cleanup_preserves_accepted_bound_and_ambiguous_namespaces(tmp_path, monkeypatch, remote_registry, kind):
     executor = 'remote_execution:fixture' if kind in {'thirdparty', 'mixed'} else 'local_execution:command'
     root, job, config, _ = case(tmp_path, monkeypatch, executor=executor, resume=kind == 'mixed')
@@ -389,8 +389,26 @@ def test_unbound_cleanup_preserves_accepted_bound_and_ambiguous_namespaces(tmp_p
         config = e.configure(root, 2, 'local_execution:command', dict(run_argv=[sys.executable]),
             c.workspace(root, 2) / 'work/experiment-config.json')
     if kind == 'thirdparty':
-        row, counter = _killed(root, config, 'partial')
-        snapshot = Path(row['snapshot'])
+        # The retained native/interface originals are a real foreign executor.
+        # Its explicitly selected residual needs no adapter invocation to prove
+        # that the built-in Local maintenance exception must refuse it.
+        records = Path(config['record_dir'])
+        records.mkdir(parents=True, exist_ok=True)
+        snapshot = records / '.prepared-foreign-residual'
+        snapshot.mkdir()
+        (snapshot / 'source.py').write_bytes(b'foreign partial original; never executed\n')
+        counter = root.parent / 'foreign-maintenance-effects'
+        counter.write_bytes(b'')
+        native = execution.record(root, 2)
+        foreign_originals = {path: path.read_bytes() for path in (
+            root / 'settings.json', root / 'jobs/002.json',
+            native / 'native-intent.json', native / 'experiment-config.json',
+            records.parent / 'interfaces/000.json')}
+        def no_adapter_effect(*args, **kwargs):
+            with counter.open('ab') as stream:stream.write(b'forbidden adapter invocation\n')
+            pytest.fail('Foreign snapshot maintenance invoked preparation or submission')
+        monkeypatch.setattr(DifferentExternalIdentity, 'prepare', no_adapter_effect)
+        monkeypatch.setattr(DifferentExternalIdentity, 'submit', no_adapter_effect)
     else:
         snapshot, counter = _killed_local(root, config, 'accepted' if kind == 'accepted' else 'partial')
     if kind == 'bound':
@@ -416,6 +434,9 @@ def test_unbound_cleanup_preserves_accepted_bound_and_ambiguous_namespaces(tmp_p
     assert snapshot.is_dir() and (snapshot / 'source.py').read_bytes() == source
     assert counter.read_bytes() == counter_bytes
     assert all(path.read_bytes() == raw for path, raw in bindings.items())
+    if kind == 'thirdparty':
+        assert all(path.read_bytes() == raw for path, raw in foreign_originals.items())
+        assert e.Records(config).calls() == []
 
 
 @pytest.mark.process_e2e
@@ -975,3 +996,48 @@ def test_cli_keeps_missing_accepted_call_as_integrity_error(tmp_path, monkeypatc
         'run', '--payload', str(_payload(root))]) == 3
     assert json.loads(capsys.readouterr().out)['status'] == 'integrity_error'
     assert (retained / 'accepted.json').read_bytes() == accepted and not canonical.exists()
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('interruption', ['none', 'binding', 'rename'])
+def test_unbound_local_accepted_publication_preserves_original_and_never_submits(tmp_path, monkeypatch, capsys, interruption):
+    from scidiscovery.research_loop import breadth
+    from scidiscovery.research_loop.local_experiments import LocalExecution
+    root, _, config, _ = case(tmp_path, monkeypatch, executor='local_execution:command')
+    payload = c.workspace(root, 2)/'code/local.py'
+    payload.parent.mkdir(exist_ok=True)
+    payload.write_text('raise AssertionError("Publication fixture must never execute")\n')
+    with _local_writer(root, config, 'accepted', payload=payload) as (process, snapshot, counter):
+        assert _unbound(root, snapshot, 'publish-accepted')['status'] == 'busy'
+        process.kill();process.wait(timeout=5)
+    accepted = (snapshot/'accepted.json').read_bytes()
+    inode = snapshot.stat().st_dev, snapshot.stat().st_ino
+    def forbidden(*args, **kwargs):
+        pytest.fail('Local publication replayed preparation, admission or execution')
+    for target, name in ((LocalExecution, 'prepare'), (LocalExecution, 'submit'), (breadth, 'admit')):
+        monkeypatch.setattr(target, name, forbidden)
+    assert _unbound(root, snapshot, 'inspect')['status'] == 'accepted_unpublished'
+    with pytest.raises(recovery.PreparationError, match='cannot use unbound partial cleanup'):
+        _unbound(root, snapshot, 'discard-partial')
+    if interruption != 'none':
+        with monkeypatch.context() as patch:
+            module, name = (recovery, 'bind_snapshot') if interruption == 'binding' else (archive, '_publish')
+            original = getattr(module, name)
+            def interrupted(*args, **kwargs):
+                value = original(*args, **kwargs)
+                if interruption != 'binding' or kwargs.get('publish', True):
+                    raise RuntimeError('Exact local mutation completed')
+                return value
+            patch.setattr(module, name, interrupted)
+            with pytest.raises(RuntimeError, match='local mutation completed'):
+                _unbound(root, snapshot, 'publish-accepted')
+    assert _unbound_cli(root, snapshot, 'publish-accepted') == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['status'] == ('already_published' if interruption == 'rename' else 'accepted_published')
+    destination = e.Records(config).directory(result['call_id'])
+    assert (destination.stat().st_dev, destination.stat().st_ino) == inode
+    assert (destination/'accepted.json').read_bytes() == accepted
+    row, = recovery.retained_preparations(root, Path(config['record_dir']))
+    assert row['resolved'] is True
+    assert not snapshot.exists() and counter.read_text().splitlines() == ['prepare']
+    assert _unbound(root, snapshot, 'publish-accepted')['status'] == 'already_published'

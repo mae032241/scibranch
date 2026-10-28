@@ -134,7 +134,7 @@ def _mkdir(path):
         files.fsync_directory(item.parent)
 
 
-def bind_snapshot(config, directory, descriptor, accepted_base, *, context):
+def bind_snapshot(config, directory, descriptor, accepted_base, *, context, publish=True):
     root = experiment_client.root_for_configuration(config, allow_standalone=True)
     if root is None:
         return None
@@ -166,6 +166,7 @@ def bind_snapshot(config, directory, descriptor, accepted_base, *, context):
         refs['reservation'] = accepted_base.get('execution_reservation')
         _verify_ref(root, refs['reservation'], context)
     value['authority_originals'] = refs
+    if not publish:return value
     files.fsync_directory(records)
     path = records / 'host-preparations' / call / (token + '.json')
     _mkdir(path.parent)
@@ -271,13 +272,37 @@ def _tree(directory, value, config, *, complete, context=None):
     deletion._same(directory, value['directory_identity'])
 
 
+def _builtin_local_configuration(config):
+    interface = config.get('execution_interface')
+    return (isinstance(interface, dict)
+        and interface.get('version') == e.VERSION
+        and interface.get('executor') == 'local_execution:command'
+        and interface.get('plugin_version') == '1'
+        and interface.get('observation_version') == e.OBSERVATION_VERSION
+        and interface.get('projection_contract') == 'scidiscovery.local-projections.v1'
+        and interface.get('terminal_evidence') == 'local_process'
+        and interface.get('result_protocol') == e.LOCAL_RESULT_PROTOCOL
+        and interface.get('config_record') == {key: item for key, item in config.items() if key != 'execution_interface'}
+        and config.get('host_execution_authority') is None)
+
+
+def _local_unbound_acceptance(accepted, value, config):
+    return (accepted.get('host_preparation') is None
+        and _builtin_local_configuration(config)
+        and accepted.get('execution_authority') is None
+        and accepted.get('execution_reservation') is None and value.get('authority_originals') == {})
+
+
 def _accepted(directory, value, config, ref, context=None, *, historical=False):
     accepted = _json(directory / 'accepted.json', context)
     destination = Path(value['records']) / 'calls' / value['call_id']
     prepared = value['prepared']
-    if (not isinstance(accepted.get('host_preparation'),dict)
-            or set(accepted['host_preparation']) not in ({'path','size_bytes'},{'path','size_bytes','file_stat'})
-            or any(ref.get(key)!=item for key,item in accepted['host_preparation'].items()) or _acceptance_base(accepted) != value['acceptance_base']
+    local_unbound = _local_unbound_acceptance(accepted, value, config)
+    reference = accepted.get('host_preparation')
+    if ((not local_unbound and (not isinstance(reference,dict)
+            or set(reference) not in ({'path','size_bytes'},{'path','size_bytes','file_stat'})
+            or any(ref.get(key)!=item for key,item in reference.items())))
+            or _acceptance_base(accepted) != value['acceptance_base']
             or accepted.get('scope') != value['scope'] or accepted.get('call_id') != value['call_id']
             or accepted.get('native_attempt') != value['native_attempt'] or accepted.get('interface') != value['interface']
             or accepted.get('prepared') != prepared
@@ -413,7 +438,8 @@ def retained_preparations(root, records, *, context=None):
             if destination.exists():
                 accepted = _json(destination / 'accepted.json', context)
                 reference=accepted.get('host_preparation')
-                if (isinstance(reference,dict)
+                if (_local_unbound_acceptance(accepted, value, config)
+                        or isinstance(reference,dict)
                         and set(reference) in ({'path','size_bytes'},{'path','size_bytes','file_stat'})
                         and all(ref.get(key)==item for key,item in reference.items())):
                     # Historical verification uses snapshot bytes but the original inode
@@ -598,26 +624,19 @@ def _local_configurations(root, step, records, context):
         observed.add(path.name)
     if observed != expected:
         _fail('Unbound local cleanup requires every exact retained interface')
+    configurations = []
     for number, (native, _) in enumerate(attempts):
         _check(context)
         config = _json(native / 'experiment-config.json', context)
-        interface = config.get('execution_interface')
         execution_key = c.record_ref(root / 'jobs' / f'{step:03d}.json') if number == 0 else c.record_ref(native / 'native-intent.json')
         if (experiment_client.root_for_configuration(config) != root or config['record_dir'] != str(records)
                 or config.get('scope', {}).get('step') != step
                 or config.get('native_attempt') != dict(number=number, execution_key=execution_key)
-                or not isinstance(interface, dict)
-                or interface.get('version') != e.VERSION
-                or interface.get('executor') != 'local_execution:command'
-                or interface.get('plugin_version') != '1'
-                or interface.get('observation_version') != e.OBSERVATION_VERSION
-                or interface.get('projection_contract') != 'scidiscovery.local-projections.v1'
-                or interface.get('terminal_evidence') != 'local_process'
-                or interface.get('result_protocol') != e.LOCAL_RESULT_PROTOCOL
-                or interface.get('config_record') != {key: value for key, value in config.items() if key != 'execution_interface'}
-                or config.get('host_execution_authority') is not None):
+                or not _builtin_local_configuration(config)):
             _fail('Unbound local cleanup requires an exclusively built-in local preparation namespace')
         _configuration(root, config, context)
+        configurations.append(config)
+    return configurations
 
 
 def _unbound_local(root, step, records, snapshot_token, *, action, context):
@@ -632,7 +651,8 @@ def _unbound_local(root, step, records, snapshot_token, *, action, context):
         locks.enter_context(c.record_writer(records, blocking=False, exclusive=True))
         owner.require_owner(root)
         _check(context)
-        _local_configurations(root, step, records, context)
+        configurations = _local_configurations(root, step, records, context)
+        bound_path = None
         bindings = files.check_path(records / 'host-preparations')
         if bindings.exists():
             for calls in bindings.iterdir():
@@ -640,15 +660,61 @@ def _unbound_local(root, step, records, snapshot_token, *, action, context):
                 files.check_path(calls)
                 if not calls.is_dir() or not e.ID.fullmatch(calls.name) or calls.name in {'.', '..'}:
                     _fail('Unbound local cleanup has an ambiguous host preparation namespace')
-                if files.check_path(calls / (snapshot_token + '.json')).exists():
-                    _fail('A bound host preparation requires its exact original call')
+                candidate = files.check_path(calls / (snapshot_token + '.json'))
+                if candidate.exists():
+                    if action != 'publish-accepted' or bound_path is not None:
+                        _fail('A bound host preparation requires its exact original call')
+                    bound_path = candidate
         snapshot = files.check_path(records / ('.prepared-' + snapshot_token))
-        if not snapshot.exists():
+        if bound_path is not None:
+            value, config, ref = _binding(root, records, bound_path, context)
+            _live(root, value)
+            if config not in configurations or value['authority_originals']:
+                _fail('Local publication lost its retained configuration')
+            destination = files.check_path(records / 'calls' / value['call_id'])
+            if destination.exists():
+                if snapshot.exists() or _identity(destination) != value['directory_identity']:
+                    _fail('Local publication differs from its original snapshot')
+                _accepted(destination, value, config, ref, context, historical=True)
+                _receipt(bound_path.with_name(snapshot_token + '.published.json'),
+                    dict(version=1, kind='accepted_snapshot_published', binding=ref,
+                        accepted=e.proof(destination / 'accepted.json', context=context)), context)
+                return _result(value, ref, 'already_published')
+            _accepted(snapshot, value, config, ref, context)
+        elif not snapshot.exists():
             _fail('The explicitly selected unbound local partial is absent')
         identity = _identity(snapshot)
         accepted = files.check_path(snapshot / 'accepted.json')
         if accepted.exists():
-            _fail('Durable accepted snapshot cannot use unbound partial cleanup', 'preparation_publish_required')
+            if action == 'discard-partial':
+                _fail('Durable accepted snapshot cannot use unbound partial cleanup', 'preparation_publish_required')
+            if bound_path is None:
+                accepted_value = _json(accepted, context)
+                matches = [config for config in configurations
+                    if config['native_attempt'] == accepted_value.get('native_attempt')
+                    and config['scope'] == accepted_value.get('scope')
+                    and config['execution_interface'] == accepted_value.get('interface')]
+                if len(matches) != 1 or accepted_value.get('host_preparation') is not None:
+                    _fail('Unbound acceptance lost its exact built-in Local configuration')
+                config = matches[0]
+                descriptor = e.LocalFileDescriptor.model_validate(accepted_value['prepared'])
+                value = bind_snapshot(config, snapshot, descriptor, accepted_value, context=context, publish=False)
+                _accepted(snapshot, value, config, None, context)
+                if action == 'inspect':
+                    return _result(value, None, 'accepted_unpublished')
+                ref = bind_snapshot(config, snapshot, descriptor, accepted_value, context=context)
+                bound_path = Path(ref['path'])
+                destination = files.check_path(records / 'calls' / value['call_id'])
+            if destination.exists():
+                _fail('Canonical call already exists beside the original Local snapshot')
+            _mkdir(destination.parent)
+            archive._publish(snapshot, destination)
+            _receipt(bound_path.with_name(snapshot_token + '.published.json'),
+                dict(version=1, kind='accepted_snapshot_published', binding=ref,
+                    accepted=e.proof(destination / 'accepted.json', context=context)), context)
+            return _result(value, ref, 'accepted_published')
+        if action == 'publish-accepted':
+            _fail('No durable original accepted snapshot exists', 'preparation_incomplete')
         deletion._preflight_tree(snapshot, identity, context=context)
         if action == 'discard-partial':
             deletion._remove_tree(snapshot, identity, context=context)
@@ -660,7 +726,6 @@ def _maintain(root, step, call_id, snapshot_token, *, action, max_seconds, autho
     exact_call = isinstance(call_id, str) and e.ID.fullmatch(call_id) and call_id not in {'.', '..'}
     if (type(step) is not int or step <= 0 or type(unbound_local) is not bool
             or not (call_id is None if unbound_local else exact_call)
-            or unbound_local and action == 'publish-accepted'
             or not isinstance(snapshot_token, str) or not TOKEN.fullmatch(snapshot_token)
             or action not in {'inspect', 'discard-partial', 'publish-accepted'}
             or type(max_seconds) not in (int, float) or not math.isfinite(max_seconds) or max_seconds <= 0
