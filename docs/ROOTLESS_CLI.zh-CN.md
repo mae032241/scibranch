@@ -466,6 +466,9 @@ checkpoint 也是原节点产物，后继只引用同一原件。删除 node 产
 
 `execution-resume ... --maintenance query|collect|cancel` 为已经 accepted 的原调用提供有限的宿主维护窗口，须给 `--max-seconds` 和 `--authorization-note`。即使原科学时钟跨 boot 无法继续，也可查询、取消或收集同一调用；此模式不能准备、提交、新建授权请求或增加额度，不能与 `--request-valid-seconds` 合用。精确终态由既有资源账本结算；暂不能结算时不生成退款或新额度。
 
+内置 Local 已有完整终态、只缺 completion 时，查询或收集会在原写者停止并取得同一调用的写锁后补齐结果，复用已冻结输出，不重新执行命令。原写者仍在运行时只报告未完成。
+内置 TCAD SSH 收集在同一 run 内保留收集进度；下载或收据发布中断后，仍收集原 run，不重跑 solver。已写出的终态收据优先复用，不能靠重查产生不同的历史收据。远端 worker 丢失后，只有原 worker/solver 的停止事实可验证时才结束原 run；活着的孤儿 solver 仍受原硬时限及取消约束。缺少停止证明的运行继续保留 unknown 和原槽位，不重新提交。
+
 ### 未发布准备快照的准确维护
 
 `execution-preparation-maintain --root ... --step N --call-id ... --snapshot-token ...
@@ -493,8 +496,11 @@ scid-research execution-preparation-maintain --root /absolute/instance --step N 
 也可先用 `--action inspect`。此分支在取得源实例、控制器及准确 records 写者锁后，核对该 step
 所有保留 attempt 的配置原件与 interface 投影，要求它们完整、一致、均属于内置本地执行且无
 执行 authority。仅当前配置为 local、缺少绑定或缺少进程文件均不构成证明；第三方、混合历史、
-缺原件、已有目标绑定或任何 durable accepted 都拒绝。只删除明确 token 的现存残缺目录，
-不增加持久记录、不推断执行状态、不改预算，也不授权重试。目标不存在时拒绝，不能据此补造
+缺原件或不匹配的目标绑定都拒绝。`discard-partial` 只删除明确 token 的现存残缺目录，
+不增加持久记录；完整 durable accepted 不可删除。若内置 Local 的 accepted 和输入已完整写出、
+只差原绑定或目录发布，可在同一 `--unbound-local` 入口使用 `--action publish-accepted`，
+补齐精确原绑定并发布同一 inode；绑定或 rename 后中断也可用同一 token 收口。accepted 原字节、
+调用身份和预算不改，不重新 prepare、准入或提交。目标不存在且没有匹配原发布记录时拒绝，不能据此补造
 上次清理已完成的结论。其他无绑定 `.prepared-*` 不自动清理或补造来源；入口不接受任意 records
 路径或批量删除。
 已发布历史绑定保留原字节和来源；现场维护仍核对原宿主、owner 和目录身份，历史可读性
@@ -735,7 +741,7 @@ N1a 已增加本地持久 runner：前台控制器退出后，已接受的原生
 封存存在仍需 `run` 验证。原生成功但封存失败只重试封存；执行身份丢失、失败或缺量仍不自动重放。
 实际模型提交前再查预算；已确证未提交时记录 `native_not_submitted` 和零用量。
 控制层保留该节点及原意图；预算修订或重试不自动删除这些记录。`--reconciliation-ref` 接收绝对
-path 与精确 size_bytes 的 JSON，以下 1234 是须替换的字节大小示例。独立工程审查以精确原件和正向源码路径证明确未提交模型时，新安装的兼容 runtime 可显式执行 `native-startup-successor --root INSTANCE --step N --reconciliation REPORT --reconciliation-ref '{"path":"/absolute/reconciliation.json","size_bytes":1234}' --native-home ORIGINAL_HOME --authorization-statement STATEMENT`。该入口冻结工程报告及其局限、原调用归属、原权限与最终 A claim，只追加唯一的新上下文 attempt 1；旧失败、unknown 原件、已消费时间和 dispatch 保留。它仅允许同一逻辑最终 A 的首次实际模型提交，不授权新的科学循环或新额度；重复命令只收集同一 attempt，后继未知时不再提交。空日志、空 thread 或操作者文字本身均不构成未提交证明，既有外部未知效果仍阻断恢复。框架及工具升级不要求保留旧安装；启用正式审查时仍核对原审查合同的科学语义，不迁移审查 verdict 或产生新资格。原有交付资格及提交内必要机械审计保持有效。
+path 与精确 size_bytes 的 JSON，以下 1234 是须替换的字节大小示例。独立工程审查以精确原件和正向源码路径证明确未提交模型时，新安装的兼容 runtime 可显式执行 `native-startup-successor --root INSTANCE --step N --reconciliation REPORT --reconciliation-ref '{"path":"/absolute/reconciliation.json","size_bytes":1234}' --native-home ORIGINAL_HOME --authorization-statement STATEMENT`。该入口冻结工程报告及其局限、原调用归属、原权限与最终 A claim，只追加唯一的新上下文 attempt 1；旧失败、unknown 原件、已消费时间和 dispatch 保留。它仅允许同一逻辑最终 A 的首次实际模型提交，不授权新的科学循环或新额度；重复命令沿用同一 attempt：若后继意图已持久化、尚无 runner/native/outcome 任一回执，可沿原授权启动该 attempt；已有任一执行回执则只收集，后继未知时不再提交。空日志、空 thread 或操作者文字本身均不构成未提交证明，既有外部未知效果仍阻断恢复。框架及工具升级不要求保留旧安装；启用正式审查时仍核对原审查合同的科学语义，不迁移审查 verdict 或产生新资格。原有交付资格及提交内必要机械审计保持有效。
 已封存最终 A 后，若独立工程原件以正向调用顺序证明确切原交付 intent 尚未首次调用，可在当前 host runtime 使用 `native-startup-collect --root INSTANCE --step N --reconciliation REPORT --reconciliation-ref '{"path":"/absolute/reconciliation.json","size_bytes":1234}' --authorization-statement STATEMENT`。它追加精确工程核对原件和原操作绑定，只执行已有科学选择的 host 交付与同操作确认，不进入 native 或科学路由。首次实际调用沿用原声明的有限调用时长；原全局消费、失败、unknown 和身份均保留。收集 intent 一旦持久化，重复命令只核对同操作，绝不再次 submit。授权引用校验、当前准入和结果/科学资格校验分开；旧交付/审查合同原件保持不变。
 暂停只阻止新节点，恢复时也允许原已接受节点完成和封存。
 科学角色的 `wait` 仍表示停止等待。W 已接受且同一 external execution 明确 running 时，控制在科学封存前保留原 checkpoint 并进入 `waiting`；默认 `run` 自动监控原 call，终态后 reconcile 并在合格的原会话中续接 W 消费原件，再封存。等待不调用模型、不增加 native dispatch 或 `advance_seconds`，但真实执行的 `waiting_seconds` 仍消耗原授权总运行时限；旧 elapsed 口径继续按总经过时间计量。暂停阻止唤醒的新 native turn，允许核对原终态；控制进程同 boot 重启后从原 waiting 恢复，未知提交不重放。续接仍受原预算/有限次数与冻结 launcher/session 能力约束；能力不足保留 checkpoint 并报告 unavailable。

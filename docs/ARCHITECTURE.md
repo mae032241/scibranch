@@ -745,6 +745,21 @@ Already accepted ordinary successors retain their exact scientific route when
 replayed after a budget amendment. Current role shares apply to new admission,
 including a prepared successor that has no native acceptance.
 
+Native request delivery and event reception share interruptible I/O, so pipe
+backpressure cannot prevent the existing finite-stop checks. Host delivery
+failures clean up through the original child handle; missing group-cleanup proof stays
+unknown and never authorizes a replacement submission.
+
+Local completion recovery consumes the original terminal under the same call's
+writer lease, after its writer has stopped. TCAD collection resumes the original
+run's publication progress, and a retained terminal receipt completes a missing
+collection receipt without querying or downloading again. A stopped remote worker
+can be reconciled only with positive worker and solver identity evidence; a live
+orphan solver retains the original hard deadline. Uncertain starts retain their
+identity, consumed budgets and occupied slot. A fully written, unbound built-in
+Local accepted snapshot can finish its original binding and inode publication;
+it is never discarded or prepared again.
+
 FINAL authorizes one exact original A through `final_a_return`, using accepted W
 evidence and preserving missing inputs. Insufficient, zero or exceeded shared
 token, time or step budgets cannot veto this A or its original authorized host
