@@ -1588,7 +1588,7 @@ def _validate_inputs(root, work, job):
     if job.get('purpose') == 'closeout':
         from . import budget, delivery
         boundary = job.get('closeout_begin') or {}
-        events, _ = budget._events(root, settings(root))
+        events, _ = budget._events(root)
         begin = next((event for event in events if event['kind'] == 'closeout_begin' and event['seq'] == boundary.get('seq')), None)
         if (job['purpose'] != 'closeout' or job['role'] not in {'A','W'} or job['role']=='W' and job.get('engineering_repair') is None or begin is None
                 or job.get('source_cutoff') != begin['source_cutoff'] or job['step'] < begin['first_step']

@@ -20,6 +20,7 @@ import time
 from . import configuration_updates
 from . import budget as control_budget, execution, runtime, search, checkpoint, profiles, backends
 from .output_repair import OutputRepairRequired
+from .native_usage import terminal_attempt_tokens
 from .contracts import (ACTIONS, actions, ROLE_INSTRUCTIONS, record_ref, file_ref, host_record, read,
                         seal_result, workspace, write, NATIVE_TASK_INSTRUCTION, decode_scientific_output)
 
@@ -124,6 +125,7 @@ def usage(root: Path, *, budget_events=None):
             outcome = record / 'native-outcome.json'
             metadata = read(outcome).get('metering') if outcome.exists() else None
             if metadata is None and observation.exists():metadata = read(observation)
+            value = attempt_usage(record, value=value, metadata=metadata)
             if metadata is not None and metadata.get('coverage') == 'unknown' and step not in unknown:
                 unknown.append(step)
             if (record / 'interruption.json').exists() and not outcome.exists() and step not in unknown:
@@ -132,6 +134,38 @@ def usage(root: Path, *, budget_events=None):
     result=dict(**totals, observed_tokens=totals['input_tokens'] + totals['output_tokens'], unknown_steps=unknown)
     result.update(control_budget.usage_accounting(root,result,events=budget_events))
     return result
+
+
+def attempt_usage(record, *, value=None, metadata=None):
+    """Effective attempt consumption, retaining all immutable original bytes.
+
+    Older resumed runners wrote the session terminal rather than its proven
+    delta. Only their exact persisted session/live/terminal equality permits a
+    derived correction; ordinary turn meters and uncertain reports stay intact.
+    Execution chain validation belongs to the caller, as for usage.json itself.
+    """
+    value = read(record / 'usage.json') if value is None else value
+    if metadata is None and (record / 'native-outcome.json').exists():
+        metadata = read(record / 'native-outcome.json').get('metering')
+    if metadata is None and (record / 'usage-observation.json').exists():
+        metadata = read(record / 'usage-observation.json')
+    if not isinstance(metadata, dict):
+        return value
+    intent = read(record / 'native-intent.json')
+    session = intent.get('session') or {}
+    outcome_path = record / 'native-outcome.json'
+    outcome = read(outcome_path) if outcome_path.exists() else {}
+    if (type(intent.get('attempt')) is not int or intent['attempt'] <= 0
+            or intent.get('context_mode') == 'new_context'
+            or not session.get('thread_id') or session['thread_id'] != metadata.get('thread_id')
+            or outcome.get('native_backend') != 'codex' or outcome.get('thread_id') != session['thread_id']
+            or not session.get('path') or (outcome.get('native_identity') or {}).get('path') != session['path']
+            or metadata.get('source') != 'turn.completed'
+            or metadata.get('reconciliation') != 'terminal_covers_live'
+            or metadata.get('tokens') != value):
+        return value
+    live = dict(metadata, coverage=metadata.get('live_coverage'), tokens=metadata.get('live_tokens'))
+    return terminal_attempt_tokens(value, live)
 
 
 
@@ -158,6 +192,7 @@ def _complete_reported_tokens(root,step):
         # Do not upgrade that lower bound to a complete sample for a number.
         if metadata.get('reporting_delay_unmeasured') is not False or metadata.get('inflight_usage_unknown') is not False:
             return None,'reporting_delay_unmeasured'
+        value=attempt_usage(record,value=value,metadata=metadata)
         total+=value['input_tokens']+value['output_tokens']
     return (total,None) if accepted else (None,'accepted_attempts_unavailable')
 
@@ -613,7 +648,8 @@ def run_native(root: Path, step: int, attempt=0):
                             elif event.get('completed'):
                                 terminal_usage_missing = True
                     observation = live_meter.poll()
-                    projected = {key: max(terminal_meter[key], observation['tokens'][key]) for key in meter}
+                    attempt_terminal = terminal_attempt_tokens(terminal_meter, observation)
+                    projected = {key: max(attempt_terminal[key], observation['tokens'][key]) for key in meter}
                     if projected != meter:
                         hint_dirty = True
                     meter = projected
@@ -688,8 +724,8 @@ def run_native(root: Path, step: int, attempt=0):
     if process is not None:
         observation = live_meter.poll()
         observed = observed or observation['has_observation']
-        for key in meter:
-            meter[key] = max(meter[key], observation['tokens'][key], terminal_meter[key])
+        attempt_terminal = terminal_attempt_tokens(terminal_meter, observation)
+        meter = {key: max(observation['tokens'][key], attempt_terminal[key]) for key in meter}
         observation.update(live_coverage=observation['coverage'], live_reason=observation['reason'],
                            live_tokens=dict(observation['tokens']))
         if terminal_observed:
@@ -697,12 +733,12 @@ def run_native(root: Path, step: int, attempt=0):
         if terminal_fault:
             observation.update(coverage='unknown', reason=terminal_fault)
         elif terminal_usage_observed and not terminal_usage_missing:
-            mismatch = any(terminal_meter[key] < meter[key] for key in meter)
+            mismatch = any(attempt_terminal[key] < meter[key] for key in meter)
             if mismatch or live_meter.fault:
                 observation.update(coverage='unknown', reason=live_meter.fault or 'terminal_usage_below_live_observation')
             else:
                 observation.update(coverage='terminal', reason=None, source=backend.terminal_source,
-                                   reconciliation=('matched' if observation['tokens'] == terminal_meter else 'terminal_covers_live')
+                                   reconciliation=('matched' if observation['tokens'] == attempt_terminal else 'terminal_covers_live')
                                        if observation['has_observation'] else 'terminal_fallback',
                                    unreported_usage=None)
         else:

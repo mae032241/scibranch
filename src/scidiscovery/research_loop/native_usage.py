@@ -27,6 +27,23 @@ def tokens(value):
     return {key: value[key] for key in FIELDS}
 
 
+def terminal_attempt_tokens(terminal, observation):
+    """Normalize only a terminal proven equal to the exact session counter.
+
+    A turn meter is normally invocation-local. On some resumed Codex versions
+    it is session-cumulative: the independently bound append-only counter must
+    prove that interpretation, field for field, before subtracting anything.
+    """
+    baseline = tokens(observation.get('baseline_tokens'))
+    live = tokens(observation.get('tokens'))
+    if (tokens(terminal) is not None and baseline is not None and live is not None
+            and observation.get('coverage') == 'live' and observation.get('has_observation') is True
+            and any(baseline.values())
+            and all(terminal[key] == baseline[key] + live[key] for key in FIELDS)):
+        return live
+    return terminal
+
+
 def context(value):
     """Allowlist optional numeric telemetry, independently of billable counters."""
     if not isinstance(value, dict) or value.get('status') != 'last_reported':

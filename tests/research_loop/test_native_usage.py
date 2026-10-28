@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop.native_usage import SessionUsage, READ_BYTES, LINE_BYTES
+from scidiscovery.research_loop.native_usage import SessionUsage, READ_BYTES, LINE_BYTES, terminal_attempt_tokens
 
 THREAD = '01a13eb3-81b8-74e2-97f7-84e8f170ab5d'
 FIXTURES = Path(__file__).parent / 'fixtures/native_usage'
@@ -54,6 +54,34 @@ def test_resume_subtracts_prelaunch_baseline_and_fresh_context_counts_independen
     fresh = SessionUsage(home, work)
     fresh.bind_thread(THREAD)
     assert fresh.poll()['tokens']['input_tokens'] == 130
+
+
+def test_resume_terminal_session_counter_uses_exact_append_only_delta(tmp_path):
+    baseline = dict(input_tokens=2017365, cached_input_tokens=1926656, output_tokens=22940)
+    terminal = dict(input_tokens=2385841, cached_input_tokens=2180096, output_tokens=24982)
+    delta = dict(input_tokens=368476, cached_input_tokens=253440, output_tokens=2042)
+    home, work, path = session(tmp_path, counter(**baseline))
+    reader = SessionUsage(home, work, session=dict(path=str(path), thread_id=THREAD))
+    with path.open('ab') as stream:
+        stream.write(counter(**terminal))
+    observation = reader.poll()
+    assert terminal_attempt_tokens(terminal, observation) == delta
+    assert terminal_attempt_tokens(delta, observation) == delta  # turn-local versions
+    assert terminal == dict(input_tokens=2385841, cached_input_tokens=2180096, output_tokens=24982)
+
+
+@pytest.mark.parametrize('mutation', ['unknown', 'missing_baseline', 'no_observation', 'different_counter', 'first_turn'])
+def test_terminal_baseline_is_not_subtracted_without_exact_session_proof(mutation):
+    baseline = dict(input_tokens=100, cached_input_tokens=80, output_tokens=5)
+    live = dict(input_tokens=30, cached_input_tokens=20, output_tokens=3)
+    terminal = {key: baseline[key] + live[key] for key in baseline}
+    observation = dict(coverage='live', has_observation=True, baseline_tokens=baseline, tokens=live)
+    if mutation == 'unknown':observation['coverage'] = 'unknown'
+    if mutation == 'missing_baseline':observation['baseline_tokens'] = None
+    if mutation == 'no_observation':observation['has_observation'] = False
+    if mutation == 'different_counter':terminal['output_tokens'] += 1
+    if mutation == 'first_turn':observation['baseline_tokens'] = dict.fromkeys(baseline, 0)
+    assert terminal_attempt_tokens(terminal, observation) == terminal
 
 
 def test_missing_partial_regressed_and_replaced_logs_keep_unknown_and_high_water(tmp_path):

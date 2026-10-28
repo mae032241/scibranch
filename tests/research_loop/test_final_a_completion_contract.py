@@ -3,7 +3,7 @@ import copy
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts as c, controller, execution, native
+from scidiscovery.research_loop import budget, contracts as c, controller, delivery, execution, native
 from test_history_handoff import finish
 
 
@@ -85,6 +85,33 @@ def test_new_prepare_freezes_one_original_final_a_grant(original_final):
     assert budget.final_a_barrier(root) == accepted
     assert budget.final_a_barrier(root, before_step=2) is None
     assert budget.final_a_barrier(root, before_step=3) == accepted
+
+
+def test_prepared_protected_final_validates_original_inputs_before_native_launch(tmp_path, monkeypatch):
+    from test_soft_external_closeout import external_scene
+    root = external_scene(tmp_path, monkeypatch)
+    nodes = [dict(step=step, seal_ref=c.record_ref(execution.origin(root, step) / 'result-identity.json'))
+             for step in (1, 2)]
+    sources = delivery.catalogue_sources(root, nodes)
+    budget.begin_closeout(root, 2, 3, 'Explicit fixture FINAL phase',
+                          final_only=True, delivery_sources=sources)
+    job = c.build_job(root, 3, 'A', [1, 2], purpose='closeout',
+                      source_cutoff=2, delivery_sources=sources)
+    intent = dict(step=3, task_ref=c.record_ref(root / 'jobs/003.json'),
+                  budget_slice=budget.accept_node(root, job))
+    c.write(execution.origin(root, 3) / 'native-intent.json', intent)
+    assert job['purpose'] == 'closeout' and job['final_only']
+    accepted = budget.final_a_return(root, job, intent)
+    assert accepted['kind'] == 'final_a_return'
+    originals = [root / 'settings.json', root / 'jobs/003.json',
+                 execution.origin(root, 3) / 'native-intent.json',
+                 root / 'control-ledger' / f'{accepted["seq"]:06d}.json']
+    before = {path: path.read_bytes() for path in originals}
+
+    c._validate_inputs(root, c.workspace(root, 3), job)
+
+    assert all(path.read_bytes() == raw for path, raw in before.items())
+    assert not (execution.origin(root, 3) / 'native-outcome.json').exists()
 
 
 @pytest.mark.parametrize('change', ['missing', 'seq', 'digest', 'task', 'role', 'step',

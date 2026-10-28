@@ -1687,7 +1687,7 @@ def require_final_a_delivery_eligibility(root, decision, binding):
 def _attempt_consumption(root, job, paths, *, automatic_recovery=None, automatic_successor=None):
     """Derive cumulative consumption from exact completed native facts."""
     from . import native
-    tokens, seconds = 0, 0.
+    tokens, recorded_tokens, seconds = 0, 0, 0.
     policy = node_limits(root, job)
     for number, path in enumerate(paths):
         intent = contracts.read(contracts.regular(path / 'native-intent.json'))
@@ -1732,15 +1732,20 @@ def _attempt_consumption(root, job, paths, *, automatic_recovery=None, automatic
         if (meter is not None and native._usage_event(dict(type='turn.completed', usage=meter)) != meter
                 or intent.get('task_ref') != contracts.record_ref(root / 'jobs' / f'{job["step"]:03d}.json')
                 or anchor.get('limits') != policy or anchor.get('role') != job['role']
-                or not startup and (anchor.get('previous_tokens', 0) != tokens or anchor.get('previous_seconds', 0.) != seconds)
+                or not startup and (anchor.get('previous_tokens', 0) not in (tokens, recorded_tokens) or anchor.get('previous_seconds', 0.) != seconds)
                 or bool(report.get('usage_observed')) != (meter is not None) or report.get('limits') != policy
                 or report.get('role') != job['role'] or report.get('dispatches') != number + 1
                 or any(report.get(key) != reported[key] for key in ('input_tokens', 'cached_input_tokens', 'output_tokens'))):
             raise ValueError('Original node usage report or identity changed')
-        tokens += reported['input_tokens'] + reported['output_tokens']
+        effective = native.attempt_usage(path, value=meter) if meter is not None else reported
+        tokens += effective['input_tokens'] + effective['output_tokens']
+        # Validate original report arithmetic against its own accepted prefix.
+        # A historical session-terminal overcount stays in those immutable
+        # receipts; only its independently proven attempt delta is consumed.
+        recorded_tokens = anchor.get('previous_tokens', 0) + reported['input_tokens'] + reported['output_tokens']
         duration = report.get('advance_seconds')
         if (type(duration) not in (int, float) or not math.isfinite(duration) or duration < seconds
-                or report.get('observed_tokens') != tokens):
+                or report.get('observed_tokens') != recorded_tokens):
             raise ValueError('Original cumulative node consumption changed')
         seconds = duration
     return tokens, seconds
@@ -1772,7 +1777,14 @@ def _node_duration(root, job, intent, limits):
         # remains a lower bound during runner admission/reporting as at accept.
         original = _attempt_consumption(root, job, paths[:number],
             automatic_successor=accepted if accepted.get('continuation_kind') == 'automatic_recovery' else None)
-        if (prior_tokens, prior) != original:
+        prior_path = paths[number - 1]
+        if (prior_path / 'native-outcome.json').exists():
+            prior_report = contracts.read(prior_path / 'native-outcome.json').get('budget_slice', {})
+        else:
+            from . import continuation
+            prior_report = continuation.interruption(root, job, prior_path)['budget_slice']
+        recorded_prior = prior_report.get('observed_tokens')
+        if prior != original[1] or prior_tokens not in (original[0], recorded_prior):
             raise ValueError('Continuation cannot refund original consumption')
     elif prior_tokens or prior:
         raise ValueError('Initial node cannot invent previous consumption')
