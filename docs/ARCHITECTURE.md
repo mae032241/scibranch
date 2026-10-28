@@ -810,7 +810,13 @@ original reviewed producer, while compiled V3 inputs retain their compiler chain
 An explicitly incomplete declaration cannot fall back to a broader source claim.
 Optional observers need a separately enabled frozen source contract and a source
 view bound to the exact observation. Display coverage alone grants no qualification.
-Mutable observation metadata is retained at capture under the existing storage policy. Model artifacts reuse exact managed output originals; a live path without retained custody remains unavailable rather than being copied or labeled archived. Replacing a later submission marker preserves earlier captured facts.
+Mutable observation metadata is retained at capture under the existing storage policy.
+An unchanged source path, device, inode, size and modification time reuse the prior
+retained original after its identity is checked; a changed source is copied into a
+new original, preserving the earlier bytes. Model artifacts reuse exact managed
+output originals; a live path without retained custody remains unavailable rather
+than being copied or labeled archived. Replacing a later submission marker
+preserves earlier captured facts.
 Known producer contributions enter authorship even when not selected as an
 implementation. Ordinary parent links do not manufacture authorship.
 

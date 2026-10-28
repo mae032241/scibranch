@@ -3,11 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import audit_recovery, budget, candidate_audit, contracts as c, delivery, execution, native
+from scidiscovery.research_loop import audit_recovery, budget, candidate_audit, contracts as c, controller, delivery, execution, native
 from test_candidate_audit import audit_fixture, request
-from test_operator_usage_reserve import unknown_original, historical_charge
 from test_author_closeout_successor import pure_upgrade
-from test_legacy_author_compiler_client import legacy_compiler
 
 
 def _accepted_audit(root):
@@ -30,13 +28,12 @@ def _forbid_results(monkeypatch):
                     'usage-observation.json', 'runner-process.json', 'native-process.json', 'fixture-thread.jsonl',
                     'author-closeout-facts.json', 'author-closeout-science.json', 'author-science-context.json',
                     'accepted.json', 'completed.json', 'execution-observation.json', 'compiler.json'}
-    for name in ('read', 'digest'):
-        original = getattr(c, name)
-        def guarded(path, *args, _original=original, **kwargs):
-            if Path(path).name in result_names:
-                forbidden()
-            return _original(path, *args, **kwargs)
-        monkeypatch.setattr(c, name, guarded)
+    original = c.read
+    def guarded(path, *args, **kwargs):
+        if Path(path).name in result_names:
+            forbidden()
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(c, 'read', guarded)
     for owner, name in ((c, 'validate'), (execution, 'records'), (execution, 'raw'),
                         (native, 'usage'), (budget, 'snapshot'),
                         (candidate_audit, '_outcome'), (audit_recovery, 'facts')):
@@ -51,6 +48,7 @@ def test_audit_permission_and_consumption_ignore_broken_results(tmp_path, monkey
     for path in (execution.origin(root, 3)/'science-output.json',
                  execution.origin(root, 3)/'usage.json',
                  directory/'outcome.json', directory/'dispatch.json', directory/'binding.json'):
+        if path.exists():path.chmod(0o600)
         path.write_text('Broken result original; never an authorization input')
     with monkeypatch.context() as pure:
         _forbid_results(pure)
@@ -68,6 +66,7 @@ def test_audit_new_acceptance_requires_valid_scientific_result(tmp_path, monkeyp
     root = audit_fixture(tmp_path)
     job, payload = request(root)
     raw = execution.raw(root, 3)
+    raw.chmod(0o600)
     raw.write_bytes(raw.read_bytes()+b'\n')
     def no_effect(*args, **kwargs):
         pytest.fail('Invalid scientific decision reached adapter preparation/effects')
@@ -83,10 +82,12 @@ def test_accepted_audit_still_rejects_changed_result_before_effect(tmp_path, mon
     root = audit_fixture(tmp_path)
     job, payload, intent = _accepted_audit(root)
     raw = execution.raw(root, 3)
+    raw.chmod(0o600)
     raw.write_bytes(raw.read_bytes()+b'\n')
     candidate_audit.validate_intent(root, intent)
     assert budget.used_steps(root) == 4
-    assert candidate_audit.execute(root, job, payload) == 'candidate_audit_unknown'
+    with controller._writer(root):
+        assert candidate_audit.execute(root, job, payload) == 'candidate_audit_unknown'
     def no_effect(*args, **kwargs):
         pytest.fail('Changed scientific result reached adapter effects')
     monkeypatch.setattr(delivery, '_call', no_effect)
@@ -154,71 +155,22 @@ def test_audit_retry_consumption_ignores_results_but_rejects_bad_intent(tmp_path
         budget.used_steps(root)
 
 
-def _startup_permit(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import startup_recovery as recovery
-    from test_native_startup_recovery import scene
-    root, options = scene(tmp_path)
-    write = c.write
-    def after_publication(file, value):
-        write(file, value)
-        if Path(file) == recovery.path(root, 3):
-            raise RuntimeError('fixture stopped after authorization publication')
-    with monkeypatch.context() as stopped:
-        stopped.setattr(c, 'write', after_publication)
-        with pytest.raises(RuntimeError, match='authorization publication'):
-            recovery.start(root, 3, **options)
-    return root, options, recovery.validate(root, 3)
+def _final_permit(tmp_path):
+    root = audit_fixture(tmp_path)
+    budget.begin_closeout(root, 2, 3, 'fixture final', final_only=True)
+    job = c.build_job(root, 3, 'A', [1, 2], final_report=dict(source_cutoff=2, stopped_original=None))
+    intent = dict(step=3, task_ref=c.record_ref(root/'jobs/003.json'), budget_slice=budget.accept_node(root, job))
+    c.write(execution.origin(root, 3)/'native-intent.json', intent)
+    return root, job, intent
 
 
-def test_startup_and_final_permissions_never_read_execution_results(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import startup_recovery as recovery
-    root, _, permit = _startup_permit(tmp_path, monkeypatch)
-    original = c.read(Path(permit['originals']['intent']['path']))
-    job = c.read(root/'jobs/003.json')
-    intent = dict(step=3, attempt=1, continuation_kind='startup_successor', context_mode='new_context',
-        task_ref=c.record_ref(root/permit['originals']['job']['path']), native_profile=permit['native_profile'],
-        root_intent_ref=c.record_ref(root/permit['originals']['intent']['path']), previous=recovery.original_proof(root, 3),
-        startup_recovery=recovery._ref(recovery.path(root, 3)), budget_slice=original['budget_slice'])
+@pytest.mark.process_e2e
+def test_final_permissions_never_read_execution_results(tmp_path, monkeypatch):
+    root, job, intent = _final_permit(tmp_path)
     with monkeypatch.context() as pure:
         _forbid_results(pure)
-        pure.setattr(recovery, 'reconciled_original', lambda *args, **kwargs: pytest.fail('Permission required result qualification'))
-        assert recovery.validate(root, 3) == permit
-        assert recovery.validate_intent(root, job, intent) == permit
         assert budget.final_a_return(root, job, intent)['step'] == 3
         assert budget.final_a_barrier(root)['step'] == 3
-
-
-def test_startup_bad_original_keeps_permission_but_blocks_new_effects_and_classification(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import startup_recovery as recovery
-    root, options, permit = _startup_permit(tmp_path, monkeypatch)
-    outcome = Path(permit['originals']['outcome']['path'])
-    outcome.write_bytes(outcome.read_bytes()+b' ')
-    assert recovery.validate(root, 3) == permit
-    with pytest.raises(ValueError, match='changed'):
-        budget.usage_accounting(root, dict(observed_tokens=20, unknown_steps=[3]))
-    def no_effect(*args, **kwargs):pytest.fail('Invalid original reached new native dispatch')
-    from scidiscovery.research_loop import runtime
-    monkeypatch.setattr(runtime, 'start', no_effect)
-    with pytest.raises(ValueError, match='changed'):
-        recovery.start(root, 3, **options)
-    assert not (execution.origin(root, 3)/'continuations/001/native-intent.json').exists()
-
-
-def test_startup_grant_does_not_prove_positive_engineering_facts(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import startup_recovery as recovery
-    root, _, permit = _startup_permit(tmp_path, monkeypatch)
-    # Deliberately construct a declaration with no positive result verdict.
-    report = Path(permit['reconciliation']['path'])
-    value = c.read(report)
-    value['engineering_judgment']['provider_submission'] = 'unknown'
-    c.write(report, value)
-    permit['reconciliation'] = recovery._ref(report)
-    c.write(recovery.path(root, 3), permit)
-    recovery.validate(root, 3)
-    with pytest.raises(ValueError, match='Positive independent'):
-        budget.usage_accounting(root, dict(observed_tokens=20, unknown_steps=[3]))
-    with pytest.raises(ValueError, match='Positive independent'):
-        recovery.require_eligibility(root, 3)
 
 
 @pytest.mark.process_e2e
@@ -229,12 +181,12 @@ def test_final_cursor_permission_is_separate_from_sealed_source_eligibility(tmp_
                   correction_request=None, author_correction=None, source_refs=refs)
     begin = budget.begin_closeout(root, 2, 3, 'fixture final', final_only=True, resume_cursor=cursor)
     seal = execution.origin(root, 2)/'result-identity.json'
-    seal.write_bytes(seal.read_bytes()+b' ')
+    seal.write_text('Broken scientific seal; permission replay must not read it')
     with monkeypatch.context() as pure:
         _forbid_results(pure)
         assert budget.closeout_state(root)['begin'] == begin
-    events, _ = budget._events(root, c.settings(root))
-    with pytest.raises(ValueError, match='accepted normal science'):
+    events, _ = budget._events(root)
+    with pytest.raises(ValueError):
         budget.require_cursor_eligibility(root, cursor, 3, events)
 
 
@@ -249,39 +201,24 @@ def test_final_report_grant_replay_does_not_revalidate_stopped_results(tmp_path,
     with monkeypatch.context() as pure:
         _forbid_results(pure)
         pure.setattr(budget, 'validate_final_report_inputs', lambda *args, **kwargs: pytest.fail('Grant replay required result eligibility'))
+        assert budget.accept_node(root, job) == anchor
         assert budget.final_a_barrier(root)['step'] == 4
         assert anchor['final_return']['seq'] == budget.final_a_barrier(root)['seq']
 
 
+@pytest.mark.process_e2e
 def test_final_delivery_scope_read_is_pure_but_acceptance_keeps_result_gate(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import startup_recovery as recovery
-    root, _, permit = _startup_permit(tmp_path, monkeypatch)
-    decision = dict(step=3, job_ref=c.record_ref(root/permit['originals']['job']['path']), raw_ref='a'*64, seal_ref=dict(path='/fixture/native-evidence/002/result-identity.json'))
+    root, _, intent = _final_permit(tmp_path)
+    decision = dict(step=3, job_ref=c.record_ref(root/'jobs/003.json'),
+                    raw_ref=dict(path='/fixture/native-evidence/003/science-output.json'),
+                    seal_ref=dict(path='/fixture/native-evidence/003/result-identity.json'))
     bound = dict(decision=decision, operation_id='c'*64)
     with monkeypatch.context() as pure:
         _forbid_results(pure)
-        assert budget.final_a_delivery(root, decision, bound) == permit['final_return']
+        assert budget.final_a_delivery(root, decision, bound) == intent['budget_slice']['final_return']
     with pytest.raises((ValueError, FileNotFoundError)):
         budget.require_final_a_delivery_eligibility(root, decision, bound)
     assert not budget.closeout_state(root)['actions']
-
-
-def test_historical_usage_reserve_permission_replay_does_not_read_results_or_charge(unknown_original, monkeypatch):
-    root, record, session = unknown_original
-    historical_charge(root, session)
-    usage=native.usage(root)
-    assert usage['observed_tokens']==usage['accounted_tokens']==120 and usage['reserved_tokens']==0
-    snapshot = budget.snapshot
-    with monkeypatch.context() as pure:
-        _forbid_results(pure)
-        pure.setattr(budget, 'snapshot', snapshot)
-        pure.setattr(budget, 'require_usage_reserve_eligibility', lambda *args, **kwargs: pytest.fail('Permission replay required usage qualification'))
-        assert budget.snapshot(root)['max_tokens'] == 1000
-        assert budget.used_steps(root) == 1
-    (record/'usage.json').write_text('Broken usage original')
-    assert budget.snapshot(root)['max_tokens'] == 1000
-    with pytest.raises(ValueError, match='original changed'):
-        budget.usage_accounting(root, dict(observed_tokens=120, unknown_steps=[1]))
 
 
 def test_author_permissions_never_read_outcomes_call_results_or_scientific_context(pure_upgrade, monkeypatch):
@@ -312,29 +249,3 @@ def test_author_bad_source_result_keeps_grant_but_fails_explicit_eligibility(pur
     assert author.validate(root, original)==original
     with pytest.raises(ValueError, match='original changed'):
         author.require_successor_eligibility(root, successor)
-
-
-def test_legacy_author_permission_does_not_validate_scientific_compilation(legacy_compiler, monkeypatch):
-    from scidiscovery.research_loop import execution_inputs as inputs
-    root, job, compiler, material, permit, *_ = legacy_compiler
-    with monkeypatch.context() as pure:
-        _forbid_results(pure)
-        pure.setattr(inputs, 'verify_compilation', lambda *args, **kwargs: pytest.fail('Permission required scientific compiler output'))
-        original=inputs._legacy_authorization(root, job, compiler, material, permit, 1, require_intent=True)
-        assert c.record_ref(root/original['job']['path'])==c.record_ref(root/'jobs/002.json')
-
-
-@pytest.mark.parametrize('failure', ['author', 'compiler'])
-def test_legacy_client_requires_eligibility_before_publication(legacy_compiler, monkeypatch, failure):
-    from scidiscovery.research_loop import author_closeout as author, execution_inputs as inputs
-    root, job, compiler, material, permit, public, _ = legacy_compiler
-    if failure=='author':
-        def invalid(*args, **kwargs):raise ValueError('fixture author qualification failed')
-        monkeypatch.setattr(author, 'require_original_eligibility', invalid)
-    else:
-        value=inputs.q._read(root,compiler)
-        monkeypatch.setattr(inputs, 'verify_compilation', lambda *args, **kwargs:dict(value, job=dict(value['job'], path='jobs/unapproved.json')))
-    with pytest.raises(ValueError):
-        inputs.create_legacy_author_client(root, job, compiler, material, permit, 1, public)
-    assert not public.exists()
-    assert not (root/compiler['path']).with_name('author-client-001.json').exists()

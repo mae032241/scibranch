@@ -1,5 +1,5 @@
 """Frozen role token shares route optional thinking by control; no model calls."""
-from test_history_handoff import selection_explanation
+from test_history_handoff import fixture_final_coverage, selection_explanation
 import sys
 
 import pytest
@@ -42,7 +42,9 @@ def seal(root, step, role, parents, *, action='wait', tokens=10, plan=None, revi
     payload = dict(summary='A contribution', scientific_result='A bounded finding', limitations=['Fixture only'], implementation_selection=None)
     if role == 'H':payload.update(search_plan=plan)
     if role == 'A':payload.update(search_review=review, candidate_recommendation=recommendation, progress_assessment=None,
-                                  decision_request=None, portfolio_review=None)
+        decision_request=None, portfolio_review=dict(main_line=None,
+            reason='Retained findings do not establish a preferred mechanism; preserve missing observations and defer further discriminating work.',
+            discriminating_work=None))
     if role == 'W':
         nominations = (dict(representatives=[], extras=[], gaps=[dict(mechanism_ref=row['mechanism_ref'],
             reason='Fixture declares no scientific candidate suitability; the retained pool remains available to A.')
@@ -52,6 +54,7 @@ def seal(root, step, role, parents, *, action='wait', tokens=10, plan=None, revi
     if role in {'H', 'A'}:payload.update(next_action=action, route_reason='Exact scientific question')
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(path)))
     if isinstance(payload.get('candidate_recommendation'),str):payload['selection_explanation']=selection_explanation()
+    fixture_final_coverage(root, job, payload)
     c.write(record / 'science-output.json', payload)
     c.write(record / 'usage.json', dict(input_tokens=tokens - 1, cached_input_tokens=0, output_tokens=1))
     c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, usage=native.usage(root),
@@ -132,7 +135,7 @@ def test_optional_role_share_uses_actual_usage_without_prepaying_target_or_unkno
     assert role_share.reason(root,1,dict(role='A'),{},'H')=='role_share_thinking_reached'
 
 
-def test_old_instance_without_policy_keeps_original_routes(tmp_path):
+def test_without_role_policy_keeps_original_routes(tmp_path):
     root = scene(tmp_path, policy=None)
     assert 'role_budget_policy' not in c.settings(root)
     seal(root, 1, 'H', [], action='experiment', plan=PLAN, tokens=100_000)

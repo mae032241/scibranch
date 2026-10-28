@@ -1,4 +1,4 @@
-"""Role token shares of the effective authorization derived from sealed meters; routing only, no new balance.
+"""Role token shares of the effective authorization from reported usage; routing only, no new balance.
 
 Optional H/A thinking is refused once its reported exploration usage reaches
 the configured share of the current total authorization, or when
@@ -32,10 +32,10 @@ def configured(root, job=None):
 
 
 def usage(root, through_step):
-    """Sum effective attempt meters through this exact routing boundary."""
+    """Sum published attempt usage through this exact routing boundary."""
     totals = dict(H=0, W=0, A=0, E=0, closeout=0)
     unknown = []
-    from . import fork_runtime, native
+    from . import fork_runtime
     for step in fork_runtime.local_steps(root):
         if step > through_step:
             break
@@ -49,7 +49,6 @@ def usage(root, through_step):
                 unknown.append(step)
                 continue
             meter = c.read(c.regular(record / 'usage.json'))
-            meter = native.attempt_usage(record, value=meter)
             totals[key] += meter['input_tokens'] + meter['output_tokens']
     return dict(totals, thinking=totals['H'] + totals['A'], unknown_steps=sorted(set(unknown)))
 

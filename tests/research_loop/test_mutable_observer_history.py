@@ -9,6 +9,93 @@ from test_history_handoff import finish, scene
 from execution_fixtures import execution_registry
 
 
+def metadata_observer(scene,tmp_path):
+    setup_observer(scene,tmp_path,'''import json,sys
+q=json.load(sys.stdin)
+candidate='metadata-'+str(q['step'])
+print(json.dumps(dict(candidates=[dict(id=candidate,status='ok',evidence=['fact.json'])],
+ current_candidate=dict(candidate_id=candidate,evidence=['fact.json']),actual_submission=None,
+ coverage=dict(status='complete',note='Control metadata fixture only'))))
+''')
+
+
+def metadata_proof(scene,step):
+    observation=c.read(scene/'host-history/observations'/f'{step:03d}.json')
+    proof=observation['candidates'][0]['evidence'][0]
+    assert observation['current_candidate']['evidence']==[proof]
+    return proof
+
+
+def test_unchanged_metadata_reuses_one_original_across_three_nodes(scene,tmp_path,monkeypatch):
+    from scidiscovery.research_loop import shared_originals
+    metadata_observer(scene,tmp_path)
+    live=scene/'fact.json';live.write_bytes(b'first')
+    retain=shared_originals.retain;copied=[]
+    def capture_copy(root,path,**options):
+        copied.append(Path(path))
+        return retain(root,path,**options)
+    monkeypatch.setattr(shared_originals,'retain',capture_copy)
+    proofs=[]
+    for step,role,parents in ((1,'H',[]),(2,'W',[1]),(3,'A',[1,2])):
+        finish(scene,step,role,parents)
+        proofs.append(metadata_proof(scene,step))
+    assert proofs==[proofs[0]]*3
+    retained=scene/proofs[0]['snapshot']
+    assert retained.stat().st_ino==proofs[0]['file_stat'][1]
+    assert retained.stat().st_ino!=live.stat().st_ino
+    assert proofs[0]['source_file_stat']==[live.stat().st_dev,live.stat().st_ino,5,live.stat().st_mtime_ns]
+    assert copied==[live]
+
+
+@pytest.mark.parametrize('change',['in_place','atomic_replace'])
+def test_changed_metadata_gets_new_original_and_keeps_old_bytes(scene,tmp_path,monkeypatch,change):
+    import os
+    from scidiscovery.research_loop import shared_originals
+    metadata_observer(scene,tmp_path)
+    live=scene/'fact.json';live.write_bytes(b'first')
+    retain=shared_originals.retain;copied=[]
+    def capture_copy(root,path,**options):
+        copied.append(Path(path))
+        return retain(root,path,**options)
+    monkeypatch.setattr(shared_originals,'retain',capture_copy)
+    finish(scene,1,'H',[])
+    first=metadata_proof(scene,1)
+    if change=='in_place':
+        live.write_bytes(b'other')
+        # Make this ordinary write's new generation explicit on coarse clocks.
+        os.utime(live,ns=(live.stat().st_atime_ns,first['source_file_stat'][3]+1_000_000))
+    else:
+        pending=scene/'next.json';pending.write_bytes(b'other')
+        # Equal size and mtime still differ through the atomic replacement inode.
+        os.utime(pending,ns=(pending.stat().st_atime_ns,first['source_file_stat'][3]))
+        pending.replace(live)
+    finish(scene,2,'W',[1])
+    second=metadata_proof(scene,2)
+    assert second['snapshot']!=first['snapshot']
+    assert second['file_stat'][1]!=first['file_stat'][1]
+    assert (scene/first['snapshot']).read_bytes()==b'first'
+    assert (scene/second['snapshot']).read_bytes()==b'other'
+    assert copied==[live,live]
+    for proof in (first,second):history._validate_proof(scene,proof)
+
+
+def test_capture_rejects_corrupt_original_before_reusing_unchanged_metadata(scene,tmp_path,monkeypatch):
+    from scidiscovery.research_loop import execution,shared_originals
+    metadata_observer(scene,tmp_path)
+    (scene/'fact.json').write_bytes(b'first')
+    finish(scene,1,'H',[])
+    proof=metadata_proof(scene,1)
+    job=c.build_job(scene,2,'W',[1])
+    c.write(execution.raw(scene,2),dict(summary='Unsealed component observation'))
+    retained=scene/proof['snapshot'];retained.chmod(0o600);retained.write_bytes(b'other')
+    def no_copy(*args,**kwargs):
+        raise AssertionError('A damaged retained original must not be replaced by a fresh copy')
+    monkeypatch.setattr(shared_originals,'retain',no_copy)
+    with pytest.raises(history.ObserverIntegrityError,match='Archived observer original changed'):
+        history.capture(scene,job,{},[])
+    assert not (scene/'host-history/observations/002.json').exists()
+
+
 def test_small_live_original_survives_same_size_atomic_replacement(scene):
     path=scene/'live.json';path.write_bytes(b'first')
     proof=history._proof(scene,'live.json')

@@ -128,7 +128,13 @@ def resolve(root, target, receipts, *, current=None):
     return c._public_materials(root,[row])[0]
 
 
-def _proof(root, source, *, context=None, source_kind='mutable'):
+def _observer_source_stat(info):
+    # Same byte-generation fields as experiments.proof; the retained object's
+    # file_stat belongs to a different inode and cannot identify its live source.
+    return [info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns]
+
+
+def _proof(root, source, *, context=None, source_kind='mutable', previous=None):
     from .protocol import require_current
     require_current(root)
     saved=source if isinstance(source,dict) else None
@@ -142,7 +148,8 @@ def _proof(root, source, *, context=None, source_kind='mutable'):
     if Path(snapshot).is_absolute() and (saved is None or 'file_stat' not in saved):
         raise ObserverIntegrityError('External observer evidence requires its saved identity')
     c.regular(path)
-    size = path.stat().st_size
+    source_stat = _observer_source_stat(path.stat())
+    size = source_stat[2]
     from . import experiments
     if saved is not None:
         actual=experiments.proof(path,context=context)
@@ -156,11 +163,27 @@ def _proof(root, source, *, context=None, source_kind='mutable'):
         original=experiments.proof(path,context=context)
         return dict(path=relative,**{key:original[key] for key in ('size_bytes','file_stat')},
             retention='archived',snapshot=relative)
+    if previous is not None:
+        owner,prior = previous
+        if prior.get('source_file_stat')==source_stat and prior.get('size_bytes')==size:
+            from . import originals
+            try:
+                retained=originals.resolve_ref(owner,dict(prior,path=_snapshot(prior)),context=context)
+            except (OSError,ValueError) as error:
+                raise ObserverIntegrityError('Archived observer original changed') from error
+            original=experiments.proof(retained,context=context) if owner.inherited else prior
+            if _observer_source_stat(path.stat())!=source_stat:
+                raise ObserverIntegrityError('Observer evidence changed during retention')
+            return dict(path=relative,**{key:original[key] for key in ('size_bytes','file_stat')},
+                retention='archived',source_file_stat=source_stat,
+                snapshot=retained.relative_to(root).as_posix() if retained.is_relative_to(root) else str(retained))
     from . import shared_originals
     retained=shared_originals.retain(root,path,size_bytes=size,source_kind='mutable',context=context)
     original=experiments.proof(retained,context=context)
+    if _observer_source_stat(path.stat())!=source_stat:
+        raise ObserverIntegrityError('Observer evidence changed during retention')
     return dict(path=relative,**{key:original[key] for key in ('size_bytes','file_stat')},
-        retention='archived',snapshot=retained.relative_to(root).as_posix())
+        retention='archived',snapshot=retained.relative_to(root).as_posix(),source_file_stat=source_stat)
 
 
 def source_control_ref(source, relative):
@@ -850,7 +873,20 @@ def _capture(root, job, payload, materials):
         if stored.get('binding') != binding:
             raise ObserverIntegrityError('Retained observer snapshot binding changed')
         return dict(path=path.relative_to(root).as_posix())
-    known = set();known_contexts = set();prior_contexts = [];managed_outputs = {}
+    known = set();known_contexts = set();prior_contexts = [];managed_outputs = {};previous_proofs = {}
+    def remember_proofs(observation, owner):
+        # Read only already-loaded control metadata here. Validate the chosen
+        # retained object later, without statting every historical evidence file.
+        proofs=[proof for row in observation['candidates'] for proof in row['evidence']]
+        for field in ('current_candidate','actual_submission'):
+            if observation.get(field) is not None:proofs.extend(observation[field]['evidence'])
+        for row in observation.get('contexts',[]):proofs.extend(row['proofs'])
+        for proof in proofs:
+            if proof.get('retention')=='archived' and 'source_file_stat' in proof:
+                source=originals.source_for_ref(owner,proof)
+                key=str(Path(source.original_root)/proof['path'])
+                previous=previous_proofs.get(key)
+                if previous is None or previous[0].step<source.step:previous_proofs[key]=(source,proof)
     def remember_outputs(rows, owner):
         # Index only existing host-managed output bindings. Resolve and verify
         # the exact original only when the observer actually selects it.
@@ -869,6 +905,7 @@ def _capture(root, job, payload, materials):
             known_contexts.update(row['call_id'] for row in prior.get('contexts', []))
             prior_contexts.extend(prior.get('contexts', []))
             remember_outputs(prior.get('managed_calls',[]),prior_source)
+            remember_proofs(prior,prior_source)
     current_calls=managed_calls(root,job) if _managed_config(job,root) else None
     if current_calls is not None:
         remember_outputs(current_calls,originals.node(root,job['step']))
@@ -919,7 +956,7 @@ def _capture(root, job, payload, materials):
             raise ValueError('Observer original path is not a string')
         if name in artifact_names:return artifact(name)
         if name not in proof_cache:
-            proof_cache[name] = _proof(root,name)
+            proof_cache[name] = _proof(root,name,previous=previous_proofs.get(str(root/name)))
         return proof_cache[name]
     candidates, seen, diagnostics = [], set(), []
     receipts = job.get('history', {}).get('nodes', [])
