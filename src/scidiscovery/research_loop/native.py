@@ -136,25 +136,28 @@ def usage(root: Path, *, budget_events=None):
     return result
 
 
-def attempt_usage(record, *, value=None, metadata=None):
+def attempt_usage(record, *, value=None, metadata=None, intent=None, outcome=None):
     """Effective attempt consumption, retaining all immutable original bytes.
 
     Older resumed runners wrote the session terminal rather than its proven
     delta. Only their exact persisted session/live/terminal equality permits a
     derived correction; ordinary turn meters and uncertain reports stay intact.
     Execution chain validation belongs to the caller, as for usage.json itself.
+    Saved display readers can supply their memoized originals without invoking
+    control readers or rereading sealed records.
     """
     value = read(record / 'usage.json') if value is None else value
-    if metadata is None and (record / 'native-outcome.json').exists():
-        metadata = read(record / 'native-outcome.json').get('metering')
+    if outcome is None:
+        outcome_path = record / 'native-outcome.json'
+        outcome = read(outcome_path) if outcome_path.exists() else {}
+    if metadata is None:
+        metadata = outcome.get('metering')
     if metadata is None and (record / 'usage-observation.json').exists():
         metadata = read(record / 'usage-observation.json')
     if not isinstance(metadata, dict):
         return value
-    intent = read(record / 'native-intent.json')
+    intent = read(record / 'native-intent.json') if intent is None else intent
     session = intent.get('session') or {}
-    outcome_path = record / 'native-outcome.json'
-    outcome = read(outcome_path) if outcome_path.exists() else {}
     if (type(intent.get('attempt')) is not int or intent['attempt'] <= 0
             or intent.get('context_mode') == 'new_context'
             or not session.get('thread_id') or session['thread_id'] != metadata.get('thread_id')

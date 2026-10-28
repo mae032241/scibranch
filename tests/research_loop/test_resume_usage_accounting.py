@@ -99,6 +99,66 @@ def test_shared_fold_retains_unknown_and_counts_proven_resume_delta(tmp_path, mo
     assert all(path.read_bytes() == data for path, data in originals.items())
 
 
+def test_saved_ui_uses_effective_meter_and_memo_invalidation_without_control_reads(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import ui_saved_status
+    from test_node_budget import instance
+    root = instance(tmp_path, max_tokens=5000000)
+    c.build_job(root, 1, 'H', [])
+    original = execution.origin(root, 1)
+    c.write(original / 'native-intent.json', dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json')))
+    c.write(original / 'usage.json', BASELINE)
+    c.write(original / 'native-outcome.json', dict(metering=dict(coverage='unknown')))
+    resumed, metadata = old_record(original)
+    # The display memo uses the saved seal marker, without validating science.
+    c.write(original / 'result-identity.json', {})
+    monkeypatch.setattr(execution, 'records', lambda selected_root, step: [original, resumed])
+    originals = {path: path.read_bytes() for record in (original, resumed)
+                 for path in record.iterdir() if path.is_file()}
+    control_usage = native.usage
+    expected = control_usage(root)
+    def forbidden(*args, **kwargs):
+        pytest.fail('Saved UI metering must not invoke control admission/accounting')
+    monkeypatch.setattr(native, 'usage', forbidden)
+    original_read = c.read
+    reads = []
+    def counted(path, *args, **kwargs):
+        if path.name in {'usage.json', 'native-intent.json', 'native-outcome.json'}:
+            reads.append(path)
+        return original_read(path, *args, **kwargs)
+    monkeypatch.setattr(c, 'read', counted)
+    monkeypatch.setattr(native, 'read', counted)
+    memo = {}
+    first = ui_saved_status._usage(root, [1], memo)
+    assert first['observed_tokens'] == first['accounted_tokens'] == expected['observed_tokens'] == 2410823
+    assert first['unknown_steps'] == expected['unknown_steps'] == [1]
+    assert len(reads) == 6  # one read per saved meter, intent and outcome
+    reads.clear()
+    assert ui_saved_status._usage(root, [1], memo) == first
+    assert reads == []
+    assert all(path.read_bytes() == data for path, data in originals.items())
+
+    # Simulate a saved-record replacement: stat identity invalidates only the
+    # affected memo entries, while the effective counter still matches control.
+    updated = {key: TERMINAL[key] + extra for key, extra in
+               zip(TERMINAL, (100, 20, 2))}
+    updated_delta = {key: updated[key] - BASELINE[key] for key in BASELINE}
+    metadata = dict(metadata, tokens=updated, live_tokens=updated_delta)
+    outcome = original_read(resumed / 'native-outcome.json')
+    outcome['metering'] = metadata
+    c.write(resumed / 'usage.json', updated)
+    c.write(resumed / 'native-outcome.json', outcome)
+    c.write(resumed / 'usage-observation.json', metadata)
+    changed_expected = control_usage(root)
+    reads.clear()
+    changed = ui_saved_status._usage(root, [1], memo)
+    assert changed['observed_tokens'] == changed['accounted_tokens'] == changed_expected['observed_tokens'] == 2410925
+    assert changed['unknown_steps'] == [1]
+    assert set(reads) == {resumed / 'usage.json', resumed / 'native-outcome.json'}
+    reads.clear()
+    assert ui_saved_status._usage(root, [1], memo) == changed and reads == []
+    assert all(path.read_bytes() == data for path, data in originals.items() if path.parent == original)
+
+
 def test_role_share_uses_same_effective_consumption_without_false_optional_a_refusal(tmp_path, monkeypatch):
     from scidiscovery.research_loop import controller
     from test_node_budget import policy
