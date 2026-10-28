@@ -875,48 +875,56 @@ def _call(spec, request, seconds, *, on_process=None, evidence=None):
             cleanup_code()  # Popen established that this leaf never started.
             if request.get('phase')=='audit':raise DeliveryUnresolved('delivery_audit_process_unavailable') from error
             raise
-        identity = runtime.process_identity(process.pid, request['operation_id'])
-        if on_process is not None:
-            try:
-                on_process(request['phase'], identity)
-            except BaseException:
-                if runtime.process_matches(identity, identity['task_ref']):os.killpg(identity['pgid'], signal.SIGKILL)
-                process.wait(timeout=5)
-                process.stdout.close();process.stderr.close()
-                if runtime.cleanup_owned_group(identity) != 'observed_group_cleaned':
-                    raise DeliveryUnresolved('delivery_cleanup_unknown')
-                raise
-        deadline = replay_deadline if replay_deadline is not None else time.clock_gettime(time.CLOCK_BOOTTIME) + seconds
+        identity = None
         failed = False
-        with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ)
-            selector.register(process.stderr, selectors.EVENT_READ)
-            while selector.get_map() or process.poll() is None:
-                remaining = deadline - time.clock_gettime(time.CLOCK_BOOTTIME)
-                if remaining <= 0:failed = True;break
-                for key, _ in selector.select(min(.1, remaining)):
-                    block = os.read(key.fileobj.fileno(), 65536)
-                    if not block:selector.unregister(key.fileobj);continue
-                    if key.fileobj is process.stdout:
-                        output_file.write(block);output.extend(block);del output[:-MAX_LEAF_TAIL];totals['stdout']+=len(block)
-                    else:errors.extend(block);del errors[:-MAX_LEAF_TAIL];totals['stderr'] += len(block)
-                if failed:break
+        cleanup = False
+        try:
+            identity = runtime.process_identity(process.pid, request['operation_id'])
+            if on_process is not None:
+                on_process(request['phase'], identity)
+            deadline = replay_deadline if replay_deadline is not None else time.clock_gettime(time.CLOCK_BOOTTIME) + seconds
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                selector.register(process.stderr, selectors.EVENT_READ)
+                while selector.get_map() or process.poll() is None:
+                    remaining = deadline - time.clock_gettime(time.CLOCK_BOOTTIME)
+                    if remaining <= 0:failed = True;break
+                    for key, _ in selector.select(min(.1, remaining)):
+                        block = os.read(key.fileobj.fileno(), 65536)
+                        if not block:selector.unregister(key.fileobj);continue
+                        if key.fileobj is process.stdout:
+                            output_file.write(block);output.extend(block);del output[:-MAX_LEAF_TAIL];totals['stdout']+=len(block)
+                        else:errors.extend(block);del errors[:-MAX_LEAF_TAIL];totals['stderr'] += len(block)
+            if not failed:
+                process.wait(timeout=5)
+        finally:
+            # Popen transfers child ownership before identity or durable receipt
+            # publication. Every later failure must reap that exact child.
+            # Without identity we can stop our child, but cannot certify a group.
+            try:
+                if process.poll() is None:
+                    try:
+                        if identity is not None and runtime.process_matches(identity, identity['task_ref']):
+                            os.killpg(identity['pgid'], signal.SIGKILL)
+                    except (OSError, ValueError):
+                        pass  # A failed group proof cannot forfeit direct child ownership.
+                    if process.poll() is None:process.kill()
+                process.wait(timeout=5)
+                if identity is not None:
+                    cleanup = runtime.cleanup_owned_group(identity) == 'observed_group_cleaned'
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                cleanup = False  # Keep the original call error, if one is propagating.
+            finally:
+                for stream in (process.stdout, process.stderr):
+                    try:stream.close()
+                    except OSError:pass
+                keep('time_or_byte_limit' if failed else 'child_stopped' if process.returncode is not None else 'cleanup_unknown', process.returncode)
+        if not cleanup:
+            raise DeliveryUnresolved('delivery_cleanup_unknown')
         if failed:
-            if runtime.process_matches(identity, identity['task_ref']):
-                os.killpg(identity['pgid'], signal.SIGKILL)
-            process.wait(timeout=5)
-            process.stdout.close();process.stderr.close()
-            keep('time_or_byte_limit', process.returncode)
-            if runtime.cleanup_owned_group(identity) != 'observed_group_cleaned':
-                raise DeliveryUnresolved('delivery_cleanup_unknown')
             if request.get('phase') == 'audit':
                 raise DeliveryUnresolved('delivery_audit_timeout')
             return None
-        process.wait(timeout=5)
-        process.stdout.close();process.stderr.close()
-        keep('exited', process.returncode)
-        if runtime.cleanup_owned_group(identity) != 'observed_group_cleaned':
-            raise DeliveryUnresolved('delivery_cleanup_unknown')
         if process.returncode:
             if request.get('phase')=='audit':raise DeliveryUnresolved('delivery_audit_process_failed')
             return None
