@@ -32,10 +32,10 @@ def configured(root, job=None):
 
 
 def usage(root, through_step):
-    """Sum original meters of steps 1..through_step only, so replay is exact."""
+    """Sum effective attempt meters through this exact routing boundary."""
     totals = dict(H=0, W=0, A=0, E=0, closeout=0)
     unknown = []
-    from . import fork_runtime
+    from . import fork_runtime, native
     for step in fork_runtime.local_steps(root):
         if step > through_step:
             break
@@ -49,6 +49,7 @@ def usage(root, through_step):
                 unknown.append(step)
                 continue
             meter = c.read(c.regular(record / 'usage.json'))
+            meter = native.attempt_usage(record, value=meter)
             totals[key] += meter['input_tokens'] + meter['output_tokens']
     return dict(totals, thinking=totals['H'] + totals['A'], unknown_steps=sorted(set(unknown)))
 

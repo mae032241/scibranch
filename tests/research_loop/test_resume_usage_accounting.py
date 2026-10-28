@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts as c, continuation, native, execution
+from scidiscovery.research_loop import budget, contracts as c, continuation, native, execution, role_share
 
 
 BASELINE = dict(input_tokens=2017365, cached_input_tokens=1926656, output_tokens=22940)
@@ -96,6 +96,56 @@ def test_shared_fold_retains_unknown_and_counts_proven_resume_delta(tmp_path, mo
     assert {key: result[key] for key in TERMINAL} == TERMINAL
     assert result['observed_tokens'] == result['accounted_tokens'] == 2410823
     assert result['unknown_steps'] == [1]
+    assert all(path.read_bytes() == data for path, data in originals.items())
+
+
+def test_role_share_uses_same_effective_consumption_without_false_optional_a_refusal(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import controller
+    from test_node_budget import policy
+    public = tmp_path / 'public'
+    public.mkdir()
+    objective = public / 'objective.md'
+    objective.write_text('Account retained H work before an optional A analysis.')
+    root = tmp_path / 'instance'
+    controller.prepare(root, objective, public, ['fixture-never-launch'], max_tokens=8000000,
+        max_seconds=120, max_steps=6, model='fixture-no-model', reasoning_effort='high',
+        node_budget_mode='soft', node_budget_policy=policy(tokens=5000000),
+        role_budget_policy=role_share.DEFAULT)
+    job = c.build_job(root, 1, 'H', [])
+    original = execution.origin(root, 1)
+    resumed, _ = old_record(original)
+    paths = [original, resumed]
+    limits = budget.node_limits(root, job)
+    previous = 0
+    for number, (record, meter) in enumerate(zip(paths, [BASELINE, TERMINAL])):
+        intent = c.read(record / 'native-intent.json') if number else {}
+        intent.update(task_ref=c.record_ref(root / 'jobs/001.json'),
+            budget_slice=dict(role='H', limits=limits, previous_tokens=previous, previous_seconds=number))
+        c.write(record / 'native-intent.json', intent)
+        c.write(record / 'usage.json', meter)
+        outcome = c.read(record / 'native-outcome.json') if number else dict(metering=dict(coverage='unknown'))
+        previous += meter['input_tokens'] + meter['output_tokens']
+        outcome['budget_slice'] = dict(role='H', limits=limits, usage_observed=True, dispatches=number+1,
+            advance_seconds=number+1, observed_tokens=previous, **meter)
+        c.write(record / 'native-outcome.json', outcome)
+    monkeypatch.setattr(execution, 'records', lambda selected_root, step: paths)
+    originals = {path: path.read_bytes() for record in paths for path in record.iterdir() if path.is_file()}
+    shared = native.usage(root)
+    role = role_share.usage(root, 1)
+    assert shared['unknown_steps'] == [1]
+    assert role['H'] == role['thinking'] == shared['observed_tokens'] == 2410823
+    assert budget._attempt_consumption(root, job, paths) == (2410823, 2)
+    assert role['thinking'] < role_share.DEFAULT['max_thinking_share'] * 8000000 < previous
+    assert role_share.reason(root, 1, job, dict(next_action='analyze'), 'A') is None
+    # Missing later billing remains missing in each consumer, and never adds an
+    # invented zero meter or changes the retained known lower bound.
+    pending = original / 'continuations/002'
+    pending.mkdir()
+    c.write(pending / 'native-intent.json', dict(attempt=2))
+    paths.append(pending)
+    assert role_share.usage(root, 1)['unknown_steps'] == [1]
+    assert role_share.usage(root, 1)['thinking'] == 2410823
+    assert native.usage(root)['unknown_steps'] == [1]
     assert all(path.read_bytes() == data for path, data in originals.items())
 
 
