@@ -49,7 +49,7 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
         if job['role']=='A':instruction+='\n'+c.AUTHOR_EVIDENCE_GUIDANCE
         rules=c.response_instructions(job)
         if all(task.get(key)==value for key,value in rules.items()):
-            format_rule='Task response rules override old formats; extras optional.'
+            format_rule='Use task response rules over old formats; extras optional.'
         else:
             format_rule=('Current response rules replace older output shapes only; scientific scope stays binding: '
                 +json.dumps(rules,ensure_ascii=False,separators=(',',':')))
@@ -61,15 +61,20 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
             format_rule+='\n'+'; '.join(menu)
         # The same developer layer follows the complete frozen scientific literal.
         instruction+='\n'+format_rule
-        prompt=('Read science-task.json/inputs; honor goal/checks/scope/permissions. JSON object only. '
-            'Originals read-only; edit declared code/ or work/ copies. No control wrappers/hashes. '
-            'work/budget-status.json: unknown!=0; cached input once.')
+        prompt=('Follow science-task.json/inputs goal/checks/scope/permissions. JSON object only. '
+            'Edit declared code/ or work/ copies; originals read-only; no control wrappers/hashes. '
+            'work/budget-status.json: past/partial advice, no grant; unknown!=0; cached input once.')
         if final_return:
             prompt+=(' Protected FINAL: conclude now; no new role/audit/experiment. '
                 'Reference token/time/step ceilings do not revoke this accepted return; original call limits, '
                 'permissions and delivery qualification still apply.')
         else:
-            prompt+=' Soft targets keep accepted work; finite call limits/permissions stand.'
+            prompt+=' Soft targets keep accepted work; call limits/permissions stand.'
+            if (job['role'] in {'A','H','W'} and not author and not startup
+                    and not output_only_wake and not intent.get('output_repair')):
+                before='routing' if job['role'] in {'A','H'} else 'bulk reads/code'
+                prompt+=(' Before '+before+', budget prep/later roles/experiments; '
+                    'if short, may close with unmet goals. Index/reuse evidence.')
     if budget_status:prompt+='\n'+json.dumps(budget_status,ensure_ascii=False,separators=(',',':'))
     if execution_interface is not None and not author and not output_only_wake:
         prompt+='\nManaged execution: '+json.dumps(dict(command=managed_command,
@@ -78,7 +83,7 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
         prompt+=(' Read capabilities/describe before run; use original IDs, never replay unknowns. '
             'Pause code/ edits during capture; logs/outputs stay outside code/.')
     if job['role']=='W' and ('managed_execution_wait' in job or execution_interface is not None or intent.get('execution_wake')):
-        prompt+=' Follow handoff.action: poll the pending original; return on return_control.'
+        prompt+=' Follow handoff.action: poll pending originals; finalize_response=scientific JSON; return_control=wait.'
     if job['role']=='W' and not output_only_wake and not author:
         prompt+=' engineering_check covers its sample only, not training/audit.'
     if remaining is not None:

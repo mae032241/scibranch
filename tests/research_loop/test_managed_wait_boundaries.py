@@ -62,3 +62,28 @@ def test_verified_terminal_still_uses_original_wake_admission(tmp_path, monkeypa
         managed_wait.wait_and_wake(tmp_path, 1)
     assert calls == [(tmp_path, 1, [managed_wait.e.proof(observed)])] and queries == []
     assert all(path.read_bytes() == raw for path, raw in saved.items())
+
+
+@pytest.mark.parametrize('status,reason', [
+    ('budget_exhausted', 'shared_time_exhausted'),
+    ('budget_exhausted', 'shared_budget_exhausted'),
+    ('budget_unavailable', 'shared_usage_unknown'),
+])
+def test_budget_refusal_handoff_finishes_scientific_response_without_wait(monkeypatch, status, reason):
+    monkeypatch.setattr(managed_wait.e, 'Records', lambda *args: pytest.fail('Refusal must not query an original'))
+    result = managed_wait.handoff({}, dict(status=status, accepted=False, reason=reason), 'run')
+    assert result['action'] == 'finalize_response' and result['reason'] == reason
+    assert 'normal scientific JSON' in result['instruction']
+    assert 'not performed' in result['instruction'] and 'Preserve existing code' in result['instruction']
+    assert 'review requests and polling' in result['instruction']
+    assert 'call_id' not in result and 'poll_interval_seconds' not in result
+    if status == 'budget_unavailable':
+        assert 'Shared usage remains unknown' in result['instruction']
+        assert 'do not report zero usage' in result['instruction']
+
+
+@pytest.mark.parametrize('accepted', [None, True])
+def test_budget_words_without_proven_nonacceptance_do_not_finish_original(accepted):
+    result = managed_wait.handoff(None, dict(status='budget_exhausted', accepted=accepted,
+        reason='shared_time_exhausted', call_id='original-call'), 'query')
+    assert result['action'] == 'reconcile_or_stop'

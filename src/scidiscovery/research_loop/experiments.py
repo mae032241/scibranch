@@ -67,11 +67,31 @@ class _AdmissionReviewRequired(ReviewRequired):
     """A control check proved this dispatch was not accepted."""
 
 
+class _BudgetAdmissionUnavailable(ReviewRequired):
+    """A trusted host gate refused new work; preparation may still be unresolved."""
+    _REASONS = {
+        'review_deadline_reached': ('budget_exhausted', 'shared_time_exhausted'),
+        'reserve_reached': ('budget_exhausted', 'shared_budget_exhausted'),
+        'shared_usage_unknown': ('budget_unavailable', 'shared_usage_unknown'),
+    }
+
+    def __init__(self, reason):
+        self.status, self.reason = self._REASONS[reason]
+        self._review_reason = reason
+        super().__init__(self.reason)
+
+
+class _AdmissionBudgetRefused(_BudgetAdmissionUnavailable):
+    """The budget gate refused this dispatch before any external side effect."""
+
+
 class _AdmissionOpportunityRequired(breadth.OpportunityRequired):
     """A control check proved this dispatch was not accepted."""
 
 
 def _raise_admission_refusal(error):
+    if isinstance(error, _BudgetAdmissionUnavailable):
+        raise _AdmissionBudgetRefused(error._review_reason) from error
     refusal = _AdmissionReviewRequired if isinstance(error, ReviewRequired) else _AdmissionOpportunityRequired
     raise refusal(str(error)) from error
 
@@ -1041,7 +1061,11 @@ class Records:
             raise ConcurrentExecution('Another original execution was accepted; query its identity')
         if recovery_admission is None:
             review=review_status(self.config)
-            if review['requested'] and review['enforced']:raise ReviewRequired(review['reason'])
+            if review['requested'] and review['enforced']:
+                reason=review['reason']
+                if reason in _BudgetAdmissionUnavailable._REASONS:
+                    raise _BudgetAdmissionUnavailable(reason)
+                raise ReviewRequired(reason)
         else:
             recovery_admission()
         from . import breadth
@@ -2271,6 +2295,15 @@ def main(argv=None):
         result['feedback']=dict(version=1,budget=feedback.budget_hint(work),
             review=review_feedback(feedback_config),
             qualification='Execution metadata does not establish scientific or candidate qualification.')
+    except (_AdmissionBudgetRefused,common._AdmissionBudgetRefused) as error:
+        if args.command=='run' and accepted_call_id is None:
+            result=dict(status=error.status,reason=error.reason,accepted=False,
+                note=('The shared budget refused this new execution.' if error.status=='budget_exhausted'
+                    else 'Shared usage is unknown; new execution is unavailable.'))
+            code=2
+        else:
+            result=dict(status='unknown',**(dict(call_id=accepted_call_id) if accepted_call_id is not None else {}),
+                note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config));code=3
     except (_AdmissionReviewRequired,common._AdmissionReviewRequired) as error:result=dict(status='review_required',reason=_diagnostic(error,'Original execution review required; request the declared review before continuing',config=feedback_config),accepted=False);code=2
     except (_AdmissionOpportunityRequired,common._AdmissionOpportunityRequired) as error:result=dict(status='unresolved',accepted=False,note=_diagnostic(error,'Choose an available authorized H mechanism before another request',config=feedback_config));code=2
     except (ReviewRequired,common.ReviewRequired,breadth.OpportunityRequired) as error:

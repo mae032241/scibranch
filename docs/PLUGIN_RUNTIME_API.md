@@ -77,6 +77,19 @@ Known process success is an engineering fact. A cancelled native state remains a
 known engineering failure; neither state establishes scientific qualification.
 Pending native states remain pending; uncertain submission is unknown.
 
+Host preacceptance budget refusals are application feedback, not native execution
+states. Only the trusted host gate and a proven side-effect-free refusal produce
+`accepted=false` with `budget_exhausted` (`shared_time_exhausted` or
+`shared_budget_exhausted`) or `budget_unavailable` (`shared_usage_unknown`). The
+latter preserves unknown usage instead of inventing an exhausted or zero balance.
+`handoff.action=finalize_response` requests normal scientific JSON reporting the
+unperformed work, retained evidence and unmet goals. It creates no waiting call,
+wake permission, retry or new allowance; the host applies its original control
+rules. Formal review remains `review_required`. Uncertain provider outcomes,
+uncertain external preparation and accepted original calls preserve their existing
+outcome and identity; exception text alone never establishes nonacceptance. Public reasons are
+fixed host codes; arbitrary exception text remains in private diagnostics.
+
 For new W code, the host captures the selected `code/` bytes in instance-private
 Git before `prepare` and binds the original call to a seven-field `code_version`
 (`version`, `object_format`, `commit`, `tree_path`, `selection`, `entry`,

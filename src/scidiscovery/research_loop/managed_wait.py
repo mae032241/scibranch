@@ -53,6 +53,17 @@ def handoff(config,result,command,call_id=None):
             **(dict(call_id=call_id) if call_id is not None else {}),**fields)
     stop=lambda reason:hint('reconcile_or_stop',reason,
         'Reconcile this same original call once if supported, or report the unresolved obstacle. Never blindly poll, rerun or resubmit.')
+    if (result.get('accepted') is False
+            and (result.get('status'),result.get('reason')) in {
+                ('budget_exhausted','shared_time_exhausted'),
+                ('budget_exhausted','shared_budget_exhausted'),
+                ('budget_unavailable','shared_usage_unknown')}):
+        return dict(action='finalize_response',reason=result['reason'],
+            instruction=('Return normal scientific JSON now. Stop new execution requests, preparation, review requests and polling. '
+                'Preserve existing code, design and evidence; report that this requested execution was not performed and state the unmet goal and limitations. '
+                'Preserve any separately accepted original call and its unresolved status; never resubmit it. '
+                + ('The host applies the original budget and FINAL policy.' if result['status']=='budget_exhausted' else
+                   'Shared usage remains unknown; do not report zero usage, exhausted balance, successful completion or an automatic FINAL decision.')))
     if result.get('accepted') is False and result.get('status') in {'known_not_started','review_required','unresolved'}:
         return dict(action='reconcile_or_stop',reason='execution_not_accepted',
             instruction='This request was not accepted. Resolve the reported admission, input or local cleanup issue before another request; preserve any separately reported original call.')
