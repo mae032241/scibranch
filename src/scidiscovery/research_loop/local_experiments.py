@@ -233,6 +233,7 @@ class LocalExecution:
                     or any(type(identity.get(field)) is not int or identity[field]<=0
                            for field in ('pid','start_ticks','pgid','sid'))):
                 raise e.IntegrityError('Original local process identity is malformed or changed')
+        self._recover_completion(call_id)
         if (directory/'completed.json').exists():
             observation=directory/'execution-observation.json'
             if observation.exists():
@@ -254,6 +255,35 @@ class LocalExecution:
                 raise e.IntegrityError('Completed local execution differs from its transport')
             return state
         return 'running' if identity and runtime.process_matches(identity,identity['task_ref']) else 'unknown'
+
+    def _recover_completion(self,call_id):
+        """Project a stopped original Local call; never dispatch another command."""
+        if type(self) is not LocalExecution:return
+        from . import runtime
+        from contextlib import ExitStack
+        directory=self.records.directory(call_id)
+        if (directory/'completed.json').exists() or not (directory/'terminal.json').exists():return
+        with ExitStack() as writer:
+            try:writer.enter_context(self._execution_writer_lease(call_id))
+            except BlockingIOError:return  # The original host may still publish outputs.
+            if (directory/'completed.json').exists():return
+            accepted=self.records.accepted(call_id)
+            identity=json.loads(e.read(directory/'process.json'))
+            key=dict(path=str(directory/'accepted.json'))
+            if (identity.get('task_ref')!=key
+                    or any(type(identity.get(field)) is not int or identity[field]<=0
+                        for field in ('pid','start_ticks','pgid','sid'))):
+                raise e.IntegrityError('Original local process identity is malformed or changed')
+            if runtime.process_matches(identity,key):return
+            terminal=json.loads(e.read(directory/'terminal.json'))
+            if terminal.get('call_id')!=call_id or terminal.get('scope')!=accepted['scope']:
+                raise e.IntegrityError('Original Local terminal owner changed')
+            if (terminal.get('cleanup_confirmed') is not True
+                    or terminal.get('transport_complete') is not True
+                    or type(terminal.get('returncode')) is not int):return
+            completed=self.completion(directory,accepted,terminal['returncode'],True,True,
+                context=storage.Deadline(self.config['max_seconds']), _recovering=True)
+            self.records.publish(call_id,'completed.json',completed)
 
     def _execution_deadline(self,accepted):
         """Optional local partition; ordinary and previously accepted calls keep their limit."""
@@ -369,7 +399,7 @@ class LocalExecution:
         self.records.publish(call_id,'completed.json',self.completion(directory,accepted,returncode,cleanup,transport_complete,
             context=completion_context))
 
-    def completion(self,directory,accepted,returncode,cleanup,transport_complete,*,context=None):
+    def completion(self,directory,accepted,returncode,cleanup,transport_complete,*,context=None,_recovering=False):
         if 'code_version' in accepted and ((directory/'completed.json').exists() or (directory/'completed.json').is_symlink()):
             if (directory!=self.records.directory(accepted['call_id'])
                     or self.records.accepted(accepted['call_id'])!=accepted):
@@ -422,10 +452,32 @@ class LocalExecution:
                             target=source
                         else:
                             target=directory/'outputs'/item['name']
-                            frozen_original=shared_originals.retain(root,source,size_bytes=item['size_bytes'],source_kind='mutable',
-                                context=context,policy=self.config.get('storage_policy'))
-                            shared_originals.link(frozen_original,target,size_bytes=item['size_bytes'],context=context,
-                                root=root,policy=self.config.get('storage_policy'))
+                            if _recovering and (target.exists() or target.is_symlink()):
+                                # A prior completion may have frozen this output
+                                # before its receipt was interrupted. Reuse only
+                                # the exact call slot whose retained bytes still
+                                # match the stopped command's original output.
+                                shared_originals.link(target,target,size_bytes=item['size_bytes'],context=context,
+                                    root=root,policy=self.config.get('storage_policy'))
+                                saved=e.proof(target,context=context)
+                                with source.open('rb') as source_stream, target.open('rb') as target_stream:
+                                    remaining=item['size_bytes']
+                                    while remaining:
+                                        context.remaining_seconds()
+                                        block=source_stream.read(min(65536,remaining))
+                                        if not block or block!=target_stream.read(len(block)):
+                                            raise e.IntegrityError('Interrupted Local output differs from its retained original')
+                                        remaining-=len(block)
+                                    if source_stream.read(1) or target_stream.read(1):
+                                        raise e.IntegrityError('Interrupted Local output grew during recovery')
+                                if (e.proof(source,context=context)!= {key:value for key,value in item.items() if key!='name'}
+                                        or e.proof(target,context=context)!=saved):
+                                    raise e.IntegrityError('Interrupted Local output changed during recovery')
+                            else:
+                                frozen_original=shared_originals.retain(root,source,size_bytes=item['size_bytes'],source_kind='mutable',
+                                    context=context,policy=self.config.get('storage_policy'))
+                                shared_originals.link(frozen_original,target,size_bytes=item['size_bytes'],context=context,
+                                    root=root,policy=self.config.get('storage_policy'))
                         frozen=e.proof(target,context=context)
                         if any(frozen[key]!=item[key] for key in ('size_bytes','file_stat')) and target==source:
                             raise e.IntegrityError('Local output changed during its terminal seal')
@@ -515,6 +567,7 @@ class LocalExecution:
     @e.record_effect
     def result(self,call_id):
         directory=self.records.directory(call_id)
+        self._recover_completion(call_id)
         path=directory/'completed.json'
         if not path.exists():return dict(status='unknown',call_id=call_id,note='Original execution has no confirmed completion')
         result=json.loads(e.read(path))

@@ -297,3 +297,45 @@ def test_actual_run_query_and_progress_preserve_freeform_direction(local, capsys
         assert result['candidates']==value['candidates']
     assert original.read_bytes() == retained
     assert len(e.Records(config).calls()) == 1
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('existing_output', ['retained', 'foreign'])
+def test_terminal_only_local_reconciles_same_call_after_writer_stops(local, monkeypatch, existing_output):
+    root, script, config, _ = local
+    publish = e.Records.publish
+    def lost_completion(self, call_id, filename, value):
+        if filename != 'completed.json':return publish(self, call_id, filename, value)
+    with monkeypatch.context() as patch:
+        patch.setattr(e.Records, 'publish', lost_completion)
+        e.dispatch(config, script, command_options=dict(experiment_directory=str(root), arguments=[]))
+    records = e.Records(config)
+    directory, = records.calls()
+    call = directory.name
+    assert (directory/'terminal.json').exists() and not (directory/'completed.json').exists()
+    controls = {name:(directory/name).read_bytes() for name in ('accepted.json','process.json','terminal.json')}
+    output = directory/'outputs/value.txt'
+    if existing_output == 'foreign':
+        output.unlink();output.write_bytes(b'99');output.chmod(0o400)
+    original_output = e.proof(output)
+    from scidiscovery.research_loop import shared_originals
+    retain = shared_originals.retain
+    mutable_copies = []
+    def counted(*args, **kwargs):
+        if kwargs.get('source_kind') == 'mutable':mutable_copies.append(args[1])
+        return retain(*args, **kwargs)
+    monkeypatch.setattr(shared_originals, 'retain', counted)
+    adapter = e.load(config)
+    with adapter._execution_writer_lease(call):
+        assert adapter.result(call)['status'] == 'unknown'
+        assert adapter.status(call) == 'unknown'
+        assert not (directory/'completed.json').exists()
+    result = adapter.result(call)
+    assert result['status'] == 'known_success'
+    assert result['result']['status'] == ('available' if existing_output == 'retained' else 'unavailable')
+    assert e.proof(output) == original_output and mutable_copies == []
+    assert adapter.status(call) == 'succeeded'
+    assert adapter.collect_original(call)
+    assert all((directory/name).read_bytes() == original for name, original in controls.items())
+    assert len(records.calls()) == 1
+    assert adapter.result(call) == result
