@@ -477,13 +477,15 @@ def observe(request):
                 generation=[info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns]
                 if (marker.get('candidate_id')==candidate and marker.get('audit')==fact
                         and isinstance(marker.get('operation_id'),str) and marker['operation_id']
-                        and isinstance(reference,dict) and reference==original
+                        and isinstance(reference,dict) and reference=={key:original[key] for key in ('path','size_bytes')}
                         and marker.get('published',{}).get('run_model')==generation):
+                    _check(original)
                     matched=True
             if (fact.get('model_path')!=str(model) or candidate not in known|{row['id'] for row in candidates}
                     or not matched):
                 candidate=None;partial=True;submission_note=' Submitted artifact is observed but candidate binding is unknown.'
-            actual=dict(candidate_id=candidate,artifact=str(model.relative_to(root)),evidence=[str(submitted.relative_to(root))])
+            observed_model=Path(original['path']) if matched else model
+            actual=dict(candidate_id=candidate,artifact=str(observed_model.relative_to(root)),evidence=[str(submitted.relative_to(root))])
     return dict(candidates=candidates,current_candidate=None,actual_submission=actual,contexts=contexts,
         coverage=dict(status='partial' if partial else 'complete',note='Managed declared relations only; ordinary shell/parallel or unknown calls remain uncovered.'+submission_note))
 

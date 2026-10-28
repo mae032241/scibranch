@@ -6,12 +6,17 @@ import subprocess
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, history, lineage, protocol
+from scidiscovery.research_loop import contracts as c, history, lineage, originals, protocol
 from test_history_handoff import finish, source, scene, REUSED
 
 
 def bind(root, step):
     return lineage.bind(root, step, 'H', protocol.CURRENT)[0]
+
+
+def bound_history_file(root, work, binding, path):
+    row=next(item for item in binding['files'] if item['path']==path)
+    return originals.resolve_root_ref(root,dict(row,path=str(work/path)))
 
 
 def read_pages(work, start, key):
@@ -36,13 +41,13 @@ def test_role_index_paging_and_complete_scientific_text_are_readable_now(scene):
     assert len(second['records']) == 3 and second['next_page'] is None
     assert {row['role'] for row in [*page['records'], *second['records']]} == {'H', 'W', 'A', 'E'}
     old = page['records'][2]
-    detail = ''.join(c.read(work / path)['text'] for path in old['conclusion_pages'])
+    detail = ''.join(c.read(bound_history_file(scene,work,binding,path))['text'] for path in old['conclusion_pages'])
     assert json.loads(detail) == c.read(c.host_record(c.workspace(scene, 3)) / 'science-output.json')
-    assert (work / old['conclusion_pages'][0]).stat().st_mode & 0o222 == 0
-    assert not list((work / 'inputs/history').rglob('candidate.py'))
+    assert bound_history_file(scene,work,binding,old['conclusion_pages'][0]).stat().st_mode & 0o222 == 0
+    assert not any(Path(row['path']).name=='candidate.py' for row in binding['files'])
     assert [row['step'] for row in binding['view']['recent']] == [10, 11]
     assert c.read(scene / 'jobs/009.json')['direct_refs'] == [dict(
-        path='inputs/parents/008/conclusion.json', size_bytes=(c.workspace(scene, 9) / 'inputs/parents/008/conclusion.json').stat().st_size)]
+        path='inputs/parents/008/conclusion.json', size_bytes=(c.host_record(c.workspace(scene,8))/'science-output.json').stat().st_size)]
     h9 = next(row for row in lineage.project(scene, 12)['records'] if row['step'] == 9)
     assert h9['view']['h_parents'] == [6]
     assert 'failed' not in binding['view']  # limitations are author's declarations, no semantic guess.
@@ -78,7 +83,7 @@ def test_tampered_history_is_rejected(scene, changed):
     source(scene)
     work = c.workspace(scene, 3);work.mkdir()
     bound = bind(scene, 3)
-    path = work / bound['files'][0]['path'] if changed == 'page' else c.host_record(c.workspace(scene, 2)) / ('science-output.json' if changed == 'source' else 'result-identity.json')
+    path = bound_history_file(scene,work,bound,bound['files'][0]['path']) if changed == 'page' else c.host_record(c.workspace(scene, 2)) / ('science-output.json' if changed == 'source' else 'result-identity.json')
     path.chmod(0o600);path.write_text('{}')
     with pytest.raises((ValueError, KeyError)):
         history.validate(scene, work, bound)
@@ -89,7 +94,7 @@ def test_oversized_navigation_has_explicit_omission_without_discarding_originals
     work = c.workspace(scene, 3);work.mkdir()
     original = (c.workspace(scene, 2) / 'artifacts/candidate.py').read_bytes()
     monkeypatch.setattr(history, 'MAX_PAGE_BYTES', 512)
-    _, paged, files = history.page_writer(work)
+    _, paged, files = history.page_writer(work,root=scene)
     paths = paged([dict(step=2, summary='Scientific detail ' * 1000)], 8, 'records', 'inputs/history/large')
     row = c.read(work / paths[0])['records'][0]
     assert row['step'] == 2 and row['view_omitted'] and row['omission_reason']
@@ -139,7 +144,8 @@ print(json.dumps({"current_candidate":None,"coverage":{"status":"complete","note
     first = history.capture(scene, job, raw, materials)
     observation = c.read(scene / first['path'])
     assert observation['actual_submission']['artifact']['size_bytes'] == (scene / 'artifact.bin').stat().st_size
-    assert (scene / observation['actual_submission']['artifact']['snapshot']).read_bytes() == b'not a pickle, never executed'
+    assert observation['actual_submission']['artifact']['retention']=='unavailable'
+    assert observation['coverage']['status']=='partial'
     (scene / 'fact.json').write_text('{"measured":999}')
     assert history.capture(scene, job, raw, materials) == first
     assert c.read(scene / first['path']) == observation
@@ -222,12 +228,13 @@ def test_revised_h_reads_old_science_now_and_selects_only_old_code_for_successor
     page = c.read(work / job['history']['view']['indexes']['nodes'])
     old = next(row for row in page['records'] if row['step'] == 2)
     assert old['implementations'][0] == dict(id='W002-I001', label='candidate.py', label_truncated=False)
-    assert json.loads(''.join(c.read(work / path)['text'] for path in old['conclusion_pages']))['summary'] == 'A contribution'
+    assert json.loads(''.join(c.read(bound_history_file(scene,work,job['history'],path))['text'] for path in old['conclusion_pages']))['summary'] == 'A contribution'
     finish(scene, 6, 'H', [5], text='Select the retained scientific implementation.', action='experiment', selection=['W002-I001'])
     successor = c.build_job(scene, 7, 'W', [6])
-    assert (c.workspace(scene, 7) / REUSED).read_text() == 'def predict(): return 42\n'
+    material=next(row for row in successor['direct_materials'] if row['path']==REUSED)
+    assert originals.material_path(scene,material).read_text() == 'def predict(): return 42\n'
     assert [row['path'] for row in successor['direct_refs']] == ['inputs/parents/006/conclusion.json']
-    assert not list((c.workspace(scene, 7) / 'inputs').rglob('unused.txt'))
+    assert not any(Path(row['path']).name=='unused.txt' for row in successor['direct_materials'])
 
 
 def test_current_history_packets_stay_fixed_and_legacy_write_schema_is_rejected(scene):
@@ -264,7 +271,7 @@ def test_utf8_history_default_brief_is_at_most_4096_bytes(scene):
 def test_nodes_paginate_by_bytes_as_well_as_row_count(scene):
     source(scene)
     work = c.workspace(scene, 3);work.mkdir()
-    _, paged, files = history.page_writer(work)
+    _, paged, files = history.page_writer(work,root=scene)
     rows = [dict(step=index, summary='界' * 4000) for index in range(1, 7)]
     paths = paged(rows, 8, 'records', 'inputs/history/byte-packing')
     assert len(paths) > 1  # Six rows exceed the byte bound before the count bound.
@@ -281,13 +288,14 @@ print(json.dumps({"candidates":[],"current_candidate":None,"coverage":{"status":
     (scene / 'artifact.bin').write_bytes(b'original submitted bytes')
     source(scene)
     old = c.read(scene / 'host-history/observations/002.json')
-    proof = old['actual_submission']['artifact']
+    proof = old['actual_submission']['evidence'][0]
+    assert old['actual_submission']['artifact']['retention']=='unavailable'
     assert proof['retention'] == 'archived'
-    assert (scene / proof['snapshot']).read_bytes() == b'original submitted bytes'
+    assert (scene / proof['snapshot']).read_text() == '{"observation":1}'
     (scene / 'fact.json').write_text('{"observation":2}')
     (scene / 'artifact.bin').write_bytes(b'new submitted bytes')
     finish(scene, 3, 'A', [2])
-    assert (scene / proof['snapshot']).read_bytes() == b'original submitted bytes'
+    assert (scene / proof['snapshot']).read_text() == '{"observation":1}'
     c.validate(c.workspace(scene, 2))  # Mutable public sources are not mistaken for frozen originals.
     (scene / proof['snapshot']).chmod(0o600);(scene / proof['snapshot']).write_bytes(b'tampered')
     with pytest.raises(ValueError, match='Archived observer original changed'):
@@ -372,17 +380,19 @@ def test_unknown_a_recommendation_preserves_science_with_local_diagnostic(scene)
     assert (record/'science-output.json').read_bytes()==original
 
 
-def test_complete_observer_original_is_archived_without_a_navigation_count_cap(scene, tmp_path):
+def test_live_artifact_is_unavailable_and_complete_observer_metadata_is_retained(scene, tmp_path):
     setup_observer(scene, tmp_path, '''print('{"candidates":[],"current_candidate":null,"coverage":{"status":"complete","note":"Fixture"},"actual_submission":{"candidate_id":null,"artifact":"artifact.bin","evidence":["fact.json"]}}')''')
-    raw = b'Complete retained artifact ' * 12000
-    (scene / 'fact.json').write_text('{}');(scene / 'artifact.bin').write_bytes(raw)
+    raw = b'Complete observed metadata ' * 12000
+    (scene / 'fact.json').write_bytes(raw);(scene / 'artifact.bin').write_bytes(b'live model')
     finish(scene, 1, 'H', [])
     fact = c.read(scene / 'host-history/observations/001.json')
     proof = fact['actual_submission']['artifact']
-    assert proof['retention'] == 'archived' and proof['size_bytes'] == len(raw)
-    assert (scene / proof['snapshot']).read_bytes() == raw
+    assert proof == dict(path='artifact.bin',size_bytes=10,retention='unavailable')
+    assert fact['coverage']['status']=='partial'
+    assert (scene/fact['actual_submission']['evidence'][0]['snapshot']).read_bytes()==raw
+    (scene/'artifact.bin').write_bytes(b'new live generation')
     c.validate(c.workspace(scene, 1))
-    assert c.read(scene / 'host-history/overview.json')['actual_submission']['retention'] == 'archived'
+    assert c.read(scene / 'host-history/overview.json')['actual_submission']['retention'] == 'unavailable'
 
 
 def test_repeated_known_candidate_becomes_unavailable_without_poisoning_seals(scene, tmp_path):

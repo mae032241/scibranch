@@ -11,7 +11,8 @@ from test_worker_resume import FAKE, instance, wait_runner
 THREAD = '11111111-2222-4333-8444-555555555555'
 
 
-def interrupted_instance(tmp_path, monkeypatch, *, formal_review=False, output_only=False, fake=FAKE):
+def interrupted_instance(tmp_path, monkeypatch, *, formal_review=False, output_only=False, fake=FAKE,
+                         closed_clock=False):
     if formal_review or output_only:
         public=tmp_path/'public'; public.mkdir()
         objective=public/'objective.md'; objective.write_text('Continue the original bounded task.')
@@ -28,12 +29,21 @@ def interrupted_instance(tmp_path, monkeypatch, *, formal_review=False, output_o
         root = instance(tmp_path, fake=fake)
     job = c.build_job(root, 1, 'H', [])
     current = budget.clock_stamp()
-    old = dict(at_unix=current['at_unix']-10, at_boottime=100., boot_id='previous-host-boot')
+    old = dict(at_unix=current['at_unix'] - (current['at_boottime'] + 20. if closed_clock else 10.),
+        at_boottime=100., boot_id='previous-host-boot')
     with monkeypatch.context() as clock:
         clock.setattr(budget, 'clock_stamp', lambda: dict(old))
         c.write(root/'host-started.json', old)
         budget.transition(root, 'advance', 'original_native_launch')
         anchor = budget.accept_node(root, job)
+        if closed_clock:
+            # A completed control interval on the old boot leaves ten seconds
+            # consumed. Its paused reboot gap can span the real current uptime
+            # in both this process and the detached runner, without new limits
+            # or a synthetic current clock that disappears across exec.
+            stopped = dict(old, at_unix=old['at_unix'] + 10., at_boottime=110.)
+            clock.setattr(budget, 'clock_stamp', lambda: dict(stopped))
+            budget.transition(root, 'paused', 'old_controller_stopped')
     record = execution.origin(root, 1)
     c.write(record/'native-intent.json', dict(step=1,
         task_ref=c.record_ref(root/'jobs/001.json'), budget_slice=anchor,
@@ -58,6 +68,8 @@ def interrupted_instance(tmp_path, monkeypatch, *, formal_review=False, output_o
         work/'artifacts/retained.txt', work/'work/original-call.json',
         *[record/name for name in ('native-intent.json','native.jsonl','usage.json',
             'runner-process.json','native-process.json','watchdog-process.json')]]
+    if closed_clock:
+        saved_paths.append(root/'control-ledger/000002.json')
     return root, {path:path.read_bytes() for path in saved_paths}
 
 
@@ -72,8 +84,10 @@ def test_cross_boot_timestamp_gap_keeps_recorded_consumption():
 
 def test_cross_boot_snapshot_charges_open_interval_without_reset(tmp_path,monkeypatch):
     root, saved = interrupted_instance(tmp_path,monkeypatch)
-    before = budget.snapshot(root)
+    current = budget.clock_stamp()
+    before = budget.snapshot(root, sample_stamp=current)
     assert before['consumed_seconds'] >= 10
+    assert before['consumed_seconds'] == current['at_boottime']
     budget.transition(root,'advance','recover_original')
     after = budget.snapshot(root)
     assert after['consumed_seconds'] >= before['consumed_seconds']
@@ -194,7 +208,9 @@ def test_run_and_continue_collect_same_session_without_replaying_original(tmp_pa
         "if 'resume' not in args:\n"
         " p=home/'sessions'/('rollout-'+work.name+'-'+thread+'.jsonl');p.parent.mkdir(parents=True,exist_ok=True)\n"
         " p.write_text(json.dumps({'type':'session_meta','payload':{'id':thread,'cwd':str(work)}})+'\\n')", 1)
-    root,saved=interrupted_instance(tmp_path,monkeypatch,formal_review=True,output_only=output_only,fake=fake)
+    root,saved=interrupted_instance(tmp_path,monkeypatch,formal_review=True,output_only=output_only,
+        fake=fake,closed_clock=True)
+    assert budget.snapshot(root)['consumed_seconds'] == 10.
     assert c.read(root/'jobs/001.json')['formal_review_version']==1
     # The supported prepare entry freezes this capability; do not amend its bytes.
     assert c.settings(root)['final_a_completion_policy']==dict(version=1)

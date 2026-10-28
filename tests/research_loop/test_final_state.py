@@ -388,6 +388,16 @@ def test_two_final_cycles_keep_all_usage_claims_and_original_delivery_operations
     assert [row['intent']['action_kind'] for row in actions] == ['submit','confirm','submit','confirm']
     assert actions[0]['intent']['operation_id'] == first_operation
     assert actions[2]['intent']['operation_id'] != first_operation
+    # FINAL 5 observed the first public submission before replacing it. Its
+    # small observation originals remain readable after the second promotion.
+    seal=c.read(execution.record(root,5)/'result-identity.json')
+    observation=c.read(root/seal['observations']['path'])
+    actual=observation['actual_submission']
+    receipt=actual['evidence'][0]
+    assert receipt['path']=='runs/submitted.json'
+    assert receipt['snapshot']!=receipt['path']
+    assert c.read(root/receipt['snapshot'])['run_id']==1
+    c.validate(c.workspace(root,5))
     assert result['current_actual']['operation_id'] == actions[-1]['intent']['operation_id']
     assert native.usage(root)['accounted_tokens'] > consumed+280934
     assert budget.used_steps(root) == 9

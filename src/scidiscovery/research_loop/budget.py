@@ -920,12 +920,44 @@ def execution_blocked(root, *, ignore_operation=None, include_managed=True, igno
             if contracts.read(record / 'native-intent.json')['task_ref'] != binding:
                 return True
             outcome = contracts.read(record / 'native-outcome.json')
-            if outcome.get('stop_reason') in {'native_error_unknown', 'cleanup_unknown'}:
+            child_path = record / 'native-process.json'
+            if outcome.get('stop_reason') == 'cleanup_unknown' or outcome.get('cleanup') == 'cleanup_unknown':
+                return True
+            # A host preparation error can retain an unknown result/usage even
+            # though native was never submitted. That uncertainty must not
+            # keep an absent controller's advancement clock running. Conflicting
+            # activity or any original native receipt still prevents inactivity.
+            if outcome.get('stop_reason') == 'native_error_unknown' and outcome.get('native_started') is False:
+                if (outcome.get('returncode') is not None or child_path.exists() or child_path.is_symlink()
+                        or outcome.get('native_activity_observed') or outcome.get('terminal_observed')):
+                    return True
+                execution_key = execution.identity(root, step)
+                finishing_self = False
+                for name in ('runner-process.json', 'watchdog-process.json'):
+                    receipt_path = record / name
+                    if not receipt_path.exists() and not receipt_path.is_symlink():
+                        continue
+                    receipt = contracts.read(contracts.regular(receipt_path))
+                    if (receipt.get('task_ref') != execution_key
+                            or not isinstance(receipt.get('boot_id'), str) or not receipt['boot_id']
+                            or any(type(receipt.get(key)) is not int or receipt[key] <= 0
+                                for key in ('pid', 'start_ticks', 'pgid', 'sid', 'ppid'))):
+                        return True
+                    if runtime.process_matches(receipt, execution_key):
+                        if name == 'runner-process.json' and receipt['pid'] == os.getpid():
+                            # The runner's last completion call already ended
+                            # native/checkpoint writes. Its exact watchdog only
+                            # waits for this runner to exit; neither can submit.
+                            finishing_self = True
+                        elif not finishing_self:
+                            return True
+                continue
+            if outcome.get('stop_reason') == 'native_error_unknown':
                 return True
             if not (type(outcome.get('returncode')) is int or outcome.get('native_started') is False):
                 return True
-            if (record / 'native-process.json').exists():
-                child = contracts.read(record / 'native-process.json')
+            if child_path.exists():
+                child = contracts.read(child_path)
                 if runtime.process_matches(child, execution.identity(root, step)):
                     return True
         except (OSError, ValueError, KeyError, TypeError):

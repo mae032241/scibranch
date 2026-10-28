@@ -19,6 +19,34 @@ def read(path):
     return path.read_text()
 
 
+def submission_original(root, runs, model, fact):
+    """Use the promotion's existing source binding only for its exact generation.
+
+    Custody is verified by the host against its retained originals; this public
+    marker alone grants no immutability to an arbitrary source path.
+    """
+    marker=runs/'rootless-delivery-operation.json'
+    if marker.exists():
+        try:
+            value=json.loads(read(marker))
+            info=model.stat()
+            generation=[info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns]
+            origin=value.get('artifact_origin')
+            if (value.get('candidate_id')==f'run-{fact.get("run_id")}'
+                    and isinstance(value.get('operation_id'),str) and value['operation_id']
+                    and value.get('audit')==fact and value.get('published',{}).get('run_model')==generation
+                    and isinstance(origin,dict) and isinstance(origin.get('path'),str)
+                    and origin.get('size_bytes')==info.st_size):
+                path=Path(origin['path'])
+                # External originals need their private inherited binding; the
+                # public observer cannot establish that custody on its own.
+                if path.is_absolute() and path.is_relative_to(root) and path.resolve()==path:
+                    return path.relative_to(root).as_posix()
+        except (OSError,ValueError,TypeError):
+            pass
+    return model.relative_to(root).as_posix()
+
+
 def observe(request):
     root = Path(request['root'])
     config = request['config']
@@ -74,7 +102,7 @@ def observe(request):
         # Evidence refers to the public harness's actual exp submit. It does not
         # claim an external evaluator accepted this artifact or read its score.
         candidate_id = f'run-{fact["run_id"]}'
-        actual = dict(candidate_id=candidate_id if fact['run_id'] in ids or candidate_id in known else None, artifact=model.relative_to(root).as_posix(),
+        actual = dict(candidate_id=candidate_id if fact['run_id'] in ids or candidate_id in known else None, artifact=submission_original(root,runs,model,fact),
                       evidence=[submitted.relative_to(root).as_posix()])
     return dict(candidates=candidates, current_candidate=None, actual_submission=actual,
                 coverage=dict(status='partial' if partial else 'complete', note='Highest means observed public proxy only; scan/new-record limits may omit facts.' if partial else 'Complete public ledger scan at this observation boundary.'))

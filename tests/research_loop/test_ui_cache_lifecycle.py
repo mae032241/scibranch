@@ -318,9 +318,9 @@ def test_history_page_keeps_frozen_prefix_and_clear_expires_it(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize('basis, now, expected', [
-    ('active', dict(at_unix=112., at_boottime=1., boot_id='new'), 12.),
-    ('active', dict(at_unix=90., at_boottime=1., boot_id='new'), 5.),
-    ('active', dict(at_unix=105., at_boottime=1., boot_id='new'), 5.),
+    ('active', dict(at_unix=112., at_boottime=1., boot_id='new'), 6.),
+    ('active', dict(at_unix=90., at_boottime=1., boot_id='new'), 6.),
+    ('active', dict(at_unix=105., at_boottime=1., boot_id='new'), 6.),
     ('active', dict(at_unix=90., at_boottime=20., boot_id='original'), 10.),
     ('elapsed', dict(at_unix=112., at_boottime=1., boot_id='new'), 12.),
     ('elapsed', dict(at_unix=112., at_boottime=20., boot_id='original'), 12.),
@@ -342,7 +342,9 @@ def test_saved_budget_uses_control_clock_intervals(tmp_path, monkeypatch, basis,
         return original(before, after, **options)
     monkeypatch.setattr(budget, '_duration', counted)
     value = ui_saved_status._budget(tmp_path, settings, events)
-    assert calls and all(options == dict(legacy_elapsed=basis == 'elapsed') for options in calls)
+    assert calls and all(set(options) == {'legacy_elapsed', 'exclude_downtime'}
+        and options['legacy_elapsed'] == (basis == 'elapsed') for options in calls)
+    assert sum(options['exclude_downtime'] is True for options in calls) == (3 if basis == 'active' else 0)
     if expected is None:
         assert value['time_status'] == 'unknown'
         assert value['consumed_seconds'] is None and value['seconds_remaining'] is None
@@ -351,6 +353,9 @@ def test_saved_budget_uses_control_clock_intervals(tmp_path, monkeypatch, basis,
     else:
         authority = budget._snapshot(tmp_path, settings, events, sample_stamp=now)
         assert value['time_status'] == 'recorded' and value['consumed_seconds'] == expected
+        assert value['advance_seconds'] == 5.
+        assert value['waiting_seconds'] == (expected - 5. if now['boot_id'] == 'new' else 5.)
+        assert value['seconds_remaining'] == 1000. - expected
         for key in ('consumed_seconds', 'seconds_remaining', 'advance_seconds', 'waiting_seconds'):
             assert value[key] == authority[key]
 

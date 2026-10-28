@@ -156,9 +156,11 @@ def _proof(root, source, *, context=None, source_kind='mutable'):
         original=experiments.proof(path,context=context)
         return dict(path=relative,**{key:original[key] for key in ('size_bytes','file_stat')},
             retention='archived',snapshot=relative)
-    original=experiments.proof(path,context=context)
+    from . import shared_originals
+    retained=shared_originals.retain(root,path,size_bytes=size,source_kind='mutable',context=context)
+    original=experiments.proof(retained,context=context)
     return dict(path=relative,**{key:original[key] for key in ('size_bytes','file_stat')},
-        retention='archived',snapshot=relative)
+        retention='archived',snapshot=retained.relative_to(root).as_posix())
 
 
 def source_control_ref(source, relative):
@@ -848,7 +850,15 @@ def _capture(root, job, payload, materials):
         if stored.get('binding') != binding:
             raise ObserverIntegrityError('Retained observer snapshot binding changed')
         return dict(path=path.relative_to(root).as_posix())
-    known = set();known_contexts = set();prior_contexts = []
+    known = set();known_contexts = set();prior_contexts = [];managed_outputs = {}
+    def remember_outputs(rows, owner):
+        # Index only existing host-managed output bindings. Resolve and verify
+        # the exact original only when the observer actually selects it.
+        for row in rows:
+            for proof in row.get('outputs',[]):
+                if proof.get('retention')=='archived':
+                    managed_outputs[str(Path(owner.original_root)/proof['path'])]=(owner,proof)
+                    managed_outputs[str(Path(owner.original_root)/proof['snapshot'])]=(owner,proof)
     from . import originals
     for receipt in job.get('history', {}).get('nodes', []):
         prior_source = originals.node(root, receipt['step'])
@@ -858,6 +868,10 @@ def _capture(root, job, payload, materials):
             known.update(row['id'] for row in prior['candidates'])
             known_contexts.update(row['call_id'] for row in prior.get('contexts', []))
             prior_contexts.extend(prior.get('contexts', []))
+            remember_outputs(prior.get('managed_calls',[]),prior_source)
+    current_calls=managed_calls(root,job) if _managed_config(job,root) else None
+    if current_calls is not None:
+        remember_outputs(current_calls,originals.node(root,job['step']))
     request = dict(root=str(root), step=job['step'], config=config['config'], materials=materials,
                    known_candidates=sorted(known),
                    **(dict(known_contexts=sorted(known_contexts)) if config.get('contract_version') == 2 else {}))
@@ -876,13 +890,36 @@ def _capture(root, job, payload, materials):
     coverage = value['coverage']
     if not isinstance(coverage, dict) or set(coverage) != {'status', 'note'} or coverage['status'] not in ('complete', 'partial', 'unavailable') or not isinstance(coverage['note'], str):
         raise ValueError('Observer coverage requires an explicit status')
-    proof_cache = {}
+    proof_cache = {};artifact_cache = {}
+    def artifact(name):
+        if not isinstance(name,str):raise ValueError('Observer artifact path is not a string')
+        if name not in artifact_cache:
+            bound=managed_outputs.get(str(root/name))
+            if bound is None:
+                path=root/name
+                if Path(name).is_absolute() or '..' in Path(name).parts or path.resolve()!=path:
+                    raise ObserverIntegrityError('Observer artifact must be an exact instance path')
+                artifact_cache[name]=dict(path=name,size_bytes=c.regular(path).stat().st_size,retention='unavailable')
+            else:
+                owner,saved=bound
+                path=originals.resolve_ref(originals.source_for_ref(owner,saved),dict(saved,path=saved['snapshot']))
+                from . import experiments
+                actual=experiments.proof(path)
+                artifact_cache[name]=dict(path=name,snapshot=str(path),retention='archived',
+                    **{key:actual[key] for key in ('size_bytes','file_stat')})
+        return artifact_cache[name]
+    # Contract2 top-level file descriptors are artifacts; listing one again in
+    # proofs cannot turn its scientific bytes into copyable control metadata.
+    artifact_names={item['artifact'] for item in [value.get('actual_submission')] if isinstance(item,dict) and isinstance(item.get('artifact'),str)}
+    if config.get('contract_version')==2:
+        from . import lineage
+        artifact_names.update(proof['path'] for item in value['contexts'] for proof in lineage.context_artifacts(item))
     def proof(name):
         if not isinstance(name, str):
             raise ValueError('Observer original path is not a string')
+        if name in artifact_names:return artifact(name)
         if name not in proof_cache:
-            item = _proof(root, name)
-            proof_cache[name] = item
+            proof_cache[name] = _proof(root,name)
         return proof_cache[name]
     candidates, seen, diagnostics = [], set(), []
     receipts = job.get('history', {}).get('nodes', [])
@@ -925,7 +962,7 @@ def _capture(root, job, payload, materials):
                 or (actual['candidate_id'] is not None and actual['candidate_id'] not in seen | known)
                 or not isinstance(actual['evidence'], list) or not actual['evidence']):
             diagnostics.append(dict(code='actual_submission_unresolved'));actual=None
-        else:actual = dict(candidate_id=actual['candidate_id'], artifact=proof(actual['artifact']),
+        else:actual = dict(candidate_id=actual['candidate_id'], artifact=artifact(actual['artifact']),
                           evidence=[proof(name) for name in actual['evidence']])
     contexts = None
     if config.get('contract_version') == 2:
@@ -935,6 +972,8 @@ def _capture(root, job, payload, materials):
             coverage = dict(status='partial',note='Original execution contexts include unknown outcomes.')
     snapshot = dict(binding=binding, candidates=candidates, current_candidate=current, actual_submission=actual, coverage=coverage,
                     **(dict(contexts=contexts) if contexts is not None else {}))
+    if any(proof.get('retention')!='archived' for proof in artifact_cache.values()):
+        snapshot['coverage']=dict(status='partial',note='Live observer artifacts have no retained managed original; their historical bytes are unavailable.')
     if diagnostics:snapshot['candidate_diagnostics']=diagnostics
     if config.get('source_contract') is not None:
         from . import qualification as q
@@ -943,7 +982,7 @@ def _capture(root, job, payload, materials):
         observer_input_sources(root, job, snapshot)
     if _managed_config(job,root):
         from . import generic_results
-        snapshot['managed_calls']=managed_calls(root,job)
+        snapshot['managed_calls']=current_calls
         diagnostics=[]
         for candidate in generic_results.candidates(snapshot['managed_calls'],diagnostics=diagnostics):
             if candidate['id'] in known | seen:raise ObserverIntegrityError('Managed candidate identity collides with observer facts')
