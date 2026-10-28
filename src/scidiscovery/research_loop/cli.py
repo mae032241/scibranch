@@ -124,6 +124,9 @@ def main(argv=None):
             command.add_argument('--ack-correction', help='Exact current published pause trigger ID; permits one nondeferred A cycle')
             command.add_argument('--authorization-note', help='External operator decision; not authentication or a budget amendment')
     amend = commands.add_parser('budget-amend', help='Record an external operator ceiling revision without resetting consumption')
+    reconcile = commands.add_parser('reconcile-final', help='Record exact independent engineering evidence for a mistaken token FINAL; never launch native work')
+    reconcile.add_argument('--root', type=Path, required=True)
+    reconcile.add_argument('--report', type=Path, required=True)
     amend.add_argument('--root', type=Path, required=True)
     amend.add_argument('--max-tokens', type=int)
     amend.add_argument('--max-seconds', type=float)
@@ -368,6 +371,8 @@ def main(argv=None):
             result = status(root)
         elif args.command == 'closeout':
             result = controller.closeout(root, export_only=args.export_only)
+        elif args.command == 'reconcile-final':
+            result = controller.reconcile_final(root, args.report)
         elif args.command == 'budget-amend':
             resource_change = args.execution_wall_seconds is not None or args.execution_storage_bytes is not None
             if resource_change and (args.execution_wall_seconds is None or args.execution_storage_bytes is None):
@@ -393,7 +398,7 @@ def main(argv=None):
         print(json.dumps(dict(status='error',error=str(error),**(dict(code=error.code) if hasattr(error, 'code') else {})), ensure_ascii=False))
         return 1
     print(json.dumps(result, ensure_ascii=False))
-    if result.get('status') == 'instance_deleted':
+    if result.get('status') in {'instance_deleted', 'final_reconciled'}:
         return 0
     if args.command == 'execution-preparation-maintain':
         return 0 if result.get('status') in {'partial', 'accepted_unpublished', 'already_published', 'partial_discarded', 'accepted_published'} else 2

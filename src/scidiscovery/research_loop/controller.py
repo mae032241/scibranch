@@ -1355,17 +1355,64 @@ def _final_a_result(root, job, result):
     return _run_delivery_actions(root, job, result)
 
 
-def _resume_final(root, begin):
+def reconcile_final(root, report):
+    """Record one independent admission correction; never dispatch native work."""
+    from .protocol import require_current
+    require_current(root)
+    root = Path(root).resolve(); source = contracts.regular(Path(report).resolve())
+    with _writer(root), _inactive_on_error(root, 'final_reconciliation_stopped'):
+        events, _ = budget._events(root)
+        for event in events:
+            if event['kind'] == 'closeout_resume' and event.get('reconciliation_ref'):
+                saved = contracts.regular(Path(event['reconciliation_ref']['path']))
+                if saved.read_bytes() == source.read_bytes():
+                    budget.inactive(root,'final_admission_reconciled')
+                    return dict(status='final_reconciled', next_step=event['first_step'])
+        state = budget.closeout_state(root); begin = state['begin']
+        proof = budget.final_reconciliation(root,begin,contracts.file_ref(source),events,execution=True)
+        step = proof['step']; sources = proof['report']['metering_sources']
+        accepted = {path for row in begin['resume_cursor']['source_refs'] for path in execution.records(root,row['step'])}
+        if (len(sources) != len(set(sources)) or any(Path(path) not in accepted for path in sources)
+                or any(int(path.stem) > step for path in (root/'jobs').glob('*.json'))
+                or any(row['intent']['seq'] > begin['seq'] for row in state['actions'])):
+            raise ValueError('Final reconciliation changed its exact meter sources or has later effects')
+        difference = 0
+        for name in sources:
+            record = Path(name); raw = contracts.read(contracts.regular(record/'usage.json'))
+            effective = native.attempt_usage(record)
+            difference += raw['input_tokens'] + raw['output_tokens'] - effective['input_tokens'] - effective['output_tokens']
+        current = native.usage(root)['accounted_tokens']
+        if difference <= 0 or proof['claim']['selection']['accounted_tokens'] - current != difference:
+            raise ValueError('Final reconciliation has no exact corrected original token overcount')
+        if (budget.execution_blocked(root,reconciliation=contracts.file_ref(source))
+                or _launch_limit(root,contracts.settings(root)) is not None
+                or not budget.task_step_available(root,step+1)
+                or budget.node_admission(root,dict(step=step+1,role=begin['resume_cursor']['role']),normal_resume_check=True)):
+            raise ValueError('Final reconciliation has insufficient original admission or unresolved execution')
+        target = root/'host-recovery/final-resume'/f'{step:03d}.json'
+        target.parent.mkdir(parents=True,exist_ok=True)
+        if target.exists() and target.read_bytes() != source.read_bytes():
+            raise ValueError('Original final reconciliation cannot be replaced')
+        if not target.exists():
+            with target.open('xb') as stream:stream.write(source.read_bytes())
+            target.chmod(0o400)
+        if not _resume_final(root,begin,reconciliation_ref=contracts.file_ref(target)):
+            raise ValueError('The exact pending normal route is not eligible for reconciliation')
+        budget.inactive(root,'final_admission_reconciled')
+        return dict(status='final_reconciled', next_step=step+1)
+
+
+def _resume_final(root, begin, *, reconciliation_ref=None):
     if begin['mode'] != 'final' or begin.get('resume_cursor') is None:
         return False
     events,_ = budget._events(root)
-    raised = budget._threshold_raised(events,begin['seq'])
-    if not raised or budget.execution_blocked(root) or _launch_limit(root,contracts.settings(root)) is not None:
+    raised = reconciliation_ref is not None or budget._threshold_raised(events,begin['seq'])
+    if not raised or budget.execution_blocked(root,reconciliation=reconciliation_ref) or _launch_limit(root,contracts.settings(root)) is not None:
         return False
     if (root/'pause.request').exists() or correction.gate(root,begin['source_cutoff']) is not None:
         return False
     record = _record(root,begin['first_step'])
-    if (record/'native-intent.json').exists() and not (record/'result-identity.json').exists():
+    if reconciliation_ref is None and (record/'native-intent.json').exists() and not (record/'result-identity.json').exists():
         return False  # Finish/collect this exact original A first.
     state = budget.closeout_state(root)
     actions = [row for row in state['actions'] if row['intent']['seq'] > begin['seq']]
@@ -1383,7 +1430,7 @@ def _resume_final(root, begin):
     if not budget.task_step_available(root, first) or budget.node_admission(root,
             dict(step=first,role=cursor['role']),normal_resume_check=True) is not None:
         return False
-    budget.resume_final(root,begin,first)
+    budget.resume_final(root,begin,first,reconciliation_ref=reconciliation_ref)
     return True
 
 

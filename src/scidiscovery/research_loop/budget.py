@@ -867,7 +867,7 @@ def transition(root, phase, reason, *, operation_context=None):
             _append(root, settings, events, parent, kind='clock', phase=phase, reason=reason)
 
 
-def execution_blocked(root, *, ignore_operation=None, include_managed=True, ignore_recovery=None, ignore_unstarted_action=None):
+def execution_blocked(root, *, ignore_operation=None, include_managed=True, ignore_recovery=None, ignore_unstarted_action=None, reconciliation=None):
     """Unknown or live originals prohibit inactive time and amendments."""
     from . import runtime, execution
     settings = contracts.settings(root)
@@ -914,6 +914,13 @@ def execution_blocked(root, *, ignore_operation=None, include_managed=True, igno
                     return True
     if any(op != ignore_operation for op in state['unresolved_operations']):
         return True
+    events, _ = _events(root)
+    reconciled = [(next(row for row in events if row['seq'] == event['source_final']['seq']), event['reconciliation_ref'])
+                  for event in events if event['kind'] == 'closeout_resume' and event.get('reconciliation_ref')]
+    if reconciliation is not None:
+        reconciled.append((state['begin'], reconciliation))
+    unsubmitted = {final_reconciliation(root, begin, ref, events, execution=True)['step']
+                   for begin, ref in reconciled}
     from . import fork_runtime
     for step in fork_runtime.local_steps(root, include_native=True):
         try:
@@ -923,6 +930,8 @@ def execution_blocked(root, *, ignore_operation=None, include_managed=True, igno
             binding = contracts.record_ref(root / 'jobs' / f'{step:03d}.json')
             if contracts.read(record / 'native-intent.json')['task_ref'] != binding:
                 return True
+            if step in unsubmitted and record == execution.origin(root, step):
+                continue
             outcome = contracts.read(record / 'native-outcome.json')
             if outcome.get('stop_reason') in {'native_error_unknown', 'cleanup_unknown'}:
                 return True
@@ -1324,22 +1333,67 @@ def _threshold_raised(events, after_seq):
         or latest.get('after_max_steps',0) > latest.get('before_max_steps',0))
 
 
+def final_reconciliation(root, begin, ref, events, *, execution=False):
+    """Exact host engineering evidence; it neither seals science nor grants a retry."""
+    from . import runtime
+    path = contracts.regular(Path(ref['path']))
+    report = contracts.read(path)
+    if contracts.file_ref(path) != ref or begin is None or begin.get('resume_cursor') is None:
+        raise ValueError('Final reconciliation lost its exact report or pending route')
+    step = begin['first_step']; record = contracts.host_record(contracts.workspace(root, step))
+    claim = next((row for row in events if row['kind'] == 'final_a_return' and row['step'] == step), None)
+    if (begin['mode'] != 'final' or begin['stop_reason'] not in {'token_limit','closeout_reserve_tokens','node_budget_unavailable_tokens'}
+            or claim is None or claim['selection']['accounted_tokens'] < claim['anchor']['shared_limits']['max_tokens']):
+        raise ValueError('Final reconciliation requires the original token-only admission error')
+    paths = dict(final=root/'control-ledger'/f'{begin["seq"]:06d}.json',
+        claim=root/'control-ledger'/f'{claim["seq"]:06d}.json', job=root/'jobs'/f'{step:03d}.json',
+        **{name:record/file for name,file in dict(intent='native-intent.json',outcome='native-outcome.json',
+            runner='runner-process.json',stderr='runner.stderr').items()})
+    if (report.get('provider_submission') != 'not_submitted'
+            or any(not isinstance(report.get(key),str) or not report[key].strip()
+                   for key in ('author','reviewer','source_commit','source_flow'))
+            or report['author'] == report['reviewer']
+            or report.get('originals') != {name:contracts.file_ref(contracts.regular(file)) for name,file in paths.items()}
+            or not isinstance(report.get('metering_sources'),list) or not report['metering_sources']
+            or any(not isinstance(name,str) or not Path(name).is_absolute() for name in report['metering_sources'])):
+        raise ValueError('Independent positive source-flow reconciliation and exact originals are required')
+    if execution:
+        outcome, intent = contracts.read(paths['outcome']), contracts.read(paths['intent'])
+        runner = contracts.read(paths['runner'])
+        if (outcome.get('native_started') is not False or outcome.get('returncode') is not None
+                or outcome.get('stop_reason') != 'native_error_unknown' or outcome.get('thread_id') is not None
+                or outcome.get('terminal_observed') or outcome.get('native_activity_observed')
+                or (outcome.get('budget_slice') or {}).get('observed_tokens') != 0
+                or 'attempt' in intent or intent.get('task_ref') != contracts.record_ref(paths['job'])
+                or (intent.get('budget_slice') or {}).get('final_return') != _event_ref(root,claim)
+                or any((record/name).exists() or (record/name).is_symlink() for name in
+                       ('native-process.json','continuations','usage.json','science-output.json','result.pending.json','result-identity.json'))
+                or contracts.regular(record/'native.jsonl',limit=None).stat().st_size
+                or runner.get('task_ref') != intent['task_ref'] or runtime.process_matches(runner,intent['task_ref'])
+                or not paths['stderr'].read_text().strip()):
+            raise ValueError('Final reconciliation does not prove this exact pre-dispatch failure')
+    return dict(step=step, claim=claim, report=report)
+
+
 def _validate_resume_event(root, event, previous):
     begin = _active_final(previous)
     if (begin is None or begin.get('resume_cursor') is None
             or event.get('source_final') != _event_ref(root,begin)
             or type(event.get('first_step')) is not int or event['first_step'] <= begin['first_step']
-            or not _threshold_raised(previous,begin['seq'])):
+            or not event.get('reconciliation_ref') and not _threshold_raised(previous,begin['seq'])):
         raise ValueError('Normal resume requires an explicit raised threshold and exact final cursor')
     _validate_cursor(root,begin['resume_cursor'],begin['source_cutoff']+1,previous)
+    if event.get('reconciliation_ref'):
+        final_reconciliation(root,begin,event['reconciliation_ref'],previous)
 
 
-def resume_final(root, begin, first_step):
+def resume_final(root, begin, first_step, *, reconciliation_ref=None):
     """Publish normal routing only; admission and quiescence are checked by run."""
     settings = contracts.settings(root)
     with _ledger_writer(root):
         events,parent = _events(root)
         value = dict(kind='closeout_resume', source_final=_event_ref(root,begin), first_step=first_step)
+        if reconciliation_ref is not None:value['reconciliation_ref'] = reconciliation_ref
         # Validate before publication, preserving the original final cycle.
         probe = dict(value,seq=len(events)+1)
         _validate_resume_event(root,probe,events)
