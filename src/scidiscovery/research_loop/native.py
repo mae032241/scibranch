@@ -584,13 +584,38 @@ def run_native(root: Path, step: int, attempt=0):
                                            stderr=err, env=env, start_new_session=True, pass_fds=pass_fds)
             process_id = runtime.process_identity(process.pid, execution.identity(root, step, attempt))
             write(record / "native-process.json", process_id)
-            process.stdin.write(backend.request(prompt, profile=profile, work=work, schema=schema_path,formal_review=bool(job.get('formal_review')),response_schema=response_schema))
-            process.stdin.close()
+            request = memoryview(backend.request(prompt, profile=profile, work=work, schema=schema_path,formal_review=bool(job.get('formal_review')),response_schema=response_schema))
+            # Startup events can fill stdout before the launcher consumes its
+            # request. Keep both directions in the same interruptible loop so
+            # the existing finite clocks still run while stdin is backpressured.
+            os.set_blocking(process.stdin.fileno(), False)
+            os.set_blocking(process.stdout.fileno(), False)
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
+                if request:
+                    selector.register(process.stdin, selectors.EVENT_WRITE)
+                else:
+                    process.stdin.close()
                 while selector.get_map() or process.poll() is None:
                     for key, _ in selector.select(1):
-                        chunk = os.read(key.fileobj.fileno(), 65536)
+                        if key.fileobj is process.stdin:
+                            try:
+                                sent = os.write(key.fileobj.fileno(), request[:65536])
+                                request = request[sent:]
+                            except BlockingIOError:
+                                continue
+                            except BrokenPipeError:
+                                # A launcher may close its request pipe while
+                                # still publishing its exact failure/outcome.
+                                request = request[:0]
+                            if not request:
+                                selector.unregister(key.fileobj)
+                                key.fileobj.close()
+                            continue
+                        try:
+                            chunk = os.read(key.fileobj.fileno(), 65536)
+                        except BlockingIOError:
+                            continue
                         if not chunk:
                             selector.unregister(key.fileobj)
                             if not pending_line:

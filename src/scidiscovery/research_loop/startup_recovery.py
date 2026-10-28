@@ -344,9 +344,15 @@ def start(root, step, *, reconciliation, reconciliation_ref, native_home, author
             record.mkdir(parents=True,exist_ok=True)
             with (record/'native-intent.json').open('x') as stream:
                 json.dump(intent,stream);stream.flush();os.fsync(stream.fileno())
-            runtime.start(root,step,1)
         else:
             validate_intent(root,job,c.read(record/'native-intent.json'))
+        # Acceptance is fsynced before spawning. A repeated dedicated entry
+        # closes only that local crash window, retaining the exact attempt and
+        # original budget. Any runner receipt keeps unknown submissions closed;
+        # the runner's own lease/receipt checks serialize concurrent starts.
+        if not any((record/name).exists() for name in
+                ('runner-process.json','native-process.json','native-outcome.json')):
+            runtime.start(root,step,1)
         return _run(root)
 
 

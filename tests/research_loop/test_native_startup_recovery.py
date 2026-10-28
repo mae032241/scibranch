@@ -168,6 +168,57 @@ def test_successor_unknown_remains_blocking_and_is_never_restarted(tmp_path):
     assert not (execution.origin(root,3)/'continuations/002').exists()
 
 
+def _accepted_before_spawn(tmp_path,monkeypatch):
+    root,options=scene(tmp_path)
+    def crash(*args,**kwargs):raise RuntimeError('fixture crash after accepted intent before spawn')
+    with monkeypatch.context() as change:
+        change.setattr(runtime,'start',crash)
+        with pytest.raises(RuntimeError,match='accepted intent before spawn'):
+            recovery.start(root,3,**options)
+    current=execution.record(root,3)
+    assert c.read(current/'native-intent.json')['continuation_kind']=='startup_successor'
+    assert not any((current/name).exists() for name in
+        ('runner-process.json','native-process.json','native-outcome.json'))
+    return root,options,current
+
+
+@pytest.mark.process_e2e
+def test_accepted_successor_before_spawn_resumes_same_authorized_attempt(tmp_path,monkeypatch):
+    root,options,current=_accepted_before_spawn(tmp_path,monkeypatch)
+    saved=originals(root)
+    intent=(current/'native-intent.json').read_bytes()
+    permit=recovery.path(root,3).read_bytes()
+    claim=budget.final_a_barrier(root)
+    accepted_steps=budget.used_steps(root)
+    result=recovery.start(root,3,**options)
+    assert result['status']=='final_a_completed',json.dumps(result,indent=2)
+    assert execution.record(root,3)==current
+    assert (current/'native-intent.json').read_bytes()==intent
+    assert recovery.path(root,3).read_bytes()==permit
+    assert budget.final_a_barrier(root)==claim
+    assert budget.used_steps(root)==accepted_steps
+    assert all(file.read_bytes()==data for file,data in saved.items())
+    assert c.read(current/'native-intent.json')['budget_slice']==c.read(execution.origin(root,3)/'native-intent.json')['budget_slice']
+    assert (c.workspace(root,3)/'work/submission-count').read_text()=='one\n'
+    assert recovery.start(root,3,**options)['status']=='final_a_completed'
+    assert (c.workspace(root,3)/'work/submission-count').read_text()=='one\n'
+    assert not (execution.origin(root,3)/'continuations/002').exists()
+
+
+@pytest.mark.parametrize('receipt',['runner-process.json','native-process.json','native-outcome.json'])
+def test_accepted_successor_with_any_receipt_never_restarts(tmp_path,monkeypatch,receipt):
+    root,options,current=_accepted_before_spawn(tmp_path,monkeypatch)
+    # Presence is enough to forbid this narrow restart. Generic collection must
+    # retain responsibility for interpreting any original/unknown outcome.
+    c.write(current/receipt,dict(fixture='original unknown receipt'))
+    before=(current/receipt).read_bytes()
+    monkeypatch.setattr(runtime,'start',lambda *args,**kwargs:pytest.fail('Existing execution receipt must prevent restart'))
+    monkeypatch.setattr(controller,'_run',lambda root:dict(status='fixture collection only'))
+    assert recovery.start(root,3,**options)['status']=='fixture collection only'
+    assert (current/receipt).read_bytes()==before
+    assert not (c.workspace(root,3)/'work/submission-count').exists()
+
+
 @pytest.mark.parametrize('mutation',['no_positive_source','not_positive_judgment','wrong_original','missing_author'])
 def test_empty_stream_null_thread_and_missing_meter_do_not_authorize_successor(tmp_path,mutation):
     root,options=scene(tmp_path)
