@@ -62,6 +62,28 @@ def read(path: Path):
     return json.loads(path.read_text(encoding='utf-8'))
 
 
+def decode_scientific_output(text: str):
+    """Parse one authored object, allowing only an outer BOM or whole JSON fence."""
+    text = text.strip()
+    normalization = []
+    if text.startswith('\ufeff'):
+        text = text[1:].strip()
+        normalization.append('bom')
+    fenced = re.fullmatch(r'```(?:json)?\r?\n(.*?)\r?\n```', text, re.DOTALL)
+    if fenced is not None:
+        text = fenced[1]
+        normalization.append('fenced')
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise json.JSONDecodeError('Scientific output must be one JSON object', text, 0)
+    return value, '+'.join(normalization) or None
+
+
+def read_scientific_output(path: Path):
+    """Read syntax only; sealed conclusions retain their accepted interpretation."""
+    return decode_scientific_output(path.read_text(encoding='utf-8'))[0]
+
+
 def write(path: Path, value):
     payload = (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + '\n').encode('utf-8')
     atomic_files.replace_bytes(path, payload)
@@ -234,7 +256,7 @@ def response_instructions(job):
         if job.get('purpose')=='closeout':
             fields['closeout_response']=('FINAL: follow action options; no new work/audit.' if job.get('final_only') else 'Closeout: deliver/audit/finish/wait; no exploration.')
     elif job['role']=='W':
-        fields['delivery_requirements']='Retain required outputs/receipts before scratch disappears; report gaps.'
+        fields['delivery_requirements']='Managed originals persist; cite directly, no copies. Retain other outputs/receipts; report gaps.'
         fields['stage_response']='stage_intent: review=A-ready; decision=partial obstacle; continue=authorized same-stage work.'
         fields['stage_continuation']=dict(status='configured' if job.get('worker_fragment_policy') else 'unavailable',
             context=(job.get('worker_fragment_policy') or {}).get('context'),
@@ -273,7 +295,7 @@ def science_payload(path: Path, role: str, protocol=CURRENT, comparison=False,*,
     from .output_repair import OutputRepairRequired
     original = regular(path)
     try:
-        value = read(original)
+        value = read_scientific_output(original)
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise OutputRepairRequired('invalid_json', 'Return one valid JSON object matching final_response; completed experiments remain retained.') from error
     schema=result_schema(role,protocol,comparison,formal_review=formal_review,review_enabled=review_enabled,
@@ -350,14 +372,14 @@ def _parent_view(job, ref, root=None, *, limitation_bytes=1024):
         if target.exists():
             path=originals.resolve_root_ref(root,dict(ref,path=str(target)))
         else:
-            payload=read(actual)
+            payload=read_scientific_output(actual)
             projected=scientific_projection(candidate_refs.public_science_fields(payload,
                 candidate_refs.for_job(job)),str(Path(ref['path']).parent/'scientific-original.json'))
             if projected!=payload:raise ValueError('Bound public parent projection is unavailable')
             path=actual
         if path.stat().st_size!=ref['size_bytes']:
             raise ValueError('Direct scientific original changed')
-        payload=read(path)
+        payload=read_scientific_output(path)
         view['role']=originals.source_job(owner)['role']
         view['limitations'],view['limitations_omitted_count']=_whole_limitations(payload['limitations'],byte_limit=limitation_bytes)
     return view
@@ -691,12 +713,12 @@ def science_view(job, root=None):
     return candidate_refs.public_fields(view,candidate_refs.for_job(job))
 
 
-def collect_materials(root: Path, step: int):
-    """Seal this stopped node's own deliverables at their actual output paths."""
+def material_inventory(root: Path, step: int):
+    """Validate stopped-node originals and layout without changing permissions."""
     job=read(regular(root/'jobs'/f'{step:03d}.json'))
     policy = settings(root, job)
     work = workspace(root, step)
-    rows, mutable, total = [], [], 0
+    rows, mutable, destinations = [], [], {}
     from . import execution
     record=execution.record(root,step)
     from . import worker_delivery
@@ -710,24 +732,27 @@ def collect_materials(root: Path, step: int):
             author_closeout.validate_science_context(root,job,proof)
 
     def add(path, relative, *, source_kind='mutable'):
-        nonlocal total
         path = regular(path)
         size = path.stat().st_size
         if policy.get('max_output_item_bytes') is not None and size > policy['max_output_item_bytes']:
             raise ValueError(f'Deliverable {relative!r} exceeds item byte budget '
                              f'({size} > {policy["max_output_item_bytes"]})')
-        total += size
-        if policy.get('max_output_total_bytes') is not None and total > policy['max_output_total_bytes']:
-            raise ValueError(f'Deliverable {relative!r} exhausts total byte budget '
-                             f'({total} > {policy["max_output_total_bytes"]})')
         if source_kind=='mutable':
             if path.resolve()!=path or not path.is_relative_to(work):
                 raise ValueError('Node deliverables must remain in their original owned workspace')
             if path.stat().st_nlink != 1:
                 raise ValueError(f'Mutable deliverable {relative!r} must not have hard-link aliases')
-            mutable.append(path)
         elif path.stat().st_mode & 0o777 != 0o400:
             raise ValueError('Managed output has not been sealed by its stopped writer')
+        sources = destinations.setdefault(relative, [])
+        for index, previous in enumerate(sources):
+            if previous[0] != path:continue
+            if source_kind == 'managed_frozen' and previous[1] == 'mutable':
+                sources[index] = (path, source_kind)
+                mutable.remove(path)
+            return
+        sources.append((path, source_kind))
+        if source_kind=='mutable':mutable.append(path)
         rows.append(dict(source=str(path), original_source=str(path),
                          path=f'inputs/parents/{step:03d}/artifacts/{relative}', size_bytes=size))
 
@@ -771,14 +796,39 @@ def collect_materials(root: Path, step: int):
             for item in outputs:
                 if item.get('retention')!='archived':raise ValueError('Managed deliverable original unavailable')
                 add(root/item['path'],f'experiments/{call["call_id"]}/artifacts/{item["name"]}',source_kind='managed_frozen')
-    if len({row['path'] for row in rows}) != len(rows):
-        raise ValueError('Deliverable paths collide with nested experiment outputs')
+    collisions = [sources for sources in destinations.values() if len(sources) > 1]
+    # Inspect every original at each destination, including managed originals
+    # hidden behind an author's first entry. The author cannot resolve these.
+    if any(sum(kind == 'managed_frozen' for _, kind in sources) > 1 for sources in collisions):
+        raise ValueError('Different managed originals share a deliverable path')
+    if collisions:
+        from .output_repair import OutputRepairRequired
+        managed = next((sources for sources in collisions if any(kind == 'managed_frozen' for _, kind in sources)), None)
+        if managed is not None:
+            authored = next(path for path, kind in managed if kind == 'mutable')
+            diagnostic = (
+                'Remove redundant copies; cite retained managed originals directly. Put distinct authored content at a separate path. '
+                f'Preserve managed originals/call IDs; no rerun/resubmit. Owned path: {authored.relative_to(work).as_posix()}')
+        else:
+            paths = '; '.join(path.relative_to(work).as_posix() for path, _ in collisions[0])
+            diagnostic = ('Separate owned deliverables at different publication paths; preserve distinct content. '
+                f'No new work/rerun/resubmit. Owned paths: {paths}')
+        raise OutputRepairRequired('deliverable_path_collision', diagnostic)
+    total = sum(row['size_bytes'] for row in rows)
+    if policy.get('max_output_total_bytes') is not None and total > policy['max_output_total_bytes']:
+        raise ValueError(f'Deliverables exhaust total byte budget ({total} > {policy["max_output_total_bytes"]})')
+    return sorted(rows, key=lambda row: row['path']), mutable
+
+
+def collect_materials(root: Path, step: int):
+    """Seal this stopped node's validated deliverables at their original paths."""
+    rows, mutable = material_inventory(root, step)
     # Inventory, budgets and all original bindings must be valid before the
     # first permission change. IO failures in the sealing pass can still leave
     # partially changed modes; this is not a filesystem transaction.
     for path in mutable:
         if path.stat().st_mode & 0o777 != 0o400:path.chmod(0o400)
-    return sorted(rows, key=lambda row: row['path'])
+    return rows
 
 
 def global_materials(root: Path):
@@ -1162,7 +1212,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     for original in refs:
         parent=int(Path(original['path']).parts[2]);source=regular(_execution_raw(root,parent))
         if source.stat().st_size!=original['size_bytes']:raise ValueError('Direct producer original changed')
-        reported=candidate_refs.public_science_fields(read(source),candidate_refs.for_job(job))
+        reported=candidate_refs.public_science_fields(read_scientific_output(source),candidate_refs.for_job(job))
         original_path=str(Path(original['path']).parent/'scientific-original.json')
         public=scientific_projection(reported,original_path)
         # A logical raw link resolves to the sealed parent original.
@@ -1171,8 +1221,8 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
                 size_bytes=original['size_bytes'],kind='scientific_original'))
         target=work/original['path']
         if target.exists():
-            if read(regular(target))!=public:raise ValueError('Frozen parent scientific view changed')
-        elif public!=read(source):
+            if read_scientific_output(regular(target))!=public:raise ValueError('Frozen parent scientific view changed')
+        elif public!=read_scientific_output(source):
             write(target,public);target.chmod(0o400)
         if source.stat().st_size!=original['size_bytes']:raise ValueError('Direct producer original changed')
         job['direct_refs'].append(dict(path=original['path'],
@@ -1614,14 +1664,14 @@ def _validate_inputs(root, work, job):
         source=regular(_execution_raw(root,int(Path(ref['path']).parts[2])))
         if source.stat().st_size!=ref['size_bytes']:
             raise ValueError('Direct producer original changed')
-        reported=candidate_refs.public_science_fields(read(source),candidate_refs.for_job(job))
+        reported=candidate_refs.public_science_fields(read_scientific_output(source),candidate_refs.for_job(job))
         original_path=str(Path(ref['path']).parent/'scientific-original.json')
         public=scientific_projection(reported,original_path)
         if public!=reported:
             originals.resolve_ref(originals.node(root,int(Path(ref['path']).parts[2])),
                 read(originals.source_record(originals.node(root,int(Path(ref['path']).parts[2])),
                     'result-identity.json'))['raw_ref'])
-        if read(originals.resolve_root_ref(root,dict(next(row for row in job['direct_refs']
+        if read_scientific_output(originals.resolve_root_ref(root,dict(next(row for row in job['direct_refs']
                 if row['path']==ref['path']),path=str(work/ref['path']))))!=public:
             raise ValueError('Scientific parent view differs from its verified original')
     for ref in job['direct_materials']:

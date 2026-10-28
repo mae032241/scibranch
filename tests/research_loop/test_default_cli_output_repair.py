@@ -70,6 +70,18 @@ elif role=='W':
    result=json.loads(outcome.stdout);assert result['status']=='known_success'
    locator_file.write_text(json.dumps(dict(call_id=result['call_id'],artifact=artifacts[0])))
   locator=json.loads(locator_file.read_text())
+  if config['fault'].startswith('nomination-layout'):
+   import shutil
+   output_name='model-0.bin'  # The fixture's public output descriptor; candidate artifact retains its own identity.
+   original=work/'work/retained-experiments'/locator['call_id']/'outputs'/output_name
+   copied=work/'artifacts/experiments'/locator['call_id']/'artifacts'/output_name
+   if not resume:
+    copied.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(original,copied)
+    assert copied.read_bytes()==original.read_bytes() and not copied.samefile(original)
+   else:
+    assert 'Fix diagnosed JSON/layout only' in prompt and 'deliverable_path_collision' in prompt
+    assert 'Remove redundant copies' in prompt
+    if config['fault']!='nomination-layout-repeat':copied.unlink()
   if resume and config.get('output_repair_probe'):
    import subprocess
    from scidiscovery.research_loop.worker_execution_bridge import SUBMISSION_DIRECTORY
@@ -94,7 +106,7 @@ elif role=='W':
   if resume:
    assert locator_file.is_file()
    payload['candidate_nominations']=value
-  elif completed_work:payload['candidate_nominations']=value
+  elif completed_work or config['fault'].startswith('nomination-layout'):payload['candidate_nominations']=value
   elif config['fault']=='nomination-extra':
    value['extras']=[dict(candidate=dict(call_id=locator['call_id'],artifact='artifacts/model-'+str(i)+'.bin'),reason='Distinct scientific alternative.') for i in (1,2,3)]
    payload['candidate_nominations']=value
@@ -126,7 +138,7 @@ elif role=='W':
     result=json.loads(outcome.stdout);assert result['status']=='known_success'
     second.write_text(json.dumps(dict(call_id=result['call_id'])))
     payload['mechanism_findings'].append(dict(mechanism='Second fixture mechanism',basis='observed',finding='A different retained assigned observation; scientific suitability remains for A.'))
- if config.get('output_repair_probe') and not completed_work and not resume:payload.pop('summary')
+ if config.get('output_repair_probe') and not completed_work and not resume and not config['fault'].startswith('nomination-layout'):payload.pop('summary')
 else:
  assert role=='A'
  payload.update(next_action='finish',route_reason='The measured scientific objective remains unresolved.',
@@ -154,7 +166,8 @@ else:
 if not (config['fault']=='completed-missing-output' and role=='W' and not resume):
  pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))
 if (config['fault']!='unknown' and config['fault']!='nomination-unknown') or role=='H':
- print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=10,cached_input_tokens=3,output_tokens=4))),flush=True)
+ tokens=2040301 if role=='W' and config['fault'].startswith('nomination-layout') and not resume else 10
+ print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=tokens,cached_input_tokens=3,output_tokens=4))),flush=True)
 raise SystemExit(7 if config['fault']=='failed' and role=='A' else 0)
 '''
 

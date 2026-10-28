@@ -995,7 +995,9 @@ scid-research closeout --root /绝对路径/实例 --export-only
 标准单命令 `codex` 的 CLI `prepare` 在未传 `--worker-resume-policy` 且未请求
 `--worker-context` 时，冻结最多两次同任务、同 session 的输出补填或原受管执行唤醒：
 `output_repair: true`、`output_only: true`、`execution_wake: true`。
-补填只修已确认完成的返回；窄唤醒只解释同一原受管调用的已核验终态并完成返回，
+补填只修已确认完成的必需返回或明确诊断的作者交付布局冲突；原作者可删冗余副本或整理
+自己的文件位置，受管原件直接引用、无需复制。起始 BOM 和完整唯一 JSON 围栏由统一科学
+解析器处理，原始字节保留；散文夹杂或多个对象仍补正。窄唤醒只解释同一原受管调用的已核验终态并完成返回，
 这两项窄权限本身不授权新实验、训练、失败任务续跑、`WorkRepairRequired` 科学修复或 W fragment。
 新标准配置另有上文的独立 `automatic_recovery` 许可，可在原边界内续接提前停止、临时故障
 和 completed 但科学交付不足的原任务；不借 `output_only` 扩权。

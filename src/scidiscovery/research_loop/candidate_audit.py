@@ -134,7 +134,7 @@ def _outcome(root, step):
     value = c.read(c.regular(path))
     if value['decision'] != _decision(root, step):
         raise ValueError('Candidate audit receipt scientific source changed')
-    raw = c.read(execution.raw(root, step))
+    raw = c.read_scientific_output(execution.raw(root, step))
     from . import candidate_refs
     raw=candidate_refs.control_payload(c.read(root/'jobs'/f'{step:03d}.json'),raw,root=root)
     if (type(value['accepted']) is not bool or value['accepted'] != (directory / 'intent.json').exists()

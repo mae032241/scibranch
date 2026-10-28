@@ -563,8 +563,20 @@ unmeasured goal; A reports unmet objectives when stopping.
 A explains candidate criteria, any revisions, supporting evidence and tradeoffs in
 ordinary scientific prose. selection_explanation is optional and has no nested
 completeness gate. Exact candidate identity, frozen inputs, audit qualification and
-delivery authorization remain required. Output repair addresses genuinely required
-fields while retaining the same task, cumulative usage and FINAL completion protection.
+delivery authorization remain required. Output repair addresses required fields and
+diagnosed author-owned delivery-layout conflicts, retaining the same task, cumulative
+usage and FINAL completion protection. The original author may remove redundant
+copies or separate its own conflicting files; managed originals remain unchanged.
+Managed outputs persist and can be referenced directly, without copying them into
+the author's artifacts. Identity, I/O, unknown-execution and authorization failures
+remain control errors and do not authorize an author retry.
+
+Scientific final-output parsing accepts one leading BOM and a whole, single
+plain or `json` Markdown fence. Surrounding prose, multiple objects and malformed
+JSON still require bounded author repair. The raw bytes remain unchanged; sealing,
+historical reads and display use the same scientific parser. Only a normalized
+form adds `scientific_output_normalization` to the native outcome; control JSON
+continues to use its strict reader.
 
 Standard single-command `codex` CLI preparation freezes up to two output-only
 repairs or original managed-execution wakes and a separate bounded automatic-recovery

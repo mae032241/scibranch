@@ -277,7 +277,7 @@ def _logical_input(root, path, *, source=None, context=None):
         seal=_json(source_record(owner,'result-identity.json'))
         raw=resolve_ref(owner,seal['raw_ref'],context=context)
         from . import contracts as c, candidate_refs
-        original=c.read(raw)
+        original=c.read_scientific_output(raw)
         public=c.scientific_projection(candidate_refs.public_science_fields(original,
             candidate_refs.for_job(job)),str(PurePosixPath(logical).parent/'scientific-original.json'))
         if public!=original:raise ValueError('Selected public scientific projection is unavailable')

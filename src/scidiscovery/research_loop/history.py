@@ -1003,7 +1003,7 @@ def _source(root, step, *, resolve_choices=True):
         from . import candidate_refs
         raw=originals.resolve_ref(source,seal['raw_ref'])
         _sealed_raw_ref(raw,seal)
-        payload=c.read(raw)
+        payload=c.read_scientific_output(raw)
         if resolve_choices:
             payload = candidate_refs.control_payload(job, payload, root=root, source=source)
             mapping = candidate_refs.source_input_mapping(source, job)
@@ -1022,7 +1022,7 @@ def _source(root, step, *, resolve_choices=True):
     _sealed_raw_ref(raw,seal)
     job=originals.source_job(source)
     from . import candidate_refs
-    payload=c.read(raw)
+    payload=c.read_scientific_output(raw)
     return job, candidate_refs.control_payload(job,payload,root=root) if resolve_choices else payload, seal, c.record_ref(seal_path)
 
 

@@ -718,6 +718,7 @@ def output_request(root, step, record, *, source_attempt=None, verify_task=True)
                 from . import worker_delivery, candidate_nominations
                 worker_delivery.require_delivery(root,job,science,record,source_attempt=source_attempt)
                 candidate_nominations.require(root,job,science)
+            c.material_inventory(root, step)
         except OutputRepairRequired as failure:
             error = failure
         else:
@@ -757,7 +758,7 @@ def _accepted_repair_request(root,step,intent,prior):
         if (job['role']!='W' or job.get('formal_review') or job.get('final_only') or job.get('purpose')=='closeout'
                 or outcome.get('output_status')=='missing' or request.get('code')!='worker_delivery_incomplete'
                 or request.get('work_evidence_ref')!=c.record_ref(prior/'work-evidence.json')
-                or c.read(raw).get('stage_intent')=='continue'):
+                or c.read_scientific_output(raw).get('stage_intent')=='continue'):
             raise ValueError('Accepted work repair changed its original scope')
     elif request.get('work_evidence_ref') is not None:
         raise ValueError('Output repair cannot acquire scientific work scope')
@@ -949,6 +950,7 @@ def start(root, step):
                 if science['stage_intent']!='continue' or (last/'stage-end.json').exists():
                     worker_delivery.require_delivery(root,job,science,last)
                     candidate_nominations.require(root,job,science)
+                if (last/'stage-end.json').exists():return c.seal_result(root, step)
                 return native.wait_native(root,step)
             return c.seal_result(root, step)
         except WorkRepairRequired:

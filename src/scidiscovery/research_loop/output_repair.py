@@ -6,7 +6,7 @@ class OutputRepairRequired(ValueError):
 
     def __init__(self, code, diagnostic):
         self.code = code
-        self.diagnostic = diagnostic[:512]
+        self.diagnostic = diagnostic.encode('utf-8')[:512].decode('utf-8', errors='ignore')
         super().__init__(self.diagnostic)
 
     def request(self):

@@ -21,11 +21,11 @@ from . import configuration_updates
 from . import budget as control_budget, execution, runtime, search, checkpoint, profiles, backends
 from .output_repair import OutputRepairRequired
 from .contracts import (ACTIONS, actions, ROLE_INSTRUCTIONS, record_ref, file_ref, host_record, read,
-                        seal_result, workspace, write, NATIVE_TASK_INSTRUCTION)
+                        seal_result, workspace, write, NATIVE_TASK_INSTRUCTION, decode_scientific_output)
 
 
 RESUME_INSTRUCTION = 'Resume this exact task within original scope/permissions/budget; never replay unknown calls.'
-OUTPUT_REPAIR_INSTRUCTION = 'Fix final JSON only; keep results, no rerun/resubmit. Diagnosis: '
+OUTPUT_REPAIR_INSTRUCTION = 'Fix diagnosed JSON/layout only; no new work/rerun/resubmit: '
 WORK_REPAIR_INSTRUCTION = 'Complete missing assigned work under original authorization; reuse exact calls/results, never resubmit. Report obstacles/limits. Diagnosis: '
 FRAGMENT_INSTRUCTION = 'Read work/science-resume.json; continue per stage_response.'
 
@@ -764,5 +764,12 @@ def run_native(root: Path, step: int, attempt=0):
         raise OutputRepairRequired('missing_output', 'Return the required final scientific JSON; the completed work and checkpoints are already retained.')
     os.replace(pending, raw)
     outcome['raw_ref'] = file_ref(raw)
-    write(record / 'native-outcome.json', outcome)
+    try:
+        _, normalization = decode_scientific_output(raw.read_text(encoding='utf-8'))
+        if normalization is not None:
+            outcome['scientific_output_normalization'] = normalization
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass  # Preserve the original for the existing bounded output-repair gate.
+    finally:
+        write(record / 'native-outcome.json', outcome)
     return outcome

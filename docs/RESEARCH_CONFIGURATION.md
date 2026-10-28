@@ -238,6 +238,12 @@ schema shape alone never makes an ordinary task a formal review.
 `native_schema_transport` records the actual invocation mode separately from frozen
 launcher capabilities.
 
+Scientific final-output parsing tolerates one leading BOM or one whole plain/JSON
+Markdown fence, retaining the original bytes. Prose and multiple objects still use
+bounded repair. Required-field and author-owned delivery-layout errors can return
+to the same author under its frozen repair policy. Managed originals are retained
+and referenced directly; repairing a duplicate copy grants no new scientific run.
+
 普通 Codex 任务首轮就通过简短提示要求一个 JSON 最终回答，已有旧严格 Schema 的普通任务也
 一样，不发送 `--output-schema`，不追加旧 Schema 全文。Protocol 请求携带当前最小回答
 Schema。原 task 和 Schema 文件保持不变；实际出站说明明确当前必填项和条件广度规则，
@@ -247,6 +253,10 @@ Schema。原 task 和 Schema 文件保持不变；实际出站说明明确当前
 必需输出不合格走有限的仅输出补填。真正的正式独审任务保持独立严格合同，不能根据
 Schema 形状把普通任务当作正式独审。`native_schema_transport` 单独记录实际调用方式，
 不改写冻结的 launcher 能力。
+
+科学最终输出容忍一次起始 BOM 或完整唯一的普通/json Markdown 围栏，原始字节不改；夹杂
+散文或多个对象仍有界补正。必填字段及作者自有交付布局错误沿冻结补填策略交回同一作者。
+受管原件持续保留并直接引用，整理重复副本不授权新实验。
 
 For an already-recorded native format rejection, the existing enabled recovery
 policy can negotiate once only when the complete original stream positively proves
@@ -345,7 +355,7 @@ A completed W screen return with valid required JSON may separately continue the
 original full W task when its exact `work-evidence.json` assessment is `incomplete`.
 This uses the independent automatic permission, original session and exact response,
 outcome and evidence bindings, and shares `max_continues` with early-stop recovery.
-Pure formatting and nomination omissions use output repair; that permission alone
+Required-format and conditional breadth omissions use output repair; that permission alone
 does not authorize scientific work. A repaired valid response can independently
 qualify for work continuation. Valid partial findings, explicit blocks and decision
 handoffs keep their existing route to A. Complete or inapplicable delivery adds no
@@ -370,7 +380,7 @@ Codex home 用精确 ID 执行 `exec resume`，仍沿用原 thread 并再次到�
 已知完成 turn 缺少或给出无效必需输出时，走既有有限输出补填；合法 fragment 保持既有阶段接续语义。
 已完成 W screen 返回的必需 JSON 合法，但精确 `work-evidence.json` 判定仍为 `incomplete` 时，
 可依靠独立自动许可续接原 W 完整任务；沿用原 session，绑定原返回、outcome 和证据快照，
-与提前停止共用 `max_continues`。单纯格式和提名声明缺失走输出补填，该许可本身不授权科学续工；
+与提前停止共用 `max_continues`。必需格式和条件广度声明缺失走输出补填，该许可本身不授权科学续工；
 补成合法返回后可另行符合独立续工条件。有效 partial、明确障碍和 decision 交接仍沿原路交 A；
 完整或不适用的交付判定不追加恢复动作。
 强制 host review 仍优先沿原路交 A。continue 次数或原预算耗尽记录可核验的 partial 出口，

@@ -104,13 +104,18 @@ def _saved(root, step):
 
 
 def node(root, step):
+    from .contracts import read_scientific_output
     root, record, seal, raw = _saved(root, step)
+    try:
+        payload = read_scientific_output(raw)
+    except OSError:
+        raise ValueError('Saved instance document is missing or inaccessible') from None
     if not isinstance(record, str):
         from . import originals
-        return dict(job=originals.source_job(record), payload=_json(raw), seal=seal,
+        return dict(job=originals.source_job(record), payload=payload, seal=seal,
                     result=_json(originals.source_record(record, 'result.json')))
     return dict(job=_json(_path(root, f'jobs/{step:03d}.json')),
-                payload=_json(raw), seal=seal,
+                payload=payload, seal=seal,
                 result=_json(_path(root, record + '/result.json')))
 
 
