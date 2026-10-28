@@ -136,7 +136,7 @@ def science_context(root, job, record, *, permit=None, attempt=None):
     # receipts. They remain scientific originals, never JSON display pages.
     for original in job.get('direct_originals',[]):
         parent=int(Path(original['path']).parts[2]);raw=c.regular(c._execution_raw(root,parent))
-        reported=candidate_refs.public_science_fields(c.read(raw),candidate_refs.for_job(job))
+        reported=candidate_refs.public_science_fields(c.read_scientific_output(raw),candidate_refs.for_job(job))
         name=str(Path(original['path']).parent/'scientific-original.json')
         if c.scientific_projection(reported,name)!=reported:
             paths[name]='source'
@@ -166,7 +166,8 @@ def science_context(root, job, record, *, permit=None, attempt=None):
         source=originals.material_path(root,bound)
         original=dict(bound,source=str(source))
         if kind=='framework':
-            c.write(target,_context_projection(name,c.read(source),references,texts));target.chmod(0o400)
+            reader=c.read_scientific_output if name in {row['path'] for row in job['direct_refs']} else c.read
+            c.write(target,_context_projection(name,reader(source),references,texts));target.chmod(0o400)
         entries.append(dict(kind=kind,source=original,display=(_ref(root,target) if kind=='framework' else
             dict(path=target.relative_to(root).as_posix(),size_bytes=row['size_bytes']))))
     if permit is not None:
@@ -214,8 +215,9 @@ def validate_science_context(root, job, proof):
         else:
             display=_check(root,item['display'])
             name=display.relative_to(directory).as_posix()
+            reader=c.read_scientific_output if name in {row['path'] for row in job['direct_refs']} else c.read
             expected=(candidate_refs.public_fields(c.read(source),references) if item['kind']=='task' else
-                _context_projection(name,c.read(source),references,texts))
+                _context_projection(name,reader(source),references,texts))
             if c.read(display)!=expected:raise ValueError('Author scientific display differs from its exact original')
     return directory
 

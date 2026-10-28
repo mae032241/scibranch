@@ -376,6 +376,8 @@ A 在普通科学正文解释候选准则、修订、证据及代价，selection
 前后散文、多个对象和错误 JSON 仍走有界补正。原始字节不改；封存、历史读取和显示共用
 科学解析器。只有实际规范化时才在 native outcome 记 scientific_output_normalization，
 控制 JSON 继续使用严格读取。
+父节点的 `inputs/parents/<step>/conclusion.json` 可能直接引用带 BOM 或围栏的原始作者文本。
+脚本读取它时须使用相同的窄科学解析规则，不能假定 `json.load` 可直接解析。
 
 标准单命令 `codex` 的 CLI prepare 默认冻结最多两次仅输出补填或原受管执行唤醒，并启用独立的
 有界自动接续策略；在私有策略中绑定原

@@ -577,6 +577,9 @@ JSON still require bounded author repair. The raw bytes remain unchanged; sealin
 historical reads and display use the same scientific parser. Only a normalized
 form adds `scientific_output_normalization` to the native outcome; control JSON
 continues to use its strict reader.
+Parent `inputs/parents/<step>/conclusion.json` may alias those raw authored bytes,
+including a BOM or fence. Programmatic consumers must use the same narrow scientific
+parser rather than assume a directly readable JSON document.
 
 Standard single-command `codex` CLI preparation freezes up to two output-only
 repairs or original managed-execution wakes and a separate bounded automatic-recovery
