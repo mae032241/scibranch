@@ -33,7 +33,7 @@ FRAGMENT_INSTRUCTION = 'Read work/science-resume.json; continue per stage_respon
 
 def render_scientific_request(job, task, intent, *, backend_name, instruction_transport,
         budget_status=None, remaining=None, execution_interface=None, managed_command=None,
-        output_only_wake=False, author=None, final_return=False, startup=False):
+        output_only_wake=False, author=None, final_return=False):
     """Pure rendering of the complete request; no later response-format appends."""
     from . import contracts as c
     formal=bool(job.get('formal_review'))
@@ -70,7 +70,7 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
                 'permissions and delivery qualification still apply.')
         else:
             prompt+=' Soft targets keep accepted work; call limits/permissions stand.'
-            if (job['role'] in {'A','H','W'} and not author and not startup
+            if (job['role'] in {'A','H','W'} and not author
                     and not output_only_wake and not intent.get('output_repair')):
                 before='routing' if job['role'] in {'A','H'} else 'bulk reads/code'
                 prompt+=(' Before '+before+', budget prep/later roles/experiments; '
@@ -104,8 +104,6 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
             'Original calls are read-only; stage_intent=review/decision, never continue. '
             'Assess original goals, evidence and limitations; write only needed artifacts/. ')
         prompt+=json.dumps(author['limits'],separators=(',',':'))
-    if startup:
-        prompt+=' Single final A successor: deliver an existing authorized candidate or finish with unsupported reason; no wait/audit/new work/correction.'
     if instruction_transport=='prompt':prompt=instruction+'\n'+prompt
     return prompt,instruction,schema
 
@@ -130,7 +128,6 @@ def usage(root: Path, *, budget_events=None):
             outcome = record / 'native-outcome.json'
             metadata = read(outcome).get('metering') if outcome.exists() else None
             if metadata is None and observation.exists():metadata = read(observation)
-            value = attempt_usage(record, value=value, metadata=metadata)
             if metadata is not None and metadata.get('coverage') == 'unknown' and step not in unknown:
                 unknown.append(step)
             if (record / 'interruption.json').exists() and not outcome.exists() and step not in unknown:
@@ -139,43 +136,6 @@ def usage(root: Path, *, budget_events=None):
     result=dict(**totals, observed_tokens=totals['input_tokens'] + totals['output_tokens'], unknown_steps=unknown)
     result.update(control_budget.usage_accounting(root,result,events=budget_events))
     return result
-
-
-def attempt_usage(record, *, value=None, metadata=None, intent=None, outcome=None):
-    """Effective attempt consumption, retaining all immutable original bytes.
-
-    Older resumed runners wrote the session terminal rather than its proven
-    delta. Only their exact persisted session/live/terminal equality permits a
-    derived correction; ordinary turn meters and uncertain reports stay intact.
-    Execution chain validation belongs to the caller, as for usage.json itself.
-    Saved display readers can supply their memoized originals without invoking
-    control readers or rereading sealed records.
-    """
-    value = read(record / 'usage.json') if value is None else value
-    if outcome is None:
-        outcome_path = record / 'native-outcome.json'
-        outcome = read(outcome_path) if outcome_path.exists() else {}
-    if metadata is None:
-        metadata = outcome.get('metering')
-    if metadata is None and (record / 'usage-observation.json').exists():
-        metadata = read(record / 'usage-observation.json')
-    if not isinstance(metadata, dict):
-        return value
-    intent = read(record / 'native-intent.json') if intent is None else intent
-    session = intent.get('session') or {}
-    if (type(intent.get('attempt')) is not int or intent['attempt'] <= 0
-            or intent.get('context_mode') == 'new_context'
-            or not session.get('thread_id') or session['thread_id'] != metadata.get('thread_id')
-            or outcome.get('native_backend') != 'codex' or outcome.get('thread_id') != session['thread_id']
-            or not session.get('path') or (outcome.get('native_identity') or {}).get('path') != session['path']
-            or metadata.get('source') != 'turn.completed'
-            or metadata.get('reconciliation') != 'terminal_covers_live'
-            or metadata.get('tokens') != value):
-        return value
-    live = dict(metadata, coverage=metadata.get('live_coverage'), tokens=metadata.get('live_tokens'))
-    return terminal_attempt_tokens(value, live)
-
-
 
 def _complete_reported_tokens(root,step):
     """Strict advisory sample: missing endpoint/coverage never contributes zero."""
@@ -200,7 +160,6 @@ def _complete_reported_tokens(root,step):
         # Do not upgrade that lower bound to a complete sample for a number.
         if metadata.get('reporting_delay_unmeasured') is not False or metadata.get('inflight_usage_unknown') is not False:
             return None,'reporting_delay_unmeasured'
-        value=attempt_usage(record,value=value,metadata=metadata)
         total+=value['input_tokens']+value['output_tokens']
     return (total,None) if accepted else (None,'accepted_attempts_unavailable')
 
@@ -393,11 +352,6 @@ def run_native(root: Path, step: int, attempt=0):
     record.mkdir(parents=True, exist_ok=True)
     intent = read(record / 'native-intent.json')
     final_return = control_budget.final_a_return(root, job, intent)
-    startup = None
-    if intent.get('continuation_kind') == 'startup_successor':
-        from . import startup_recovery
-        startup = startup_recovery.validate_intent(root,job,intent)
-        startup_recovery.require_eligibility(root,step,startup)
     if intent.get('task_ref') != record_ref(job_path):
         raise ValueError('Native execution task changed')
     profile = profiles.validate_intent(settings, job, intent)
@@ -464,7 +418,7 @@ def run_native(root: Path, step: int, attempt=0):
         shared_observed_tokens_remaining=max(0,limits['max_tokens']-budget.get('accounted_tokens',budget['observed_tokens'])))
     if intent.get('budget_slice'):status['node_budget']=intent['budget_slice']['limits']
     remaining=None
-    if attempt and startup is None:
+    if attempt:
         remaining=dict(observed_tokens=max(0,intent['budget_slice']['limits']['max_observed_tokens']-intent['budget_slice']['previous_tokens']),
             active_seconds=max(0.,intent['budget_slice']['limits']['max_seconds']-control_budget._node_duration(root,job,intent,limits)),
             mode='soft_targets',previous_observed_tokens=intent['budget_slice']['previous_tokens'])
@@ -500,7 +454,7 @@ def run_native(root: Path, step: int, attempt=0):
     prompt,role_instruction,response_schema=render_scientific_request(job,task,intent,backend_name=backend.name,
         instruction_transport=backend.instruction_transport,budget_status=status,remaining=remaining,
         execution_interface=interface,managed_command=command,output_only_wake=output_only_wake,
-        author=author,final_return=final_return is not None,startup=startup is not None)
+        author=author,final_return=final_return is not None)
     args=backend.launch(profile,work,pending,schema_path,role_instruction)
     if resume_session is not None:
         args,resume_position=backend.resume(args,profile,work,pending,schema_path,resume_session)
@@ -509,9 +463,6 @@ def run_native(root: Path, step: int, attempt=0):
     env = {**os.environ, 'THIN_HWA_ROLE': job['role'], 'THIN_HWA_WORKSPACE': str(work),
            'THIN_HWA_NATIVE_HOME': str(home), 'THIN_HWA_JOB_MANIFEST': str(job_path)}
     if settings.get('resume_policy') is not None and backend.name == 'codex':env['CODEX_HOME'] = str(home)
-    if startup is not None:
-        env['CODEX_HOME'] = startup['native_home']
-        args[0] = startup['native_program']['path']
     meter_home = home
     if settings.get('resume_policy') is None and standard_native:
         # Raw Codex keeps its inherited credentials/configuration and writes its
@@ -800,7 +751,7 @@ def run_native(root: Path, step: int, attempt=0):
         outcome['final_a_completion'] = control_budget.final_a_receipt(final_return, intent, meter if observed else None, outcome['usage'])
     if attempt and intent.get('context_mode') != 'new_context' and not startup_retry and thread_id != intent['session']['thread_id']:
         stop = outcome['stop_reason'] = 'native_thread_changed'
-    if (settings.get('resume_policy') is not None or intent.get('continuation_kind') in {'author_closeout','startup_successor'}) and process is not None:
+    if (settings.get('resume_policy') is not None or intent.get('continuation_kind') == 'author_closeout') and process is not None:
         outcome['execution_processes'] = {name: record_ref(record / name) for name in ('runner-process.json', 'native-process.json')}
     if intent.get('budget_slice') is not None:
         try:

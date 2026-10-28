@@ -867,7 +867,7 @@ def transition(root, phase, reason, *, operation_context=None):
             _append(root, settings, events, parent, kind='clock', phase=phase, reason=reason)
 
 
-def execution_blocked(root, *, ignore_operation=None, include_managed=True, ignore_recovery=None, ignore_unstarted_action=None, reconciliation=None):
+def execution_blocked(root, *, ignore_operation=None, include_managed=True, ignore_recovery=None):
     """Unknown or live originals prohibit inactive time and amendments."""
     from . import runtime, execution
     settings = contracts.settings(root)
@@ -886,10 +886,6 @@ def execution_blocked(root, *, ignore_operation=None, include_managed=True, igno
     if state['begin'] is not None and state['begin']['stop_reason'] == 'delivery_cleanup_unknown':
         return True  # A read-only resolver can still leave unknown local work.
     for action in state['actions']:
-        if ignore_unstarted_action == action['intent']['action_id']:
-            from . import startup_recovery
-            startup_recovery.unstarted_action(root,action['intent'])
-            continue
         outcome = action['outcome']
         if outcome is not None and not outcome['result']['cleanup_confirmed']:
             return True
@@ -914,13 +910,6 @@ def execution_blocked(root, *, ignore_operation=None, include_managed=True, igno
                     return True
     if any(op != ignore_operation for op in state['unresolved_operations']):
         return True
-    events, _ = _events(root)
-    reconciled = [(next(row for row in events if row['seq'] == event['source_final']['seq']), event['reconciliation_ref'])
-                  for event in events if event['kind'] == 'closeout_resume' and event.get('reconciliation_ref')]
-    if reconciliation is not None:
-        reconciled.append((state['begin'], reconciliation))
-    unsubmitted = {final_reconciliation(root, begin, ref, events, execution=True)['step']
-                   for begin, ref in reconciled}
     from . import fork_runtime
     for step in fork_runtime.local_steps(root, include_native=True):
         try:
@@ -930,8 +919,6 @@ def execution_blocked(root, *, ignore_operation=None, include_managed=True, igno
             binding = contracts.record_ref(root / 'jobs' / f'{step:03d}.json')
             if contracts.read(record / 'native-intent.json')['task_ref'] != binding:
                 return True
-            if step in unsubmitted and record == execution.origin(root, step):
-                continue
             outcome = contracts.read(record / 'native-outcome.json')
             if outcome.get('stop_reason') in {'native_error_unknown', 'cleanup_unknown'}:
                 return True
@@ -1015,18 +1002,10 @@ def usage_accounting(root, meter, *, events=None):
     root = Path(root).resolve()
     if events is None:
         events, _ = _events(root)
-    from . import startup_recovery
-    reconciled = []
-    for permit in (root/'host-recovery/native-startup').glob('[0-9]*.json'):
-        if not permit.stem.isdigit():continue
-        value = startup_recovery.reconciled_original(root,int(permit.stem))
-        reconciled.append(dict(step=value['step'],attempt=0,record=str(Path(value['originals']['intent']['path']).parent.relative_to(root)),
-            provider_model_tokens=0,reconciliation_ref=value['reconciliation']))
     # Missing billing coverage neither invents usage nor grants replay;
     # unresolved execution is checked through its own retained facts.
     return dict(reserved_tokens=0, accounted_tokens=meter['observed_tokens'],
-        reserved_unknown_steps=[], blocking_unknown_steps=[], accounting_basis='observed_lower_bound',
-        **(dict(reconciled_not_submitted_attempts=reconciled) if reconciled else {}))
+        reserved_unknown_steps=[], blocking_unknown_steps=[], accounting_basis='observed_lower_bound')
 
 
 def amend(root, *, max_tokens=None, max_seconds=None, max_steps=None, authorization_note, authorization_statement=None):
@@ -1333,67 +1312,24 @@ def _threshold_raised(events, after_seq):
         or latest.get('after_max_steps',0) > latest.get('before_max_steps',0))
 
 
-def final_reconciliation(root, begin, ref, events, *, execution=False):
-    """Exact host engineering evidence; it neither seals science nor grants a retry."""
-    from . import runtime
-    path = contracts.regular(Path(ref['path']))
-    report = contracts.read(path)
-    if contracts.file_ref(path) != ref or begin is None or begin.get('resume_cursor') is None:
-        raise ValueError('Final reconciliation lost its exact report or pending route')
-    step = begin['first_step']; record = contracts.host_record(contracts.workspace(root, step))
-    claim = next((row for row in events if row['kind'] == 'final_a_return' and row['step'] == step), None)
-    if (begin['mode'] != 'final' or begin['stop_reason'] not in {'token_limit','closeout_reserve_tokens','node_budget_unavailable_tokens'}
-            or claim is None or claim['selection']['accounted_tokens'] < claim['anchor']['shared_limits']['max_tokens']):
-        raise ValueError('Final reconciliation requires the original token-only admission error')
-    paths = dict(final=root/'control-ledger'/f'{begin["seq"]:06d}.json',
-        claim=root/'control-ledger'/f'{claim["seq"]:06d}.json', job=root/'jobs'/f'{step:03d}.json',
-        **{name:record/file for name,file in dict(intent='native-intent.json',outcome='native-outcome.json',
-            runner='runner-process.json',stderr='runner.stderr').items()})
-    if (report.get('provider_submission') != 'not_submitted'
-            or any(not isinstance(report.get(key),str) or not report[key].strip()
-                   for key in ('author','reviewer','source_commit','source_flow'))
-            or report['author'] == report['reviewer']
-            or report.get('originals') != {name:contracts.file_ref(contracts.regular(file)) for name,file in paths.items()}
-            or not isinstance(report.get('metering_sources'),list) or not report['metering_sources']
-            or any(not isinstance(name,str) or not Path(name).is_absolute() for name in report['metering_sources'])):
-        raise ValueError('Independent positive source-flow reconciliation and exact originals are required')
-    if execution:
-        outcome, intent = contracts.read(paths['outcome']), contracts.read(paths['intent'])
-        runner = contracts.read(paths['runner'])
-        if (outcome.get('native_started') is not False or outcome.get('returncode') is not None
-                or outcome.get('stop_reason') != 'native_error_unknown' or outcome.get('thread_id') is not None
-                or outcome.get('terminal_observed') or outcome.get('native_activity_observed')
-                or (outcome.get('budget_slice') or {}).get('observed_tokens') != 0
-                or 'attempt' in intent or intent.get('task_ref') != contracts.record_ref(paths['job'])
-                or (intent.get('budget_slice') or {}).get('final_return') != _event_ref(root,claim)
-                or any((record/name).exists() or (record/name).is_symlink() for name in
-                       ('native-process.json','continuations','usage.json','science-output.json','result.pending.json','result-identity.json'))
-                or contracts.regular(record/'native.jsonl',limit=None).stat().st_size
-                or runner.get('task_ref') != intent['task_ref'] or runtime.process_matches(runner,intent['task_ref'])
-                or not paths['stderr'].read_text().strip()):
-            raise ValueError('Final reconciliation does not prove this exact pre-dispatch failure')
-    return dict(step=step, claim=claim, report=report)
-
-
 def _validate_resume_event(root, event, previous):
+    if 'reconciliation_ref' in event:
+        raise ValueError('FINAL reconciliation rescue events are no longer supported')
     begin = _active_final(previous)
     if (begin is None or begin.get('resume_cursor') is None
             or event.get('source_final') != _event_ref(root,begin)
             or type(event.get('first_step')) is not int or event['first_step'] <= begin['first_step']
-            or not event.get('reconciliation_ref') and not _threshold_raised(previous,begin['seq'])):
+            or not _threshold_raised(previous,begin['seq'])):
         raise ValueError('Normal resume requires an explicit raised threshold and exact final cursor')
     _validate_cursor(root,begin['resume_cursor'],begin['source_cutoff']+1,previous)
-    if event.get('reconciliation_ref'):
-        final_reconciliation(root,begin,event['reconciliation_ref'],previous)
 
 
-def resume_final(root, begin, first_step, *, reconciliation_ref=None):
+def resume_final(root, begin, first_step):
     """Publish normal routing only; admission and quiescence are checked by run."""
     settings = contracts.settings(root)
     with _ledger_writer(root):
         events,parent = _events(root)
         value = dict(kind='closeout_resume', source_final=_event_ref(root,begin), first_step=first_step)
-        if reconciliation_ref is not None:value['reconciliation_ref'] = reconciliation_ref
         # Validate before publication, preserving the original final cycle.
         probe = dict(value,seq=len(events)+1)
         _validate_resume_event(root,probe,events)
@@ -1514,14 +1450,10 @@ def final_a_return(root, job, intent, *, events=None):
         if accepted is not None and accepted['step'] == job['step']:
             raise ValueError('Final A return reference is missing from its original intent')
         return None
-    startup = intent.get('continuation_kind') == 'startup_successor'
     reentry = intent.get('continuation_kind') == 'reentry'
     format_retry = (intent.get('continuation_kind') == 'automatic_recovery'
         and (intent.get('automatic_recovery') or {}).get('format_fallback') is True)
     repair = intent.get('continuation_kind') == 'repair' and isinstance(intent.get('output_repair'),dict) and 'work_repair' not in intent
-    if startup:
-        from . import startup_recovery
-        startup_recovery.validate_intent(root,job,intent)
     expected_anchor = dict(accepted['anchor'], final_return=marker) if accepted is not None else None
     if reentry and accepted is not None:
         # An administrative reattachment completes this same final return.
@@ -1566,8 +1498,8 @@ def final_a_return(root, job, intent, *, events=None):
         # ceilings, task and final-return marker while advancing this call's clock.
         expected_anchor.update({key:intent['budget_slice'].get(key) for key in
             ('boot_id','advance_seconds','previous_tokens','previous_seconds')})
-    if (accepted is None or ('attempt' in intent and not (startup or repair or reentry or format_retry))
-            or intent.get('continuation_kind') is not None and not (startup or repair or reentry or format_retry) or intent.get('step') != job['step']
+    if (accepted is None or ('attempt' in intent and not (repair or reentry or format_retry))
+            or intent.get('continuation_kind') is not None and not (repair or reentry or format_retry) or intent.get('step') != job['step']
             or job['role'] != 'A' or job.get('formal_review') is not None
             or intent.get('task_ref') != accepted['anchor']['task_ref']
             or accepted['step'] != job['step']
@@ -1741,7 +1673,7 @@ def require_final_a_delivery_eligibility(root, decision, binding):
 def _attempt_consumption(root, job, paths, *, automatic_recovery=None, automatic_successor=None):
     """Derive cumulative consumption from exact completed native facts."""
     from . import native
-    tokens, recorded_tokens, seconds = 0, 0, 0.
+    tokens, seconds = 0, 0.
     policy = node_limits(root, job)
     for number, path in enumerate(paths):
         intent = contracts.read(contracts.regular(path / 'native-intent.json'))
@@ -1753,14 +1685,6 @@ def _attempt_consumption(root, job, paths, *, automatic_recovery=None, automatic
             original = dict(budget_slice=saved['budget_slice'])
         else:
             original = contracts.read(contracts.regular(path / 'native-outcome.json'))
-        from . import startup_recovery
-        startup_original = not (path/'usage.json').exists() and number == 0 and startup_recovery.path(root,job['step']).exists()
-        if startup_original:
-            startup_recovery.reconciled_original(root,job['step'])
-            duration = original['budget_slice']['advance_seconds']
-            if duration < seconds:raise ValueError('Reconciled startup time cannot be refunded')
-            seconds = duration
-            continue
         meter = contracts.read(contracts.regular(path / 'usage.json')) if (path/'usage.json').exists() else None
         if meter is None and not interrupted and not native_completion_known(dict(original,stop_reason=None), contracts.settings(root, job)):
             from . import continuation
@@ -1778,28 +1702,19 @@ def _attempt_consumption(root, job, paths, *, automatic_recovery=None, automatic
         # An absent meter contributes no reported tokens to the lower bound;
         # retain its absence and unknown coverage, never publish a zero meter.
         reported = meter or dict(input_tokens=0,cached_input_tokens=0,output_tokens=0)
-        startup = intent.get('continuation_kind') == 'startup_successor'
-        if startup:
-            from . import startup_recovery
-            startup_recovery.validate_intent(root,job,intent)
         report = original.get('budget_slice', {})
         if (meter is not None and native._usage_event(dict(type='turn.completed', usage=meter)) != meter
                 or intent.get('task_ref') != contracts.record_ref(root / 'jobs' / f'{job["step"]:03d}.json')
                 or anchor.get('limits') != policy or anchor.get('role') != job['role']
-                or not startup and (anchor.get('previous_tokens', 0) not in (tokens, recorded_tokens) or anchor.get('previous_seconds', 0.) != seconds)
+                or anchor.get('previous_tokens', 0) != tokens or anchor.get('previous_seconds', 0.) != seconds
                 or bool(report.get('usage_observed')) != (meter is not None) or report.get('limits') != policy
                 or report.get('role') != job['role'] or report.get('dispatches') != number + 1
                 or any(report.get(key) != reported[key] for key in ('input_tokens', 'cached_input_tokens', 'output_tokens'))):
             raise ValueError('Original node usage report or identity changed')
-        effective = native.attempt_usage(path, value=meter) if meter is not None else reported
-        tokens += effective['input_tokens'] + effective['output_tokens']
-        # Validate original report arithmetic against its own accepted prefix.
-        # A historical session-terminal overcount stays in those immutable
-        # receipts; only its independently proven attempt delta is consumed.
-        recorded_tokens = anchor.get('previous_tokens', 0) + reported['input_tokens'] + reported['output_tokens']
+        tokens += reported['input_tokens'] + reported['output_tokens']
         duration = report.get('advance_seconds')
         if (type(duration) not in (int, float) or not math.isfinite(duration) or duration < seconds
-                or report.get('observed_tokens') != recorded_tokens):
+                or report.get('observed_tokens') != tokens):
             raise ValueError('Original cumulative node consumption changed')
         seconds = duration
     return tokens, seconds
@@ -1817,7 +1732,7 @@ def _node_duration(root, job, intent, limits):
     prior_tokens = anchor.get('previous_tokens', 0)
     if type(prior_tokens) is not int or prior_tokens < 0:
         raise ValueError('Invalid original node token consumption')
-    if intent.get('attempt') is not None and intent.get('continuation_kind') != 'startup_successor':
+    if intent.get('attempt') is not None:
         from . import execution
         number = intent['attempt']
         paths = execution.records(root, job['step'])
@@ -1831,14 +1746,7 @@ def _node_duration(root, job, intent, limits):
         # remains a lower bound during runner admission/reporting as at accept.
         original = _attempt_consumption(root, job, paths[:number],
             automatic_successor=accepted if accepted.get('continuation_kind') == 'automatic_recovery' else None)
-        prior_path = paths[number - 1]
-        if (prior_path / 'native-outcome.json').exists():
-            prior_report = contracts.read(prior_path / 'native-outcome.json').get('budget_slice', {})
-        else:
-            from . import continuation
-            prior_report = continuation.interruption(root, job, prior_path)['budget_slice']
-        recorded_prior = prior_report.get('observed_tokens')
-        if prior != original[1] or prior_tokens not in (original[0], recorded_prior):
+        if prior != original[1] or prior_tokens != original[0]:
             raise ValueError('Continuation cannot refund original consumption')
     elif prior_tokens or prior:
         raise ValueError('Initial node cannot invent previous consumption')

@@ -148,7 +148,6 @@ def _node(root, step, job):
 
 
 def _usage(root, numbers, memo=None):
-    from . import native
     totals = dict(input_tokens=0, cached_input_tokens=0, output_tokens=0)
     unknown = []
     for step in numbers:
@@ -165,9 +164,6 @@ def _usage(root, numbers, memo=None):
                 if step not in unknown:
                     unknown.append(step)
             if value is not None:
-                intent = _saved_read(record / 'native-intent.json', cache) or {}
-                value = native.attempt_usage(record, value=value, metadata=metadata,
-                    intent=intent, outcome=outcome)
                 for key in totals:
                     totals[key] += value.get(key, 0)
     observed = totals['input_tokens'] + totals['output_tokens']

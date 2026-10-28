@@ -60,7 +60,7 @@ def complete(root, job, intent, *, unknown=False):
     c.write(record / 'science-output.json', payload)
     accepted = budget.final_a_return(root, job, intent)
     usage = native.usage(root)
-    outcome = dict(returncode=-15 if unknown else 0,
+    outcome = dict(returncode=-15 if unknown else 0, native_started=False,
         stop_reason='token_limit' if unknown else None, cleanup='observed_group_cleaned',
         metering=observation, usage=usage, raw_ref=c.file_ref(record / 'science-output.json'),
         final_a_completion=budget.final_a_receipt(accepted, intent, meter, usage))
@@ -245,14 +245,22 @@ def test_final_completion_requires_exact_receipt_terminal_meter_and_cleanup(orig
 
 
 @pytest.mark.parametrize('name', ['native-outcome.json', 'usage.json'])
-def test_seal_binds_final_receipt_and_usage_bytes(original_final, name):
+def test_seal_validates_final_receipt_and_usage_semantics(original_final, name):
     root, job, intent = original_final
     complete(root, job, intent)
     c.seal_result(root, 2)
     assert c.validate(c.workspace(root, 2))['next_action'] == 'finish'
     path = execution.origin(root, 2) / name
+    # Control references retain paths; JSON formatting does not change facts.
     path.write_bytes(path.read_bytes() + b' ')
-    with pytest.raises(ValueError, match='Final A completion receipt identity changed'):
+    assert c.validate(c.workspace(root, 2))['next_action'] == 'finish'
+    changed = c.read(path)
+    if name == 'native-outcome.json':
+        changed['final_a_completion']['final_overrun']['observed_node_tokens'] += 1
+    else:
+        changed['output_tokens'] += 1
+    c.write(path, changed)
+    with pytest.raises(ValueError, match='Final A completion or overrun receipt changed'):
         c.validate(c.workspace(root, 2))
 
 

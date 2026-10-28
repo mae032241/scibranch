@@ -1732,14 +1732,8 @@ def seal_result(root: Path, step: int):
     raw = regular(raw_path)
     if native_raw_ref != file_ref(raw):
         raise ValueError('Terminal scientific output is unverified or changed')
-    if intent.get('continuation_kind') == 'startup_successor':
-        from .startup_recovery import validate_intent
-        validate_intent(root,job,intent)
     from . import candidate_refs
     value = envelope(job, candidate_refs.control_payload(job,science_payload(raw, job['role'], job['handoff_protocol'], 'selection' in job,**response_options(job)),root=root))
-    if intent.get('continuation_kind') == 'startup_successor' and value.get('next_action') not in {'deliver','finish'}:
-        from .output_repair import OutputRepairRequired
-        raise OutputRepairRequired('invalid_final_action','Return the final conclusion with deliver or an explicit unsubmitted finish; no new scientific turn is authorized.')
     if job['role']=='W':
         from . import managed_wait
         managed_wait.before_seal(root,job,native_record)

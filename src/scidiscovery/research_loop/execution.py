@@ -18,10 +18,6 @@ def proof(record):
         names.append('checkpoint.json')
     if (record / 'stage-end.json').exists():
         names.append('stage-end.json')
-    if not (record/'usage.json').exists() and record.parent.name == 'native-evidence':
-        from . import startup_recovery
-        if startup_recovery.path(record.parents[1],int(record.name)).exists():
-            return startup_recovery.original_proof(record.parents[1],int(record.name))
     return {name: c.record_ref(c.regular(record / name)) for name in names
             if name != 'usage.json' or (record/name).exists()}
 
@@ -123,11 +119,6 @@ def records(root, step):
         original=c.read(c.regular(author_permit))
         author_closeout.require_original_eligibility(root,original)
         verified_authors={1:(author_closeout._ref(root,author_permit),original,original)}
-    from . import startup_recovery
-    startup = startup_recovery.path(root,step).exists()
-    if startup:
-        startup_recovery.reconciled_original(root,step)
-        limit=max(limit,1)
     repairs = 0
     task = c.record_ref(c.regular(root / 'jobs' / f'{step:03d}.json'))
     original_intent = c.read(c.regular(first / 'native-intent.json'))
@@ -146,7 +137,7 @@ def records(root, step):
         output_repair=intent.get('continuation_kind')=='repair' and isinstance(intent.get('output_repair'),dict) and 'work_repair' not in intent
         format_retry=(intent.get('continuation_kind')=='automatic_recovery'
             and (intent.get('automatic_recovery') or {}).get('format_fallback') is True)
-        if (original_intent.get('budget_slice') or {}).get('final_return') is not None and intent.get('continuation_kind') not in {'startup_successor','reentry'} and not (output_repair or format_retry):
+        if (original_intent.get('budget_slice') or {}).get('final_return') is not None and intent.get('continuation_kind') != 'reentry' and not (output_repair or format_retry):
             raise ValueError('Final A return cannot acquire another native attempt')
         if (output_repair or format_retry) and (original_intent.get('budget_slice') or {}).get('final_return') is not None and (intent.get('budget_slice') or {}).get('final_return') != original_intent['budget_slice']['final_return']:
             raise ValueError('Final A output repair must retain its original completion authorization')
@@ -164,16 +155,13 @@ def records(root, step):
         if ((settings.get('resume_policy') or {}).get('output_only') and kind in {'repair','fragment','execution_wake'}
                 and not output_repair and not wake_authorized):
             raise ValueError('Output-only policy cannot authorize scientific continuation')
-        if kind not in {'repair', 'fragment', 'execution_wake','author_closeout','startup_successor','reentry','automatic_recovery'} or kind == 'fragment' and not fragments:
+        if kind not in {'repair', 'fragment', 'execution_wake','author_closeout','reentry','automatic_recovery'} or kind == 'fragment' and not fragments:
             raise ValueError('Native continuation kind differs from its frozen policy')
         if kind == 'automatic_recovery':
             continuation.validate_automatic(root, step, intent, prior_record=result[-1],
                 prior_intents=[c.read(c.regular(item / 'native-intent.json')) for item in result])
         if kind == 'reentry':
             continuation.validate_reentry(root, job, intent, result[-1])
-        if kind == 'startup_successor':
-            if not startup or number != 1:raise ValueError('Only one exact startup successor is authorized')
-            startup_recovery.validate_intent(root,job,intent)
         if kind=='author_closeout':
             if verified_authors is not None:
                 author_closeout.require_intent_eligibility(root,job,intent,verified=verified_authors[number])

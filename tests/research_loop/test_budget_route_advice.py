@@ -44,7 +44,7 @@ def test_budget_planning_uses_existing_observations_once_without_rewriting_scien
     assert all(path.read_bytes()==value for path,value in originals.items())
 
 
-@pytest.mark.parametrize('variant',['output_repair','output_only_wake','author','final','startup'])
+@pytest.mark.parametrize('variant',['output_repair','output_only_wake','author','final'])
 def test_restricted_returns_do_not_suggest_new_budget_planning(tmp_path,variant):
     _,job,task,_=request_scene(tmp_path,'A' if variant=='final' else 'W')
     intent={};options={}
@@ -52,7 +52,6 @@ def test_restricted_returns_do_not_suggest_new_budget_planning(tmp_path,variant)
     elif variant=='output_only_wake':intent=dict(execution_wake=True);options['output_only_wake']=True
     elif variant=='author':options['author']=dict(facts='work/author-closeout-science.json',limits={})
     elif variant=='final':options['final_return']=True
-    else:options['startup']=True
     prompt,_,_=native.render_scientific_request(job,task,intent,backend_name='codex',
         instruction_transport='prompt',**options)
     assert 'budget prep/later roles/experiments' not in prompt

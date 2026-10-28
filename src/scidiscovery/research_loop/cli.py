@@ -124,9 +124,6 @@ def main(argv=None):
             command.add_argument('--ack-correction', help='Exact current published pause trigger ID; permits one nondeferred A cycle')
             command.add_argument('--authorization-note', help='External operator decision; not authentication or a budget amendment')
     amend = commands.add_parser('budget-amend', help='Record an external operator ceiling revision without resetting consumption')
-    reconcile = commands.add_parser('reconcile-final', help='Record exact independent engineering evidence for a mistaken token FINAL; never launch native work')
-    reconcile.add_argument('--root', type=Path, required=True)
-    reconcile.add_argument('--report', type=Path, required=True)
     amend.add_argument('--root', type=Path, required=True)
     amend.add_argument('--max-tokens', type=int)
     amend.add_argument('--max-seconds', type=float)
@@ -135,19 +132,6 @@ def main(argv=None):
     amend.add_argument('--execution-wall-seconds', type=int, help='Explicit cumulative execution ceiling; preserves prior reservations/usage and grants no exact-call permission')
     amend.add_argument('--execution-storage-bytes', type=int, help='Explicit cumulative execution storage ceiling; must accompany --execution-wall-seconds')
     amend.add_argument('--authorization-note', required=True, help='Operator decision for the audit; this text is not authentication')
-    startup = commands.add_parser('native-startup-successor', help='Explicitly authorize the sole first model submission after exact independent startup non-submission reconciliation')
-    startup.add_argument('--root',type=Path,required=True)
-    startup.add_argument('--step',type=int,required=True)
-    startup.add_argument('--reconciliation',type=Path,required=True)
-    startup.add_argument('--reconciliation-ref',type=json.loads,required=True)
-    startup.add_argument('--native-home',type=Path,required=True)
-    startup.add_argument('--authorization-statement',required=True)
-    collector = commands.add_parser('native-startup-collect', help='Collect an existing sealed final A and its exact proven unstarted delivery; never launch native work')
-    collector.add_argument('--root',type=Path,required=True)
-    collector.add_argument('--step',type=int,required=True)
-    collector.add_argument('--reconciliation',type=Path,required=True)
-    collector.add_argument('--reconciliation-ref',type=json.loads,required=True)
-    collector.add_argument('--authorization-statement',required=True)
     author = commands.add_parser('worker-closeout', help='Explicit finite fresh-context author closeout using the exact retained W work')
     author.add_argument('--root', type=Path, required=True)
     author.add_argument('--step', type=int, required=True)
@@ -348,15 +332,6 @@ def main(argv=None):
             result = preparation_recovery.maintain(root, args.step, args.call_id, args.snapshot_token,
                 action=args.action, max_seconds=args.max_seconds, authorization_note=args.authorization_note,
                 unbound_local=args.unbound_local)
-        elif args.command == 'native-startup-collect':
-            from . import startup_recovery
-            result = startup_recovery.collect_delivery(root,args.step,reconciliation=args.reconciliation,
-                reconciliation_ref=args.reconciliation_ref,authorization_statement=args.authorization_statement)
-        elif args.command == 'native-startup-successor':
-            from . import startup_recovery
-            result = startup_recovery.start(root,args.step,reconciliation=args.reconciliation,
-                reconciliation_ref=args.reconciliation_ref,
-                native_home=args.native_home,authorization_statement=args.authorization_statement)
         elif args.command == 'worker-closeout':
             result = controller.worker_closeout(root, args.step, max_tokens=args.max_tokens, max_seconds=args.max_seconds,
                 authorization_note=args.authorization_note,successor=args.successor,
@@ -371,8 +346,6 @@ def main(argv=None):
             result = status(root)
         elif args.command == 'closeout':
             result = controller.closeout(root, export_only=args.export_only)
-        elif args.command == 'reconcile-final':
-            result = controller.reconcile_final(root, args.report)
         elif args.command == 'budget-amend':
             resource_change = args.execution_wall_seconds is not None or args.execution_storage_bytes is not None
             if resource_change and (args.execution_wall_seconds is None or args.execution_storage_bytes is None):
@@ -398,7 +371,7 @@ def main(argv=None):
         print(json.dumps(dict(status='error',error=str(error),**(dict(code=error.code) if hasattr(error, 'code') else {})), ensure_ascii=False))
         return 1
     print(json.dumps(result, ensure_ascii=False))
-    if result.get('status') in {'instance_deleted', 'final_reconciled'}:
+    if result.get('status') == 'instance_deleted':
         return 0
     if args.command == 'execution-preparation-maintain':
         return 0 if result.get('status') in {'partial', 'accepted_unpublished', 'already_published', 'partial_discarded', 'accepted_published'} else 2

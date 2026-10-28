@@ -16,7 +16,7 @@ Legacy retained object paths use UUIDs, without content deduplication or hash ca
 Fork manifest v2 retains this reference contract. Independent archive and whole-instance
 cold checkpoint packages are retired. Only current protocol 27 instances with
 worker/lineage view 1, soft budgets and final-A policy v1 are supported. Earlier
-formats are rejected without compatibility reading, migration or owner reactivation. Read-only Linux mounts protect selected
+formats are rejected without compatibility reading, migration or owner reactivation. One-off engineering rescue commands, their historical execution exceptions and derived correction of old usage receipts are retired. Instances relying on those rescue records are unsupported; current same-session attempt metering, ordinary restart recovery and budget-amendment continuation remain supported. Read-only Linux mounts protect selected
 inputs in the scientific namespace; trusted same-UID code remains a soft boundary,
 without protection against deliberate same-UID rewrites or content-tamper detection.
 

@@ -740,9 +740,7 @@ N1a 已增加本地持久 runner：前台控制器退出后，已接受的原生
 `status` 区分 `prepared / running / native_not_submitted / native_outcome_unsealed / seal_present_unverified / unknown`；
 封存存在仍需 `run` 验证。原生成功但封存失败只重试封存；执行身份丢失、失败或缺量仍不自动重放。
 实际模型提交前再查预算；已确证未提交时记录 `native_not_submitted` 和零用量。
-控制层保留该节点及原意图；预算修订或重试不自动删除这些记录。`--reconciliation-ref` 接收绝对
-path 与精确 size_bytes 的 JSON，以下 1234 是须替换的字节大小示例。独立工程审查以精确原件和正向源码路径证明确未提交模型时，新安装的兼容 runtime 可显式执行 `native-startup-successor --root INSTANCE --step N --reconciliation REPORT --reconciliation-ref '{"path":"/absolute/reconciliation.json","size_bytes":1234}' --native-home ORIGINAL_HOME --authorization-statement STATEMENT`。该入口冻结工程报告及其局限、原调用归属、原权限与最终 A claim，只追加唯一的新上下文 attempt 1；旧失败、unknown 原件、已消费时间和 dispatch 保留。它仅允许同一逻辑最终 A 的首次实际模型提交，不授权新的科学循环或新额度；重复命令沿用同一 attempt：若后继意图已持久化、尚无 runner/native/outcome 任一回执，可沿原授权启动该 attempt；已有任一执行回执则只收集，后继未知时不再提交。空日志、空 thread 或操作者文字本身均不构成未提交证明，既有外部未知效果仍阻断恢复。框架及工具升级不要求保留旧安装；启用正式审查时仍核对原审查合同的科学语义，不迁移审查 verdict 或产生新资格。原有交付资格及提交内必要机械审计保持有效。
-已封存最终 A 后，若独立工程原件以正向调用顺序证明确切原交付 intent 尚未首次调用，可在当前 host runtime 使用 `native-startup-collect --root INSTANCE --step N --reconciliation REPORT --reconciliation-ref '{"path":"/absolute/reconciliation.json","size_bytes":1234}' --authorization-statement STATEMENT`。它追加精确工程核对原件和原操作绑定，只执行已有科学选择的 host 交付与同操作确认，不进入 native 或科学路由。首次实际调用沿用原声明的有限调用时长；原全局消费、失败、unknown 和身份均保留。收集 intent 一旦持久化，重复命令只核对同操作，绝不再次 submit。授权引用校验、当前准入和结果/科学资格校验分开；旧交付/审查合同原件保持不变。
+控制层保留该节点及原意图；预算修订或重试不自动删除这些记录。普通 reentry 或 automatic recovery 已接受意图、尚无任何执行回执时，恢复沿用同一 attempt；已有执行回执则核对原调用，不另起替代调用。
 暂停只阻止新节点，恢复时也允许原已接受节点完成和封存。
 科学角色的 `wait` 仍表示停止等待。W 已接受且同一 external execution 明确 running 时，控制在科学封存前保留原 checkpoint 并进入 `waiting`；默认 `run` 自动监控原 call，终态后 reconcile 并在合格的原会话中续接 W 消费原件，再封存。等待不调用模型、不增加 native dispatch 或 `advance_seconds`，但真实执行的 `waiting_seconds` 仍消耗原授权总运行时限；旧 elapsed 口径继续按总经过时间计量。暂停阻止唤醒的新 native turn，允许核对原终态；控制进程同 boot 重启后从原 waiting 恢复，未知提交不重放。续接仍受原预算/有限次数与冻结 launcher/session 能力约束；能力不足保留 checkpoint 并报告 unavailable。
 
@@ -873,7 +871,7 @@ author closeout 使用本次已验证 permit 的 token 软目标与有限时间�
 不会把原 W 上限当作 author 额度；缺少本次额度时明确标记当前边界不可用。部分只读 author 视图不暴露动态更新，
 以其明确的静态 token 软目标和有限时间为准。提示只能在文件可见且被读取时生效，不是授权、计量原件或科学证据。
 每次请求已报告的全部 input 都计入用量，cached input 已包含在 input 中；未知计量保留覆盖未知，不补造零用量。
-同 session 续接的终态可能报告整个 session 的累计用量；只有原 baseline、实时增量和终态三个计数逐项精确相加时，才按本 attempt 的增量消费，避免重复计入先前请求。已有错误累计回执也只在原 session 身份和这些计数证据一致时派生校正；原 usage、outcome 和 seal 不改写，时间、步数及未知覆盖不退款或清除。
+同 session 续接的终态可能报告整个 session 的累计用量；只有原 baseline、实时增量和终态三个计数逐项精确相加时，才按本 attempt 的增量消费，避免重复计入先前请求。差值在本次调用记录落盘时确定，旧错误累计回执不再派生重计量。原 usage、outcome 和 seal 不改写，时间、步数及未知覆盖不退款或清除。
 运行中请求及报告滞后仍未计量，当前接口没有逐模型请求前的预算准入。
 预算提示缺失或陈旧不授予新额度，也不成为执行拒绝；原身份校验与独立执行授权仍适用。
 提示不能替代运行时边界或证明实际 token 节省。
@@ -896,14 +894,6 @@ A 仍须给出结论和限制，host 明确输出未提交及原因。
 非零退出、清理未知、实际执行或外部提交未知仍不能由此变成成功，须按原身份核对，禁止重放。
 
 同一 FINAL 周期不再启动 W/E、独立科学审查、补正或另一轮 A；原 host 提交内的必要机械资格检查保留。
-旧版若重复计入 session 累计 token，且因此进入 FINAL、最终 A 又在模型提交前因宿主故障失败，可用独立工程对账恢复原待执行路线：
-
-```bash
-scid-research reconcile-final --root /绝对路径/实例 --report /绝对路径/工程对账.json
-```
-
-对账须绑定原 FINAL、最终 A claim/job/intent/outcome、runner 和 traceback，记录独立作者与复核者、原实现版本及证明失败发生在 Popen 前的调用链，并列出重复计量的精确 attempt 目录。控制层核对真实重复差额和当前准入；已提交、仍在执行、存在后继 attempt/交付动作或当前预算不足时拒绝。命令只追加原 `closeout_resume` 和对账记录，暂停推进计时，不调用模型；随后可在网页或 CLI 继续原路线。原失败和未知覆盖保留，时间与步数不退款，不必伪造增额，也不重新调用失败的最终 A。
-
 未知外部操作只对同一原调用核对，不重新提交。实际用量、cached input 一次计量、时间、步数与
 `final_overrun` 完整保留，原共享额度不增加、不退款。单次调用、清理和提交确认的有限时间、
 资源与执行权限仍约束原执行。未配置可选节点预算时，使用原冻结全局 token/时间设置作为最终

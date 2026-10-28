@@ -56,9 +56,7 @@ def contract(root, job=None):
     original=q._read(root, policy['contract'])
     if ({key:value for key,value in original.items() if key!='implementation'} !=
             {key:value for key,value in current.items() if key!='implementation'}):
-        from . import startup_recovery
-        if not startup_recovery.review_contract(root,policy,current):
-            raise q.IntegrityError('Current formal review contract differs from its frozen original')
+        raise q.IntegrityError('Current formal review contract differs from its frozen original')
     return policy['contract']
 
 

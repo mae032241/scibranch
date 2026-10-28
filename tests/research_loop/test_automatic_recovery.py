@@ -311,10 +311,10 @@ def test_known_completed_fragment_or_missing_output_returns_to_existing_flow(tmp
     assert continuation.automatic_decision(root, 1)['action'] == 'none'
 
 
-@pytest.mark.parametrize('scope', ['author_closeout','startup_successor','execution_wake','output_repair','work_repair'])
+@pytest.mark.parametrize('scope', ['author_closeout','execution_wake','output_repair','work_repair'])
 def test_narrow_original_scope_does_not_acquire_full_task_recovery(tmp_path, monkeypatch, scope):
     root, record = arbiter_instance(tmp_path, monkeypatch)
-    original = (dict(continuation_kind=scope) if scope in {'author_closeout','startup_successor','execution_wake'}
+    original = (dict(continuation_kind=scope) if scope in {'author_closeout','execution_wake'}
         else {scope:dict(code='retained_narrow_scope')})
     c.write(record / 'native-intent.json', original)
     assert continuation.automatic_decision(root, 1)['reason'] == 'automatic_recovery_special_scope_unavailable'

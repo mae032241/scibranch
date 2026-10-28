@@ -998,7 +998,7 @@ def leaf_phase(root, source, operation_id, phase, seconds, *, on_process=None, j
 
 
 @owner_effect
-def invoke(root, intent, max_seconds, *, on_process=None, audit_only=False, collection=None):
+def invoke(root, intent, max_seconds, *, on_process=None, audit_only=False):
     """Caller already durably accepted this action; recovered submits never call here."""
     from .protocol import require_current
     require_current(root)
@@ -1017,11 +1017,6 @@ def invoke(root, intent, max_seconds, *, on_process=None, audit_only=False, coll
     if stored['outcome'] is not None:
         return stored['outcome']['result']
     anchor = intent['advance_seconds']
-    if collection is not None:
-        from . import startup_recovery
-        if collection != startup_recovery.collection_dispatch(root,intent):
-            raise ValueError('First delivery dispatch differs from its exact collector intent')
-        anchor = collection['advance_seconds']
     used = budget.snapshot(root)['advance_seconds'] - anchor
     if used < 0:raise ValueError('Delivery action time moved backwards')
     max_seconds = min(max_seconds, intent['max_seconds'] - used)

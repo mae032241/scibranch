@@ -58,7 +58,7 @@ def external_scene(tmp_path, monkeypatch, *, mode='soft', action='deliver', acco
                 mechanism_findings=None, stage_intent='review')
             c.write(record/'science-output.json', payload)
             c.write(record/'usage.json', dict(input_tokens=accounted_worker, cached_input_tokens=2, output_tokens=0))
-            c.write(record/'native-outcome.json', dict(returncode=0, stop_reason=None, usage=native.usage(root),
+            c.write(record/'native-outcome.json', dict(returncode=0, native_started=False, stop_reason=None, usage=native.usage(root),
                 raw_ref=c.file_ref(record/'science-output.json')))
             c.seal_result(root, step)
         monkeypatch.setattr(protocol, 'finish', retained_original)

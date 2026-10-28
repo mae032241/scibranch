@@ -124,7 +124,7 @@ def _completed_work_request(root, step, record, source_attempt, prior_intents):
     job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
     if (job['role'] != 'W' or job.get('formal_review') or job.get('final_only')
             or job.get('purpose') == 'closeout'
-            or any(item.get('continuation_kind') in {'author_closeout','startup_successor','execution_wake'}
+            or any(item.get('continuation_kind') in {'author_closeout','execution_wake'}
                 or item.get('execution_wake')
                 for item in prior_intents)
             or not (record / 'work-evidence.json').exists() or (record / 'stage-end.json').exists()):
@@ -184,7 +184,7 @@ def automatic_decision(root, step):
     original = c.read(c.regular(last / 'native-intent.json'))
     format_outcome = (format_source(root, step, last)
         if not completed and (last / 'native.jsonl').exists() else None)
-    if (original.get('continuation_kind') in {'author_closeout','startup_successor','execution_wake'}
+    if (original.get('continuation_kind') in {'author_closeout','execution_wake'}
             or not completed and (original.get('output_repair')
                 or original.get('work_repair') and original.get('continuation_kind')!='automatic_recovery')):
         return stop('automatic_recovery_special_scope_unavailable')
@@ -261,7 +261,7 @@ def validate_automatic(root, step, intent, *, prior_record=None, prior_intents=N
         work_request=_completed_work_request(root,step,prior_record,intent['attempt']-1,prior_intents)
     if work_request is not None:
         if (outcome.get('terminal_observed') is not True or (prior_record/'stage-end.json').exists()
-                or any(item.get('continuation_kind') in {'author_closeout','startup_successor','execution_wake'}
+                or any(item.get('continuation_kind') in {'author_closeout','execution_wake'}
                     or item.get('execution_wake') for item in prior_intents)):
             raise ValueError('Automatic work recovery cannot reopen a closed or special task')
         expected = native_recovery.work_decision(limits, native_recovery.counters(prior_intents),
@@ -269,7 +269,7 @@ def validate_automatic(root, step, intent, *, prior_record=None, prior_intents=N
         if intent.get('work_repair') != work_request or intent.get('output_repair') is not None:
             raise ValueError('Automatic work recovery differs from its exact original delivery failure')
     elif not format_fallback and (job.get('final_only') or job.get('purpose') == 'closeout'
-            or prior_intent.get('continuation_kind') in {'author_closeout','startup_successor','execution_wake'}
+            or prior_intent.get('continuation_kind') in {'author_closeout','execution_wake'}
             or prior_intent.get('output_repair')
             or prior_intent.get('work_repair') and prior_intent.get('continuation_kind')!='automatic_recovery'
             or intent.get('work_repair') or intent.get('output_repair')
@@ -277,7 +277,7 @@ def validate_automatic(root, step, intent, *, prior_record=None, prior_intents=N
         raise ValueError('Automatic recovery source is not an eligible unfinished task')
     used = native_recovery.counters(prior_intents)
     if format_fallback:
-        if (prior_intent.get('continuation_kind') in {'author_closeout','startup_successor','execution_wake'}
+        if (prior_intent.get('continuation_kind') in {'author_closeout','execution_wake'}
                 or prior_intent.get('output_repair') or prior_intent.get('work_repair')
                 or intent.get('work_repair') or intent.get('output_repair')):
             raise ValueError('Automatic format fallback changed its original scope')
@@ -547,7 +547,7 @@ def _reenter_locked(root, step):
     settings = configuration_updates.for_step(root, step)
     from . import profiles
     original = c.read(c.regular(prior / 'native-intent.json'))
-    if (original.get('continuation_kind') in {'author_closeout','startup_successor'}
+    if (original.get('continuation_kind') == 'author_closeout'
             or original.get('output_repair') or original.get('work_repair')
             or original.get('execution_wake') and (settings.get('resume_policy') or {}).get('output_only')
             or not isinstance(original.get('budget_slice'), dict)):
@@ -571,9 +571,11 @@ def _reenter_locked(root, step):
             advance_seconds=snapshot['advance_seconds'], budget_slice=report,
             processes={name:c.record_ref(prior/name) for name in ('runner-process.json','native-process.json')}))
     saved = interruption(root, job, prior)
+    # Validate the saved prefix against the same persisted attempt meters used
+    # for ordinary continuation admission before publishing a new reentry.
+    tokens, seconds = budget._attempt_consumption(root, job, paths)
     anchor = dict(original['budget_slice'], boot_id=budget.clock_stamp()['boot_id'],
-        advance_seconds=saved['advance_seconds'], previous_tokens=saved['budget_slice']['observed_tokens'],
-        previous_seconds=saved['budget_slice']['advance_seconds'])
+        advance_seconds=saved['advance_seconds'], previous_tokens=tokens, previous_seconds=seconds)
     number = len(paths); record = execution.origin(root, step) / 'continuations' / f'{number:03d}'
     record.mkdir(parents=True, exist_ok=True)
     intent = dict(step=step, attempt=number, continuation_kind='reentry', **profile_binding,
