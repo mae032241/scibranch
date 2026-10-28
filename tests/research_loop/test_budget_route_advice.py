@@ -34,7 +34,21 @@ def test_budget_planning_uses_existing_observations_once_without_rewriting_scien
         instruction_transport=transport,budget_status=status)
     assert prompt.count('Before routing' if role in 'HA' else 'Before bulk reads/code')==1
     assert 'budget prep/later roles/experiments' in prompt
-    assert 'may close with unmet goals' in prompt and 'Index/reuse evidence' in prompt
+    assert 'may close with unmet goals' in prompt and 'Reuse evidence/code' in prompt
+    assert prompt.count(guidance.STAGE_PLANNING[role])==1
+    assert guidance.STAGE_PLANNING[role] not in instruction
+    if role=='A':
+        assert 'first-screen fairness, not total calls' in prompt
+        assert 'zero alone is no denial/H trigger' in prompt
+        assert 'H scope/conditions/limits allow' in prompt
+        assert 'finite continue_w' in prompt
+        assert 'H question/mechanism/constraint changes or an exhausted explicit H call cap' in prompt
+    elif role=='H':
+        assert 'goal, remaining budget and information gain' in prompt
+        assert 'not a default two calls' in prompt and 'within declared bounds' in prompt
+    else:
+        assert 'scientific stall, scope change or actual runtime refusal' in prompt
+        assert 'within the finite stage/permissions' in prompt
     assert 'past/partial advice, no grant; unknown!=0' in prompt
     assert 'cached input once' in prompt and 'Soft targets keep accepted work' in prompt
     assert 'budget prep/later roles/experiments' not in instruction
@@ -44,28 +58,36 @@ def test_budget_planning_uses_existing_observations_once_without_rewriting_scien
     assert all(path.read_bytes()==value for path,value in originals.items())
 
 
-@pytest.mark.parametrize('variant',['output_repair','output_only_wake','author','final'])
+@pytest.mark.parametrize('variant',['output_repair','work_repair','output_only_wake','author','final','closeout','final_only','formal_review'])
 def test_restricted_returns_do_not_suggest_new_budget_planning(tmp_path,variant):
-    _,job,task,_=request_scene(tmp_path,'A' if variant=='final' else 'W')
+    _,job,task,_=request_scene(tmp_path,'A' if variant in {'final','closeout','final_only','formal_review'} else 'W')
     intent={};options={}
     if variant=='output_repair':intent=dict(output_repair=dict(code='json',diagnostic='Return the existing result as JSON.'))
+    elif variant=='work_repair':intent=dict(work_repair=dict(code='missing_work',diagnostic='Complete only the original assignment.'))
     elif variant=='output_only_wake':intent=dict(execution_wake=True);options['output_only_wake']=True
     elif variant=='author':options['author']=dict(facts='work/author-closeout-science.json',limits={})
     elif variant=='final':options['final_return']=True
+    elif variant=='closeout':job['purpose']='closeout'
+    elif variant=='final_only':job['final_only']=True
+    elif variant=='formal_review':
+        job['formal_review']={"subject": "original"}
+        task['review_instruction']='Independently assess the exact original.'
     prompt,_,_=native.render_scientific_request(job,task,intent,backend_name='codex',
         instruction_transport='prompt',**options)
     assert 'budget prep/later roles/experiments' not in prompt
+    assert all(advice not in prompt for advice in guidance.STAGE_PLANNING.values())
     if variant=='final':assert 'Protected FINAL: conclude now; no new role/audit/experiment' in prompt
 
 
 def test_custom_frozen_instruction_is_retained_with_launcher_level_budget_advice(tmp_path):
-    custom={**guidance.DEFAULT,'H':'Retain the exact custom scientific scope and all 25 required runs.'}
+    custom={**guidance.DEFAULT,'H':'Retain all 25 required runs and the final eight unimproved audits. This finite stage permits exactly two calls.'}
     root,job,task,_=request_scene(tmp_path,'H',advice=custom)
     prompt,instruction,_=native.render_scientific_request(job,task,{},backend_name='codex',
         instruction_transport='prompt')
     assert instruction.startswith(custom['H']+'\n') and prompt.startswith(custom['H']+'\n')
     assert c.settings(root)['role_guidance']==custom
     assert prompt.count('Before routing')==1
+    assert prompt.count(guidance.STAGE_PLANNING['H'])==1
 
 
 def test_worker_handoff_distinguishes_final_scientific_response_from_pending_wait(tmp_path):

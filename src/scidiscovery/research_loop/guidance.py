@@ -24,6 +24,15 @@ OPPORTUNITY = {
 }
 
 
+# Current launcher advice is separate from the immutable scientific literal.
+# This plans work only; it never changes H scope or execution admission.
+STAGE_PLANNING = {
+    'H': 'Size finite stages by goal, remaining budget and information gain, not a default two calls; let W iterate within declared bounds.',
+    'A': 'Initial/grant=first-screen fairness, not total calls; zero alone is no denial/H trigger. If H scope/conditions/limits allow, use finite continue_w; revise_h for H question/mechanism/constraint changes or an exhausted explicit H call cap.',
+    'W': 'Iterate registered work within the finite stage/permissions; return for scientific stall, scope change or actual runtime refusal; avoid bulk rereads.',
+}
+
+
 
 def policy(value):
     if not isinstance(value, dict) or set(value) != set(DEFAULT):

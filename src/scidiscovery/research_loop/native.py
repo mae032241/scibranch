@@ -21,6 +21,7 @@ from . import configuration_updates
 from . import budget as control_budget, execution, runtime, search, checkpoint, profiles, backends
 from .output_repair import OutputRepairRequired
 from .native_usage import terminal_attempt_tokens
+from .guidance import STAGE_PLANNING
 from .contracts import (ACTIONS, actions, ROLE_INSTRUCTIONS, record_ref, file_ref, host_record, read,
                         seal_result, workspace, write, NATIVE_TASK_INSTRUCTION, decode_scientific_output)
 
@@ -71,10 +72,11 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
         else:
             prompt+=' Soft targets keep accepted work; call limits/permissions stand.'
             if (job['role'] in {'A','H','W'} and not author
-                    and not output_only_wake and not intent.get('output_repair')):
+                    and not output_only_wake and not intent.get('output_repair') and not intent.get('work_repair')
+                    and job.get('purpose')!='closeout' and not job.get('final_report') and not job.get('final_only')):
                 before='routing' if job['role'] in {'A','H'} else 'bulk reads/code'
                 prompt+=(' Before '+before+', budget prep/later roles/experiments; '
-                    'if short, may close with unmet goals. Index/reuse evidence.')
+                    'if short, may close with unmet goals. Reuse evidence/code. '+STAGE_PLANNING[job['role']])
     if budget_status:prompt+='\n'+json.dumps(budget_status,ensure_ascii=False,separators=(',',':'))
     if execution_interface is not None and not author and not output_only_wake:
         prompt+='\nManaged execution: '+json.dumps(dict(command=managed_command,
