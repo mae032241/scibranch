@@ -558,6 +558,30 @@ class SSHTCADTransport:
             if {item.name for item in descriptors}!={item.name for item in manifest.outputs}|{'tcad_manifest','tcad_log'}:
                 raise RuntimeError('remote results differ from native output inventory')
             records={item.name:item for item in manifest.outputs}
+        publication = {}
+        publication_path = private_directory / 'publication.json'
+        staging_directory = None
+        if science_directory is not None:
+            # Bind the restart record before accepting any Node output. Staging
+            # lives on the destination filesystem, so publication is a rename,
+            # including when the private transfer spool is on another mount.
+            staging_directory = science_directory / ('.tcad-collection-' + run_id)
+            binding_path = private_directory / 'collection-binding.json'
+            binding = {'run_id': run_id, 'output_directory': str(science_directory),
+                'outputs': value['outputs'], 'manifest': manifest.model_dump(mode='json')}
+            if not binding_path.exists() and staging_directory.exists():
+                raise RuntimeError('scientific collection staging already exists without its binding')
+            _write_immutable(binding_path, _canonical(binding))
+            if staging_directory.resolve() != staging_directory:
+                raise ValueError('scientific collection staging must not contain symlinks')
+            staging_directory.mkdir(exist_ok=True, mode=0o700)
+            for stale in staging_directory.glob('.*.download'):
+                if context: context.remaining_seconds()
+                stale.unlink()
+            if publication_path.exists():
+                if publication_path.is_symlink():
+                    raise ValueError('collection publication record must not be a symlink')
+                publication = json.loads(publication_path.read_bytes())
         outputs: list[dict[str, Any]] = []
         seen: set[str] = set()
         completed_bytes = 0
@@ -569,8 +593,28 @@ class SSHTCADTransport:
         pending = []
         ordered = []
         local_names = set()
+        science_targets = {}
+        def identity(path):
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError('collection output must be a regular file')
+            return {'device': info.st_dev, 'inode': info.st_ino,
+                'size_bytes': info.st_size, 'mtime_ns': info.st_mtime_ns}
+
         def completed(descriptor, path, *, reused=False):
             nonlocal completed_bytes
+            target = science_targets.get(descriptor.name)
+            if target is not None:
+                if path != target:
+                    proof = identity(path)
+                    if target.exists():
+                        raise RuntimeError('scientific output appeared before completed transfer')
+                    # A kill after this write, or immediately after rename,
+                    # leaves enough exact same-file evidence to resume.
+                    publication[descriptor.name] = proof
+                    atomic_json(publication_path, publication)
+                    os.replace(path, target)
+                path = target
             outputs.append({**descriptor.model_dump(mode="json"), "local_path": str(path)})
             completed_bytes += descriptor.size_bytes
             progress(phase="verify_cache" if reused else "extract_archive", current_file=None, current_file_bytes=0, reused=reused)
@@ -603,8 +647,17 @@ class SSHTCADTransport:
             if path.is_symlink() or parent.resolve()!=parent:
                 raise ValueError("collection cache must not contain symlinks")
             ordered.append(remote_descriptor.name)
-            if parent==science_directory and path.exists():
-                raise RuntimeError('scientific output already exists without a saved collection')
+            if parent == science_directory:
+                science_targets[remote_descriptor.name] = path
+                if path.exists():
+                    if (not matches(path, remote_descriptor)
+                            or publication.get(remote_descriptor.name) != identity(path)):
+                        raise RuntimeError('scientific output already exists without matching collection progress')
+                    completed(remote_descriptor, path, reused=True)
+                    continue
+                path = staging_directory / name
+                if path.is_symlink():
+                    raise ValueError('scientific staging output must not be a symlink')
             if matches(path, remote_descriptor):
                 completed(remote_descriptor, path, reused=True)
             else:

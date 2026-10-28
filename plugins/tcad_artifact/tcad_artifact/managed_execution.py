@@ -498,14 +498,10 @@ class TCADManagedExecution:
         if external is None:
             return dict(state='unknown', call_id=call)
         directory = self.records.directory(call)
-        if (directory / 'collected.json').exists():
-            receipt = json.loads(e.read(directory / 'tcad-terminal-binding.json'))
-            if (receipt.get('call_id') != call or receipt.get('scope') != self.config['scope']
-                    or receipt.get('prepared_ref') != dict(path=descriptor.local_path,size_bytes=descriptor.size_bytes)
-                    or receipt.get('external_run_id') != external
-                    or execution_status(receipt.get('status', {}).get('state')) not in {'known_success', 'known_failed'}):
-                raise e.IntegrityError('TCAD retained terminal binding changed')
-            self._collection(call,receipt['status']['state'],self.operation_context,verify_outputs=False)
+        if (directory / 'tcad-terminal-binding.json').exists():
+            receipt = self._retained_terminal(call,self.operation_context,verify_outputs=False)
+            if (directory / 'collected.json').exists():
+                self._collection(call,receipt['status']['state'],self.operation_context,verify_outputs=False)
             return receipt['status']
         backend=json.loads(e.read(directory/'tcad-backend-binding.json'))
         if backend != dict(call_id=call,scope=self.config['scope'],
@@ -562,27 +558,23 @@ class TCADManagedExecution:
                 raise e.IntegrityError('TCAD completion omitted an original collected output')
         return value
 
-    def _collection(self, call, native, context=None, *, verify_outputs=True):
+    def _retained_terminal(self, call, context=None, *, verify_outputs=True):
         accepted, prepared = self._bound(call,verify_inputs=False)
         directory = self.records.directory(call)
-        collected = json.loads(e.read(directory / 'collected.json'))
         receipt = json.loads(e.read(directory / 'tcad-terminal-binding.json'))
         backend = json.loads(e.read(directory / 'tcad-backend-binding.json'))
-        if (collected.get('call_id') != call or collected.get('scope') != accepted['scope']
-                or collected.get('mechanism_binding') != accepted.get('mechanism_binding')
-                or collected.get('native_state') != native
-                or receipt.get('call_id') != call or receipt.get('scope') != accepted['scope']
+        native = receipt.get('status', {}).get('state')
+        if (receipt.get('call_id') != call or receipt.get('scope') != accepted['scope']
                 or receipt.get('prepared_ref') != dict(path=prepared.local_path,size_bytes=prepared.size_bytes)
                 or receipt.get('external_run_id') != self.records.external(call)
-                or receipt.get('outputs') != collected.get('outputs')
-                or receipt.get('status', {}).get('state') != native):
-            raise e.IntegrityError('TCAD collection differs from the original terminal state')
+                or execution_status(native) not in {'known_success', 'known_failed'}):
+            raise e.IntegrityError('TCAD retained terminal binding changed')
         if backend != dict(call_id=call, scope=accepted['scope'], prepared_ref=dict(path=prepared.local_path,size_bytes=prepared.size_bytes),
                            external_run_id=self.records.external(call), target=self.target):
             raise e.IntegrityError('TCAD retained backend binding changed')
         outputs = tuple(LocalFileDescriptor.model_validate({key:value for key,value in item.items() if key!='file_stat'})
-            for item in collected['outputs'])
-        for saved,item in zip(collected['outputs'],outputs):
+            for item in receipt['outputs'])
+        for saved,item in zip(receipt['outputs'],outputs):
             if context is not None:
                 context.remaining_seconds()
             if 'file_stat' not in saved and Path(item.local_path) != directory / 'tcad-originals' / item.name:
@@ -591,6 +583,19 @@ class TCADManagedExecution:
                 _verify_proof(dict(path=item.local_path,size_bytes=item.size_bytes,
                     **({'file_stat':saved['file_stat']} if 'file_stat' in saved else {})),context)
         self._inventory(outputs, native, context=context,verify_files=verify_outputs)
+        return receipt
+
+    def _collection(self, call, native, context=None, *, verify_outputs=True):
+        accepted, _ = self._bound(call,verify_inputs=False)
+        directory = self.records.directory(call)
+        collected = json.loads(e.read(directory / 'collected.json'))
+        receipt = self._retained_terminal(call,context,verify_outputs=verify_outputs)
+        if (collected.get('call_id') != call or collected.get('scope') != accepted['scope']
+                or collected.get('mechanism_binding') != accepted.get('mechanism_binding')
+                or collected.get('native_state') != native
+                or receipt.get('outputs') != collected.get('outputs')
+                or receipt.get('status', {}).get('state') != native):
+            raise e.IntegrityError('TCAD collection differs from the original terminal state')
         return collected
 
     @staticmethod
@@ -705,13 +710,23 @@ class TCADManagedExecution:
                 context = permit['context']
                 context.remaining_seconds()
                 if not (directory / 'collected.json').exists():
-                    options={}
-                    if self.config.get('transport')=='command':
-                        from scidiscovery.research_loop.local_experiments import artifact_directory
-                        options['output_directory']=artifact_directory(self.config,call)
-                    outputs = self.adapter.collect_with_budget(self.records.external(call), context=context,**options)
-                    context.remaining_seconds()
-                    self._retain(call, outputs, details, context)
+                    if (directory / 'tcad-terminal-binding.json').exists():
+                        # The immutable receipt is published before collected.
+                        # Resume that exact evidence without redownloading a
+                        # manifest or replacing its inode/status observation.
+                        receipt = self._retained_terminal(call,context)
+                        details = receipt['status']
+                        context.remaining_seconds()
+                        self.records.publish(call, 'collected.json', dict(
+                            native_state=details['state'], outputs=receipt['outputs']))
+                    else:
+                        options={}
+                        if self.config.get('transport')=='command':
+                            from scidiscovery.research_loop.local_experiments import artifact_directory
+                            options['output_directory']=artifact_directory(self.config,call)
+                        outputs = self.adapter.collect_with_budget(self.records.external(call), context=context,**options)
+                        context.remaining_seconds()
+                        self._retain(call, outputs, details, context)
                 collected = self._collection(call, details['state'], context)
                 context.remaining_seconds()
             except SharingUnsupported:

@@ -534,6 +534,9 @@ def _status(config, run_id):
 def _status_value(config, run_id):
     run_dir = _run_dir(config, run_id)
     submitted = _read_regular(os.path.join(run_dir, "submitted_at")).decode("ascii").strip()
+    orphan_running = False
+    if not os.path.isfile(os.path.join(run_dir, "done")):
+        orphan_running = _reconcile_worker(config, run_dir)
     done = os.path.isfile(os.path.join(run_dir, "done"))
     if done:
         manifest = json.loads(_read_regular(os.path.join(run_dir, "output_manifest.json"), config["runner"]["max_manifest_bytes"]).decode("utf-8"))
@@ -554,7 +557,7 @@ def _status_value(config, run_id):
             "done": False,
         }
     pid = _read_pid(run_dir)
-    if pid is not None and _alive(pid):
+    if orphan_running or (pid is not None and _alive(pid)):
         return {
             "run_id": run_id,
             "state": "running" if os.path.isfile(os.path.join(run_dir, "running")) else "accepted",
@@ -596,18 +599,20 @@ def _cancel(config, run_id):
     marker = os.path.join(run_dir, "cancel_requested")
     if not os.path.exists(marker):
         _write_new(marker, (_timestamp() + "\n").encode("ascii"), 0o440)
-    return {
-        "run_id": run_id,
-        "state": "cancelling",
-        "accepted_at": _read_regular(
-            os.path.join(run_dir, "submitted_at")
-        ).decode("ascii").strip(),
-        "exit_code": None,
-        "done": False,
-    }
+    return _status(config, run_id)
 
 
 def _run_worker(config, run_dir):
+    # The lease covers startup, solver launch and final publication. A reader
+    # must hold this same lease before repairing a stopped worker's run.
+    with open(os.path.join(run_dir, "worker.lock"), "a+") as lease:
+        fcntl.flock(lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        worker = {"worker": _process_identity(os.getpid()), "solver": None}
+        _write_new(os.path.join(run_dir, "worker.json"), _canonical(worker), 0o440)
+        return _run_worker_owned(config, run_dir, worker)
+
+
+def _run_worker_owned(config, run_dir, worker):
     runtime = json.loads(_read_regular(os.path.join(run_dir, "runtime.json")).decode("utf-8"))
     _write_new(os.path.join(run_dir, "pid"), (str(os.getpid()) + "\n").encode("ascii"), 0o440)
     _write_new(os.path.join(run_dir, "running"), b"", 0o440)
@@ -641,6 +646,11 @@ def _run_worker(config, run_dir):
         with open(os.path.join(run_dir, "worker.log"), "wb") as log:
             if os.path.isfile(os.path.join(run_dir, "cancel_requested")):
                 raise _Cancelled("cancelled_before_launch")
+            # A kill during Popen has no safe same-boot absence proof. Preserve
+            # that uncertainty until a solver identity or a later boot resolves it.
+            worker["solver"] = "launching"
+            worker["solver_deadline_monotonic"] = time.monotonic() + runtime["limits"]["wall_time_seconds"]
+            _atomic_write(os.path.join(run_dir, "worker.json"), _canonical(worker), 0o440)
             process = subprocess.Popen(
                 [runtime["executable"]] + runtime["arguments"],
                 cwd=os.path.join(run_dir, "work"),
@@ -651,6 +661,8 @@ def _run_worker(config, run_dir):
                 preexec_fn=lambda: _limits(runtime["limits"]),
                 start_new_session=True,
             )
+            worker["solver"] = _process_identity(process.pid)
+            _atomic_write(os.path.join(run_dir, "worker.json"), _canonical(worker), 0o440)
             _write_new(os.path.join(run_dir, "solver_pid"), (str(process.pid) + "\n").encode("ascii"), 0o440)
             exit_code = _wait(process, runtime, run_dir, usage)
         solver_exit_code = exit_code
@@ -1095,7 +1107,7 @@ def _logical_storage_bytes(run_dir, entries, expected, check=None):
     originals = {item["relative_path"]: item["size_bytes"] for item in entries}
     total = sum(originals.values())
     work = os.path.join(str(run_dir), "work")
-    control = {"job.json", "runtime.json", "submitted_at", "started_at", "pid", "solver_pid", "launcher_pid", "running", "done", "status", "output_manifest.json", "cancel_requested"}
+    control = {"job.json", "runtime.json", "submitted_at", "started_at", "pid", "solver_pid", "launcher_pid", "running", "done", "status", "output_manifest.json", "cancel_requested", "worker.json", "worker.lock"}
     for directory, dirs, files in os.walk(str(run_dir), followlinks=False):
         if check is not None:
             check()
@@ -1232,6 +1244,131 @@ def _read_pid(run_dir):
         except (IOError, OSError, ValueError):
             pass
     return None
+
+
+def _boot_id():
+    return _read_regular("/proc/sys/kernel/random/boot_id", 128).decode("ascii").strip()
+
+
+def _process_record(pid):
+    raw = _read_regular("/proc/%s/stat" % pid, 4096).decode("ascii")
+    fields = raw[raw.rindex(")") + 2:].split()
+    return fields[0], fields[19]
+
+
+def _process_identity(pid):
+    _, started = _process_record(pid)
+    return {"pid": pid, "boot_id": _boot_id(), "start_time": started}
+
+
+def _identity_state(identity):
+    if (not isinstance(identity, dict) or set(identity) != {"pid", "boot_id", "start_time"}
+            or type(identity["pid"]) is not int or identity["pid"] <= 0
+            or not isinstance(identity["boot_id"], str) or not identity["boot_id"]
+            or not isinstance(identity["start_time"], str) or not identity["start_time"].isdigit()):
+        raise RuntimeError("remote worker process identity is invalid")
+    if identity["boot_id"] != _boot_id():
+        return "stopped"
+    try:
+        state, started = _process_record(identity["pid"])
+    except FileNotFoundError:
+        return "stopped"
+    if started != identity["start_time"] or state in ("Z", "X"):
+        return "stopped"
+    return "alive"
+
+
+def _solver_state(identity):
+    state = _identity_state(identity)
+    if identity["boot_id"] != _boot_id():
+        return "stopped"
+    try:
+        os.killpg(identity["pid"], 0)
+    except ProcessLookupError:
+        return state
+    try:
+        _, started = _process_record(identity["pid"])
+    except FileNotFoundError:
+        # A group can outlive its leader. Its original PGID cannot be reused
+        # while the group still exists and there is no process with that PID.
+        return "alive"
+    if started != identity["start_time"]:
+        raise RuntimeError("remote solver process group identity is uncertain")
+    return "alive"
+
+
+def _reconcile_worker(config, run_dir):
+    """Finish only this accepted local worker, with positive stop evidence.
+
+    Missing startup facts remain uncertain. Neither a timeout nor a missing PID
+    by itself proves that an external submission never happened.
+    """
+    with open(os.path.join(run_dir, "worker.lock"), "a+") as lease:
+        try:
+            fcntl.flock(lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        if os.path.isfile(os.path.join(run_dir, "done")):
+            return False
+        try:
+            worker = json.loads(_read_regular(os.path.join(run_dir, "worker.json"), 4096).decode("utf-8"))
+        except FileNotFoundError:
+            return False
+        identity = worker["worker"]
+        if _identity_state(identity) != "stopped":
+            return False
+        rebooted = identity["boot_id"] != _boot_id()
+        solver = worker["solver"]
+        cancelled = os.path.isfile(os.path.join(run_dir, "cancel_requested"))
+        wall_expired = False
+        if not rebooted and solver == "launching":
+            raise RuntimeError("remote worker stopped during uncertain solver launch")
+        if not rebooted and solver is not None and _solver_state(solver) == "alive":
+            deadline = worker.get("solver_deadline_monotonic")
+            wall_expired = (type(deadline) in (int, float) and deadline >= 0
+                            and time.monotonic() >= deadline)
+            if not cancelled and not wall_expired:
+                return True
+            # Only a positively identified orphan session may be signalled.
+            # This bounded cancellation never launches another worker or solver.
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                if _solver_state(solver) != "alive":
+                    break
+                try:
+                    os.killpg(solver["pid"], sig)
+                except ProcessLookupError:
+                    break
+                deadline = time.monotonic() + config["runner"]["terminate_grace_seconds"]
+                while _solver_state(solver) == "alive" and time.monotonic() < deadline:
+                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+            if _solver_state(solver) == "alive":
+                return True
+        manifest_path = os.path.join(run_dir, "output_manifest.json")
+        if os.path.exists(manifest_path):
+            # Worker finalization may have stopped between its atomic manifest
+            # publication and done. Preserve the exact original terminal facts.
+            manifest = json.loads(_read_regular(manifest_path, config["runner"]["max_manifest_bytes"]).decode("utf-8"))
+            if (manifest.get("terminal_state") not in ("succeeded", "failed", "cancelled")
+                    or type(manifest.get("exit_code")) is not int
+                    or not isinstance(manifest.get("outputs"), list)):
+                raise RuntimeError("remote worker terminal manifest is invalid")
+        else:
+            started = os.path.join(run_dir, "started_at")
+            started_at = (_read_regular(started, 128).decode("ascii").strip() if os.path.exists(started)
+                          else _read_regular(os.path.join(run_dir, "submitted_at"), 128).decode("ascii").strip())
+            error = "wall_time_exceeded" if wall_expired else "remote_worker_lost"
+            manifest = {"completed_at": _timestamp(), "error": error,
+                "exit_code": 124 if wall_expired else 130 if cancelled else 99,
+                "outputs": [], "solver_exit_code": None,
+                "collection_errors": ["remote_worker_lost"], "started_at": started_at,
+                "terminal_state": "cancelled" if cancelled and not wall_expired else "failed", "resource_usage": {}}
+            _atomic_write(manifest_path, _canonical(manifest), 0o440)
+        _atomic_write(os.path.join(run_dir, "status"), (str(manifest["exit_code"]) + "\n").encode("ascii"), 0o440)
+        if not os.path.exists(os.path.join(run_dir, "worker.log")):
+            _write_new(os.path.join(run_dir, "worker.log"), b"remote_worker_lost\n", 0o440)
+        _unlink(os.path.join(run_dir, "running"))
+        _write_new(os.path.join(run_dir, "done"), b"", 0o440)
+        return False
 
 
 def _alive(pid):

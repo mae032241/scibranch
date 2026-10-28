@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import uuid
 from types import SimpleNamespace
@@ -262,3 +263,160 @@ def test_worker_recovery_and_finalization_observe_collection_stop(tmp_path, monk
         assert "collection_time_exceeded" in manifest["error"] + ";".join(manifest["collection_errors"])
     if stage == "diagnostic":
         assert [item["relative_path"] for item in manifest["outputs"]] == ["output.txt"]
+
+
+def _stopped_worker_fixture(tmp_path, *, rebooted=False):
+    config, submissions = _submission_fixture(tmp_path)
+    job = json.loads(Path(submissions[0]['local_path']).read_bytes())
+    run_id = 'run_' + job['request_id']
+    root = Path(config['result_root']) / run_id
+    (root / 'work').mkdir(parents=True)
+    (root / 'submission.json').write_bytes(runner._canonical(job))
+    (root / 'submitted_at').write_text('2026-10-28T00:00:00Z')
+    (root / 'started_at').write_text('2026-10-28T00:00:01Z')
+    (root / 'running').touch()
+    identity = runner._process_identity(os.getpid())
+    if rebooted:
+        identity['boot_id'] = 'previous-boot'
+    else:
+        # Positive PID-reuse evidence, even though that numeric PID is alive.
+        identity['start_time'] = str(int(identity['start_time']) + 1)
+    (root / 'worker.json').write_text(json.dumps(dict(worker=identity, solver=None)))
+    return config, submissions, run_id, root
+
+
+@pytest.mark.parametrize('rebooted', [False, True])
+@pytest.mark.parametrize('cancelled', [False, True])
+def test_status_reconciles_exact_stopped_worker_and_releases_slot(tmp_path, monkeypatch, rebooted, cancelled):
+    config, submissions, run_id, root = _stopped_worker_fixture(tmp_path, rebooted=rebooted)
+    if rebooted:
+        worker = json.loads((root / 'worker.json').read_bytes())
+        worker['solver'] = dict(worker['worker'])
+        (root / 'worker.json').write_text(json.dumps(worker))
+    if cancelled:
+        (root / 'cancel_requested').touch()
+    state = runner._lookup_submission(config, run_id[4:])
+    assert state['found'] is True and state['run_id'] == run_id
+    assert state['state'] == ('cancelled' if cancelled else 'failed')
+    assert state['done'] is True and state['consumed_budget'] is not None
+    assert runner._retire_submission(config, run_id[4:])['found'] is True
+    collected = runner._collect(config, run_id)
+    assert {item['name'] for item in collected['outputs']} == {'tcad_log', 'tcad_manifest'}
+    assert json.loads((root / 'output_manifest.json').read_bytes())['error'] == 'remote_worker_lost'
+    assert not (root / 'running').exists()
+    launches = []
+    def next_launch(*args, **kwargs):
+        launches.append(args)
+        raise OSError('next original launch reached')
+    monkeypatch.setattr(runner.subprocess, 'Popen', next_launch)
+    with pytest.raises(OSError, match='next original launch reached'):
+        runner._submit(config, submissions[1])
+    assert len(launches) == 1
+
+
+def test_stopped_worker_completes_existing_terminal_manifest_without_rewriting(tmp_path):
+    config, _, run_id, root = _stopped_worker_fixture(tmp_path)
+    manifest = dict(started_at='2026-10-28T00:00:01Z', completed_at='2026-10-28T00:00:02Z',
+        terminal_state='succeeded', exit_code=0, solver_exit_code=0,
+        outputs=[], error='', collection_errors=[], resource_usage={})
+    raw = json.dumps(manifest, indent=2).encode()
+    (root / 'output_manifest.json').write_bytes(raw)
+    assert runner._status(config, run_id)['state'] == 'succeeded'
+    assert (root / 'output_manifest.json').read_bytes() == raw
+    assert (root / 'done').is_file()
+
+
+def test_uncertain_solver_launch_keeps_original_run_reserved(tmp_path):
+    config, _, run_id, root = _stopped_worker_fixture(tmp_path)
+    worker = json.loads((root / 'worker.json').read_bytes())
+    worker['solver'] = 'launching'
+    (root / 'worker.json').write_text(json.dumps(worker))
+    with pytest.raises(RuntimeError, match='uncertain solver launch'):
+        runner._status(config, run_id)
+    with pytest.raises(RuntimeError, match='uncertain solver launch'):
+        runner._cancel(config, run_id)
+    assert not (root / 'done').exists()
+
+
+def test_stopped_solver_does_not_turn_later_collection_loss_into_wall_timeout(tmp_path):
+    config, _, run_id, root = _stopped_worker_fixture(tmp_path)
+    worker = json.loads((root / 'worker.json').read_bytes())
+    worker['solver'] = dict(pid=2**30, boot_id=runner._boot_id(), start_time='1')
+    worker['solver_deadline_monotonic'] = time.monotonic() - 1
+    (root / 'worker.json').write_text(json.dumps(worker))
+    assert runner._status(config, run_id)['state'] == 'failed'
+    assert json.loads((root / 'output_manifest.json').read_bytes())['error'] == 'remote_worker_lost'
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('completion', ['cancel', 'wall_deadline'])
+def test_dead_worker_live_solver_is_observed_then_stopped_under_same_run(tmp_path, completion):
+    """Real lease death and orphan process-group cancellation; no solver/SSH."""
+    config, _, run_id, root = _stopped_worker_fixture(tmp_path)
+    (root / 'worker.json').unlink()
+    config['runner']['terminate_grace_seconds'] = 0.5
+    solver = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                              start_new_session=True)
+    worker = None
+    reaper = None
+    program = r'''
+import json, os, runpy, signal, sys
+r = runpy.run_path(sys.argv[1])
+def held(config, directory, worker):
+    worker['solver'] = json.loads(sys.argv[3])
+    worker['solver_deadline_monotonic'] = __import__('time').monotonic() + float(sys.argv[4])
+    r['_atomic_write'](os.path.join(directory, 'worker.json'), r['_canonical'](worker), 0o440)
+    r['_write_new'](os.path.join(directory, 'pid'), (str(os.getpid()) + '\n').encode(), 0o440)
+    r['_write_new'](os.path.join(directory, 'ready'), b'', 0o440)
+    signal.pause()
+r['_run_worker'].__globals__['_run_worker_owned'] = held
+r['_run_worker']({}, sys.argv[2])
+'''
+    try:
+        solver_identity = runner._process_identity(solver.pid)
+        original = json.loads((root / 'submission.json').read_bytes())
+        worker = subprocess.Popen([sys.executable, '-c', program, runner.__file__, str(root),
+                                   json.dumps(solver_identity), str(original['limits']['wall_time_seconds'])],
+                                  start_new_session=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        deadline = time.monotonic() + 3
+        while not (root / 'ready').exists() and time.monotonic() < deadline:
+            assert worker.poll() is None
+            time.sleep(0.01)
+        assert (root / 'ready').is_file()
+        # A live lease prevents any concurrent terminal repair.
+        assert runner._status(config, run_id)['state'] == 'running'
+        worker.kill()
+        worker.communicate(timeout=3)
+        assert runner._status(config, run_id)['state'] == 'running'
+        assert solver.poll() is None, 'status unexpectedly killed the orphan solver'
+        assert not (root / 'done').exists()
+        # This test owns the orphan and can reap it after cancellation; the
+        # runner itself never mistakes an extant zombie group for stop proof.
+        reaper = threading.Thread(target=solver.wait, kwargs=dict(timeout=3))
+        reaper.start()
+        if completion == 'cancel':
+            result = runner._cancel(config, run_id)
+        else:
+            # The original accepted deadline, rather than a new execution or
+            # user cancellation, authorizes stopping this identified orphan.
+            record = json.loads((root / 'worker.json').read_bytes())
+            time.sleep(max(0, record['solver_deadline_monotonic'] - time.monotonic()) + 0.02)
+            result = runner._status(config, run_id)
+        reaper.join(timeout=3)
+        assert result['state'] == ('cancelled' if completion == 'cancel' else 'failed')
+        assert result['done'] is True
+        manifest = json.loads((root / 'output_manifest.json').read_bytes())
+        assert manifest['error'] == ('remote_worker_lost' if completion == 'cancel' else 'wall_time_exceeded')
+        assert solver.returncode is not None
+        assert runner._lookup_submission(config, run_id[4:])['run_id'] == run_id
+        assert runner._collect(config, run_id)['run_id'] == run_id
+    finally:
+        if worker is not None and worker.poll() is None:
+            worker.kill()
+            worker.communicate(timeout=3)
+        if solver.poll() is None:
+            os.killpg(solver.pid, signal.SIGKILL)
+            solver.wait(timeout=3)
+        if reaper is not None:
+            reaper.join(timeout=3)
