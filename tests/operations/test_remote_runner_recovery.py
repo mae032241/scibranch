@@ -3,6 +3,7 @@ import io
 import json
 from pathlib import Path
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -48,6 +49,132 @@ def _submission_fixture(tmp_path):
         path.write_bytes(runner._canonical(job))
         submissions.append(runner._descriptor(identity, str(path), "application/json"))
     return config, submissions
+
+
+def _launchable_run_fixture(tmp_path, monkeypatch):
+    config, submissions = _submission_fixture(tmp_path)
+    job = json.loads(Path(submissions[0]["local_path"]).read_bytes())
+    job["arguments"] = ["-c", "with open('executions', 'a') as out: out.write('run\\n')"]
+    path = tmp_path / "launchable.json"
+    path.write_bytes(runner._canonical(job))
+    descriptor = runner._descriptor("launchable", str(path), "application/json")
+    # Prepare the actual accepted original without launching until the barrier.
+    with monkeypatch.context() as patch:
+        patch.setattr(runner.subprocess, "Popen", lambda *a, **k: SimpleNamespace(pid=os.getpid()))
+        accepted = runner._submit(config, descriptor)
+    return config, descriptor, accepted["run_id"], Path(config["result_root"]) / accepted["run_id"]
+
+
+_CONTENDED_WORKER_PROGRAM = r'''
+import fcntl, json, runpy, sys
+r = runpy.run_path(sys.argv[1])
+real_flock = fcntl.flock
+def observed_flock(fd, operation):
+    # Prove that the other process really owns this lease before reporting
+    # startup's requested mode. No scheduling delay can turn this into no race.
+    try:
+        real_flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        pass
+    else:
+        raise AssertionError('worker did not encounter the held lease')
+    print(json.dumps({'contended': True, 'blocking': not bool(operation & fcntl.LOCK_NB)}), flush=True)
+    return real_flock(fd, operation)
+fcntl.flock = observed_flock
+raise SystemExit(r['_run_worker']({}, sys.argv[2]))
+'''
+
+
+def _read_process_barrier(child):
+    assert select.select([child.stdout], [], [], 3)[0], "child did not reach its barrier"
+    line = child.stdout.readline()
+    assert line, "child exited before its barrier"
+    return json.loads(line)
+
+
+@pytest.mark.process_e2e
+def test_query_lease_before_worker_start_waits_then_completes_original(tmp_path, monkeypatch):
+    """The real reconciliation lease must delay startup without losing it."""
+    config, descriptor, run_id, root = _launchable_run_fixture(tmp_path, monkeypatch)
+    real_read = runner._read_regular
+    children = []
+
+    def held_query(path, *args, **kwargs):
+        if path == str(root / "worker.json") and not children:
+            # _reconcile_worker calls this only after acquiring worker.lock.
+            child = subprocess.Popen(
+                [sys.executable, "-c", _CONTENDED_WORKER_PROGRAM, runner.__file__, str(root)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            children.append(child)
+            assert _read_process_barrier(child) == {"contended": True, "blocking": True}
+            assert child.poll() is None
+            assert not (root / "worker.json").exists()
+            assert not (root / "pid").exists()
+            assert not (root / "work" / "executions").exists()
+        return real_read(path, *args, **kwargs)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(runner, "_read_regular", held_query)
+            assert runner._status(config, run_id)["run_id"] == run_id
+        stdout, stderr = children[0].communicate(timeout=5)
+        assert children[0].returncode == 0, (stdout, stderr)
+        assert (root / "work" / "executions").read_text() == "run\n"
+        worker_raw = (root / "worker.json").read_bytes()
+        manifest_raw = (root / "output_manifest.json").read_bytes()
+        assert runner._lookup_submission(config, run_id[4:])["state"] == "succeeded"
+        assert runner._collect(config, run_id)["run_id"] == run_id
+        assert runner._submit(config, descriptor)["run_id"] == run_id
+        assert (root / "worker.json").read_bytes() == worker_raw
+        assert (root / "output_manifest.json").read_bytes() == manifest_raw
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=3)
+
+
+@pytest.mark.process_e2e
+def test_duplicate_worker_waits_without_reexecuting_original(tmp_path, monkeypatch):
+    """A queued second worker must not overwrite the first worker's identity."""
+    config, descriptor, run_id, root = _launchable_run_fixture(tmp_path, monkeypatch)
+    held_worker_program = r'''
+import json, runpy, select, sys
+r = runpy.run_path(sys.argv[1])
+owned = r['_run_worker_owned']
+def held(config, directory, worker):
+    print(json.dumps({'owned': True}), flush=True)
+    if not select.select([sys.stdin.buffer], [], [], 5)[0] or sys.stdin.buffer.read(1) != b'x':
+        raise AssertionError('worker barrier closed or timed out')
+    return owned(config, directory, worker)
+r['_run_worker'].__globals__['_run_worker_owned'] = held
+raise SystemExit(r['_run_worker']({}, sys.argv[2]))
+'''
+    children = []
+    try:
+        first = subprocess.Popen([sys.executable, "-c", held_worker_program, runner.__file__, str(root)],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        children.append(first)
+        assert _read_process_barrier(first) == {"owned": True}
+        original_identity = json.loads((root / "worker.json").read_bytes())["worker"]
+        second = subprocess.Popen([sys.executable, "-c", _CONTENDED_WORKER_PROGRAM, runner.__file__, str(root)],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        children.append(second)
+        assert _read_process_barrier(second) == {"contended": True, "blocking": True}
+        stdout, stderr = first.communicate(b"x", timeout=5)
+        assert first.returncode == 0, (stdout, stderr)
+        stdout, stderr = second.communicate(timeout=5)
+        assert second.returncode != 0
+        assert b"file already exists" in stderr
+        assert (root / "work" / "executions").read_text() == "run\n"
+        assert json.loads((root / "worker.json").read_bytes())["worker"] == original_identity
+        assert runner._submit(config, descriptor)["run_id"] == run_id
+        assert runner._status(config, run_id)["state"] == "succeeded"
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=3)
 
 
 @pytest.mark.process_e2e

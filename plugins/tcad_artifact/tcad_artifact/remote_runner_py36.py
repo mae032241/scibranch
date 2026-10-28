@@ -606,7 +606,10 @@ def _run_worker(config, run_dir):
     # The lease covers startup, solver launch and final publication. A reader
     # must hold this same lease before repairing a stopped worker's run.
     with open(os.path.join(run_dir, "worker.lock"), "a+") as lease:
-        fcntl.flock(lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # A status reader may briefly own the lease before startup. Wait for
+        # that reader instead of losing the accepted worker before its identity
+        # is published. The immutable worker.json still fences duplicate starts.
+        fcntl.flock(lease.fileno(), fcntl.LOCK_EX)
         worker = {"worker": _process_identity(os.getpid()), "solver": None}
         _write_new(os.path.join(run_dir, "worker.json"), _canonical(worker), 0o440)
         return _run_worker_owned(config, run_dir, worker)
