@@ -1999,18 +1999,18 @@ def _accepted_failure(config,call_id,error,operation,*,operation_started=True):
     category=('IntegrityError' if integrity else 'UnsupportedExecution' if unsupported else
         'ConcurrentExecution' if isinstance(error,(ConcurrentExecution,common.ConcurrentExecution)) else
         'ReviewRequired' if review else 'TimeoutError' if isinstance(error,TimeoutError) else
-        'OSError' if isinstance(error,OSError) else 'provider_error')
+        'OSError' if isinstance(error,OSError) else 'provider_error' if operation_started else 'preflight_error')
     # errno is host-defined; provider messages, destinations and exception class
     # names are not public diagnostics. Retain their complete chain privately.
     if isinstance(error,OSError) and type(error.errno) is int and error.errno in errno.errorcode:
         category+=f' ({errno.errorcode[error.errno]}: {os.strerror(error.errno)})'
     _diagnostic(error,f'{operation} failed',config=config)
-    status='integrity_error' if integrity else ('unavailable' if unsupported else 'review_required') if not operation_started and (unsupported or review) else 'unknown'
+    status='integrity_error' if integrity else ('review_required' if review else 'unavailable') if not operation_started else 'unknown'
     result=dict(status=status,accepted=True,call_id=call_id)
     if status=='integrity_error':
         result['note']=f'{operation} failed its original integrity check ({category}). Preserve this exact call and originals; report the integrity failure. Do not repair host originals or resubmit.'
     elif status in {'unavailable','review_required'}:
-        result['note']=f'{operation} was not performed ({category}); this operation is unavailable under the current declared capability or permission. Preserve this accepted call; consume its verified retained terminal result if available, otherwise report the capability or permission gap without resubmission.'
+        result['note']=f'{operation} was not performed ({category}); local preflight or interface loading did not complete, including any required capability or permission checks. Preserve this accepted call; consume its verified retained terminal result if available, otherwise report the current operation obstacle without resubmission.'
     else:
         result['note']=f'{operation} failed ({category}); the operation response is unknown. Preserve this exact accepted call; use same-call lookup or reconciliation if supported, otherwise report the unresolved obstacle. Never resubmit.'
     if not integrity:

@@ -610,8 +610,9 @@ preserving the original checkpoint and call.
 An explicit `caller_error` with `accepted=false` returns `correct_request`: fix the
 reported inputs or options before a corrected request, preserving any separately
 accepted call. Failure of an operation on that call does not erase a verified original
-terminal state. Unsupported operations are reported as unavailable before provider work;
-a lost submission reply remains unknown under the same call ID. Arbitrary backend
+terminal state. Known non-integrity failures before an existing-call provider operation
+are reported as unavailable, including local loading or resource checks; required review
+keeps its own status. A lost submission reply remains unknown under the same call ID. Arbitrary backend
 exception text stays in host diagnostics; public feedback reports a safe operation and
 error category. The Worker client preserves the host handoff. Local ignores candidate
 parent/change annotations without inventing

@@ -88,7 +88,7 @@ def handoff(config,result,command,call_id=None):
             state=observed['status'];verified=True
         elif refused:
             return hint('reconcile_or_stop','original_operation_unavailable',
-                'The requested operation was not performed and no verified retained terminal result is available. Report the declared capability or permission gap for this same accepted call; never rerun or resubmit it.')
+                'The requested operation was not performed and no verified retained terminal result is available. Report the local preflight, interface loading, capability or permission obstacle for this same accepted call; never rerun or resubmit it.')
         elif state=='unknown' and command not in {'collect','cancel'}:
             return stop('original_state_unknown')
         elif command=='cancel':
