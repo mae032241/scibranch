@@ -544,11 +544,12 @@ Cov 执行器来自独立 `scidiscovery-cov-execution` 插件，标识为 `cov_e
 未声明 `[project]` 时，W 新编写的执行代码须位于当前科学工作区的 `code/`，数据、日志和输出放在该目录之外；
 以下示例使用此默认模式。工程原路径与 editable 入口按[工程主合同](RESEARCH_CONFIGURATION.md#declared-projects--声明工程)处理。
 Local 的 `--experiment-dir` 选择独立的 `experiments/<name>` 运行工作目录；它固定整个
-`code/` 树，脚本由 `--script` 指定。例如先编写 `code/check-one/run.py` 及其代码模块，
+`code/` 树，缺失的运行目录在正常路径与准入检查后自动创建，无需先 `mkdir`。
+脚本由 `--script` 指定，其相对路径始终从任务工作区根目录解析，不随 `--experiment-dir` 改变。
+例如先编写 `code/check-one/run.py` 及其代码模块，
 再使用独立 cwd：
 
 ```sh
-mkdir -p experiments/check-one
 scid-experiment --config work/experiment-config.json run \
   --experiment-dir experiments/check-one --script code/check-one/run.py -- --seed 7
 ```

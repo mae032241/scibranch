@@ -116,12 +116,12 @@ def test_thin_help_and_ingress_errors_have_no_execution_effects(tmp_path,monkeyp
     assert tool('help')['status']=='help'
     assert '--script' in tool('help','run')['usage']
     assert tool('run','--help')['status']=='help'
-    assert tool('wrong-command',code=2)['status']=='caller_error'
-    assert tool('run','--not-an-option',code=2)['status']=='caller_error'
     assert not slot.exists() and e.Records(config).calls()==[]
     outside=tmp_path/'other-science.json';outside.write_text('{}')
     source=work/'work/source-link.json';source.symlink_to(outside)
     with bridge.serve(slot,work/'work/experiment-config.json',work,launch=lambda *args:None):
+        assert tool('wrong-command',code=2)['status']=='caller_error'
+        assert tool('run','--not-an-option',code=2)['status']=='caller_error'
         for path in (outside,source):
             reply=bridge.client(slot,['run','--payload',str(path),'--new-plan','--mechanism','P'])
             assert reply['code']==2 and reply['result']['status']=='caller_error'

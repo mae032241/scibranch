@@ -71,6 +71,20 @@ class LocalExecution:
         from . import execution_inputs
         return execution_inputs.local_input_sources(self.config,self.frozen_interface,payload,metadata)
 
+    def prepare_runtime_directory(self, directory, source):
+        """Create only a validated current-W Local runtime, after preflight."""
+        from . import experiment_client
+        config=dict(self.config,execution_interface=self.frozen_interface)
+        selection=experiment_client.code_selection(config,source,experiment_directory=directory)
+        if selection is None:
+            raise e.CallerError('Choose current-W code with an explicit experiments/<name> Local runtime directory.')
+        directory=Path(directory).absolute()
+        try:directory.mkdir(parents=True,exist_ok=True)
+        except OSError:
+            raise e.CallerError('The selected experiments/<name> runtime directory cannot be created. Select a writable ordinary runtime directory.') from None
+        if directory.resolve()!=directory or not directory.is_dir():
+            raise e.CallerError('The selected experiments/<name> runtime directory must remain an ordinary directory.')
+
     @e.record_effect
     def prepare(self,payload,*,preparation_profile,exchange_directory):
         if preparation_profile!='research_loop.v1' or Path(exchange_directory)!=self.records.root:

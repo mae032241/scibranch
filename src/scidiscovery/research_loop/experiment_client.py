@@ -5,6 +5,7 @@ This is a default presentation boundary, not protection from same-user access.
 from pathlib import Path
 import json
 import re
+import stat
 
 VERSION = 1
 
@@ -205,13 +206,15 @@ def code_selection(config, path, *, resolved=None, experiment_directory=None):
     layout=project_layout.code_roots(project,work)
     code_root=layout['root']
     if not path.is_relative_to(code_root) or path==code_root:
-        raise CallerError('Move a new code entry into the declared code scope; --experiment-dir selects only the Local runtime working directory.')
+        logical_root=code_root.relative_to(work).as_posix()+'/'
+        raise CallerError(f'Move a new code entry into the declared {logical_root} code scope; --experiment-dir selects only the Local runtime working directory.')
     if experiment_directory is not None:
         directory=Path(experiment_directory).absolute()
         relative=directory.relative_to(work) if directory.is_relative_to(work) else Path()
         if (config.get('execution_interface',{}).get('executor')!='local_execution:command'
                 or len(relative.parts)!=2 or relative.parts[0]!='experiments'
-                or directory.resolve()!=directory or not directory.is_dir()
+                or directory.resolve()!=directory or directory.exists() and not directory.is_dir()
+                or directory.parent.exists() and not directory.parent.is_dir()
                 or directory.is_relative_to(code_root)):
             raise CallerError('Choose an explicit current-W experiments/<name> runtime directory outside code/.')
         selection='directory';selected=code_root
@@ -232,15 +235,31 @@ def code_selection(config, path, *, resolved=None, experiment_directory=None):
 
 
 
+def _selected_reference(path, logical='script or payload'):
+    """Validate author-owned files only, after original binding resolution."""
+    from .experiments import CallerError, proof
+    if path.resolve()!=path:
+        raise CallerError(f'The selected scientific input {logical!r} must use an ordinary task path without links or parent directories.',error='scientific_input_unusable')
+    try:
+        metadata=path.lstat()
+    except (FileNotFoundError,NotADirectoryError):
+        raise CallerError(f'The selected scientific input {logical!r} is missing. Write or select its task file; script paths are relative to the task workspace, independently of --experiment-dir.',error='scientific_input_not_found') from None
+    except PermissionError:
+        raise CallerError(f'The selected scientific input {logical!r} cannot be read. Select an accessible ordinary task file.',error='scientific_input_unusable') from None
+    if not stat.S_ISREG(metadata.st_mode):
+        raise CallerError(f'The selected scientific input {logical!r} must be an ordinary file, not a directory or special file.',error='scientific_input_unusable')
+    try:return proof(path)
+    except (FileNotFoundError,NotADirectoryError,PermissionError):
+        raise CallerError(f'The selected scientific input {logical!r} is unavailable. Write or select an accessible ordinary task file.',error='scientific_input_unusable') from None
+
+
 def input_reference(config, path):
     """Resolve the exact task binding before fingerprinting its actual source."""
     from . import contracts as c, originals
     from .experiments import IntegrityError, proof
     path=Path(path).absolute()
-    if path.resolve()!=path:
-        raise IntegrityError('Scientific input requires an exact ordinary path')
     root=root_for_configuration(config,allow_standalone=True)
-    if root is None:return proof(path)
+    if root is None:return _selected_reference(path)
     work=c.workspace(root,config['scope']['step'])
     job=c.read(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
     matches={json.dumps(item,sort_keys=True):item for item in _input_rows(job)
@@ -248,8 +267,12 @@ def input_reference(config, path):
     if matches:
         if len(matches)!=1:raise IntegrityError('Scientific input binding is ambiguous')
         material=next(iter(matches.values()))
-        original=originals.material_path(root,dict(material,source=material.get('source',str(work/material['path']))))
-        reference=proof(original)
+        try:
+            if path.resolve()!=path:raise IntegrityError('Scientific input requires an exact ordinary path')
+            original=originals.material_path(root,dict(material,source=material.get('source',str(work/material['path']))))
+            reference=proof(original)
+        except (OSError,ValueError) as error:
+            raise IntegrityError('Scientific input original is unavailable or changed') from error
         if reference['size_bytes']!=material['size_bytes']:
             raise IntegrityError('Scientific input differs from its original bound size')
         return reference
@@ -257,6 +280,12 @@ def input_reference(config, path):
         raise IntegrityError('Scientific input is outside this task bound inputs or current workspace files')
     from . import shared_input_views
     if any(path.is_relative_to(work/'work'/name) for name in shared_input_views.DYNAMIC_ROOTS):
-        original=shared_input_views.logical_original(root,job,path)
-        if original is not None:return proof(original)
-    return proof(path)
+        try:
+            if path.resolve()!=path:raise IntegrityError('Scientific input requires an exact ordinary path')
+            original=shared_input_views.logical_original(root,job,path)
+            if original is not None:return proof(original)
+        except (OSError,ValueError) as error:
+            raise IntegrityError('Retained scientific input original is unavailable or changed') from error
+    # Unbound workspace files are author-owned; original failures above retain
+    # their integrity meaning and must never become a request correction.
+    return _selected_reference(path,path.relative_to(work).as_posix())

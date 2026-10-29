@@ -1278,11 +1278,7 @@ def dispatch(config, script, *, parent=None, new=False, change=None, mechanism=N
     with instance_owner.lease_for_configuration(config):
         if '\0' in os.fspath(script):raise CallerError('Script or payload path cannot contain NUL bytes.')
         logical=experiment_client.code_path(config,script)
-        try:
-            logical.lstat()
-            reference=experiment_client.input_reference(config,logical)
-        except FileNotFoundError as error:
-            raise CallerError('The selected script or payload is missing; write or select an existing scientific input file.',error='scientific_input_not_found') from error
+        reference=experiment_client.input_reference(config,logical)
         source=experiment_client.payload_path(config,logical);item=proof(source)
         if str(source)==reference['path'] and item!=reference:
             raise IntegrityError('Scientific payload changed after its saved input binding was checked')
@@ -1895,6 +1891,8 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, pa
             except (OSError,ValueError,storage.StorageQuotaExceeded) as error:
                 raise CommandOptionsError('Selected code could not be fixed before preparation; check the dedicated code scope, supported file types and capture limits.') from error
             if local_preparation:
+                if (command_options or {}).get('experiment_directory') is not None:
+                    adapter.prepare_runtime_directory(command_options['experiment_directory'],logical)
                 local_metadata=_local_metadata(adapter,descriptor,parent=parent,new=new,change=change,
                     command_options=dict(command_options or {},source_script=str(logical)),
                     _code_version=dict(code_version))
@@ -2120,11 +2118,7 @@ def compile_implementation(config, adapter, source, aliases, output):
     if '\0' in os.fspath(source) or '\0' in os.fspath(output):
         raise CallerError('Compile implementation and output paths cannot contain NUL bytes.')
     source=experiment_client.code_path(config,source)
-    try:
-        Path(source).lstat()
-        experiment_client.input_reference(config,source)
-    except FileNotFoundError as error:
-        raise CallerError('The implementation input is missing; write or select an existing scientific implementation file.',error='scientific_input_not_found') from error
+    experiment_client.input_reference(config,source)
     if config.get('worker_view_version')!=1:return adapter.compile_implementation(source, aliases, output)
     root=experiment_client.root_for_configuration(config);work=c.workspace(root,config['scope']['step'])
     source=experiment_client.code_path(config,source)
@@ -2170,8 +2164,8 @@ def _cli_parser(*,configuration=True):
     if configuration:parser.add_argument('--config',type=Path,required=True)
     sub=parser.add_subparsers(dest='command',required=True)
     run=sub.add_parser('run');payload=run.add_mutually_exclusive_group(required=True)
-    payload.add_argument('--script',type=Path);payload.add_argument('--payload',type=Path)
-    run.add_argument('--experiment-dir',type=Path,help='When declared by the selected executor, snapshot this directory excluding artifacts/; unavailable for Cov single-source execution')
+    payload.add_argument('--script',type=Path,help='Script path relative to the task workspace, independently of --experiment-dir');payload.add_argument('--payload',type=Path)
+    run.add_argument('--experiment-dir',type=Path,help='Current-W Local: independent experiments/<name> runtime directory, created if absent; script remains relative to the task workspace. Other declared executors retain their directory snapshot semantics; unavailable for Cov single-source execution')
     choice=run.add_mutually_exclusive_group();choice.add_argument('--parent-plan');choice.add_argument('--new-plan',action='store_true')
     run.add_argument('--change-intent');run.add_argument('--mechanism')
     run.add_argument('arguments',nargs=argparse.REMAINDER,help='When declared by the selected executor, script arguments after --; passed as argv, never shell text')
@@ -2274,11 +2268,7 @@ def main(argv=None):
         elif args.command=='compile':
             from . import experiment_client
             if '\0' in os.fspath(args.scientific_files):raise CallerError('Scientific-files path cannot contain NUL bytes.')
-            try:
-                args.scientific_files.absolute().lstat()
-                aliases=experiment_client.input_reference(config,args.scientific_files)
-            except FileNotFoundError as error:
-                raise CallerError('The scientific-files JSON input is missing; write or select its existing task file.',error='scientific_input_not_found') from error
+            aliases=experiment_client.input_reference(config,args.scientific_files)
             try:alias_map=json.loads(read(aliases['path']))
             except json.JSONDecodeError as error:
                 raise CallerError(f'Scientific-files JSON is invalid at line {error.lineno}, column {error.colno}: {error.msg}.') from error
@@ -2470,7 +2460,9 @@ def main(argv=None):
         code=3
     finally:owner_lease.close()
     if result.get('status')=='integrity_error':code=3
-    if args.command in {'run','query','lookup','collect','cancel','reconcile'}:
+    if (args.command in {'run','query','lookup','collect','cancel','reconcile'}
+            or args.command=='compile' and result.get('status')=='caller_error'
+            and result.get('accepted') is False):
         from . import managed_wait
         result['handoff']=managed_wait.handoff(feedback_config,result,args.command,getattr(args,'call_id',None))
     # CLI is a compact model view; the complete collection is already durable.
@@ -2816,7 +2808,9 @@ def verify_scientific_inputs(accepted, *, config=None, context=None):
         items=[accepted['script'],*[dict(path=str(record/'inputs'/item['name']),
             size_bytes=item['size_bytes']) for item in items]]
     for item in items:
-        current=proof(item['path'],context=context)
+        try:current=proof(item['path'],context=context)
+        except (OSError,ValueError) as error:
+            raise IntegrityError('Accepted scientific input original is unavailable or changed') from error
         if any(current[key]!=item[key] for key in ('size_bytes','file_stat') if key in item):
             raise IntegrityError('Accepted scientific input original changed')
     return accepted

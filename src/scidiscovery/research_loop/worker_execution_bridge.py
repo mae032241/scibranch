@@ -89,13 +89,18 @@ def _arguments(arguments, work, config=None):
             if option!='--output':
                 try:
                     if option=='--experiment-dir':
-                        if not path.is_dir():raise FileNotFoundError(path)
+                        relative=path.relative_to(work)
+                        local_runtime=(config is not None and config.get('scope',{}).get('role')=='W'
+                            and config.get('execution_interface',{}).get('executor')=='local_execution:command'
+                            and len(relative.parts)==2 and relative.parts[0]=='experiments')
+                        if not path.is_dir() and not (local_runtime and not path.exists()):
+                            raise CallerError('Select an ordinary --experiment-dir directory. Current-W Local execution can create an explicit experiments/<name> runtime directory.',error='scientific_input_unusable')
                     elif config is not None:
                         from . import experiment_client
                         experiment_client.input_reference(config,path)
                     elif not path.is_file():raise FileNotFoundError(path)
                 except FileNotFoundError:
-                    raise CallerError('The selected scientific input is missing. Write or select its task file, then check exp help <command>.',error='scientific_input_not_found') from None
+                    raise CallerError(f'The selected {option} scientific input is missing. Write or select its task file; script paths are relative to the task workspace, independently of --experiment-dir.',error='scientific_input_not_found') from None
             value=str(path)
         result.extend([option,value]);index+=2
     return result
@@ -473,7 +478,10 @@ def _handle(server, raw, *, retained=False):
         response=dict(code=3,result=dict(status='integrity_error',
             note='Scientific submission could not be verified; preserve original calls'),submission_ref=reference,request=request)
     arguments=request['arguments']
-    if isinstance(arguments,list) and arguments and isinstance(arguments[0],str) and arguments[0] in {'run','query','lookup','collect','cancel','reconcile'}:
+    if (isinstance(arguments,list) and arguments and isinstance(arguments[0],str)
+            and (arguments[0] in {'run','query','lookup','collect','cancel','reconcile'}
+                or arguments[0]=='compile' and response['result'].get('status')=='caller_error'
+                and response['result'].get('accepted') is False)):
         # Recompute only the public projection, never cached claim originals.
         # A retained unknown remains unknown even if its old hint said to wait.
         from . import managed_wait
