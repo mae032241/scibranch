@@ -645,9 +645,11 @@ def validate_managed_original(source,job,rows,*,controls_only=False):
                     any(actual[key]!=expected[key] for key in ('name','size_bytes'))
                     for actual,expected in zip(row.get('outputs',[]),expected_outputs))):
                 raise ObserverIntegrityError('Inherited scientific output projection changed')
-            if row.get('execution') != dict(returncode=completed.get('returncode'), wall_seconds=completed.get('wall_seconds'),
+            expected_execution = (dict(returncode=completed.get('returncode'), wall_seconds=completed.get('wall_seconds'),
                     **(dict(public_result=frozen['public_result']) if 'public_result' in frozen else {}),
-                    result=completed.get('result'), **(dict(native_state=completed['native_state']) if 'native_state' in completed else {})):
+                    result=completed.get('result'), **(dict(native_state=completed['native_state']) if 'native_state' in completed else {}))
+                if 'result' in completed or row.get('observation') is not None else None)
+            if row.get('execution') != expected_execution:
                 raise ObserverIntegrityError('Inherited execution facts changed their completed original')
         if status != row['status']:
             raise ObserverIntegrityError('Inherited managed state differs from verified terminal originals')
