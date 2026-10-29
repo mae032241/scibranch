@@ -648,8 +648,9 @@ reason（一段自由说明）、discriminating_work（null 或三键新工作�
 等待、无完成 W、明确无 search、正式独审豁免，FINAL 实际评估 W 时仍适用。
 
 pending 幂等重入 unfinished，不清零调用、授权和投入。新 discriminating_work 只填
-mechanism_refs、question、next_action；后续活跃 work_updates 每项只需 work_ref、
-action（execute/defer/withdraw）、reason，保留原问题、A 来源和准确后继响应。
+mechanism_refs、question、next_action；后续 work_updates 可选且稀疏，已填项使用 work_ref、
+action（execute/defer/withdraw）、reason，遗漏保留原问题、状态、A 来源和准确后继响应。
+显式 execute 仍须匹配实际路线与 focus；未被执行或资格消费的可选科学引文错误仅记诊断。
 执行不自动解决问题。当前主线可以不同于下一次判别实验的机制，实际 focus 和权限仍检查。
 portfolio 索引持续显示独立 W→A 周期、机制参与、待评估 W、未服务周期、明确主线连续次数
 及活跃判别待办。恢复和补填不增周期；同周期多机制比例可重叠，fork 只取准确 cut。
@@ -702,7 +703,8 @@ native-evidence/<node>/           # 私有原生轨迹、schema、引用与封�
 ```
 
 角色使用原生文件工具。模型只做科学工作、选择必要成果，最终直接回答简短科学 JSON。
-`final_response` 给出字段名；无需读 schema、另存最终回答、制作索引、计算哈希或打包。
+启动请求给出必填字段、类型和动作选项，普通任务文件不重复列字段清单；无需读 schema、
+另存最终回答、制作索引、计算哈希或打包。
 子实验不是额外 Agent，结论可以是 Markdown 或 JSON；无需逐次填写机械表单。
 
 控制层自动采集节点 `artifacts/` 及子实验成果和可选结论，规范为直接前驱成果目录。
@@ -803,22 +805,6 @@ scid-research worker-closeout --root /精确原实例 --step N \
 框架或工具升级不要求预先保留旧源码或填写实现 manifest。各 attempt 的已报告消费分别累计；缺失计量保持 unknown，不估算收费。后继入口追加 `host-recovery/author-closeout/NNN-successor.json`，绑定旧 permit 及失败 attempt 1 的任务、调用、用量和进程原件；不改旧 permit、settings、失败 outcome 或科学原件。追加授权记录本身不是执行：只有当前已报告累计 token、时间及控制步数满足本次作者授权门槛，才接受唯一 attempt 2；protected FINAL 的共享交付预留为零。接受后重复调用只收集它，不自动重试，也不授权 attempt 3；新 attempt 2 若真实执行或清理仍 unknown，仍须按原身份核对并阻断后继封存和交付；单纯计量覆盖未知只记录 unknown，不估算收费或单独阻断。
 
 后继额度来自原有累计预算，不重置消费、不自动续额。每个失败 attempt 与新 turn 的已报告消费均计入原有累计账；操作者独立保留的评价额度及当前交付预留不得挪作新 turn。时间上限及已消费时间不因接续增加。新 W 先读当前 attempt 的紧凑机械事实索引，按需取完整科学原件；索引不替作者排名、判定方法多样性或推导审计平台期，科学结论仍由真实 W 编写。原实验、模型及旧 native attempt 只读；当前 attempt、必要 artifacts 与新上下文权限按原隔离启动器保留。这只授权作者完成既有工作，不授权新训练，受管入口仍拒绝 run、compile、submit、query、collect、cancel；同 uid 原生代码仍是信任的软边界，并非任意计算的强隔离保证。
-
-以下 `worker-output-accept` 只说明历史 token-stop 原件的接纳记录。`--pending-ref` 的 path
-按该入口的私有绑定使用实例相对路径；示例中的 NNN 与 1234 须换成精确节点目录及文件字节大小。协议 27 的作者 token 目标统一为 soft，越线后原返回正常完成，不会生成 `author_closeout_token_limit`；旧协议原件只读，不能据此继续运行。有限时间停止不能按 token 超额接纳为完成。
-
-```sh
-scid-research worker-output-accept --root /精确原实例 --step N --attempt 2 \
-  --pending-ref '{"path":"native-evidence/NNN/continuations/002/result.pending.json","size_bytes":1234}' --session /精确原session.jsonl \
-  --authorization-note '仅接纳这份已完整返回的原文' \
-  --authorization-statement '操作者授权原话'
-```
-
-仅接受原返回码为 0、进程已清理、最终消息先于唯一完成事件且完成后没有新的 turn/item 活动、该消息与 pending 字节一致、终态用量和精确 session 的实时计数完全匹配，并且没有同时越过原作者 wall 上限的 author attempt 2。未知、部分返回、其他 stop、活动写者、错误任务/原件或不合法的 W 结果不能由此变成成功。当前累计账、时间、控制步数和交付预留仍须足够；不增加额度、不抹去历史 unknown、不接受新 unknown，不授权 attempt 3 或任何新训练。
-
-此入口先追加绑定精确 successor 和操作者授权的 `NNN-output-upgrade.json`；该记录不要求保留旧框架源码，本身不接纳输出，也不授权封存。当前准入通过后才追加 `NNN-output-acceptance.json`，绑定精确 job、intent、outcome、完整用量/原生流/session、process、pending 和授权原件。pending 精确复制为 `science-output.json`，原 pending、outcome、局部上限及 stop marker 全部保留。接纳记录记录已发生的局部超额及限制，封存引用该记录提供的 raw_ref，仍执行原有输入、schema、科学路由、受管实验、材料和来源检查，不改写 W 结论，不宣称科学资格或审计通过。重复操作只能核对同一接纳和既有后继，不创建新作者 turn。
-
-这一例外仅用于原 W 收口并转入 `purpose=closeout` 的 A 审查、审计与交付；不放宽普通 search/correction 的历史直接来源资格，不重新开放探索。同 uid 信任和隔离启动器的软边界不变。实施记录及具体阶段额度保留在本地 ignored 原件中，不作为长期产品默认值。
 
 它复用精确历史实验、原模型和声明权限，不授权新训练；收口的受管入口拒绝新执行，原实验及模型原件只读。真实 W 返回科学 JSON 并封存后进入收口审查。该次续接仍消费累计控制步，不替代科学资格或执行决定，也不清除任何未知原件事实。同 uid 原生进程仍属于信任的软边界；这些合同和受管入口限制不保证阻止任意同用户代码进行计算或修改其有权写入的位置。
 
@@ -1014,12 +1000,19 @@ scid-research closeout --root /绝对路径/实例 --export-only
 标准单命令 `codex` 的 CLI `prepare` 在未传 `--worker-resume-policy` 且未请求
 `--worker-context` 时，冻结最多两次同任务、同 session 的输出补填或原受管执行唤醒：
 `output_repair: true`、`output_only: true`、`execution_wake: true`。
-补填只修已确认完成的必需返回或明确诊断的作者交付布局冲突；原作者可删冗余副本或整理
+补填修正已确认完成的必需返回、实际动作消费的作者引用及明确诊断的交付布局冲突；
+封存与补填共用消费校验，字段错误不另开 H/A 科学节点。原作者可删冗余副本或整理
 自己的文件位置，受管原件直接引用、无需复制。起始 BOM 和完整唯一 JSON 围栏由统一科学
 解析器处理，原始字节保留；散文夹杂或多个对象仍补正。窄唤醒只解释同一原受管调用的已核验终态并完成返回，
 这两项窄权限本身不授权新实验、训练、失败任务续跑、`WorkRepairRequired` 科学修复或 W fragment。
 新标准配置另有上文的独立 `automatic_recovery` 许可，可在原边界内续接提前停止、临时故障
 和 completed 但科学交付不足的原任务；不借 `output_only` 扩权。
+原 W 的末次 run/compile 若有明确 caller_error、accepted=false，且该拒绝造成工作未完成，
+控制层沿原 task/session 有界拉回具体修正，覆盖 improve 和无 search 普通工作。后续已接受的
+修正请求不再触发补正；未知命令的原参数交回作者自行修正，不猜测命令意图。
+真正科学 decision/blocked 仍交 A，已接受未知调用只核对原调用。
+FINAL 与 closeout 沿同一 native collector 接续 interrupted 或已接受未启动的 attempt；
+宿主明确的提交前预算拒绝转入 FINAL 时保留完整原 attempt 链与累计消费。
 launcher 的绝对调用路径及其指向的原文件被冻结，保留符号链接调用语义。
 原 `CODEX_HOME`（未设置时为 `~/.codex`）仅在宿主私有策略中绑定，配置、认证和权限来源不变，
 不复制凭据；没有节点预算文件时，各角色软目标引用原全局 token/时间上限，不预扣或增加共享额度。
@@ -1038,7 +1031,7 @@ W 的 `science-task.json` 会报告 `managed_execution_wait.wake_authorized`。
 
 `exp run/query/lookup/collect/reconcile/cancel` 的回执增加宿主生成的 `handoff` 投影，
 与宿主等待使用同一状态判定规则，不改原 accepted/terminal/seal：
-明确的 `caller_error` 且 `accepted=false` 返回 `correct_request`，要求修正指出的参数或输入后提交修正请求，同时保留任何独立已接受原调用。Local 不支持 `--parent-plan` 和 `--change-intent`，在 prepare、接受和提交前按此反馈；这次未接受请求没有需要查找的原调用。单凭缺少 call ID 不能证明未接受，其余未决事实仍按原调用核对。
+明确的 `caller_error` 且 `accepted=false` 返回 `correct_request`，要求修正指出的参数或输入后提交修正请求，同时保留任何独立已接受原调用。Local 不消费 `--parent-plan` 和 `--change-intent`，忽略这些说明并保留未建立父模型关系的事实；真正消费父模型的执行器仍检查准确引用。这次未接受请求没有需要查找的原调用。单凭缺少 call ID 不能证明未接受，其余未决事实仍按原调用核对。
 阻塞式执行器在调用内等待后返回回执，W 仍按返回的 `handoff` 行动，无需另选阻塞分支。
 `action=return_control` 表示原调用可查且已冻结唤醒能力，W 正常交回当前科学 JSON；
 `poll_original` 要求在同一 native turn 按 `poll_interval_seconds`（默认 1 秒）持续等待、

@@ -1122,13 +1122,21 @@ def direct_sources(root, job):
         input_path = (originals.resolve_ref(chooser, dict(ref, path=f'project/nodes/{job["step"]:03d}/' + ref['path']))
             if chooser is not None else originals.resolve_root_ref(root,dict(ref,
                 path=str(c.workspace(root,job['step'])/ref['path']))))
-        outcome = c.read(originals.source_record(original, 'native-outcome.json'))
+        native_record = (Path(original.original_root) / (original.native_record or f'native-evidence/{step:03d}')
+            if original.inherited else execution.record(root, step))
+        intent = c.read(originals.source_record(original, 'native-intent.json')
+            if original.inherited else native_record / 'native-intent.json')
+        outcome = c.read(originals.source_record(original, 'native-outcome.json')
+            if original.inherited else native_record / 'native-outcome.json')
+        raw_ref = c._native_output_identity(root, step, intent, outcome,
+            **(dict(source=original) if original.inherited else {}))
         if (c.regular(input_path).stat().st_size != ref['size_bytes']
                 or next((row for row in job.get('direct_originals',job['direct_refs']) if row['path']==ref['path']),None) is None
-                or c.read(originals.source_record(original, 'native-intent.json'))['task_ref'] != seal['job_ref']
-                or type(outcome.get('returncode')) is not int or outcome['returncode'] != 0 or outcome.get('stop_reason')
+                or intent['task_ref'] != seal['job_ref']
+                or type(outcome.get('returncode')) is not int or outcome['returncode'] != 0
+                or outcome.get('stop_reason')
                 or outcome.get('usage', {}).get('unknown_steps') != [] and not budget.native_completion_known(outcome, originals.source_settings(original))
-                or outcome.get('raw_ref') != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}
+                or raw_ref != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}
                 or c.read(originals.source_record(original, 'result.json')) != c.result_projection(source, payload)):
             raise ValueError('Direct scientific original or terminal identity changed')
         sources.append((source, payload, seal))

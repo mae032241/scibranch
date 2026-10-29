@@ -478,9 +478,9 @@ def scientific_result(config, accepted, completed, observation):
     return result
 
 
-def _diagnostic(error, fallback, *, config=None):
-    # Provider/validator exception text can contain arbitrary private paths and
-    # credentials. Keep the original only in the host diagnostic namespace.
+def _diagnostic(error, fallback, *, config=None, detail=False):
+    # Keep the full exception in host diagnostics. Explicit detailed feedback
+    # uses the existing public cleaner for known private paths and credentials.
     if isinstance(config,dict) and isinstance(config.get('record_dir'),str):
         try:
             from . import contracts as c
@@ -488,6 +488,15 @@ def _diagnostic(error, fallback, *, config=None):
             if directory.resolve()!=directory:raise ValueError('Diagnostic namespace changed')
             c.write(directory/(uuid.uuid4().hex+'.json'),dict(error=type(error).__name__,note=str(error)))
         except (OSError,ValueError,TypeError):pass
+    if detail and isinstance(config,dict):
+        from . import public_output,experiment_client,contracts as c
+        try:
+            root=experiment_client.root_for_configuration(config,allow_standalone=True)
+            settings=c.settings(root) if root is not None else config
+            clean=public_output.cleaner(root if root is not None else Path(config['record_dir']).parent,settings)
+            return clean(f'{fallback}: {type(error).__name__}: {error}',2048)
+        except (OSError,ValueError,KeyError,TypeError):
+            return f'{fallback}: {type(error).__name__}; original diagnostic retained privately; public diagnostic context unavailable'
     return fallback
 
 
@@ -1264,8 +1273,13 @@ def dispatch(config, script, *, parent=None, new=False, change=None, mechanism=N
     """Convenience input path; neutral callers may provide a descriptor directly."""
     from . import experiment_client
     with instance_owner.lease_for_configuration(config):
+        if '\0' in os.fspath(script):raise CallerError('Script or payload path cannot contain NUL bytes.')
         logical=experiment_client.code_path(config,script)
-        reference=experiment_client.input_reference(config,logical)
+        try:
+            logical.lstat()
+            reference=experiment_client.input_reference(config,logical)
+        except FileNotFoundError as error:
+            raise CallerError('The selected script or payload is missing; write or select an existing scientific input file.',error='scientific_input_not_found') from error
         source=experiment_client.payload_path(config,logical);item=proof(source)
         if str(source)==reference['path'] and item!=reference:
             raise IntegrityError('Scientific payload changed after its saved input binding was checked')
@@ -1808,8 +1822,18 @@ def _original_dispatch_state(config, payload, *, parent=None, new=False, change=
     return adapter,capabilities,expected_calls
 
 
+def _local_metadata(adapter,descriptor,**options):
+    from . import experiments as common
+    try:return adapter.acceptance_metadata(descriptor,**options)
+    except FileNotFoundError as error:
+        raise CallerError('A selected Local experiment input is missing; select existing ordinary inputs before running.') from error
+    except ValueError as error:
+        if isinstance(error,(IntegrityError,common.IntegrityError)):raise
+        raise CallerError(str(error)) from error
+
+
 def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, parent=None, new=False, change=None, mechanism=None, command_options=None,_source_script=None):
-    from . import code_versions, experiment_client, preparation_recovery, storage_policy as storage
+    from . import code_versions, experiment_client, preparation_recovery, experiments as common, storage_policy as storage
     instance=experiment_client.root_for_configuration(config,allow_standalone=True)
     pending=_pending_dispatch(config,instance)
     if pending is not None:return pending
@@ -1821,6 +1845,12 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, pa
             and config['execution_interface']['executor']!='local_execution:command'):
         raise UnsupportedExecution('Project directory execution requires the managed Local runtime; compile a self-contained implementation JSON for this executor.')
     _require_new_execution(config)
+    opportunities=breadth.validate(config.get('breadth'))
+    if opportunities is not None and not opportunities['prior_unknown']:
+        matches=[row for row in opportunities['mechanisms'] if mechanism in (row['mechanism_ref'],row['label'])]
+        if len(matches)!=1:
+            problem='matches multiple mechanisms' if matches else 'does not select a declared mechanism'
+            raise CallerError(f'The --mechanism choice {problem}; choose one exact H mechanism reference or its unique scientific label.')
     try:records.preflight(expected_calls=expected_calls,mechanism=mechanism)
     except (ReviewRequired,breadth.OpportunityRequired) as error:_raise_admission_refusal(error)
     except ConcurrentExecution:return None
@@ -1834,13 +1864,16 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, pa
     from .local_experiments import LocalExecution
     local_preparation=(type(adapter) is LocalExecution
         and config['execution_interface']['executor']=='local_execution:command')
-    if local_preparation and (parent is not None or change is not None):
-        raise CallerError('Local execution does not support --parent-plan or --change-intent. '
-            'Remove these options and submit the corrected request.')
+    if local_preparation:
+        from . import worker_execution_bridge
+        try:worker_execution_bridge.local_process_available()
+        except (UnsupportedExecution,common.UnsupportedExecution) as error:
+            return dict(status='known_not_started',accepted=False,error='unsupported_execution',
+                note=_diagnostic(error,'Managed Local launch is unsupported',config=config,detail=True))
     operation_context=storage.Deadline(config['max_seconds'])
     # Legacy direct Local input selection is host-owned and effect-free. New W
     # code reaches every adapter through its exact Git export first.
-    local_metadata=(adapter.acceptance_metadata(descriptor,parent=parent,new=new,change=change,**options)
+    local_metadata=(_local_metadata(adapter,descriptor,parent=parent,new=new,change=change,**options)
         if local_preparation and selection is None else None)
     code_version=None;preparation_started=False;published=False
     try:
@@ -1859,7 +1892,7 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, pa
             except (OSError,ValueError,storage.StorageQuotaExceeded) as error:
                 raise CommandOptionsError('Selected code could not be fixed before preparation; check the dedicated code scope, supported file types and capture limits.') from error
             if local_preparation:
-                local_metadata=adapter.acceptance_metadata(descriptor,parent=parent,new=new,change=change,
+                local_metadata=_local_metadata(adapter,descriptor,parent=parent,new=new,change=change,
                     command_options=dict(command_options or {},source_script=str(logical)),
                     _code_version=dict(code_version))
         preparation_started=True
@@ -1940,9 +1973,15 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, pa
                 raise LocalPreparationCleanupError('Unsubmitted code export cleanup failed before execution') from error
 
 
+def _accepted_failure(config,call_id,error,operation):
+    """Own the original identity even when a provider loses its response."""
+    reason=_diagnostic(error,f'{operation} failed',config=config,detail=True)
+    return dict(status='unknown',accepted=True,call_id=call_id,
+        note=f'{reason}. Preserve this exact accepted call; reconcile it without resubmission.')
+
+
 def _submit_descriptor(config, adapter, capabilities, prepared, accepted):
-    from . import experiments as common
-    records=Records(config);call_id=accepted['call_id']
+    records=Records(config);call_id=accepted['call_id'];operation='accepted input verification'
     try:
         verify_scientific_inputs(accepted,config=config)
         if 'code_version' in accepted:
@@ -1959,19 +1998,22 @@ def _submit_descriptor(config, adapter, capabilities, prepared, accepted):
                 raise IntegrityError('Accepted prepared execution original changed or is unavailable') from error
             if current!=accepted['script']:
                 raise IntegrityError('Accepted prepared execution original changed or is unavailable')
+        operation='submission'
         adapter.dispatch_lease(accepted)
         external_id,state=adapter.submit(prepared)
         records.bind_external(call_id,external_id,state)
+        operation='terminal observation or collection'
         observed=record_observation(config,adapter,call_id)
+        operation='result'
         result=json.loads(read(observed['completed']['path'])) if observed is not None else adapter.result(call_id)
         if observed is None and capabilities.query and records.external(call_id) is not None:
             state=execution_status(adapter.status_details(call_id).get('state'))
             if state in PENDING_EXECUTION_STATES:
                 result=dict(result,status=state,note='Original execution is '+state+'; preserve its identity without resubmission.')
-    except (BlockingIOError,ConcurrentExecution,common.ConcurrentExecution,
-            ReviewRequired,common.ReviewRequired,breadth.OpportunityRequired):
-        return dict(status='unknown',call_id=call_id,
-            note='Original accepted execution outcome is unknown; reconcile this exact call without resubmission.')
+    except Exception as error:
+        return _accepted_failure(config,call_id,error,operation)
+    if accepted.get('note'):
+        result=dict(result,note=' '.join(item for item in (result.get('note'),accepted['note']) if item))
     return result
 
 
@@ -2031,14 +2073,22 @@ def compile_implementation(config, adapter, source, aliases, output):
             or not callable(getattr(adapter, 'compile_implementation', None))):
         raise UnsupportedExecution('Selected implementation does not declare optional scientific compilation')
     if not isinstance(aliases, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in aliases.items()):
-        raise ValueError('Scientific file choices must map slot names to exact bound input aliases')
-    if config.get('worker_view_version')!=1:return adapter.compile_implementation(source, aliases, output)
+        raise CallerError('Scientific file choices must map slot names to exact bound input aliases')
     from . import contracts as c,experiment_client
+    if '\0' in os.fspath(source) or '\0' in os.fspath(output):
+        raise CallerError('Compile implementation and output paths cannot contain NUL bytes.')
+    source=experiment_client.code_path(config,source)
+    try:
+        Path(source).lstat()
+        experiment_client.input_reference(config,source)
+    except FileNotFoundError as error:
+        raise CallerError('The implementation input is missing; write or select an existing scientific implementation file.',error='scientific_input_not_found') from error
+    if config.get('worker_view_version')!=1:return adapter.compile_implementation(source, aliases, output)
     root=experiment_client.root_for_configuration(config);work=c.workspace(root,config['scope']['step'])
     source=experiment_client.code_path(config,source)
     output=Path(output).absolute()
     if output.resolve()!=output or not output.is_relative_to(work/'artifacts') or output.exists():
-        raise ValueError('Choose a new scientific implementation output under this task artifacts')
+        raise CallerError('Choose a new scientific implementation output under this task artifacts; the selected output already exists or is outside artifacts/.')
     private=Path(config['record_dir']).parent/'implementations'
     private.mkdir(parents=True,exist_ok=True)
     entries=list(private.iterdir())
@@ -2175,19 +2225,33 @@ def main(argv=None):
             code=0
         elif args.command=='compile':
             from . import experiment_client
-            aliases=experiment_client.input_reference(config,args.scientific_files)
-            result=compile_implementation(config,adapter,args.implementation,json.loads(read(aliases['path'])),args.output)
+            if '\0' in os.fspath(args.scientific_files):raise CallerError('Scientific-files path cannot contain NUL bytes.')
+            try:
+                args.scientific_files.absolute().lstat()
+                aliases=experiment_client.input_reference(config,args.scientific_files)
+            except FileNotFoundError as error:
+                raise CallerError('The scientific-files JSON input is missing; write or select its existing task file.',error='scientific_input_not_found') from error
+            try:alias_map=json.loads(read(aliases['path']))
+            except json.JSONDecodeError as error:
+                raise CallerError(f'Scientific-files JSON is invalid at line {error.lineno}, column {error.colno}: {error.msg}.') from error
+            result=compile_implementation(config,adapter,args.implementation,alias_map,args.output)
             result={key:result[key] for key in ('status','path','qualification') if key in result}
             code=0
         elif args.command=='run':
             arguments=args.arguments[1:] if args.arguments[:1]==['--'] else args.arguments
             options=dict(arguments=arguments,experiment_directory=str(args.experiment_dir.absolute()) if args.experiment_dir else None)
             parent=args.parent_plan
-            if parent is not None and instance_owner.configuration_root(config) is not None:
+            from .local_experiments import LocalExecution
+            local_parent_unused=(type(adapter) is LocalExecution
+                and config['execution_interface']['executor']=='local_execution:command')
+            if parent is not None and not local_parent_unused and instance_owner.configuration_root(config) is not None:
                 from . import candidate_refs,contracts as c
                 root=instance_owner.configuration_root(config)
                 job=c.read(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
-                parent=candidate_refs.resolve_reference(root,job,parent)
+                try:parent=candidate_refs.resolve_reference(root,job,parent)
+                except ValueError as error:
+                    if isinstance(error,(IntegrityError,common.IntegrityError)):raise
+                    raise CallerError('The --parent-plan reference does not select a listed candidate; choose its exact candidate reference.') from error
             result=dispatch(config,args.script or args.payload,parent=parent,new=args.new_plan,change=args.change_intent,mechanism=args.mechanism,
                 command_options=options if arguments or args.experiment_dir else None)
             observation=None
@@ -2227,11 +2291,16 @@ def main(argv=None):
                 result=scientific_result(config,Records(config).accepted(result['call_id']),result,observed)
             elif result.get('status')=='known_not_started' and result.get('accepted') is False:
                 result={key:result[key] for key in ('status','accepted','error','note') if key in result}
+            elif result.get('accepted') is True and result.get('status')=='unknown':pass
             else:result=adapter.public_result(result)
+            if local_parent_unused and (args.parent_plan is not None or args.change_intent is not None):
+                result=dict(result,note=' '.join(item for item in (result.get('note'),'Local execution ignores --parent-plan and --change-intent; no candidate parent or change semantics are declared.') if item))
             result=_run_view(result)
             code={'known_success':0,'known_failed':1}.get(result['status'],2)
         elif args.command=='lineage-status':result=progress(config);code=0
         elif args.command=='retire':
+            Records(config).accepted(args.call_id)
+            accepted_call_id=args.call_id
             config,adapter=original_adapter(config,args.call_id,'retire')
             accepted_call_id=args.call_id
             result=retire_original(config,adapter,args.call_id)
@@ -2239,6 +2308,8 @@ def main(argv=None):
             if isinstance(result.get('resource_accounting'),dict):result['resource_accounting']=_accounting_view(result['resource_accounting'])
             code=0 if result.get('status')=='not_submitted' else 2
         else:
+            Records(config).accepted(args.call_id)
+            accepted_call_id=args.call_id
             capability='lookup_submission' if args.command=='lookup' else 'query' if args.command in {'query','reconcile'} else args.command
             if not getattr(lifecycle_capabilities(adapter),capability):
                 raise UnsupportedExecution('Requested original execution operation unavailable')
@@ -2305,20 +2376,48 @@ def main(argv=None):
                     else 'Shared usage is unknown; new execution is unavailable.'))
             code=2
         else:
-            result=dict(status='unknown',**(dict(call_id=accepted_call_id) if accepted_call_id is not None else {}),
-                note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config));code=3
-    except (_AdmissionReviewRequired,common._AdmissionReviewRequired) as error:result=dict(status='review_required',reason=_diagnostic(error,'Original execution review required; request the declared review before continuing',config=feedback_config),accepted=False);code=2
-    except (_AdmissionOpportunityRequired,common._AdmissionOpportunityRequired) as error:result=dict(status='unresolved',accepted=False,note=_diagnostic(error,'Choose an available authorized H mechanism before another request',config=feedback_config));code=2
+            result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+                dict(status='unknown',note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config)))
+            code=3
+    except (_AdmissionReviewRequired,common._AdmissionReviewRequired) as error:
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+            dict(status='review_required',reason=_diagnostic(error,'Original execution review required; request the declared review before continuing',config=feedback_config),accepted=False))
+        code=2
+    except (_AdmissionOpportunityRequired,common._AdmissionOpportunityRequired) as error:
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+            dict(status='unresolved',accepted=False,note=_diagnostic(error,'Choose an available authorized H mechanism before another request',config=feedback_config)))
+        code=2
     except (ReviewRequired,common.ReviewRequired,breadth.OpportunityRequired) as error:
-        result=dict(status='unknown',**(dict(call_id=accepted_call_id) if accepted_call_id is not None else {}),
-            note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config));code=3
-    except (ConcurrentExecution,common.ConcurrentExecution) as error:result=dict(status='unknown',note=_diagnostic(error,'Execution preparation outcome is unknown; preserve the original preparation without replay',config=feedback_config));code=2
-    except (IntegrityError,common.IntegrityError,feedback.history.ObserverIntegrityError) as error:result=dict(status='integrity_error',note=_diagnostic(error,'Execution original integrity check failed; preserve originals and report this call',config=feedback_config));code=3
-    except OSError as error:result=dict(status='integrity_error',note=_diagnostic(error,'Execution original cannot be read; preserve originals and report the unavailable input',config=feedback_config));code=3
-    except (CommandOptionsError,common.CommandOptionsError) as error:result=dict(status='known_not_started',accepted=False,error='caller_error',note=_diagnostic(error,'Requested command options are unavailable; check exp help for this command',config=feedback_config));code=2
-    except (CallerError,common.CallerError) as error:result=caller_feedback(error);code=2
-    except ValueError as error:result=dict(status='unavailable' if isinstance(error,(UnsupportedExecution,common.UnsupportedExecution)) else 'unresolved',note=_diagnostic(error,'Execution request could not be resolved; check declared inputs and preserve any original call',config=feedback_config));code=2
-    except Exception as error:result=dict(status='unknown',note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config));code=3
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+            dict(status='unknown',note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config)))
+        code=3
+    except (ConcurrentExecution,common.ConcurrentExecution) as error:
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+            dict(status='unknown',note=_diagnostic(error,'Execution preparation outcome is unknown; preserve the original preparation without replay',config=feedback_config)))
+        code=2
+    except (IntegrityError,common.IntegrityError,feedback.history.ObserverIntegrityError) as error:
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+            dict(status='integrity_error',note=_diagnostic(error,'Execution original integrity check failed; preserve originals and report this call',config=feedback_config)))
+        code=3
+    except OSError as error:
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+            dict(status='integrity_error',note=_diagnostic(error,'Execution original cannot be read; preserve originals and report the unavailable input',config=feedback_config)))
+        code=3
+    except (CommandOptionsError,common.CommandOptionsError) as error:
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+            caller_feedback(CallerError(_diagnostic(error,'Requested command options are unavailable',config=feedback_config,detail=True))))
+        code=2
+    except (CallerError,common.CallerError) as error:
+        result=_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else caller_feedback(error)
+        code=2
+    except ValueError as error:
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+            dict(status='unavailable' if isinstance(error,(UnsupportedExecution,common.UnsupportedExecution)) else 'unresolved',note=_diagnostic(error,'Execution request could not be resolved; check declared inputs and preserve any original call',config=feedback_config)))
+        code=2
+    except Exception as error:
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+            dict(status='unknown',note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config)))
+        code=3
     finally:owner_lease.close()
     if args.command in {'run','query','lookup','collect','cancel','reconcile'}:
         from . import managed_wait

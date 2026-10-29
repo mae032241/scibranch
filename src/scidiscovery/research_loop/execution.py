@@ -202,11 +202,7 @@ def record(root, step, attempt=None):
     current = chain[-1]
     if len(chain) > 1 and (current / 'native-outcome.json').exists():
         outcome = c.read(c.regular(current / 'native-outcome.json'))
-        accepted=None
-        if outcome.get('returncode') == 0 and outcome.get('stop_reason')=='author_closeout_token_limit':
-            from . import author_closeout
-            accepted=author_closeout.accepted_output(root,step,current,c.read(current/'native-intent.json'),outcome)
-        if outcome.get('returncode') == 0 and (not outcome.get('stop_reason') or accepted is not None):
+        if outcome.get('returncode') == 0 and not outcome.get('stop_reason'):
             _terminal(root, step, chain, outcome)
     return current
 

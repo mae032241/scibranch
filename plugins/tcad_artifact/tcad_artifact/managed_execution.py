@@ -8,6 +8,8 @@ import re
 from contextlib import contextmanager
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from scidiscovery.artifact_agent.schema.execution import ExecutionAdmission
 from scidiscovery.operations.execution import (
     AdapterCapability, ExecutionInterfaceRegistration, LifecycleCapabilities,
@@ -166,11 +168,17 @@ class TCADManagedExecution:
         if self.compilation_original is None or self.implementation_inputs is None:
             raise e.UnsupportedExecution('Native compilation requires the explicit operator snapshot and trusted input host')
         _verify_proof(self.compilation_original)
-        authored = TCADImplementation.model_validate_json(c.regular(Path(source).absolute()).read_bytes(), strict=True)
+        def author_document(raw):
+            try:return TCADImplementation.model_validate_json(raw,strict=True)
+            except ValidationError as error:
+                rows=error.errors(include_input=False,include_context=False,include_url=False)
+                details='; '.join(f'{".".join(str(item) for item in row["loc"]) or "document"}: {row["msg"]} [{row["type"]}]' for row in rows[:8])
+                raise e.CallerError('TCAD implementation JSON is invalid: '+details[:1800]) from error
+        authored = author_document(c.regular(Path(source).absolute()).read_bytes())
         contract = next(item for item in e._public_capabilities(self) if item['key'] == 'implementation_authoring')
 
         def build(raw, resolved):
-            author = TCADImplementation.model_validate_json(raw, strict=True)
+            author = author_document(raw)
             inputs = tuple(NativeResolvedProjectInput.model_validate_json(e.encoded(row), strict=True) for row in resolved)
             return compile_native_implementation(author, capability=self.compilation_capability, resolved_inputs=inputs)
 

@@ -130,7 +130,7 @@ def _completed_work_request(root, step, record, source_attempt, prior_intents):
             or not (record / 'work-evidence.json').exists() or (record / 'stage-end.json').exists()):
         return None
     from . import worker_delivery
-    if not worker_delivery.applicable(job):return None
+    if not worker_delivery.repair_applicable(job):return None
     outcome = c.read(c.regular(record / 'native-outcome.json'))
     if (outcome.get('returncode') != 0 or outcome.get('stop_reason')
             or outcome.get('output_status') == 'missing'
@@ -711,9 +711,10 @@ def output_request(root, step, record, *, source_attempt=None, verify_task=True)
             science=candidate_refs.control_payload(job,science,root=root)
             from . import formal_review
             formal_review.validate_choice(root,job,science)
+            from . import semantic
+            interpretation,_=semantic.author_choices(root,job,science)
             if job['role']=='A' and not job.get('formal_review'):
                 from . import search,candidate_nominations
-                interpretation=search.interpret(root,job,science) if job.get('search') is not None else None
                 search.require_portfolio_review(root,job,science,interpretation=interpretation)
                 candidate_nominations.require_final_coverage(root,job,science)
             if job['role']=='W':

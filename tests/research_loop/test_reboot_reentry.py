@@ -12,7 +12,7 @@ THREAD = '11111111-2222-4333-8444-555555555555'
 
 
 def interrupted_instance(tmp_path, monkeypatch, *, formal_review=False, output_only=False, fake=FAKE,
-                         closed_clock=False):
+                         closed_clock=False, final=False):
     if formal_review or output_only:
         public=tmp_path/'public'; public.mkdir()
         objective=public/'objective.md'; objective.write_text('Continue the original bounded task.')
@@ -27,12 +27,15 @@ def interrupted_instance(tmp_path, monkeypatch, *, formal_review=False, output_o
                     native_home=str(tmp_path/'original-native-home')) if output_only else {})))
     else:
         root = instance(tmp_path, fake=fake)
-    job = c.build_job(root, 1, 'H', [])
+    if not final:job = c.build_job(root, 1, 'H', [])
     current = budget.clock_stamp()
     old = dict(at_unix=current['at_unix'] - (current['at_boottime'] + 20. if closed_clock else 10.),
         at_boottime=100., boot_id='previous-host-boot')
     with monkeypatch.context() as clock:
         clock.setattr(budget, 'clock_stamp', lambda: dict(old))
+        if final:
+            budget.begin_closeout(root, 0, 1, 'Original final report', final_only=True)
+            job = c.build_job(root, 1, 'A', [], final_report=dict(source_cutoff=0, stopped_original=None))
         c.write(root/'host-started.json', old)
         budget.transition(root, 'advance', 'original_native_launch')
         anchor = budget.accept_node(root, job)
@@ -288,3 +291,60 @@ def test_run_and_continue_collect_same_session_without_replaying_original(tmp_pa
             with pytest.raises(q.IntegrityError,match='Direct source does not name its exact producer original'):
                 q._inputs(root,final_job)
     assert all(path.read_bytes()==data for path,data in saved.items())
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('entry',['run','continue','closeout'])
+@pytest.mark.parametrize('crash_before_spawn',[False,True])
+def test_final_collects_exact_interrupted_or_accepted_unstarted_original(tmp_path,monkeypatch,entry,crash_before_spawn):
+    from scidiscovery.research_loop import instance_control
+    root,saved=interrupted_instance(tmp_path,monkeypatch,closed_clock=True,final=True)
+    grant=budget.final_a_barrier(root)
+    assert grant['step']==1 and runtime.node_state(root,1)=='interrupted'
+    if crash_before_spawn:
+        with monkeypatch.context() as crash:
+            crash.setattr(runtime,'start',lambda *args:(_ for _ in ()).throw(RuntimeError('before original reentry spawn')))
+            with pytest.raises(RuntimeError,match='before original reentry spawn'):
+                continuation.reenter(root,1)
+        assert runtime.node_state(root,1)=='unstarted'
+    command={'run':controller.run,'continue':instance_control.continue_instance,'closeout':controller.closeout}[entry]
+    result=command(root)
+    assert result['status']=='final_a_completed',result
+    wait_runner(root)
+    original,current=execution.records(root,1)
+    intent=c.read(current/'native-intent.json')
+    assert intent['continuation_kind']=='reentry' and intent['task_ref']==c.read(original/'native-intent.json')['task_ref']
+    assert intent.get('native_profile')==c.read(original/'native-intent.json').get('native_profile')
+    assert intent['session']['thread_id']==THREAD
+    assert intent['budget_slice']['previous_tokens']==14
+    assert intent['budget_slice']['previous_seconds']>=10
+    assert intent['budget_slice']['final_return']==c.read(original/'native-intent.json')['budget_slice']['final_return']
+    assert (c.workspace(root,1)/'work/launches').read_text()=='resume\n'
+    assert not (original/'native-outcome.json').exists()
+    assert budget.final_a_barrier(root)==grant and budget.used_steps(root)==1
+    assert native.usage(root)['observed_tokens']==36
+    assert all(path.read_bytes()==data for path,data in saved.items())
+    assert not (root/'jobs/002.json').exists()
+    usage=native.usage(root)
+    assert command(root)['status']=='final_a_completed'
+    assert native.usage(root)==usage and execution.records(root,1)==[original,current]
+    assert budget.final_a_barrier(root)==grant
+
+
+def test_final_unknown_original_never_acquires_a_reentry(tmp_path,monkeypatch):
+    root,_=interrupted_instance(tmp_path,monkeypatch,closed_clock=True,final=True)
+    record=execution.origin(root,1)
+    receipt=c.read(record/'runner-process.json')
+    c.write(record/'runner-process.json',dict(receipt,task_ref=dict(path='/another/original.json')))
+    assert runtime.node_state(root,1)=='unknown'
+    grant=budget.final_a_barrier(root)
+    before={path:path.read_bytes() for path in (record/'native-intent.json',record/'runner-process.json',record/'usage.json')}
+    now=[0.]
+    monkeypatch.setattr(native.time,'monotonic',lambda:now[0])
+    monkeypatch.setattr(native.time,'sleep',lambda seconds:now.__setitem__(0,now[0]+seconds))
+    monkeypatch.setattr(runtime,'start',lambda *args:pytest.fail('Unknown original must not relaunch'))
+    result=controller.run(root)
+    assert result['status']=='closeout_native_unsealed',result
+    assert budget.final_a_barrier(root)==grant
+    assert all(path.read_bytes()==data for path,data in before.items())
+    assert not (record/'continuations').exists() and not (root/'jobs/002.json').exists()

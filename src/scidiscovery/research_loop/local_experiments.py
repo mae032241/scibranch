@@ -86,17 +86,16 @@ class LocalExecution:
         return payload
 
     def acceptance_metadata(self,payload,*,parent=None,new=False,change=None,command_options=None,_code_version=None):
-        if parent is not None or change is not None:
-            raise ValueError('This implementation does not declare candidate parent semantics')
         options=command_options or {}; arguments=options.get('arguments',[])
         if (set(options)-{'arguments','experiment_directory','source_script'} or not isinstance(arguments,list)
-                or len(arguments)>128 or any(not isinstance(item,str) or '\0' in item for item in arguments)
-                or sum(len(item.encode()) for item in arguments)>16_000):
-            raise ValueError('Bounded command argv required')
+                or any(not isinstance(item,str) or '\0' in item for item in arguments)):
+            raise ValueError('Local command arguments must be a list of strings without NUL bytes; use -- before script arguments.')
         metadata=dict(parent=dict(status='unknown',candidate_id=None,source='none'),change_intent=None,
             local_observation_version=1,
             command=[*self.config['run_argv'],payload.local_path,*arguments],script_index=len(self.config['run_argv']),cwd=self.config.get('cwd'),
             config_record=self.config)
+        if parent is not None or change is not None:
+            metadata['note']='Local execution ignores --parent-plan and --change-intent; no candidate parent or change semantics are declared.'
         if _code_version is not None:
             from . import experiment_client, contracts as c
             source=Path(options.get('source_script',payload.local_path)).absolute()

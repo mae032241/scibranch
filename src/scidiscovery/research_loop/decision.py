@@ -9,15 +9,20 @@ def schema():
                   question=dict(type='string'),
                   change_criterion=dict(type='string'))
     return dict(type=['object', 'null'], properties=fields, required=list(fields), additionalProperties=False,
-        description='For continue_w, revise_h or extract, state the scientific decision, concrete question '
-                    'and what result would change that decision. Null is allowed for audit, wait or finish. '
+        description='Optional context for continue_w, revise_h or extract: the scientific decision, concrete question '
+                    'and what result would change it. Missing or unconsumable context uses the actual route and reason. '
                     'No evidence paths or hashes: the host binds the actual mechanism and assessed originals.')
 
 
-def _key(job, payload, focus):
+def _request(job, payload):
     request = c.scientific_field(job,payload,'decision_request')
+    return request if request is not None and all(request[key].strip() for key in ('question','change_criterion')) else None
+
+
+def _key(job, payload, focus):
+    request = _request(job,payload)
     mechanism = focus.get('mechanism_ref') if focus else None
-    if request is None and 'decision_request' not in payload:
+    if request is None:
         return ('route', payload['next_action'], payload['route_reason'].strip(),
                 mechanism, payload.get('candidate_recommendation'))
     candidate = payload.get('candidate_recommendation') if request['decision'] == 'candidate' else None
@@ -50,9 +55,6 @@ def assess(root, job, payload, *, focus=None):
         return []
     if payload['next_action'] not in ACTIONS:
         return []  # Necessary audit, pause and delivery choices are independent.
-    request = c.scientific_field(job,payload,'decision_request')
-    if 'decision_request' in payload and (request is None or any(not request[key].strip() for key in ('question', 'change_criterion'))):
-        return [dict(code='a_decision_request_missing', subject=payload['next_action'])]
     key, basis = _key(job, payload, focus), _basis(root, job)
     sources = {}
     for ref in job['history']['nodes']:
@@ -68,8 +70,7 @@ def assess(root, job, payload, *, focus=None):
                 or control.get('search_status') == 'unresolved'
                 or control.get('selection_status') == 'unresolved'):
             continue
-        if (('decision_request' not in prior or c.scientific_field(original,prior,'decision_request') is not None)
-                and _completed(original, prior, sources)
+        if (_completed(original, prior, sources)
                 and _key(original, prior, control.get('resolved_focus')) == key and basis <= _basis(root, original)):
             return [dict(code='a_decision_request_repeated', subject=payload['next_action'])]
     return []

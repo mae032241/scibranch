@@ -10,6 +10,25 @@ from . import contracts as c, history, search
 MAX_DIAGNOSTICS = 8
 MAX_AUTHOR_CORRECTIONS = 2
 
+def author_choices(root,job,payload):
+    """The same prospective consumers serve sealing and original-output repair."""
+    enabled=c.settings(root,job).get('search_policy') is not None and not job.get('formal_review') and not job.get('final_report')
+    interpretation=search.interpret(root,job,payload) if enabled else dict(focus=None,allocation=None,diagnostics=[])
+    selection=[]
+    c.selected_inputs(c.workspace(root,job['step']),payload,job,selection)
+    # Interpretation reports either authored mechanism/route consumption or an
+    # unavailable scientific observation/repair authority. Only the latter
+    # needs a new scientific reconsideration rather than fixing this response.
+    repair=[row for row in interpretation['diagnostics']
+        if not row['code'].startswith(('screen_source_','search_repair_'))]
+    repair.extend(selection)
+    if repair:
+        from .output_repair import OutputRepairRequired
+        row=repair[0]
+        raise OutputRepairRequired(row['code'], 'Correct '+str(row.get('subject','scientific action'))[:128]+': '+row['code']+
+            '. Use an exact declared reference and the required action fields in this same task; retained work must not be repeated.')
+    return interpretation,selection
+
 
 def outcome(root,job,payload):
     from .protocol import CURRENT
@@ -17,13 +36,11 @@ def outcome(root,job,payload):
         raise ValueError('Current scientific interpretation required')
     from . import formal_review
     formal_review.validate_choice(root,job,payload)
-    enabled=c.settings(root, job).get('search_policy') is not None and not job.get('formal_review') and not job.get('final_report')
-    interpretation=search.interpret(root,job,payload) if enabled else dict(focus=None,allocation=None,diagnostics=[])
+    interpretation,selection=author_choices(root,job,payload)
     search.require_portfolio_review(root,job,payload,interpretation=interpretation)
     from . import candidate_nominations
     candidate_nominations.require_final_coverage(root,job,payload)
     diagnostics=interpretation['diagnostics']
-    selection=[];c.selected_inputs(c.workspace(root,job['step']),payload,job,selection)
     from . import decision
     requests=decision.assess(root,job,payload,focus=interpretation['focus'])
     delivery=None
@@ -31,6 +48,7 @@ def outcome(root,job,payload):
         from . import worker_delivery
         delivery=worker_delivery.require_delivery(root,job,payload,execution.record(root,job['step']))
     rows=[*diagnostics,*selection,*requests,*history.validate_recommendation(job,payload,root=root)]
+    rows.extend(search.optional_reference_diagnostics(root,job,payload))
     rows.extend(row for row in c.scientific_diagnostics(job,payload) if row not in rows)
     return dict(**(dict(stage_end_reason='continuation_unavailable') if job['role']=='W' and payload.get('stage_intent')=='continue' and not job.get('worker_fragment_policy') else {}),
         **(dict(worker_delivery=delivery) if delivery is not None else {}),

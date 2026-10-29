@@ -23,7 +23,7 @@ sys.stdin.read()
 work = pathlib.Path(os.environ['THIN_HWA_WORKSPACE'])
 task = json.loads((work / 'science-task.json').read_text())
 role = task['role']
-payload = {key: None for key in task['final_response']}
+payload = {}
 payload.update(summary='Local transport reproduction ' + role,
     scientific_result='Synthetic transport evidence only; no scientific finding.',
     limitations=['No model, API, remote service or solver was invoked.'],

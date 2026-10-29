@@ -37,7 +37,8 @@ else:
 payload=dict(summary='Deterministic CLI transport',scientific_result='No scientific qualification is asserted.',
  limitations=['Only native communication is simulated.'],implementation_selection=None)
 completed_work=config['fault'].startswith('completed-')
-nomination=config['fault'].startswith('nomination-') or completed_work
+author_repair=config['fault'].startswith('author-')
+nomination=config['fault'].startswith('nomination-') or completed_work or author_repair
 if role=='H':
  payload.update(next_action='analyze',route_reason='Review retained evidence',search_plan=None)
  if config['fault']=='incomplete_w' or nomination:
@@ -46,10 +47,46 @@ if role=='H':
    focus=dict(label=None,action='screen')))
   if completed_work:
    payload['search_plan']['commitments'].append(dict(label='Second fixture mechanism',minimal_test='Produce a different bounded observation',existing_ref=None))
+   if 'caller-improve' in config['fault']:payload['search_plan']['focus']=dict(label='Fixture mechanism',action='improve')
+ if author_repair:
+  if resume:
+   assert 'Fix diagnosed JSON/layout only' in prompt
+   (work/'work/author-repair-prompt.txt').write_text(prompt)
+  if config['fault'].startswith('author-focus'):
+   payload['search_plan']['focus']['label']='Misspelled fixture mechanism' if not resume or config['fault']=='author-focus-repeat' else 'Fixture mechanism'
+  if config['fault']=='author-selection' and not resume:payload['implementation_selection']=['W999-I001']
+ if config['fault'] in {'caller-no-search','caller-compile-no-search','caller-command-no-search'}:payload['next_action']='experiment'
 elif role=='W':
  payload.update(stage_intent='review',mechanism_findings=None)
  task=json.loads((work/'science-task.json').read_text())
  mechanisms=task.get('candidate_nomination_mechanisms',[])
+ if config['fault'] in {'caller-no-search','caller-compile-no-search','caller-command-no-search'}:
+  import subprocess
+  from scidiscovery.research_loop.worker_execution_bridge import SUBMISSION_DIRECTORY
+  directory=work/'experiments/no-search';directory.mkdir(parents=True,exist_ok=True)
+  code=work/'code';code.mkdir(exist_ok=True);script=code/'run.py'
+  script.write_text('from pathlib import Path\nPath("artifacts/result.json").write_text('+repr(json.dumps(dict(version=1,metrics=[],outputs=[])))+')\n')
+  arguments=[sys.executable,'-m','scidiscovery.research_loop.worker_execution_bridge','--submission-directory',str(work/SUBMISSION_DIRECTORY),
+   'run','--experiment-dir',str(directory),'--script',str(script)]
+  if config['fault']=='caller-compile-no-search' and not resume:
+   aliases=work/'code/scientific-files.json';aliases.write_text('{"broken":')
+   arguments=arguments[:5]+['compile','--implementation',str(script),'--scientific-files',str(aliases),'--output',str(work/'code/compiled.json')]
+  elif config['fault']=='caller-command-no-search' and not resume:arguments=arguments[:5]+['rnu']
+  elif not resume:arguments+=['--misspelled-option','value']
+  outcome=subprocess.run(arguments,capture_output=True,text=True)
+  response=json.loads(outcome.stdout)
+  if resume:
+   if config['fault']=='caller-compile-no-search':
+    assert 'unaccepted compile request' in prompt and 'JSON' in prompt
+    (work/'work/caller-repair-prompt.txt').write_text(prompt)
+   if config['fault']=='caller-command-no-search':
+    assert 'unaccepted rnu request' in prompt
+    (work/'work/caller-repair-prompt.txt').write_text(prompt)
+   assert outcome.returncode==0 and response['status']=='known_success',(outcome.stdout,outcome.stderr)
+   (work/'work/only-accepted-call.json').write_text(json.dumps(response))
+  else:
+   assert outcome.returncode==2 and response['status']=='caller_error' and response['accepted'] is False,(outcome.stdout,outcome.stderr)
+   (work/'work/caller-refusal.json').write_text(json.dumps(response));payload['stage_intent']='decision'
  if config['fault']=='incomplete_w':
   payload['candidate_nominations']=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row['mechanism_ref'],
    reason='This fixture supplies no scientific model suitability claim.') for row in mechanisms if row['status']!='waived'])
@@ -138,6 +175,35 @@ elif role=='W':
     result=json.loads(outcome.stdout);assert result['status']=='known_success'
     second.write_text(json.dumps(dict(call_id=result['call_id'])))
     payload['mechanism_findings'].append(dict(mechanism='Second fixture mechanism',basis='observed',finding='A different retained assigned observation; scientific suitability remains for A.'))
+   if config['fault'].startswith('completed-caller-'):
+    payload['mechanism_findings']=[dict(mechanism='Fixture mechanism',basis='observed',finding='The first original observation is retained.')]
+    import subprocess
+    from scidiscovery.research_loop.worker_execution_bridge import SUBMISSION_DIRECTORY
+    bridge=[sys.executable,'-m','scidiscovery.research_loop.worker_execution_bridge','--submission-directory',str(work/SUBMISSION_DIRECTORY)]
+    directory=work/'experiments/second';directory.mkdir(parents=True,exist_ok=True)
+    script=work/'code/second.py'
+    script.write_text('from pathlib import Path\nPath("artifacts/analysis.txt").write_text("A different assigned bounded observation")\nPath("artifacts/result.json").write_text('+repr(json.dumps(dict(version=1,metrics=[],outputs=[dict(path='artifacts/analysis.txt')])))+')\n')
+    requested_mechanism='Fixture mechanism' if 'caller-improve' in config['fault'] else 'Second fixture mechanism'
+    requested_ref='h001.m1' if 'caller-improve' in config['fault'] else 'h001.m2'
+    arguments=['run','--experiment-dir',str(directory),'--script',str(script),'--mechanism',requested_mechanism]
+    if not resume:
+     rejected=subprocess.run([*bridge,*arguments,'--misspelled-option','value'],capture_output=True,text=True)
+     response=json.loads(rejected.stdout)
+     assert rejected.returncode==2 and response['status']=='caller_error' and response['accepted'] is False,(rejected.stdout,rejected.stderr)
+     (work/'work/caller-refusal.json').write_text(json.dumps(response))
+    if resume or config['fault']=='completed-caller-corrected':
+     if resume:
+      assert 'worker_delivery_incomplete' in prompt and requested_ref in prompt
+      (work/'work/caller-repair-prompt.txt').write_text(prompt)
+     second=work/'work/second-original-call.json';assert not second.exists()
+     accepted=subprocess.run([*bridge,*arguments],capture_output=True,text=True)
+     response=json.loads(accepted.stdout)
+     assert accepted.returncode==0 and response['status']=='known_success',(accepted.stdout,accepted.stderr)
+     second.write_text(json.dumps(dict(call_id=response['call_id'])))
+     payload['mechanism_findings'].append(dict(mechanism=requested_mechanism,basis='observed',finding='The corrected request yielded the retained assigned observation.'))
+    elif config['fault']=='completed-caller-blocked':
+     payload['mechanism_findings'].append(dict(mechanism='Second fixture mechanism',basis='blocked',finding='The command options were refused before this required observation started.'))
+    else:payload['stage_intent']='decision'
  if config.get('output_repair_probe') and not completed_work and not resume and not config['fault'].startswith('nomination-layout'):payload.pop('summary')
 else:
  assert role=='A'
@@ -166,7 +232,7 @@ else:
 if not (config['fault']=='completed-missing-output' and role=='W' and not resume):
  pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))
 if (config['fault']!='unknown' and config['fault']!='nomination-unknown') or role=='H':
- tokens=2040301 if role=='W' and config['fault'].startswith('nomination-layout') and not resume else 10
+ tokens=config['layout_input_tokens'] if role=='W' and config['fault'].startswith('nomination-layout') and not resume else 10
  print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=tokens,cached_input_tokens=3,output_tokens=4))),flush=True)
 raise SystemExit(7 if config['fault']=='failed' and role=='A' else 0)
 '''
@@ -252,13 +318,13 @@ def nomination_diagnostic(root, result, *, fault, fragment=False):
     return rendered
 
 
-def prepare_cli(tmp_path,*,fault='missing',custom=False,explicit_false=False,final=False,fragment=False,automatic=None,max_tokens=None,a_screened=False,output_repair_probe=False):
+def prepare_cli(tmp_path,*,fault='missing',custom=False,explicit_false=False,final=False,fragment=False,automatic=None,max_tokens=None,a_screened=False,output_repair_probe=False,layout_input_tokens=2040301):
     public=tmp_path/'public';public.mkdir();objective=public/'objective.md';objective.write_text('Retain scientific uncertainty.')
     home=tmp_path/'inherited-home';home.mkdir()
     configuration='[sandbox_workspace_write]\nnetwork_access=true\nexclude_tmpdir_env_var=true\n'
     (home/'config.toml').write_text(configuration);(home/'auth.json').write_text('{"fixture":"private authentication marker"}')
     program=tmp_path/'native.py'
-    if fault.startswith(('nomination-','completed-')):
+    if fault.startswith(('nomination-','completed-','author-','caller-')):
         # The model wire is fake; managed local execution still needs the real
         # sandbox auxiliary from the selected native installation, as in the
         # existing default-local transport fixture.
@@ -272,12 +338,12 @@ def prepare_cli(tmp_path,*,fault='missing',custom=False,explicit_false=False,fin
         auxiliary.parent.mkdir(parents=True);auxiliary.symlink_to(actual)
     program.write_text('#!'+sys.executable+'\n'+NATIVE);program.chmod(0o755)
     binary=tmp_path/'bin';binary.mkdir();(binary/'codex').symlink_to(program)
-    c.write(program.with_name('launcher-config.json'),dict(fault=fault,home=str(home),configuration=configuration,default_home=not explicit_false,a_screened=a_screened,output_repair_probe=output_repair_probe))
+    c.write(program.with_name('launcher-config.json'),dict(fault=fault,home=str(home),configuration=configuration,default_home=not explicit_false,a_screened=a_screened,output_repair_probe=output_repair_probe,layout_input_tokens=layout_input_tokens))
     env=dict(os.environ,CODEX_HOME=str(home),PATH=str(binary)+os.pathsep+os.environ.get('PATH',''))
     source=str(Path(__file__).resolve().parents[2]/'src')
     env['PYTHONPATH']=source+os.pathsep+env.get('PYTHONPATH','')
     root=tmp_path/'instance';search=tmp_path/'search.json'
-    c.write(search,dict(search_contract.DEFAULT_POLICY,initial_calls=1) if fault=='incomplete_w' or fault.startswith(('nomination-','completed-')) else None)
+    c.write(search,dict(search_contract.DEFAULT_POLICY,initial_calls=1) if fault=='incomplete_w' or fault.startswith(('nomination-','completed-','author-')) else None)
     launcher=[sys.executable,str(program)] if custom else [str(binary/'codex') if explicit_false or fragment or automatic is not None else 'codex']
     arguments=['prepare','--objective',str(objective),'--public-root',str(public),
         '--native-launcher-json',json.dumps(launcher),

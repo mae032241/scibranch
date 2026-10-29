@@ -96,7 +96,7 @@ def capture(root, job, record):
     destination = record / 'checkpoint.json'
     if destination.exists() or destination.is_symlink():
         return validate(root, job, record)
-    if worker_delivery.applicable(job) and (record/'science-output.json').exists():worker_delivery.capture(root,job,record)
+    if worker_delivery.repair_applicable(job) and (record/'science-output.json').exists():worker_delivery.capture(root,job,record)
     originals, missing = [], []
     for name in NATIVE_ORIGINALS:
         path = record / name

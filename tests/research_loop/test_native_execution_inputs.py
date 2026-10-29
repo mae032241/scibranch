@@ -167,7 +167,8 @@ def chain(tmp_path, monkeypatch, request):
     job = c.build_job(root, 2, 'W', [1]); work = c.workspace(root, 2); record = c.host_record(work)
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/002.json')))
     config_path = work / 'work/execution.json'; config = e.configure(root, 2, 'tcad_execution:tcad', options, config_path)
-    author = work / ('project/src/implementation.json' if project is not None else 'work/implementation.json')
+    author = work / ('project/src/implementation.json' if project is not None else 'code/implementation.json')
+    author.parent.mkdir(parents=True,exist_ok=True)
     c.write(author, dict(solver_kind='sdevice', files=[dict(relative_path='main.cmd', content='Solve {}\n')],
         input_slots=[dict(semantic_name='mesh', target_relative_path='inputs/mesh.tdr', media_type='application/octet-stream')],
         entrypoint='main.cmd', resource_limits=dict(wall_time_seconds=1, cpu_time_seconds=1,

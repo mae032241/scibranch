@@ -258,6 +258,9 @@ def prepare(root, step, record, work, home, args, *, standard, resume_position=N
     snapshot.chmod(0o400)
     original=e.proof(snapshot)
 
+    def check_available():
+        if 'unsupported' in value:raise e.UnsupportedExecution(value['unsupported'])
+
     def launch(config,accepted,command,cwd):
         if e.proof(snapshot)!=original or c.read(c.regular(snapshot))!=value:
             raise e.IntegrityError('Original native permissions changed')
@@ -272,6 +275,7 @@ def prepare(root, step, record, work, home, args, *, standard, resume_position=N
             if e.proof(value[key]['path'])!=value[key]:
                 raise e.IntegrityError('Original native sandbox implementation changed')
         return _launch(value,config,accepted,command,cwd,public=public,root=root)
+    launch.check_available=check_available
     return native_args,launch
 
 

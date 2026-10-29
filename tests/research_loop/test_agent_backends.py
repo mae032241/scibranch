@@ -376,9 +376,12 @@ request=json.loads(wire) if protocol else None
 prompt=request['prompt'] if protocol else wire
 configs=[args[i+1] for i,value in enumerate(args) if value=='-c']
 developer=[json.loads(value.split('=',1)[1]) for value in configs if value.startswith('developer_instructions=')]
-(work/'work/captured.json').write_text(json.dumps(dict(prompt=prompt,developer=developer,args=args)))
+(work/'work/captured.json').write_text(json.dumps(dict(prompt=prompt,developer=developer,args=args,
+ response_schema=request['response_schema'] if protocol else None)))
 task=json.loads((work/'science-task.json').read_text())
-properties=request['response_schema']['properties'] if protocol else {key:None for key in task['final_response']}
+properties=request['response_schema']['properties'] if protocol else ['summary','scientific_result','limitations']
+if not protocol and task['role'] in {'H','A'}:properties+=['next_action','route_reason']
+if not protocol and task['role']=='W':properties+=['stage_intent']
 result={key:None for key in properties}
 result.update(summary='Transport capture',scientific_result='No scientific qualification',limitations=['Local fake transport'],next_action='wait',route_reason='Bounded fixture')
 if protocol:
@@ -432,7 +435,13 @@ def test_role_rules_have_one_actual_launch_transport_and_task_data_remains(tmp_p
         assert not captured['developer'] and rules in captured['prompt']
     assert all(key not in task for key in ('role_instruction','role_guidance','scientific_judgment'))
     assert task['role']==role and task['global']['objective']=='inputs/global/objective.md'
-    assert task['final_response'] and 'schema' not in task
+    assert 'final_response' not in task and 'schema' not in task
+    current=c.result_schema(role,**c.response_options(job))
+    if transport=='protocol':
+        assert captured['response_schema']==current
+    else:
+        required_menu=captured['developer'][0].split('Required: ',1)[1]
+        assert all(name in required_menu for name in current['required'])
 
 
 def test_codex_resume_preserves_the_single_developer_instruction_and_permissions(tmp_path):

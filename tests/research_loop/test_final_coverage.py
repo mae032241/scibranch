@@ -11,7 +11,7 @@ from test_portfolio_contract import prepared, raw_author, comparison, rewrite
 pytestmark = pytest.mark.process_e2e
 
 
-@pytest.mark.parametrize('damage',['missing','null','malformed','omitted','duplicate','unknown','blank_reason','missing_questions','private_ref','unknown_ref'])
+@pytest.mark.parametrize('damage',['missing','null','malformed','omitted','duplicate','unknown','blank_reason'])
 def test_final_coverage_raw_seal_gate_rejects_missing_or_unbound_declarations(tmp_path,damage):
     root=prepared(tmp_path);job,payload,record=raw_author(root,review=comparison())
     value=payload['final_coverage']
@@ -22,12 +22,22 @@ def test_final_coverage_raw_seal_gate_rejects_missing_or_unbound_declarations(tm
     elif damage=='duplicate':value.append(copy.deepcopy(value[0]))
     elif damage=='unknown':value[0]['mechanism_ref']='h999.m1'
     elif damage=='blank_reason':value[0]['reason']=' \t'
-    elif damage=='missing_questions':value[0].pop('unanswered_questions')
-    elif damage=='private_ref':value[0]['science_refs']=[dict(source_step=1,pointer='/direct_refs/0/path')]
-    elif damage=='unknown_ref':value[0]['science_refs']=[dict(source_step=99,pointer='/scientific_result')]
     rewrite(record,payload)
     with pytest.raises(OutputRepairRequired,match='final_coverage'):c.seal_result(root,3)
     assert not (record/'result-identity.json').exists() and not (record/'result.json').exists()
+
+
+@pytest.mark.parametrize('pointer,source',[('/direct_refs/0/path',1),('/scientific_result',99)])
+def test_optional_final_citations_are_diagnostic_without_blocking_coverage(tmp_path,pointer,source):
+    root=prepared(tmp_path);job,payload,record=raw_author(root,review=comparison())
+    payload['final_coverage'][0].pop('unanswered_questions',None)
+    payload['final_coverage'][0]['science_refs']=[dict(source_step=source,pointer=pointer)]
+    rewrite(record,payload);original=(record/'science-output.json').read_bytes()
+    c.seal_result(root,3)
+    assert c.validate(c.workspace(root,3))['final_coverage']==payload['final_coverage']
+    diagnostics=c.read(record/'result-identity.json')['control_outcome']['diagnostics']
+    assert dict(code='scientific_reference_unresolved',subject='optional scientific citations') in diagnostics
+    assert (record/'science-output.json').read_bytes()==original
 
 
 def test_sealed_final_coverage_retains_authored_depth_questions_and_replays(tmp_path):
@@ -37,7 +47,7 @@ def test_sealed_final_coverage_retains_authored_depth_questions_and_replays(tmp_
     payload['final_coverage'][1].update(status='screened_pending',reason='Synthetic A retains a screened comparison for later evidence.')
     rewrite(record,payload);c.seal_result(root,3)
     assert c.validate(c.workspace(root,3))['final_coverage']==payload['final_coverage']
-    assert c.science_view(job,root)['final_coverage_mechanisms']==job['final_coverage_mechanisms']
+    assert c.science_view(job,root)['final_coverage_mechanisms']==[row['mechanism_ref'] for row in job['final_coverage_mechanisms']]
     saved=c.read(root/'host-history/overview.json')['portfolio_metrics']
     assert saved['source_step']==3 and saved['portfolio']['completed_cycle_count']==1
     assert saved['portfolio']['mainline_streak']==1 and saved['token_advice']['status']=='unavailable'

@@ -1003,20 +1003,22 @@ class NativeInputHost:
         if (source.resolve() != source or not source.is_relative_to(work)
                 or output.resolve() != output or not output_allowed
                 or any(parent.is_symlink() for parent in output.parents)):
-            raise ValueError('Compile source/output must be original files in this task and its host-owned output namespace')
+            raise e.CallerError('Compile source/output must be original files in this task and its host-owned output namespace')
         from . import atomic_files, code_versions
         logical_source=source
         if set(aliases) != {slot['semantic_name'] for slot in slots}:
-            raise ValueError('Select one exact bound scientific-file alias for every slot')
+            missing=sorted({slot['semantic_name'] for slot in slots}-set(aliases))
+            extra=sorted(set(aliases)-{slot['semantic_name'] for slot in slots})
+            raise e.CallerError(f'Scientific-files slot mapping differs: missing slots {missing}; extra slots {extra}. Select one exact bound alias for every slot.')
         inputs = []
         for slot in slots:
             alias = aliases[slot['semantic_name']]
             found = {json.dumps(row, sort_keys=True): row for row in _bound(self.job) if row['path'] == alias}
             if len(found) != 1:
-                raise ValueError('Scientific file alias is missing or ambiguous; choose an exact listed task input')
+                raise e.CallerError(f'Scientific-files slot {slot["semantic_name"]!r} has a missing or ambiguous alias; choose an exact listed task input.')
             material = next(iter(found.values())); original = _producer(self.root, material)
             if original['producer_step'] >= self.job['step']:
-                raise ValueError('Compile inputs must be preceding sealed originals')
+                raise e.CallerError(f'Scientific-files slot {slot["semantic_name"]!r} must select a preceding sealed original.')
             inputs.append(dict(slot, alias=alias, original=original, size_bytes=material['size_bytes']))
         if c.output_quota_exceeded(c.settings(self.root, self.job), (item['size_bytes'] for item in inputs)):
             raise ValueError('Scientific inputs exceed the explicit frozen handoff quota')
@@ -1113,7 +1115,7 @@ class NativeInputHost:
             snapshot=q._ref(self.root,capability_path)
             originals.resolve_root_ref(self.root,snapshot)
             if output.exists() or output.is_symlink():
-                raise ValueError('Choose a new output; sealed packages cannot be overwritten')
+                raise e.CallerError('Choose a new output; sealed packages cannot be overwritten')
             frozen=shared_originals.publish_bytes(self.root,raw,policy=policy,context=context)
             shared_originals.link(frozen,output,size_bytes=len(raw),root=self.root,policy=policy,context=context)
             value = dict(version=1, **invocation, **author_binding,

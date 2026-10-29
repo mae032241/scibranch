@@ -16,6 +16,41 @@ def applicable(job):
     return job['role']=='W' and ((job.get('search') or {}).get('focus') or {}).get('action')=='screen'
 
 
+def repair_applicable(job):
+    return (job['role']=='W' and not job.get('formal_review') and not job.get('final_only')
+        and job.get('purpose')!='closeout')
+
+
+def _obligations(job):
+    search=job.get('search') or {}
+    if not search.get('focus'):return []
+    if applicable(job):return search['coverage_obligation']
+    focus=search['focus']['mechanism_ref']
+    return [{key:row[key] for key in ('mechanism_ref','source_h','source_h_ref')}
+        for row in search['breadth']['mechanisms'] if row['mechanism_ref']==focus]
+
+
+def _caller_correction(root,job,record):
+    if not repair_applicable(job):return None
+    from . import worker_execution_bridge
+    refusal=worker_execution_bridge.terminal_caller_error(root,job,record)
+    if refusal is None:return None
+    arguments=refusal['arguments']
+    search=job.get('search') or {}
+    if not search.get('focus'):
+        subject='unaccepted '+arguments[0]+' request' if arguments else 'unaccepted command request'
+        return dict(diagnostic=refusal['diagnostic'],mechanism_ref=subject)
+    control=arguments[:arguments.index('--')] if '--' in arguments else arguments
+    choices=[control[index+1] for index,value in enumerate(control[:-1]) if value=='--mechanism']
+    choice=choices[-1] if choices else None
+    matches=[row['mechanism_ref'] for row in search['breadth']['mechanisms']
+        if choice in (row['mechanism_ref'],row['label'])]
+    # A misspelled mechanism is itself correctable. Bind the task's original
+    # focus for the repair message, never an inferred replacement submission.
+    ref=matches[0] if len(matches)==1 else search['focus']['mechanism_ref']
+    return dict(diagnostic=refusal['diagnostic'],mechanism_ref=ref)
+
+
 def _bytes(value):
     return (json.dumps(value,ensure_ascii=False,indent=2,allow_nan=False)+'\n').encode()
 
@@ -124,7 +159,8 @@ def capture(root,job,record):
     This is one attempt's fact original, not a new call index or mutable balance.
     Each proof uses the existing archive. Later calls/collections cannot change it.
     """
-    if not applicable(job):return None
+    if not repair_applicable(job):return None
+    if not (job.get('search') or {}).get('focus') and _caller_correction(root,job,record) is None:return None
     from .protocol import require_current,stage_scope
     require_current(root,job)
     root,record=Path(root),Path(record);path=record/FACT_NAME
@@ -133,7 +169,7 @@ def capture(root,job,record):
         raw_ref=c.file_ref(c.regular(record/'science-output.json',limit=None)),source_attempt=number)
     if path.exists():return validate(root,job,record)
     writers_stopped(root,job,record)
-    needed={row['mechanism_ref'] for row in job['search']['coverage_obligation']}
+    needed={row['mechanism_ref'] for row in _obligations(job)}
     rows=[];unknown=[];capacity=False
     # Frozen predecessor observations only, never recursively copy their assets.
     for source,row in _prefix_calls(root,job):
@@ -150,20 +186,22 @@ def capture(root,job,record):
         if 'observation' in row:proofs['observation']=row['observation']
         proofs.update(originals=row.get('originals',[]),outputs=row.get('outputs',[]))
         if row['status'] in {'known_success','known_failed'}:
+            if accepted.get('mechanism_binding') is None:continue
             ref=accepted['mechanism_binding']['mechanism_ref']
             if ref in needed:rows.append(dict(mechanism_ref=ref,**proofs))
         elif row['status']=='unknown':unknown.append(proofs)
         # A verified permanent non-submission is neither an observation nor
         # unknown work. Its complete proof stays with the history owner.
     # Keep one exact observation per required current-H mechanism.
-    obligations={row['mechanism_ref']:row for row in job['search']['coverage_obligation']};selected={}
+    obligations={row['mechanism_ref']:row for row in _obligations(job)};selected={}
     for row in rows:
         original=row['accepted']
         if original.get('retention')!='archived':capacity=True;continue
         value=accepted_original(root,original);mechanism=value.get('mechanism_binding') or {};ref=row['mechanism_ref'];expected=obligations[ref]
         if all(mechanism.get(key)==expected[key] for key in ('mechanism_ref','source_h','source_h_ref')):selected[ref]=row
     value=dict(version=1,binding=binding,evidence=list(selected.values()),unknown=unknown,
-        prior_unknown=job['search']['breadth']['prior_unknown'],capacity=capacity,omitted_evidence=0,omitted_unknown=0)
+        prior_unknown=((job.get('search') or {}).get('breadth') or {}).get('prior_unknown',False),
+        capacity=capacity,omitted_evidence=0,omitted_unknown=0)
     c.write(path,value);path.chmod(0o400)
     return validate(root,job,record)
 
@@ -203,7 +241,7 @@ def validate(root,job,record,*,source_attempt=None):
                     raise history.ObserverIntegrityError('Worker evidence lacks its exact frozen inherited observation')
             elif history.managed_status(root,row) not in {'known_success','known_failed'}:
                 raise history.ObserverIntegrityError('Worker observation differs from accepted terminal originals')
-            ref=row['mechanism_ref'];target=next((item for item in job['search']['coverage_obligation'] if item['mechanism_ref']==ref),None)
+            ref=row['mechanism_ref'];target=next((item for item in _obligations(job) if item['mechanism_ref']==ref),None)
             if target is None or any(accepted['mechanism_binding'].get(key)!=target[key] for key in ('mechanism_ref','source_h','source_h_ref')):
                 raise history.ObserverIntegrityError('Worker observation differs from assigned H version')
     return value
@@ -256,9 +294,17 @@ def validate_original(root,owner,job,seal,*,controls_only=False):
 
 def assessment(root,job,science,record,*,source_attempt=None):
     """Coverage of this task's own authored findings; no scientific screened verdict."""
-    if not applicable(job):return dict(status='not_applicable',missing=[],blocked=[],reason=None)
+    if not repair_applicable(job):return dict(status='not_applicable',missing=[],blocked=[],reason=None)
+    correction=_caller_correction(root,job,record)
+    if not applicable(job) and correction is None:
+        return dict(status='not_applicable',missing=[],blocked=[],reason=None)
     facts=validate(root,job,record,source_attempt=source_attempt)
-    expected={row['mechanism_ref'] for row in job['search']['coverage_obligation']}
+    if facts['capacity'] or facts['unknown'] or facts['prior_unknown']:correction=None
+    if not applicable(job):
+        return dict(status='incomplete' if correction else 'not_applicable',
+            missing=[correction['mechanism_ref']] if correction else [],blocked=[],reason=None,
+            **(dict(facts_ref=c.record_ref(c.regular(record/FACT_NAME)),caller_correction=correction) if correction else {}))
+    expected={row['mechanism_ref'] for row in _obligations(job)}
     known={row['mechanism_ref'] for row in facts['evidence']}
     blocked=set();findings=science.get('mechanism_findings')
     mechanisms=job['search']['breadth']['mechanisms']
@@ -271,8 +317,15 @@ def assessment(root,job,science,record,*,source_attempt=None):
     reason=('work_evidence_capacity' if facts['capacity'] else 'original_execution_unknown' if facts['unknown'] or facts['prior_unknown']
         else 'worker_decision' if science.get('stage_intent')=='decision'
         else 'scientific_blocked' if blocked else None)
+    if correction is not None:
+        # This exact rejected request has no observation, even if earlier work
+        # on that mechanism is retained. A later accepted correction suppresses
+        # the refusal at the bridge producer before this consumer sees it.
+        missing=sorted(set(missing)|{correction['mechanism_ref']})
+        reason=None
     return dict(status='partial' if reason else 'incomplete' if missing else 'complete',missing=missing,blocked=sorted(blocked),reason=reason,
-        facts_ref=c.record_ref(c.regular(record/FACT_NAME)))
+        facts_ref=c.record_ref(c.regular(record/FACT_NAME)),
+        **(dict(caller_correction=correction) if correction is not None else {}))
 
 
 def require_delivery(root,job,science,record,*,source_attempt=None):
@@ -287,7 +340,9 @@ def require_delivery(root,job,science,record,*,source_attempt=None):
                 reason=validate_exit(root,job,record,value['work_exit'])
                 if value['reason']!=reason:raise history.ObserverIntegrityError('Stage ending changed its verified Worker exception')
                 return dict(result,status='partial',reason=reason)
-        raise WorkRepairRequired('Complete the missing assigned observations: '+', '.join(result['missing'])+
+        diagnosis=('Correct the unaccepted request for '+result['caller_correction']['mechanism_ref']+': '+
+            result['caller_correction']['diagnostic']+'. ' if result.get('caller_correction') else '')
+        raise WorkRepairRequired(diagnosis+'Complete the missing assigned observations: '+', '.join(result['missing'])+
             '. Reuse retained results and reconcile original calls; do not resubmit completed experiments.')
     return result
 

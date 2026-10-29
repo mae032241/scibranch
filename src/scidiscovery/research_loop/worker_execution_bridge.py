@@ -57,10 +57,17 @@ def local_process_launch(config, accepted, command, cwd, *, operation_context=No
         _LOCAL_LAUNCH_CONTEXT.reset(token)
 
 
+def local_process_available():
+    """Reject a host's already known unsupported launcher before admission."""
+    launch=_LOCAL_LAUNCH.get()
+    check=getattr(launch,'check_available',None)
+    if check is not None:check()
+
+
 def _arguments(arguments, work, config=None):
     from .experiments import CallerError
-    if (not isinstance(arguments,list) or not 1<=len(arguments)<=128
-            or any(not isinstance(arg,str) or '\x00' in arg or len(arg.encode())>4096 for arg in arguments)
+    if (not isinstance(arguments,list) or not arguments
+            or any(not isinstance(arg,str) or '\x00' in arg for arg in arguments)
             or arguments[0] not in COMMANDS):
         raise CallerError('Choose an existing scientific command with exp help.')
     result=[arguments[0]];index=1
@@ -143,14 +150,45 @@ def _encoded(value):
 
 
 def _submission(raw):
-    if len(raw)>MAX_REQUEST_BYTES:raise ValueError('Scientific submission exceeds its declared bound')
+    if len(raw)>MAX_BYTES:raise ValueError('Scientific message exceeds its declared transport bound')
     try:value=json.loads(raw)
     except RecursionError:raise ValueError('Ordinary scientific submission required') from None
-    if (not isinstance(value,dict) or set(value)!={'submission_ref','arguments'}
+    if (not isinstance(value,dict) or set(value) not in ({'submission_ref','arguments'},{'submission_ref','arguments','client_error'})
+            or 'client_error' in value and value['client_error']!='submission_frame_too_large'
             or not isinstance(value['submission_ref'],str)
             or not SUBMISSION_REF.fullmatch(value['submission_ref'])):
         raise ValueError('Ordinary submission reference and existing command required')
     return value
+
+
+def _frame_refusal(size=None):
+    from .experiments import CallerError
+    note=(f'Scientific submission is {size} bytes; the request frame limit is {MAX_REQUEST_BYTES} bytes.'
+        if size is not None else
+        f'The original scientific request was rejected before publication because its request/response would exceed the {MAX_BYTES}-byte transport frame.')
+    return CallerError(note+' Shorten command arguments or use a scientific input file.',error='submission_frame_too_large')
+
+
+def _client_request(reference,arguments):
+    """Use the existing claim channel for a proven prepublication rejection."""
+    from . import experiments as e,managed_wait
+    request=dict(submission_ref=reference,arguments=arguments)
+    raw=_encoded(request)
+    result=e.caller_feedback(_frame_refusal(len(raw)))
+    result['handoff']=managed_wait.handoff(None,result,'run')
+    response=dict(code=2,result=result,submission_ref=reference,request=request)
+    if len(raw)<=MAX_BYTES and len(_encoded(response))<=MAX_BYTES:return request
+    control=arguments[:arguments.index('--')] if '--' in arguments else arguments
+    selected=control[:1]
+    if '--mechanism' in control:
+        index=control.index('--mechanism')
+        if index+1<len(control):selected=[*selected,'--mechanism',control[index+1]]
+    notification=dict(submission_ref=reference,arguments=selected,client_error='submission_frame_too_large')
+    if len(_encoded(notification))>MAX_REQUEST_BYTES:
+        notification['arguments']=selected[:1]
+    if len(_encoded(notification))>MAX_REQUEST_BYTES:
+        notification['arguments']=[]
+    return notification
 
 
 @contextmanager
@@ -199,6 +237,7 @@ def _execute(server, arguments):
             c.write(server.record/'bridge-operation.json',dict(boot_id=budget.clock_stamp()['boot_id'],
                 deadline_boottime=time.clock_gettime(time.CLOCK_BOOTTIME)+config['max_seconds']+8))
         return server.launch(config,accepted,command,cwd)
+    trusted_launch.check_available=getattr(server.launch,'check_available',lambda:None)
     token=_LOCAL_LAUNCH.set(trusted_launch)
     try:
         with _environment(server.environment),redirect_stdout(out),redirect_stderr(err):
@@ -343,10 +382,13 @@ def _response_calls(server, request, response, before):
     records=e.Records(server.configuration)
     references={path.name for path in records.calls()}-before
     result=response.get('result',{})
+    if result.get('accepted') is False and not references:return []
     if isinstance(result.get('call_id'),str):references.add(result['call_id'])
     for row in result.get('calls',[]):
         if isinstance(row,dict) and isinstance(row.get('call_id'),str):references.add(row['call_id'])
     arguments=request['arguments']
+    if not isinstance(arguments,list) or any(not isinstance(item,str) for item in arguments):
+        arguments=[]
     if '--' in arguments:arguments=arguments[:arguments.index('--')]
     if '--call-id' in arguments:
         index=arguments.index('--call-id')
@@ -408,7 +450,12 @@ def _handle(server, raw, *, retained=False):
             c.write(claim/'binding.json',dict(step=server.client['step'],attempt=server.client['attempt'],
                 configuration=server.configuration,retained_at_start=retained,submission=e.proof(claim/'submit.json')))
             before={path.name for path in e.Records(server.configuration).calls()}
-            response=_unknown() if retained else _execute(server,request['arguments'])
+            try:
+                if request.get('client_error')=='submission_frame_too_large':raise _frame_refusal()
+                if len(raw)>MAX_REQUEST_BYTES:raise _frame_refusal(len(raw))
+                response=_unknown() if retained else _execute(server,request['arguments'])
+            except e.CallerError as error:
+                response=dict(code=2,result=e.caller_feedback(error))
             calls=[] if retained else _response_calls(server,request,response,before)
             _verify_calls(server.configuration,calls,arguments=request['arguments'],response=response)
             # A fresh e.main return owns its verified pending state and handle.
@@ -443,6 +490,89 @@ def _handle(server, raw, *, retained=False):
         result['handoff']=managed_wait.handoff(None,result,'run')
         response=dict(code=3,result=result,submission_ref=reference,request=request)
     _publish(server.directory/'response.json',_encoded(response))
+
+
+def terminal_caller_error(root,job,record):
+    """Read a final rejected work command from its host claim, never public files."""
+    from . import contracts as c,execution,experiments as e,public_output
+    root=Path(root);record=Path(record)
+    config_path=record/'experiment-config.json'
+    if not config_path.exists():return None
+    config=c.read(c.regular(config_path))
+    attempt=config.get('native_attempt')
+    if (not isinstance(attempt,dict) or config.get('scope',{}).get('step')!=job['step']
+            or execution.record(root,job['step'],attempt['number'])!=record):
+        raise e.IntegrityError('Caller-error evidence differs from its original native attempt')
+    claims=Path(config['record_dir']).parent/'worker-submissions'
+    if not claims.exists():return None
+    latest=None;latest_stamp=None
+    readonly={'capabilities','describe','lineage-status','query','lookup','help','--help','-h'}
+    for claim in claims.iterdir():
+        if not SUBMISSION_REF.fullmatch(claim.name) or claim.resolve()!=claim or not claim.is_dir():
+            raise e.IntegrityError('Original scientific submission namespace changed')
+        binding_path=claim/'binding.json'
+        if not binding_path.exists():
+            submit=claim/'submit.json'
+            if submit.exists():
+                pending=_submission(_read_file(submit)).get('arguments')
+                if isinstance(pending,list) and pending and isinstance(pending[0],str) and pending[0] in readonly:continue
+            return None
+        binding=c.read(c.regular(binding_path))
+        if binding.get('attempt')!=attempt['number']:continue
+        if (set(binding)!={'step','attempt','configuration','retained_at_start','submission'}
+                or binding['step']!=job['step'] or binding['configuration']!=config
+                or any(e.proof(claim/'submit.json').get(key)!=value for key,value in binding['submission'].items())):
+            raise e.IntegrityError('Caller-error submission binding changed')
+        request=_submission(_read_file(claim/'submit.json'))
+        arguments=request.get('arguments')
+        command=arguments[0] if isinstance(arguments,list) and arguments and isinstance(arguments[0],str) else None
+        effect=command not in readonly
+        outcome_path=claim/'outcome.json';response_path=claim/'response.json'
+        if not outcome_path.exists() or not response_path.exists():
+            if effect:return None
+            continue
+        outcome=c.read(c.regular(outcome_path))
+        response=json.loads(_read_file(response_path))
+        if (set(outcome)!={'submission','response','calls'}
+                or any(e.proof(binding_path).get(key)!=value for key,value in outcome['submission'].items())
+                or any(e.proof(response_path).get(key)!=value for key,value in outcome['response'].items())
+                or set(response)!={'code','result','submission_ref','request'}
+                or response['submission_ref']!=claim.name or request['submission_ref']!=claim.name
+                or response['request']!=request or not isinstance(outcome['calls'],list)):
+            raise e.IntegrityError('Caller-error original response changed')
+        _verify_calls(config,outcome['calls'],arguments=request['arguments'],response=response)
+        terminal=True
+        for call in outcome['calls']:
+            current=_call_evidence(config,call['call_id'])
+            if current['observation'] is None and current['retirement'] is None:terminal=False
+        if not terminal:return None
+        if not effect:continue
+        if response['result'].get('status') in {'unknown','integrity_error'} and not outcome['calls']:return None
+        stamp=outcome_path.stat().st_mtime_ns
+        if latest_stamp is None or stamp>latest_stamp:
+            latest=(request,response,outcome);latest_stamp=stamp
+        elif stamp==latest_stamp:return None
+    if latest is None:return None
+    request,response,outcome=latest;result=response['result']
+    arguments=request['arguments']
+    command=arguments[0] if isinstance(arguments,list) and arguments and isinstance(arguments[0],str) else None
+    correctable=command in {'run','compile'} or (command not in COMMANDS and command not in readonly)
+    if (not isinstance(arguments,list) or not correctable or response['code']!=2
+            or result.get('status')!='caller_error' or result.get('accepted') is not False
+            or outcome['calls'] or not isinstance(result.get('note'),str)):
+        return None
+    # A direct host operation after this response may have no bridge claim.
+    # A later acceptance still prevents treating the rejected request as work.
+    for call in e.Records(config).calls():
+        accepted=e.Records(config).accepted(call.name)
+        if accepted.get('native_attempt')!=attempt:continue
+        if (call/'accepted.json').stat().st_mtime_ns>=latest_stamp:return None
+        current=_call_evidence(config,call.name)
+        _verify_calls(config,[current])
+        if current['observation'] is None and current['retirement'] is None:return None
+    clean=public_output.cleaner(root,c.settings(root,job))
+    note=clean(result['note'],2048).encode('utf-8')[:240].decode('utf-8',errors='ignore')
+    return dict(diagnostic=note,arguments=request['arguments'])
 
 
 def _watch(server, stop, initial):
@@ -655,13 +785,13 @@ def _client(directory, arguments):
     if previous is not None and (not isinstance(prior_response,dict)
             or prior_response.get('submission_ref')!=previous['submission_ref']
             or prior_response.get('request')!=previous):
-        if previous['arguments']!=arguments:
+        if previous!=_client_request(previous['submission_ref'],arguments):
             raise ValueError('An original submission still awaits its result')
         request=previous
     else:
         number=1 if previous is None else int(previous['submission_ref'][1:])+1
         if number>999999:raise ValueError('Submission reference bound exhausted')
-        request=dict(submission_ref=f'S{number:03d}',arguments=arguments)
+        request=_client_request(f'S{number:03d}',arguments)
         _submission(_encoded(request))
         _publish(path,_encoded(request))
     original=_read_file(path)
@@ -715,7 +845,6 @@ def main(argv=None):
                 scientific[0] if scientific and scientific[0] in COMMANDS else None)
             response=dict(code=0,result=e.cli_help(command))
         else:
-            _arguments(scientific,Path(arguments[1]).absolute().parents[1])
             response=client(arguments[1],scientific)
     except e.CallerError as error:response=dict(code=2,result=e.caller_feedback(error))
     except (OSError,ValueError):
@@ -730,8 +859,8 @@ def main(argv=None):
 def _request_consumption(arguments):
     """Interpret the current request without resolving any scientific paths."""
     from . import experiments as e
-    if (not isinstance(arguments,list) or not 1<=len(arguments)<=128
-            or any(not isinstance(arg,str) or '\x00' in arg or len(arg.encode())>4096 for arg in arguments)
+    if (not isinstance(arguments,list) or not arguments
+            or any(not isinstance(arg,str) or '\x00' in arg for arg in arguments)
             or arguments[0] not in COMMANDS):
         raise e.CallerError('Choose an existing scientific command with exp help.')
     parser,_=e._cli_parser(configuration=False)

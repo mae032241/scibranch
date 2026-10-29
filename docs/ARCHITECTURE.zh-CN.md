@@ -109,8 +109,9 @@ main_line（准确机制引用或 null）、reason（一段自由科学说明）
 FINAL 实际评估已完成 W 时适用同一判断。
 
 pending 处置幂等恢复未完成工作，不清零消费。已声明 discriminating_work 保留准确 A 来源
-与后继响应；新工作只填 mechanism_refs、question、next_action，活跃 work_updates
-只填 work_ref、action（execute/defer/withdraw）、reason。相关条件和证据合入理由，
+与后继响应；新工作只填 mechanism_refs、question、next_action，work_updates 可选且稀疏，
+已填写项使用 work_ref、action（execute/defer/withdraw）、reason；遗漏保留原状态，显式 execute
+仍须匹配实际路线和 focus。相关条件和证据合入理由，
 其余科学细节可选；执行不自动解决科学问题。当前主线与下一判别实验可指向不同机制，
 真正 focus 和执行权限仍显式检查。
 
@@ -369,10 +370,20 @@ workspace 与框架已知路径的元数据。同用户外部宿主进程、既�
 
 A 在普通科学正文解释候选准则、修订、证据及代价，selection_explanation 可选，
 不再有独立嵌套完整性门槛。精确候选身份、冻结输入、审计资格和交付授权仍须核对。
-必填内容及明确诊断的作者交付布局冲突，沿同一任务有界补正，保留累计消费与 FINAL 完成保护。
+必填内容、无法消费的作者动作引用及明确诊断的交付布局冲突，沿同一任务有界补正，
+封存与修复入口共用消费校验，保留累计消费与 FINAL 完成保护。
 原作者可删除冗余副本或分开自己的冲突文件，受管原件保持不变。受管输出持续保留、可直接
 引用，无需另复制到作者 artifacts。原件身份、IO、执行未知及授权问题仍由控制层处理，
 不据此自动拉起作者重试。
+
+Local 不消费的候选 parent/change 说明不阻断，也不建立父模型关系；真正消费父模型的执行器
+仍检查准确引用。重复 argv 数量和字节门槛移除，保留实际消息传输边界及字符串/NUL 要求。
+明确的 caller_error、accepted=false 把具体参数或输入错误交回作者。若原 W 因该末次 run/compile
+拒绝而结束且工作未完成，控制层可按原自动接续权限在同 task/session 有界重开，覆盖 improve 和
+无 search 的普通工作；同 turn 已有后续接受结果时不再补正。真实科学 decision/blocked 仍交 A，
+已接受未知调用仍只核对原调用。未知命令把原参数交回作者自行修正，控制层不猜测命令意图。
+FINAL 与 closeout 复用同一 native collector，处理 interrupted 和已接受但尚未启动的 attempt。
+只有宿主明确的提交前预算拒绝可据此转 FINAL，完整原 attempt 链和累计消费保留。
 
 科学最终输出的解析容忍一次起始 BOM，以及包住整段单个对象的普通或 json Markdown 围栏。
 前后散文、多个对象和错误 JSON 仍走有界补正。原始字节不改；封存、历史读取和显示共用
@@ -524,8 +535,7 @@ commit/tree/blob 对象，传入子实例自有私有 Git；不依赖父仓库 a
 可写 `code/`；声明工程时，只恢复 `project/` 下准确声明的 editable 草稿，基础工程仍为原
 共享外部依赖。未封存交接草稿保留在现有 `visibility=private_snapshot` 条目中，作为可读的
 惰性私有状态，不写入 child 的 native 执行命名空间，不生成 native intent、commit、seal、
-科学资格或执行许可。已经由 seal 绑定 completed-output acceptance 的 pending 是科学引用，
-不再作为当前交接草稿。科学可见范围仍由原任务准确输入 cut 限定。
+科学资格或执行许可。科学可见范围仍由原任务准确输入 cut 限定。
 
 必要 job、seal、accepted、compiler、authority、history 与 recovery 控制复制到 child 的
 既有私有存储；原逻辑身份保持，继承读取器使用这些声明的副本，不要求父 jobs/control 中

@@ -256,3 +256,44 @@ def test_delivery_repair_refusal_binds_old_origin_not_new_same_label(inherited_c
             assert bound['candidate_id']=='original'
             assert bound['decision']['job_ref']==c.record_ref(root/'jobs/005.json')
     assert not (root/'host-delivery').exists()
+
+
+def test_fork_selected_a_consumes_exact_inherited_catalogue(tmp_path):
+    from scidiscovery.research_loop import fork_runtime
+    from test_delivery import FAKE_HARNESS,descriptor,delivery_policy
+    public=tmp_path/'public';public.mkdir()
+    objective=public/'objective.md';objective.write_text('Retain the exact candidate comparison.')
+    observer=tmp_path/'observer.py';observer.write_text(OBSERVER)
+    parent=tmp_path/'parent'
+    (public/'harness').mkdir()
+    for name in ('exp_cli.py','runner.py','train.csv','val.csv','meta.json'):
+        path=public/'harness'/name
+        if name=='exp_cli.py':path.write_text(FAKE_HARNESS)
+        elif name=='meta.json':c.write(path,dict(mode='ok',control_path=str(parent/'settings.json'),hidden_path=str(tmp_path/'private')))
+        else:path.write_text('Public fixture input.\n')
+    controller.prepare(parent,objective,public,['no-model'],max_tokens=10000,max_seconds=120,
+        max_steps=6,model='fixture',reasoning_effort='high',search_policy=None,
+        node_budget_policy={role:dict(max_observed_tokens=2000,max_seconds=30) for role in 'HWAE'},
+        delivery_policy=delivery_policy(descriptor(parent,public)),
+        selection_policy=dict(version=2),history_observer=dict(adapter=str(observer),config={}))
+    (parent/'runs').mkdir();(parent/'submission').mkdir()
+    finish(parent,1,'H',[],action='experiment')
+    finish(parent,2,'W',[1],files={'evidence.txt':'Exact candidate evidence.\n'})
+    original,_,_=finish(parent,3,'A',[1,2],action='finish',recommendation='original')
+    with controller._writer(parent):pass
+    child=tmp_path/'child';limits=dict(max_tokens=1000,max_seconds=30,max_steps=1)
+    preview=fork_service.preview(parent,3,child,budget=limits)
+    fork_service.create(parent,3,child,budget=limits,expected_preview_id=preview['preview_id'],
+        operation_id='frozen-catalogue-consumer')
+    selected=fork_runtime.build_selected_job(child,3)
+    assert selected['selection']==original['selection'] and selected.get('fork_source')
+    producer=originals.node(child,2)
+    candidate=candidate_refs.origin_candidate(producer.origin_identity,'original')
+    assert shortlist.choice(child,selected,dict(candidate_recommendation=candidate))==candidate
+    with pytest.raises(delivery.DeliveryUnresolved,match='selection_candidate_unavailable'):
+        shortlist.choice(child,selected,dict(candidate_recommendation='original'))
+    changed=dict(selected,selection=dict(selected['selection'],record=dict(path='/foreign/screen.json')))
+    with pytest.raises(ValueError,match='differs from its exact original task'):
+        shortlist.choice(child,changed,dict(candidate_recommendation=candidate))
+    assert budget.closeout_state(child)['actions']==[]
+    assert not (child/'native-evidence/003/native-intent.json').exists()

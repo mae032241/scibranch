@@ -146,21 +146,18 @@ def require_final_coverage(root,job,payload):
     final=bool(job.get('final_report') or job.get('final_only') or job.get('purpose')=='closeout')
     if not final and payload.get('next_action') not in {'finish','deliver'}:return
     from .output_repair import OutputRepairRequired
-    from . import search
     def reject(detail):
         raise OutputRepairRequired('final_coverage_incomplete','Correct final_coverage in this same A output: '+detail+
             '. Preserve originals and report limitations; no new scientific work is authorized.')
     value=payload.get('final_coverage')
     if not isinstance(value,list):reject('give mechanism_ref, status and a nonblank reason for every frozen mechanism')
-    expected={row['mechanism_ref'] for row in job['final_coverage_mechanisms']};seen=set();refs=[]
+    expected={row['mechanism_ref'] for row in job['final_coverage_mechanisms']};seen=set()
     for row in value:
         if (not isinstance(row,dict) or not isinstance(row.get('mechanism_ref'),str) or row['mechanism_ref'] not in expected
                 or row['mechanism_ref'] in seen or not isinstance(row.get('status'),str)
                 or row['status'] not in {'deep','screened_pending','ruled_out','unexplored'}
                 or not isinstance(row.get('reason'),str) or not row['reason'].strip()):
             reject('cover each exact mechanism once with its authored status and reason')
-        seen.add(row['mechanism_ref']);refs.extend(search._evidence_refs(row.get('science_refs')))
+        seen.add(row['mechanism_ref'])
     if seen!=expected:reject('cover the complete frozen mechanism list, including waived routes')
-    try:search.validate_science_refs(root,job,refs)
-    except ValueError:reject('provided scientific references must resolve inside exact visible originals')
     return value

@@ -363,37 +363,12 @@ class _Closure:
                         raise ValueError('Current code draft contains a nonregular file')
         seal_path = execution.origin(root, source.step) / 'result-identity.json'
         seal = _json(seal_path) if seal_path.exists() else None
-        receipt = (seal or {}).get('completed_output_acceptance')
-        accepted_pending = None
-        if receipt is None:
-            record = execution.record(root, source.step)
-        else:
-            # A sealed accepted return is science, not the current draft B.
-            # Select its exact accepted chain from controls without asking the
-            # local execution reader to consume pending/raw/log/session bytes.
-            from . import contracts as c
-            chain = [record for record, _ in execution.accepted_intents(root, source.step)]
-            if not chain or seal.get('execution_ref') != execution._reference(chain):
-                raise ValueError('Sealed native execution reference changed')
-            record = chain[-1]
-            intent = _json(record / 'native-intent.json')
-            outcome = _json(record / 'native-outcome.json')
-            if seal.get('job_ref') != intent.get('task_ref'):
-                raise ValueError('Source seal changed its exact original job')
-            _, accepted = c._native_output_identity(root, source.step, record, intent, outcome,
-                source=source, seal=seal, controls_only=True)
-            if accepted is None or accepted['receipt'] != receipt:
-                raise ValueError('Sealed completed output lost its exact acceptance')
-            acceptance = _json(o.resolve_ref(source, receipt))
-            saved = Path(acceptance['originals']['result.pending.json']['path'])
-            accepted_pending = saved if saved.is_absolute() else root / saved
+        record = execution.record(root, source.step)
         names = ['result.pending.json']
         if seal is None:
             names.append('science-output.json')
         for name in names:
             path = record / name
-            if path==accepted_pending:
-                continue  # This is already the sealed accepted science original.
             if path.exists() or path.is_symlink():
                 if path.lstat().st_size>32*1024*1024:
                     raise ValueError('Current output draft exceeds its finite JSON bound')
@@ -420,17 +395,17 @@ class _Closure:
                 return self.control(source, proof)
             return None
 
-        # These fields are control refs in job, seal, compiler, acceptance,
+        # These fields are control refs in job, seal, compiler,
         # provenance and recovery records. Raw/output/material fields below
         # remain scientific locators and are never read as control JSON.
         for name in ('job', 'job_ref', 'task_ref', 'configuration', 'native_intent',
                 'root_intent_ref', 'source_provenance', 'observations', 'native_authorship',
-                'formal_review', 'pending_executions', 'completed_output_acceptance',
+                'formal_review', 'pending_executions',
                 'contract', 'accepted', 'completed', 'submission', 'native_terminal',
                 'observation', 'retirement', 'parent_ref', 'previous_ref', 'execution_authority',
                 'request', 'intent', 'outcome', 'header', 'decision', 'admission',
                 'allocation', 'pending_set', 'query', 'seal_ref', 'host_preparation',
-                'upgrade', 'successor', 'original_permit', 'original_intent',
+                'original_permit', 'original_intent',
                 'original_experiment_config', 'settings'):
             follow(value.get(name))
         for name in ('execution_qualifications',):
@@ -480,11 +455,6 @@ class _Closure:
                 # opaque result field names do not change their control role.
                 for proof in allocation.values():
                     if isinstance(proof,dict) and {'path','size_bytes'}<=set(proof):follow(proof)
-        if value.get('scope')=='explicit_completed_author_output':
-            for name in ('native-intent.json','native-outcome.json','experiment-config.json'):
-                follow(value['originals'][name])
-            follow(value['admission']['ledger'])
-            self.science_ref(source,value['originals']['result.pending.json'])
         if isinstance(value.get('row'), dict):
             self.call(source, value['row'])
         if isinstance(value.get('old_row'), dict):
@@ -776,12 +746,11 @@ class _Closure:
             self.control(source, dict(path=path))
         # Current original author controls keep their exact presence in the cut;
         # they do not need a legacy compiler ordering/absence projection.
-        for suffix in ('successor', 'output-upgrade'):
-            path = f'host-recovery/author-closeout/{source.step:03d}-{suffix}.json'
-            present = (bool(source._index.get((o.identity_key(source.origin_identity), path)))
-                if source.inherited else (source.storage_root / path).exists())
-            if present:
-                self.control(source, dict(path=path))
+        path = f'host-recovery/author-closeout/{source.step:03d}-successor.json'
+        present = (bool(source._index.get((o.identity_key(source.origin_identity), path)))
+            if source.inherited else (source.storage_root / path).exists())
+        if present:
+            self.control(source, dict(path=path))
 
     def _logical_path(self, source, actual):
         if source.entries is None:

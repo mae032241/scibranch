@@ -381,6 +381,8 @@ def test_unproven_native_permissions_refuse_managed_launch_without_overrides(tmp
     arguments=['custom-launcher','exec','-']
     applied,launch=native_execution.prepare(root,1,record,work,home,arguments,standard=standard)
     assert applied==arguments
+    with pytest.raises(e.UnsupportedExecution,match='unsupported'):
+        launch.check_available()
     snapshot=c.read(record/'native-execution-permissions.json')
     scope=dict(job_ref=snapshot['task_ref'])
     accepted=dict(native_attempt=snapshot['native_attempt'],scope=scope)

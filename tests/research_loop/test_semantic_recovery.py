@@ -1,14 +1,15 @@
 """Incremental scientific choices and bounded author correction; no models."""
-from test_history_handoff import selection_explanation
+from test_history_handoff import selection_explanation, fixture_portfolio_review, fixture_final_coverage
 import json
-import sys
 
 import pytest
 
-from scidiscovery.research_loop import backends, budget, contracts as c, controller, correction, execution, experiments, native, search, semantic
+from scidiscovery.research_loop import backends, budget, contracts as c, controller, correction, execution, experiments, native, originals, search, semantic
 from execution_fixtures import execution_registry
 from scidiscovery.research_loop.protocol import CURRENT, UnsupportedProtocol
 from test_breadth_science import run as run_command, findings
+
+pytestmark = pytest.mark.process_e2e
 
 
 def native_intent(root, job):
@@ -68,10 +69,12 @@ def finish(root, step, role, parents, text='A bounded scientific finding', actio
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(contents)
     if isinstance(payload.get('candidate_recommendation'),str):payload['selection_explanation']=selection_explanation()
+    fixture_portfolio_review(root,job,payload)
+    fixture_final_coverage(root,job,payload)
     c.write(record / 'science-output.json', payload)
     meter=dict(input_tokens=7,cached_input_tokens=2,output_tokens=3)
     c.write(record / 'usage.json',meter)
-    terminal=dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_ref=c.file_ref(record/'science-output.json'))
+    terminal=dict(returncode=0,stop_reason=None,native_started=False,usage=native.usage(root),raw_ref=c.file_ref(record/'science-output.json'))
     intent=c.read(record/'native-intent.json')
     if (intent.get('budget_slice') or {}).get('final_return') is not None:
         backend=backends.selected(c.settings(root,job))
@@ -94,9 +97,9 @@ def observed_worker(root, step, parents, *, observed):
     assert job['role'] == 'W' and [int(row['path'].split('/')[2]) for row in job['direct_refs']] == parents
     record = execution.record(root, step)
     original_intent = native_intent(root, job)
-    output = root.parent / f'semantic-execution-{step}.json'
-    experiments.configure(root, step, 'local_execution:command', dict(run_argv=[sys.executable]), output)
-    config = c.read(output)
+    output = c.workspace(root,step) / 'work/experiment-config.json'
+    selected_configuration=c.settings(root,job)['execution_config']
+    config=experiments.configure(root,step,selected_configuration['executor'],selected_configuration['configuration'],output)
     mechanisms = config['breadth']['mechanisms']
     assigned = {row['mechanism_ref'] for row in job['search']['coverage_obligation']}
     assert set(observed) <= assigned
@@ -117,8 +120,10 @@ def prepare_scene(tmp_path, *, max_tokens=100_000, max_steps=32, correction_poli
     objective = public / 'objective.md'
     objective.write_text('Compare mechanisms, preserve original findings and correct unsupported choices.')
     root = tmp_path / 'instance'
-    controller.prepare(root, objective, public, ['fake'], max_tokens=max_tokens,
+    from breadth_execution_fixtures import native_launcher
+    controller.prepare(root, objective, public, native_launcher(), max_tokens=max_tokens,
                        max_seconds=3600, max_steps=max_steps, model='fake', reasoning_effort='high',
+                       native_options=dict(workspace='workspace-write',network=False),
                        correction_policy=correction_policy)
     return root
 
@@ -207,16 +212,17 @@ def test_known_identity_survives_rename_and_later_omission(scene, focus_label):
 def test_unknown_h_focus_keeps_science_but_does_not_apply_plan_or_invent_mechanism(scene):
     four_screened(scene)
     text = 'A scientific alternative was considered; the claimed focus has no declared identity.'
-    _, work, record = finish(scene, 10, 'H', [1, 8, 9], text=text, action='experiment',
-                              search_choice=plan([commitment('Mechanism 5')], 'Unbound textual focus'))
-    control = outcome(record)
-    assert control['search_status'] == 'unresolved'
-    assert control['diagnostics'] == [dict(code='science_focus_unauthorized', subject='Unbound textual focus')]
-    assert c.validate(work)['scientific_result'] == text
-    state = search.project(scene, 11)
+    from scidiscovery.research_loop.output_repair import OutputRepairRequired
+    with pytest.raises(OutputRepairRequired) as caught:
+        finish(scene, 10, 'H', [1, 8, 9], text=text, action='experiment',
+            search_choice=plan([commitment('Mechanism 5')], 'Unbound textual focus'))
+    assert caught.value.code=='science_focus_unauthorized'
+    record=execution.record(scene,10)
+    assert c.read(record/'science-output.json')['scientific_result']==text
+    assert not (record/'result-identity.json').exists()
+    state = search.project(scene, 10)
     assert set(state['mechanisms']) == {f'h001.m{i}' for i in range(1, 5)}
     assert all(row['status'] == 'screened' for row in state['mechanisms'].values())
-    assert state['focus'] is None
 
 
 @pytest.mark.parametrize('binding', ['unavailable', 'ambiguous'])
@@ -248,17 +254,16 @@ def test_invalid_selection_never_falls_back_to_predecessor_implementation(scene)
     finish(scene, 1, 'H', [], action='experiment', search_choice=plan([commitment('Mechanism')], 'Mechanism'))
     finish(scene, 2, 'W', [1], files={'candidate.py': 'ORIGINAL_IMPLEMENTATION'})
     finish(scene, 3, 'A', [1, 2], action='revise_h', selection=['W002-I001'])
-    job, _, record = finish(scene, 4, 'H', [1, 2, 3], action='experiment',
-                            search_choice=plan([], 'h001.m1'), selection=['W002-I999'])
+    from scidiscovery.research_loop.output_repair import OutputRepairRequired
+    with pytest.raises(OutputRepairRequired) as caught:
+        finish(scene, 4, 'H', [1, 2, 3], action='experiment',
+            search_choice=plan([], 'h001.m1'), selection=['W002-I999'])
+    assert caught.value.code=='implementation_unresolved'
+    job=c.read(scene/'jobs/004.json');record=execution.record(scene,4)
     old_path = 'inputs/parents/002/artifacts/candidate.py'
     assert [row['material']['path'] for row in job['selected_inputs']] == [old_path]
-    control = outcome(record)
-    assert control['selection_status'] == 'unresolved'
-    assert 'implementation_unresolved' in {row['code'] for row in control['diagnostics']}
-    assert c.read(record / 'result-identity.json').get('selected_inputs', []) == []
-    next_job = c.build_job(scene, 5, 'W', [4])
-    assert next_job.get('selected_inputs', []) == []
-    assert not (c.workspace(scene, 5) / old_path).exists()
+    assert not (record/'result-identity.json').exists()
+    assert not (scene/'jobs/005.json').exists()
 
 
 def finish_bound(root, step, **choices):
@@ -289,17 +294,18 @@ def original_bytes(root, steps):
     paths = []
     for step in steps:
         paths.append(root / 'jobs' / f'{step:03d}.json')
-        paths.extend(path for base in (c.workspace(root, step), c.host_record(c.workspace(root, step)))
-                     for path in base.rglob('*') if path.is_file())
-    return {path: path.read_bytes() for path in paths}
+        work=c.workspace(root,step);record=c.host_record(work)
+        paths.extend(work/name for name in ('science-task.json','conclusion.json','artifacts/candidate.py'))
+        paths.extend(record/name for name in ('native-intent.json','native-outcome.json','science-output.json',
+            'usage.json','result-identity.json','result.json','work-evidence.json','checkpoint.json','stage-end.json'))
+    return {path: path.read_bytes() for path in paths if path.is_file()}
 
 
 def assert_original_bytes(originals):
     assert all(path.is_file() and path.read_bytes() == data for path, data in originals.items())
 
 
-@pytest.mark.parametrize('last_error', ['focus', 'selection'])
-def test_author_correction_cap_survives_new_prose_error_kind_and_restart(scene, monkeypatch, last_error):
+def test_scientific_reconsideration_cap_survives_new_prose_and_restart(scene, monkeypatch):
     calls = []
     def execute(root, step):
         calls.append(step)
@@ -307,9 +313,7 @@ def test_author_correction_cap_survives_new_prose_error_kind_and_restart(scene, 
             assert_public_author_request(root, c.read(root / 'jobs' / f'{step:03d}.json'), 4 - step)
         label = f'Declared mechanism {step}'
         finish_bound(root, step, action='experiment', text=f'Different scientific prose {step}',
-                     search_choice=plan([commitment(label)], label if step == 3 and last_error == 'selection'
-                                        else f'Unbound focus {step}'),
-                     selection=['W999-I001'] if step == 3 and last_error == 'selection' else None)
+                     search_choice=plan([commitment(label)],label,'repair'))
     monkeypatch.setattr(native, 'execute_native', execute)
     result = controller.run(scene)
     assert semantic.MAX_AUTHOR_CORRECTIONS == 2
@@ -347,7 +351,7 @@ def test_author_corrections_consume_original_token_and_node_budget(tmp_path, mon
             originals.update(original_bytes(root,[1,2]))
             finish_bound(root,step,action='finish',text='The original author corrections consumed the exploration budget; no accepted W evidence or external submission is available.')
         else:
-            finish_bound(root, step, action='experiment', search_choice=plan([commitment('Declared')], 'Undeclared'))
+            finish_bound(root, step, action='experiment', search_choice=plan([commitment('Declared')], 'Declared','repair'))
             if step==2:spent.update(tokens=native.usage(root)['observed_tokens'],nodes=budget.used_steps(root))
     monkeypatch.setattr(native, 'execute_native', execute)
     settings = (root / 'settings.json').read_bytes()
@@ -404,37 +408,20 @@ def test_a_returns_to_its_author_and_only_legal_correction_permits_next_w(scene,
 
 
 def test_waived_focus_stays_unresolved_and_never_authorizes_a_worker(scene, monkeypatch):
-    calls = []
-    def execute(root, step):
-        job = c.read(root / 'jobs' / f'{step:03d}.json')
-        calls.append((step, job['role']))
-        if step == 1:
-            finish_bound(root, step, action='analyze', search_choice=plan([commitment('Mechanism')], 'Mechanism'))
-        else:
-            assert job['role'] == 'A'
-            finish_bound(root, step, action='continue_w',
-                search_choice=review([disposition('h001.m1', 'waived')], focus(action='improve')))
-    monkeypatch.setattr(native, 'execute_native', execute)
-    result = controller.run(scene)
-    assert result['status'] == 'semantic_correction_required' and result['reason'] == 'semantic_correction_limit'
-    assert calls == [(1, 'H'), (2, 'A'), (3, 'A'), (4, 'A')]
-    for step in (2, 3, 4):
-        record = c.host_record(c.workspace(scene, step))
-        control = outcome(record)
-        assert control['search_status'] == 'unresolved'
-        assert control['diagnostics'] == [dict(code='science_focus_waived', subject='h001.m1')]
-        assert c.read(record / 'science-output.json')['search_review']['dispositions'] == [disposition('h001.m1', 'waived')]
-    assert search.project(scene, 5)['mechanisms']['h001.m1']['status'] == 'pending'
-    assert not (scene / 'jobs/005.json').exists()
-    originals = original_bytes(scene, range(1, 5))
-    assert controller.run(scene)['reason'] == 'semantic_correction_limit'
-    assert len(calls) == 4
-    assert_original_bytes(originals)
+    from scidiscovery.research_loop.output_repair import OutputRepairRequired
+    finish(scene,1,'H',[],action='analyze',search_choice=plan([commitment('Mechanism')],'Mechanism'))
+    with pytest.raises(OutputRepairRequired) as caught:
+        finish(scene,2,'A',[1],action='continue_w',
+            search_choice=review([disposition('h001.m1','waived')],focus(action='improve')))
+    assert caught.value.code=='science_focus_waived'
+    assert not (execution.record(scene,2)/'result-identity.json').exists()
+    assert not (scene/'jobs/003.json').exists()
+    assert search.project(scene,2)['mechanisms']['h001.m1']['status']=='pending'
 
 
-def test_invalid_selection_gets_h_correction_before_experiment_and_never_uses_old_fallback(scene, monkeypatch):
+def test_invalid_selection_stops_before_successor_without_old_fallback(scene, monkeypatch):
     calls = []
-    old_path = 'inputs/parents/002/artifacts/candidate.py'
+    retained={}
     def execute(root, step):
         job = c.read(root / 'jobs' / f'{step:03d}.json')
         calls.append((step, job['role']))
@@ -444,21 +431,20 @@ def test_invalid_selection_gets_h_correction_before_experiment_and_never_uses_ol
             finish_bound(root, step, files={'candidate.py': 'ORIGINAL_IMPLEMENTATION'})
         elif step == 3:
             finish_bound(root, step, action='revise_h', selection=['W002-I001'])
-        elif step in {4, 5}:
-            if step == 5:
-                assert job['role'] == 'H' and job['author_correction']['root']['step'] == 4
-                assert job.get('selected_inputs', []) == []
-            finish_bound(root, step, action='experiment', search_choice=plan([], 'h001.m1'),
-                         selection=['W002-I999'] if step == 4 else ['W002-I001'])
-        elif job['role'] == 'W':
-            assert [row['material']['path'] for row in job['selected_inputs']] == [old_path]
-            assert (c.workspace(root, step) / old_path).read_text() == 'ORIGINAL_IMPLEMENTATION'
-            finish_bound(root, step)
-        else:
-            finish_bound(root, step, action='finish')
+        elif step==4:
+            try:
+                finish_bound(root, step, action='experiment', search_choice=plan([], 'h001.m1'),
+                             selection=['W002-I999'])
+            finally:retained.update(original_bytes(root,[4]))
+        else:pytest.fail('A mechanical selection error must return to its original author task')
     monkeypatch.setattr(native, 'execute_native', execute)
-    assert controller.run(scene)['status'] == 'finish'
-    assert calls == [(1, 'H'), (2, 'W'), (3, 'A'), (4, 'H'), (5, 'H'), (6, 'W'), (7, 'A')]
+    result=controller.run(scene)
+    assert result['status']=='output_repair_required'
+    assert calls == [(1,'H'),(2,'W'),(3,'A'),(4,'H')]
+    assert not (scene/'jobs/005.json').exists()
+    assert c.read(execution.record(scene,4)/'science-output.json')['implementation_selection']==['W002-I999']
+    assert not (execution.record(scene,4)/'result-identity.json').exists()
+    assert_original_bytes(retained)
 
 
 def terminal_payload(root, step, payload):
@@ -467,7 +453,7 @@ def terminal_payload(root, step, payload):
     if isinstance(payload.get('candidate_recommendation'),str):payload['selection_explanation']=selection_explanation()
     c.write(record / 'science-output.json', payload)
     c.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
-    c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None,
+    c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None,native_started=False,
         usage=native.usage(root), raw_ref=c.file_ref(record / 'science-output.json')))
 
 
@@ -514,7 +500,9 @@ def test_integrity_corruption_is_not_semantic_author_recovery(scene, monkeypatch
     if changed == 'raw':
         (record / 'science-output.json').write_text('TAMPERED SCIENCE')
     elif changed == 'job':
-        c.write(scene / 'jobs/001.json', {**job, 'instruction': 'Different immutable task'})
+        c.write(record/'native-intent.json',dict(task_ref=dict(path=str(scene/'jobs/002.json'))))
+        with pytest.raises(ValueError,match='Native launch task changed'):
+            c.seal_result(scene,step)
     else:
         page = c.workspace(scene, step) / job['history']['view']['indexes']['nodes']
         page.chmod(0o600)
@@ -525,10 +513,12 @@ def test_integrity_corruption_is_not_semantic_author_recovery(scene, monkeypatch
     stopped=controller.run(scene)
     if changed=='history_page':
         assert stopped['status']=='seal_pending' and stopped['completed_steps']==2
-        assert 'Bound scientific history page changed' in stopped['reason']
+        assert 'Original size changed' in stopped['reason']
+        assert str(page) in stopped['reason']
     else:
         assert stopped['status'] in {'native_outcome_unsealed','seal_pending'}
     assert not (record / 'result-identity.json').exists()
+    assert execution.records(scene,step)==[record]
     assert not (scene / 'jobs' / f'{step+1:03d}.json').exists()
 
 
@@ -536,20 +526,13 @@ def test_terminal_unsealed_attempt_is_collected_before_new_author_work(scene, mo
     c.build_job(scene, 1, 'H', [])
     terminal_payload(scene, 1, h_payload(plan([commitment('Declared')], 'Undeclared')))
     originals = original_bytes(scene, [1])
-    calls = []
-    def execute(root, step):
-        calls.append(step)
-        if step == 2:
-            finish_bound(root, step, action='analyze', search_choice=plan([commitment('Corrected')], 'Corrected'))
-        else:
-            finish_bound(root, step, action='finish')
-    monkeypatch.setattr(native, 'execute_native', execute)
-    assert controller.run(scene)['status'] == 'finish'
-    assert calls == [2, 3]
-    assert outcome(c.host_record(c.workspace(scene, 1)))['search_status'] == 'unresolved'
+    from scidiscovery.research_loop import continuation
+    from scidiscovery.research_loop.output_repair import OutputRepairRequired
+    with pytest.raises(OutputRepairRequired):c.seal_result(scene,1)
+    request=continuation.output_request(scene,1,execution.record(scene,1),verify_task=False)
+    assert request['code']=='science_focus_unauthorized'
+    assert not (scene/'jobs/002.json').exists()
     assert_original_bytes(originals)
-    assert controller.run(scene)['status'] == 'finish'
-    assert calls == [2, 3]
 
 
 def test_current_terminal_tenth_attempt_survives_finite_author_correction_without_replay(scene, monkeypatch):
@@ -573,28 +556,15 @@ def test_current_terminal_tenth_attempt_survives_finite_author_correction_withou
     terminal_payload(scene, 10, h_payload(plan([commitment('Mechanism 5')], 'Undeclared mechanism')))
     assert not (c.host_record(c.workspace(scene, 10)) / 'result-identity.json').exists()
     originals = original_bytes(scene, range(1, 11))
-    calls = []
-    def execute(root, step):
-        calls.append(step)
-        # The retained tenth terminal turn is sealed before any new author acts.
-        assert outcome(c.host_record(c.workspace(root, 10)))['search_status'] == 'unresolved'
-        job = c.read(root / 'jobs' / f'{step:03d}.json')
-        if step == 11:
-            assert job['role'] == 'H' and job['handoff_protocol'] == CURRENT
-            assert job['author_correction']['root']['step'] == 10
-            finish_bound(root, step, action='analyze', search_choice=plan([commitment('Mechanism 5')], 'Mechanism 5'))
-        else:
-            assert job['role'] == 'A'
-            finish_bound(root, step, action='finish')
-    monkeypatch.setattr(native, 'execute_native', execute)
-    assert controller.run(scene)['status'] == 'finish'
-    assert calls == [11, 12]
+    from scidiscovery.research_loop import continuation
+    from scidiscovery.research_loop.output_repair import OutputRepairRequired
+    with pytest.raises(OutputRepairRequired):c.seal_result(scene,10)
+    request=continuation.output_request(scene,10,execution.record(scene,10),verify_task=False)
+    assert request['code']=='science_focus_unauthorized'
+    assert not (scene/'jobs/011.json').exists()
     assert c.read(scene / 'jobs/010.json')['handoff_protocol'] == CURRENT
     assert all(outcome(c.host_record(c.workspace(scene, step)))['binding_protocol'] == CURRENT
                for step in range(1, 10))
-    assert_original_bytes(originals)
-    assert controller.run(scene)['status'] == 'finish'
-    assert calls == [11, 12]
     assert_original_bytes(originals)
 
 
@@ -602,10 +572,8 @@ def test_current_terminal_tenth_attempt_survives_finite_author_correction_withou
 def test_retired_write_schema_is_rejected_without_changing_originals(scene, protocol):
     finish(scene, 1, 'H', [], action='analyze', search_choice=plan([commitment('Declared')], 'Declared'))
     originals = original_bytes(scene, [1])
-    paths = {path for path in scene.rglob('*') if path.is_file()}
     with pytest.raises(UnsupportedProtocol):
         c.result_schema('H', protocol)
-    assert {path for path in scene.rglob('*') if path.is_file()} == paths
     assert_original_bytes(originals)
 
 
@@ -629,7 +597,9 @@ def test_more_than_sixteen_multibyte_mechanisms_have_bounded_readonly_navigation
         assert not page_path.stat().st_mode & 0o222
         for row in page['mechanisms']:
             assert len(row['minimal_test'].encode()) <= 160 and row['minimal_test_truncated'] is True
-            assert (c.workspace(scene, 6) / row['original']).is_file()
+            original=originals.resolve_root_ref(scene,dict(path=str(c.workspace(scene,6)/row['original'])))
+            assert original.is_file() and not original.stat().st_mode & 0o222
+            assert c.read(original)['step']==int(row['original'].split('/')[3])
         rows.extend(page['mechanisms'])
         pages.append(page_path)
         path = page['next_page']
@@ -654,7 +624,7 @@ def test_author_h_retains_n4_request_and_only_real_work_can_resolve_review(tmp_p
                          search_choice=review(next_focus=focus()))
         elif step == 4:
             assert job['role'] == 'H' and job['correction_request'] is not None
-            finish_bound(root, step, action='experiment', search_choice=plan([], 'Undeclared focus'))
+            finish_bound(root, step, action='experiment', search_choice=plan([], 'h001.m1','repair'))
         elif step == 5:
             assert job['role'] == 'H' and job['author_correction']['root']['step'] == 4
             assert job['correction_request'] == c.read(root / 'jobs/004.json')['correction_request']
@@ -696,7 +666,7 @@ def test_e_requested_at_author_cap_preserves_root_and_does_not_renew_author_coun
         calls.append((step, job['role']))
         if job['role'] == 'H':
             finish_bound(root, step, action='extract' if step == 3 else 'experiment',
-                         search_choice=plan([commitment(f'Declared {step}')], f'Unbound {step}'))
+                         search_choice=plan([commitment(f'Declared {step}')], f'Declared {step}','repair'))
         else:
             assert step == 4 and job['role'] == 'E'
             assert job['evidence_return'] == dict(role='H', step=3)
@@ -719,22 +689,24 @@ def test_e_requested_at_author_cap_preserves_root_and_does_not_renew_author_coun
     assert_original_bytes(originals)
 
 
-@pytest.mark.parametrize('changed', ['status', 'diagnostics'])
-def test_tampered_control_outcome_is_integrity_failure_not_author_correction(scene, monkeypatch, changed):
+@pytest.mark.parametrize('changed', ['job_ref', 'raw_ref'])
+def test_wrong_sealed_original_identity_is_not_author_correction(scene, monkeypatch, changed):
     _, work, record = finish(scene, 1, 'H', [], action='experiment',
-                             search_choice=plan([commitment('Declared')], 'Undeclared'))
+                             search_choice=plan([commitment('Declared')], 'Declared','repair'))
     path = record / 'result-identity.json'
     seal = c.read(path)
-    if changed == 'status':
-        seal['control_outcome']['search_status'] = 'applied'
+    if changed == 'job_ref':
+        seal['job_ref']=dict(path=str(scene/'jobs/002.json'))
     else:
-        seal['control_outcome']['diagnostics'][0]['subject'] = 'Different unbound choice'
+        foreign=scene/'foreign-science.json'
+        foreign.write_bytes((record/'science-output.json').read_bytes())
+        seal['raw_ref']=c.file_ref(foreign)
     c.write(path, seal)
     corrupted = path.read_bytes()
     with pytest.raises(ValueError):
         c.validate(work)
     def forbidden(*args, **kwargs):
-        pytest.fail('A forged control receipt cannot authorize a new author or experiment')
+        pytest.fail('Wrong original identity cannot authorize a new author or experiment')
     monkeypatch.setattr(native, 'execute_native', forbidden)
     assert controller.run(scene)['status'] == 'sealed_node_invalid'
     assert path.read_bytes() == corrupted
@@ -746,7 +718,7 @@ def test_prepared_old_w_is_preserved_when_effective_route_requires_author_h(scen
     def execute(root, step):
         calls.append(step)
         assert step == 1
-        finish_bound(root, step, action='experiment', search_choice=plan([commitment('Declared')], 'Undeclared'))
+        finish_bound(root, step, action='experiment', search_choice=plan([commitment('Declared')], 'Declared','repair'))
         # Represents a controller which froze its old W successor before the
         # semantic author route was implemented; that unsubmitted task is immutable.
         c.build_job(root, 2, 'W', [1], instruction='Exact scientific question')

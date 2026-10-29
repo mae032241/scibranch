@@ -112,7 +112,7 @@ def test_no_duplicate_comparison_declaration_is_required(tmp_path,boundary):
     assert (record/'result-identity.json').exists()
 
 
-def test_active_work_updates_are_small_but_each_remains_explicit():
+def test_active_work_updates_are_sparse_and_explicit_execute_keeps_real_focus_gate():
     context=dict(applicable=True,mechanisms={MAIN:{},OTHER:{}},final=False,
         discriminating_work=[dict(work_ref='A003-D001',status='deferred',mechanism_refs=[OTHER],next_action='continue_w')])
     job=dict(role='A');payload=dict(next_action='continue_w',portfolio_review=dict(discriminating_work=None,main_line=MAIN,
@@ -122,7 +122,27 @@ def test_active_work_updates_are_small_but_each_remains_explicit():
     assert search.require_portfolio_review(None,job,payload,context=context,
         interpretation=dict(focus=dict(mechanism_ref=OTHER,action='improve')))==payload['portfolio_review']
     payload['portfolio_review'].pop('work_updates')
-    with pytest.raises(OutputRepairRequired):search.require_portfolio_review(None,job,payload,context=context)
+    assert search.require_portfolio_review(None,job,payload,context=context)==payload['portfolio_review']
+    payload['portfolio_review']['work_updates']=[dict(work_ref='A003-D001',action='execute',reason='Test its prediction.')]
+    with pytest.raises(OutputRepairRequired,match='actual W focus'):
+        search.require_portfolio_review(None,job,payload,context=context,
+            interpretation=dict(focus=dict(mechanism_ref=MAIN,action='improve')))
+
+
+def test_sparse_update_preserves_omitted_work_original_and_response():
+    import copy
+    from scidiscovery.research_loop.scientific_intent import resolve_discriminating_work
+    first=dict(work_ref='A003-D001',status='deferred',source_a=3,declaration_pointer='/portfolio_review/discriminating_work',
+        mechanism_refs=[MAIN],next_action='extract',updates=[],executions=[])
+    second=dict(copy.deepcopy(first),work_ref='A004-D001',source_a=4,mechanism_refs=[OTHER])
+    state=dict(order=dict(discriminating_work=[first,second]));before=copy.deepcopy(state)
+    payload=dict(next_action='extract',portfolio_review=dict(main_line=MAIN,reason='Keep both scientific commitments visible.',
+        discriminating_work=None,work_updates=[dict(work_ref=first['work_ref'],action='execute',reason='Gather the exact missing observation.')]))
+    context=dict(applicable=True,mechanisms={MAIN:{},OTHER:{}},final=False,discriminating_work=[first,second])
+    search.require_portfolio_review(None,dict(role='A'),payload,context=context)
+    rows=resolve_discriminating_work(state,dict(role='A',step=5),payload)
+    assert rows[0]['status']=='executed' and rows[0]['executions']==[dict(source_a=5,response=None)]
+    assert rows[1]==before['order']['discriminating_work'][1] and state==before
 
 
 @pytest.mark.parametrize('action',['defer','withdraw'])

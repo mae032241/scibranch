@@ -154,29 +154,30 @@ def test_capture_and_export_refusal_precedes_prepare_and_cleans_only_owned_expor
     assert all(not path.exists() for path in fixed_code['exports'].values())
 
 
-def test_local_cli_change_intent_refusal_precedes_code_capture_and_acceptance(fragment, monkeypatch, execution_registry, fixed_code, capsys):
+def test_local_cli_unused_candidate_alias_and_change_do_not_block_code(fragment, monkeypatch, execution_registry, fixed_code, capsys):
     root,job,_=fragment;config=_configuration(root,job);source=_code(root,job)
-    def forbidden(*args,**options):
-        pytest.fail('Unsupported Local change intent must be rejected before preparation, acceptance or submission')
-    monkeypatch.setattr(LocalExecution,'prepare',forbidden)
-    monkeypatch.setattr(e.Records,'accept',forbidden)
-    monkeypatch.setattr(LocalExecution,'submit',forbidden)
+    submitted=[]
+    def submit(config,adapter,capabilities,prepared,accepted):
+        submitted.append(accepted)
+        return dict(status='unknown',accepted=True,call_id=accepted['call_id'])
+    monkeypatch.setattr(e,'_submit_descriptor',submit)
     path=c.workspace(root,job['step'])/'work/version-config.json'
     assert e.main(['--config',str(path),'run','--script',str(source),
-        '--change-intent','Training-only calibration'])==2
-    refused=json.loads(capsys.readouterr().out)
-    assert refused['status']=='caller_error' and refused['accepted'] is False
-    assert 'call_id' not in refused and e.Records(config).calls()==[]
-    assert 'Local execution does not support --parent-plan or --change-intent' in refused['note']
-    assert refused['handoff']['action']=='correct_request'
-    assert refused['handoff']['reason']=='execution_not_accepted'
-    assert fixed_code['bindings']=={} and fixed_code['exports']=={} and fixed_code['cleaned']==[]
+        '--parent-plan','W999-C001','--change-intent','Training-only calibration'])==2
+    result=json.loads(capsys.readouterr().out)
+    assert result['status']=='unknown' and result['accepted'] is True
+    assert len(submitted)==1 and submitted[0]['call_id']==result['call_id']
+    assert submitted[0]['parent']==dict(status='unknown',candidate_id=None,source='none')
+    assert submitted[0]['change_intent'] is None
+    assert len(fixed_code['bindings'])==1 and len(e.Records(config).calls())==1
 
 
 def test_local_subclass_metadata_failure_after_prepare_is_not_caller_error(fragment, execution_registry, fixed_code):
     root,job,_=fragment;config=_configuration(root,job);source=_code(root,job)
     marker=root/'prepare-effect'
     class EffectfulLocal(LocalExecution):
+        def acceptance_metadata(self,*args,**options):
+            raise ValueError('This implementation does not declare candidate parent semantics')
         def prepare(self,payload,**options):
             marker.write_text('prepare performed')
             return super().prepare(payload,**options)

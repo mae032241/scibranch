@@ -140,14 +140,6 @@ def main(argv=None):
     author.add_argument('--authorization-note', required=True)
     author.add_argument('--successor', action='store_true', help='Explicitly authorize the single second author-only turn; never automatic retry')
     author.add_argument('--authorization-statement', help='Original operator statement authorizing this one successor')
-    accept = commands.add_parser('worker-output-accept', help='Explicitly accept exact already returned author2 bytes; never another native turn')
-    accept.add_argument('--root', type=Path, required=True)
-    accept.add_argument('--step', type=int, required=True)
-    accept.add_argument('--attempt', type=int, choices=[2], required=True)
-    accept.add_argument('--pending-ref', type=json.loads, required=True)
-    accept.add_argument('--session', type=Path, required=True)
-    accept.add_argument('--authorization-note', required=True)
-    accept.add_argument('--authorization-statement', required=True)
     closeout = commands.add_parser('closeout', help='Close exploration within the original remaining authorization')
     closeout.add_argument('--root', type=Path, required=True)
     closeout.add_argument('--export-only', action='store_true', help='Export existing verified results without sealing, launching science or delivering')
@@ -336,10 +328,6 @@ def main(argv=None):
             result = controller.worker_closeout(root, args.step, max_tokens=args.max_tokens, max_seconds=args.max_seconds,
                 authorization_note=args.authorization_note,successor=args.successor,
                 authorization_statement=args.authorization_statement)
-        elif args.command == 'worker-output-accept':
-            result=controller.worker_output_accept(root,args.step,attempt=args.attempt,pending_ref=args.pending_ref,
-                session=args.session,
-                authorization_note=args.authorization_note,authorization_statement=args.authorization_statement)
         elif args.command == 'worker-resume':
             result = controller.worker_resume(root, args.step)
         elif args.command == 'status':

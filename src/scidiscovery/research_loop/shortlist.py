@@ -6,7 +6,7 @@ Qualification is obtained only for an explicitly requested audit or delivery.
 from __future__ import annotations
 
 from . import configuration_updates
-from . import budget, contracts as c, delivery, originals, selection
+from . import budget, contracts as c, delivery, history, originals, selection
 from .candidate_audit import _save
 
 

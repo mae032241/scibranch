@@ -31,17 +31,17 @@ ACTIONS = {
 }
 MAX_FIXED_RESPONSE_BYTES = 3072
 AUTHOR_EVIDENCE_GUIDANCE = (
-    'Cite evidence/conditions; separate measurement/inference/proxy. State uncertainty/gaps/unmet goals and '
+    'Cite evidence/conditions; distinguish measured/inferred/proxy. Retain uncertainty/gaps/unmet goals and '
     'criteria changes/tradeoffs. Waive only supported negatives/infeasibility; else defer.')
 NATIVE_TASK_INSTRUCTION = (
     'Read science-task.json/exact inputs. Honor goal/checks, scope/permissions and budget. '
     'Follow task rules; return JSON, no hashes/manifests/validators.')
 PORTFOLIO_RESPONSE = (
-    'After completed W except wait: portfolio_review={main_line:ref|null,reason,discriminating_work:null|{mechanism_refs,question,next_action}}. '
-    'reason=strongest rival/cheapest test/decision/defer-revisit or infeasibility; next_action=continue_w|revise_h|extract. '
-    'All active lineage.indexes.portfolio refs need nested work_updates[{work_ref,action:execute|defer|withdraw,reason}].')
+    'Completed W except wait: portfolio_review={main_line:ref|null,reason,discriminating_work:null|{mechanism_refs,question,next_action:continue_w|revise_h|extract}}. '
+    'reason=rival/cheapest test/decision/defer-revisit/infeasibility. '
+    'Sparse optional work_updates[{work_ref,action:execute|defer|withdraw,reason}]; omitted=keep.')
 FINAL_COVERAGE_RESPONSE = (
-    'finish/deliver/FINAL: cover all refs in final_coverage[{mechanism_ref,status:deep|screened_pending|ruled_out|unexplored,reason}]. '
+    'finish/deliver/FINAL: final_coverage[{mechanism_ref,status:deep|screened_pending|ruled_out|unexplored,reason}] for every ref; '
     'reason=depth/evidence/open questions; limitations=input/resource gaps.')
 
 
@@ -240,19 +240,22 @@ def result_schema(role: str,protocol=CURRENT,comparison=False,*,formal_review=Fa
 
 def response_instructions(job):
     """The actual fixed output instructions shown in the scientific task."""
-    fields=dict(final_response=list(result_schema(job['role'],job['handoff_protocol'],
-        'selection' in job,**response_options(job))['properties']),
-        implementation_reuse='implementation_selection: null keeps; [] clears; IDs replace.')
+    # Ordinary required fields/types are already carried by the Codex renderer
+    # menu or the protocol response_schema. Keep one transport declaration.
+    fields=dict(implementation_reuse='implementation_selection: null=keep; []=clear; IDs=replace.')
+    if job.get('formal_review'):
+        fields['final_response']=list(result_schema(job['role'],job['handoff_protocol'],
+            'selection' in job,**response_options(job))['properties'])
     if job.get('search') is not None and job['role'] in {'H','A'}:
         fields['breadth_response']=(
             'search_plan: commitments[{label,minimal_test,existing_ref?}], focus?{label,action}; action=screen|improve|repair|validate; omissions retain.'
             if job['role']=='H' else
-            'search_review: dispositions[{mechanism_ref,status,reason}],next_focus?{mechanism_ref,action}; status=pending|screened|deferred|waived; action=screen|improve|repair|validate; omitted=keep.')
+            'search_review: dispositions[{mechanism_ref,status:pending|screened|deferred|waived,reason}],next_focus?{mechanism_ref,action:screen|improve|repair|validate}; omitted=keep.')
     if job.get('portfolio_context') is not None and 'portfolio_review' in job.get('scientific_response_fields',[]):
         fields['portfolio_response']=PORTFOLIO_RESPONSE
     if job.get('final_coverage_mechanisms'):fields['final_coverage_response']=FINAL_COVERAGE_RESPONSE
     if job['role']=='A':
-        fields['delivery_selection']='deliver: exact candidate_recommendation+rationale; output/receipt gaps; partial OK.'
+        fields['delivery_selection']='deliver: candidate_recommendation+rationale; output/receipt gaps; partial OK.'
         if job.get('purpose')=='closeout':
             fields['closeout_response']=('FINAL: follow action options; no new work/audit.' if job.get('final_only') else 'Closeout: deliver/audit/finish/wait; no exploration.')
     elif job['role']=='W':
@@ -260,7 +263,7 @@ def response_instructions(job):
         fields['stage_response']='stage_intent: review=A-ready; decision=partial obstacle; continue=authorized same-stage work.'
         fields['stage_continuation']=dict(status='configured' if job.get('worker_fragment_policy') else 'unavailable',
             context=(job.get('worker_fragment_policy') or {}).get('context'),
-            permission='Original terminal/session, known usage and remaining authorization required.')
+            permission='Requires original terminal/session, known usage and remaining authorization.')
     return fields
 
 
@@ -304,7 +307,13 @@ def science_payload(path: Path, role: str, protocol=CURRENT, comparison=False,*,
         jsonschema.Draft202012Validator(schema).validate(value)
     except jsonschema.ValidationError as error:
         location = '.'.join(map(str, error.absolute_path))[:128] or 'final response'
-        raise OutputRepairRequired('invalid_fields', 'Correct required fields and types in ' + location + ' using final_response; do not repeat experiments.') from error
+        if error.validator=='required':
+            missing=[key for key in error.validator_value if key not in error.instance]
+            detail='missing required field '+', '.join(missing)
+        elif error.validator=='type':detail='expected '+str(error.validator_value)
+        elif error.validator=='enum':detail='expected one of '+', '.join(map(str,error.validator_value))
+        else:detail='must satisfy '+str(error.validator)
+        raise OutputRepairRequired('invalid_fields', 'Correct '+location+': '+detail+'. Return corrected JSON; do not repeat experiments.') from error
     if final_only and final_delivery and (not isinstance(value.get('candidate_recommendation'),str)
             or not value['candidate_recommendation'].strip()):
         raise OutputRepairRequired('candidate_recommendation_missing',
@@ -1016,8 +1025,6 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         budget.validate_final_report_inputs(root, dict(step=step, role=role, purpose=purpose,
             final_only=phase is not None and phase['mode'] == 'final' and step == phase['first_step'],
             final_report=final_report, direct_refs=[dict(path=f'inputs/parents/{parent:03d}/conclusion.json') for parent in parents]))
-    if purpose is None and any((root/'host-recovery/author-closeout'/f'{prior:03d}-output-acceptance.json').exists() for prior in range(1,step)):
-        raise ValueError('Accepted completed author output permits closeout handoff only')
     if purpose is not None:
         from . import budget
         begin=budget.closeout_state(root)['begin']
@@ -1325,19 +1332,12 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     return job
 
 
-def _native_output_identity(root, step, native_record, intent, outcome, *, source=None, seal=None, controls_only=False):
+def _native_output_identity(root, step, intent, outcome, *, source=None):
     from . import budget
     if source is None:
         job = read(regular(Path(root) / 'jobs' / f'{step:03d}.json'))
         budget.validate_final_a_receipt(root, job, intent, outcome)
-    # The original stopped outcome remains byte-exact. Only a separate explicit
-    # completed-return receipt can provide its exceptional final raw identity.
-    if outcome.get('stop_reason')=='author_closeout_token_limit' and intent.get('attempt')==2:
-        from . import author_closeout
-        options={} if source is None else dict(source=source,seal=seal,controls_only=controls_only)
-        accepted=author_closeout.accepted_output(root,step,native_record,intent,outcome,**options)
-        if accepted is not None:return accepted['raw_ref'],accepted
-    return outcome.get('raw_ref'),None
+    return outcome.get('raw_ref')
 
 
 def _final_a_seal(native_record, outcome):
@@ -1399,14 +1399,11 @@ def validate_original(source, *, _active=None, _memo=None, controls_only=False):
     outcome = read(originals.source_record(source, 'native-outcome.json'))
     raw = None if controls_only else originals.resolve_ref(source,seal['raw_ref'])
     result = originals.resolve_ref(source,seal['result_ref'])
-    raw_ref,accepted=_native_output_identity(Path(source.original_root),source.step,
-        Path(seal['raw_ref']['path']).parent,intent,outcome,source=source,seal=seal,controls_only=controls_only)
-    identity=({key:raw_ref.get(key) for key in ('path','size_bytes')}
-        if accepted is not None and isinstance(raw_ref,dict) else raw_ref)
+    raw_ref=_native_output_identity(Path(source.original_root),source.step,intent,outcome,source=source)
     if (intent.get('task_ref') != seal['job_ref'] or outcome.get('returncode') != 0
+            or outcome.get('stop_reason')
             or not isinstance(raw_ref,dict)
-            or identity != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}
-            or (seal.get('completed_output_acceptance') is not None and accepted is None)):
+            or raw_ref != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}):
         raise ValueError('Source terminal lost its exact original task/output')
     payload = read(result) if controls_only else _sealed_science(job,seal,raw,result,source=source)
     if not controls_only:
@@ -1459,13 +1456,9 @@ def validate(work: Path):
     raw = regular(native_record / 'science-output.json')
     result = regular(record / 'result.json')
     conclusion = work / 'conclusion.json'
-    native_raw_ref,accepted=_native_output_identity(root,job['step'],native_record,intent,outcome)
+    native_raw_ref=_native_output_identity(root,job['step'],intent,outcome)
     if seal.get('final_a_completion') != _final_a_seal(native_record, outcome):
         raise ValueError('Final A completion receipt identity changed')
-    expected_acceptance=accepted['receipt'] if accepted is not None else None
-    if (seal.get('completed_output_acceptance')!=expected_acceptance
-            or seal.get('completed_output_limitation')!=(accepted['facts'] if accepted is not None else None)):
-        raise ValueError('Completed-output acceptance seal identity changed')
     if (seal['job_ref'] != record_ref(job_path) or intent['task_ref'] != record_ref(job_path)
             or {key:seal['raw_ref'][key] for key in ('path','size_bytes')} != file_ref(raw) or seal['result_ref'] != file_ref(result)
             or native_raw_ref != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}):
@@ -1705,11 +1698,11 @@ def seal_result(root: Path, step: int):
     outcome = read(regular(native_record / 'native-outcome.json'))
     from . import worker_delivery
     worker_delivery.writers_stopped(root,job,native_record)
-    native_raw_ref,accepted=_native_output_identity(root,step,native_record,intent,outcome)
+    native_raw_ref=_native_output_identity(root,step,intent,outcome)
     from . import budget
     final = budget.final_a_return(root, job, intent)
     if (type(outcome.get('returncode')) is not int or outcome['returncode'] != 0
-            or outcome.get('stop_reason') and accepted is None
+            or outcome.get('stop_reason')
             or budget.final_a_usage_unknown(final, outcome['usage']) and not budget.native_completion_known(outcome, settings(root, read(regular(root / 'jobs' / f'{step:03d}.json'))))):
         raise ValueError('Terminal scientific output is unverified or changed')
     if native_record!=execution.origin(root,step):
@@ -1742,6 +1735,8 @@ def seal_result(root: Path, step: int):
             if not (native_record/'checkpoint.json').exists():
                 checkpoint.capture(root,job,native_record)
             else:checkpoint.validate(root,job,native_record)
+        elif worker_delivery.repair_applicable(job):
+            worker_delivery.capture(root,job,native_record)
         worker_delivery.require_delivery(root,job,value,native_record)
         from . import candidate_nominations
         candidate_nominations.require(root,job,value)
@@ -1771,7 +1766,6 @@ def seal_result(root: Path, step: int):
     seal = dict(result_ref=file_ref(record / 'result.json'), raw_ref=raw_ref,
           job_ref=record_ref(job_path), materials=private_materials, entry_points=entry_points,
           scope='Exact bytes and direct lineage; not scientific qualification',
-          **(dict(completed_output_acceptance=accepted['receipt'],completed_output_limitation=accepted['facts']) if accepted is not None else {}),
           **(dict(execution_ref=execution.reference(root, step)) if execution.reference(root, step) is not None else {}),
           **(dict(control_outcome=control) if control is not None else {}),
           unresolved_links=unresolved,

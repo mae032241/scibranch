@@ -92,7 +92,7 @@ def test_existing_execution_wake_policy_still_bounds_new_work(tmp_path,monkeypat
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('default_policy',[False,True],ids=['legacy-output-only','default-independent-auto'])
 def test_output_repair_turn_rejects_new_bridge_run_but_keeps_original_reads(tmp_path,execution_registry,default_policy):
-    root,_,env=prepare_cli(tmp_path,fault='nomination-missing',fragment=not default_policy,output_repair_probe=True)
+    root,_,env=prepare_cli(tmp_path,fault='nomination-layout',fragment=not default_policy,output_repair_probe=True,layout_input_tokens=10)
     policy=c.settings(root)['resume_policy']
     assert policy['output_only'] is True and policy['output_repair'] is True
     if default_policy:assert policy['automatic_recovery']['enabled'] is True
@@ -101,7 +101,7 @@ def test_output_repair_turn_rejects_new_bridge_run_but_keeps_original_reads(tmp_
     assert result['status']=='finish',nomination_diagnostic(root,result,fault='output-repair-new-effect')
     origin,current=execution.records(root,2)
     intent=c.read(current/'native-intent.json')
-    assert intent['continuation_kind']=='repair' and intent['output_repair']['code']=='candidate_nominations_incomplete'
+    assert intent['continuation_kind']=='repair' and intent['output_repair']['code']=='deliverable_path_collision'
     work=c.workspace(root,2);locator=c.read(work/'work/retained-candidate-locator.json')
     query=c.read(work/'work/output-repair-query.json')
     collected=c.read(work/'work/output-repair-collect.json')

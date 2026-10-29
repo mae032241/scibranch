@@ -73,6 +73,22 @@ def test_breadth_consumers_are_enabled_without_expanding_base_schema():
     assert c.response_fields(dict(role='A'),dict(search_policy=None))==[]
 
 
+def rendered_contract(tmp_path,job,task,intent,backend,**context):
+    """Include actual renderer escaping and the selected backend's request wire."""
+    import json
+    from scidiscovery.research_loop import native
+    prompt,instruction,projection=native.render_scientific_request(job,task,intent,
+        backend_name=backend.name,instruction_transport=backend.instruction_transport,**context)
+    schema=tmp_path/'schema.json';c.write(schema,projection)
+    packet=backend.request(prompt,schema=schema,profile={},work=tmp_path,response_schema=projection)
+    wire=packet if backend.name=='codex' else json.dumps({key:value for key,value in json.loads(packet).items()
+        if key in {'prompt','response_schema'}},ensure_ascii=False,separators=(',',':')).encode()
+    size=len(wire)+len(json.dumps(task,ensure_ascii=False,indent=2).encode())
+    if backend.instruction_transport=='developer':size+=len(instruction.encode())
+    if job['role']=='W':size+=len(job['scientific_work_unit'].encode())
+    return size,prompt,instruction,packet
+
+
 @pytest.mark.parametrize(('role','scope'),[('H','ordinary'),('W','ordinary'),('A','ordinary'),('A','closeout'),('A','final'),('E','ordinary')])
 @pytest.mark.parametrize('backend_name',['codex','protocol'])
 @pytest.mark.parametrize('branch',['ordinary','automatic','repair','fragment'])
@@ -84,7 +100,7 @@ def test_complete_fixed_model_response_contract_fits_three_kib(tmp_path,role,sco
     its existing separate contract. The 512-byte diagnostic is part of the wire.
     """
     import json
-    from scidiscovery.research_loop import backends,guidance,native
+    from scidiscovery.research_loop import backends,guidance
     job=dict(role=role,handoff_protocol=c.HANDOFF_PROTOCOL,search={},
         scientific_response_fields=['portfolio_review','final_coverage'],formal_review_version=1,
         native_role_instruction=max((guidance.OPPORTUNITY[role],c.ROLE_INSTRUCTIONS[role]),key=lambda value:len(value.encode())))
@@ -103,18 +119,16 @@ def test_complete_fixed_model_response_contract_fits_three_kib(tmp_path,role,sco
     backend=backends.selected(dict(native_backend=backend_name,native_launcher_argv=['codex'] if backend_name=='codex' else ['independent']),
         schema_transport='prompt' if backend_name=='codex' else None)
     interface=dict(capabilities={},result_protocol='local-result-v1',executor='local_execution:command') if role=='W' else None
-    prompt,instruction,projection=native.render_scientific_request(job,task,intent,backend_name=backend_name,
-        instruction_transport=backend.instruction_transport,remaining=remaining,final_return=scope=='final',
+    context=dict(remaining=remaining,final_return=scope=='final',
         execution_interface=interface,managed_command=['experiment'] if role=='W' else None,
         budget_status=dict(shared_seconds_remaining=0,shared_observed_tokens_remaining=0))
-    schema=tmp_path/'schema.json';c.write(schema,projection)
-    packet=backend.request(prompt,schema=schema,profile={},work=tmp_path,response_schema=projection)
-    contract_wire=packet if backend_name=='codex' else json.dumps({key:value for key,value in json.loads(packet).items()
-        if key in {'prompt','response_schema'}},ensure_ascii=False,separators=(',',':')).encode()
-    chunks=[contract_wire,json.dumps(task,ensure_ascii=False,indent=2).encode()]
-    if backend.instruction_transport=='developer':chunks.append(instruction.encode())
-    if role=='W':chunks.append(job['scientific_work_unit'].encode())
-    size=sum(map(len,chunks));diagnostic_bytes=len(diagnosis['diagnostic'].encode()) if branch=='repair' else 0
+    size,prompt,instruction,packet=rendered_contract(tmp_path,job,task,intent,backend,**context)
+    diagnostic_bytes=0
+    if branch=='repair':
+        field='work_repair' if role=='W' else 'output_repair'
+        empty_intent=dict(intent,**{field:dict(diagnosis,diagnostic='')})
+        empty_size,_,_,_=rendered_contract(tmp_path,job,task,empty_intent,backend,**context)
+        diagnostic_bytes=size-empty_size
     fixed_size=size-diagnostic_bytes
     import os
     if os.environ.get('SCID_TEST_LOG_DIR'):
@@ -130,13 +144,56 @@ def test_complete_fixed_model_response_contract_fits_three_kib(tmp_path,role,sco
 
 
 @pytest.mark.parametrize('backend_name',['codex','protocol'])
-@pytest.mark.parametrize('scope',['wake','output_only_wake','author_closeout','startup'])
+@pytest.mark.parametrize('text',[
+    pytest.param('D'*512,id='ascii512'),
+    pytest.param('"'*512,id='quotes'),
+    pytest.param('\\'*512,id='backslashes'),
+    pytest.param('\n'*512,id='newlines'),
+    pytest.param('\x00\x01\t\r'*512,id='controls'),
+    pytest.param('界'*512,id='chinese'),
+    pytest.param('"\\\n界\x00'*512,id='mixed'),
+])
+def test_diagnostic_allowance_counts_actual_escaped_renderer_and_backend_wire(tmp_path,backend_name,text):
+    import json
+    from scidiscovery.research_loop import backends,guidance
+    job=dict(role='A',handoff_protocol=c.HANDOFF_PROTOCOL,search={},portfolio_context={},formal_review_version=1,
+        scientific_response_fields=['portfolio_review','final_coverage'],
+        final_coverage_mechanisms=[dict(mechanism_ref='h001.m1')],
+        native_role_instruction=guidance.OPPORTUNITY['A'])
+    task=c.response_instructions(job)
+    backend=backends.selected(dict(native_backend=backend_name,
+        native_launcher_argv=['codex'] if backend_name=='codex' else ['independent']),
+        schema_transport='prompt' if backend_name=='codex' else None)
+    diagnosis=OutputRepairRequired('candidate_recommendation_missing',text).request()
+    size,_,_,_=rendered_contract(tmp_path,job,task,dict(output_repair=diagnosis),backend,remaining={})
+    empty=dict(diagnosis,diagnostic='')
+    empty_size,_,_,_=rendered_contract(tmp_path,job,task,dict(output_repair=empty),backend,remaining={})
+    def encoded(value):
+        result=json.dumps(value,ensure_ascii=False)
+        if backend_name=='protocol':result=json.dumps(result,ensure_ascii=False)
+        return len(result.encode('utf-8'))
+    increment=size-empty_size
+    assert increment==encoded(diagnosis['diagnostic'])-encoded('')
+    assert increment<=512 and len(diagnosis['diagnostic'].encode('utf-8'))<=512
+    assert empty_size+512<=c.MAX_FIXED_RESPONSE_BYTES==3072
+    assert size<=c.MAX_FIXED_RESPONSE_BYTES
+    if text=='D'*512:assert diagnosis['diagnostic']==text and increment==512
+    # Raw UTF-8 truncation alone is insufficient for JSON control characters.
+    raw_only=text.encode('utf-8')[:512].decode('utf-8',errors='ignore')
+    if backend_name=='protocol' and any(char in raw_only for char in '"\\\n\x00\x01\t\r'):
+        unsafe=dict(diagnosis,diagnostic=raw_only)
+        unsafe_size,_,_,_=rendered_contract(tmp_path,job,task,dict(output_repair=unsafe),backend,remaining={})
+        assert unsafe_size-empty_size>512 and unsafe_size>c.MAX_FIXED_RESPONSE_BYTES
+
+
+@pytest.mark.parametrize('backend_name',['codex','protocol'])
+@pytest.mark.parametrize('scope',['wake','output_only_wake','author_closeout','protected_final'])
 def test_full_renderer_special_suffixes_fit_same_contract(tmp_path,backend_name,scope):
     import json
     from scidiscovery.research_loop import backends,guidance,native
-    role='A' if scope=='startup' else 'W'
+    role='A' if scope=='protected_final' else 'W'
     job=dict(role=role,handoff_protocol=c.HANDOFF_PROTOCOL,native_role_instruction=guidance.OPPORTUNITY[role])
-    if scope=='startup':job.update(final_only=True,delivery_sources=dict(items=[{}]),purpose='closeout',
+    if scope=='protected_final':job.update(final_only=True,delivery_sources=dict(items=[{}]),purpose='closeout',
         portfolio_context={},final_coverage_mechanisms=[dict(mechanism_ref='h001.m1')],
         scientific_response_fields=['portfolio_review','final_coverage'])
     else:
@@ -150,7 +207,7 @@ def test_full_renderer_special_suffixes_fit_same_contract(tmp_path,backend_name,
     prompt,instruction,projection=native.render_scientific_request(job,task,intent,backend_name=backend_name,
         instruction_transport=backend.instruction_transport,remaining={},output_only_wake=scope=='output_only_wake',
         author=dict(facts='work/author-closeout-science.json',limits={}) if scope=='author_closeout' else None,
-        final_return=scope=='startup',startup=scope=='startup',
+        final_return=scope=='protected_final',
         execution_interface=dict(capabilities={},result_protocol='local-result-v1',executor='local_execution:command') if scope=='wake' else None,
         managed_command=['experiment'] if scope=='wake' else None)
     schema=tmp_path/'schema.json';c.write(schema,projection)
@@ -176,7 +233,11 @@ def test_protected_final_delivery_repairs_missing_explicit_candidate(tmp_path,ch
 def test_same_task_output_repair_runs_conditional_breadth_gates(tmp_path,monkeypatch,gate):
     from scidiscovery.research_loop import continuation,candidate_refs,formal_review,candidate_nominations,search
     root=tmp_path/'instance';record=c.host_record(c.workspace(root,1))
-    job=dict(role='A',handoff_protocol=c.HANDOFF_PROTOCOL)
+    job=dict(role='A',step=1,handoff_protocol=c.HANDOFF_PROTOCOL,worker_view_version=1,lineage_projection_version=1,
+        direct_materials=[],history=dict(nodes=[]))
+    c.write(root/'settings.json',dict(handoff_protocol=c.HANDOFF_PROTOCOL,search_policy=None))
+    c.write(root/'settings-identity.json',dict(path='settings.json'))
+    c.write(root/'jobs/001.json',job)
     raw=record/'science-output.json'
     c.write(raw,dict(summary='Finding',scientific_result='Retained evidence',limitations=[],next_action='finish',route_reason='Stop'))
     c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=dict(unknown_steps=[]),raw_ref=c.file_ref(raw)))

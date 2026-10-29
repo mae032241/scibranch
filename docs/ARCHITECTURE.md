@@ -157,8 +157,9 @@ FINAL applies this judgment when it actually assesses a completed W.
 
 A pending disposition restores unfinished work without resetting consumption.
 Declared discriminating_work retains its exact A source and later response. New work
-names mechanism_refs, question and next_action; active work_updates need only work_ref,
-action (execute/defer/withdraw) and reason. Reasons contain the relevant conditions
+names mechanism_refs, question and next_action; optional sparse work_updates use work_ref,
+action (execute/defer/withdraw) and reason. Omitted work keeps its existing state;
+an explicit execute still must match the actual route and focus. Reasons contain the relevant conditions
 and evidence; other scientific details are optional. Execution does not resolve the
 question automatically. A may retain one main line while assigning the next experiment
 to a competitor; actual focus and execution authorization remain explicit.
@@ -564,8 +565,9 @@ unmeasured goal; A reports unmet objectives when stopping.
 A explains candidate criteria, any revisions, supporting evidence and tradeoffs in
 ordinary scientific prose. selection_explanation is optional and has no nested
 completeness gate. Exact candidate identity, frozen inputs, audit qualification and
-delivery authorization remain required. Output repair addresses required fields and
-diagnosed author-owned delivery-layout conflicts, retaining the same task, cumulative
+delivery authorization remain required. Output repair addresses required fields,
+unusable author-owned action references and diagnosed delivery-layout conflicts,
+retaining the same task, cumulative
 usage and FINAL completion protection. The original author may remove redundant
 copies or separate its own conflicting files; managed originals remain unchanged.
 Managed outputs persist and can be referenced directly, without copying them into
@@ -607,8 +609,10 @@ permission is diagnosed before host monitoring waits for terminal completion, wh
 preserving the original checkpoint and call.
 An explicit `caller_error` with `accepted=false` returns `correct_request`: fix the
 reported inputs or options before a corrected request, preserving any separately
-accepted call. Local rejects unsupported `--parent-plan` and `--change-intent`
-before preparation or acceptance with this feedback. A missing call ID alone
+accepted call. Local ignores candidate parent/change annotations without inventing
+parent lineage; executors that actually consume a parent still validate it.
+Duplicate argv item/count ceilings are removed; the real message transport bound
+and string/NUL requirements remain. A missing call ID alone
 does not establish nonacceptance; other unresolved facts retain reconciliation.
 Executor receipts carry a compact host-generated `handoff.action`: `return_control`,
 `poll_original`, `consume_terminal`, or `reconcile_or_stop`. The same pure decision
@@ -642,15 +646,24 @@ This proves the selected local CLI failure/session path, not successful real-pro
 reasoning recovery, usage coverage or native permission qualification. Missing-session
 startup still requires explicit non-acceptance evidence. A completed turn with incomplete
 required output uses existing output repair, while legal fragments keep their stage semantics.
-A completed W screen response with valid required JSON can separately need scientific
-work: only an exact `work-evidence.json` assessment of `incomplete` may use the
+A completed W response with valid required JSON can separately need scientific
+work: an exact `work-evidence.json` assessment of `incomplete` may use the
 independent automatic permission to continue the same original full W task. This
 uses the same session, task and retained observations, binds the original response,
 outcome and evidence snapshot, and consumes `max_continues`. Missing required format or
 conditional breadth declarations use narrow output repair; a repaired valid response
 may then need this independently authorized work continuation. Valid partial findings,
 explicit scientific blocks and decision handoffs retain their existing route to A.
+A final typed caller rejection of a run or compile request can reopen unfinished
+work in the same task/session under the existing automatic policy, including
+improve and no-search work. An unknown command is returned verbatim for the author
+to correct; control does not infer the intended command. A later accepted request suppresses that correction;
+unknown accepted execution only permits same-call reconciliation. A live tool hint
+alone does not establish this terminal repair permission.
 Complete or inapplicable delivery assessments add no recovery action.
+FINAL and closeout use the same native collector for interrupted or accepted
+unstarted attempts. An exact host budget refusal before submission can enter
+FINAL with the full original attempt chain and consumption retained.
 An enforced host review keeps its existing priority over work continuation.
 Exhausting the automatic continue cap or the original budget records a verified partial exit for A; it
 creates neither completed findings nor a scientific screening verdict.
@@ -868,9 +881,7 @@ base remains a shared external dependency. The existing
 `visibility=private_snapshot` entries retain unsealed handoff drafts as readable,
 inert private state. They do not populate the child's native execution namespace,
 create a native intent, commit or seal, or grant scientific qualification or execution
-permission. Completed-output acceptance already bound by a seal remains a scientific
-reference, not a current handoff draft. The original selected input cut still defines
-scientific visibility.
+permission. The original selected input cut still defines scientific visibility.
 
 Necessary job, seal, accepted, compiler, authority, history and recovery controls are
 copied into the child's existing private store. Original logical identities remain

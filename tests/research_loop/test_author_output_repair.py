@@ -11,7 +11,7 @@ from test_default_cli_output_repair import cli, nomination_diagnostic, prepare_c
 def inventory_scene(tmp_path, monkeypatch):
     root=tmp_path/'instance';work=root/'node';record=root/'record'
     work.mkdir(parents=True);record.mkdir()
-    job=dict(role='W',step=1,handoff_protocol=c.HANDOFF_PROTOCOL)
+    job=dict(role='W',step=1,handoff_protocol=c.HANDOFF_PROTOCOL,direct_materials=[])
     c.write(root/'jobs/001.json',job)
     managed=root/'managed/model.bin';managed.parent.mkdir();managed.write_bytes(b'original');managed.chmod(0o400)
     copied=work/'artifacts/experiments/call-1/artifacts/model.bin'

@@ -1,37 +1,25 @@
 """Scientific decision declarations, exact request admission and bounded clarification."""
 import copy
-from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, controller, correction, decision, native, protocol, semantic
+from scidiscovery.research_loop import contracts as c, controller, decision, native, protocol
 from test_history_handoff import finish, fixture_portfolio_review, fixture_final_coverage
 
 REQUEST = dict(decision='candidate', question='Should the candidate be retained under the declared target condition?',
                change_criterion='A controlled contradiction would change the candidate choice.')
 
 
-def prepare(tmp_path, *, enabled=True, correction_enabled=False):
-    from scidiscovery.research_loop import search
+def prepare(tmp_path, *, enabled=True):
     public = tmp_path / 'public'; public.mkdir(parents=True)
     objective = public / 'objective.md'; objective.write_text('Compare mechanisms without abandoning required controls.')
     root = tmp_path / 'instance'
     controller.prepare(root, objective, public, ['never-launched'], max_tokens=100_000,
         max_seconds=3600, max_steps=16, model='fixture', reasoning_effort='high',
         decision_contract_version=1 if enabled else None,
-        search_policy=search.DEFAULT_POLICY if correction_enabled else None,
-        correction_policy=dict(review_after=1, pause_after=1) if correction_enabled else None)
-    plan = dict(scope='Target discrimination', commitments=[dict(label='M',minimal_test='Required control',existing_ref=None)],
-                focus=dict(label='M',action='screen')) if correction_enabled else None
-    finish(root, 1, 'H', [], action='experiment', search_choice=plan)
-    job = c.build_job(root, 2, 'W', [1], instruction='Exact scientific question')
-    findings = [dict(mechanism=row['mechanism_ref'], basis='blocked',
-                     finding='Fixture has no solver observations for this assigned mechanism; target uncertainty remains.')
-                for row in (job.get('search') or {}).get('coverage_obligation', [])]
-    text = ('No experiment observations were produced; target uncertainty remains.' if findings
-            else 'Negative controlled result; target uncertainty remains.')
-    finish(root, 2, 'W', [1], text=text,
-           mechanism_findings=findings or None)
+        search_policy=None)
+    finish(root, 1, 'H', [], action='experiment')
+    finish(root, 2, 'W', [1], text='Negative controlled result; target uncertainty remains.')
     return root
 
 
@@ -86,21 +74,20 @@ def test_minimal_route_still_rejects_completed_repetition_without_new_evidence(t
 
 
 @pytest.mark.parametrize('action', ['continue_w', 'revise_h', 'extract'])
-def test_missing_scientific_declaration_preserves_raw_and_returns_to_a(tmp_path, action):
+@pytest.mark.parametrize('decision_request',[None,{},dict(decision='mechanism',question='',change_criterion='')])
+def test_unconsumable_optional_decision_uses_route_fallback_and_preserves_raw(tmp_path, action,decision_request):
     root = prepare(tmp_path)
-    job, payload = author(root, 3, [1, 2], None, action=action)
+    job, payload = author(root, 3, [1, 2], decision_request, action=action)
     record = c.host_record(c.workspace(root, 3))
     raw = (record / 'science-output.json').read_bytes()
     assert c.validate(c.workspace(root, 3))['next_action'] == action
     receipt = c.read(record / 'result-identity.json')['control_outcome']
-    assert receipt['decision_status'] == 'unresolved'
-    route = controller._route(root, 3, 'A', payload, job, 1, 2)
-    route = semantic.effective_route(root, 3, payload, job, (*route, None))
-    assert route[0] == 'A' and route[7]['reason'] == 'a_decision_request_missing'
-    following = c.build_job(root, 4, 'A', route[1], instruction=route[2], author_correction=route[7])
-    assert following['author_correction']['root']['step'] == 3
+    assert receipt['decision_status'] == 'applied'
+    omitted=dict(payload);omitted.pop('decision_request')
+    assert decision._key(job,payload,None)==decision._key(job,omitted,None)
+    assert decision.reason(root,job,payload) is None
     assert (record / 'science-output.json').read_bytes() == raw
-    assert not (c.host_record(c.workspace(root, 4)) / 'native-intent.json').exists()
+    assert not (root/'jobs/004.json').exists()
 
 
 def test_exact_completed_request_without_new_original_is_rejected_but_negative_new_result_is_allowed(tmp_path):
@@ -145,39 +132,6 @@ def test_no_completed_dependency_does_not_consume_request_and_changed_prose_is_n
     focus = c.read(c.host_record(c.workspace(root, 4)) / 'result-identity.json')['control_outcome']['resolved_focus']
     assert focus is None  # Both requests assess the same absence of search focus.
     assert decision._key(job, changed, focus) != decision._key(job, payload, focus)
-
-
-def test_real_controller_clarification_is_bounded_and_not_counted_as_progress(tmp_path, monkeypatch):
-    root = prepare(tmp_path, correction_enabled=True)
-    record = c.host_record(c.workspace(root, 2))
-    delivery = c.read(record / 'result-identity.json')['control_outcome']['worker_delivery']
-    assert delivery['status'] == 'partial' and delivery['reason'] == 'scientific_blocked'
-    assert c.read(record / 'work-evidence.json')['evidence'] == []
-    review = dict(dispositions=[], next_focus=dict(mechanism_ref='h001.m1', action='screen'))
-    # Partial W delivery supplies the exact question retained by the A job.
-    route = controller._route(root, 2, 'W', c.validate(c.workspace(root, 2)),
-                              c.read(root / 'jobs/002.json'), 1, None)
-    assert route[0] == 'A' and route[1] == [1, 2]
-    c.build_job(root, 3, 'A', route[1], instruction=route[2])
-    author(root, 3, [1, 2], None, review=review)
-    controller._check_job(root, c.settings(root), 3, 'A', route[1], route[2], route[3])
-    assert correction.project(root)['eligible'] == []
-    accepted = []
-    def respond(root, step):
-        job = c.read(root / 'jobs' / f'{step:03d}.json')
-        assert job['role'] == 'A' and job['author_correction']['root']['step'] == 3
-        accepted.append(step)
-        parents = [int(Path(row['path']).parts[2]) for row in job['direct_refs']]
-        author(root, step, parents, None, review=review)
-    monkeypatch.setattr(native, 'execute_native', respond)
-    result = controller.run(root)
-    assert result['status'] == 'semantic_correction_required' and result['reason'] == 'semantic_correction_limit', result
-    assert accepted == [4, 5] and result['completed_steps'] == 5
-    assert correction.project(root)['eligible'] == []
-    before = [(root / 'jobs' / f'{step:03d}.json').read_bytes() for step in (3, 4, 5)]
-    assert controller.run(root)['status'] == 'semantic_correction_required'
-    assert accepted == [4, 5]
-    assert before == [(root / 'jobs' / f'{step:03d}.json').read_bytes() for step in (3, 4, 5)]
 
 
 def test_minimal_schema_and_current_tasks_stay_frozen_without_decision_contract(tmp_path):

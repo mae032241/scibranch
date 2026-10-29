@@ -55,7 +55,7 @@ def test_local_process_launch_without_original_host_owner_is_rejected(tmp_path):
     ('--change-intent','Training-only calibration'),
     ('--parent-plan','prior-candidate'),
 ],ids=['change-intent','parent-plan'])
-def test_local_cli_unsupported_parent_options_can_be_corrected_before_acceptance(local,monkeypatch,capsys,option,value):
+def test_local_cli_optional_parent_options_are_ignored_without_lineage(local,monkeypatch,capsys,option,value):
     root,script,config,path=local
     effects=[]
     prepare,submit=LocalExecution.prepare,LocalExecution.submit
@@ -68,20 +68,12 @@ def test_local_cli_unsupported_parent_options_can_be_corrected_before_acceptance
     monkeypatch.setattr(LocalExecution,'prepare',prepared)
     monkeypatch.setattr(LocalExecution,'submit',submitted)
     command=['--config',str(path),'run','--experiment-dir',str(root),'--script',str(script)]
-    assert e.main([*command,option,value])==2
-    refused=json.loads(capsys.readouterr().out)
-    assert refused['status']=='caller_error' and refused['accepted'] is False
-    assert 'call_id' not in refused and e.Records(config).calls()==[] and effects==[]
-    assert 'Local execution does not support --parent-plan or --change-intent' in refused['note']
-    assert 'Remove these options and submit the corrected request' in refused['note']
-    assert refused['handoff']['action']=='correct_request'
-    assert refused['handoff']['reason']=='execution_not_accepted'
-    assert 'no original call from this request to look up' in refused['handoff']['instruction']
-    assert e.main(command)==0
-    corrected=json.loads(capsys.readouterr().out)
-    assert corrected['status']=='known_success'
+    assert e.main([*command,option,value])==0
+    result=json.loads(capsys.readouterr().out)
+    assert result['status']=='known_success'
+    assert 'ignores --parent-plan and --change-intent' in result['note']
     assert effects==['prepare','submit'] and len(e.Records(config).calls())==1
-    accepted=e.Records(config).accepted(corrected['call_id'])
+    accepted=e.Records(config).accepted(result['call_id'])
     assert accepted['parent']==dict(status='unknown',candidate_id=None,source='none')
     assert accepted['change_intent'] is None
 

@@ -1,4 +1,5 @@
 """Author-correctable final response failures, never integrity or I/O failures."""
+import json
 
 
 class OutputRepairRequired(ValueError):
@@ -6,7 +7,16 @@ class OutputRepairRequired(ValueError):
 
     def __init__(self, code, diagnostic):
         self.code = code
-        self.diagnostic = diagnostic.encode('utf-8')[:512].decode('utf-8', errors='ignore')
+        text=diagnostic.encode('utf-8',errors='replace')[:512].decode('utf-8', errors='ignore')
+        def wire_bytes(value):
+            return len(json.dumps(json.dumps(value,ensure_ascii=False),ensure_ascii=False).encode('utf-8'))
+        empty=wire_bytes('')
+        low,high=0,len(text)
+        while low<high:
+            middle=(low+high+1)//2
+            if wire_bytes(text[:middle])-empty<=512:low=middle
+            else:high=middle-1
+        self.diagnostic=text[:low]
         super().__init__(self.diagnostic)
 
     def request(self):

@@ -26,7 +26,7 @@ from .contracts import (ACTIONS, actions, ROLE_INSTRUCTIONS, record_ref, file_re
                         seal_result, workspace, write, NATIVE_TASK_INSTRUCTION, decode_scientific_output)
 
 
-RESUME_INSTRUCTION = 'Resume this exact task within original scope/permissions/budget; never replay unknown calls.'
+RESUME_INSTRUCTION = 'Resume same task/scope/permissions/budget; no unknown-call replay.'
 OUTPUT_REPAIR_INSTRUCTION = 'Fix diagnosed JSON/layout only; no new work/rerun/resubmit: '
 WORK_REPAIR_INSTRUCTION = 'Complete missing assigned work under original authorization; reuse exact calls/results, never resubmit. Report obstacles/limits. Diagnosis: '
 FRAGMENT_INSTRUCTION = 'Read work/science-resume.json; continue per stage_response.'
@@ -50,7 +50,7 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
         if job['role']=='A':instruction+='\n'+c.AUTHOR_EVIDENCE_GUIDANCE
         rules=c.response_instructions(job)
         if all(task.get(key)==value for key,value in rules.items()):
-            format_rule='Use task response rules over old formats; extras optional.'
+            format_rule='Current fields override task formats; extra science optional.'
         else:
             format_rule=('Current response rules replace older output shapes only; scientific scope stays binding: '
                 +json.dumps(rules,ensure_ascii=False,separators=(',',':')))
@@ -59,24 +59,24 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
             text_fields=[name for name,rule in properties.items() if rule.get('type')=='string' and 'enum' not in rule]
             menu=['/'.join(text_fields)+':text','limitations:text[]']
             menu.extend(name+':'+ '|'.join(rule['enum']) for name,rule in properties.items() if 'enum' in rule)
-            format_rule+='\n'+'; '.join(menu)
+            format_rule+='\nRequired: '+'; '.join(menu)
         # The same developer layer follows the complete frozen scientific literal.
         instruction+='\n'+format_rule
-        prompt=('Follow science-task.json/inputs goal/checks/scope/permissions. JSON object only. '
-            'Edit declared code/ or work/ copies; originals read-only; no control wrappers/hashes. '
-            'work/budget-status.json: past/partial advice, no grant; unknown!=0; cached input once.')
+        prompt=('Read science-task.json/inputs; JSON only. '
+            'Edit code/ or work/ copies only; no control wrappers/hashes. '
+            'work/budget-status.json: stale/partial, no grant; unknown!=0; cached once.')
         if final_return:
             prompt+=(' Protected FINAL: conclude now; no new role/audit/experiment. '
                 'Reference token/time/step ceilings do not revoke this accepted return; original call limits, '
                 'permissions and delivery qualification still apply.')
         else:
-            prompt+=' Soft targets keep accepted work; call limits/permissions stand.'
+            prompt+=' Soft targets keep accepted work; call limits/permissions apply.'
             if (job['role'] in {'A','H','W'} and not author
                     and not output_only_wake and not intent.get('output_repair') and not intent.get('work_repair')
                     and job.get('purpose')!='closeout' and not job.get('final_report') and not job.get('final_only')):
                 before='routing' if job['role'] in {'A','H'} else 'bulk reads/code'
-                prompt+=(' Before '+before+', budget prep/later roles/experiments; '
-                    'if short, may close with unmet goals. Reuse evidence/code. '+STAGE_PLANNING[job['role']])
+                prompt+=(' Budget all work before '+before+'; reuse evidence/code; '
+                    'close with unmet goals if short. '+STAGE_PLANNING[job['role']])
     if budget_status:prompt+='\n'+json.dumps(budget_status,ensure_ascii=False,separators=(',',':'))
     if execution_interface is not None and not author and not output_only_wake:
         prompt+='\nManaged execution: '+json.dumps(dict(command=managed_command,
@@ -281,6 +281,9 @@ def wait_native(root: Path, step: int, *, _reentry_started=False):
                 if runner.exists() and runtime.process_matches(read(runner), execution.identity(root, step)):
                     time.sleep(.1)
                     continue
+                refused = control_budget.prelaunch_budget_reason(root, step, record)
+                if refused is not None:
+                    raise control_budget.NodeBudgetUnavailable(refused)
                 if job['role']=='W' and fragments and not (record/'checkpoint.json').exists():
                     raise continuation.ResumeUnavailable('worker_fragment_checkpoint_unavailable')
                 decision = continuation.automatic_decision(root, step)

@@ -1173,11 +1173,44 @@ def _final_a_reserve(settings, job, events):
     return closeout_floor(settings, preparation_seconds=preparation)
 
 
+def prelaunch_budget_reason(root, step, record):
+    """Recognize the host's exact refusal before native submission.
+
+    Missing process receipts alone say nothing about submission. This requires
+    the positive original refusal and its zero invocation meter instead.
+    """
+    intent = contracts.read(contracts.regular(record / 'native-intent.json'))
+    outcome_path = record / 'native-outcome.json'
+    if not outcome_path.exists():return None
+    outcome = contracts.read(contracts.regular(outcome_path))
+    if (set(outcome) != {'returncode', 'stop_reason', 'native_started', 'usage', 'thread_id', 'limitation'}
+            or intent.get('task_ref') != contracts.record_ref(contracts.regular(Path(root) / 'jobs' / f'{step:03d}.json'))
+            or outcome.get('native_started') is not False or outcome.get('returncode') is not None
+            or outcome.get('stop_reason') not in {'wall_limit', 'token_limit'}
+            or outcome.get('thread_id') is not None
+            or outcome.get('limitation') != 'Budget stopped the original intent before native submission.'
+            or outcome.get('raw_ref') is not None or outcome.get('terminal_observed')
+            or not (record / 'usage.json').exists()
+            or contracts.read(contracts.regular(record / 'usage.json')) != dict(input_tokens=0, cached_input_tokens=0, output_tokens=0)
+            or (record / 'native-process.json').exists() or (record / 'native-process.json').is_symlink()):
+        return None
+    return outcome['stop_reason']
+
+
 def stopped_report_original(root, step):
     """Bind a cleaned stopped native task; its scientific output stays unqualified."""
     job_path = Path(root) / 'jobs' / f'{step:03d}.json'
     record = contracts.host_record(contracts.workspace(root, step))
-    names = ['native-intent.json', 'native-outcome.json', 'usage-observation.json'] if (record / 'native-intent.json').exists() else []
+    from . import execution
+    chain = execution.records(root, step) if (record / 'native-intent.json').exists() else [record]
+    if len(chain) > 1:
+        value = dict(step=step, job_ref=contracts.record_ref(contracts.regular(job_path)),
+            records=_stopped_chain_records(record, chain))
+        _validate_stopped_report(root, value)
+        return value
+    names = ['native-intent.json', 'native-outcome.json'] if (record / 'native-intent.json').exists() else []
+    if names and prelaunch_budget_reason(root, step, record) is None:
+        names.append('usage-observation.json')
     if (record / 'usage.json').exists():
         names.append('usage.json')
     value = dict(step=step, job_ref=contracts.record_ref(contracts.regular(job_path)),
@@ -1186,19 +1219,62 @@ def stopped_report_original(root, step):
     return value
 
 
+def _stopped_chain_records(origin, chain):
+    """Use the existing original-relative record map for every accepted attempt."""
+    from . import execution
+    records = {}
+    for record in chain:
+        names = set(execution.proof(record))
+        names.update(name for name in ('usage-observation.json', 'runner-process.json', 'native-process.json')
+            if (record / name).exists())
+        for name in sorted(names):
+            records[(record / name).relative_to(origin).as_posix()] = contracts.record_ref(contracts.regular(record / name))
+    return records
+
+
 def _validate_stopped_report(root, value):
     if (not isinstance(value, dict) or set(value) != {'step', 'job_ref', 'records'}
             or type(value['step']) is not int or value['step'] <= 0 or not isinstance(value['records'], dict)
-            or set(value['records']) not in (set(), {'native-intent.json', 'native-outcome.json', 'usage-observation.json'},
+            or any(not isinstance(name, str) or Path(name).is_absolute() or '..' in Path(name).parts
+                for name in value['records'])
+            or not any('/' in name for name in value['records']) and set(value['records']) not in (set(), {'native-intent.json', 'native-outcome.json', 'usage.json'},
+                    {'native-intent.json', 'native-outcome.json', 'usage-observation.json'},
                     {'native-intent.json', 'native-outcome.json', 'usage-observation.json', 'usage.json'})):
         raise ValueError('Final report requires the exact stopped original')
     path = Path(root) / 'jobs' / f'{value["step"]:03d}.json'
     job = contracts.read(contracts.regular(path))
     record = contracts.host_record(contracts.workspace(root, value['step']))
     if (contracts.record_ref(path) != value['job_ref']
-            or (record / 'result-identity.json').exists() or (record / 'continuations').exists()
+            or (record / 'result-identity.json').exists()
             or any(contracts.record_ref(contracts.regular(record / name)) != proof for name, proof in value['records'].items())):
         raise ValueError('Stopped report original identity changed')
+    if any('/' in name for name in value['records']):
+        from . import continuation, execution
+        chain = execution.records(root, value['step'])
+        if (len(chain) < 2 or value['records'] != _stopped_chain_records(record, chain)
+                or prelaunch_budget_reason(root, value['step'], chain[-1]) is None):
+            raise ValueError('Final report requires the exact accepted chain and pre-submission budget refusal')
+        continuation.validate_repair_chain(root, value['step'], chain)
+        continuation.validate_fragment_chain(root, value['step'], chain)
+        # Prior accepted work remains consumed. The last refusal has no new
+        # invocation report; only its predecessor reports can supply this cost.
+        last = contracts.read(chain[-1] / 'native-intent.json')
+        tokens, seconds = _attempt_consumption(root, job, chain[:-1],
+            automatic_successor=last if last.get('continuation_kind') == 'automatic_recovery' else None)
+        anchor = last.get('budget_slice') or {}
+        if anchor.get('previous_tokens') != tokens or anchor.get('previous_seconds') != seconds:
+            raise ValueError('Stopped continuation changed its consumed original budget')
+        for prior in chain[:-1]:
+            if not (prior / 'native-outcome.json').exists():
+                continuation.interruption(root, job, prior)
+                continue
+            outcome = contracts.read(prior / 'native-outcome.json')
+            if (type(outcome.get('returncode')) is not int or outcome.get('cleanup') != 'observed_group_cleaned'
+                    or outcome.get('stop_reason') in {'native_error_unknown', 'cleanup_unknown'}):
+                raise ValueError('Final report cannot summarize a live or unknown-effect original')
+        return value
+    if (record / 'continuations').exists():
+        raise ValueError('Stopped report omitted accepted native continuations')
     if not value['records']:
         from . import experiment_client, qualification
         qualification.validate_inputs(root, job)
@@ -1209,6 +1285,10 @@ def _validate_stopped_report(root, value):
         return value
     intent = contracts.read(record / 'native-intent.json')
     outcome = contracts.read(record / 'native-outcome.json')
+    if set(value['records']) == {'native-intent.json', 'native-outcome.json', 'usage.json'}:
+        if 'attempt' not in intent and prelaunch_budget_reason(root, value['step'], record) is not None:
+            return value
+        raise ValueError('Final report requires the exact native pre-submission budget refusal')
     if (intent.get('task_ref') != value['job_ref'] or 'attempt' in intent
             or type(outcome.get('returncode')) is not int or outcome.get('cleanup') != 'observed_group_cleaned'
             or outcome.get('stop_reason') not in {'closeout_protected_token_limit', 'closeout_protected_time_limit',

@@ -24,6 +24,10 @@ class UnresolvedSearch(ValueError):
         self.code, self.subject = code, subject
 
 
+class UnresolvedScientificReference(ValueError):
+    """An optional authored citation cannot resolve within validated originals."""
+
+
 def policy(value):
     if not isinstance(value, dict) or set(value) not in (set(DEFAULT_POLICY),set(DEFAULT_POLICY)|{'initial_calls'}):
         raise ValueError('Search policy requires finite ceilings and optional initial_calls')
@@ -115,19 +119,19 @@ def validate_science_refs(root,job,refs):
     sources=_frozen_sources(root,job)
     for ref in refs:
         if not isinstance(ref,dict) or not {'source_step','pointer'}<=ref.keys() or type(ref['source_step']) is not int:
-            raise ValueError('Scientific evidence needs source_step and RFC6901 pointer')
+            raise UnresolvedScientificReference('Scientific evidence needs source_step and RFC6901 pointer')
         row=sources.get(ref['source_step']);pointer=ref['pointer']
         if row is None or not isinstance(pointer,str) or not pointer.startswith('/') or re.search(r'~(?![01])',pointer):
-            raise ValueError('Scientific evidence is outside the frozen visible prefix')
+            raise UnresolvedScientificReference('Scientific evidence is outside the frozen visible prefix')
         source,payload,_,_=row
         keys=[key.replace('~1','/').replace('~0','~') for key in pointer[1:].split('/')]
         if keys[0] not in payload or keys[0] in {'role','direct_refs','implementation_selection','control_outcome'}:
-            raise ValueError('Scientific evidence points outside declared scientific fields')
+            raise UnresolvedScientificReference('Scientific evidence points outside declared scientific fields')
         value=payload
         for key in keys:
             if isinstance(value,dict) and key in value:value=value[key]
             elif isinstance(value,list) and re.fullmatch(r'0|[1-9][0-9]*',key) and int(key)<len(value):value=value[int(key)]
-            else:raise ValueError('Scientific evidence pointer does not resolve')
+            else:raise UnresolvedScientificReference('Scientific evidence pointer does not resolve')
     return copy.deepcopy(refs)
 
 
@@ -153,15 +157,15 @@ def require_portfolio_review(root,job,payload,*,context=None,interpretation=None
     if main is not None and (not isinstance(main,str) or main not in mechanisms):reject('main_line must name an exact listed mechanism or null')
     active={row['work_ref']:row for row in context['discriminating_work'] if row['status']!='withdrawn'}
     updates=review.get('work_updates',[])
-    if not isinstance(updates,list):reject('work_updates must list the active work decisions')
-    names=[];refs=[]
+    if not isinstance(updates,list):reject('work_updates must be a list of explicit work decisions')
+    names=[]
     for update in updates:
         if (not isinstance(update,dict) or not isinstance(update.get('work_ref'),str) or update['work_ref'] not in active
                 or not isinstance(update.get('action'),str) or update['action'] not in {'execute','defer','withdraw'}
                 or not isinstance(update.get('reason'),str) or not update['reason'].strip()):
-            reject('each active work needs its exact work_ref, execute/defer/withdraw and a nonblank reason')
-        names.append(update['work_ref']);refs.extend(_evidence_refs(update.get('evidence')))
-    if len(names)!=len(set(names)) or set(names)!=set(active):reject('decide each active work_ref exactly once')
+            reject('each update needs an active work_ref, execute/defer/withdraw and a nonblank reason')
+        names.append(update['work_ref'])
+    if len(names)!=len(set(names)):reject('update each work_ref at most once')
     action=payload.get('next_action');work=review.get('discriminating_work')
     selected=None
     if work is not None:
@@ -189,11 +193,27 @@ def require_portfolio_review(root,job,payload,*,context=None,interpretation=None
         focus=(interpretation or {}).get('focus')
         if action=='continue_w' and (focus is None or focus['mechanism_ref'] not in row['mechanism_refs']):
             reject('executed work must include the actual W focus')
-    competitor=review.get('competitor')
-    if isinstance(competitor,dict):refs.extend(_evidence_refs(competitor.get('evidence')))
-    try:validate_science_refs(root,job,refs)
-    except ValueError:reject('provided scientific references must resolve inside exact visible originals')
     return review
+
+
+def optional_reference_diagnostics(root,job,payload):
+    """Unresolved narrative citations never authorize work or block delivery."""
+    refs=[]
+    review=payload.get('portfolio_review')
+    if isinstance(review,dict):
+        competitor=review.get('competitor')
+        if isinstance(competitor,dict):refs.extend(_evidence_refs(competitor.get('evidence')))
+        updates=review.get('work_updates')
+        for row in updates if isinstance(updates,list) else []:
+            if isinstance(row,dict):refs.extend(_evidence_refs(row.get('evidence')))
+    coverage=payload.get('final_coverage')
+    for row in coverage if isinstance(coverage,list) else []:
+        if isinstance(row,dict):refs.extend(_evidence_refs(row.get('science_refs')))
+    if not refs:return []
+    try:validate_science_refs(root,job,refs)
+    except UnresolvedScientificReference:
+        return [dict(code='scientific_reference_unresolved',subject='optional scientific citations')]
+    return []
 
 
 def schema(role, protocol=None):

@@ -620,12 +620,6 @@ def _wait_automatic_recovery(root, step, decision):
             budget.transition(root, 'advance', 'automatic_recovery_arbitration')
 
 
-def _format_fallback_ready(root, step):
-    """Collection may negotiate only a freshly verified rejected format."""
-    decision=continuation.automatic_decision(root,step)
-    return decision.get('action')=='retry' and decision.get('format_fallback') is True
-
-
 def _native_call(root, step, *, launch=False, operation=None):
     """One controller consumer owns all automatic recovery scheduling."""
     call = operation if operation is not None else native.execute_native if launch else native.wait_native
@@ -1501,10 +1495,7 @@ def _run_final(root, begin):
     try:
         record = _record(root, step)
         if (record / 'native-intent.json').exists():
-            if runtime.node_state(root, step) == 'running' or _terminal_success(root, record) or _format_fallback_ready(root,step):
-                _native_call(root, step)
-            else:
-                return _closeout_result(root, 'closeout_native_unsealed', reason='exact_final_original_unverified', step=step)
+            _native_call(root, step)
         else:
             _native_call(root, step, launch=True)
     except (budget.NodeBudgetUnavailable, continuation.ResumeUnavailable, OutputRepairRequired, RuntimeError, ValueError) as error:
@@ -1523,13 +1514,10 @@ def _collect_final_a(root, accepted):
     if not (record / 'result-identity.json').exists():
         try:
             if (record / 'native-intent.json').exists():
-                current = execution.record(root,step)
-                if runtime.node_state(root, step) == 'running':
-                    _native_call(root, step)
-                elif _terminal_success(root, current) or _format_fallback_ready(root,step):
-                    _native_call(root, step)
-                else:
-                    raise RuntimeError('The exact final A has no verified terminal output')
+                # The ordinary collector owns exact reentry qualification as
+                # well as terminal checks; an outer state gate loses accepted
+                # interrupted and not-yet-started continuation originals.
+                _native_call(root, step)
             else:
                 _native_call(root, step, launch=True)
         except (budget.NodeBudgetUnavailable, continuation.ResumeUnavailable, OutputRepairRequired, RuntimeError, ValueError) as error:
@@ -1761,24 +1749,12 @@ def _run_closeout(root):
             if author_request is not None and corrections > semantic.MAX_AUTHOR_CORRECTIONS:
                 return _closeout_result(root, 'closeout_unresolved', reason='semantic_correction_limit', step=step)
             if (record / 'native-intent.json').exists():
-                state = runtime.node_state(root, step)
-                current = execution.record(root, step)
-                outcome = contracts.read(current / 'native-outcome.json') if (current / 'native-outcome.json').exists() else {}
-                # This gate selects collection only. Raw output identities and
-                # final receipts belong to the formal seal checks below; a
-                # damaged original must not become an ordinary unknown state.
-                collect = state == 'running' or (state == 'terminal'
-                    and type(outcome.get('returncode')) is int and outcome['returncode'] == 0
-                    and not outcome.get('stop_reason'))
-                if not collect and state == 'terminal':
-                    collect=_format_fallback_ready(root,step)
-                if not collect:
-                    failed = state == 'terminal' and type(outcome.get('returncode')) is int and outcome['returncode'] != 0
-                    reason = ('Original closeout native failed; explicit worker-resume required for the same original task'
-                        if failed else 'Original closeout native execution is unknown; reconcile the same original without replay')
-                    return _closeout_result(root, 'closeout_native_unsealed', step=step, reason=reason)
                 try:
                     _native_call(root, step)
+                except budget.NodeBudgetUnavailable as error:
+                    if _budget_denied(error.reason):
+                        return _start_budget_closeout(root, begin['source_cutoff'], step, 'W' if repair else 'A', error.reason)
+                    return _closeout_result(root, 'closeout_budget_unavailable', reason=error.reason, step=step)
                 except continuation.ResumeUnavailable as error:
                     status = ('output_repair_unavailable' if getattr(error, 'status', None) == 'output_repair_unavailable'
                         else 'closeout_native_unsealed')
@@ -1985,18 +1961,6 @@ def worker_closeout(root: Path, step: int, *, max_tokens, max_seconds, authoriza
         else:
             author_closeout.start(root,step,max_tokens=max_tokens,max_seconds=max_seconds,authorization_note=authorization_note)
         return _start_closeout(root,step,step+1,'operator_author_closeout')
-
-
-def worker_output_accept(root: Path, step: int, *, attempt, pending_ref, session,
-                         authorization_note, authorization_statement):
-    """Explicitly accept one already returned author output; no native retry."""
-    from .protocol import require_current
-    from . import author_closeout
-    root=Path(root).resolve();require_current(root)
-    with _writer(root),_inactive_on_error(root,'completed_author_output_acceptance_failed'):
-        author_closeout.accept_completed_output(root,step,attempt=attempt,pending_ref=pending_ref,session=session,
-            authorization_note=authorization_note,authorization_statement=authorization_statement)
-        return _start_closeout(root,step,step+1,'operator_completed_author_output_acceptance')
 
 
 def worker_resume(root: Path, step: int):
