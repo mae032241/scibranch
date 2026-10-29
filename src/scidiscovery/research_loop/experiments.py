@@ -1834,6 +1834,9 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, pa
     from .local_experiments import LocalExecution
     local_preparation=(type(adapter) is LocalExecution
         and config['execution_interface']['executor']=='local_execution:command')
+    if local_preparation and (parent is not None or change is not None):
+        raise CallerError('Local execution does not support --parent-plan or --change-intent. '
+            'Remove these options and submit the corrected request.')
     operation_context=storage.Deadline(config['max_seconds'])
     # Legacy direct Local input selection is host-owned and effect-free. New W
     # code reaches every adapter through its exact Git export first.

@@ -1038,6 +1038,7 @@ W 的 `science-task.json` 会报告 `managed_execution_wait.wake_authorized`。
 
 `exp run/query/lookup/collect/reconcile/cancel` 的回执增加宿主生成的 `handoff` 投影，
 与宿主等待使用同一状态判定规则，不改原 accepted/terminal/seal：
+明确的 `caller_error` 且 `accepted=false` 返回 `correct_request`，要求修正指出的参数或输入后提交修正请求，同时保留任何独立已接受原调用。Local 不支持 `--parent-plan` 和 `--change-intent`，在 prepare、接受和提交前按此反馈；这次未接受请求没有需要查找的原调用。单凭缺少 call ID 不能证明未接受，其余未决事实仍按原调用核对。
 阻塞式执行器在调用内等待后返回回执，W 仍按返回的 `handoff` 行动，无需另选阻塞分支。
 `action=return_control` 表示原调用可查且已冻结唤醒能力，W 正常交回当前科学 JSON；
 `poll_original` 要求在同一 native turn 按 `poll_interval_seconds`（默认 1 秒）持续等待、

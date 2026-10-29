@@ -605,6 +605,11 @@ The W task reports frozen wake permission and normal pending-call handoff instru
 this does not force a live W to yield or prove that its session is usable. Missing
 permission is diagnosed before host monitoring waits for terminal completion, while
 preserving the original checkpoint and call.
+An explicit `caller_error` with `accepted=false` returns `correct_request`: fix the
+reported inputs or options before a corrected request, preserving any separately
+accepted call. Local rejects unsupported `--parent-plan` and `--change-intent`
+before preparation or acceptance with this feedback. A missing call ID alone
+does not establish nonacceptance; other unresolved facts retain reconciliation.
 Executor receipts carry a compact host-generated `handoff.action`: `return_control`,
 `poll_original`, `consume_terminal`, or `reconcile_or_stop`. The same pure decision
 rule drives host waiting. Consumption requires a verified original terminal,

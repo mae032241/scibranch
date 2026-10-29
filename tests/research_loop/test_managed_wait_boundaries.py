@@ -87,3 +87,33 @@ def test_budget_words_without_proven_nonacceptance_do_not_finish_original(accept
     result = managed_wait.handoff(None, dict(status='budget_exhausted', accepted=accepted,
         reason='shared_time_exhausted', call_id='original-call'), 'query')
     assert result['action'] == 'reconcile_or_stop'
+
+
+def test_caller_error_with_proven_nonacceptance_corrects_request_without_original(monkeypatch):
+    monkeypatch.setattr(managed_wait.e, 'Records', lambda *args: pytest.fail('Rejected request has no original to query'))
+    result = managed_wait.handoff(None, dict(status='caller_error', accepted=False,
+        error='invalid_arguments', note='Remove unsupported --change-intent.'), 'run')
+    assert result['action'] == 'correct_request' and result['reason'] == 'execution_not_accepted'
+    assert 'This request was not accepted' in result['instruction']
+    assert 'no original call from this request to look up' in result['instruction']
+    assert 'Correct the reported arguments or inputs, then submit the corrected request' in result['instruction']
+    assert 'separately accepted original call' in result['instruction'] and 'never resubmit it' in result['instruction']
+    assert 'call_id' not in result and 'poll_interval_seconds' not in result
+
+
+@pytest.mark.parametrize('accepted', [None, True])
+def test_caller_error_without_proven_nonacceptance_preserves_original(accepted, monkeypatch):
+    monkeypatch.setattr(managed_wait.e, 'Records', lambda *args: pytest.fail('Unavailable response must preserve the original'))
+    result = managed_wait.handoff({}, dict(status='caller_error', accepted=accepted,
+        error='invalid_arguments', note='Remove unsupported --change-intent.', call_id='original-call'), 'run')
+    assert result['action'] == 'reconcile_or_stop'
+    assert result['reason'] == 'original_response_unavailable' and result['call_id'] == 'original-call'
+
+
+@pytest.mark.parametrize('status', ['unknown', 'integrity_error', 'unresolved'])
+def test_caller_error_words_do_not_authorize_corrected_execution(status, monkeypatch):
+    monkeypatch.setattr(managed_wait.e, 'Records', lambda *args: pytest.fail('Missing configuration must preserve uncertainty'))
+    result = managed_wait.handoff(None, dict(status=status, accepted=False, error='caller_error',
+        note='This request was not accepted; remove unsupported --change-intent.', call_id='original-call'), 'run')
+    assert result['action'] == 'reconcile_or_stop'
+    assert 'never' in result['instruction'].lower() or 'preserve' in result['instruction'].lower()

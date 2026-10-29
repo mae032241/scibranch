@@ -1,5 +1,6 @@
 """Selected W code binds Git versions before the first adapter effect."""
 from copy import deepcopy
+import json
 from pathlib import Path
 import sys
 import subprocess
@@ -151,6 +152,46 @@ def test_capture_and_export_refusal_precedes_prepare_and_cleans_only_owned_expor
     assert adapter.prepared==[] and e.Records(config).calls()==[]
     assert len(fixed_code['cleaned'])==(failure=='export')
     assert all(not path.exists() for path in fixed_code['exports'].values())
+
+
+def test_local_cli_change_intent_refusal_precedes_code_capture_and_acceptance(fragment, monkeypatch, execution_registry, fixed_code, capsys):
+    root,job,_=fragment;config=_configuration(root,job);source=_code(root,job)
+    def forbidden(*args,**options):
+        pytest.fail('Unsupported Local change intent must be rejected before preparation, acceptance or submission')
+    monkeypatch.setattr(LocalExecution,'prepare',forbidden)
+    monkeypatch.setattr(e.Records,'accept',forbidden)
+    monkeypatch.setattr(LocalExecution,'submit',forbidden)
+    path=c.workspace(root,job['step'])/'work/version-config.json'
+    assert e.main(['--config',str(path),'run','--script',str(source),
+        '--change-intent','Training-only calibration'])==2
+    refused=json.loads(capsys.readouterr().out)
+    assert refused['status']=='caller_error' and refused['accepted'] is False
+    assert 'call_id' not in refused and e.Records(config).calls()==[]
+    assert 'Local execution does not support --parent-plan or --change-intent' in refused['note']
+    assert refused['handoff']['action']=='correct_request'
+    assert refused['handoff']['reason']=='execution_not_accepted'
+    assert fixed_code['bindings']=={} and fixed_code['exports']=={} and fixed_code['cleaned']==[]
+
+
+def test_local_subclass_metadata_failure_after_prepare_is_not_caller_error(fragment, execution_registry, fixed_code):
+    root,job,_=fragment;config=_configuration(root,job);source=_code(root,job)
+    marker=root/'prepare-effect'
+    class EffectfulLocal(LocalExecution):
+        def prepare(self,payload,**options):
+            marker.write_text('prepare performed')
+            return super().prepare(payload,**options)
+    adapter=EffectfulLocal({key:value for key,value in config.items() if key!='execution_interface'},
+        frozen_interface=config['execution_interface'])
+    payload=LocalFileDescriptor(name='input',local_path=str(source),size_bytes=source.stat().st_size,
+        media_type='application/octet-stream')
+    records=e.Records(config)
+    with pytest.raises(ValueError,match='does not declare candidate parent semantics') as failure:
+        e._prepare_descriptor(config,payload,adapter,records,[],change='Training-only calibration',
+            command_options=dict(source_script=str(source)),_source_script=str(source))
+    assert type(failure.value) is ValueError
+    assert marker.read_text()=='prepare performed' and records.calls()==[]
+    assert fixed_code['cleaned']==[]
+    assert len(fixed_code['exports'])==1 and next(iter(fixed_code['exports'].values())).is_dir()
 
 
 def test_arbitrary_prepare_failure_retains_exact_export(fragment, execution_registry, fixed_code):

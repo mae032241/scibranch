@@ -53,6 +53,11 @@ def handoff(config,result,command,call_id=None):
             **(dict(call_id=call_id) if call_id is not None else {}),**fields)
     stop=lambda reason:hint('reconcile_or_stop',reason,
         'Reconcile this same original call once if supported, or report the unresolved obstacle. Never blindly poll, rerun or resubmit.')
+    if result.get('accepted') is False and result.get('status')=='caller_error':
+        return dict(action='correct_request',reason='execution_not_accepted',
+            instruction=('This request was not accepted; there is no original call from this request to look up. '
+                'Correct the reported arguments or inputs, then submit the corrected request. '
+                'Preserve any separately accepted original call and its unresolved status; never resubmit it.'))
     if (result.get('accepted') is False
             and (result.get('status'),result.get('reason')) in {
                 ('budget_exhausted','shared_time_exhausted'),
