@@ -153,14 +153,16 @@ def accepted_original(root,proof,*,source=None):
     return c.read(originals.resolve_ref(owner,ref) if owner is not None else originals.resolve_root_ref(root,ref))
 
 
-def capture(root,job,record):
+def capture(root,job,record,*,correction=None):
     """The native owner calls this only after its attempt has stopped writing.
 
     This is one attempt's fact original, not a new call index or mutable balance.
     Each proof uses the existing archive. Later calls/collections cannot change it.
     """
     if not repair_applicable(job):return None
-    if not (job.get('search') or {}).get('focus') and _caller_correction(root,job,record) is None:return None
+    if not applicable(job):
+        if correction is None:correction=_caller_correction(root,job,record)
+        if correction is None:return None
     from .protocol import require_current,stage_scope
     require_current(root,job)
     root,record=Path(root),Path(record);path=record/FACT_NAME
@@ -298,6 +300,8 @@ def assessment(root,job,science,record,*,source_attempt=None):
     correction=_caller_correction(root,job,record)
     if not applicable(job) and correction is None:
         return dict(status='not_applicable',missing=[],blocked=[],reason=None)
+    if not applicable(job) and not (record/FACT_NAME).exists():
+        capture(root,job,record,correction=correction)
     facts=validate(root,job,record,source_attempt=source_attempt)
     if facts['capacity'] or facts['unknown'] or facts['prior_unknown']:correction=None
     if not applicable(job):

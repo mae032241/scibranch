@@ -380,8 +380,11 @@ Local 不消费的候选 parent/change 说明不阻断，也不建立父模型�
 仍检查准确引用。重复 argv 数量和字节门槛移除，保留实际消息传输边界及字符串/NUL 要求。
 明确的 caller_error、accepted=false 把具体参数或输入错误交回作者。若原 W 因该末次 run/compile
 拒绝而结束且工作未完成，控制层可按原自动接续权限在同 task/session 有界重开，覆盖 improve 和
-无 search 的普通工作；同 turn 已有后续接受结果时不再补正。真实科学 decision/blocked 仍交 A，
-已接受未知调用仍只核对原调用。未知命令把原参数交回作者自行修正，控制层不猜测命令意图。
+无 search 的普通工作；同 turn 已有后续接受结果时不再补正。这种准确机械拒绝在原有限额度内
+优先于该返回的 decision/blocked；没有这种拒绝时，真实科学 decision/blocked 仍交 A，
+已接受未知调用仍只核对原调用。已接受调用的某次操作失败不抹去已核验原终态；能力预检拒绝
+明确报告不可用，实际提交后失联仍按原 ID 保留 unknown。后端异常原文只留宿主诊断，公开回执
+保留安全的操作和错误类别，Worker 客户端保留宿主 handoff。未知命令的原参数交作者自行修正。
 FINAL 与 closeout 复用同一 native collector，处理 interrupted 和已接受但尚未启动的 attempt。
 只有宿主明确的提交前预算拒绝可据此转 FINAL，完整原 attempt 链和累计消费保留。
 
@@ -427,11 +430,13 @@ message-only 错误保持 unknown，普通 agent/tool 正文不授重试许可�
 失败/session 路径，未验证真实服务商推理恢复、用量覆盖或原生权限资格；无 session 的
 启动重试仍须明确未接受证据。已完成 turn 缺少或给出无效必需输出时仍走原输出补填，合法 fragment 保持
 阶段语义。
-已完成 W screen 的必需 JSON 合法但科学交付仍不足时，只有精确 `work-evidence.json`
+已完成 W 的必需 JSON 合法但有已核验的工作缺口时，只有精确 `work-evidence.json`
 判定为 `incomplete` 才能依靠独立自动许可续接同一 W 的原完整任务。它沿用原 session、
 任务和保留观察，绑定原返回、outcome 与证据快照，并消耗 `max_continues`。必需格式或
 条件广度声明缺失走窄输出补填；补成合法返回后，科学不足可另经独立自动许可续工。有效 partial、
-明确科学障碍及 decision 交接仍沿原路交 A；完整或不适用的交付判定不追加恢复动作。
+没有准确未接受机械拒绝的科学障碍及 decision 交接仍沿原路交 A；该机械拒绝可在原有限
+接续额度内优先修正，覆盖 screen、improve 及无 search 普通任务。完整或不适用的交付判定
+不追加恢复动作。
 强制 host review 仍优先沿原路交 A。continue 次数或原预算耗尽记录可核验的 partial 出口，
 不补造已完成 finding 或科学 screened 资格。
 `output_only` 原义不变，`automatic_recovery` 是独立许可；显式旧策略没有该字段

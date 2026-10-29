@@ -5,6 +5,7 @@ No model execution, domain parser, subprocess launch or Artifact service lives h
 from __future__ import annotations
 
 import argparse
+import errno
 from collections.abc import Mapping
 from contextlib import contextmanager, ExitStack
 from dataclasses import asdict
@@ -17,6 +18,7 @@ from pathlib import Path
 import re
 import sys
 import time
+import traceback
 import uuid
 from functools import wraps
 
@@ -486,7 +488,8 @@ def _diagnostic(error, fallback, *, config=None, detail=False):
             from . import contracts as c
             directory=Path(config['record_dir']).parent/'execution-diagnostics'
             if directory.resolve()!=directory:raise ValueError('Diagnostic namespace changed')
-            c.write(directory/(uuid.uuid4().hex+'.json'),dict(error=type(error).__name__,note=str(error)))
+            c.write(directory/(uuid.uuid4().hex+'.json'),dict(error=type(error).__name__,
+                note=''.join(traceback.format_exception(error))))
         except (OSError,ValueError,TypeError):pass
     if detail and isinstance(config,dict):
         from . import public_output,experiment_client,contracts as c
@@ -1973,11 +1976,50 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, pa
                 raise LocalPreparationCleanupError('Unsubmitted code export cleanup failed before execution') from error
 
 
-def _accepted_failure(config,call_id,error,operation):
-    """Own the original identity even when a provider loses its response."""
-    reason=_diagnostic(error,f'{operation} failed',config=config,detail=True)
-    return dict(status='unknown',accepted=True,call_id=call_id,
-        note=f'{reason}. Preserve this exact accepted call; reconcile it without resubmission.')
+def _retained_observation(config,call_id):
+    """Read and verify an existing terminal original without contacting its provider."""
+    original=original_configuration(config,call_id)
+    directory=Records(original).directory(call_id)
+    path=directory/'execution-observation.json'
+    if not path.exists() and not path.is_symlink():return None
+    observed=json.loads(read(path))
+    verify_observation(observed,lambda item:Path(item['path']),interface=original['execution_interface'])
+    if (observed.get('call_id')!=call_id or observed.get('scope')!=original['scope']
+            or observed.get('accepted',{}).get('path')!=str(directory/'accepted.json')):
+        raise IntegrityError('Retained observation differs from its exact accepted call')
+    return observed
+
+
+def _accepted_failure(config,call_id,error,operation,*,operation_started=True):
+    """Separate this operation's refusal from the accepted original execution."""
+    from . import experiments as common, feedback
+    integrity=isinstance(error,(IntegrityError,common.IntegrityError,feedback.history.ObserverIntegrityError))
+    unsupported=isinstance(error,(UnsupportedExecution,common.UnsupportedExecution))
+    review=isinstance(error,(ReviewRequired,common.ReviewRequired,breadth.OpportunityRequired))
+    category=('IntegrityError' if integrity else 'UnsupportedExecution' if unsupported else
+        'ConcurrentExecution' if isinstance(error,(ConcurrentExecution,common.ConcurrentExecution)) else
+        'ReviewRequired' if review else 'TimeoutError' if isinstance(error,TimeoutError) else
+        'OSError' if isinstance(error,OSError) else 'provider_error')
+    # errno is host-defined; provider messages, destinations and exception class
+    # names are not public diagnostics. Retain their complete chain privately.
+    if isinstance(error,OSError) and type(error.errno) is int and error.errno in errno.errorcode:
+        category+=f' ({errno.errorcode[error.errno]}: {os.strerror(error.errno)})'
+    _diagnostic(error,f'{operation} failed',config=config)
+    status='integrity_error' if integrity else ('unavailable' if unsupported else 'review_required') if not operation_started and (unsupported or review) else 'unknown'
+    result=dict(status=status,accepted=True,call_id=call_id)
+    if status=='integrity_error':
+        result['note']=f'{operation} failed its original integrity check ({category}). Preserve this exact call and originals; report the integrity failure. Do not repair host originals or resubmit.'
+    elif status in {'unavailable','review_required'}:
+        result['note']=f'{operation} was not performed ({category}); this operation is unavailable under the current declared capability or permission. Preserve this accepted call; consume its verified retained terminal result if available, otherwise report the capability or permission gap without resubmission.'
+    else:
+        result['note']=f'{operation} failed ({category}); the operation response is unknown. Preserve this exact accepted call; use same-call lookup or reconciliation if supported, otherwise report the unresolved obstacle. Never resubmit.'
+    if not integrity:
+        try:observed=_retained_observation(config,call_id)
+        except (OSError,ValueError,KeyError,TypeError) as failure:
+            _diagnostic(failure,'Retained execution observation cannot be verified',config=config)
+            return _accepted_failure(config,call_id,IntegrityError('Retained execution observation cannot be verified'),operation)
+        if observed is not None:result['state']=observed['status']
+    return result
 
 
 def _submit_descriptor(config, adapter, capabilities, prepared, accepted):
@@ -2172,7 +2214,7 @@ def main(argv=None):
         print(json.dumps(result,allow_nan=False));return 2
     except OSError:
         print(json.dumps(dict(status='integrity_error',note='Configuration client cannot be read; preserve its original and report the unavailable input.'),allow_nan=False));return 3
-    owner_lease = ExitStack();feedback_config=None;accepted_call_id=None
+    owner_lease = ExitStack();feedback_config=None;accepted_call_id=None;original_operation_started=True
     try:
         config=json.loads(read(args.config.absolute()))
         if isinstance(config,dict) and 'worker_view_version' in config and 'scope' not in config:
@@ -2187,6 +2229,12 @@ def main(argv=None):
         if args.command in {'run','compile','lookup','collect','cancel','reconcile','retire'}:
             from .protocol import require_scope
             require_scope(config.get('scope'))
+        if args.command in {'query','lookup','collect','cancel','reconcile','retire'}:
+            # Establish the original before local capability/loading preflight.
+            # Only entering the provider operation can make its reply uncertain.
+            Records(config).accepted(args.call_id)
+            accepted_call_id=args.call_id
+            original_operation_started=False
         adapter=load(config,path=args.config)
         if args.command in {'capabilities','describe'}:
             frozen_declared=_public_capabilities(adapter)
@@ -2285,13 +2333,13 @@ def main(argv=None):
                     records.accepted(call_id)
                     accepted_call_id=call_id
                     observation=records.directory(call_id)/'execution-observation.json'
-            if observation is not None and observation.exists():
+            if observation is not None and observation.exists() and result.get('status')!='integrity_error':
                 observed=json.loads(read(observation))
                 verify_observation(observed,lambda item:Path(item['path']),interface=config['execution_interface'])
                 result=scientific_result(config,Records(config).accepted(result['call_id']),result,observed)
             elif result.get('status')=='known_not_started' and result.get('accepted') is False:
                 result={key:result[key] for key in ('status','accepted','error','note') if key in result}
-            elif result.get('accepted') is True and result.get('status')=='unknown':pass
+            elif result.get('accepted') is True and result.get('status') in {'unknown','integrity_error','unavailable','review_required'}:pass
             else:result=adapter.public_result(result)
             if local_parent_unused and (args.parent_plan is not None or args.change_intent is not None):
                 result=dict(result,note=' '.join(item for item in (result.get('note'),'Local execution ignores --parent-plan and --change-intent; no candidate parent or change semantics are declared.') if item))
@@ -2303,6 +2351,7 @@ def main(argv=None):
             accepted_call_id=args.call_id
             config,adapter=original_adapter(config,args.call_id,'retire')
             accepted_call_id=args.call_id
+            original_operation_started=True
             result=retire_original(config,adapter,args.call_id)
             result={key:result[key] for key in ('call_id','status','note','resource_accounting') if key in result}
             if isinstance(result.get('resource_accounting'),dict):result['resource_accounting']=_accounting_view(result['resource_accounting'])
@@ -2319,6 +2368,7 @@ def main(argv=None):
                 from . import storage_policy as storage
                 operation_context=storage.Deadline(config['max_seconds'])
                 storage.check(operation_context)
+            original_operation_started=True
             if args.command=='query':result=adapter.status_details(args.call_id)
             elif args.command=='reconcile':
                 observed=record_observation(config,adapter,args.call_id)
@@ -2376,49 +2426,50 @@ def main(argv=None):
                     else 'Shared usage is unknown; new execution is unavailable.'))
             code=2
         else:
-            result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+            result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
                 dict(status='unknown',note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config)))
             code=3
     except (_AdmissionReviewRequired,common._AdmissionReviewRequired) as error:
-        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
             dict(status='review_required',reason=_diagnostic(error,'Original execution review required; request the declared review before continuing',config=feedback_config),accepted=False))
         code=2
     except (_AdmissionOpportunityRequired,common._AdmissionOpportunityRequired) as error:
-        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
             dict(status='unresolved',accepted=False,note=_diagnostic(error,'Choose an available authorized H mechanism before another request',config=feedback_config)))
         code=2
     except (ReviewRequired,common.ReviewRequired,breadth.OpportunityRequired) as error:
-        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
             dict(status='unknown',note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config)))
         code=3
     except (ConcurrentExecution,common.ConcurrentExecution) as error:
-        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
             dict(status='unknown',note=_diagnostic(error,'Execution preparation outcome is unknown; preserve the original preparation without replay',config=feedback_config)))
         code=2
     except (IntegrityError,common.IntegrityError,feedback.history.ObserverIntegrityError) as error:
-        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
             dict(status='integrity_error',note=_diagnostic(error,'Execution original integrity check failed; preserve originals and report this call',config=feedback_config)))
         code=3
     except OSError as error:
-        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
             dict(status='integrity_error',note=_diagnostic(error,'Execution original cannot be read; preserve originals and report the unavailable input',config=feedback_config)))
         code=3
     except (CommandOptionsError,common.CommandOptionsError) as error:
-        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
             caller_feedback(CallerError(_diagnostic(error,'Requested command options are unavailable',config=feedback_config,detail=True))))
         code=2
     except (CallerError,common.CallerError) as error:
-        result=_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else caller_feedback(error)
+        result=_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else caller_feedback(error)
         code=2
     except ValueError as error:
-        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
             dict(status='unavailable' if isinstance(error,(UnsupportedExecution,common.UnsupportedExecution)) else 'unresolved',note=_diagnostic(error,'Execution request could not be resolved; check declared inputs and preserve any original call',config=feedback_config)))
         code=2
     except Exception as error:
-        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command) if accepted_call_id is not None else
+        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
             dict(status='unknown',note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config)))
         code=3
     finally:owner_lease.close()
+    if result.get('status')=='integrity_error':code=3
     if args.command in {'run','query','lookup','collect','cancel','reconcile'}:
         from . import managed_wait
         result['handoff']=managed_wait.handoff(feedback_config,result,args.command,getattr(args,'call_id',None))

@@ -91,10 +91,14 @@ def test_real_tcad_lost_submit_reply_preserves_call_and_reconciles_without_resub
     assert e.main(command)==2
     result=json.loads(capsys.readouterr().out)
     assert result['status']=='unknown' and result['accepted'] is True,result
-    assert 'TCAD submission response is unknown' in result['note']
+    assert 'submission failed (UnsupportedExecution)' in result['note']
     assert str(root) not in json.dumps(result) and 'hidden-credential' not in json.dumps(result)
     call=result['call_id'];records=e.Records(config)
     accepted=(records.directory(call)/'accepted.json').read_bytes()
+    assert (records.directory(call)/'tcad-dispatch.json').is_file()
+    diagnostics=Path(config['record_dir']).parent/'execution-diagnostics'
+    assert any('hidden-credential' in c.read(item)['note'] and 'TimeoutError' in c.read(item)['note']
+        for item in diagnostics.iterdir())
     assert records.external(call) is None and backend.submits==1
     assert e.main(command)==2
     blocked=json.loads(capsys.readouterr().out)
@@ -123,6 +127,29 @@ def test_postaccept_adapter_error_keeps_exact_id_and_safe_reason(local,monkeypat
     assert result['status']=='unknown' and result['accepted'] is True and result['call_id']==call
     assert 'OSError' in result['note'] and 'Argument list too long' in result['note']
     assert str(path.parent) not in json.dumps(result) and 'hidden-credential' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('operation',['submit','query','collect'])
+def test_provider_ssh_details_remain_only_in_private_diagnostics(local,monkeypatch,capsys,operation):
+    _,script,config,path=local
+    private=('ssh failed for hidden-operator@198.51.100.47 via hidden-jump.internal; '
+        'IdentityFile=/opt/hidden-ssh/key.pem; opaque-ssh-material-8364')
+    def failed(*args,**kwargs):raise OSError(errno.EIO,private)
+    monkeypatch.setattr(LocalExecution,'submit',failed if operation=='submit' else lambda self,payload:(payload.name,'running'))
+    assert e.main(['--config',str(path),'run','--script',str(script)])==2
+    result=json.loads(capsys.readouterr().out);call=result['call_id']
+    if operation!='submit':
+        monkeypatch.setattr(LocalExecution,'status_details' if operation=='query' else 'collect_original',failed)
+        assert e.main(['--config',str(path),operation,'--call-id',call])==3
+        result=json.loads(capsys.readouterr().out)
+    assert result['status']=='unknown' and result['accepted'] is True and result['call_id']==call
+    assert ('submission' if operation=='submit' else operation) in result['note'] and 'OSError (EIO:' in result['note']
+    public=json.dumps(result)
+    for secret in ('hidden-operator','198.51.100.47','hidden-jump.internal','/opt/hidden-ssh','opaque-ssh-material-8364'):
+        assert secret not in public
+    diagnostics=Path(config['record_dir']).parent/'execution-diagnostics'
+    assert any(private in c.read(item)['note'] for item in diagnostics.iterdir())
+    assert len(e.Records(config).calls())==1
 
 
 @pytest.mark.parametrize('standard',[False,True],ids=['custom-launcher','named-permissions'])
@@ -247,7 +274,7 @@ def test_original_operation_concurrent_error_after_acceptance_keeps_original_id(
     assert e.main(['--config',str(path),command,'--call-id',call])==2
     result=json.loads(capsys.readouterr().out)
     assert result['status']=='unknown' and result['accepted'] is True and result['call_id']==call
-    assert 'ConcurrentExecution' in result['note'] and 'original operation lease is busy' in result['note']
+    assert 'ConcurrentExecution' in result['note'] and 'operation response is unknown' in result['note']
     assert len(e.Records(config).calls())==1
 
 

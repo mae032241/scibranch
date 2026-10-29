@@ -1735,9 +1735,6 @@ def seal_result(root: Path, step: int):
             if not (native_record/'checkpoint.json').exists():
                 checkpoint.capture(root,job,native_record)
             else:checkpoint.validate(root,job,native_record)
-        elif worker_delivery.repair_applicable(job):
-            worker_delivery.capture(root,job,native_record)
-        worker_delivery.require_delivery(root,job,value,native_record)
         from . import candidate_nominations
         candidate_nominations.require(root,job,value)
     control = None

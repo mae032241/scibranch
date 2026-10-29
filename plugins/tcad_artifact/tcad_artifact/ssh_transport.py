@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import ipaddress
 import json
 import os
@@ -521,7 +522,7 @@ class SSHTCADTransport:
             science_directory.mkdir(parents=True,exist_ok=True)
         # The control collection lock owns this execution's single writer. A
         # forced process kill cannot run finally; discard only its private temps.
-        for stale in private_directory.glob(".*.download"):
+        for stale in private_directory.glob(".results.*.tar.download"):
             if context: context.remaining_seconds()
             stale.unlink()
         if context:
@@ -530,6 +531,10 @@ class SSHTCADTransport:
         descriptors=[FileDescriptor.model_validate(item,strict=True) for item in value['outputs']]
         if len({item.name for item in descriptors})!=len(descriptors):
             raise RuntimeError('remote result names are not unique')
+        local_names = tuple(item.name if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", item.name)
+            else "output_" + str(index) for index, item in enumerate(descriptors, 1))
+        if len(set(local_names)) != len(local_names):
+            raise RuntimeError("remote result names map to the same cache file")
         manifest=None
         manifest_path=None
         if science_directory is not None:
@@ -544,8 +549,10 @@ class SSHTCADTransport:
             manifest_path=private_directory/'tcad_manifest'
             if manifest_path.is_symlink():
                 raise ValueError('native manifest cache must not be a symlink')
-            temporary=manifest_path.with_name(manifest_path.name+'.download')
-            if temporary.is_symlink():raise ValueError('native manifest temporary must not be a symlink')
+            _cleanup_downloads(private_directory, ('tcad_manifest',), protected=local_names, context=context)
+            fd, temporary = tempfile.mkstemp(prefix='.tcad_manifest.', suffix='.download', dir=private_directory)
+            os.close(fd)
+            temporary = Path(temporary)
             try:
                 if context:context.remaining_seconds()
                 self.remote.get_to(descriptor.local_path,temporary,descriptor.size_bytes)
@@ -575,15 +582,11 @@ class SSHTCADTransport:
             if staging_directory.resolve() != staging_directory:
                 raise ValueError('scientific collection staging must not contain symlinks')
             staging_directory.mkdir(exist_ok=True, mode=0o700)
-            for stale in staging_directory.glob('.*.download'):
-                if context: context.remaining_seconds()
-                stale.unlink()
             if publication_path.exists():
                 if publication_path.is_symlink():
                     raise ValueError('collection publication record must not be a symlink')
                 publication = json.loads(publication_path.read_bytes())
         outputs: list[dict[str, Any]] = []
-        seen: set[str] = set()
         completed_bytes = 0
         total_bytes = sum(item["size_bytes"] for item in value["outputs"])
         def progress(**extra):
@@ -592,7 +595,6 @@ class SSHTCADTransport:
                     "total_files": len(value["outputs"]), "total_bytes": total_bytes, **extra})
         pending = []
         ordered = []
-        local_names = set()
         science_targets = {}
         def identity(path):
             info = path.lstat()
@@ -624,17 +626,10 @@ class SSHTCADTransport:
                 return False
             return True
 
-        for remote_descriptor in descriptors:
+        paths = []
+        for remote_descriptor, name in zip(descriptors, local_names):
             if context is not None:
                 context.remaining_seconds()
-            if remote_descriptor.name in seen:
-                raise RuntimeError("remote result names are not unique")
-            seen.add(remote_descriptor.name)
-            name = (remote_descriptor.name if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", remote_descriptor.name)
-                else "output_" + str(len(seen)))
-            if name in local_names:
-                raise RuntimeError("remote result names map to the same cache file")
-            local_names.add(name)
             parent=private_directory
             if manifest is not None:
                 record=records.get(remote_descriptor.name)
@@ -646,8 +641,19 @@ class SSHTCADTransport:
             path = parent / name
             if path.is_symlink() or parent.resolve()!=parent:
                 raise ValueError("collection cache must not contain symlinks")
+            paths.append((remote_descriptor, path))
+        _cleanup_downloads(private_directory,
+            (path.name for _, path in paths if path.parent == private_directory),
+            protected=local_names, context=context)
+        if staging_directory is not None:
+            _cleanup_downloads(staging_directory,
+                (path.name for _, path in paths if path.parent == science_directory),
+                protected=local_names, context=context)
+        for remote_descriptor, path in paths:
+            if context is not None:
+                context.remaining_seconds()
             ordered.append(remote_descriptor.name)
-            if parent == science_directory:
+            if path.parent == science_directory:
                 science_targets[remote_descriptor.name] = path
                 if path.exists():
                     if (not matches(path, remote_descriptor)
@@ -655,7 +661,7 @@ class SSHTCADTransport:
                         raise RuntimeError('scientific output already exists without matching collection progress')
                     completed(remote_descriptor, path, reused=True)
                     continue
-                path = staging_directory / name
+                path = staging_directory / path.name
                 if path.is_symlink():
                     raise ValueError('scientific staging output must not be a symlink')
             if matches(path, remote_descriptor):
@@ -674,9 +680,9 @@ class SSHTCADTransport:
         else:
             for descriptor, path in pending:
                 if context: context.remaining_seconds()
-                temporary = path.with_name(path.name + ".download")
-                if temporary.is_symlink():
-                    raise ValueError("collection temporary file must not be a symlink")
+                fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '.', suffix='.download', dir=path.parent)
+                os.close(fd)
+                temporary = Path(temporary)
                 try:
                     self.remote.get_to(descriptor.local_path, temporary, descriptor.size_bytes)
                     if not matches(temporary, descriptor):
@@ -689,6 +695,12 @@ class SSHTCADTransport:
                 completed(descriptor, path)
         by_name = {item["name"]: item for item in outputs}
         outputs = [by_name[name] for name in ordered]
+        if staging_directory is not None:
+            try:
+                staging_directory.rmdir()
+            except OSError as error:
+                if error.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                    raise
         return {"outputs": outputs}
 
     def _rpc(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -716,6 +728,21 @@ class SSHTCADTransport:
         if not isinstance(value, dict):
             raise RuntimeError("remote TCAD result is not an object")
         return value
+
+
+def _cleanup_downloads(directory, names, *, protected, context=None):
+    """Remove only known producers' temps in this run's owned directory."""
+    for name in names:
+        fixed = directory / (name + '.download')
+        candidates = list(directory.glob('.' + name + '.*.download'))
+        if fixed.name not in protected:
+            candidates.append(fixed)
+        for temporary in candidates:
+            if context:
+                context.remaining_seconds()
+            if temporary.is_symlink():
+                raise ValueError('collection temporary file must not be a symlink')
+            temporary.unlink(missing_ok=True)
 
 
 def _read_descriptor(descriptor: FileDescriptor) -> bytes:

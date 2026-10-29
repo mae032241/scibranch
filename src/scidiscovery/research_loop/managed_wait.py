@@ -75,20 +75,22 @@ def handoff(config,result,command,call_id=None):
     if not isinstance(config,dict):return stop('original_configuration_unavailable')
     call_id=result.get('call_id',call_id)
     if not isinstance(call_id,str):return stop('original_call_unavailable')
-    if result.get('status') in {'unavailable','unresolved','integrity_error','caller_error','known_not_started','review_required'}:
+    refused=(result.get('accepted') is True and result.get('status') in {'unavailable','review_required'})
+    if result.get('status') in {'unavailable','unresolved','integrity_error','caller_error','known_not_started','review_required'} and not refused:
         return stop('original_response_unavailable')
     try:
         records=e.Records(config);records.accepted(call_id)
         original=e.original_configuration(config,call_id)
         query=original['execution_interface']['capabilities']['query']
         state=_handoff_state(result.get('state',result.get('status')));verified=False
-        if state=='unknown' and command not in {'collect','cancel'}:
-            return stop('original_state_unknown')
-        observation=records.directory(call_id)/'execution-observation.json'
-        if observation.exists():
-            observed=c.read(c.regular(observation))
-            e.verify_observation(observed,lambda proof:Path(proof['path']),interface=original['execution_interface'])
+        observed=e._retained_observation(config,call_id)
+        if observed is not None:
             state=observed['status'];verified=True
+        elif refused:
+            return hint('reconcile_or_stop','original_operation_unavailable',
+                'The requested operation was not performed and no verified retained terminal result is available. Report the declared capability or permission gap for this same accepted call; never rerun or resubmit it.')
+        elif state=='unknown' and command not in {'collect','cancel'}:
+            return stop('original_state_unknown')
         elif command=='cancel':
             # Cancellation acknowledgement is not the original execution state.
             state='unknown'

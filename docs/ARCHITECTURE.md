@@ -609,7 +609,12 @@ permission is diagnosed before host monitoring waits for terminal completion, wh
 preserving the original checkpoint and call.
 An explicit `caller_error` with `accepted=false` returns `correct_request`: fix the
 reported inputs or options before a corrected request, preserving any separately
-accepted call. Local ignores candidate parent/change annotations without inventing
+accepted call. Failure of an operation on that call does not erase a verified original
+terminal state. Unsupported operations are reported as unavailable before provider work;
+a lost submission reply remains unknown under the same call ID. Arbitrary backend
+exception text stays in host diagnostics; public feedback reports a safe operation and
+error category. The Worker client preserves the host handoff. Local ignores candidate
+parent/change annotations without inventing
 parent lineage; executors that actually consume a parent still validate it.
 Duplicate argv item/count ceilings are removed; the real message transport bound
 and string/NUL requirements remain. A missing call ID alone
@@ -658,8 +663,10 @@ A final typed caller rejection of a run or compile request can reopen unfinished
 work in the same task/session under the existing automatic policy, including
 improve and no-search work. An unknown command is returned verbatim for the author
 to correct; control does not infer the intended command. A later accepted request suppresses that correction;
-unknown accepted execution only permits same-call reconciliation. A live tool hint
-alone does not establish this terminal repair permission.
+unknown accepted execution only permits same-call reconciliation. This exact mechanical
+refusal takes precedence over that response's decision/blocked handoff under the same
+finite allowance; without it, scientific decisions and blocks still go to A. A live
+tool hint alone does not establish this terminal repair permission.
 Complete or inapplicable delivery assessments add no recovery action.
 FINAL and closeout use the same native collector for interrupted or accepted
 unstarted attempts. An exact host budget refusal before submission can enter

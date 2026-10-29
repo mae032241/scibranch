@@ -878,6 +878,7 @@ def _call(spec, request, seconds, *, on_process=None, evidence=None):
         identity = None
         failed = False
         cleanup = False
+        child_completed = False
         try:
             identity = runtime.process_identity(process.pid, request['operation_id'])
             if on_process is not None:
@@ -897,6 +898,7 @@ def _call(spec, request, seconds, *, on_process=None, evidence=None):
                         else:errors.extend(block);del errors[:-MAX_LEAF_TAIL];totals['stderr'] += len(block)
             if not failed:
                 process.wait(timeout=5)
+                child_completed = True
         finally:
             # Popen transfers child ownership before identity or durable receipt
             # publication. Every later failure must reap that exact child.
@@ -918,7 +920,10 @@ def _call(spec, request, seconds, *, on_process=None, evidence=None):
                 for stream in (process.stdout, process.stderr):
                     try:stream.close()
                     except OSError:pass
-                keep('time_or_byte_limit' if failed else 'child_stopped' if process.returncode is not None else 'cleanup_unknown', process.returncode)
+                outcome = ('cleanup_unknown' if not cleanup else 'time_or_byte_limit' if failed
+                    else 'child_completed' if child_completed and process.returncode == 0
+                    else 'child_failed' if child_completed else 'child_stopped')
+                keep(outcome, process.returncode)
         if not cleanup:
             raise DeliveryUnresolved('delivery_cleanup_unknown')
         if failed:

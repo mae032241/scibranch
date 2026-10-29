@@ -184,16 +184,19 @@ TOML 对应 `[policies.resume.automatic_recovery]`，CLI 通过原
 工作开始前被接口拒绝时，才可按原自动策略消费一个 retry 名额协商一次。其他 400、普通文字、
 未知外部执行或已有科学活动不因此重放。原失败回执、未知计量和消费保留；`--json` 仅指 Codex
 事件流，详见[输出传输](RESEARCH_CONFIGURATION.md#response-schema-transport--输出-schema-传输)。
-已完成 W screen 的必需 JSON 合法但精确 `work-evidence.json` 仍判定 `incomplete` 时，
+已完成 W 的必需 JSON 合法但精确 `work-evidence.json` 仍判定 `incomplete` 时，
 可依靠独立自动许可续接同一 W 原完整任务，保留原 session 与观察，绑定原返回、outcome
 及证据快照，与提前停止共用 `max_continues`。必需格式和条件广度声明缺失走窄输出补填；补成合法
-返回后，科学不足可另经独立许可续工。有效 partial、明确障碍或 decision 交接仍沿原路交 A；
-完整或不适用的交付判定不追加恢复动作。
+返回后，科学不足可另经独立许可续工。例外是宿主核验的末次未接受机械请求拒绝：它在原有限
+额度内优先于该返回的 decision/blocked，覆盖 screen、improve 及无 search 普通任务；后续已
+接受请求会抑制补正。没有这种拒绝的有效 partial、科学障碍或 decision 仍交 A；完整或不适用
+的交付判定不追加恢复动作。
 强制 host review 仍优先沿原路交 A。continue 次数或原预算耗尽留下可核验 partial 出口，
 不制造 finding 或科学资格，也不退还已用预算。
 protected FINAL 与 closeout 禁用自动科学续工，原有有限输出补填不变；上述格式协商仅沿用同一
-原 final claim 与上限，不新增科学任务。普通收口只收集仍活着的
-原 attempt 或已成功原结果，或核对合格后协商同一任务的格式降级；其他失败、未知、fragment 续接或输出补填不可用保留准确未封存诊断，
+原 final claim 与上限，不新增科学任务。普通收口复用原 native collector，收集原 attempt，
+并按原许可处理合格的 interrupted 或已接受未启动重入、输出补填及格式协商；其他失败、
+未知或续接不可用保留准确未封存诊断，
 不自动改派普通任务。`closeout_native_unsealed` 区分已知失败须显式 `worker-resume` 与
 执行未知须核对同一原调用，未知绝不重放；fragment 续接不可用保留原诊断。纯输出补填
 启动被拒绝时报告 `output_repair_unavailable` 及原原因。
@@ -1009,8 +1012,9 @@ scid-research closeout --root /绝对路径/实例 --export-only
 和 completed 但科学交付不足的原任务；不借 `output_only` 扩权。
 原 W 的末次 run/compile 若有明确 caller_error、accepted=false，且该拒绝造成工作未完成，
 控制层沿原 task/session 有界拉回具体修正，覆盖 improve 和无 search 普通工作。后续已接受的
-修正请求不再触发补正；未知命令的原参数交回作者自行修正，不猜测命令意图。
-真正科学 decision/blocked 仍交 A，已接受未知调用只核对原调用。
+修正请求不再触发补正；未知命令的原参数交回作者自行修正，不猜测命令意图。准确的未接受
+机械拒绝在原有限额度内优先修正；没有这种拒绝的科学 decision/blocked 仍交 A。已接受未知
+调用只核对原调用。
 FINAL 与 closeout 沿同一 native collector 接续 interrupted 或已接受未启动的 attempt；
 宿主明确的提交前预算拒绝转入 FINAL 时保留完整原 attempt 链与累计消费。
 launcher 的绝对调用路径及其指向的原文件被冻结，保留符号链接调用语义。
@@ -1032,6 +1036,10 @@ W 的 `science-task.json` 会报告 `managed_execution_wait.wake_authorized`。
 `exp run/query/lookup/collect/reconcile/cancel` 的回执增加宿主生成的 `handoff` 投影，
 与宿主等待使用同一状态判定规则，不改原 accepted/terminal/seal：
 明确的 `caller_error` 且 `accepted=false` 返回 `correct_request`，要求修正指出的参数或输入后提交修正请求，同时保留任何独立已接受原调用。Local 不消费 `--parent-plan` 和 `--change-intent`，忽略这些说明并保留未建立父模型关系的事实；真正消费父模型的执行器仍检查准确引用。这次未接受请求没有需要查找的原调用。单凭缺少 call ID 不能证明未接受，其余未决事实仍按原调用核对。
+对既有调用查询、收集或取消失败，不会抹去已核验的原执行终态。失败回执的 `status` 描述
+本次操作，存在的 `state` 来自已核验原终态；能力预检拒绝明确报不可用，真正提交后失联
+仍保留原 ID 与 unknown。后端异常原文只留宿主诊断，公开回执给
+安全的操作、错误类别和下一步；客户端保留宿主 `handoff`。
 阻塞式执行器在调用内等待后返回回执，W 仍按返回的 `handoff` 行动，无需另选阻塞分支。
 `action=return_control` 表示原调用可查且已冻结唤醒能力，W 正常交回当前科学 JSON；
 `poll_original` 要求在同一 native turn 按 `poll_interval_seconds`（默认 1 秒）持续等待、

@@ -505,7 +505,7 @@ def terminal_caller_error(root,job,record):
         raise e.IntegrityError('Caller-error evidence differs from its original native attempt')
     claims=Path(config['record_dir']).parent/'worker-submissions'
     if not claims.exists():return None
-    latest=None;latest_stamp=None
+    latest=[];latest_stamp=None;accepted_claims={}
     readonly={'capabilities','describe','lineage-status','query','lookup','help','--help','-h'}
     for claim in claims.iterdir():
         if not SUBMISSION_REF.fullmatch(claim.name) or claim.resolve()!=claim or not claim.is_dir():
@@ -549,11 +549,19 @@ def terminal_caller_error(root,job,record):
         if not effect:continue
         if response['result'].get('status') in {'unknown','integrity_error'} and not outcome['calls']:return None
         stamp=outcome_path.stat().st_mtime_ns
+        if command=='run':
+            # These host originals establish that the accepted call already
+            # existed by this response, independent of its file's later mtime.
+            for call in outcome['calls']:
+                reference=call['call_id']
+                accepted_claims[reference]=min(stamp,accepted_claims.get(reference,stamp))
         if latest_stamp is None or stamp>latest_stamp:
-            latest=(request,response,outcome);latest_stamp=stamp
-        elif stamp==latest_stamp:return None
-    if latest is None:return None
-    request,response,outcome=latest;result=response['result']
+            latest=[(request,response,outcome)];latest_stamp=stamp
+        elif stamp==latest_stamp:latest.append((request,response,outcome))
+    # An older tie cannot hide a later request encountered after it. Only an
+    # actual latest tie leaves the final work request ambiguous.
+    if len(latest)!=1:return None
+    request,response,outcome=latest[0];result=response['result']
     arguments=request['arguments']
     command=arguments[0] if isinstance(arguments,list) and arguments and isinstance(arguments[0],str) else None
     correctable=command in {'run','compile'} or (command not in COMMANDS and command not in readonly)
@@ -563,10 +571,13 @@ def terminal_caller_error(root,job,record):
         return None
     # A direct host operation after this response may have no bridge claim.
     # A later acceptance still prevents treating the rejected request as work.
-    for call in e.Records(config).calls():
-        accepted=e.Records(config).accepted(call.name)
+    records=e.Records(config)
+    for call in records.calls():
+        accepted=records.accepted(call.name)
         if accepted.get('native_attempt')!=attempt:continue
-        if (call/'accepted.json').stat().st_mtime_ns>=latest_stamp:return None
+        accepted_stamp=accepted_claims.get(call.name)
+        if ((accepted_stamp is None and (call/'accepted.json').stat().st_mtime_ns>=latest_stamp)
+                or accepted_stamp is not None and accepted_stamp>=latest_stamp):return None
         current=_call_evidence(config,call.name)
         _verify_calls(config,[current])
         if current['observation'] is None and current['retirement'] is None:return None
@@ -849,7 +860,8 @@ def main(argv=None):
     except e.CallerError as error:response=dict(code=2,result=e.caller_feedback(error))
     except (OSError,ValueError):
         response=dict(code=3,result=dict(status='unknown',note='Scientific submission result is unavailable; preserve original calls'))
-    if response['result'].get('status') in {'unknown','integrity_error','caller_error'}:
+    if (response['result'].get('status') in {'unknown','integrity_error','caller_error'}
+            and not isinstance(response['result'].get('handoff'),dict)):
         from . import managed_wait
         response['result']['handoff']=managed_wait.handoff(None,response['result'],'run')
     print(json.dumps(response['result'],ensure_ascii=False,allow_nan=False))
