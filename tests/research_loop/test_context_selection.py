@@ -33,12 +33,20 @@ print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=N
     return root
 
 
+def bound_input_path(root, job, path):
+    """Resolve a logical task input through its frozen producer binding."""
+    from scidiscovery.research_loop import experiment_client,originals
+    row=next(item for item in experiment_client._input_rows(job) if item['path']==path)
+    bound=dict(row,source=row.get('source',str(c.workspace(root,job['step'])/originals.relative(path))))
+    return originals.material_path(root,bound)
+
+
 def indexed_rows(root, job, name):
     """Read the complete frozen index when a compact preview is omitted."""
     page=job['history']['view']['indexes'][name]
     rows=[]
     while page:
-        path=c.workspace(root,job['step'])/page
+        path=bound_input_path(root,job,page)
         original=next(row for row in job['history']['files'] if row['path']==page)
         assert path.stat().st_size==original['size_bytes']
         value=c.read(path)
@@ -46,8 +54,10 @@ def indexed_rows(root, job, name):
     return rows
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('role,first',[('H','A'),('W','H'),('A','W'),('E','A')])
 def test_role_material_priority_preserves_constraints_caveats_and_opportunities(tmp_path,role,first):
+    from scidiscovery.research_loop import execution
     root=context_scene(tmp_path)
     job=c.build_job(root,5,role,[1,2,3,4],instruction='Exact question about the target constraint.',
         evidence_return=dict(step=3,role='A') if role=='E' else None)
@@ -57,49 +67,38 @@ def test_role_material_priority_preserves_constraints_caveats_and_opportunities(
     question='Exact question about the target constraint.'
     assert job['instruction']==question
     if role=='W':
-        work_unit=('Screen the assigned H combination with cheap discriminating observations and your own findings or concrete obstacles. '
-            'Preserve declared checks. A completed call alone is not scientific screening; '
-            'report the combination when its assigned coverage is ready for A.')
+        from scidiscovery.research_loop import guidance
+        work_unit=guidance.WORK_UNITS['screen']
         assert job['scientific_work_unit']==work_unit
         assert view['question']==question+'\nWork unit: '+work_unit
     else:
         assert 'scientific_work_unit' not in job
         assert view['question']==question
     assert view['parents'][0]['role']==first
-    assert (c.workspace(root,5)/view['global']['objective']).read_text().startswith('Keep the original target constraint')
+    assert bound_input_path(root,job,view['global']['objective']).read_text().startswith('Keep the original target constraint')
     h=next(row for row in view['parents'] if row['role']=='H')
     assert h['limitations']==['Original target condition is still unknown','A counterexample remains unresolved','Later caveat must survive']
     assert h['limitations_omitted_count']==1
-    assert (c.workspace(root,5)/h['conclusion']).is_file()
+    assert bound_input_path(root,job,h['conclusion']).is_file()
     mechanisms=view['lineage']['mechanisms']
     originals=indexed_rows(root,job,'mechanisms')
     assert [row['mechanism_ref'] for row in originals]==[f'h001.m{index}' for index in range(1,5)]
-    assert all(row['status']=='pending' and (c.workspace(root,5)/row['original']).is_file() for row in originals)
+    assert all(row['status']=='pending' and bound_input_path(root,job,row['original']).is_file() for row in originals)
     if view['lineage'].get('view_omitted'):
         assert view['lineage']['omission_reason']
         assert mechanisms['count']==mechanisms['pending_count']==4
     else:
         mechanism=mechanisms['unfinished_plan']
         assert mechanism['remaining_count']==4
-        assert (c.workspace(root,5)/mechanism['index']).is_file()
+        assert bound_input_path(root,job,mechanism['index']).is_file()
     candidates=view['lineage']['candidates']
-    if view['lineage'].get('view_omitted'):
-        assert candidates['coverage'] is None and candidates['a_recommended'] is None
-        assert candidates['candidate_facts']==[]
-        # The original A choice and negative observations remain readable.
-        assert c.validate(c.workspace(root,3))['candidate_recommendation']=='P'
-    else:
-        assert candidates['failed_candidate_count']==candidates['unknown_candidate_count']==1
-        assert {row['candidate_id'] for row in candidates['candidate_alerts']}=={'negative','unresolved'}
-        assert candidates['coverage']=='partial'
-        assert candidates['a_recommended']['candidate_id']=='P'
+    # Unbound observer rows and authored advice cannot create registered candidates.
+    assert c.read_scientific_output(execution.raw(root,3))['candidate_recommendation']=='P'
+    assert candidates['count' if view['lineage'].get('view_omitted') else 'candidate_count']==0
+    assert candidates['candidate_facts']==[]
+    assert candidates['candidate_facts_omitted_count']==0
+    assert indexed_rows(root,job,'candidates')==[]
     assert 'target_best' not in candidates
-    ids=['P','negative','unresolved']
-    assert [row['id'] for row in candidates['candidate_facts']]==ids[:len(candidates['candidate_facts'])]
-    assert len(candidates['candidate_facts'])+candidates['candidate_facts_omitted_count']==len(ids)
-    originals=indexed_rows(root,job,'candidates')
-    assert [row['id'] for row in originals]==ids
-    assert {row['id']:row['status'] for row in originals}==dict(P='ok',negative='failed',unresolved='unknown')
     assert 'experiments' not in view
     assert len((json.dumps(view,ensure_ascii=False,indent=2)+'\n').encode())<12000
     assert 'BODY-CROWD '*2000 not in json.dumps(view)
@@ -140,11 +139,13 @@ def test_selection_preserves_late_failed_unknown_and_relevant_audit():
     assert len(selection._bytes(result))<=4096
 
 
+@pytest.mark.process_e2e
 def test_w_combination_view_uses_frozen_authorized_rows_not_single_focus(tmp_path):
+    from scidiscovery.research_loop import execution
     root=context_scene(tmp_path)
     job=c.build_job(root,5,'W',[1,2,3,4],instruction='Work within the authorized scientific questions.')
     # Pure projection contract input: acceptance and grants remain another owner.
-    plan=c.read(c.workspace(root,1)/'conclusion.json')['search_plan']
+    plan=c.read_scientific_output(execution.raw(root,1))['search_plan']
     mechanisms=[dict(mechanism_ref=f'h001.m{index}',label=item['label'],source_h=1,
         source_h_ref=c.record_ref(c.host_record(c.workspace(root,1))/'result-identity.json'),
         minimal_test=item['minimal_test'],status='pending') for index,item in enumerate(plan['commitments'],1)]
@@ -165,7 +166,7 @@ def test_w_combination_view_uses_frozen_authorized_rows_not_single_focus(tmp_pat
     assert [row['mechanism_ref'] for row in rows]==[row['mechanism_ref'] for row in mechanisms]
     assert [row['label'] for row in rows]==[row['label'] for row in mechanisms]
     for row in rows:
-        assert (c.workspace(root,5)/row['original']).is_file()
+        assert bound_input_path(root,job,row['original']).is_file()
     public=json.dumps(view)
     assert 'source_h_ref' not in public and 'baseline' not in public and 'accepted_count' not in public
     assert len((json.dumps(view['lineage'],ensure_ascii=False,indent=2)+'\n').encode())<=4096

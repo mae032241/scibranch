@@ -275,7 +275,7 @@ def brief(records, state, graph, candidates, indexes, *, selection_protocol=0):
             candidate_facts=[{k:item[k] for k in ('id','evaluation_key','metric','direction','status')} for item in candidates['candidate_facts'][:2]],
             candidate_facts_omitted_count=len(candidates['candidate_index'])-min(2,len(candidates['candidate_facts']))),
         relationships=dict(count=len(graph['relations']),coverage=graph['coverage'],scope='Declared derivation and reuse; support remains unknown without original scientific intent.'),
-        access='Read index/next_page and original conclusion pages as needed. Unselected historical attachments are not mounted. '
+        access='Use index/next_page for gaps; reuse fully read parents. Unselected historical attachments are not mounted. '
                'Implementation IDs select exact objects; null keeps current selected inputs, [] clears, lists replace. '
                'Candidate facts, authored recommendation and actual submission are independent; unknown/partial coverage is not a complete tree.')
     # Large user labels/focus are navigation excerpts, never a license to drop bounds.
