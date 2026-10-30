@@ -811,7 +811,7 @@ def _route(root, step, role, result, job, current_h, current_w):
 def _terminal_success(root, record):
     """Known terminal turn, including diagnosed missing output, never unknown work."""
     try:
-        outcome = contracts.read(record / 'native-outcome.json')
+        outcome = contracts.native_outcome(record)
         final = None
         if outcome.get('final_a_completion') is not None:
             step = int(record.parents[1].name) if record.parent.name == 'continuations' else int(record.name)
@@ -826,7 +826,9 @@ def _terminal_success(root, record):
         if outcome.get('output_status') == 'missing':
             return (outcome.get('raw_ref') is None and outcome.get('cleanup') == 'observed_group_cleaned'
                     and not raw.exists() and not raw.is_symlink() and not pending.exists() and not pending.is_symlink())
-        return outcome.get('raw_ref') == contracts.file_ref(contracts.regular(raw))
+        candidate = raw if raw.exists() else pending
+        return outcome.get('raw_ref') == dict(path=str(raw),
+            size_bytes=contracts.regular(candidate).stat().st_size)
     except (KeyError, ValueError, OSError, TypeError):
         return False
 
@@ -1101,7 +1103,7 @@ def _run(root, *, continue_wait=None):
                 return _finish(root, settings, "native_outcome_unsealed", completed, last,
                     reason="Native work returned without a complete seal", next_role=role)
         try:
-            outcome = contracts.read(execution.record(root, step) / "native-outcome.json")
+            outcome = contracts.native_outcome(execution.record(root, step))
             if (type(outcome.get("returncode")) is not int or outcome["returncode"] != 0 or outcome.get("stop_reason")
                     or outcome['usage'].get('blocking_unknown_steps',outcome['usage']['unknown_steps'])
                     and not budget.native_completion_known(outcome, contracts.settings(root))):

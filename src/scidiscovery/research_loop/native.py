@@ -18,12 +18,13 @@ import sys
 import time
 
 from . import configuration_updates
-from . import budget as control_budget, execution, runtime, search, checkpoint, profiles, backends
+from . import budget as control_budget, execution, runtime, search, checkpoint, profiles, backends, native_recovery
 from .output_repair import OutputRepairRequired
 from .native_usage import terminal_attempt_tokens
 from .guidance import STAGE_PLANNING
 from .contracts import (ACTIONS, actions, ROLE_INSTRUCTIONS, record_ref, file_ref, host_record, read,
-                        seal_result, workspace, write, NATIVE_TASK_INSTRUCTION, decode_scientific_output)
+                        seal_result, workspace, write, NATIVE_TASK_INSTRUCTION, decode_scientific_output,
+                        native_outcome)
 
 
 RESUME_INSTRUCTION = 'Resume same task/scope/permissions/budget; no accepted unknown-call replay.'
@@ -127,7 +128,7 @@ def usage(root: Path, *, budget_events=None):
                 raise ValueError('Native usage observation changed')
             observation = record / 'usage-observation.json'
             outcome = record / 'native-outcome.json'
-            metadata = read(outcome).get('metering') if outcome.exists() else None
+            metadata = native_outcome(record).get('metering') if outcome.exists() else None
             if metadata is None and observation.exists():metadata = read(observation)
             if metadata is not None and metadata.get('coverage') == 'unknown' and step not in unknown:
                 unknown.append(step)
@@ -149,7 +150,7 @@ def _complete_reported_tokens(root,step):
         if intent.get('task_ref')!=c.record_ref(c.regular(Path(root)/'jobs'/f'{step:03d}.json')):
             raise ValueError('Advisory sample task identity changed')
         if not (record/'native-outcome.json').exists():return None,'current_usage_inflight'
-        outcome=c.read(c.regular(record/'native-outcome.json'))
+        outcome=c.native_outcome(record)
         if type(outcome.get('returncode')) is not int:return None,'terminal_endpoint_unavailable'
         if not (record/'usage.json').exists():return None,'meter_unavailable'
         value=c.read(c.regular(record/'usage.json'))
@@ -483,6 +484,7 @@ def run_native(root: Path, step: int, attempt=0):
     observed = False
     terminal_observed = False
     terminal_fault = None
+    completed_before = None
     terminal_usage_observed = False
     terminal_usage_missing = False
     terminal_meter = dict(meter)
@@ -606,7 +608,8 @@ def run_native(root: Path, step: int, attempt=0):
                             if event.get('failure') is not None:
                                 native_failures.append(event['failure'])
                             native_activity_observed = native_activity_observed or bool(event.get('activity'))
-                            if event.get('failed'):
+                            if event.get('failed') and (terminal_observed
+                                    or (event.get('failure') or {}).get('event_type') != 'error'):
                                 terminal_fault = terminal_fault or 'native_failure_event'
                             if terminal_observed and ('session' in event or event.get('activity')):
                                 terminal_fault = terminal_fault or 'native_activity_after_completion'
@@ -622,6 +625,7 @@ def run_native(root: Path, step: int, attempt=0):
                                     raise ValueError('Native protocol result is invalid or duplicated')
                                 write(pending,event['result'])
                             if event.get('completed'):
+                                if not terminal_observed:completed_before = len(native_failures)
                                 terminal_observed = True
                             current = event.get('usage')
                             if current is not None:
@@ -708,6 +712,10 @@ def run_native(root: Path, step: int, attempt=0):
                 process.stdin.close()
         _cleanup_code_exports(root, code_exports, launch_started=launch_started,
             process=process, cleanup=cleanup, bridge_stopped=bridge_stopped)
+    native_failure = native_recovery.combine(native_failures, completed_before=completed_before
+        if terminal_observed and process is not None and process.returncode == 0
+            and cleanup == 'observed_group_cleaned' else None)
+    if native_failure is not None:terminal_fault = terminal_fault or 'native_failure_event'
     stop = stop or terminal_fault
     if process is not None:
         observation = live_meter.poll()
@@ -735,10 +743,9 @@ def run_native(root: Path, step: int, attempt=0):
         if observed:
             write(record / 'usage.json', meter)
         write(record / 'usage-observation.json', observation)
-    from . import native_recovery
     outcome = dict(returncode=process.returncode if process else None, native_started=process is not None,
           stop_reason=stop, usage=usage(root), thread_id=thread_id, cleanup=cleanup,
-          terminal_observed=terminal_observed, native_failure=native_recovery.combine(native_failures),
+          terminal_observed=terminal_observed, native_failure=native_failure,
           native_activity_observed=native_activity_observed,
           native_identity=backend.identity(live_meter, thread_id),
           native_backend=backend.name,

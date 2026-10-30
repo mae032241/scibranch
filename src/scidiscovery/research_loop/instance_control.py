@@ -36,7 +36,7 @@ def status(root: Path, *, after=0, limit=None, live_feedback=True):
         state = {'sealed': 'seal_present_unverified', 'terminal': 'native_outcome_unsealed',
                  'unstarted': 'prepared'}.get(state, state)
         if state == 'native_outcome_unsealed':
-            outcome = contracts.read(execution.record(root, step) / 'native-outcome.json')
+            outcome = contracts.native_outcome(execution.record(root, step))
             if not isinstance(outcome, dict):
                 raise history.ObserverIntegrityError('Native status original outcome is malformed')
             if outcome.get('native_started') is False:
@@ -45,7 +45,7 @@ def status(root: Path, *, after=0, limit=None, live_feedback=True):
         if not live_feedback:
             outcome_path = execution.record(root, step) / 'native-outcome.json'
             if outcome_path.exists():
-                outcome = contracts.read(contracts.regular(outcome_path))
+                outcome = contracts.native_outcome(outcome_path.parent)
                 if not isinstance(outcome, dict):
                     raise history.ObserverIntegrityError('Native status original outcome is malformed')
                 node.update(stop_reason=outcome.get('stop_reason'), returncode=outcome.get('returncode'))
@@ -57,7 +57,7 @@ def status(root: Path, *, after=0, limit=None, live_feedback=True):
         if settings.get('node_budget_policy') is not None:
             record = execution.record(root, step)
             intent = contracts.read(record / 'native-intent.json') if (record / 'native-intent.json').exists() else {}
-            outcome = contracts.read(record / 'native-outcome.json') if (record / 'native-outcome.json').exists() else {}
+            outcome = contracts.native_outcome(record) if (record / 'native-outcome.json').exists() else {}
             if not isinstance(intent, dict) or not isinstance(outcome, dict):
                 raise history.ObserverIntegrityError('Native budget status originals are malformed')
             node.update(**(dict(node_budget_mode='soft') if budget.node_mode(root)=='soft' else {}), budget_slice=intent.get('budget_slice'), budget_report=outcome.get('budget_slice'), stop_reason=outcome.get('stop_reason'))

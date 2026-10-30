@@ -5,6 +5,7 @@ from . import budget, execution
 
 import json
 import re
+from pathlib import Path
 
 from . import contracts as c, history
 
@@ -191,14 +192,18 @@ def project(root, before_step=None):
         step = source.step
         record = originals.source_record(source, 'result-identity.json').parent
         job, payload, seal, _ = history._source(root, step)
-        outcome = c.read(originals.source_record(source, 'native-outcome.json'))
+        outcome = c.native_outcome(originals.source_record(source, 'native-outcome.json').parent,
+            original_record=Path(seal['raw_ref']['path']).parent,
+            output_path=originals.resolve_ref(source, seal['raw_ref']))
         intent = c.read(originals.source_record(source, 'native-intent.json'))
-        if (intent.get('task_ref') != c.record_ref(originals.resolve_ref(source, dict(path=f'jobs/{step:03d}.json')))
+        if (intent.get('task_ref') != seal['job_ref']
                 or type(outcome.get('returncode')) is not int or outcome['returncode'] != 0
-                or outcome.get('stop_reason') or outcome.get('usage', {}).get('blocking_unknown_steps', outcome.get('usage', {}).get('unknown_steps')) != []
+                or outcome.get('stop_reason')
+                or outcome.get('usage', {}).get('blocking_unknown_steps', outcome.get('usage', {}).get('unknown_steps')) != []
+                    and not budget.native_completion_known(outcome, originals.source_settings(source))
                 or outcome.get('raw_ref') != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}):
             raise ValueError('Correction replay requires verified original terminal nodes')
-        if c.read(record / 'result.json') != c.result_projection(job, payload):
+        if c.read(originals.source_record(source, 'result.json')) != c.result_projection(job, payload):
             raise ValueError('Correction result differs from original scientific fields')
         request = job.get('correction_request')
         if (job['role'] == 'H' and request is not None

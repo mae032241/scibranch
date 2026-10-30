@@ -721,6 +721,9 @@ class _Closure:
             raise ValueError('Inherited seal lost its exact native output record')
         self.records[f'{o.identity_key(source.origin_identity)}:{step}'] = record
         self.add(source, record + '/science-output.json', proof=seal['raw_ref'], visibility='historical_science')
+        outcome = _json(o.resolve_ref(source, dict(path=record + '/native-outcome.json')))
+        if outcome.get('stop_reason') == 'native_failure_event':
+            self.add(source, record + '/native.jsonl', visibility='host_proof')
         self.add(source, f'native-evidence/{step:03d}/result.json', proof=seal['result_ref'], visibility='historical_science')
         self.add(source, f'project/nodes/{step:03d}/conclusion.json', proof=seal['raw_ref'], visibility='historical_science')
         for material in seal.get('materials', []):

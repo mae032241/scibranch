@@ -62,6 +62,79 @@ def read(path: Path):
     return json.loads(path.read_text(encoding='utf-8'))
 
 
+def native_outcome(record, *, original_record=None, output_path=None):
+    """Read terminal facts from the retained original call, without rewriting it.
+
+    An intermediate exec error is diagnostic until the original turn completes.
+    A unique clean completion and its exact final bytes can resolve that error;
+    every other receipt retains its original interpretation.
+    """
+    record = Path(record)
+    outcome = read(regular(record / 'native-outcome.json'))
+    if not isinstance(outcome, dict):return outcome
+    if (outcome.get('stop_reason') != 'native_failure_event'
+            or type(outcome.get('returncode')) is not int or outcome['returncode'] != 0
+            or outcome.get('native_started') is not True
+            or outcome.get('cleanup') != 'observed_group_cleaned'
+            or outcome.get('terminal_observed') is not True
+            or outcome.get('native_backend') != 'codex'):
+        return outcome
+    from . import backends, native_recovery
+    backend = backends.selected(dict(native_launcher_argv=['codex']))
+    failures = []
+    completed_before = None
+    terminal = None
+    thread = None
+    activity = False
+    final_text = None
+    try:
+        with regular(record / 'native.jsonl').open('rb') as stream:
+            for line in stream:
+                event = json.loads(line)
+                if not isinstance(event, dict):return outcome
+                projected = backend.event(event)
+                if terminal is not None and ('session' in projected or projected.get('activity')
+                        or projected.get('completed') or projected.get('failed')):
+                    return outcome
+                failure = projected.get('failure')
+                if failure is not None:failures.append(failure)
+                if projected.get('failed') and (failure or {}).get('event_type') != 'error':
+                    return outcome
+                activity = activity or bool(projected.get('activity'))
+                if 'session' in projected:thread = projected['session']
+                item = event.get('item')
+                if (event.get('type') == 'item.completed' and isinstance(item, dict)
+                        and item.get('type') == 'agent_message'):
+                    final_text = item.get('text')
+                if projected.get('completed'):
+                    terminal = projected.get('usage')
+                    if terminal is None:return outcome
+                    completed_before = len(failures)
+        meter = read(regular(record / 'usage.json'))
+        metering = outcome.get('metering') or {}
+        if (not isinstance(metering, dict) or terminal is None or terminal != meter or completed_before is None
+                or not failures or native_recovery.combine(failures, completed_before=completed_before) is not None
+                or outcome.get('native_failure') != native_recovery.combine(failures)
+                or thread != outcome.get('thread_id')
+                or activity is not outcome.get('native_activity_observed')
+                or metering.get('tokens') != meter or metering.get('live_reason') is not None
+                or not isinstance(final_text, str)):
+            return outcome
+        expected = final_text.encode('utf-8')
+        candidates = [record / name for name in ('science-output.json', 'result.pending.json')
+            if (record / name).exists() or (record / name).is_symlink()]
+        if output_path is not None:candidates.append(Path(output_path))
+        if not candidates or any(regular(path).read_bytes() != expected for path in candidates):
+            return outcome
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        return outcome
+    effective = dict(outcome, stop_reason=None, native_failure=None,
+        raw_ref=dict(path=str(Path(original_record or record) / 'science-output.json'), size_bytes=len(expected)))
+    effective['metering'] = dict(outcome.get('metering') or {}, coverage='terminal', reason=None,
+        source=backend.terminal_source)
+    return effective
+
+
 def decode_scientific_output(text: str):
     """Parse one authored object, allowing only an outer BOM or whole JSON fence."""
     text = text.strip()
@@ -1529,7 +1602,12 @@ def validate_original(source, *, _active=None, _memo=None, controls_only=False):
         source=originals.NodeSource(source.origin_identity,source.step,source.original_root,source.storage_root,
             native_record=native.relative_to(source.original_root).as_posix())
     intent = read(originals.source_record(source, 'native-intent.json'))
-    outcome = read(originals.source_record(source, 'native-outcome.json'))
+    outcome_record = originals.source_record(source, 'native-outcome.json').parent
+    saved_outcome = read(regular(outcome_record / 'native-outcome.json'))
+    outcome = native_outcome(outcome_record,
+        original_record=Path(seal['raw_ref']['path']).parent,
+        output_path=(originals.resolve_ref(source, seal['raw_ref'])
+            if saved_outcome.get('stop_reason') == 'native_failure_event' else None))
     raw = None if controls_only else originals.resolve_ref(source,seal['raw_ref'])
     result = originals.resolve_ref(source,seal['result_ref'])
     raw_ref=_native_output_identity(Path(source.original_root),source.step,intent,outcome,source=source)
@@ -1585,7 +1663,7 @@ def validate(work: Path):
     from . import execution
     native_record = execution.record(root, job['step'])
     intent = read(regular(native_record / 'native-intent.json'))
-    outcome = read(regular(native_record / 'native-outcome.json'))
+    outcome = native_outcome(native_record)
     raw = regular(native_record / 'science-output.json')
     result = regular(record / 'result.json')
     conclusion = work / 'conclusion.json'
@@ -1839,9 +1917,19 @@ def seal_result(root: Path, step: int):
     if intent['task_ref'] != record_ref(regular(job_path)):
         raise ValueError('Native launch task changed')
     _validate_inputs(root, work, job)
-    outcome = read(regular(native_record / 'native-outcome.json'))
+    outcome = native_outcome(native_record)
     from . import worker_delivery
     worker_delivery.writers_stopped(root,job,native_record)
+    # Collect the same completed call. Keep its pending output and receipt as
+    # retained originals; publishing the scientific bytes never starts a turn.
+    raw_path = native_record / 'science-output.json'
+    pending = native_record / 'result.pending.json'
+    if (pending.exists() and not pending.is_symlink()
+            and not raw_path.exists() and not raw_path.is_symlink()
+            and outcome.get('returncode') == 0 and outcome.get('stop_reason') is None
+            and outcome.get('cleanup') == 'observed_group_cleaned'
+            and outcome.get('raw_ref') == dict(path=str(raw_path), size_bytes=regular(pending).stat().st_size)):
+        os.link(regular(pending), raw_path, follow_symlinks=False)
     native_raw_ref=_native_output_identity(root,step,intent,outcome)
     from . import budget
     final = budget.final_a_return(root, job, intent)

@@ -259,6 +259,8 @@ def present(error, root, *, context='', settings=None, record_diagnostic=False, 
         if record_diagnostic else '核对保存的原记录与原操作编号后再决定下一步，勿重复提交。')
     if record_diagnostic and not saved:
         hint += ' 诊断未能保存，请检查工作台目录写入权限。'
+    elif saved:
+        hint += ' 本机诊断位置（相对工作台目录）：.scid-ui/errors/' + reference + '.json。'
     return Problem(409 if isinstance(error, ControlFailure) else 500, title,
         '此次操作未完成，详细原因已交由本机诊断记录。' if saved else '此次操作未完成；请核对原记录。', hint,
         href=href, reference=reference, code='control_failed' if isinstance(error, ControlFailure) else 'internal_error')

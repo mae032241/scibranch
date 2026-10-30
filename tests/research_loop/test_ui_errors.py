@@ -53,6 +53,7 @@ def test_unknown_error_has_private_bounded_durable_diagnostic_and_public_referen
         assert problem.status == 500 and problem.code == 'internal_error'
         assert re.fullmatch(r'[0-9a-f]{32}', problem.reference)
         assert secret not in problem.markup() and secret not in json.dumps(problem.payload())
+        assert '.scid-ui/errors/' + problem.reference + '.json' in problem.hint
     assert stat.S_IMODE(records[0].parent.stat().st_mode) == 0o700
     for path in records:
         assert stat.S_IMODE(path.stat().st_mode) == 0o600 and path.stat().st_size <= ui_errors._MAX_BYTES

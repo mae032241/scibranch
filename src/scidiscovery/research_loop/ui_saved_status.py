@@ -3,7 +3,7 @@ import copy
 import math
 
 from . import budget, contracts as c, instance_display as display, native_usage, runtime
-from .ui_view import memo_lock
+from .ui_view import memo_lock, native_completed
 
 
 def _read(path, default=None):
@@ -102,10 +102,49 @@ def final_return(root, events=None):
         and (event.get('version') == 1 or active is not None and event['step'] == active['first_step'])), None)
 
 
-def _node(root, step, job):
+def _native_outcome(record, memo=None):
+    outcome = _saved_read(record / 'native-outcome.json', memo) or {}
+    if (outcome.get('stop_reason') == 'native_failure_event'
+            and type(outcome.get('returncode')) is int and outcome['returncode'] == 0
+            and outcome.get('terminal_observed') is True and outcome.get('native_started') is True
+            and outcome.get('native_backend') == 'codex'
+            and outcome.get('cleanup') == 'observed_group_cleaned'):
+        # Old reconnect receipts need the collector's effective endpoint. Cache
+        # only this display projection against both exact source files; polling
+        # must not repeatedly read the complete retained native stream.
+        with memo_lock(memo):
+            paths = [record / name for name in ('native-outcome.json', 'native.jsonl',
+                'usage.json', 'science-output.json', 'result.pending.json')]
+            identity = []
+            try:
+                for path in paths:
+                    try:
+                        info = path.lstat()
+                        identity.append((info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+                    except FileNotFoundError:
+                        identity.append(None)
+            except OSError:
+                return outcome
+            identity = tuple(identity)
+            key = str(record / 'native-outcome.json') + ':effective'
+            saved = memo.get(key) if memo is not None else None
+            if identity[1] is None:
+                return outcome  # Missing native stream cannot establish completion.
+            elif saved is not None and saved[0] == identity:
+                outcome = copy.deepcopy(saved[1])
+            else:
+                outcome = c.native_outcome(record)
+                if memo is not None:
+                    while len(memo) >= 1024:
+                        memo.pop(next(iter(memo)))
+                    memo[key] = (identity, copy.deepcopy(outcome))
+    return outcome
+
+
+def _node(root, step, job, memo=None):
     records = attempts(root, step)
     record = records[-1]
-    outcome = _read(record / 'native-outcome.json', {})
+    outcome = _native_outcome(record, memo)
     intent = _read(record / 'native-intent.json', {})
     recovery = _read(record / 'automatic-recovery.json')
     if (records[0] / 'result-identity.json').exists():
@@ -129,7 +168,8 @@ def _node(root, step, job):
             retry_count=used.get('retries', 0) + int(accepted_recovery.get('action') == 'retry'),
             continue_count=used.get('continues', 0) + int(accepted_recovery.get('action') == 'continue'),
             service_wait_seconds=used.get('wait_seconds', 0.) + accepted_recovery.get('wait_seconds', 0.))
-    if recovery is not None and state != 'seal_present_unverified':
+    completed = native_completed(dict(outcome, state=state))
+    if recovery is not None and state != 'seal_present_unverified' and not completed:
         if recovery.get('status') in {'waiting', 'ready'}:
             state = 'automatic_recovery_waiting'
         elif recovery.get('status') == 'paused':
@@ -140,10 +180,19 @@ def _node(root, step, job):
     # single recovery arbiter; private native/control paths never enter the UI.
     shown = ({key: recovery[key] for key in ('status', 'action', 'reason', 'next_attempt_at',
         'retry_count', 'continue_count', 'service_wait_seconds', 'limitation') if key in recovery}
-        if isinstance(recovery, dict) else None)
+        if isinstance(recovery, dict) and not completed else None)
+    from . import native_recovery
+    failure = outcome.get('native_failure') or {}
+    known_codes = native_recovery._PERMANENT | native_recovery._TEMPORARY | native_recovery._INCOMPLETE
+    failure = dict(category=failure.get('category') if failure.get('category') in
+        {'permanent', 'temporary', 'incomplete', 'unknown'} else 'unknown',
+        codes=[code for code in failure.get('codes', []) if code in known_codes],
+        statuses=[status for status in failure.get('statuses', []) if type(status) is int and 100 <= status <= 599]) if failure else None
     return dict(step=step, role=job['role'], state=state, continuations=len(records) - 1,
         **(dict(automatic_recovery=shown) if shown is not None else {}),
         stop_reason=outcome.get('stop_reason'), returncode=outcome.get('returncode'),
+        terminal_observed=outcome.get('terminal_observed'), cleanup=outcome.get('cleanup'),
+        native_failure=failure,
         budget_slice=intent.get('budget_slice'), budget_report=outcome.get('budget_slice'))
 
 
@@ -158,7 +207,7 @@ def _usage(root, numbers, memo=None):
             terminal = sealed and (record / 'native-outcome.json').exists()
             cache = memo if terminal else None
             value = _saved_read(record / 'usage.json', cache)
-            outcome = _saved_read(record / 'native-outcome.json', cache) or {}
+            outcome = _native_outcome(record, memo)
             metadata = outcome.get('metering') or _saved_read(record / 'usage-observation.json', cache) or {}
             if value is None or metadata.get('coverage') == 'unknown':
                 if step not in unknown:
@@ -368,7 +417,7 @@ def status(root, *, after=0, limit=None, memo=None):
     selected = [step for step in visible if step > after]
     if limit is not None:
         selected = selected[:limit]
-    nodes = [_node(root, step, c.read(root / 'jobs' / f'{step:03d}.json')) if step in numbers else
+    nodes = [_node(root, step, c.read(root / 'jobs' / f'{step:03d}.json'), memo) if step in numbers else
         dict(step=step, role=originals.source_job(originals.node(root, step))['role'],
              state='seal_present_unverified', inherited=True) for step in selected]
     last = selected[-1] if selected else after

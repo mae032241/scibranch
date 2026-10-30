@@ -303,7 +303,7 @@ def _restriction(root, document, active, memo, sources, *, verify_inputs=True):
             if not native_record.is_relative_to(root/'native-evidence'/f'{step:03d}'):
                 raise IntegrityError('Source producer lost its exact native attempt')
             intent=c.read(c.regular(native_record/'native-intent.json'))
-            outcome=c.read(c.regular(native_record/'native-outcome.json'))
+            outcome=c.native_outcome(native_record)
             raw_ref={key:seal['raw_ref'][key] for key in ('path','size_bytes')}
             if (seal['job_ref']!=c.record_ref(c.regular(job_path))
                     or seal['result_ref']!=c.file_ref(c.regular(record/'result.json'))

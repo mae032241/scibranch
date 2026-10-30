@@ -13,6 +13,7 @@ import os
 import re
 from pathlib import Path
 import secrets
+import shlex
 import shutil
 import threading
 import tempfile
@@ -832,6 +833,13 @@ class InstanceUI:
             operation_id = row.get('operation_id')
             if isinstance(operation_id, str) and len(operation_id) == 32 and all(char in '0123456789abcdef' for char in operation_id):
                 body += '<p class="note">请求编号：<code>' + operation_id + '</code></p>'
+                if stopped or row.get('error'):
+                    body += '<p class="note">本机原回执（相对实例目录）：<code>host-control/operations/' + operation_id + '.json</code></p>'
+            if stopped:
+                body += '<p>控制停止代码：<code>' + ui.esc(result['status']) + '</code></p>'
+                if type(result.get('attempt_step')) is int and result['attempt_step'] > 0:
+                    body += '<p>原任务阶段：' + str(result['attempt_step']) + '</p>'
+                body += '<p><a href="/">返回总览查看原任务原因与可用处理操作</a></p>'
             if row.get('error'):
                 body += self._problem(ui_errors.ControlFailure('Saved operation failed'), context='control').markup()
             body += '</section>'
@@ -1104,8 +1112,25 @@ class InstanceUI:
                 item['form'] = ui.Safe('<p class="note">确认后继续研究，将由综合评估助手重新判断下一步；原结论与已用预算保留。</p>'
                     + self._control_form(token, 'continue', correction_trigger=(view['correction'].get('current_pause') or {}).get('trigger_id')))
             items.append(item)
-        if status['state'] in {'external_wait', 'unsealed', 'not_submitted'}:
-            items.append(dict(text=status['headline'] + '；请核对原任务，不会自动重新提交。', href='/progress', action='核对原任务'))
+        if status['state'] in {'external_wait', 'unsealed', 'not_submitted'} or (
+                display['current'] and display['current'].get('native_failure')
+                and display['current']['state'] not in ui_view.SEALED):
+            current = display['current']
+            item = dict(text=status['headline'] + '；请核对原任务，不会自动重新提交。',
+                href='/nodes/' + str(current['step']), action='查看原任务与续接条件')
+            details = ui.facts(ui_view.native_facts(current, ui_view.cleaner(self.root)))
+            if manager:
+                attempt = current.get('continuations') or 0
+                record = 'native-evidence/' + f'{current["step"]:03d}'
+                if attempt:
+                    record += '/continuations/' + f'{attempt:03d}'
+                details += '<p class="note">本机原生诊断（相对实例目录）：<code>' + record + '/native-outcome.json</code></p>'
+                if ui_view.native_completed(current):
+                    command = 'scid-research worker-resume --root ' + shlex.quote(str(self.root)) + ' --step ' + str(current['step'])
+                    details += ('<p>使用上方“收集封存并继续研究”处理同一原任务；需要补填输出时仍按原 Worker 修复条件与预算执行。</p>'
+                        '<p class="note">同一操作的命令：<code>' + ui.esc(command) + '</code></p>')
+            item['form'] = ui.Safe(details)
+            items.append(item)
         if status['state'] == 'unknown':
             items.append(dict(text='上一次任务的结果还不确定。请核对原任务，勿重复提交。', href='/progress', action='查看原任务进度'))
         if (view.get('closeout') or {}).get('status') == 'delivery_unknown':
@@ -1132,6 +1157,10 @@ class InstanceUI:
     def _primary(self, token, manager, snapshot, status):
         state = status['state']
         view = snapshot['view']
+        current = status['display']['current']
+        if state == 'unsealed' and manager and ui_view.native_completed(current):
+            return ui.Safe(self._form(token, 'resume', '<input type="hidden" name="step" value="'
+                + str(current['step']) + '">', '收集封存并继续研究'))
         links = {'waiting': ('/results/' + str((status['display']['current'] or {}).get('step')), '查看等待原因'),
                  'unknown': ('/progress', '查看原任务进度'),
                  'external_wait': ('/progress', '核对原实验进度'),
@@ -1156,6 +1185,8 @@ class InstanceUI:
 
     def _notices(self, snapshot, receipt):
         notices = []
+        current = snapshot['view']['nodes'][-1] if snapshot['view']['nodes'] else None
+        sealed = bool(current and current['state'] in ui_view.SEALED)
         if receipt:
             texts = {'accepted':'已接受请求，正在安排研究工作。', 'running':'控制请求仍在处理；研究状态以上方阶段为准。',
                 'completed':'本次控制请求已结束；研究结论以上方阶段为准。', 'applied':'本次控制请求已处理。',
@@ -1174,12 +1205,17 @@ class InstanceUI:
                     'waiting_execution': '本次控制请求已结束，正在等待原实验执行（waiting_execution）。请核对原任务，勿重复提交。',
                 }
                 notice = stopped.get(result.get('status'), notice)
+                if result.get('status') in stopped:
+                    if sealed:
+                        notice = '历史控制请求曾停止推进；当前阶段结论已封存，请以当前研究状态为准。'
+                    elif ui_view.native_completed(current):
+                        notice = '原控制请求已停止推进；当前原生已完成，待收集封存。请按当前原任务的处理操作继续。'
                 # Reasons can contain private diagnostics. Only this exact static
                 # controller reason has a public explanation; never render raw text.
-                if (result.get('status') == 'native_outcome_unsealed' and result.get('reason') ==
+                if (not sealed and not ui_view.native_completed(current) and result.get('status') == 'native_outcome_unsealed' and result.get('reason') ==
                         'Original execution lost its verified completion; preserved without replay'):
                     notice += ' 停止说明：原任务缺少可验证的完成记录；现有工作已保留，未重新执行。'
-                if result.get('status') == 'closeout_native_unsealed':
+                if result.get('status') == 'closeout_native_unsealed' and not sealed and not ui_view.native_completed(current):
                     explanations = {
                         'Original closeout native failed; explicit worker-resume required for the same original task':
                             '原收尾任务已失败，未自动重试。如需续接，请用 worker-resume 精确选择同一原任务；仍须通过原权限与预算核验。',
@@ -1196,8 +1232,7 @@ class InstanceUI:
                     if type(result.get('attempt_step')) is int and result['attempt_step'] > 0:
                         notice += ' 原任务步骤：' + str(result['attempt_step']) + '。'
             notices.append(notice)
-        current = snapshot['view']['nodes'][-1] if snapshot['view']['nodes'] else None
-        if current and current.get('stop_reason'):
+        if current and not sealed and current.get('stop_reason'):
             notices.append('工作停止说明：' + ui_view.cleaner(self.root)(current['stop_reason'], 600))
         return notices
 

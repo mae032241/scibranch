@@ -451,9 +451,10 @@ def role_line(reader, node, clean, *, mechanisms=None, labels=None, references=N
     step, role = node['step'], node['role']
     state = node.get('state')
     line = dict(step=step, role=role, role_label=ROLE_LABELS.get(role, role), state=state,
-                state_label=STATE_LABELS.get(state, '状态待核对'), sealed=state in SEALED,
+                state_label=native_state_label(node), sealed=state in SEALED,
                 kind='ordinary', one_line=None, facts=[], links=_links(node, False), next_action=None)
     if not line['sealed']:
+        line['facts'].extend(native_facts(node, clean))
         recovery = node.get('automatic_recovery')
         if isinstance(recovery, dict):
             line['automatic_recovery'] = recovery
@@ -620,6 +621,37 @@ def rounds(reader, nodes, clean, *, completed=False, mechanisms=None, labels=Non
 
 # ---------------------------------------------------------------- status
 
+def native_completed(node):
+    """Display the collector's known terminal endpoint; this grants no action."""
+    return bool(node and node.get('state') == 'native_outcome_unsealed'
+        and type(node.get('returncode')) is int and node['returncode'] == 0
+        and node.get('terminal_observed') is True and not node.get('stop_reason')
+        and not node.get('native_failure') and node.get('cleanup') == 'observed_group_cleaned')
+
+
+def native_state_label(node):
+    return '原生已完成，待收集封存' if native_completed(node) else STATE_LABELS.get(node.get('state'), '状态待核对')
+
+
+def native_facts(node, clean):
+    facts = []
+    if type(node.get('returncode')) is int:
+        facts.append(dict(label='原生退出码', value=str(node['returncode'])))
+    failure = node.get('native_failure') or {}
+    if failure:
+        category = {'permanent': '永久服务错误，先修复配置或账户条件',
+            'temporary': '临时服务错误，按原接续策略处理',
+            'incomplete': '原生工作中断，按原续接条件处理', 'unknown': '原因未分类，须核对原任务'}
+        facts.append(dict(label='原生错误', value=category.get(failure.get('category'), category['unknown'])))
+        if failure.get('codes'):
+            facts.append(dict(label='服务错误码', value=clean('、'.join(failure['codes']), 500)))
+        if failure.get('statuses'):
+            facts.append(dict(label='HTTP 状态', value='、'.join(str(value) for value in failure['statuses'])))
+    if node.get('stop_reason'):
+        facts.append(dict(label='停止代码', value=clean(str(node['stop_reason']), 300)))
+    return facts
+
+
 def recovery_facts(recovery, clean):
     """Present saved recovery limits without implying permission to replay."""
     facts = [dict(label='自动接续范围', value='仅原任务和已核对的原 session；未知外部调用只核对，不重提')]
@@ -678,6 +710,8 @@ def status_summary(presentation, view, *, final_phase=False, exhausted=None, wai
     elif state in {'external_wait', 'unsealed', 'not_submitted'}:
         headline = {'external_wait': '等待原外部执行结果', 'unsealed': '原生工作已结束，阶段结论尚未封存',
             'not_submitted': '原任务尚未提交，需先核对原意图'}[state]
+        if state == 'unsealed' and native_completed(current):
+            headline = native_state_label(current)
     elif state == 'unknown':
         headline = '上次任务结果不确定'
     elif state == 'pause_requested':
@@ -698,7 +732,7 @@ def status_summary(presentation, view, *, final_phase=False, exhausted=None, wai
     stage = None
     if current:
         stage = '第 ' + str(current['step']) + ' 阶段 · ' + ROLE_LABELS.get(current['role'], current['role']) + ' · ' \
-            + STATE_LABELS.get(current['state'], '状态待核对')
+            + native_state_label(current)
     return dict(state=state, badge=STATES[state], headline=headline, stage=stage)
 
 

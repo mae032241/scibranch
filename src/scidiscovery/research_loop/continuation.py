@@ -27,9 +27,10 @@ def automatic_source(root, step, record):
     backend = backends.selected(configuration_updates.for_step(root, step))
     if backend.name != 'codex' or not backend.standard:
         raise ResumeUnavailable('automatic_recovery_unsupported_backend')
-    outcome = c.read(c.regular(record / 'native-outcome.json'))
+    outcome = c.native_outcome(record)
     failures = []
     terminal = activity = False
+    completed_before = None
     original = c.read(c.regular(record / 'native-intent.json'))
     thread = (original.get('session') or {}).get('thread_id')
     with c.regular(record / 'native.jsonl', limit=None).open('rb') as stream:
@@ -39,10 +40,13 @@ def automatic_source(root, step, record):
             if not isinstance(event, dict):continue
             projected = backend.event(event)
             if projected.get('failure') is not None:failures.append(projected['failure'])
+            if projected.get('completed') and not terminal:completed_before = len(failures)
             terminal = terminal or projected.get('completed', False)
             activity = activity or projected.get('activity', False)
             if 'session' in projected:thread = projected['session']
-    expected = native_recovery.combine(failures)
+    expected = native_recovery.combine(failures, completed_before=completed_before
+        if terminal and outcome.get('returncode') == 0
+            and outcome.get('cleanup') == 'observed_group_cleaned' else None)
     if (outcome.get('native_failure') != expected
             or outcome.get('terminal_observed') is not terminal
             or outcome.get('native_activity_observed') is not activity
@@ -131,7 +135,7 @@ def _completed_work_request(root, step, record, source_attempt, prior_intents):
         return None
     from . import worker_delivery
     if not worker_delivery.repair_applicable(job):return None
-    outcome = c.read(c.regular(record / 'native-outcome.json'))
+    outcome = c.native_outcome(record)
     if (outcome.get('returncode') != 0 or outcome.get('stop_reason')
             or outcome.get('output_status') == 'missing'
             or outcome.get('usage', {}).get('unknown_steps') and not budget.native_completion_known(
@@ -170,7 +174,7 @@ def automatic_decision(root, step):
     if runtime.node_state(root, step) != 'terminal':
         return dict(base, reason='automatic_recovery_original_not_terminal')
     job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
-    outcome = c.read(c.regular(last / 'native-outcome.json'))
+    outcome = c.native_outcome(last)
     completed = outcome.get('terminal_observed') is True
     work_request = None
     if completed:
@@ -634,7 +638,7 @@ def seal_or_repair(root, step):
                 checkpoint.stage_end(root, job, record)
                 return c.seal_result(root, step)
             saved = checkpoint.validate(root, job, record)
-            outcome = c.read(c.regular(record / 'native-outcome.json'))
+            outcome = c.native_outcome(record)
             if (outcome.get('returncode') == 0 and not outcome.get('stop_reason')
                     and (not outcome['usage']['unknown_steps'] or budget.native_completion_known(outcome, configuration_updates.for_step(root, step)))):
                 if saved['science']['status'] != 'present':
@@ -692,7 +696,7 @@ def output_request(root, step, record, *, source_attempt=None, verify_task=True)
     """Recompute a repair binding from verified original final-response bytes."""
     job = validate_task(root, step) if verify_task else c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
     if source_attempt is None:source_attempt = len(execution.records(root, step)) - 1
-    outcome = c.read(c.regular(record / 'native-outcome.json'))
+    outcome = c.native_outcome(record)
     if (type(outcome.get('returncode')) is not int or outcome['returncode'] != 0
             or outcome.get('stop_reason')
             or outcome['usage']['unknown_steps'] and not budget.native_completion_known(outcome, configuration_updates.for_step(root, step))):
@@ -738,7 +742,7 @@ def _accepted_repair_request(root,step,intent,prior):
     accepted=execution.origin(root,step)/'continuations'/f'{attempt:03d}'/'native-intent.json'
     if not accepted.exists():return None  # Admission still uses today's gates.
     request=intent.get('work_repair') or intent.get('output_repair')
-    outcome=c.read(c.regular(prior/'native-outcome.json'))
+    outcome=c.native_outcome(prior)
     job=c.read(c.regular(Path(root)/'jobs'/f'{step:03d}.json'))
     if (c.read(c.regular(accepted))!=intent or not isinstance(request,dict)
             or type(request.get('source_attempt')) is not int or request['source_attempt']!=attempt-1
@@ -808,7 +812,7 @@ def validate_fragment_chain(root, step, chain):
             continue
         prior = chain[number - 1]
         saved = checkpoint.validate(root, job, prior)
-        original = c.read(c.regular(prior / 'native-outcome.json'))
+        original = c.native_outcome(prior)
         science = c.science_payload(prior / 'science-output.json', 'W', job.get('handoff_protocol', 1))
         if (saved['science']['status'] != 'present' or science.get('stage_intent') != 'continue'
                 or original.get('returncode') != 0 or original.get('stop_reason')
@@ -835,7 +839,7 @@ def fragment_review(root, job):
 def _eligible_original(root, step, paths, *, successful=False, wait_runner=False, budgeted=True):
     """No accepted replacement until the exact old native writer is terminal."""
     last = paths[-1]
-    outcome = c.read(c.regular(last / 'native-outcome.json'))
+    outcome = c.native_outcome(last)
     if (type(outcome.get('returncode')) is not int or outcome['returncode'] == 0 and not successful
             or outcome.get('stop_reason') or outcome.get('cleanup') != 'observed_group_cleaned'):
         raise ResumeUnavailable('worker_resume_terminal_ineligible')
@@ -928,7 +932,6 @@ def start(root, step):
     require_current(root)
     from . import contracts as _contracts
     require_current(root,_contracts.read(_contracts.regular(Path(root)/'jobs'/f'{step:03d}.json')))
-    limits = validate_launcher(root, step)
     if (execution.origin(root, step) / 'result-identity.json').exists():
         return c.validate(c.workspace(root, step))
     paths = execution.records(root, step)
@@ -938,7 +941,7 @@ def start(root, step):
     if runtime.node_state(root, step) in {'running','waiting','unstarted'} or (len(paths) > 1 and runtime.node_state(root, step) == 'unknown'):
         return native.wait_native(root, step)  # An accepted attempt is collected before cap checks.
     last = paths[-1]
-    outcome = c.read(c.regular(last / 'native-outcome.json'))
+    outcome = c.native_outcome(last)
     repair = None
     work_repair=False
     if outcome.get('returncode') == 0 and not outcome.get('stop_reason'):
@@ -960,9 +963,11 @@ def start(root, step):
             repair=output_request(root,step,last)
             work_repair=True
         except OutputRepairRequired:
+            limits = validate_launcher(root, step)
             if not limits.get('output_repair', False):
                 raise
             repair = output_request(root, step, last)
+    limits = validate_launcher(root, step)
     closeout = budget.closeout_state(root)['begin']
     job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
     if limits.get('output_only') and (repair is None or work_repair):

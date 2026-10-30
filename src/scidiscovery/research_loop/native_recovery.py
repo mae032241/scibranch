@@ -199,8 +199,16 @@ def format_decision(limits, used, *, session_available, already_fallback=False):
         startup_retry=not session_available, delay_seconds=0., retry_after_seconds=None)
 
 
-def combine(failures):
-    """A generic wrapper cannot erase a structured underlying failure."""
+def combine(failures, *, completed_before=None):
+    """Only a verified later completion supersedes intermediate stream errors.
+
+    completed_before is the number of failures preceding the first completion;
+    callers supply it only after the original process exits zero and cleans up.
+    Failed/incomplete/interrupted turns and errors after completion remain.
+    """
+    if completed_before is not None:
+        failures = [failure for index, failure in enumerate(failures)
+            if index >= completed_before or failure.get('event_type') != 'error']
     if not failures:return None
     rank = dict(permanent=4, unknown=0, temporary=2, incomplete=1)
     selected = max(failures, key=lambda item:rank[item['category']])

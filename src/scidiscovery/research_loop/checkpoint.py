@@ -63,7 +63,7 @@ def _science(root, job, originals):
         return dict(status='missing', diagnostic='missing_output'), None
     outcome = next((item for item in originals if Path(item['path']).name == 'native-outcome.json'), None)
     try:
-        receipt = c.read(root / outcome['path']) if outcome else None
+        receipt = c.native_outcome((root / outcome['path']).parent) if outcome else None
     except (json.JSONDecodeError, UnicodeDecodeError):
         receipt = None
     if not isinstance(receipt, dict) or receipt.get('raw_ref') != dict(path=str(Path(root)/row['path']),size_bytes=row['size_bytes']):

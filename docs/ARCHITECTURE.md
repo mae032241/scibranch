@@ -661,10 +661,12 @@ handoff explanation literally; existing task and call originals remain unchanged
 `native_recovery.py` classifies structured native failure fields and narrowly
 matched native failure envelopes, then supplies one bounded recovery decision
 through the existing continuation/controller path.
+Intermediate top-level `error` diagnostics do not override a later successful native endpoint: a unique completion, zero exit and confirmed cleanup resolve those earlier diagnostics. True failed/incomplete/interrupted turns, errors or activity after completion, duplicate completion and missing terminal evidence retain their existing failure handling. The same terminal interpretation is used by collection, repair admission, history validation and usage coverage. When retained pending bytes match the original final message and terminal counters, the ordinary collection path can seal that same call without another model turn; it preserves the original outcome, pending output, usage and attempt identity.
+
 Qualified unfinished turns may continue the original session; qualified temporary
 rate/capacity/connection or service failures may retry it. A startup retry needs
 explicit native evidence that the request was not accepted; absence of a session
-does not establish that fact. Permanent auth/quota/configuration failures and
+does not establish that fact. Unresolved permanent auth/quota/configuration failures and
 unclassified errors stop. Native failure events additionally support the exact 429
 retry-limit/quota texts and anchored bounded 503 HTTP envelope confirmed with the
 installed Codex CLI and synthetic loopback responses. Other message-only errors

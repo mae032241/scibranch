@@ -443,14 +443,46 @@ if role=='H' and not resume:
 if resume:
  assert thread in args and prompt.strip()
  assert (work/'work/retained-observation').read_text()=='one exact observation'
-task=json.loads((work/'science-task.json').read_text())
-payload={name:None for name in task['final_response']}
-payload.update(summary='Recovered bounded transport',scientific_result='Retained observations, no scientific qualification.',
- limitations=['Only native transport is simulated.'],
- next_action='analyze' if role=='H' else 'finish',route_reason='Review the retained bounded observation.')
+payload=dict(summary='Recovered bounded transport',scientific_result='Retained observations, no scientific qualification.',
+ limitations=['Only native transport is simulated.'],implementation_selection=None)
+if role in {'H','A'}:
+ payload.update(next_action='analyze' if role=='H' else 'finish',route_reason='Review the retained bounded observation.')
+ if role=='H':payload['search_plan']=None
+if role=='W':payload['stage_intent']='review'
 pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))
 print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=10,cached_input_tokens=3,output_tokens=4))),flush=True)
 '''
+
+
+def _automatic_failure_diagnostic(root, result, fault):
+    """Retain only the two exact fake H attempts, never environment or auth."""
+    import os
+    from pathlib import Path
+    records = [('original', root / 'native-evidence/001'),
+        ('continuation-001', root / 'native-evidence/001/continuations/001')]
+    observed = {}
+    for label, record in records:
+        files = {}
+        for name in ('native-outcome.json', 'runner.stderr', 'native.stderr',
+                'native.jsonl', 'automatic-recovery.json'):
+            path = record / name
+            if not path.is_file() or path.is_symlink():
+                files[name] = 'missing'
+                continue
+            with path.open('rb') as stream:
+                stream.seek(max(0, path.stat().st_size - 8192))
+                files[name] = stream.read(8192).decode('utf-8', errors='replace')
+        observed[label] = files
+    safe_result = {key: result.get(key) for key in
+        ('status', 'reason', 'completed_steps', 'last_step', 'next_role')}
+    rendered = json.dumps(dict(fault=fault, result=safe_result, attempts=observed),
+        ensure_ascii=False, indent=2)
+    destination = os.environ.get('SCID_TEST_LOG_DIR')
+    if destination:
+        directory = Path(destination)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / ('automatic-recovery-' + fault + '-h001.json')).write_text(rendered)
+    return rendered
 
 
 @pytest.mark.process_e2e
@@ -469,7 +501,7 @@ def test_default_controller_recovers_one_exact_session_and_keeps_attempt_chain(t
     settings = c.settings(root)
     originals = {path:path.read_bytes() for path in (root / 'settings.json',home / 'config.toml',home / 'auth.json')}
     result = controller.run(root)
-    assert result['status'] == 'finish', result
+    assert result['status'] == 'finish', _automatic_failure_diagnostic(root, result, fault)
     first, recovered = execution.records(root, 1)
     request = c.read(recovered / 'native-intent.json')
     assert request['continuation_kind'] == 'automatic_recovery'

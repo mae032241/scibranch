@@ -201,7 +201,7 @@ def record(root, step, attempt=None):
         raise ValueError('Sealed native execution reference changed')
     current = chain[-1]
     if len(chain) > 1 and (current / 'native-outcome.json').exists():
-        outcome = c.read(c.regular(current / 'native-outcome.json'))
+        outcome = c.native_outcome(current)
         if outcome.get('returncode') == 0 and not outcome.get('stop_reason'):
             _terminal(root, step, chain, outcome)
     return current

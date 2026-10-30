@@ -160,7 +160,7 @@ def validate(root,job,record):
 def before_seal(root,job,record):
     """Only original bound execution facts may suspend a successful W turn."""
     if job['role']!='W':return
-    outcome=c.read(c.regular(record/'native-outcome.json'))
+    outcome=c.native_outcome(record)
     raw=record/'science-output.json'
     if outcome.get('output_status')=='missing' or not raw.is_file() or raw.is_symlink():return
     if (type(outcome.get('returncode')) is not int or outcome.get('returncode')!=0 or outcome.get('stop_reason')

@@ -1128,8 +1128,10 @@ def direct_sources(root, job):
             if original.inherited else execution.record(root, step))
         intent = c.read(originals.source_record(original, 'native-intent.json')
             if original.inherited else native_record / 'native-intent.json')
-        outcome = c.read(originals.source_record(original, 'native-outcome.json')
-            if original.inherited else native_record / 'native-outcome.json')
+        outcome_record = (originals.source_record(original, 'native-outcome.json').parent
+            if original.inherited else native_record)
+        outcome = c.native_outcome(outcome_record, original_record=native_record,
+            output_path=originals.resolve_ref(original, seal['raw_ref']) if original.inherited else None)
         raw_ref = c._native_output_identity(root, step, intent, outcome,
             **(dict(source=original) if original.inherited else {}))
         if (c.regular(input_path).stat().st_size != ref['size_bytes']
