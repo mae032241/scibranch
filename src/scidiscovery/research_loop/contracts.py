@@ -391,6 +391,13 @@ def _parent_view(job, ref, root=None, *, limitation_bytes=1024):
         payload=read_scientific_output(path)
         view['role']=originals.source_job(owner)['role']
         view['limitations'],view['limitations_omitted_count']=_whole_limitations(payload['limitations'],byte_limit=limitation_bytes)
+        from . import history
+        binding=job['history']
+        nodes=[row for row in binding['nodes'] if row['step']==parent_step]
+        alias=f'inputs/history/nodes/{parent_step:03d}/0001.json'
+        if (nodes==[dict(step=parent_step,seal_ref=history.source_seal_ref(owner))]
+                and any(row['path']==alias for row in binding['files'])):
+            view['history_alias']=alias
     return view
 
 
@@ -571,7 +578,7 @@ def _decision_context(root, job):
                 'Original user constraints and H scope/discriminating commitments remain binding; W owns execution design and H owns mechanism revision.')
 
 
-def _role_lineage(job):
+def _role_lineage(job, parents=()):
     """Select role material from the same frozen view; indexes retain all facts."""
     import copy
     view=copy.deepcopy(job['history']['view'])
@@ -591,6 +598,15 @@ def _role_lineage(job):
         mechanisms['coverage_required_count']=len((job.get('search') or {}).get('coverage_obligation',[]))
         from .lineage import bounded_brief
         bounded_brief(view)
+    # These routes share an exact sealed scientific producer, not necessarily
+    # byte representation: history wraps the public conclusion in text pages.
+    aliases={row['history_alias']:row['conclusion'] for row in parents if row.get('history_alias')}
+    mechanisms=view['mechanisms']
+    for rows in (view['recent'], mechanisms.get('overview',[]),
+                 (mechanisms.get('unfinished_plan') or {}).get('remaining',[])):
+        for row in rows:
+            if row.get('original') in aliases:
+                row['original']=aliases[row['original']]
     return view
 
 
@@ -695,9 +711,9 @@ def science_view(job, root=None):
            if job.get('project') is not None else {}),
         **(dict(configured_delivery=job['configured_delivery']) if 'configured_delivery' in job else {}),
         'parents': parents,
-        'reading_order':reading[job['role']]+' Read originals via native file/shell tools: needed JSON fields/lines first; keep combined batch returns within all tool limits. Reuse unchanged originals fully read this session; fill gaps/conflicts/truncation. Check live execution facts at original calls. Parents are claims; retain limitations. Omissions: conclusion/index/next_page.',
+        'reading_order':reading[job['role']]+' Read each parent conclusion first; its history_alias and matching history-index pages expose the same scientific source, not independent evidence. Use native file/shell tools: inspect JSON keys/shapes, then needed fields or line ranges; size combined batch returns for every inner/outer tool limit. Analyze large numeric arrays with your own local code and report needed results with exact source locators; originals remain available. Reuse unchanged originals fully read this session; fill gaps/conflicts/truncation, including later pages and limitations. A verifies independently. Check live execution facts at original calls. Parents are claims. Omissions: conclusion/index/next_page.',
         'reused_implementations':[dict(label=row['label'],path=row['material']['path']) for row in job.get('selected_inputs',[])],
-        'lineage': _role_lineage(job),
+        'lineage': _role_lineage(job,parents),
         'input_selection_status': job['input_selection_status'], 'control_diagnostics': job['control_diagnostics'],
         **(dict(control_request=request)
            if job.get('author_correction') else {}),

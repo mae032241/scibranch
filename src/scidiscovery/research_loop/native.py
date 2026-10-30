@@ -64,7 +64,7 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
         instruction+='\n'+format_rule
         prompt=('Read science-task.json/inputs; JSON only. '
             'Edit code/ or work/ copies only; no control wrappers/hashes. '
-            'work/budget-status.json: partial/stale token billing, no grant; unknown tokens!=0; cached once.')
+            'work/budget-status.json: partial/stale billing, no grant; unknown tokens!=0; input includes cache.')
         if final_return:
             prompt+=(' Protected FINAL: conclude now; no new role/audit/experiment. '
                 'Reference token/time/step ceilings do not revoke this accepted return; original call limits, '
@@ -74,8 +74,8 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
             if (job['role'] in {'A','H','W'} and not author
                     and not output_only_wake and not intent.get('output_repair') and not intent.get('work_repair')
                     and job.get('purpose')!='closeout' and not job.get('final_report') and not job.get('final_only')):
-                if job['role']=='W':prompt+=' Budget own work before bulk reads/code;'
-                prompt+=(' Reuse evidence/code; close with unmet goals if short. '+STAGE_PLANNING[job['role']])
+                prompt+=' Reuse evidence/code; close with unmet goals if short. '+STAGE_PLANNING[job['role']]
+                if job['role']=='W':prompt+=' Prefer 10-30s waits on pending original sessions within deadlines.'
     if budget_status:prompt+='\n'+json.dumps(budget_status,ensure_ascii=False,separators=(',',':'))
     if execution_interface is not None and not author and not output_only_wake:
         prompt+='\nManaged execution: '+json.dumps(dict(command=managed_command,
@@ -84,7 +84,7 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
         prompt+=(' Read capabilities/describe first; use original IDs; never replay accepted unknown calls. '
             'Freeze code/ during capture; logs/outputs outside code/.')
     if job['role']=='W' and ('managed_execution_wait' in job or execution_interface is not None or intent.get('execution_wake')):
-        prompt+=' handoff.action: poll pending originals; finalize_response=JSON; return_control=wait.'
+        prompt+=' Follow handoff.action; finalize_response=JSON; return_control=wait.'
     if job['role']=='W' and not output_only_wake and not author:
         prompt+=' engineering_check: sample only, not training/audit.'
     if remaining is not None:

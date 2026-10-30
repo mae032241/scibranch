@@ -174,7 +174,7 @@ def test_soft_native_stdin_has_budget_advice_and_prelaunch_hint(tmp_path,role):
     assert local['inflight_usage_unknown'] and local['reporting_delay_unmeasured']
     assert ordinary['token_usage_unknown']  # This current native task has no outcome or usage before submission.
     assert 'unknown_usage' not in ordinary
-    for text in ('Soft targets','work/budget-status.json','cached once',
+    for text in ('Soft targets','work/budget-status.json','input includes cache',
             'unknown tokens!=0','no grant','no control wrappers/hashes'):
         assert text in prompt
     assert c.read(execution.record(root,step)/'native-outcome.json')['stop_reason'] is None

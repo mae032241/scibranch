@@ -222,6 +222,10 @@ focus to request the next finite W stage after review. Prior stage usage remains
 consumed; H revision changes scientific commitments and cannot reset budgets.
 Initial/grant opportunities protect first screening and do not cap all subsequent trials. Runtime budgets and execution permissions come from operator configuration and the control ledger. H plans scientific questions and mechanisms; A assesses evidence and routes within that scope; W plans its own work against the control allowance. H/A resource estimates and suggested call/audit counts do not become runtime caps or H-renewal triggers. Scientific design counts, user/task requirements and actual per-call limits retain their meaning.
 
+Ordinary W guidance favors incremental implementation and validation, sizing the next work from evidence and current budget. Pending original tool sessions normally use finite 10–30 second waits within actual deadlines; this is advice, not a new polling policy. The actual handoff still governs finalization, host waiting and reconciliation. Repair, protected FINAL and author-only returns retain their original boundaries.
+
+Task navigation uses a direct parent conclusion as the primary reading route only when its frozen source seal matches the historical source. Its optional `history_alias` retains the alternate text-page route; the two representations describe the same scientific source, not necessarily identical bytes. Full historical pages and complete indexes remain available. Agents inspect JSON shapes and selected fields, analyze numerical arrays with their own local code, and reread missing or conflicting evidence as needed. Independent A review remains required; control does not author scientific summaries or impose a read-once limit.
+
 Each task freezes actual optional consumers. Extra scientific content stays in the
 original; optional explanations do not create format-repair gates. W delivery uses
 exact retained observation facts, with explicit blocked/decision and host exceptions

@@ -41,7 +41,7 @@ def bound_input_path(root, job, path):
     return originals.material_path(root,bound)
 
 
-def indexed_rows(root, job, name):
+def indexed_rows(root, job, name, *, key=None):
     """Read the complete frozen index when a compact preview is omitted."""
     page=job['history']['view']['indexes'][name]
     rows=[]
@@ -50,17 +50,17 @@ def indexed_rows(root, job, name):
         original=next(row for row in job['history']['files'] if row['path']==page)
         assert path.stat().st_size==original['size_bytes']
         value=c.read(path)
-        rows.extend(value[name]);page=value['next_page']
+        rows.extend(value[key or name]);page=value['next_page']
     return rows
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('role,first',[('H','A'),('W','H'),('A','W'),('E','A')])
+@pytest.mark.parametrize('role,first',[('H','A'),('W','H'),('A','W'),('E','A'),('E','H')])
 def test_role_material_priority_preserves_constraints_caveats_and_opportunities(tmp_path,role,first):
     from scidiscovery.research_loop import execution
     root=context_scene(tmp_path)
     job=c.build_job(root,5,role,[1,2,3,4],instruction='Exact question about the target constraint.',
-        evidence_return=dict(step=3,role='A') if role=='E' else None)
+        evidence_return=dict(step=1 if first=='H' else 3,role=first) if role=='E' else None)
     original=copy.deepcopy(job)
     view=c.science_view(job,root)
     assert job==original and view==c.read(c.workspace(root,5)/'science-task.json')
@@ -80,6 +80,28 @@ def test_role_material_priority_preserves_constraints_caveats_and_opportunities(
     assert h['limitations']==['Original target condition is still unknown','A counterexample remains unresolved','Later caveat must survive']
     assert h['limitations_omitted_count']==1
     assert bound_input_path(root,job,h['conclusion']).is_file()
+    for parent in view['parents']:
+        step=int(Path(parent['conclusion']).parts[2])
+        assert parent['history_alias']==f'inputs/history/nodes/{step:03d}/0001.json'
+        assert bound_input_path(root,job,parent['history_alias']).is_file()
+    # The compact task chooses one primary route; all historical text pages
+    # remain bound and preserve even scientific content beyond the previews.
+    primary={row['history_alias']:row['conclusion'] for row in view['parents']}
+    for row in view['lineage']['recent']:
+        assert row['original']==f'inputs/parents/{row["step"]:03d}/conclusion.json'
+    historical=indexed_rows(root,job,'nodes',key='records')
+    h_record=next(row for row in historical if row['step']==1)
+    assert len(h_record['conclusion_pages'])>1
+    chunks=[c.read(bound_input_path(root,job,path)) for path in h_record['conclusion_pages']]
+    assert all(row['source']=='node:001/scientific-output' for row in chunks)
+    complete=json.loads(''.join(row['text'] for row in chunks))
+    direct=c.read_scientific_output(bound_input_path(root,job,h['conclusion']))
+    assert complete['scientific_result']==direct['scientific_result']=='BODY-CROWD '*2000
+    assert complete['limitations']==direct['limitations']
+    assert complete['limitations'][-1]=='Later caveat must survive'
+    assert complete['search_plan']==direct['search_plan']
+    assert h_record['conclusion_pages'][0] in primary
+    assert job==original
     mechanisms=view['lineage']['mechanisms']
     originals=indexed_rows(root,job,'mechanisms')
     assert [row['mechanism_ref'] for row in originals]==[f'h001.m{index}' for index in range(1,5)]
@@ -102,6 +124,44 @@ def test_role_material_priority_preserves_constraints_caveats_and_opportunities(
     assert 'experiments' not in view
     assert len((json.dumps(view,ensure_ascii=False,indent=2)+'\n').encode())<12000
     assert 'BODY-CROWD '*2000 not in json.dumps(view)
+
+
+def test_primary_reading_routes_only_replace_verified_same_source_aliases():
+    parent=dict(conclusion='inputs/parents/002/conclusion.json',
+        history_alias='inputs/history/nodes/002/0001.json')
+    history_parent=dict(step=2,original=parent['history_alias'])
+    nonparent=dict(step=1,original='inputs/history/nodes/001/0001.json')
+    other_path=dict(step=2,original='inputs/other/nodes/002/0001.json')
+    view=dict(recent=[history_parent,nonparent,other_path],
+        mechanisms=dict(overview=[history_parent,nonparent],
+            unfinished_plan=dict(remaining=[nonparent,history_parent])),
+        indexes=dict(nodes='inputs/history/pages/0001.json',mechanisms='inputs/lineage/mechanisms/0001.json'),
+        candidates=dict(candidate_facts=[dict(id='late-negative',status='failed')]))
+    job=dict(role='A',history=dict(view=view))
+    before=copy.deepcopy(job)
+    projected=c._role_lineage(job,[parent])
+    assert projected['recent']==[dict(history_parent,original=parent['conclusion']),nonparent,other_path]
+    assert projected['mechanisms']['overview']==[dict(history_parent,original=parent['conclusion']),nonparent]
+    assert projected['mechanisms']['unfinished_plan']['remaining']==[nonparent,dict(history_parent,original=parent['conclusion'])]
+    assert projected['indexes']==view['indexes'] and projected['candidates']==view['candidates']
+    assert job==before
+
+
+@pytest.mark.process_e2e
+def test_parent_history_alias_requires_exact_source_seal(tmp_path):
+    root=context_scene(tmp_path)
+    job=c.build_job(root,5,'H',[3],instruction='Retain independent counterevidence.')
+    ref=job['direct_refs'][0]
+    assert c._parent_view(job,ref,root)['history_alias']=='inputs/history/nodes/003/0001.json'
+    # A matching step or body basename cannot substitute for the frozen owner.
+    changed=copy.deepcopy(job)
+    row=next(row for row in changed['history']['nodes'] if row['step']==3)
+    row['seal_ref']=dict(path='/foreign/native-evidence/003/result-identity.json')
+    assert 'history_alias' not in c._parent_view(changed,ref,root)
+    changed=copy.deepcopy(job)
+    changed['history']['files']=[row for row in changed['history']['files']
+        if row['path']!='inputs/history/nodes/003/0001.json']
+    assert 'history_alias' not in c._parent_view(changed,ref,root)
 
 
 def test_fragment_brief_preserves_whole_late_limitations_before_prose(fragment):

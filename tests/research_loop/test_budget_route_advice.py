@@ -47,12 +47,13 @@ def test_role_planning_uses_control_allowance_without_rewriting_science(tmp_path
         assert 'no downstream token/time budgets or execution/call/audit caps' in prompt
         assert 'Retain scientific counts, user/task requirements and native per-call caps' in prompt
     else:
-        assert prompt.count('Budget own work before bulk reads/code')==1
+        assert prompt.count('Implement/validate incrementally')==1
+        assert 'size next work from evidence/current budget' in prompt
         assert 'scientific stall, scope change or actual runtime refusal' in prompt
         assert 'within scientific scope/control allowance' in prompt
-        assert 'H/A resource estimates add no runtime caps' in prompt
+        assert 'H/A estimates add no runtime caps' in prompt
         assert 'Return to A for scientific stall' in prompt
-        assert 'avoid bulk rereads' in prompt
+        assert prompt.count('Prefer 10-30s waits on pending original sessions within deadlines.')==1
         assert 'Return to independent A' in instruction
         assert 'A suggests methods' in instruction
     if role in 'HA':
@@ -60,8 +61,9 @@ def test_role_planning_uses_control_allowance_without_rewriting_science(tmp_path
         assert 'Budget all work before routing' not in prompt
         assert 'Budget own work' not in prompt
         assert 'exhausted explicit H call cap' not in prompt
-    assert 'partial/stale token billing, no grant; unknown tokens!=0' in prompt
-    assert 'cached once' in prompt and 'Soft targets; call limits/permissions apply' in prompt
+        assert 'Prefer 10-30s waits' not in prompt
+    assert 'partial/stale billing, no grant; unknown tokens!=0' in prompt
+    assert 'input includes cache' in prompt and 'Soft targets; call limits/permissions apply' in prompt
     assert json.JSONDecoder().raw_decode(prompt.splitlines()[-1])[0]==status
     assert schema==c.result_schema(role,job['handoff_protocol'],'selection' in job,**c.response_options(job))
     assert instruction.startswith(job['native_role_instruction']+'\n')
@@ -69,7 +71,8 @@ def test_role_planning_uses_control_allowance_without_rewriting_science(tmp_path
 
 
 @pytest.mark.parametrize('variant',['output_repair','work_repair','output_only_wake','author','final','closeout','final_only','formal_review'])
-def test_restricted_returns_do_not_suggest_new_budget_planning(tmp_path,variant):
+@pytest.mark.parametrize('transport',['prompt','developer'])
+def test_restricted_returns_do_not_suggest_new_budget_planning(tmp_path,variant,transport):
     _,job,task,_=request_scene(tmp_path,'A' if variant in {'final','closeout','final_only','formal_review'} else 'W')
     intent={};options={}
     if variant=='output_repair':intent=dict(output_repair=dict(code='json',diagnostic='Return the existing result as JSON.'))
@@ -82,10 +85,13 @@ def test_restricted_returns_do_not_suggest_new_budget_planning(tmp_path,variant)
     elif variant=='formal_review':
         job['formal_review']={"subject": "original"}
         task['review_instruction']='Independently assess the exact original.'
-    prompt,_,_=native.render_scientific_request(job,task,intent,backend_name='codex',
-        instruction_transport='prompt',**options)
+    prompt,instruction,schema=native.render_scientific_request(job,task,intent,backend_name='codex',
+        instruction_transport=transport,**options)
     assert 'Budget own work' not in prompt
+    assert 'Prefer 10-30s waits' not in prompt
     assert all(advice not in prompt for advice in guidance.STAGE_PLANNING.values())
+    assert schema==c.result_schema(job['role'],job['handoff_protocol'],'selection' in job,**c.response_options(job))
+    if variant!='formal_review':assert instruction.startswith(job['native_role_instruction']+'\n')
     if variant=='final':assert 'Protected FINAL: conclude now; no new role/audit/experiment' in prompt
 
 
@@ -102,18 +108,33 @@ def test_custom_frozen_instruction_is_retained_with_launcher_level_budget_advice
     assert prompt.count(guidance.STAGE_PLANNING['H'])==1
 
 
-def test_worker_handoff_distinguishes_final_scientific_response_from_pending_wait(tmp_path):
+@pytest.mark.parametrize('transport',['prompt','developer'])
+@pytest.mark.parametrize('waiting',['wake','managed','interface'])
+def test_worker_handoff_distinguishes_final_scientific_response_from_pending_wait(tmp_path,transport,waiting):
     _,job,task,_=request_scene(tmp_path,'W')
-    prompt,_,_=native.render_scientific_request(job,task,dict(execution_wake=True),backend_name='codex',
-        instruction_transport='prompt')
-    assert prompt.count('handoff.action:')==1
-    assert 'poll pending originals' in prompt
+    intent={};options={}
+    if waiting=='wake':intent['execution_wake']=True
+    elif waiting=='managed':job['managed_execution_wait']={}
+    else:options=dict(execution_interface=dict(capabilities={},result_protocol={}),managed_command=['original-tool'])
+    prompt,instruction,schema=native.render_scientific_request(job,task,intent,backend_name='codex',
+        instruction_transport=transport,**options)
+    assert prompt.count('Follow handoff.action;')==1
+    assert 'poll pending originals' not in prompt
     assert 'finalize_response=JSON' in prompt and 'return_control=wait' in prompt
+    assert prompt.count('Prefer 10-30s waits')==1
+    assert 'Return to independent A' in instruction
+    assert schema==c.result_schema('W',job['handoff_protocol'],'selection' in job,**c.response_options(job))
+    if waiting=='interface':
+        managed=json.JSONDecoder().raw_decode(prompt.split('Managed execution: ',1)[1])[0]
+        assert managed['command']==['original-tool']
+        assert 'use original IDs; never replay accepted unknown calls' in prompt
+    if waiting=='wake':assert 'interpret without rerun/resubmission' in prompt
 
 
 @pytest.mark.parametrize('role','HWAE')
 @pytest.mark.parametrize('repair',[False,True])
-def test_default_fixed_contract_retains_room_for_full_repair_diagnostic(role,repair):
+@pytest.mark.parametrize('backend',['codex','protocol'])
+def test_default_fixed_contract_retains_room_for_full_repair_diagnostic(role,repair,backend):
     # Include the applicable breadth/portfolio/final-coverage rules, rather
     # than measuring a small no-search task. Goal/data, concrete command and
     # budget observations are variable inputs outside this fixed contract.
@@ -128,11 +149,11 @@ def test_default_fixed_contract_retains_room_for_full_repair_diagnostic(role,rep
     intent=dict(output_repair=dict(code='output_layout_invalid',diagnostic='x'*512)) if repair else {}
     options={}
     if role=='W':options=dict(execution_interface=dict(capabilities={},result_protocol={}),managed_command=[])
-    prompt,instruction,_=native.render_scientific_request(job,rules,intent,backend_name='codex',
+    prompt,instruction,_=native.render_scientific_request(job,rules,intent,backend_name=backend,
         instruction_transport='developer',**options)
     # The developer transport keeps the instruction separate. Prompt transport
     # embeds those same bytes and must not count them a second time.
-    embedded,_,_=native.render_scientific_request(job,rules,intent,backend_name='codex',
+    embedded,_,_=native.render_scientific_request(job,rules,intent,backend_name=backend,
         instruction_transport='prompt',**options)
     assert embedded==instruction+'\n'+prompt
     fixed_bytes=len((instruction+'\n'+prompt).encode())+len(

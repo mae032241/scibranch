@@ -29,7 +29,7 @@ OPPORTUNITY = {
 STAGE_PLANNING = {
     'H': 'Own questions/mechanisms/evidence and reevaluation; no downstream token/time budgets or execution/call/audit caps. Control config/live allowances govern. Retain scientific counts, user/task requirements and native per-call caps.',
     'A': 'Initial/grant=first-screen fairness, not total calls; zero alone is no denial/H trigger. continue_w for scoped science; revise_h for question/mechanism/constraint changes. No successor budgets/caps; H/A suggestions are not control limits. Control config/live allowances govern.',
-    'W': 'Iterate within scientific scope/control allowance; H/A resource estimates add no runtime caps. Return to A for scientific stall, scope change or actual runtime refusal; avoid bulk rereads.',
+    'W': 'Implement/validate incrementally within scientific scope/control allowance; size next work from evidence/current budget. H/A estimates add no runtime caps. Return to A for scientific stall, scope change or actual runtime refusal.',
 }
 
 
