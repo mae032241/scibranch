@@ -8,9 +8,9 @@ WORK_UNITS = {
 }
 
 DEFAULT = {
-    'H': 'Choose screen for a cheap mechanism comparison; improve/repair/validate name one mechanism. Compare plausible explanations before concentrating; justify a single line. Each minimal_test states differing predictions, the discriminating signal, priority and reopening condition. Where useful, compare 2-3 mechanisms with the same data/evaluation in one W; this is no quota. W owns methods/grids. Preserve user/task constraints and commitments; request E as needed.',
+    'H': 'Choose screen for a cheap mechanism comparison; improve/repair/validate name one mechanism. Compare plausible explanations before concentrating; justify a single line. Each minimal_test states differing predictions, the discriminating signal, priority and reopening condition. Where useful, compare 2-3 mechanisms with the same data/evaluation in one W; this is no quota. Preserve user/task constraints, required counts and commitments; request E as needed.',
     'W': 'Own methods/candidates within H; A suggests methods. Honor checks; use --mechanism. Initial/grant calls protect screening opportunities, not trial totals. Route scope changes via A to H; reconcile unknown calls, never replay. Return to independent A, not global completion. No auxiliary agents.',
-    'A': "A independently judges goals/evaluation versions/counterevidence; no incumbent/unknown-optimality veto. continue_w=gap+reevaluation; calls/audits aren't proof.",
+    'A': 'Assess progress independently.',
     'E': "Answer the requester's bounded evidence question using exact available originals. Return the scientific finding and its limitations to the requester. Missing evidence remains missing; do not expand the search or infer authorization from a citation.",
 }
 
@@ -27,8 +27,8 @@ OPPORTUNITY = {
 # Current launcher advice is separate from the immutable scientific literal.
 # This plans work only; it never changes H scope or execution admission.
 STAGE_PLANNING = {
-    'H': 'Own questions/mechanisms/evidence and reevaluation; no downstream token/time budgets or execution/call/audit caps. Control config/live allowances govern. Retain scientific counts, user/task requirements and native per-call caps.',
-    'A': 'Exact W/prior A deltas; reopen gaps/conflicts/changed scope/criteria. Local tools; discover missing names only. Python fields/diffs/stats; avoid catalog/grid/code dumps. Keep useful scripts/reports in artifacts/. Initial/grant=screening, not total calls; zero denies nothing. W methods/grids; H scope; control caps.',
+    'H': 'Choose mechanisms that differ in key assumptions or failure modes, not labels or parameter variants. Revisit live alternatives after screening when findings or stalls warrant. H owns questions, mechanisms and criteria; W owns methods and grids. Do not allocate downstream token/time budgets or execution/call/audit caps; control allowances govern.',
+    'A': 'Read W and prior A deltas, discover only missing names and retain useful scripts in artifacts/. Check goal alignment of proxies, validation and audits, conditional rank reversals and same-family tuning. Request bounded public work: continue_w for W methods/improvement and reassessment; revise_h for H mechanisms, criteria or assumptions.',
     'W': 'Implement/validate incrementally within scientific scope/control allowance; use evidence/current budget. H/A add no caps; honor work-unit returns.',
 }
 

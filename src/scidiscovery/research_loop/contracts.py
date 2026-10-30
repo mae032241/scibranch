@@ -31,18 +31,17 @@ ACTIONS = {
 }
 MAX_FIXED_RESPONSE_BYTES = 3072
 AUTHOR_EVIDENCE_GUIDANCE = (
-    'Cite evidence/conditions; measured/inferred/proxy; gaps/uncertainty/unmet goals/criteria changes/tradeoffs. '
-    'Waive backed negatives/infeasibility; else defer.')
+    'Cite conditions, measured, inferred or proxy evidence, depth, open questions, input/resource gaps, uncertainty, unmet goals, criteria changes and tradeoffs. '
+    'Compare strongest feasible rivals on cheapest decision-changing evidence; no incumbent or unknown-optimality veto. '
+    'Uncertainty allows backed focus, deferral/revisit or finite closure; waive only backed negatives/infeasibility. Calls and audits are not proof.')
 NATIVE_TASK_INSTRUCTION = (
     'Read science-task.json/exact inputs. Honor goal/checks, scope/permissions and budget. '
     'Follow task rules; return JSON, no hashes/manifests/validators.')
 PORTFOLIO_RESPONSE = (
-    'Completed W except wait: portfolio_review={main_line:ref|null,reason,discriminating_work:null|{mechanism_refs,question,next_action:continue_w|revise_h|extract}}. '
-    'reason=rival/cheapest test/decision/defer-revisit/infeasibility. '
-    'Sparse optional work_updates[{work_ref,action:execute|defer|withdraw,reason}]; omitted=keep.')
+    'After W except wait: portfolio_review={main_line:ref|null,reason,discriminating_work:null|{mechanism_refs,question,next_action:continue_w|revise_h|extract}}. '
+    'Optional work_updates[{work_ref,action:execute|defer|withdraw,reason}]; omitted=keep.')
 FINAL_COVERAGE_RESPONSE = (
-    'finish/deliver/FINAL: final_coverage[{mechanism_ref,status:deep|screened_pending|ruled_out|unexplored,reason}] for every ref; '
-    'reason=depth/evidence/open questions; limitations=input/resource gaps.')
+    'finish/deliver: final_coverage[{mechanism_ref,status:deep|screened_pending|ruled_out|unexplored,reason}] for all refs.')
 
 
 ROLE_INSTRUCTIONS = {
@@ -50,7 +49,7 @@ ROLE_INSTRUCTIONS = {
          'distinguishing hypotheses from implementation choices. Decide whether evidence extraction is needed, '
          'then choose experiment or independent analysis. Preserve original constraints and unmet questions.',
     'W': 'Own methods/candidates within H; A suggests methods. Honor checks; use --mechanism. Initial/grant calls protect screening opportunities, not trial totals. Route scope changes via A to H; reconcile unknown calls, never replay. Return to independent A, not global completion. No auxiliary agents.',
-    'A': "A independently judges goals/evaluation versions/counterevidence; no incumbent/unknown-optimality veto. continue_w=gap+reevaluation; calls/audits aren't proof.",
+    'A': 'Assess progress independently.',
     'E': 'Answer the exact evidence question from the requesting H or A. Retrieve or extract only needed materials '
          'using available functional tools. Preserve original sources, locators, conflicts and missing evidence. '
          'Return to the requester; do not choose the research direction or assert qualification. '

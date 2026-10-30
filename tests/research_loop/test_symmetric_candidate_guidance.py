@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts as c, controller, execution, guidance, native, runtime, selection
+from scidiscovery.research_loop import budget, contracts as c, controller, execution, guidance, native, runtime, selection, shared_input_views
 from test_history_handoff import finish
 from execution_fixtures import execution_registry
 from test_breadth_science import prepare as managed_prepare, h, worker, run, a, findings
@@ -25,14 +25,14 @@ def prepare(tmp_path,advice,*,portfolio=False):
         portfolio_policy=dict(review_after_cycles=3) if portfolio else None)
     finish(root,1,'H',[],action='experiment',search_choice=dict(scope='One named mechanism',
         commitments=[dict(label='P',minimal_test='A discriminating scientific question remains unresolved',existing_ref=None)],
-        focus=dict(label=None,action='screen')))
+        focus=dict(index=1,action='screen')))
     return root
 
 
 def assigned_views(root):
     job=c.build_job(root,2,'W',[1]);worker_view=c.read(c.workspace(root,2)/'science-task.json')
-    finish(root,2,'W',[1],mechanism_findings=[dict(mechanism='P',basis='blocked',
-        finding='This guidance fixture has no domain observation and does not assert scientific screening.')])
+    finish(root,2,'W',[1],stage_intent='decision',mechanism_findings=[dict(mechanism='h001.m1',basis='blocked',
+        finding='This guidance fixture has no domain observation or experiment and cannot complete scientific screening.')])
     judge=c.build_job(root,3,'A',[1,2]);judge_view=c.read(c.workspace(root,3)/'science-task.json')
     return job,worker_view,judge,judge_view
 
@@ -49,31 +49,31 @@ def test_actual_prepared_worker_and_a_views_deliver_symmetric_choice_and_adaptiv
     expected=guidance.OPPORTUNITY if opportunity and supplied is guidance.DEFAULT else supplied
     assert c.settings(root)['role_guidance']==expected
     assert sum(len(text.encode()) for text in expected.values())<=guidance.MAX_BYTES==2560
-    assert 'Compare plausible mechanisms before concentrating' in expected['H']
-    assert 'justify a single-mechanism scope' in expected['H']
-    assert 'unexcluded mechanisms' in expected['H']
-    text=worker_view['role_guidance']
+    assert 'Compare plausible explanations before concentrating' in expected['H']
+    assert 'justify a single line' in expected['H']
+    text=worker_job['native_role_instruction']
     assert text==expected['W']
-    assert worker_job['native_role_instruction']==text
-    assert 'improve permits observation-driven local search' in text
-    assert 'validate informs a concrete choice with fair controls' in text
-    assert 'Neither means one candidate or full validation per candidate' in text
-    assert 'breadth fairness, not local trial totals' in text
-    assert 'original runtime/feedback limits apply' in text
-    assert 'Query unknown calls without replay' in text
-    assert 'Honor required checks' in text and 'No auxiliary agents' in text
-    judge_text=judge_view['role_guidance']
+    assert 'role_guidance' not in worker_view and 'role_instruction' not in worker_view
+    worker_prompt,worker_instruction,_=native.render_scientific_request(worker_job,worker_view,{},
+        backend_name='codex',instruction_transport='prompt')
+    assert worker_prompt.startswith(text+'\n') and worker_instruction.startswith(text+'\n')
+    assert 'Initial/grant calls protect screening opportunities, not trial totals' in text
+    assert 'reconcile unknown calls, never replay' in text
+    assert 'Honor checks' in text and 'No auxiliary agents' in text
+    judge_text=judge_job['native_role_instruction']
     assert judge_text==expected['A']
-    assert judge_job['native_role_instruction']==judge_text
-    assert 'Compare retaining and replacing candidates by the same original-goal criteria: gains, losses and unknowns' in judge_text
-    assert 'Existing candidates have no default priority' in judge_text
-    assert 'unknown target optimality alone cannot block replacement' in judge_text
-    assert 'proxy leads do not mandate choice' in judge_text
-    assert 'Missing/unbound audit remains unknown' in judge_text
-    assert 'Distinguish recommendation, proxy, observed submission and confirmed delivery' in judge_text
+    assert 'role_guidance' not in judge_view and 'role_instruction' not in judge_view
+    judge_prompt,judge_instruction,_=native.render_scientific_request(judge_job,judge_view,{},
+        backend_name='codex',instruction_transport='prompt')
+    assert judge_prompt.startswith(judge_text+'\n') and judge_instruction.startswith(judge_text+'\n')
+    assert 'no incumbent or unknown-optimality veto' in judge_instruction
+    assert c.AUTHOR_EVIDENCE_GUIDANCE in judge_instruction
+    assert guidance.STAGE_PLANNING['A'] in judge_prompt
     if kind.endswith('_domain'):
         assert text.endswith(DOMAIN_SUFFIX) and DOMAIN_SUFFIX not in judge_text
-    assert worker_view['lineage']['mechanisms']['task_action']=='screen'
+    assert worker_job['search']['focus']['action']=='screen'
+    assert worker_job['scientific_work_unit']==guidance.WORK_UNITS['screen']
+    assert worker_job['scientific_work_unit'] in worker_view['question']
 
 
 @pytest.mark.parametrize('custom',[False,True])
@@ -82,14 +82,12 @@ def test_no_guidance_fallback_and_custom_frozen_text_preserve_their_actual_assig
     root=prepare(tmp_path,advice)
     w,w_view,judge,a_view=assigned_views(root)
     for role,job,view in [('W',w,w_view),('A',judge,a_view)]:
-        if custom:
-            assert view['role_guidance']==advice[role]
-            assert job['native_role_instruction']==advice[role]
-            assert 'role_instruction' not in view
-        else:
-            assert 'role_guidance' not in view
-            assert view['role_instruction']==guidance.OPPORTUNITY[role]
-            assert job['native_role_instruction']==guidance.OPPORTUNITY[role]
+        expected=advice[role] if custom else guidance.OPPORTUNITY[role]
+        assert job['native_role_instruction']==expected
+        assert 'role_guidance' not in view and 'role_instruction' not in view
+        prompt,instruction,_=native.render_scientific_request(job,view,{},
+            backend_name='codex',instruction_transport='prompt')
+        assert prompt.startswith(expected+'\n') and instruction.startswith(expected+'\n')
 
 
 @pytest.mark.parametrize('custom', [False, True])
@@ -105,16 +103,11 @@ def test_a_breadth_judgment_reaches_actual_native_prompt_with_custom_guidance(tm
     job = c.build_job(root, 1, 'A', [])
     work = c.workspace(root, 1)
     task = c.read(work / 'science-task.json')
-    judgment = task['scientific_judgment']
-    for concept in ('before concentrating', 'single-mechanism scope', 'parameter trials',
-            'unexcluded routes, including screened', 'full mechanism index', 'original A reasons',
-            'observed investment and unresolved discriminating questions',
-            'Explain concentration, postponement and exclusion in scientific_result or route_reason',
-            'work/budget-status.json', 'retain declared finite call and stage limits',
-            'Call and cycle counts are not scientific coverage or resource costs',
-            'evidence-supported scientific negative or infeasibility reason',
-            'Temporary relative underperformance', 'deferral rather than scientific rejection'):
-        assert concept in judgment
+    judgment = guidance.STAGE_PLANNING['A']
+    for concept in ('Read W and prior A deltas', 'discover only missing names',
+            'conditional rank reversals', 'bounded public work',
+            'continue_w', 'revise_h', 'reassessment'):
+        assert concept.lower() in judgment.lower()
     record = execution.origin(root, 1)
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json'),
         budget_slice=dict(task_ref=c.record_ref(root / 'jobs/001.json'), role='A',
@@ -122,17 +115,26 @@ def test_a_breadth_judgment_reaches_actual_native_prompt_with_custom_guidance(tm
             shared_limits=dict(max_tokens=100000, max_seconds=600), previous_tokens=0, previous_seconds=0.)))
     c.write(record / 'runner-process.json', dict(fixture='prompt capture only'))
     prompts = []
+    commands = []
 
-    class CaptureInput(io.BytesIO):
-        def write(self, data):
-            prompts.append(data.decode())
-            return super().write(data)
+    class CaptureInput(io.FileIO):
+        def __init__(self):
+            self.read_fd, write_fd = os.pipe()
+            super().__init__(write_fd, 'wb', closefd=True)
+
+        def close(self):
+            if self.closed:
+                return
+            super().close()
+            with os.fdopen(self.read_fd, 'rb') as reader:
+                prompts.append(reader.read().decode())
 
     class CaptureProcess:
         pid = 999999999
         returncode = 0
 
         def __init__(self, args, **kwargs):
+            commands.append(list(args))
             self.stdin = CaptureInput()
             read_fd, write_fd = os.pipe()
             self.stdout = os.fdopen(read_fd, 'rb')
@@ -150,14 +152,19 @@ def test_a_breadth_judgment_reaches_actual_native_prompt_with_custom_guidance(tm
             return self.returncode
 
     monkeypatch.setattr(native.subprocess, 'Popen', CaptureProcess)
+    # Capture the request at the native launch boundary; namespace capability
+    # probes and mount validation belong to the readonly-view tests.
+    monkeypatch.setattr(shared_input_views, 'wrap', lambda root, job, work, argv, **kwargs: argv)
     monkeypatch.setattr(runtime, 'process_identity', lambda pid, binding: dict(task_ref=binding))
     monkeypatch.setattr(runtime, 'process_matches', lambda *args: False)
     monkeypatch.setattr(runtime, 'cleanup_owned_group', lambda *args: 'observed_group_cleaned')
     outcome = native.run_native(root, 1)
     assert outcome['returncode'] == 0 and outcome['stop_reason'] is None
     assert len(prompts) == 1 and judgment in prompts[0]
-    assert prompts[0].startswith(job['native_role_instruction'])
-    assert task['role_guidance'] == advice['A']
+    assert (prompts[0].startswith(job['native_role_instruction'])
+        or any(job['native_role_instruction'] in argument for argument in commands[0]))
+    assert job['native_role_instruction'] == advice['A']
+    assert 'role_guidance' not in task and 'role_instruction' not in task
     assert not (record / 'result-identity.json').exists()  # No scientific verdict was sealed.
 
 
@@ -165,7 +172,8 @@ def test_previously_frozen_native_literal_is_not_rewritten_by_new_defaults(tmp_p
     root=prepare(tmp_path,None)
     monkeypatch.setitem(guidance.OPPORTUNITY,'W','Previously frozen Worker scientific instruction.')
     job=c.build_job(root,2,'W',[1])
-    finish(root,2,'W',[1],mechanism_findings=[dict(mechanism='P',basis='blocked',finding='A fixture observation remains missing.')])
+    finish(root,2,'W',[1],stage_intent='decision',mechanism_findings=[dict(
+        mechanism='h001.m1',basis='blocked',finding='A fixture observation remains missing; no experiment was run.')])
     files=[root/'settings.json',root/'jobs/002.json',c.workspace(root,2)/'science-task.json',c.host_record(c.workspace(root,2))/'result-identity.json']
     before={path:path.read_bytes() for path in files}
     monkeypatch.setitem(guidance.OPPORTUNITY,'W','New defaults cannot retroactively change an accepted assignment.')
@@ -174,21 +182,26 @@ def test_previously_frozen_native_literal_is_not_rewritten_by_new_defaults(tmp_p
     assert before=={path:path.read_bytes() for path in files}
 
 
+@pytest.mark.process_e2e
 def test_local_improve_multiple_calls_already_share_original_scope_without_a_single_trial_gate(tmp_path,execution_registry):
     root=managed_prepare(tmp_path);h(root,labels=('P','Q'))
-    _,first=worker(root,tmp_path,2,[1]);run(root,first,'P')
-    finish(root,2,'W',[1],mechanism_findings=findings('P',blocked=('Q',)))
+    _,first=worker(root,tmp_path,2,[1]);run(root,first,'h001.m1')
+    finish(root,2,'W',[1],preserve_native_intent=True,
+        mechanism_findings=findings('h001.m1',blocked=('h001.m2',)))
     a(root,3,[1,2],focus='h001.m1',mode='improve')
     job,local=worker(root,tmp_path,4,[1,2,3])
     assert job['search']['focus']['action']=='improve'
-    assert len(local['breadth']['mechanisms'])==1 and local['breadth']['grant']['extra_calls']==1
-    results=[run(root,local,'P') for _ in range(3)]
+    assert local['scope']['step']==job['step']==4
+    assert [row['mechanism_ref'] for row in local['breadth']['mechanisms']]==['h001.m1']
+    results=[run(root,local,'h001.m1') for _ in range(3)]
     assert all(result['status']=='known_success' and result['scope']==local['scope'] for result in results)
+    assert all(result['mechanism_binding']['mechanism_ref']=='h001.m1' for result in results)
     assert all(result['mechanism_binding']['grant'] is None for result in results)
     assert len({result['call_id'] for result in results})==3
     assert c.read(root/'jobs/004.json')==job
-    text=c.read(c.workspace(root,4)/'science-task.json')['role_guidance']
-    assert 'observation-driven local search' in text and 'original runtime/feedback limits apply' in text
+    view=c.read(c.workspace(root,4)/'science-task.json')
+    assert guidance.WORK_UNITS['improve'] in view['question']
+    assert 'Initial/grant calls protect screening opportunities, not trial totals' in job['native_role_instruction']
 
 
 @pytest.mark.parametrize('recommended',['old','new'])

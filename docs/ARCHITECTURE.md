@@ -141,6 +141,22 @@ deferral rather than scientific rejection. H compares plausible mechanisms befor
 concentrating and explains any single-mechanism scope; parameter trial counts alone
 do not establish evidence across mechanisms. Control does not grade these reasons.
 
+Normal H planning distinguishes assumptions and failure modes, and revisits live
+alternatives after screening as findings or stalls warrant. Normal A planning
+checks whether proxy, validation and audit evidence addresses the original goal;
+conditional ranking reversals and repeated same-family tuning can motivate a
+bounded public comparison that can change the decision. Methods and improvement
+within H remain W work; mechanism, assumption or criterion revisions return to H.
+Evidence can also support concentration, deferral or finite closure. This is
+scientific advice, with no new response fields, quotas or admission gates.
+Custom and prepared role literals remain frozen; current launcher planning advice
+does not authorize new work during protected FINAL, closeout or output repair.
+Role advice, shared A evidence judgment, normal-stage planning and response field
+syntax carry separate rules. Common file/JSON/local-analysis reading advice stays
+in the task's existing `reading_order`, without a second copy in stage planning.
+Codex developer instructions and the protocol prompt are alternative transports;
+the role literal is sent once through the selected transport.
+
 Mechanism indexes retain the adopted A disposition reason as a bounded preview and
 link the complete original scientific JSON, outside navigation page size limits.
 Same-status restatements and omissions preserve the adopted reason and its source;

@@ -49,15 +49,15 @@ def test_current_role_advice_reaches_frozen_science_view_with_original_constrain
         assert c.validate(work)['summary'] == 'A contribution'
     decisions = decision.schema()['properties']['decision']['enum']
     assert set(decisions) == {'candidate', 'mechanism', 'compliance'}
-    assert 'independently judges goals/evaluation versions/counterevidence' in guidance.DEFAULT['A']
-    assert 'no incumbent/unknown-optimality veto' in guidance.DEFAULT['A']
-    assert "calls/audits aren't proof" in guidance.DEFAULT['A']
+    assert 'Assess progress independently' in guidance.DEFAULT['A']
+    assert 'no incumbent or unknown-optimality veto' in c.AUTHOR_EVIDENCE_GUIDANCE
+    assert 'Calls and audits are not proof' in c.AUTHOR_EVIDENCE_GUIDANCE
     assert 'Honor checks' in guidance.DEFAULT['W']
     assert 'Initial/grant calls protect screening opportunities, not trial totals' in guidance.DEFAULT['W']
-    assert 'W owns methods/grids' in guidance.DEFAULT['H']
+    assert 'W owns methods and grids' in guidance.STAGE_PLANNING['H']
     assert 'differing predictions, the discriminating signal, priority and reopening condition' in guidance.DEFAULT['H']
     assert 'compare 2-3 mechanisms' in guidance.DEFAULT['H'] and 'this is no quota' in guidance.DEFAULT['H']
-    assert 'Preserve user/task constraints and commitments' in guidance.DEFAULT['H']
+    assert 'Preserve user/task constraints, required counts and commitments' in guidance.DEFAULT['H']
 
 
 def test_actual_domain_usage_fits_existing_total_bound_and_only_w_receives_it(tmp_path):
