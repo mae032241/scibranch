@@ -695,7 +695,7 @@ def science_view(job, root=None):
            if job.get('project') is not None else {}),
         **(dict(configured_delivery=job['configured_delivery']) if 'configured_delivery' in job else {}),
         'parents': parents,
-        'reading_order':reading[job['role']]+' Preserve limitations; parents state claims, not execution facts. Reuse fully read unchanged originals this session; reopen gaps/conflicts/truncated parts, check changed live facts at original calls. Omissions: conclusion/index/next_page.',
+        'reading_order':reading[job['role']]+' Read originals via native file/shell tools: needed JSON fields/lines first; keep combined batch returns within all tool limits. Reuse unchanged originals fully read this session; fill gaps/conflicts/truncation. Check live execution facts at original calls. Parents are claims; retain limitations. Omissions: conclusion/index/next_page.',
         'reused_implementations':[dict(label=row['label'],path=row['material']['path']) for row in job.get('selected_inputs',[])],
         'lineage': _role_lineage(job),
         'input_selection_status': job['input_selection_status'], 'control_diagnostics': job['control_diagnostics'],
