@@ -10,7 +10,7 @@ WORK_UNITS = {
 DEFAULT = {
     'H': 'Choose screen for a cheap mechanism comparison; improve/repair/validate name one mechanism. Compare plausible explanations before concentrating; justify a single line. Each minimal_test states differing predictions, the discriminating signal, priority and reopening condition. Where useful, compare 2-3 mechanisms with the same data/evaluation in one W; this is no quota. W owns methods/grids. Preserve user/task constraints and commitments; request E as needed.',
     'W': 'Own methods/candidates within H; A suggests methods. Honor checks; use --mechanism. Initial/grant calls protect screening opportunities, not trial totals. Route scope changes via A to H; reconcile unknown calls, never replay. Return to independent A, not global completion. No auxiliary agents.',
-    'A': "A owns goal/evaluation-version judgment and counterevidence. No incumbent/unknown-optimality veto. continue_w=decision/gap plus reevaluation triggers; calls/audits aren't goal proof.",
+    'A': "A independently judges goals/evaluation versions/counterevidence; no incumbent/unknown-optimality veto. continue_w=gap+reevaluation; calls/audits aren't proof.",
     'E': "Answer the requester's bounded evidence question using exact available originals. Return the scientific finding and its limitations to the requester. Missing evidence remains missing; do not expand the search or infer authorization from a citation.",
 }
 
@@ -28,7 +28,7 @@ OPPORTUNITY = {
 # This plans work only; it never changes H scope or execution admission.
 STAGE_PLANNING = {
     'H': 'Own questions/mechanisms/evidence and reevaluation; no downstream token/time budgets or execution/call/audit caps. Control config/live allowances govern. Retain scientific counts, user/task requirements and native per-call caps.',
-    'A': 'Initial/grant protect screening, not total calls; zero denies nothing. continue_w: scoped decision/gap + reevaluation, not fixed recipes; W owns methods/grids. revise_h: question/mechanism/constraint changes. No H/A caps; control allowances govern.',
+    'A': 'Exact W/prior A deltas; reopen gaps/conflicts/changed scope/criteria. Local tools; discover missing names only. Python fields/diffs/stats; avoid catalog/grid/code dumps. Keep useful scripts/reports in artifacts/. Initial/grant=screening, not total calls; zero denies nothing. W methods/grids; H scope; control caps.',
     'W': 'Implement/validate incrementally within scientific scope/control allowance; use evidence/current budget. H/A add no caps; honor work-unit returns.',
 }
 

@@ -31,8 +31,8 @@ ACTIONS = {
 }
 MAX_FIXED_RESPONSE_BYTES = 3072
 AUTHOR_EVIDENCE_GUIDANCE = (
-    'Cite evidence/conditions; distinguish measured/inferred/proxy. Retain uncertainty/gaps/unmet goals and '
-    'criteria changes/tradeoffs. Waive only supported negatives/infeasibility; else defer.')
+    'Cite evidence/conditions; measured/inferred/proxy; gaps/uncertainty/unmet goals/criteria changes/tradeoffs. '
+    'Waive backed negatives/infeasibility; else defer.')
 NATIVE_TASK_INSTRUCTION = (
     'Read science-task.json/exact inputs. Honor goal/checks, scope/permissions and budget. '
     'Follow task rules; return JSON, no hashes/manifests/validators.')
@@ -50,7 +50,7 @@ ROLE_INSTRUCTIONS = {
          'distinguishing hypotheses from implementation choices. Decide whether evidence extraction is needed, '
          'then choose experiment or independent analysis. Preserve original constraints and unmet questions.',
     'W': 'Own methods/candidates within H; A suggests methods. Honor checks; use --mechanism. Initial/grant calls protect screening opportunities, not trial totals. Route scope changes via A to H; reconcile unknown calls, never replay. Return to independent A, not global completion. No auxiliary agents.',
-    'A': "A owns goal/evaluation-version judgment and counterevidence. No incumbent/unknown-optimality veto. continue_w=decision/gap plus reevaluation triggers; calls/audits aren't goal proof.",
+    'A': "A independently judges goals/evaluation versions/counterevidence; no incumbent/unknown-optimality veto. continue_w=gap+reevaluation; calls/audits aren't proof.",
     'E': 'Answer the exact evidence question from the requesting H or A. Retrieve or extract only needed materials '
          'using available functional tools. Preserve original sources, locators, conflicts and missing evidence. '
          'Return to the requester; do not choose the research direction or assert qualification. '
@@ -578,6 +578,96 @@ def _decision_context(root, job):
                 'Original user constraints and H scope/discriminating commitments remain binding; W owns execution design and H owns mechanism revision.')
 
 
+def _assessment_handoff(root, job):
+    """Locate the prior decision through the exact W/H route, never recency."""
+    if (job['role'] != 'A' or job.get('purpose') is not None or job.get('final_report')
+            or job.get('final_only') or job.get('formal_review') or job.get('fork_source')
+            or job.get('author_correction') or job.get('correction_request')):
+        return None
+    from . import originals, history
+    receipts = {row['step']: row['seal_ref'] for row in job['history']['nodes']}
+
+    def source(step):
+        owner = originals.node(root, step)
+        if receipts.get(step) != history.source_seal_ref(owner):
+            raise ValueError('Assessment source is outside its exact frozen history')
+        return originals.source_job(owner)
+
+    parents = [(ref, source(int(Path(ref['path']).parts[2]))) for ref in job['direct_refs']]
+    current = next((parent for _, parent in parents if parent['step'] == job['step'] - 1), None)
+    if (current is None or current.get('engineering_repair')
+            or current.get('author_correction') or current.get('correction_request')):
+        return None
+    view = {}
+    for role in ('W', 'H'):
+        refs = [ref['path'] for ref, parent in parents if parent['role'] == role]
+        if len(refs) > 1:
+            return None  # No implicit choice between scientific scopes.
+        if refs:
+            view['current_' + role.lower()] = refs[0]
+    context = _decision_context(root, current)
+    previous_a = None
+    relation = 'context_only'
+    if current['role'] == 'E':
+        requester = current.get('evidence_return') or {}
+        if requester.get('role') == 'A':
+            previous_a = next((parent for _, parent in parents if parent['step'] == requester.get('step')), None)
+            if previous_a is not None:
+                payload = read_scientific_output(_execution_raw(root, previous_a['step']))
+                if (payload.get('next_action') != 'extract' or job['instruction'] != payload.get('route_reason')
+                        or not any(ref['path'] == f'inputs/parents/{previous_a["step"]:03d}/conclusion.json'
+                                   for ref in current['direct_refs'])):
+                    previous_a = None
+    elif current['role'] == 'A':
+        payload = read_scientific_output(_execution_raw(root, current['step']))
+        if payload.get('next_action') == 'audit' and job['instruction'] == payload.get('route_reason'):
+            previous_a = current
+    elif current['role'] not in {'W', 'H'}:
+        return None
+    if current['role'] in {'A', 'E'} and previous_a is None:
+        return None
+    if context is None and current['role'] == 'W':
+        predecessor = current['step'] - 1
+        if any(ref['path'] == f'inputs/parents/{predecessor:03d}/conclusion.json'
+               for ref in current['direct_refs']):
+            parent = source(predecessor)
+            if parent['role'] == 'H':
+                payload = read_scientific_output(_execution_raw(root, predecessor))
+                if payload.get('next_action') == 'experiment' and current['instruction'] == payload.get('route_reason'):
+                    context = _decision_context(root, parent)
+    if context is not None:
+        step = int(Path(context['source_original']).parts[2])
+        previous_a = source(step)
+        relation = 'scope_revision_context' if context['source_action'] == 'revise_h' else 'context_only'
+    if previous_a is not None:
+        prior = previous_a
+        step = prior['step']
+        if (prior['role'] == 'A' and not prior.get('purpose') and not prior.get('formal_review')
+                and not prior.get('author_correction') and not prior.get('correction_request')):
+            seal = read(originals.source_record(originals.node(root, step), 'result-identity.json'))
+            view['previous_a'] = dict(step=step,
+                original=f'inputs/history/nodes/{step:03d}/scientific-original.json',
+                relation=relation, materials=[row['path'] for row in seal['materials']])
+            combined = {row['path']: row for row in [*job['direct_materials'], *seal['materials']]}
+            if output_quota_exceeded(settings(root, job), (row['size_bytes'] for row in combined.values())):
+                view['previous_a'].update(materials=[], materials_unavailable_reason='input_material_bound')
+            index = f'inputs/history/implementations/{step:03d}/0001.json'
+            if any(row['path'] == index for row in job['history']['files']):
+                view['previous_a']['implementations'] = index
+    return view
+
+
+def _assessment_original(root, handoff):
+    from . import originals
+    prior = handoff.get('previous_a')
+    if prior is None:
+        return None
+    owner = originals.node(root, prior['step'])
+    seal = read(originals.source_record(owner, 'result-identity.json'))
+    raw = originals.resolve_ref(owner, seal['raw_ref'])
+    return dict(path=prior['original'], source=str(raw), size_bytes=seal['raw_ref']['size_bytes'], kind='scientific_original')
+
+
 def _role_lineage(job, parents=()):
     """Select role material from the same frozen view; indexes retain all facts."""
     import copy
@@ -696,6 +786,7 @@ def science_view(job, root=None):
            if job.get('candidate_nomination_mechanisms') else {}),
 
         **(dict(decision_context=context) if context is not None else {}),
+        **(dict(assessment_handoff=job['assessment_handoff']) if 'assessment_handoff' in job else {}),
         'global': dict(objective='inputs/global/objective.md',
                        updates=[row['path'] for row in job['global_materials'][1:]]),
         'public_root': job['public_root'],
@@ -1229,6 +1320,32 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
             audit_projection_version=audit_projection_version,adjacent_audit=job.get('candidate_audit'),
             worker_view_version=1,assessment_job=job if role=='A' else None)
         options = [item for parent in parents for item in history.implementation_options(root, parent)]
+    if retained is not None:
+        if 'assessment_handoff' in retained:
+            job['assessment_handoff'] = retained['assessment_handoff']
+    elif correction_request is None:
+        handoff = _assessment_handoff(root, job)
+        if handoff is not None:
+            job['assessment_handoff'] = handoff
+            original = _assessment_original(root, handoff)
+            if original is not None:
+                bound = [row for row in job['history']['files'] if row['path'] == original['path']]
+                if not bound:
+                    input_inventory.entry(); input_inventory.file(original['size_bytes'])
+                    job['history']['files'].append(original)
+                elif bound != [original]:
+                    raise ValueError('Assessment original differs from its exact producer')
+    prior = job.get('assessment_handoff', {}).get('previous_a')
+    if prior is not None:
+        owner = originals.node(root, prior['step'])
+        seal = read(originals.source_record(owner, 'result-identity.json'))
+        for material in _public_materials(root, [row for row in seal['materials'] if row['path'] in prior['materials']]):
+            bound = [row for row in job['direct_materials'] if row['path'] == material['path']]
+            if bound and bound != [material]:
+                raise ValueError('Assessment material conflicts with its exact producer')
+            if not bound:
+                input_inventory.entry(); input_inventory.file(material['size_bytes'])
+                job['direct_materials'].append(material)
     from . import candidate_refs
     job['direct_originals']=refs
     job['direct_refs']=[]
@@ -1541,6 +1658,8 @@ def _validate_task_view(root, work, job):
     if (any(not isinstance(path,str) for path in actual) or len(actual)!=len(expected)
             or set(actual)!=expected):
         raise ValueError('Frozen scientific task changed its exact parents')
+    if 'assessment_handoff' in job and view.get('assessment_handoff') != job['assessment_handoff']:
+        raise ValueError('Frozen scientific task changed its assessment sources')
 
 
 def _validate_inputs(root, work, job):
@@ -1639,6 +1758,15 @@ def _validate_inputs(root, work, job):
             raise ValueError('Frozen scientific search binding changed')
     from . import history
     history.validate(root, work, job['history'])
+    if 'assessment_handoff' in job:
+        if job['assessment_handoff'] != _assessment_handoff(root, job):
+            raise ValueError('Assessment sources changed their exact W/H decision lineage')
+        original = _assessment_original(root, job['assessment_handoff'])
+        if original is not None and [row for row in job['history']['files'] if row['path'] == original['path']] != [original]:
+            raise ValueError('Assessment original differs from its exact producer')
+        prior = job['assessment_handoff'].get('previous_a')
+        if prior is not None and not set(prior['materials']) <= {row['path'] for row in job['direct_materials']}:
+            raise ValueError('Assessment materials are absent from its exact inputs')
     if output_quota_exceeded(policy,(row['size_bytes'] for row in job['direct_materials'])):
         raise ValueError('Combined input materials exceed the frozen handoff bound')
     expected = []

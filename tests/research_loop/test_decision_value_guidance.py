@@ -49,9 +49,9 @@ def test_current_role_advice_reaches_frozen_science_view_with_original_constrain
         assert c.validate(work)['summary'] == 'A contribution'
     decisions = decision.schema()['properties']['decision']['enum']
     assert set(decisions) == {'candidate', 'mechanism', 'compliance'}
-    assert 'goal/evaluation-version judgment and counterevidence' in guidance.DEFAULT['A']
-    assert 'No incumbent/unknown-optimality veto' in guidance.DEFAULT['A']
-    assert "calls/audits aren't goal proof" in guidance.DEFAULT['A']
+    assert 'independently judges goals/evaluation versions/counterevidence' in guidance.DEFAULT['A']
+    assert 'no incumbent/unknown-optimality veto' in guidance.DEFAULT['A']
+    assert "calls/audits aren't proof" in guidance.DEFAULT['A']
     assert 'Honor checks' in guidance.DEFAULT['W']
     assert 'Initial/grant calls protect screening opportunities, not trial totals' in guidance.DEFAULT['W']
     assert 'W owns methods/grids' in guidance.DEFAULT['H']

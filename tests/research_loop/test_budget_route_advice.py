@@ -36,13 +36,12 @@ def test_role_planning_uses_control_allowance_without_rewriting_science(tmp_path
     assert prompt.count(guidance.STAGE_PLANNING[role])==1
     assert guidance.STAGE_PLANNING[role] not in instruction
     if role=='A':
-        assert 'protect screening, not total calls' in prompt
+        assert 'Initial/grant=screening, not total calls' in prompt
         assert 'zero denies nothing' in prompt
-        assert 'continue_w: scoped decision/gap + reevaluation, not fixed recipes' in prompt
-        assert 'W owns methods/grids' in prompt
-        assert 'revise_h: question/mechanism/constraint changes' in prompt
-        assert 'No H/A caps; control allowances govern' in prompt
-        assert 'continue_w=decision/gap plus reevaluation triggers' in instruction
+        assert 'Exact W/prior A deltas' in prompt
+        assert 'reopen gaps/conflicts/changed scope/criteria' in prompt
+        assert 'W methods/grids; H scope; control caps' in prompt
+        assert 'continue_w=gap+reevaluation' in instruction
     elif role=='H':
         assert 'Own questions/mechanisms/evidence and reevaluation' in prompt
         assert 'no downstream token/time budgets or execution/call/audit caps' in prompt
@@ -56,7 +55,7 @@ def test_role_planning_uses_control_allowance_without_rewriting_science(tmp_path
         assert 'Return to independent A' in instruction
         assert 'A suggests methods' in instruction
     if role in 'HA':
-        assert ('Control config/live allowances govern' if role=='H' else 'control allowances govern') in prompt
+        assert ('Control config/live allowances govern' if role=='H' else 'control caps') in prompt
         assert 'Budget all work before routing' not in prompt
         assert 'Budget own work' not in prompt
         assert 'exhausted explicit H call cap' not in prompt
@@ -67,6 +66,62 @@ def test_role_planning_uses_control_allowance_without_rewriting_science(tmp_path
     assert schema==c.result_schema(role,job['handoff_protocol'],'selection' in job,**c.response_options(job))
     assert instruction.startswith(job['native_role_instruction']+'\n')
     assert all(path.read_bytes()==value for path,value in originals.items())
+
+
+@pytest.mark.parametrize('backend_name',['codex','protocol'])
+def test_a_delta_reading_advice_reaches_actual_backend_without_changing_frozen_inputs(tmp_path,backend_name):
+    root,job,task,work=request_scene(tmp_path,'A')
+    originals={path:path.read_bytes() for path in
+        (root/'settings.json',root/'jobs/002.json',work/'science-task.json')}
+    backend=backends.selected(dict(native_backend=backend_name,
+        native_launcher_argv=['codex'] if backend_name=='codex' else ['independent']),
+        schema_transport='prompt' if backend_name=='codex' else None)
+    prompt,instruction,schema=native.render_scientific_request(job,task,{},backend_name=backend.name,
+        instruction_transport=backend.instruction_transport)
+    schema_path=work/'response.schema.json';c.write(schema_path,schema)
+    packet=backend.request(prompt,schema=schema_path,profile={},work=work,response_schema=schema)
+    delivered=packet.decode() if backend_name=='codex' else json.loads(packet)['prompt']
+    assert delivered.count(guidance.STAGE_PLANNING['A'])==1
+    for advice in ('Local tools','discover missing names only','Python fields/diffs/stats',
+            'avoid catalog/grid/code dumps','reopen gaps/conflicts/changed scope/criteria',
+            'Keep useful scripts/reports in artifacts/'):
+        assert advice in delivered
+    assert instruction.startswith(job['native_role_instruction']+'\n')
+    assert 'independently judges goals/evaluation versions/counterevidence' in instruction
+    assert "calls/audits aren't proof" in instruction
+    assert set(schema['required'])=={'summary','scientific_result','limitations','next_action','route_reason'}
+    assert schema['additionalProperties'] is True
+    assert schema==c.result_schema('A',job['handoff_protocol'],**c.response_options(job))
+    assert c.build_job(root,2,'A',[1])==job
+    assert all(path.read_bytes()==value for path,value in originals.items())
+
+
+@pytest.mark.parametrize('variant',['output_repair','work_repair','output_only_wake','author','final',
+    'closeout','final_report','final_only','formal_review'])
+@pytest.mark.parametrize('backend_name',['codex','protocol'])
+def test_a_delta_reading_does_not_expand_restricted_returns(tmp_path,variant,backend_name):
+    _,job,task,_=request_scene(tmp_path,'A')
+    intent={};options={}
+    if variant=='output_repair':intent['output_repair']=dict(code='json',diagnostic='Preserve original facts.')
+    elif variant=='work_repair':intent['work_repair']=dict(code='missing_work',diagnostic='Original assignment only.')
+    elif variant=='output_only_wake':options['output_only_wake']=True
+    elif variant=='author':options['author']=dict(facts='work/author-closeout-science.json',limits={})
+    elif variant=='final':options['final_return']=True
+    elif variant=='closeout':job['purpose']='closeout'
+    elif variant=='final_report':job['final_report']={'source_cutoff':1}
+    elif variant=='final_only':job['final_only']=True
+    else:
+        job['formal_review']={'subject':'original'}
+        task['review_instruction']='Independently assess the exact original.'
+    backend=backends.selected(dict(native_backend=backend_name,
+        native_launcher_argv=['codex'] if backend_name=='codex' else ['independent']))
+    prompt,instruction,schema=native.render_scientific_request(job,task,intent,backend_name=backend.name,
+        instruction_transport=backend.instruction_transport,**options)
+    assert guidance.STAGE_PLANNING['A'] not in prompt
+    assert 'Local tools; discover missing names only' not in prompt
+    assert schema==c.result_schema('A',job['handoff_protocol'],**c.response_options(job))
+    if variant=='formal_review':assert instruction==task['review_instruction']
+    else:assert instruction.startswith(job['native_role_instruction']+'\n')
 
 
 @pytest.mark.parametrize('variant',['output_repair','work_repair','output_only_wake','author','final','closeout','final_only','formal_review'])
