@@ -114,7 +114,6 @@ def native_outcome(record, *, original_record=None, output_path=None):
         metering = outcome.get('metering') or {}
         if (not isinstance(metering, dict) or terminal is None or terminal != meter or completed_before is None
                 or not failures or native_recovery.combine(failures, completed_before=completed_before) is not None
-                or outcome.get('native_failure') != native_recovery.combine(failures)
                 or thread != outcome.get('thread_id')
                 or activity is not outcome.get('native_activity_observed')
                 or metering.get('tokens') != meter or metering.get('live_reason') is not None

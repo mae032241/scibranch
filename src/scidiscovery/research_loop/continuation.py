@@ -22,7 +22,13 @@ class AutomaticRecoveryRequired(RuntimeError):
 
 
 def automatic_source(root, step, record):
-    """Verify the failure projection against the exact retained native JSONL."""
+    """Interpret retained native failures while verifying original native facts.
+
+    The saved failure projection is a diagnostic, not recovery authority. Read
+    its current interpretation from the exact native stream without rewriting
+    that stream or receipt; terminal, activity and session facts must still
+    agree with the original process outcome.
+    """
     from . import backends, native_recovery
     backend = backends.selected(configuration_updates.for_step(root, step))
     if backend.name != 'codex' or not backend.standard:
@@ -47,12 +53,11 @@ def automatic_source(root, step, record):
     expected = native_recovery.combine(failures, completed_before=completed_before
         if terminal and outcome.get('returncode') == 0
             and outcome.get('cleanup') == 'observed_group_cleaned' else None)
-    if (outcome.get('native_failure') != expected
-            or outcome.get('terminal_observed') is not terminal
+    if (outcome.get('terminal_observed') is not terminal
             or outcome.get('native_activity_observed') is not activity
             or outcome.get('thread_id') != thread):
         raise ValueError('Automatic recovery native failure evidence changed')
-    return outcome
+    return dict(outcome, native_failure=expected)
 
 
 def format_source(root, step, record):

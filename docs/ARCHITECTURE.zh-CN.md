@@ -432,8 +432,11 @@ reconcile 再消费；unknown 或不可用事实须核对或明确报告障碍�
 明确未完成的提前停止可续接原 session；明确临时限流、容量、连接或服务故障
 可重试原 session。启动重试必须有原生证据明确证明请求未被接受，缺少 session 不构成证明。
 未被成功终态解除的永久认证、配额、配置错误及未分类错误停止；原生失败事件额外支持本机 Codex CLI 连接合成
-loopback 响应实证的 429 retry-limit/quota 完整文本及有界锚定 503 HTTP 信封。其他
-message-only 错误保持 unknown，普通 agent/tool 正文不授重试许可；本机翻译证据不等于
+loopback 响应实证的 429 retry-limit/quota 完整文本及有界锚定 503 HTTP 信封。留存 Codex 原生错误
+`workspace routing discovery timed out`、`workspace routing discovery failed` 及其精确
+`Reconnecting... N/5 (...)` 信封按临时连接故障处理，在既有重试和退避上限内续接同一已核验 session；
+永久原生事实仍优先。恢复从留存 native 流派生当前失败解释，保留原诊断并核验原终态、活动、session
+和进程事实；未知用量仍为未知。其他 message-only 错误保持 unknown，普通 agent/tool 正文不授重试许可；本机翻译证据不等于
 真实服务商故障恢复资格。完整 CLI JSON 显示合成 429/503 前已有 `thread.started`、
 `turn.started`；同一空 Codex home 以精确 ID 执行 `exec resume` 后仍是原 thread，
 再次到达同一 loopback provider，全部请求均无 Authorization。这是既有 session 重试，

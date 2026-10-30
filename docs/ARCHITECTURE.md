@@ -670,7 +670,14 @@ does not establish that fact. Unresolved permanent auth/quota/configuration fail
 unclassified errors stop. Native failure events additionally support the exact 429
 retry-limit/quota texts and anchored bounded 503 HTTP envelope confirmed with the
 installed Codex CLI and synthetic loopback responses. Other message-only errors
-remain unknown; ordinary agent/tool text grants no retry. This local translation
+remain unknown except the retained Codex `workspace routing discovery timed out`
+and `workspace routing discovery failed` failures, including their exact
+`Reconnecting... N/5 (...)` envelopes. These are temporary connection failures
+and retry the same verified session under the existing retry/backoff caps;
+permanent native facts still dominate. Recovery derives the current failure
+interpretation from the retained native stream, while preserving its saved
+diagnostic and checking original terminal, activity, session and process facts.
+Unknown usage remains unknown. Ordinary agent/tool text grants no retry. This local translation
 evidence includes the full CLI JSON stream: synthetic 429/503 failures follow
 `thread.started` and `turn.started`, and an exact-ID `exec resume` in the same empty
 Codex home reaches the same loopback provider with the original thread ID and no

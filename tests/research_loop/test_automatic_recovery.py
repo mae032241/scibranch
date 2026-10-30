@@ -20,6 +20,11 @@ CODEX_HTTP_FAILURE_MESSAGES = {
     'server_overloaded': 'unexpected status 503 Service Unavailable: Deterministic loopback native failure., url: http://127.0.0.1:46345/v1/responses',
 }
 
+# Retained native Codex exec errors from the 2026-10-30 routing incident.
+CODEX_ROUTING_MESSAGES = ['workspace routing discovery timed out', 'workspace routing discovery failed',
+    *[f'Reconnecting... {number}/5 (workspace routing discovery {reason})'
+        for number in range(1, 6) for reason in ('timed out', 'failed')]]
+
 
 def failure(code='rate_limit_exceeded', **extra):
     return recovery.classify(dict(type='turn.failed', error=dict(code=code, **extra)))
@@ -74,6 +79,60 @@ def test_confirmed_exec_native_http_translations_have_narrow_message_patterns(co
 def test_confirmed_quota_message_dominates_generic_http_429():
     event = dict(type='turn.failed',error=dict(status=429,message=CODEX_HTTP_FAILURE_MESSAGES['insufficient_quota']))
     assert recovery.classify(event)['category'] == 'permanent'
+
+
+@pytest.mark.parametrize('message', CODEX_ROUTING_MESSAGES)
+def test_exact_native_routing_failure_retries_only_the_original_session(message):
+    for event in (dict(type='error', message=message), dict(type='turn.failed', error=dict(message=message))):
+        original = copy.deepcopy(event)
+        projected = recovery.classify(event)
+        assert projected['category'] == 'temporary' and projected['codes'] == ['connection_error']
+        assert projected['message_patterns'] == ['codex_exec_workspace_routing_discovery_v1']
+        assert projected['not_accepted'] is False and event == original
+        value = dict(outcome(), native_failure=projected)
+        assert decide(value)['action'] == 'retry' and decide(value)['startup_retry'] is False
+        assert decide(value, available=False)['reason'] == 'automatic_recovery_session_unavailable'
+        assert decide(dict(value, thread_id=None), available=False)['reason'] == 'automatic_recovery_session_unavailable'
+    backend = backends.Codex(dict(native_launcher_argv=['codex']))
+    for kind in ('message', 'tool', 'item.completed', 'turn.completed'):
+        event = dict(type=kind, message=message, error=dict(message=message),
+            item=dict(type='error', message=message))
+        assert recovery.classify(event) is None and 'failure' not in backend.event(event)
+
+
+@pytest.mark.parametrize('message', [
+    'Reported: workspace routing discovery failed', 'workspace routing discovery failed\n',
+    'workspace routing discovery timed out; try again',
+    'Reconnecting... 0/5 (workspace routing discovery failed)',
+    'Reconnecting... 6/5 (workspace routing discovery failed)',
+    'Reconnecting... 1/6 (workspace routing discovery failed)',
+    'Reconnecting... 1/5 (workspace routing discovery failed) Extra ordinary text',
+    'workspace routing discovery authentication failed',
+])
+def test_routing_failure_prose_requires_the_complete_observed_native_shape(message):
+    projected = recovery.classify(dict(type='error', message=message))
+    assert projected['category'] == 'unknown' and projected['message_patterns'] == []
+
+
+@pytest.mark.parametrize('code', ['invalid_api_key', 'permission_denied', 'insufficient_quota', 'invalid_configuration'])
+def test_routing_failure_cannot_override_permanent_native_facts(code):
+    event = dict(type='turn.failed', error=dict(code=code, message='workspace routing discovery failed'))
+    assert recovery.classify(event)['category'] == 'permanent'
+    combined = recovery.combine([recovery.classify(dict(type='error', message=CODEX_ROUTING_MESSAGES[0])), failure(code)])
+    assert combined['category'] == 'permanent'
+    assert decide(dict(outcome(), native_failure=combined))['reason'] == 'automatic_recovery_permanent_failure'
+
+
+@pytest.mark.parametrize('status', [400, 401, 403, 404, 422])
+def test_routing_failure_cannot_override_permanent_http_status(status):
+    event = dict(type='error', status=status, message='workspace routing discovery failed')
+    assert recovery.classify(event)['category'] == 'permanent'
+
+
+def test_routing_message_translation_requires_a_native_error_or_failed_turn():
+    for kind in ('turn.incomplete', 'turn.interrupted'):
+        projected = recovery.classify(dict(type=kind, message='workspace routing discovery failed'))
+        assert projected['category'] == 'incomplete' and projected['message_patterns'] == []
 
 
 def json_error_message(code='invalid_json_schema', *, status=400, **fields):
@@ -341,7 +400,7 @@ def test_raw_failure_projection_is_rechecked_without_reading_agent_text(tmp_path
         continuation.automatic_source(root, 1, record)
 
 
-def test_retained_unknown_json_schema_failure_is_rejected_without_rewriting_originals(tmp_path, monkeypatch):
+def test_retained_diagnostic_uses_current_json_schema_interpretation_without_rewriting_originals(tmp_path, monkeypatch):
     record = tmp_path / 'record';record.mkdir()
     backend = backends.Codex(dict(native_launcher_argv=['codex']))
     monkeypatch.setattr(configuration_updates, 'for_step', lambda *_:{})
@@ -353,11 +412,58 @@ def test_retained_unknown_json_schema_failure_is_rejected_without_rewriting_orig
     c.write(record / 'native-outcome.json', dict(native_failure=old_projection,
         terminal_observed=False, native_activity_observed=False, thread_id=None))
     retained = {name:(record / name).read_bytes() for name in ('native.jsonl', 'native-outcome.json')}
-    with pytest.raises(ValueError, match='failure evidence changed'):
-        continuation.automatic_source(tmp_path, 1, record)
+    current = continuation.automatic_source(tmp_path, 1, record)
+    assert current['native_failure']['category'] == 'permanent'
+    assert decide(current, available=False)['reason'] == 'automatic_recovery_permanent_failure'
     assert all((record / name).read_bytes() == raw for name, raw in retained.items())
     saved = c.read(record / 'native-outcome.json')
     assert decide(saved, available=False)['reason'] == 'automatic_recovery_unknown_failure'
+
+
+def test_retained_unknown_routing_diagnostic_is_interpreted_from_native_originals(tmp_path, monkeypatch):
+    record = tmp_path / 'record';record.mkdir()
+    backend = backends.Codex(dict(native_launcher_argv=['codex']))
+    monkeypatch.setattr(configuration_updates, 'for_step', lambda *_:{})
+    monkeypatch.setattr(backends, 'selected', lambda *_:backend)
+    c.write(record / 'native-intent.json', {})
+    events = [dict(type='thread.started', thread_id='original'), dict(type='turn.started'),
+        *[dict(type='error', message=message) for message in CODEX_ROUTING_MESSAGES[2:]],
+        dict(type='item.completed', item=dict(type='error', message='Falling back from WebSockets to HTTPS.')),
+        dict(type='error', message='workspace routing discovery failed'),
+        dict(type='turn.failed', error=dict(message='workspace routing discovery failed'))]
+    (record / 'native.jsonl').write_text(''.join(json.dumps(event) + '\n' for event in events))
+    saved = dict(outcome(), native_failure=recovery.classify(dict(type='error')),
+        returncode=1, native_activity_observed=True, usage=dict(unknown_steps=[1]))
+    c.write(record / 'native-outcome.json', saved)
+    originals = {name:(record / name).read_bytes() for name in ('native-intent.json', 'native-outcome.json', 'native.jsonl')}
+    current = continuation.automatic_source(tmp_path, 1, record)
+    assert current == dict(saved, native_failure=recovery.combine([recovery.classify(event)
+        for event in events if event['type'] in {'error', 'turn.failed'}]))
+    assert decide(current)['action'] == 'retry' and recovery.recoverable_source(current)
+    assert current['usage'] == saved['usage'] and current['native_failure']['not_accepted'] is False
+    assert decide(current, available=False)['reason'] == 'automatic_recovery_session_unavailable'
+    assert all((record / name).read_bytes() == raw for name, raw in originals.items())
+    for field, changed in (('terminal_observed', True), ('native_activity_observed', False), ('thread_id', 'other')):
+        c.write(record / 'native-outcome.json', dict(saved, **{field:changed}))
+        with pytest.raises(ValueError, match='failure evidence changed'):
+            continuation.automatic_source(tmp_path, 1, record)
+
+
+@pytest.mark.parametrize('event,category', [
+    (dict(type='turn.failed', error=dict(message='Unclassified native failure.')), 'unknown'),
+    (dict(type='turn.failed', error=dict(code='insufficient_quota')), 'permanent'),
+])
+def test_saved_temporary_diagnostic_cannot_grant_recovery_without_current_native_evidence(tmp_path, monkeypatch, event, category):
+    record = tmp_path / 'record';record.mkdir()
+    backend = backends.Codex(dict(native_launcher_argv=['codex']))
+    monkeypatch.setattr(configuration_updates, 'for_step', lambda *_:{})
+    monkeypatch.setattr(backends, 'selected', lambda *_:backend)
+    c.write(record / 'native-intent.json', {})
+    (record / 'native.jsonl').write_text(json.dumps(event) + '\n')
+    c.write(record / 'native-outcome.json', dict(outcome(), thread_id=None))
+    current = continuation.automatic_source(tmp_path, 1, record)
+    assert current['native_failure']['category'] == category
+    assert decide(current)['action'] == 'stop'
 
 
 def format_error(**changes):
@@ -400,8 +506,13 @@ def test_positive_original_format_rejection_is_separate_from_immutable_old_diagn
     if value is not None:
         assert value['format_rejected'] is True and value['native_failure']['category']=='unknown'
     assert all((record/name).read_bytes()==raw for name,raw in originals.items())
-    with pytest.raises(ValueError,match='failure evidence changed'):
-        continuation.automatic_source(tmp_path,1,record)
+    if isinstance(activity,dict) and activity.get('type')=='turn.completed':
+        with pytest.raises(ValueError,match='failure evidence changed'):
+            continuation.automatic_source(tmp_path,1,record)
+    else:
+        current=continuation.automatic_source(tmp_path,1,record)
+        assert current['native_failure']['category']=='permanent'
+        assert decide(current)['reason']=='automatic_recovery_permanent_failure'
 
 
 def test_format_fallback_is_once_and_spends_existing_retry_budget():
@@ -527,6 +638,97 @@ def test_default_controller_recovers_one_exact_session_and_keeps_attempt_chain(t
     assert controller.run(root)['status'] == 'finish'
     assert native.usage(root) == before and len(execution.records(root,1)) == 2
     assert (c.workspace(root,1) / 'work/launches').read_text() == 'exec\nresume\n'
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('mode,cap,attempts,reason', [
+    ('recover', 1, 2, None), ('always', 1, 2, 'automatic_recovery_retry_limit'),
+    ('recover', 0, 1, 'automatic_recovery_retry_limit'),
+    ('permanent', 1, 1, 'automatic_recovery_permanent_failure'),
+])
+def test_retained_routing_failure_resumes_exact_w_session_with_original_receipts_and_caps(tmp_path, monkeypatch, mode, cap, attempts, reason):
+    import sys
+    from test_default_cli_output_repair import NATIVE, prepare_cli
+    from scidiscovery.research_loop import controller, native
+    root, home, env = prepare_cli(tmp_path, fault='incomplete_w', automatic=dict(
+        max_retries=cap, max_continues=0, initial_backoff_seconds=.01,
+        max_backoff_seconds=.02, max_wait_seconds=.1, jitter_fraction=0))
+    config = c.read(tmp_path / 'launcher-config.json');config['routing'] = mode
+    c.write(tmp_path / 'launcher-config.json', config)
+    route = r'''
+if role=='W':
+ print(json.dumps(dict(type='turn.started')),flush=True)
+ if not resume or config['routing']=='always':
+  for number in range(1,6):
+   print(json.dumps(dict(type='error',message='Reconnecting... '+str(number)+'/5 (workspace routing discovery timed out)')),flush=True)
+  print(json.dumps(dict(type='item.completed',item=dict(type='error',message='Falling back from WebSockets to HTTPS.'))),flush=True)
+  print(json.dumps(dict(type='error',message='workspace routing discovery failed')),flush=True)
+  error=dict(message='workspace routing discovery failed')
+  if config['routing']=='permanent':error['code']='insufficient_quota'
+  print(json.dumps(dict(type='turn.failed',error=error)),flush=True)
+  raise SystemExit(1)
+'''
+    script = NATIVE.replace('payload=dict(summary=', route + '\npayload=dict(summary=', 1)
+    script = script.replace("if not (config['fault']=='completed-missing-output'", """
+if role=='W':
+ payload['stage_intent']='decision'
+ payload['mechanism_findings']=[dict(mechanism='h001.m1',basis='blocked',finding='The bounded fixture lacks scientific input; no experiment was submitted.')]
+if not (config['fault']=='completed-missing-output'""", 1)
+    (tmp_path / 'native.py').write_text('#!' + sys.executable + '\n' + script)
+    for key in ('CODEX_HOME', 'PATH', 'PYTHONPATH'):monkeypatch.setenv(key, env[key])
+    monkeypatch.setattr(controller, '_recovery_remaining', lambda *_:0.)
+    source = continuation.automatic_source
+    def old_diagnostic(*args):
+        return dict(source(*args), native_failure=recovery.classify(dict(type='error')))
+    # Establish a stopped controller and the diagnostic saved by the earlier
+    # classifier. All original native/process facts come from the real fake CLI.
+    with monkeypatch.context() as previous:
+        previous.setattr(continuation, 'automatic_source', old_diagnostic)
+        stopped = controller.run(root)
+    assert stopped['status'] != 'finish', stopped
+    first, = execution.records(root, 2)
+    saved = c.read(first / 'native-outcome.json')
+    saved['native_failure'] = recovery.classify(dict(type='error'))
+    c.write(first / 'native-outcome.json', saved)
+    assert c.read(first / 'automatic-recovery.json')['reason'] == 'automatic_recovery_unknown_failure'
+    assert saved['returncode'] == 1 and saved['terminal_observed'] is False
+    assert saved['cleanup'] == 'observed_group_cleaned' and not (first / 'usage.json').exists()
+    assert history.managed_calls(root, c.read(root / 'jobs/002.json')) == []
+    originals = {path:path.read_bytes() for path in (root / 'settings.json', root / 'jobs/002.json',
+        home / 'config.toml', home / 'auth.json', first / 'native-intent.json', first / 'native-outcome.json',
+        first / 'native.jsonl', first / 'runner-process.json', first / 'native-process.json')}
+    before = continuation.automatic_decision(root, 2)
+    if attempts > 1:
+        assert before['action'] == 'retry' and before['delay_seconds'] == .01
+    else:assert before['reason'] == reason
+    result = controller.run(root)
+    paths = execution.records(root, 2)
+    assert len(paths) == attempts, result
+    assert (c.workspace(root, 2) / 'work/launches').read_text() == 'exec\n' + 'resume\n' * (attempts - 1)
+    if attempts > 1:
+        intent = c.read(paths[1] / 'native-intent.json')
+        assert intent['session']['thread_id'] == saved['thread_id'] and intent['session']['home'] == str(home)
+        assert intent['previous'] == execution.proof(first)
+        assert intent['task_ref'] == c.read(first / 'native-intent.json')['task_ref']
+        assert intent['automatic_recovery']['action'] == 'retry' and intent['automatic_recovery']['startup_retry'] is False
+        assert recovery.counters([intent]) == dict(continues=0, retries=1, wait_seconds=0.)
+        assert intent['budget_slice']['previous_tokens'] == 0
+    if reason is None:
+        assert result['status'] == 'finish', result
+        assert c.read(paths[-1] / 'native-outcome.json')['terminal_observed'] is True
+        assert (first / 'result-identity.json').is_file()
+        science = c.validate(c.workspace(root, 2))
+        assert science['stage_intent'] == 'decision' and science['mechanism_findings'][0]['basis'] == 'blocked'
+    else:
+        assert continuation.automatic_decision(root, 2)['reason'] == reason
+        assert not (root / 'jobs/003.json').exists()
+    assert native.usage(root)['unknown_steps'] == [2]
+    assert not (first / 'usage.json').exists()
+    assert history.managed_calls(root, c.read(root / 'jobs/002.json')) == []
+    assert all(path.read_bytes() == raw for path, raw in originals.items())
+    assert controller.run(root)['status'] == result['status']
+    assert execution.records(root, 2) == paths
+    assert all(path.read_bytes() == raw for path, raw in originals.items())
 
 
 @pytest.mark.process_e2e

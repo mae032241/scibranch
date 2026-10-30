@@ -99,7 +99,7 @@ def _json_error_layers(layers):
 
 
 def _native_message(layers):
-    """Exact exec-JSON translations confirmed by local HTTP conformance.
+    """Exact exec-JSON translations from retained native transport evidence.
 
     Codex exec discards the provider's structured error code for these shapes.
     Match only the complete native failure message, never ordinary model text.
@@ -114,6 +114,9 @@ def _native_message(layers):
             matched.append(('rate_limit_exceeded', 429, 'codex_exec_http_429_v1'))
         elif re.fullmatch(r'unexpected status 503 Service Unavailable: [^\r\n]{1,4096}, url: https?://[^\s]{1,2048}', message):
             matched.append(('service_unavailable', 503, 'codex_exec_http_503_v1'))
+        elif re.fullmatch(r'(?:workspace routing discovery (?:timed out|failed)|'
+                r'Reconnecting\.\.\. [1-5]/5 \(workspace routing discovery (?:timed out|failed)\))', message):
+            matched.append(('connection_error', None, 'codex_exec_workspace_routing_discovery_v1'))
     return matched
 
 
@@ -134,7 +137,7 @@ def classify(event):
              if isinstance(value := layer.get(key), str)}
     statuses = {value for layer in layers for key in ('status', 'status_code', 'http_status_code')
                 if type(value := layer.get(key)) is int}
-    messages = _native_message(native_layers)
+    messages = _native_message(native_layers) if event['type'] in {'error', 'turn.failed'} else []
     codes.update(code for code, _, _ in messages)
     statuses.update(status for _, status, _ in messages if status is not None)
     # Permanent codes always dominate a generic HTTP 429 or capacity code.

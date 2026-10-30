@@ -61,6 +61,27 @@ def test_original_endpoint_resolves_intermediate_error_without_rewriting(tmp_pat
     assert not (tmp_path / 'science-output.json').exists()
 
 
+@pytest.mark.parametrize('fault', [None, 'turn.failed', 'late-error', 'late-activity',
+    'duplicate', 'missing-terminal', 'nonzero', 'cleanup', 'live-meter', 'meter', 'output'])
+def test_retained_unknown_routing_diagnostic_yields_only_to_verified_original_completion(tmp_path, fault):
+    stored = retained(tmp_path, fault=fault)
+    assert stored['native_failure']['category'] == 'unknown'
+    stream = tmp_path / 'native.jsonl'
+    events = [json.loads(line) for line in stream.read_text().splitlines()]
+    for event in events:
+        if event.get('type') == 'error':event['message'] = 'Reconnecting... 2/5 (workspace routing discovery timed out)'
+    stream.write_text(''.join(json.dumps(event) + '\n' for event in events))
+    originals = {tmp_path / name:(tmp_path / name).read_bytes() for name in
+        ('native-outcome.json', 'usage.json', 'native.jsonl', 'result.pending.json')}
+    current = c.native_outcome(tmp_path)
+    if fault is None:
+        assert current['stop_reason'] is None and current['native_failure'] is None
+        assert current['metering']['coverage'] == 'terminal' and current['usage'] == stored['usage']
+    else:
+        assert current == stored
+    assert all(path.read_bytes() == raw for path, raw in originals.items())
+
+
 @pytest.mark.parametrize('fault', ['turn.failed', 'turn.incomplete', 'turn.interrupted',
     'late-error', 'late-activity', 'duplicate', 'missing-terminal', 'nonzero',
     'cleanup', 'live-meter', 'meter', 'output'])

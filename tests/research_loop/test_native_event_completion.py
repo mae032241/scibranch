@@ -24,6 +24,7 @@ def emit(value):print(json.dumps(value),flush=True)
 emit(dict(type='thread.started',thread_id=thread))
 emit(dict(type='turn.started'))
 notice=dict(type='error',message='The connection briefly interrupted; original stream remains open.')
+if mode=='routing-reconnected':notice['message']='Reconnecting... 2/5 (workspace routing discovery timed out)'
 emit(notice)
 emit(dict(type='item.started',item=dict(id='original-command',type='command_execution',command='fixture',status='in_progress')))
 emit(dict(type='item.completed',item=dict(id='original-command',type='command_execution',command='fixture',aggregated_output='retained original observation',exit_code=0,status='completed')))
@@ -71,6 +72,7 @@ def _diagnostic(root,mode):
     dict(type='error',error=dict(code='stream_disconnected')),
     dict(type='error',error=dict(code='invalid_api_key')),
     dict(type='error',error=dict(code='connection_error',accepted=False)),
+    dict(type='error',message='Reconnecting... 2/5 (workspace routing discovery timed out)'),
 ])
 def test_clean_original_completion_resolves_top_level_stream_errors(event):
     failure=_failure(event)
@@ -98,7 +100,7 @@ def test_completion_never_resolves_a_later_error_or_changes_its_classification()
 
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('mode',[
-    'reconnected','missing-terminal','turn-failed','turn-incomplete','turn-interrupted',
+    'reconnected','routing-reconnected','missing-terminal','turn-failed','turn-incomplete','turn-interrupted',
     'nonzero-exit','error-after-terminal','duplicate-terminal','activity-after-terminal',
 ])
 def test_original_fake_cli_stream_seals_only_a_verified_completion(tmp_path,monkeypatch,mode):
@@ -110,7 +112,7 @@ def test_original_fake_cli_stream_seals_only_a_verified_completion(tmp_path,monk
         home/'config.toml',home/'auth.json')}
     start_clock(root,'original native event completion fixture')
     try:
-        if mode=='reconnected':
+        if mode in {'reconnected','routing-reconnected'}:
             native.execute_native(root,1)
         else:
             with pytest.raises((RuntimeError,ValueError)):
@@ -134,7 +136,7 @@ def test_original_fake_cli_stream_seals_only_a_verified_completion(tmp_path,monk
     assert all(path.read_bytes()==raw for path,raw in frozen.items())
     assert not (root/'jobs/002.json').exists()
     expected=(work/'work/original-result.json').read_bytes()
-    if mode=='reconnected':
+    if mode in {'reconnected','routing-reconnected'}:
         assert outcome['stop_reason'] is None and outcome['native_failure'] is None
         assert outcome['returncode']==0 and outcome['cleanup']=='observed_group_cleaned'
         assert outcome['terminal_observed'] is True and outcome['metering']['coverage']=='terminal'
