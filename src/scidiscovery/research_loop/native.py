@@ -74,9 +74,8 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
             if (job['role'] in {'A','H','W'} and not author
                     and not output_only_wake and not intent.get('output_repair') and not intent.get('work_repair')
                     and job.get('purpose')!='closeout' and not job.get('final_report') and not job.get('final_only')):
-                before='routing' if job['role'] in {'A','H'} else 'bulk reads/code'
-                prompt+=(' Budget all work before '+before+'; reuse evidence/code; '
-                    'close with unmet goals if short. '+STAGE_PLANNING[job['role']])
+                if job['role']=='W':prompt+=' Budget own work before bulk reads/code;'
+                prompt+=(' Reuse evidence/code; close with unmet goals if short. '+STAGE_PLANNING[job['role']])
     if budget_status:prompt+='\n'+json.dumps(budget_status,ensure_ascii=False,separators=(',',':'))
     if execution_interface is not None and not author and not output_only_wake:
         prompt+='\nManaged execution: '+json.dumps(dict(command=managed_command,

@@ -220,7 +220,7 @@ No old screening qualification, spent opportunity or budget is transferred or
 refunded. Within unchanged H scope, A may use `continue_w` and an explicit local
 focus to request the next finite W stage after review. Prior stage usage remains
 consumed; H revision changes scientific commitments and cannot reset budgets.
-Initial/grant opportunities protect first screening and do not cap all subsequent trials. Current ordinary H/A/W launch guidance sizes finite stages to goals, remaining resources and information value; unchanged permitted scope can continue W without an automatic H renewal after two calls. Explicit scientific limits and execution authorization remain binding.
+Initial/grant opportunities protect first screening and do not cap all subsequent trials. Runtime budgets and execution permissions come from operator configuration and the control ledger. H plans scientific questions and mechanisms; A assesses evidence and routes within that scope; W plans its own work against the control allowance. H/A resource estimates and suggested call/audit counts do not become runtime caps or H-renewal triggers. Scientific design counts, user/task requirements and actual per-call limits retain their meaning.
 
 Each task freezes actual optional consumers. Extra scientific content stays in the
 original; optional explanations do not create format-repair gates. W delivery uses
