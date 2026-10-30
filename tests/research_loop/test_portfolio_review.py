@@ -31,7 +31,7 @@ def prepare(tmp_path, *, threshold=2, enabled=True, version=2):
         execution_config=dict(executor='local_execution:command',configuration=dict(run_argv=[sys.executable],max_seconds=30)),
         portfolio_policy=dict(review_after_cycles=threshold, version=version) if enabled else None)
     plan = dict(scope='Competing solutions', commitments=[dict(label=label, minimal_test='A discriminating comparison', existing_ref=None)
-                for label in ('P', 'Q', 'R', 'S')], focus=dict(label='P', action='screen'))
+                for label in ('P', 'Q', 'R', 'S')], focus=dict(index=1, action='screen'))
     finish(root, 1, 'H', [], action='experiment', search_choice=plan)
     worker(root, 2, [1])
     return root
@@ -228,7 +228,7 @@ def test_qualified_author_finishes_original_cycle_and_review_prevents_h_analyze_
     state = search.project(root, 5)['portfolio']
     assert len(state['seen_w']) == 1 and state['pending_w'] is None and state['invested']=={P:1}
     c.build_job(root, 5, 'H', [1, 2, 4], instruction='Exact scientific question')
-    finish(root, 5, 'H', [1, 2, 4], action='analyze', search_choice=dict(scope='Reconsider target solution', commitments=[], focus=dict(label=P,action='screen')))
+    finish(root, 5, 'H', [1, 2, 4], action='analyze', search_choice=dict(scope='Reconsider target solution', commitments=[dict(label='P',minimal_test='Retain the original discriminating comparison',existing_ref=P)], focus=dict(index=1,action='screen')))
     author(root, 6, [5, 2], action='revise_h')
     assert len(search.project(root, 7)['portfolio']['seen_w']) == 1
     assert search.project(root,7)['portfolio']['invested']=={P:1}
@@ -241,7 +241,8 @@ def test_same_status_omissions_and_existing_ref_rename_do_not_erase_window_defer
     author(root, 5, [1, 4], action='revise_h', dispositions=[dict(mechanism_ref=Q,status='deferred',reason='Same-status prose is not a reset')])
     c.build_job(root, 6, 'H', [1, 4, 5], instruction='Exact scientific question')
     finish(root, 6, 'H', [1, 4, 5], action='experiment', search_choice=dict(scope='Original portfolio remains',
-        commitments=[dict(label='Renamed Q',minimal_test='Same discriminating test',existing_ref=Q)], focus=dict(label=P,action='screen')))
+        commitments=[dict(label='Renamed Q',minimal_test='Same discriminating test',existing_ref=Q),
+            dict(label='P',minimal_test='Retain the original discriminating comparison',existing_ref=P)], focus=dict(index=2,action='screen')))
     state = search.project(root, 7)
     assert state['mechanisms'][Q]['label'] == 'Renamed Q' and state['portfolio']['deferred'][Q] == 2
     worker(root, 7, [6], observed='h001.m4')
@@ -270,13 +271,14 @@ def test_cumulative_actual_investments_and_waiver_use_existing_scientific_status
 def test_many_mechanisms_bounded_default_complete_index_and_page_tamper(tmp_path):
     root = prepare(tmp_path)
     author(root, 3, [1, 2], action='revise_h')
-    # H delta declarations add 16 more mechanisms without restating earlier commitments.
+    # H deltas add 16 mechanisms, restating only P to bind the selected focus.
     last = 3
     for step in range(4, 8):
         c.build_job(root, step, 'H', [last], instruction='Exact scientific question')
         finish(root, step, 'H', [last], action='analyze', search_choice=dict(scope='Global portfolio',
-            commitments=[dict(label='机' * 70 + f'{step}-{i}',minimal_test='测' * 150,existing_ref=None) for i in range(4)],
-            focus=dict(label=P,action='screen')))
+            commitments=[dict(label='机' * 70 + f'{step}-{i}',minimal_test='测' * 150,existing_ref=None) for i in range(4)] +
+                [dict(label='P',minimal_test='Retain the original discriminating comparison',existing_ref=P)],
+            focus=dict(index=5,action='screen')))
         last = step
     job = c.build_job(root, 8, 'A', [7], instruction=route_instruction(root, [7]))
     view = c.science_view(job, root)['lineage']
@@ -364,20 +366,20 @@ def test_three_w_mechanical_comparison_tracks_overlap_work_and_authored_final(tm
         for label in labels:
             assert run(root,config,label,qualified_local=True)['status']=='known_success'
         finish(root,step,'W',parents,mechanism_findings=findings(*labels),preserve_native_intent=True)
-    measured(2,[1],('P','Q','R'))
+    measured(2,[1],(P,Q,R))
     review=dict(main_line=P,reason='P is the current line; Q/R remain viable. The cheapest target evidence is deferred until it becomes available; revisit at the next A.',
         discriminating_work=dict(mechanism_refs=[Q,R],question='Which target condition distinguishes Q/R? A contradictory target observation changes the choice.',next_action='extract'))
     choice=dict(dispositions=[dict(mechanism_ref=ref,status='screened',reason='Synthetic A assesses the retained mechanical observation, without scientific qualification.') for ref in (P,Q,R)],
         next_focus=dict(mechanism_ref=P,action='improve'))
     finish(root,3,'A',[1,2],action='continue_w',search_choice=choice,portfolio_review=review)
-    measured(4,[1,3],('P',))
+    measured(4,[1,3],(P,))
     review2=dict(discriminating_work=None,main_line=P,reason='Keep P while Q/R remain unresolved; their cheapest target evidence is still unavailable.',
         work_updates=[dict(work_ref='A003-D001',action='defer',reason='Await a new target observation; revisit at the final A assessment.')])
     finish(root,5,'A',[1,4],action='continue_w',search_choice=dict(dispositions=[],next_focus=dict(mechanism_ref=P,action='improve')),
         portfolio_review=review2)
     before=search.project(root,6)
     assert len(before['portfolio']['seen_w'])==2 and before['order']['discriminating_work'][0]['status']=='deferred'
-    measured(6,[1,5],('P',))
+    measured(6,[1,5],(P,))
     final=copy.deepcopy(review2);final['reason']='Synthetic A stops within the finite scope; Q/R remain viable without the missing target input.'
     final['work_updates'][0]['reason']='The target question remains unanswered; revisit only in an authorized study with the missing input.'
     coverage=[dict(mechanism_ref=ref,status='deep' if ref==P else 'screened_pending',

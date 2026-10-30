@@ -84,11 +84,11 @@ def test_reopen_does_not_refund_initial_calls_or_renew_used_grant(tmp_path, exec
     worker(root, 2, [1], observed=['h001.m1'], qualified_local=True)
     assess(root, 3, [1, 2], search_choice=dict(dispositions=[], next_focus=focus('h001.m1', 'screen')))
     _, granted = configure_worker(root, tmp_path, 4, [1, 2, 3], qualified_local=True)
-    accepted = run(root, granted, 'P', qualified_local=True)
+    accepted = run(root, granted, 'h001.m1', qualified_local=True)
     assert accepted['mechanism_binding']['grant']['source_a'] == 3
     with pytest.raises(breadth.OpportunityRequired):
-        run(root, granted, 'P', qualified_local=True)
-    finish(root, 4, 'W', [1, 2, 3], mechanism_findings=findings('P', blocked=('Q',)),
+        run(root, granted, 'h001.m1', qualified_local=True)
+    finish(root, 4, 'W', [1, 2, 3], mechanism_findings=findings('h001.m1', blocked=('h001.m2',)),
         preserve_native_intent=True)
     assess(root, 5, [1, 4], action='finish', search_choice=review())
     before = search.project(root, 6)
@@ -104,11 +104,11 @@ def test_reopen_does_not_refund_initial_calls_or_renew_used_grant(tmp_path, exec
         'h001.m1': 2, 'h001.m2': 0}
     assert config['breadth']['grant']['extra_calls'] == config['breadth']['grant']['used_calls'] == 1
     with pytest.raises(breadth.OpportunityRequired):
-        run(root, config, 'P', qualified_local=True)
-    run(root, config, 'Q', qualified_local=True)
+        run(root, config, 'h001.m1', qualified_local=True)
+    run(root, config, 'h001.m2', qualified_local=True)
     # Once all initial opportunities are consumed, the one-call exception no
     # longer limits ordinary calls; reopening does not introduce a W quota.
-    assert run(root, config, 'P', qualified_local=True)['status'] == 'known_success'
+    assert run(root, config, 'h001.m1', qualified_local=True)['status'] == 'known_success'
 
 
 def test_h_existing_ref_reopen_preserves_calls_and_investment(tmp_path, execution_registry):
@@ -140,9 +140,9 @@ def test_explicit_a_focus_after_reopen_retains_fresh_exact_grant(tmp_path, execu
     _, config = configure_worker(root, tmp_path, 5, [1, 4], qualified_local=True)
     assert config['breadth']['grant']['source_a'] == 4
     assert config['breadth']['grant']['used_calls'] == 0
-    assert run(root, config, 'P', qualified_local=True)['mechanism_binding']['grant']['source_a'] == 4
+    assert run(root, config, 'h001.m1', qualified_local=True)['mechanism_binding']['grant']['source_a'] == 4
     with pytest.raises(breadth.OpportunityRequired):
-        run(root, config, 'P', qualified_local=True)
+        run(root, config, 'h001.m1', qualified_local=True)
 
 
 def test_screened_without_reopen_stays_visible_outside_unfinished_plan(tmp_path, execution_registry):

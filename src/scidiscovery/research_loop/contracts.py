@@ -248,7 +248,7 @@ def response_instructions(job):
             'selection' in job,**response_options(job))['properties'])
     if job.get('search') is not None and job['role'] in {'H','A'}:
         fields['breadth_response']=(
-            'search_plan: commitments[{label,minimal_test,existing_ref?}], focus?{label,action}; action=screen|improve|repair|validate; omissions retain.'
+            'search_plan: commitments[{label,minimal_test,existing_ref?}], focus?{index,action}; index=1-based in this commitments list or null for retained breadth screen; action=screen|improve|repair|validate; omissions retain.'
             if job['role']=='H' else
             'search_review: dispositions[{mechanism_ref,status:pending|screened|deferred|waived,reason}],next_focus?{mechanism_ref,action:screen|improve|repair|validate}; omitted=keep.')
     if job.get('portfolio_context') is not None and 'portfolio_review' in job.get('scientific_response_fields',[]):
@@ -300,7 +300,7 @@ def science_payload(path: Path, role: str, protocol=CURRENT, comparison=False,*,
     try:
         value = read_scientific_output(original)
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
-        raise OutputRepairRequired('invalid_json', 'Return one valid JSON object matching final_response; completed experiments remain retained.') from error
+        raise OutputRepairRequired('invalid_json', 'Return one complete valid JSON object matching final_response; repair syntax only, preserving original scientific facts/plans/limits. Reuse prior results only if they exist; no work this repair turn.') from error
     schema=result_schema(role,protocol,comparison,formal_review=formal_review,review_enabled=review_enabled,
         final_only=final_only,final_delivery=final_delivery,auxiliary_fields=auxiliary_fields)
     try:
@@ -1721,7 +1721,7 @@ def seal_result(root: Path, step: int):
                 or pending.exists() or pending.is_symlink()):
             raise ValueError('Missing final output identity changed')
         from .output_repair import OutputRepairRequired
-        raise OutputRepairRequired('missing_output', 'Return the required final scientific JSON; the completed work and checkpoints are already retained.')
+        raise OutputRepairRequired('missing_output', 'Return complete scientific JSON; preserve original facts/plans/limits. No work this repair turn; reuse prior results/checkpoints only if they exist.')
     raw = regular(raw_path)
     if native_raw_ref != file_ref(raw):
         raise ValueError('Terminal scientific output is unverified or changed')

@@ -44,16 +44,16 @@ if role=='H':
  if config['fault']=='incomplete_w' or nomination:
   payload.update(next_action='experiment',search_plan=dict(scope='Declared bounded fixture mechanisms',
    commitments=[dict(label='Fixture mechanism',minimal_test='Read a bounded observation',existing_ref=None)],
-   focus=dict(label=None,action='screen')))
+   focus=dict(index=None,action='screen')))
   if completed_work:
    payload['search_plan']['commitments'].append(dict(label='Second fixture mechanism',minimal_test='Produce a different bounded observation',existing_ref=None))
-   if 'caller-improve' in config['fault']:payload['search_plan']['focus']=dict(label='Fixture mechanism',action='improve')
+   if 'caller-improve' in config['fault']:payload['search_plan']['focus']=dict(index=1,action='improve')
  if author_repair:
   if resume:
    assert 'Fix diagnosed JSON/layout only' in prompt
    (work/'work/author-repair-prompt.txt').write_text(prompt)
   if config['fault'].startswith('author-focus'):
-   payload['search_plan']['focus']['label']='Misspelled fixture mechanism' if not resume or config['fault']=='author-focus-repeat' else 'Fixture mechanism'
+   payload['search_plan']['focus']['index']=999 if not resume or config['fault']=='author-focus-repeat' else 1
   if config['fault']=='author-selection' and not resume:payload['implementation_selection']=['W999-I001']
  if config['fault'] in {'caller-no-search','caller-compile-no-search','caller-command-no-search'}:payload['next_action']='experiment'
 elif role=='W':
@@ -102,7 +102,7 @@ elif role=='W':
    script.write_text('from pathlib import Path\nfor i,path in enumerate('+repr(artifacts)+'): Path(path).write_text("original model "+str(i))\nPath("artifacts/result.json").write_text('+repr(json.dumps(declared))+')\n')
    outcome=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.worker_execution_bridge',
     '--submission-directory',str(work/SUBMISSION_DIRECTORY),'run','--experiment-dir',str(directory),
-    '--script',str(script),'--mechanism','Fixture mechanism'],capture_output=True,text=True)
+    '--script',str(script),'--mechanism','h001.m1'],capture_output=True,text=True)
    assert outcome.returncode==0,(outcome.stdout,outcome.stderr)
    result=json.loads(outcome.stdout);assert result['status']=='known_success'
    locator_file.write_text(json.dumps(dict(call_id=result['call_id'],artifact=artifacts[0])))
@@ -135,8 +135,8 @@ elif role=='W':
    declared=dict(version=1,metrics=[],outputs=[dict(path='artifacts/new-managed-effect.txt')])
    script.write_text('from pathlib import Path\nPath("artifacts/new-managed-effect.txt").write_text("unexpected new effect")\nPath('+repr(str(work/'artifacts/output-repair-new-effect.txt'))+').write_text("unexpected new effect")\nPath("artifacts/result.json").write_text('+repr(json.dumps(declared))+')\n')
    probe('run',['run','--experiment-dir',str(directory),'--script',str(script),
-    '--mechanism','Fixture mechanism'])
-  payload['mechanism_findings']=[dict(mechanism='Fixture mechanism',basis='observed',finding='One retained fixture observation; target suitability remains for A.')]
+    '--mechanism','h001.m1'])
+  payload['mechanism_findings']=[dict(mechanism='h001.m1',basis='observed',finding='One retained fixture observation; target suitability remains for A.')]
   value=dict(representatives=[dict(mechanism_ref=mechanisms[0]['mechanism_ref'],candidate=locator,reason='A retained model for this scientific mechanism.')],extras=[],gaps=[])
   if completed_work:
    value['gaps']=[dict(mechanism_ref=row['mechanism_ref'],reason='No candidate suitability is asserted for the second bounded observation.') for row in mechanisms[1:]]
@@ -153,7 +153,7 @@ elif role=='W':
   if completed_work:
    if not resume or config['fault']=='completed-repeat' or (config['fault']=='completed-missing-output' and (work/'work/launches').read_text().count('resume')==1):
     payload['mechanism_findings']=None
-   if config['fault']=='completed-blocked':payload['mechanism_findings']=[dict(mechanism='Fixture mechanism',basis='observed',finding='The first observation is retained.'),dict(mechanism='Second fixture mechanism',basis='blocked',finding='The second assigned comparison requires unavailable scientific input.')]
+   if config['fault']=='completed-blocked':payload['mechanism_findings']=[dict(mechanism='h001.m1',basis='observed',finding='The first observation is retained.'),dict(mechanism='h001.m2',basis='blocked',finding='The second assigned comparison requires unavailable scientific input.')]
    if config['fault']=='completed-decision':payload['stage_intent']='decision'
    if config['fault']=='completed-unresolved':
     payload['mechanism_findings']='An explicit narrative finding; the second target input is unavailable.'
@@ -170,20 +170,20 @@ elif role=='W':
     script.write_text('from pathlib import Path\nPath("artifacts/analysis.txt").write_text("A different assigned bounded observation")\nPath("artifacts/result.json").write_text('+repr(json.dumps(dict(version=1,metrics=[],outputs=[dict(path='artifacts/analysis.txt')])))+')\n')
     outcome=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.worker_execution_bridge',
      '--submission-directory',str(work/SUBMISSION_DIRECTORY),'run','--experiment-dir',str(directory),
-     '--script',str(script),'--mechanism','Second fixture mechanism'],capture_output=True,text=True)
+     '--script',str(script),'--mechanism','h001.m2'],capture_output=True,text=True)
     assert outcome.returncode==0,(outcome.stdout,outcome.stderr)
     result=json.loads(outcome.stdout);assert result['status']=='known_success'
     second.write_text(json.dumps(dict(call_id=result['call_id'])))
-    payload['mechanism_findings'].append(dict(mechanism='Second fixture mechanism',basis='observed',finding='A different retained assigned observation; scientific suitability remains for A.'))
+    payload['mechanism_findings'].append(dict(mechanism='h001.m2',basis='observed',finding='A different retained assigned observation; scientific suitability remains for A.'))
    if config['fault'].startswith('completed-caller-'):
-    payload['mechanism_findings']=[dict(mechanism='Fixture mechanism',basis='observed',finding='The first original observation is retained.')]
+    payload['mechanism_findings']=[dict(mechanism='h001.m1',basis='observed',finding='The first original observation is retained.')]
     import subprocess
     from scidiscovery.research_loop.worker_execution_bridge import SUBMISSION_DIRECTORY
     bridge=[sys.executable,'-m','scidiscovery.research_loop.worker_execution_bridge','--submission-directory',str(work/SUBMISSION_DIRECTORY)]
     directory=work/'experiments/second';directory.mkdir(parents=True,exist_ok=True)
     script=work/'code/second.py'
     script.write_text('from pathlib import Path\nPath("artifacts/analysis.txt").write_text("A different assigned bounded observation")\nPath("artifacts/result.json").write_text('+repr(json.dumps(dict(version=1,metrics=[],outputs=[dict(path='artifacts/analysis.txt')])))+')\n')
-    requested_mechanism='Fixture mechanism' if 'caller-improve' in config['fault'] else 'Second fixture mechanism'
+    requested_mechanism='h001.m1' if 'caller-improve' in config['fault'] else 'h001.m2'
     requested_ref='h001.m1' if 'caller-improve' in config['fault'] else 'h001.m2'
     arguments=['run','--experiment-dir',str(directory),'--script',str(script),'--mechanism',requested_mechanism]
     if not resume:
@@ -202,7 +202,7 @@ elif role=='W':
      second.write_text(json.dumps(dict(call_id=response['call_id'])))
      payload['mechanism_findings'].append(dict(mechanism=requested_mechanism,basis='observed',finding='The corrected request yielded the retained assigned observation.'))
     elif config['fault']=='completed-caller-blocked':
-     payload['mechanism_findings'].append(dict(mechanism='Second fixture mechanism',basis='blocked',finding='The command options were refused before this required observation started.'))
+     payload['mechanism_findings'].append(dict(mechanism='h001.m2',basis='blocked',finding='The command options were refused before this required observation started.'))
     else:payload['stage_intent']='decision'
  if config.get('output_repair_probe') and not completed_work and not resume and not config['fault'].startswith('nomination-layout'):payload.pop('summary')
 else:

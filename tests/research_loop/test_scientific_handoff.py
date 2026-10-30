@@ -36,7 +36,7 @@ def registered_scene(tmp_path,execution_registry):
 
 def plan(action='screen', existing_ref=None):
     return dict(scope='Bounded global scientific question', commitments=[dict(label='Mechanism',
-        minimal_test='Discriminating comparison', existing_ref=existing_ref)], focus=dict(label='Mechanism', action=action))
+        minimal_test='Discriminating comparison', existing_ref=existing_ref)], focus=dict(index=1, action=action))
 
 
 def focus(action='screen'):
@@ -75,7 +75,7 @@ def test_current_protocol_has_no_mechanical_reference_fields(role):
 
 FIRST = 'inputs/parents/002/artifacts/a.py'
 SECOND = 'inputs/parents/002/artifacts/b.py'
-PENDING_FINDINGS = [dict(mechanism='Mechanism',basis='blocked',
+PENDING_FINDINGS = [dict(mechanism='h001.m1',basis='blocked',
     finding='Implementation files alone do not establish a discriminating observation; evaluation remains pending.')]
 
 
@@ -96,12 +96,12 @@ def registered_worker(root,step,parents,*,text='Exact managed scientific contrib
     output=root/f'local-config-{step}.json'
     config=experiments.configure(root,step,'local_execution:command',dict(run_argv=[sys.executable]),output)
     script=c.workspace(root,step)/'work/managed-input.py';script.write_text('print("bounded fixture observation")\n')
-    result=experiments.dispatch(config,script,mechanism='Mechanism')
+    result=experiments.dispatch(config,script,mechanism='h001.m1')
     assert result['status']=='known_success'
     binding=result['mechanism_binding']
     assert binding['mechanism_ref']=='h001.m1' and binding['source_h']==1
     assert binding['source_h_ref']==c.record_ref(execution.origin(root,1)/'result-identity.json')
-    sealed=finish(root,step,'W',parents,text=text,mechanism_findings=[dict(mechanism='Mechanism',
+    sealed=finish(root,step,'W',parents,text=text,mechanism_findings=[dict(mechanism='h001.m1',
         basis='observed',finding='The managed fixture produced an observation; target-condition validity is untested.')],
         preserve_native_intent=True)
     assert (record/'native-intent.json').read_bytes()==original_intent

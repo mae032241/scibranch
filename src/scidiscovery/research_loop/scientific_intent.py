@@ -49,23 +49,30 @@ def resolve_intent(state, job, payload, *, assessed=None):
     choice=payload.get('search_plan') if role=='H' else payload.get('search_review')
     choice=choice if isinstance(choice,dict) else {}
     declared=choice.get('focus' if role=='H' else 'next_focus')
-    key='label' if role=='H' else 'mechanism_ref'
+    key='index' if role=='H' else 'mechanism_ref'
     invalid=declared is not None and (not isinstance(declared,dict) or not isinstance(declared.get('action'),str) or declared['action'] not in {'screen','improve','repair','validate'}
-        or declared.get(key) is not None and not isinstance(declared[key],str))
+        or key not in declared or 'label' in declared)
+    if declared is not None and not invalid:
+        name=declared[key]
+        if role=='H':
+            commitments=choice.get('commitments',[])
+            invalid=name is not None and (type(name) is not int or not isinstance(commitments,list) or not 1<=name<=len(commitments))
+        else:invalid=name is not None and not isinstance(name,str)
     if invalid:declared=None
-    elif declared is not None:declared=dict(declared,**{key:declared.get(key)})
     selected=None;diagnostics=[dict(code='science_choice_unresolved',subject='focus')] if invalid else []
-    if declared is not None and declared['label' if role=='H' else 'mechanism_ref'] is not None:
-        name=declared['label' if role=='H' else 'mechanism_ref']
-        matches=[name] if name in authorized else [ref for ref in authorized if mechanisms[ref]['label']==name]
-        selected=matches[0] if len(matches)==1 else None
+    if declared is not None and declared[key] is not None:
+        name=declared[key]
+        if role=='H':
+            item=choice['commitments'][name-1]
+            name=item.get('existing_ref') or f'h{job["step"]:03d}.m{name}'
+        selected=name if name in authorized else None
         if selected is None:
-            diagnostics.append(dict(code='science_focus_ambiguous' if matches else 'science_focus_unauthorized',subject=name))
+            diagnostics.append(dict(code='science_focus_unauthorized',subject=name))
         elif mechanisms[selected]['status']=='waived':
             diagnostics.append(dict(code='science_focus_waived',subject=selected))
         elif not (payload.get('route_reason') or '').strip():
             diagnostics.append(dict(code='science_focus_reason_required',subject=selected))
-    if declared is not None and declared['label' if role=='H' else 'mechanism_ref'] is None and declared['action']!='screen':
+    if declared is not None and declared[key] is None and declared['action']!='screen':
         diagnostics.append(dict(code='science_focus_required',subject=declared['action']))
     repair=declared is not None and declared['action']=='repair'
     if role=='A' and action not in {'audit','formal_review','extract','wait'} and assessed is not None:
@@ -84,7 +91,7 @@ def resolve_intent(state, job, payload, *, assessed=None):
     focus=None;allocation=None
     if action in {'experiment','continue_w'}:
         if declared is None:
-            diagnostics.append(dict(code='science_task_action_required',subject='W scientific task'))
+            if not diagnostics:diagnostics.append(dict(code='science_task_action_required',subject='W scientific task'))
         elif selected is None and not diagnostics and declared['action']=='screen':
             available=[item for item in remaining if item['mechanism_ref'] in authorized]
             if not available:

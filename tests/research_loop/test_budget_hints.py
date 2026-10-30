@@ -152,6 +152,7 @@ def test_soft_native_stdin_has_budget_advice_and_prelaunch_hint(tmp_path,role):
     code=code.replace("task=json.loads((work/'science-task.json').read_text())",
         "(work/'work/prompt.txt').write_text(prompt)\n"
         "hint=json.loads((work/'work/budget-status.json').read_text())\n"
+        "(work/'work/prelaunch-budget-hint.json').write_text(json.dumps(hint))\n"
         "assert hint['mode']=='soft' and hint['inflight_usage_unknown'] is True\n"
         "task=json.loads((work/'science-task.json').read_text())")
     launcher.write_text(code)
@@ -160,14 +161,20 @@ def test_soft_native_stdin_has_budget_advice_and_prelaunch_hint(tmp_path,role):
     reserve=budget.delivery_reserve(c.settings(root))
     start_clock(root,'soft native stdin fixture');native.execute_native(root,step)
     prompt=(c.workspace(root,step)/'work/prompt.txt').read_text()
-    ordinary=json.loads(prompt.split('Ordinary exploration budget advice: ',1)[1].splitlines()[0])
+    budgets=[json.JSONDecoder().raw_decode(line)[0] for line in prompt.splitlines() if line.startswith('{')]
+    shared=next(value for value in budgets if 'shared_observed_tokens_remaining' in value)
+    ordinary=shared['exploration']
+    local=c.read(c.workspace(root,step)/'work/prelaunch-budget-hint.json')
     assert ordinary['observed_tokens_remaining_upper_bound']==100_000-previous['accounted_tokens']-reserve['tokens']
     assert 0<ordinary['active_seconds_available']<=120-reserve['seconds']
-    assert ordinary['basis']=='shared_authorization_minus_existing_final_or_closeout_reserve'
-    assert ordinary['observed_usage_is_lower_bound'] and ordinary['inflight_usage_unknown']
-    assert ordinary['unknown_usage']  # This current native task has no outcome or usage before submission.
-    for text in ('Budget mode: soft','work/budget-status.json','cached input is already included',
-            'Unknown usage is not zero','no per-request budget admission','guaranteed final-response allowance',
-            'Do not independently compute, compare, or revalidate file/evidence hashes'):
+    assert shared['shared_observed_tokens_remaining']==ordinary['observed_tokens_remaining_upper_bound']
+    assert shared['node_budget']==c.read(execution.origin(root,step)/'native-intent.json')['budget_slice']['limits']
+    assert local['shared_observed_tokens_remaining_upper_bound']==ordinary['observed_tokens_remaining_upper_bound']
+    assert local['per_request_admission']=='unavailable' and local['final_response_allowance']=='not_guaranteed'
+    assert local['inflight_usage_unknown'] and local['reporting_delay_unmeasured']
+    assert ordinary['token_usage_unknown']  # This current native task has no outcome or usage before submission.
+    assert 'unknown_usage' not in ordinary
+    for text in ('Soft targets','work/budget-status.json','cached once',
+            'unknown tokens!=0','no grant','no control wrappers/hashes'):
         assert text in prompt
     assert c.read(execution.record(root,step)/'native-outcome.json')['stop_reason'] is None

@@ -26,9 +26,9 @@ from .contracts import (ACTIONS, actions, ROLE_INSTRUCTIONS, record_ref, file_re
                         seal_result, workspace, write, NATIVE_TASK_INSTRUCTION, decode_scientific_output)
 
 
-RESUME_INSTRUCTION = 'Resume same task/scope/permissions/budget; no unknown-call replay.'
-OUTPUT_REPAIR_INSTRUCTION = 'Fix diagnosed JSON/layout only; no new work/rerun/resubmit: '
-WORK_REPAIR_INSTRUCTION = 'Complete missing assigned work under original authorization; reuse exact calls/results, never resubmit. Report obstacles/limits. Diagnosis: '
+RESUME_INSTRUCTION = 'Resume same task/scope/permissions/budget; no accepted unknown-call replay.'
+OUTPUT_REPAIR_INSTRUCTION = 'Fix diagnosed JSON/layout only; return full JSON preserving other science/plans/limits. No work/rerun/resubmit this turn; future W authorization unchanged. No prior experiment implied: '
+WORK_REPAIR_INSTRUCTION = 'Complete missing assigned work under original authorization; reuse results; never replay accepted unknown calls. Report obstacles/limits. Diagnosis: '
 FRAGMENT_INSTRUCTION = 'Read work/science-resume.json; continue per stage_response.'
 
 
@@ -50,9 +50,9 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
         if job['role']=='A':instruction+='\n'+c.AUTHOR_EVIDENCE_GUIDANCE
         rules=c.response_instructions(job)
         if all(task.get(key)==value for key,value in rules.items()):
-            format_rule='Current fields override task formats; extra science optional.'
+            format_rule='Current format; extra science allowed.'
         else:
-            format_rule=('Current response rules replace older output shapes only; scientific scope stays binding: '
+            format_rule=('Response rules supersede old formats; scientific scope binds: '
                 +json.dumps(rules,ensure_ascii=False,separators=(',',':')))
         if backend_name=='codex':
             properties=schema['properties']
@@ -64,13 +64,13 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
         instruction+='\n'+format_rule
         prompt=('Read science-task.json/inputs; JSON only. '
             'Edit code/ or work/ copies only; no control wrappers/hashes. '
-            'work/budget-status.json: stale/partial, no grant; unknown!=0; cached once.')
+            'work/budget-status.json: partial/stale token billing, no grant; unknown tokens!=0; cached once.')
         if final_return:
             prompt+=(' Protected FINAL: conclude now; no new role/audit/experiment. '
                 'Reference token/time/step ceilings do not revoke this accepted return; original call limits, '
                 'permissions and delivery qualification still apply.')
         else:
-            prompt+=' Soft targets keep accepted work; call limits/permissions apply.'
+            prompt+=' Soft targets; call limits/permissions apply.'
             if (job['role'] in {'A','H','W'} and not author
                     and not output_only_wake and not intent.get('output_repair') and not intent.get('work_repair')
                     and job.get('purpose')!='closeout' and not job.get('final_report') and not job.get('final_only')):
@@ -82,12 +82,12 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
         prompt+='\nManaged execution: '+json.dumps(dict(command=managed_command,
             lifecycle=execution_interface['capabilities'],result_protocol=execution_interface['result_protocol']),
             ensure_ascii=False,separators=(',',':'))
-        prompt+=(' Read capabilities/describe before run; use original IDs, never replay unknowns. '
-            'Pause code/ edits during capture; logs/outputs stay outside code/.')
+        prompt+=(' Read capabilities/describe first; use original IDs; never replay accepted unknown calls. '
+            'Freeze code/ during capture; logs/outputs outside code/.')
     if job['role']=='W' and ('managed_execution_wait' in job or execution_interface is not None or intent.get('execution_wake')):
-        prompt+=' Follow handoff.action: poll pending originals; finalize_response=scientific JSON; return_control=wait.'
+        prompt+=' handoff.action: poll pending originals; finalize_response=JSON; return_control=wait.'
     if job['role']=='W' and not output_only_wake and not author:
-        prompt+=' engineering_check covers its sample only, not training/audit.'
+        prompt+=' engineering_check: sample only, not training/audit.'
     if remaining is not None:
         prompt+='\n'+json.dumps(remaining,separators=(',',':'))
         if not intent.get('output_repair') and not intent.get('work_repair'):
@@ -424,9 +424,9 @@ def run_native(root: Path, step: int, attempt=0):
     if intent.get('budget_slice'):status['node_budget']=intent['budget_slice']['limits']
     remaining=None
     if attempt:
-        remaining=dict(observed_tokens=max(0,intent['budget_slice']['limits']['max_observed_tokens']-intent['budget_slice']['previous_tokens']),
-            active_seconds=max(0.,intent['budget_slice']['limits']['max_seconds']-control_budget._node_duration(root,job,intent,limits)),
-            mode='soft_targets',previous_observed_tokens=intent['budget_slice']['previous_tokens'])
+        remaining=dict(remaining_observed_tokens=max(0,intent['budget_slice']['limits']['max_observed_tokens']-intent['budget_slice']['previous_tokens']),
+            remaining_active_seconds=max(0.,intent['budget_slice']['limits']['max_seconds']-control_budget._node_duration(root,job,intent,limits)),
+            mode='soft_targets',previous_consumed_observed_tokens=intent['budget_slice']['previous_tokens'])
     command=None;interface=None
     if experiment_config is not None:
         interface=experiment_config['execution_interface']
@@ -455,7 +455,7 @@ def run_native(root: Path, step: int, attempt=0):
             and intent.get('continuation_kind')!='author_closeout'):
         available=control_budget.execution_available(root,job,limits,budget)
         status['exploration']=dict(observed_tokens_remaining_upper_bound=available['tokens'],
-            active_seconds_available=available['seconds'],unknown_usage=bool(budget.get('unknown_steps')))
+            active_seconds_available=available['seconds'],token_usage_unknown=bool(budget.get('unknown_steps')))
     prompt,role_instruction,response_schema=render_scientific_request(job,task,intent,backend_name=backend.name,
         instruction_transport=backend.instruction_transport,budget_status=status,remaining=remaining,
         execution_interface=interface,managed_command=command,output_only_wake=output_only_wake,
@@ -786,7 +786,7 @@ def run_native(root: Path, step: int, attempt=0):
     if not pending.exists():
         outcome['output_status'] = 'missing'
         write(record / 'native-outcome.json', outcome)
-        raise OutputRepairRequired('missing_output', 'Return the required final scientific JSON; the completed work and checkpoints are already retained.')
+        raise OutputRepairRequired('missing_output', 'Return complete scientific JSON; preserve original facts/plans/limits. No work this repair turn; reuse prior results/checkpoints only if they exist.')
     os.replace(pending, raw)
     outcome['raw_ref'] = file_ref(raw)
     try:

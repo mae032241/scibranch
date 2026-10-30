@@ -56,13 +56,13 @@ def test_real_bridge_missing_runtime_directory_runs_fixed_local_code(tmp_path,mo
     server=_receiver(root,config,monkeypatch,launch=launch)
     for directory in ('code/screen','scratch/runtime','experiments/nested/runtime'):
         refused=bridge.client(server.directory,['run','--experiment-dir',directory,
-            '--script','code/screen/run.py','--mechanism','P'])
+            '--script','code/screen/run.py','--mechanism','h001.m1'])
         assert refused['code']==2 and refused['result']['status']=='caller_error'
         assert refused['result']['accepted'] is False
     assert not (work/'scratch').exists() and not (work/'experiments/nested').exists()
     assert not e.Records(config).calls() and launched==[]
     arguments=['run','--experiment-dir','experiments/direct','--script','code/screen/run.py',
-        '--new-plan','--mechanism','P']
+        '--new-plan','--mechanism','h001.m1']
     reply=bridge.client(server.directory,arguments)
     assert reply['code']==0 and reply['result']['status']=='known_success'
     call=reply['result']['call_id'];assert launched==[call]
@@ -84,10 +84,10 @@ def test_real_client_caches_actionable_input_refusals_for_worker_correction(tmp_
     root,job,config,_=case(tmp_path,monkeypatch,executor='local_execution:command')
     work=c.workspace(root,2);(work/'code/directory').mkdir(parents=True)
     server=_receiver(root,config,monkeypatch,launch=lambda *args:pytest.fail('Refusal launched a process'))
-    cases=[['run','--payload','code/directory','--mechanism','P'],
+    cases=[['run','--payload','code/directory','--mechanism','h001.m1'],
         ['compile','--implementation','code/missing.json','--scientific-files','code/directory','--output','artifacts/new.json'],
         ['compile','--scientific-files','code/directory','--implementation','code/missing.json','--output','artifacts/new.json'],
-        ['run','--experiment-dir','experiments/direct','--script','run.py','--mechanism','P']]
+        ['run','--experiment-dir','experiments/direct','--script','run.py','--mechanism','h001.m1']]
     for arguments in cases:
         _assert_refusal(bridge.client(server.directory,arguments),root)
         request=c.read(server.directory/'submit.json');claim=server.claims/request['submission_ref']
@@ -114,7 +114,7 @@ def test_shared_input_reference_types_direct_cli_inputs(tmp_path,monkeypatch,exe
     for path,error in ((work/'code/missing.py','scientific_input_not_found'),(directory,'scientific_input_unusable')):
         with pytest.raises(e.CallerError) as caught:experiment_client.input_reference(config,path)
         assert caught.value.error==error and str(root) not in str(caught.value)
-    for arguments in (['run','--payload',str(directory),'--mechanism','P'],
+    for arguments in (['run','--payload',str(directory),'--mechanism','h001.m1'],
             ['compile','--scientific-files',str(directory),'--implementation',str(work/'code/missing.json'),
                 '--output',str(work/'artifacts/new.json')]):
         assert e.main(['--config',str(work/'work/experiment-config.json'),*arguments])==2
@@ -139,9 +139,9 @@ def test_missing_bound_original_remains_integrity_failure_at_bridge_and_dispatch
     # The alias cannot turn a lost bound original into an author-owned typo.
     if logical.exists():logical.unlink()
     with pytest.raises(e.IntegrityError):experiment_client.input_reference(config,logical)
-    with pytest.raises(e.IntegrityError):e.dispatch(config,logical,new=True,mechanism='P')
+    with pytest.raises(e.IntegrityError):e.dispatch(config,logical,new=True,mechanism='h001.m1')
     server=_receiver(root,config,monkeypatch,launch=lambda *args:pytest.fail('Broken original launched'))
-    reply=bridge.client(server.directory,['run','--script','inputs/bound.py','--mechanism','P'])
+    reply=bridge.client(server.directory,['run','--script','inputs/bound.py','--mechanism','h001.m1'])
     assert reply['code']==3 and reply['result']['status']=='integrity_error'
     assert reply['result'].get('accepted') is not False
     assert reply['result']['handoff']['action']=='reconcile_or_stop'
@@ -154,11 +154,11 @@ def test_unknown_accepted_original_never_becomes_worker_correction(tmp_path,monk
     root,job,config,_=case(tmp_path,monkeypatch,outcome='unknown')
     work=c.workspace(root,2);source=work/'code/source.json';source.parent.mkdir(exist_ok=True);source.write_text('{}')
     server=_receiver(root,config,monkeypatch,launch=lambda *args:pytest.fail('Remote fixture launched Local'))
-    reply=bridge.client(server.directory,['run','--payload','code/source.json','--new-plan','--mechanism','P'])
+    reply=bridge.client(server.directory,['run','--payload','code/source.json','--new-plan','--mechanism','h001.m1'])
     assert reply['result']['status']=='unknown'
     call=reply['result']['call_id'];directory=e.Records(config).directory(call)
     before={name:(directory/name).read_bytes() for name in ('accepted.json','completed.json','submission.json')}
-    _assert_refusal(bridge.client(server.directory,['run','--script','code/missing.py','--mechanism','P']),root)
+    _assert_refusal(bridge.client(server.directory,['run','--script','code/missing.py','--mechanism','h001.m1']),root)
     assert bridge.terminal_caller_error(root,job,execution.record(root,2)) is None
     assert worker_delivery._caller_correction(root,job,execution.record(root,2)) is None
     assert len(e.Records(config).calls())==1

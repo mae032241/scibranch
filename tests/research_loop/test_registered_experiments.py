@@ -24,12 +24,25 @@ def managed(tmp_path,execution_registry):
     executor='local_execution:command'
     config.write_text(json.dumps(experiments.freeze(value,executor,path=config)))
     env=dict(os.environ,PYTHONPATH=str(Path(experiments.__file__).parents[2])+os.pathsep+os.environ.get('PYTHONPATH',''))
-    command=[sys.executable,'-m','scidiscovery.research_loop.experiments']
+    # These standalone registration/admission lifecycle tests retain the real
+    # CLI, Records and Local Popen behind the existing trusted-host test seam.
+    # Native namespace/permission qualification is covered separately.
+    command=[sys.executable,'-c',
+        'from scidiscovery.research_loop import experiments, worker_execution_bridge as bridge\n'
+        'bridge._LOCAL_LAUNCH.set(lambda config,accepted,command,cwd:(command,cwd,None))\n'
+        'raise SystemExit(experiments.main())']
 
     def invoke(*args,expected=0):
         reply=subprocess.run([*command,'--config',str(config),*map(str,args)],cwd=tmp_path,env=env,
             capture_output=True,text=True,timeout=20)
-        assert reply.returncode==expected,(reply.stdout,reply.stderr)
+        diagnostics={}
+        diagnostic_root=tmp_path/'work/execution-diagnostics'
+        if reply.returncode!=expected and diagnostic_root.is_dir():
+            for path in sorted(diagnostic_root.iterdir())[:4]:
+                if path.is_file() and not path.is_symlink():
+                    with path.open('rb') as stream:
+                        diagnostics[path.name]=stream.read(4096).decode('utf-8',errors='replace')
+        assert reply.returncode==expected,(reply.stdout,reply.stderr,diagnostics)
         assert not reply.stderr
         return json.loads(reply.stdout)
 

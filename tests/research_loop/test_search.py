@@ -20,7 +20,7 @@ def plan(label='Mechanism', existing_ref=None, action='screen', other=False):
     rows = [dict(label=label, minimal_test='A bounded discriminating measurement', existing_ref=existing_ref)]
     if other:
         rows.append(dict(label='Unexplored mechanism', minimal_test='Independent negative control', existing_ref=None))
-    return dict(scope='Original scientific H scope', commitments=rows, focus=dict(label=label, action=action))
+    return dict(scope='Original scientific H scope', commitments=rows, focus=dict(index=1, action=action))
 
 
 def focus(ref='h001.m1', action='improve'):
@@ -61,7 +61,7 @@ def worker(root, step, parents, *, observed=None, cov=False, qualified_local=Fal
     mechanisms = config['breadth']['mechanisms']
     if observed is None:
         observed = [job['search']['focus']['mechanism_ref']]
-    selected = [row for row in mechanisms if row['mechanism_ref'] in observed or row['label'] in observed]
+    selected = [row for row in mechanisms if row['mechanism_ref'] in observed]
     assert len(selected) == len(observed)
     for row in selected:
         result = run_command(root, config, row['mechanism_ref'], qualified_local=qualified_local)
@@ -391,10 +391,10 @@ job=json.loads((work/'science-task.json').read_text());step=int(work.name)
 mode=os.environ.get('N3_FIXTURE_MODE','normal')
 payload=dict(summary='Scientific fixture result',scientific_result='Blocked mechanical fixture; no scientific effectiveness claim.',limitations=['No model or scientific qualification'],implementation_selection=None)
 if role=='H':
- payload.update(next_action='experiment',route_reason='Test the declared route',search_plan=dict(scope='Bounded H scope',commitments=[dict(label='Mechanism',minimal_test='Discriminating measurement',existing_ref=None)],focus=dict(label='Mechanism',action='screen')))
+ payload.update(next_action='experiment',route_reason='Test the declared route',search_plan=dict(scope='Bounded H scope',commitments=[dict(label='Mechanism',minimal_test='Discriminating measurement',existing_ref=None)],focus=dict(index=1,action='screen')))
 elif role=='W':
  manifest=json.loads(pathlib.Path(os.environ['THIN_HWA_JOB_MANIFEST']).read_text())
- payload.update(stage_intent='review',mechanism_findings=[dict(mechanism='Mechanism',basis='blocked',finding='This transport fixture runs no managed scientific observation.')],
+ payload.update(stage_intent='review',mechanism_findings=[dict(mechanism='h001.m1',basis='blocked',finding='This transport fixture runs no managed scientific observation.')],
   candidate_nominations=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row['mechanism_ref'],
    reason='This transport fixture produces no scientific candidate to compare.')
    for row in manifest['candidate_nomination_mechanisms'] if row['status']!='waived'])
@@ -449,7 +449,7 @@ def test_utf8_long_scientific_commitments_keep_default_view_bounded(scene):
     value = plan()
     value['scope'] = '原始科学问题与适用条件' * 200
     value['commitments'] = [dict(label='机制' + str(i) + '文' * 90, minimal_test='科学' * 900, existing_ref=None) for i in range(6)]
-    value['focus']['label'] = value['commitments'][0]['label']
+    value['focus']['index'] = 1
     finish(scene, 1, 'H', [], action='experiment', search_choice=value)
     assert c.validate(c.workspace(scene, 1))['search_plan'] == value
     job = c.build_job(scene, 2, 'W', [1])
@@ -464,7 +464,7 @@ def test_a_can_seal_more_than_four_scientific_dispositions_with_full_reasons(sce
     value = plan()
     value['commitments'] = [dict(label=f'Mechanism {index}', minimal_test='Independent comparison', existing_ref=None)
         for index in range(6)]
-    value['focus']['label'] = value['commitments'][0]['label']
+    value['focus']['index'] = 1
     finish(scene, 1, 'H', [], action='analyze', search_choice=value)
     choice = dict(dispositions=[dict(mechanism_ref=f'h001.m{index}', status='deferred',
         reason='保留尚未测量的机制及其科学限制' * 200) for index in range(1, 7)], next_focus=None)

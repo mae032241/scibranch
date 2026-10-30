@@ -1846,10 +1846,10 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, pa
     _require_new_execution(config)
     opportunities=breadth.validate(config.get('breadth'))
     if opportunities is not None and not opportunities['prior_unknown']:
-        matches=[row for row in opportunities['mechanisms'] if mechanism in (row['mechanism_ref'],row['label'])]
+        matches=[row for row in opportunities['mechanisms'] if mechanism==row['mechanism_ref']]
         if len(matches)!=1:
             problem='matches multiple mechanisms' if matches else 'does not select a declared mechanism'
-            raise CallerError(f'The --mechanism choice {problem}; choose one exact H mechanism reference or its unique scientific label.')
+            raise CallerError(f'The --mechanism choice {problem}; choose one exact mechanism_ref listed in this task.')
     try:records.preflight(expected_calls=expected_calls,mechanism=mechanism)
     except (ReviewRequired,breadth.OpportunityRequired) as error:_raise_admission_refusal(error)
     except ConcurrentExecution:return None

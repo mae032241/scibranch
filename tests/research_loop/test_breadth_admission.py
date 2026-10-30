@@ -41,15 +41,16 @@ def tree(root):
         for path in [root,*root.rglob('*')]}
 
 
-def run(lane,name,mechanism='P',*,failed=False,expected=0):
+def run(lane,name,mechanism='h001.m1',*,failed=False,expected=0):
     script=lane.source(name,failed=failed)
     return lane.cli('run','--script',script,'--mechanism',mechanism,'--new-plan',expected=expected)
 
 
-def rejected(lane,script,mechanism='P'):
+def rejected(lane,script,mechanism='h001.m1'):
     before=tree(lane.records)
     result=lane.cli('run','--script',script,'--mechanism',mechanism,'--new-plan',expected=2)
-    assert result['status']=='unresolved' and 'initial call opportunities' in result['note']
+    assert result['status']=='unresolved' and result['accepted'] is False
+    assert result['note']=='Choose an available authorized H mechanism before another request'
     assert tree(lane.records)==before
     return result
 
@@ -109,8 +110,8 @@ def test_failed_call_changed_script_and_forged_native_attempt_do_not_reset_oppor
     original_config=lane.config.read_bytes()
     configure(lane,combination(),native_attempt=dict(number=1,execution_key=dict(path='/fixture/native-evidence/002/continuations/001/native-intent.json')))
     before=tree(lane.records)
-    invalid=lane.cli('run','--script',lane.source('unbound-repair-P'),'--mechanism','P','--new-plan',expected=3)
-    assert invalid['status']=='integrity_error' and invalid['note']=='Original execution native attempt is unavailable'
+    invalid=lane.cli('run','--script',lane.source('unbound-repair-P'),'--mechanism','h001.m1','--new-plan',expected=3)
+    assert invalid['status']=='integrity_error' and invalid['note']=='Execution original integrity check failed; preserve originals and report this call'
     assert tree(lane.records)==before
     # A standalone fixture cannot invent a repair's native originals. Restoring
     # the exact original configuration must still retain its consumed opportunity.
@@ -118,7 +119,7 @@ def test_failed_call_changed_script_and_forged_native_attempt_do_not_reset_oppor
     rejected(lane,lane.source('restored-original-P'))
     assert originals(lane)==[original]
     assert len(list(lane.records.glob('calls/*/process.json')))==1
-    assert run(lane,'Q-after-failed-P','Q')['status']=='known_success'
+    assert run(lane,'Q-after-failed-P','h001.m2')['status']=='known_success'
 
 
 @pytest.mark.process_e2e
@@ -132,12 +133,15 @@ def test_lost_terminal_originals_cannot_be_replayed_under_any_mechanism(lane):
     (directory/'completed.json').unlink()
     before=tree(lane.records)
     assert lane.cli('query','--call-id',result['call_id'])['state']=='unknown'
-    assert lane.cli('collect','--call-id',result['call_id'],expected=2)['status']=='unavailable'
+    collected=lane.cli('collect','--call-id',result['call_id'],expected=3)
+    assert collected['status']=='integrity_error' and collected['accepted'] is True
+    assert collected['call_id']==result['call_id']
     assert tree(lane.records)==before
-    for mechanism in ('P','Q'):
+    for mechanism in ('h001.m1','h001.m2'):
         retry=lane.source('retry-'+mechanism)
-        reply=lane.cli('run','--script',retry,'--mechanism',mechanism,'--new-plan',expected=2)
-        assert reply['status']=='unknown' and tree(lane.records)==before
+        reply=lane.cli('run','--script',retry,'--mechanism',mechanism,'--new-plan',expected=3)
+        assert reply['status']=='integrity_error' and reply['accepted'] is True
+        assert reply['call_id']==result['call_id'] and tree(lane.records)==before
     assert len(originals(lane))==len(list(lane.records.glob('calls/*/process.json')))==1
 
 
@@ -164,14 +168,16 @@ def test_exact_a_extra_one_call_is_consumed_once_and_queries_collect_remain_avai
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('kind',['missing','ambiguous','unauthorized'])
-def test_scientific_label_must_resolve_exactly_before_accept_or_process(lane,kind):
+@pytest.mark.parametrize('kind',['missing','label','ambiguous','unauthorized'])
+def test_scientific_mechanism_requires_exact_ref_before_accept_or_process(lane,kind):
     if kind=='ambiguous':configure(lane,combination(ambiguous=True))
     source=lane.source('unbound-'+kind)
     args=['run','--script',source,'--new-plan']
-    if kind!='missing':args+=['--mechanism','same' if kind=='ambiguous' else 'not-authorized']
+    if kind!='missing':args+=['--mechanism','same' if kind=='ambiguous' else 'P' if kind=='label' else 'not-authorized']
     reply=lane.cli(*args,expected=2)
-    assert reply['status']=='unresolved' and 'exact authorized H mechanism' in reply['note']
+    assert reply['status']=='caller_error' and reply['accepted'] is False
+    assert 'exact mechanism_ref listed in this task' in reply['note']
+    assert 'call_id' not in reply
     assert originals(lane)==[] and not list(lane.records.glob('calls/*/process.json'))
     assert not list(lane.records.glob('.prepared-*'))
     assert not list(lane.records.rglob('starts.log'))
@@ -185,6 +191,7 @@ def test_completed_receipt_cannot_change_exact_a_authorization(lane):
     result=run(lane,'exact-A-original')
     path=lane.records/'calls'/result['call_id']/'completed.json'
     receipt=json.loads(path.read_text());receipt['mechanism_binding']['grant']['source_a_ref']=dict(path='/fixture/native-evidence/005/result-identity.json')
+    path.chmod(0o600)  # Explicit host corruption of a sealed receipt.
     path.write_text(json.dumps(receipt))
     reply=lane.cli('query','--call-id',result['call_id'],expected=3)
     assert reply['status']=='integrity_error'

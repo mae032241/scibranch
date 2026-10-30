@@ -34,7 +34,7 @@ def _local_case(tmp_path, monkeypatch):
     return root, job, config, _receiver(root, config, monkeypatch, launch=launch), launched
 
 
-def _run_candidates(root, server, *, count, unknown_metric=False, mechanism='P'):
+def _run_candidates(root, server, *, count, unknown_metric=False, mechanism='h001.m1'):
     source = c.workspace(root, 2) / 'code/candidates/run.py'
     source.parent.mkdir(parents=True)
     source.write_text('import json,pathlib,sys\n'
@@ -63,10 +63,10 @@ def _reply_debug(server, reply):
     return dict(reply=reply, host_diagnostic=diagnostic)
 
 
-def _seal_worker(root, *, observed=('P',)):
+def _seal_worker(root, *, observed=('h001.m1',)):
     finish(root, 2, 'W', [1], preserve_native_intent=True,
         mechanism_findings=[dict(mechanism=label, basis='observed' if label in observed else 'blocked',
-            finding='Inert contract fixture; missing scientific qualification remains explicit.') for label in ('P', 'Q')])
+            finding='Inert contract fixture; missing scientific qualification remains explicit.') for label in ('h001.m1', 'h001.m2')])
     record = execution.record(root, 2)
     seal = c.read(record / 'result-identity.json')
     return c.read(root / seal['observations']['path'])
@@ -162,10 +162,10 @@ def test_registered_unknown_measurement_and_failed_unknown_execution_keep_distin
     failed_source.parent.mkdir(parents=True)
     failed_source.write_text('raise SystemExit(7)\n')
     reply = bridge.client(server.directory, ['run', '--experiment-dir', 'experiments/failure',
-        '--script', 'code/failure/run.py', '--new-plan', '--mechanism', 'Q'])
+        '--script', 'code/failure/run.py', '--new-plan', '--mechanism', 'h001.m2'])
     assert reply['code'] == 1 and reply['result']['status'] == 'known_failed', _reply_debug(server, reply)
     failed = reply['result']['call_id']
-    facts = _seal_worker(root, observed=('P', 'Q'))
+    facts = _seal_worker(root, observed=('h001.m1', 'h001.m2'))
     assert launched == [success, failed]
     assert [row['status'] for row in facts['managed_calls']] == ['known_success', 'known_failed']
     assert len(facts['candidates']) == 2
@@ -208,7 +208,7 @@ def test_registered_unknown_measurement_and_failed_unknown_execution_keep_distin
         return submit(adapter, descriptor)
     monkeypatch.setattr(DifferentExternalIdentity, 'submit', submitted)
     assert e.main(['--config', str(c.workspace(root, 2) / 'work/experiment-config.json'),
-        'run', '--payload', str(source), '--new-plan', '--mechanism', 'P']) == 2
+        'run', '--payload', str(source), '--new-plan', '--mechanism', 'h001.m1']) == 2
     result = json.loads(capsys.readouterr().out)
     assert result['status'] == 'unknown', result
     unknown = result['call_id']

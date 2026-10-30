@@ -24,7 +24,7 @@ def case(tmp_path, monkeypatch, outcome='known_success', executor='remote_execut
             node_budget_policy={role:dict(max_observed_tokens=1000,max_seconds=30) for role in 'HWAE'}) if resume else {}))
     finish(root,1,'H',[],action='experiment',search_choice=dict(scope='Two explicit synthetic mechanisms',
         commitments=[dict(label=label,minimal_test='Compare the declared synthetic observation',existing_ref=None)
-            for label in ('P','Q')],focus=dict(label=None,action='screen')))
+            for label in ('P','Q')],focus=dict(index=None,action='screen')))
     job=c.build_job(root,2,'W',[1]);record=execution.record(root,2)
     node_anchor=budget.accept_node(root,job)
     anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,job))
@@ -56,7 +56,7 @@ def run(root,cli,label,outcome='known_success'):
 @pytest.mark.parametrize('outcome,state',[('known_success','succeeded'),('known_failed','failed')])
 def test_remote_cli_terminal_collect_history_worker_a_and_successor_admission(tmp_path,remote_registry,monkeypatch,outcome,state):
     root,job,config,cli=case(tmp_path,monkeypatch,outcome)
-    results=[run(root,cli,label,outcome) for label in ('P','Q')]
+    results=[run(root,cli,ref,outcome) for ref in ('h001.m1','h001.m2')]
     for result in results:
         directory=e.Records(config).directory(result['call_id'])
         assert not (directory/'process.json').exists() and not (directory/'terminal.json').exists()
@@ -64,7 +64,7 @@ def test_remote_cli_terminal_collect_history_worker_a_and_successor_admission(tm
         assert cli('lookup','--call-id',result['call_id'])['state']==state
         collected=cli('collect','--call-id',result['call_id'])
         assert collected['status']=='collected' and len(collected['outputs'])==1
-    findings=[dict(mechanism=label,basis='observed',finding='Synthetic terminal observation; science remains unqualified.') for label in ('P','Q')]
+    findings=[dict(mechanism=label,basis='observed',finding='Synthetic terminal observation; science remains unqualified.') for label in ('h001.m1','h001.m2')]
     finish(root,2,'W',[1],mechanism_findings=findings,preserve_native_intent=True)
     record=execution.record(root,2);seal=c.read(record/'result-identity.json')
     facts=c.read(root/seal['observations']['path'])
@@ -138,7 +138,7 @@ def test_remote_cli_terminal_collect_history_worker_a_and_successor_admission(tm
     next_config=e.configure(root,4,'remote_execution:fixture',{},c.workspace(root,4)/'work/experiment-config.json')
     assert not next_config['breadth']['prior_unknown']
     package=c.workspace(root,4)/'work/new-package';package.write_bytes(b'new authorized opaque input')
-    assert e.dispatch(next_config,package,new=True,mechanism='P')['status']=='known_success'
+    assert e.dispatch(next_config,package,new=True,mechanism='h001.m1')['status']=='known_success'
     # Sealed readers never load or query the plugin, and do not reconstruct facts.
     before={p:p.read_bytes() for p in root.rglob('*') if p.is_file()}
     monkeypatch.setattr(e,'load',lambda *a,**kw:pytest.fail('sealed validation queried an adapter'))
@@ -150,7 +150,7 @@ def test_remote_cli_terminal_collect_history_worker_a_and_successor_admission(tm
 @pytest.mark.parametrize('fault',['missing-observation','accepted','completed','external-id','native-proof','collected'])
 def test_remote_terminal_missing_or_tampered_originals_never_become_known(tmp_path,remote_registry,monkeypatch,fault):
     root,job,config,cli=case(tmp_path,monkeypatch)
-    result=run(root,cli,'P');directory=e.Records(config).directory(result['call_id'])
+    result=run(root,cli,'h001.m1');directory=e.Records(config).directory(result['call_id'])
     if fault=='missing-observation':
         (directory/'execution-observation.json').unlink()
         rows=history.managed_calls(root,job)
@@ -179,12 +179,12 @@ def test_remote_terminal_missing_or_tampered_originals_never_become_known(tmp_pa
 @pytest.mark.process_e2e
 def test_remote_unknown_is_preserved_without_replay_or_worker_qualification(tmp_path,remote_registry,monkeypatch):
     root,job,config,cli=case(tmp_path,monkeypatch,'unknown')
-    result=run(root,cli,'P','unknown')
+    result=run(root,cli,'h001.m1','unknown')
     directory=e.Records(config).directory(result['call_id'])
     assert not (directory/'execution-observation.json').exists()
     assert history.managed_calls(root,job)[0]['status']=='unknown'
     package=c.workspace(root,2)/'work/another';package.write_bytes(b'never submitted')
-    assert e.dispatch(config,package,new=True,mechanism='Q')['status']=='unknown'
+    assert e.dispatch(config,package,new=True,mechanism='h001.m2')['status']=='unknown'
     assert len(e.Records(config).calls())==1
     accepted=c.read(directory/'accepted.json');completed=c.read(directory/'completed.json')
     assert not worker_delivery._candidate(root,accepted,completed,None)
@@ -195,7 +195,7 @@ def test_remote_unknown_is_preserved_without_replay_or_worker_qualification(tmp_
 def test_local_control_observation_keeps_local_terminal_guarantees(tmp_path,execution_registry,monkeypatch,fault):
     root,job,config,cli=case(tmp_path,monkeypatch,executor='local_execution:command')
     source=c.workspace(root,2)/'work/local.py';source.write_text('print("local original")\n')
-    result=e.dispatch(config,source,new=True,mechanism='P');directory=e.Records(config).directory(result['call_id'])
+    result=e.dispatch(config,source,new=True,mechanism='h001.m1');directory=e.Records(config).directory(result['call_id'])
     observed=c.read(directory/'execution-observation.json')
     if fault=='masquerade':
         observed['interface']=dict(observed['interface'],terminal_evidence='adapter_result')
@@ -216,7 +216,7 @@ def test_local_control_observation_keeps_local_terminal_guarantees(tmp_path,exec
 def test_legacy_local_receipts_remain_readable_without_creating_control_facts(tmp_path,execution_registry,monkeypatch):
     root,job,config,cli=case(tmp_path,monkeypatch,executor='local_execution:command')
     source=c.workspace(root,2)/'work/local.py';source.write_text('pass\n')
-    result=e.dispatch(config,source,new=True,mechanism='P');directory=e.Records(config).directory(result['call_id'])
+    result=e.dispatch(config,source,new=True,mechanism='h001.m1');directory=e.Records(config).directory(result['call_id'])
     accepted=c.read(directory/'accepted.json');old=copy.deepcopy(config['execution_interface'])
     old.pop('observation_version');old.pop('terminal_evidence');accepted['interface']=old
     c.write(directory/'accepted.json',accepted)
@@ -235,7 +235,7 @@ def test_legacy_cov_receipts_keep_original_terminal_authority(tmp_path,execution
     from test_breadth_science import prepare,h,worker,run
     root=prepare(tmp_path,cov=True);h(root,labels=('P',))
     job,config=worker(root,tmp_path,2,[1],cov=True)
-    result=run(root,config,'P');directory=e.Records(config).directory(result['call_id'])
+    result=run(root,config,'h001.m1');directory=e.Records(config).directory(result['call_id'])
     accepted=c.read(directory/'accepted.json');old=copy.deepcopy(config['execution_interface'])
     old.pop('observation_version');old.pop('terminal_evidence');accepted['interface']=old
     c.write(directory/'accepted.json',accepted)
@@ -251,7 +251,7 @@ def test_legacy_cov_receipts_keep_original_terminal_authority(tmp_path,execution
 def test_remote_collection_names_cannot_escape_or_alias_deliverable_paths(tmp_path,remote_registry,monkeypatch,extra):
     root,job,config,cli=case(tmp_path,monkeypatch,extra=extra)
     package=c.workspace(root,2)/'work/package';package.write_bytes(b'opaque input')
-    reply=cli('run','--payload',package,'--new-plan','--mechanism','P',expected=3)
+    reply=cli('run','--payload',package,'--new-plan','--mechanism','h001.m1',expected=3)
     assert reply['status']=='integrity_error'
     assert history.managed_calls(root,job)[0]['status']=='unknown'
     assert c.collect_materials(root,2)==[]
@@ -263,13 +263,13 @@ def test_remote_collection_names_cannot_escape_or_alias_deliverable_paths(tmp_pa
 def test_retained_remote_proof_outside_instance_survives_native_source_removal(tmp_path,remote_registry,monkeypatch,include_result):
     outside=tmp_path/'backend-state'
     root,job,config,cli=case(tmp_path,monkeypatch,extra=dict(proof_directory=str(outside),include_result=include_result))
-    result=run(root,cli,'P');native_proof=outside/(result['call_id']+'.json')
+    result=run(root,cli,'h001.m1');native_proof=outside/(result['call_id']+'.json')
     assert native_proof.is_file() and not native_proof.is_relative_to(root)
     native_proof.unlink()
     monkeypatch.setattr(e,'load',lambda *a,**kw:pytest.fail('scientific sealing loaded an adapter'))
     finish(root,2,'W',[1],mechanism_findings=[
-        dict(mechanism='P',basis='observed',finding='Retained native proof; no scientific qualification.'),
-        dict(mechanism='Q',basis='blocked',finding='Not executed in this bounded fixture.')])
+        dict(mechanism='h001.m1',basis='observed',finding='Retained native proof; no scientific qualification.'),
+        dict(mechanism='h001.m2',basis='blocked',finding='Not executed in this bounded fixture.')])
     seal=c.read(execution.record(root,2)/'result-identity.json');fact=c.read(root/seal['observations']['path'])
     assert fact['managed_calls'][0]['status']=='known_success'
     history.validate_managed(root,job,fact['managed_calls']);c.validate(c.workspace(root,2))
@@ -294,7 +294,7 @@ def test_managed_outputs_first_configured_on_later_attempt_use_that_host_interfa
     path=c.workspace(root,2)/'work/later-config.json'
     current=e.configure(root,2,'remote_execution:fixture',{},path)
     package=c.workspace(root,2)/'work/later-package';package.write_bytes(b'later attempt opaque input')
-    result=e.dispatch(current,package,new=True,mechanism='P')
+    result=e.dispatch(current,package,new=True,mechanism='h001.m1')
     accepted=e.Records(current).accepted(result['call_id'])
     assert accepted['native_attempt']['number']==1 and not (origin/'experiment-config.json').exists()
     assert history._execution_interface(root,accepted)==current['execution_interface']

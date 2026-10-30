@@ -22,11 +22,11 @@ print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=N
     root=tmp_path/'instance'
     controller.prepare(root,goal,public,['never-launched'],max_tokens=100000,max_seconds=300,max_steps=12,
         model='no-model',reasoning_effort='high',history_observer=dict(adapter=str(observer),config={}))
-    plan=dict(scope='Competing target explanations',commitments=[dict(label=f'M{i}',minimal_test='A distinguishable scientific prediction',existing_ref=None) for i in range(1,5)],focus=dict(label=None,action='screen'))
+    plan=dict(scope='Competing target explanations',commitments=[dict(label=f'M{i}',minimal_test='A distinguishable scientific prediction',existing_ref=None) for i in range(1,5)],focus=dict(index=None,action='screen'))
     caveats=['Original target condition is still unknown','A counterexample remains unresolved', '"\\\n'*1000, 'Later caveat must survive']
     finish(root,1,'H',[],action='experiment',search_choice=plan,text='BODY-CROWD '*2000,limitations=caveats)
     finish(root,2,'W',[1],text='One negative observation does not resolve the other mechanisms.',limitations=['Negative result is bounded','Feasibility elsewhere is unknown'],
-        mechanism_findings=[dict(mechanism=f'M{i}',basis='blocked',finding='This view-only fixture has no domain execution originals; applicability of this mechanism remains unresolved.') for i in range(1,5)])
+        mechanism_findings=[dict(mechanism=f'h001.m{i}',basis='blocked',finding='This view-only fixture has no domain execution originals; applicability of this mechanism remains unresolved.') for i in range(1,5)])
     finish(root,3,'A',[1,2],action='wait',recommendation='P',limitations=['A applicability judgment is not an observation'])
     c.build_job(root,4,'E',[3],instruction='Retrieve the requested counterevidence.',evidence_return=dict(step=3,role='A'))
     finish(root,4,'E',[3],limitations=['Requested original is unavailable'])

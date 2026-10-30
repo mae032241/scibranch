@@ -66,9 +66,9 @@ def admit(value, choice, scope, accepted):
         return None
     if value['prior_unknown']:
         raise OpportunityRequired('Preserve the original unknown execution; resolve its identity before a new submission')
-    matches = [row for row in value['mechanisms'] if choice in (row['mechanism_ref'],row['label'])]
+    matches = [row for row in value['mechanisms'] if choice == row['mechanism_ref']]
     if len(matches) != 1:
-        raise OpportunityRequired('Choose one exact authorized H mechanism or its unique scientific label')
+        raise OpportunityRequired('Choose one exact mechanism_ref listed in this task')
     selected = matches[0];ref = selected['mechanism_ref']
     if selected['status'] == 'waived':raise OpportunityRequired('This mechanism was scientifically waived by A')
     counts = {row['mechanism_ref']:row['accepted_count'] for row in value['baseline']}

@@ -20,7 +20,7 @@ def scene(tmp_path,*,portfolio=False):
 
 
 def plan(focus=None):
-    return dict(scope='Competing target mechanisms',commitments=[dict(label=label,minimal_test='A bounded independent discrimination',existing_ref=None) for label in ('P','Q')],focus=focus or dict(label=None,action='screen'))
+    return dict(scope='Competing target mechanisms',commitments=[dict(label=label,minimal_test='A bounded independent discrimination',existing_ref=None) for label in ('P','Q')],focus=focus or dict(index=None,action='screen'))
 
 
 def review(ref):
@@ -71,8 +71,8 @@ def prefix(root):
     seal(root,1,'H',[],action='experiment',choice=plan())
     first=c.build_job(root,2,'W',[1],instruction='Bounded original scientific question')
     assert first['search']['focus']['mechanism_ref']=='h001.m1'
-    observe(root,2,'P')
-    _,_,receipt=seal(root,2,'W',[1],mechanism_findings=findings('P',blocked=('Q',)))
+    observe(root,2,'h001.m1')
+    _,_,receipt=seal(root,2,'W',[1],mechanism_findings=findings('h001.m1',blocked=('h001.m2',)))
     assert receipt['control_outcome']['worker_delivery']['status']=='partial'
 
 
@@ -98,12 +98,12 @@ def test_default_after_final_a_resolves_q_and_decision_key_uses_same_receipt(tmp
 
 def test_explicit_redirect_and_deepening_do_not_require_priority_prefix(tmp_path):
     root=scene(tmp_path)
-    seal(root,1,'H',[],action='experiment',choice=plan(dict(label='Q',action='screen')))
+    seal(root,1,'H',[],action='experiment',choice=plan(dict(index=2,action='screen')))
     redirected=c.build_job(root,2,'W',[1],instruction='Bounded original scientific question')
     assert redirected['search']['focus']['mechanism_ref']=='h001.m2'
     assert [item['mechanism_ref'] for item in redirected['search']['unfinished_plan']]==['h001.m1','h001.m2']
-    observe(root,2,'Q')
-    seal(root,2,'W',[1],mechanism_findings=findings('Q',blocked=('P',)))
+    observe(root,2,'h001.m2')
+    seal(root,2,'W',[1],mechanism_findings=findings('h001.m2',blocked=('h001.m1',)))
     choice=review('h001.m2');choice['next_focus']=dict(mechanism_ref='h001.m2',action='improve')
     job,_,receipt=seal(root,3,'A',[1,2],action='continue_w',choice=choice)
     assert not receipt['control_outcome']['diagnostics']
@@ -138,7 +138,7 @@ def test_a_to_h_empty_revision_preserves_original_unfinished_q(tmp_path):
     choice=review('h001.m1');choice['next_focus']=None
     seal(root,3,'A',[1,2],action='revise_h',choice=choice)
     _,_,receipt=seal(root,4,'H',[1,2,3],action='experiment',choice=dict(scope='Retain the original unfinished comparison',
-        commitments=[],focus=dict(label=None,action='screen')))
+        commitments=[],focus=dict(index=None,action='screen')))
     assert not receipt['control_outcome']['diagnostics']
     next_=c.build_job(root,5,'W',[4],instruction='Bounded original scientific question')
     assert next_['search']['focus']['mechanism_ref']=='h001.m2'
@@ -154,7 +154,7 @@ def test_mechanism_repair_completes_original_opportunity_once_not_an_extra_cycle
     assert [item['mechanism_ref'] for item in state['order']['remaining']]==['h001.m1','h001.m2']
     repair=c.build_job(root,4,'W',[1,2,3],instruction='Bounded original scientific question')
     assert repair['search']['repair_root']==2
-    observe(root,4,'P')
+    observe(root,4,'h001.m1')
     seal(root,4,'W',[1,2,3])
     _,_,receipt=seal(root,5,'A',[1,4],action='continue_w',choice=review('h001.m1'),question='After the repair, which mechanism should be screened next?')
     assert not receipt['control_outcome']['diagnostics']
@@ -169,7 +169,7 @@ def test_mechanism_repair_completes_original_opportunity_once_not_an_extra_cycle
 def test_empty_plan_seals_original_science_and_yields_bounded_author_correction(tmp_path):
     root=scene(tmp_path)
     job,payload,receipt=seal(root,1,'H',[],action='experiment',choice=dict(scope='No unfinished mechanism is available',
-        commitments=[],focus=dict(label=None,action='screen')))
+        commitments=[],focus=dict(index=None,action='screen')))
     assert receipt['control_outcome']['diagnostics'][0]['code']=='science_plan_empty'
     route=('W',[1],payload['route_reason'],None,1,None,None)
     corrected=semantic.effective_route(root,1,c.validate(c.workspace(root,1)),job,route)
@@ -194,8 +194,8 @@ def test_unconfigured_continue_preserves_raw_and_records_control_reason_without_
     root=scene(tmp_path)
     seal(root,1,'H',[],action='experiment',choice=plan())
     c.build_job(root,2,'W',[1],instruction='Bounded original scientific question')
-    observe(root,2,'P','Q')
-    job,payload,receipt=seal(root,2,'W',[1],stage_intent='continue',mechanism_findings=findings('P','Q'))
+    observe(root,2,'h001.m1','h001.m2')
+    job,payload,receipt=seal(root,2,'W',[1],stage_intent='continue',mechanism_findings=findings('h001.m1','h001.m2'))
     work=c.workspace(root,2);view=c.read(work/'science-task.json')
     assert view['stage_continuation']['status']=='unavailable'
     assert view['stage_continuation']['context'] is None

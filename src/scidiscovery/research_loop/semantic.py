@@ -26,7 +26,7 @@ def author_choices(root,job,payload):
         from .output_repair import OutputRepairRequired
         row=repair[0]
         raise OutputRepairRequired(row['code'], 'Correct '+str(row.get('subject','scientific action'))[:128]+': '+row['code']+
-            '. Use an exact declared reference and the required action fields in this same task; retained work must not be repeated.')
+            '. Change only the diagnosed choice using the required declared choice/action fields. Return full JSON preserving all other original science/plans/facts/limits. No prior experiment is implied.')
     return interpretation,selection
 
 

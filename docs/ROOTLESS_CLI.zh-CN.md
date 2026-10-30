@@ -128,6 +128,27 @@ skill_set = "analysis"
 原生 home 与认证；Cov 专用启动器及其认证复制路径已移除。完整来源、profile 与更新合同见
 [配置参考](RESEARCH_CONFIGURATION.md#selected-framework-skills--按角色选择框架-skill)。
 
+## 机制编号与精确引用
+
+当前协议 28 中，首次 H 和每次 H 修订都以同次 `commitments` 的 1 起始编号选择机制：
+
+```json
+{"commitments":[{"label":"机制 P","minimal_test":"有界区分测量","existing_ref":null}],"focus":{"index":1,"action":"screen"}}
+```
+
+这是 `search_plan` 的简短字段示例，完整返回仍保留 `scope` 等科学内容。
+`index:null` 只允许 `screen`，保持多机制浅筛；空 commitments 只能使用 null screen。
+修订中要选择已有机制，须在同次 commitments 中显式填写其 canonical `existing_ref`，再用该项编号；
+省略的机制仍保留广度。控制分配 `h001.m1` 等稳定引用，不随 UI 排序改变。后续 A 的
+`next_focus.mechanism_ref`、W 的 `--mechanism h001.m1` 和
+`mechanism_findings[].mechanism` 都必须使用任务给出的精确引用，显示 label 不参与匹配。
+
+窄输出补正只修改诊断指出的 JSON/布局字段，返回完整原 JSON，其余科学计划保持原义。
+提示中的 `remaining_observed_tokens`、`remaining_active_seconds` 与
+`previous_consumed_observed_tokens` 是本次补正的剩余额度及既有消费，`token_usage_unknown`
+保留计量未知；新的预算提示使用上述字段，不要求或授权重跑旧实验。协议 27 实例明确拒绝，
+不提供兼容读取或迁移，也不能通过手改旧 `settings.json` 的版本继续运行。
+
 ## 后台推进与用户方向
 
 `start --root ...` 后台启动或连接原实例控制进程，返回持久 `operation_id`；
@@ -214,12 +235,12 @@ BOOTTIME 或 elapsed 的 Unix 时间口径本地维护共享时间截止，仍�
 原 native 存活或进程身份未核清、原受管调用 running/unknown 时不启动替代 agent；沿既有
 原调用入口核对，不重 submit 未知执行，不退款或清零预算。配置保存仍只影响后续新节点，
 不修改正在恢复任务的原策略。上述自动恢复策略本身不改变科学输出合同或通用科学预算
-时钟；协议 27 的持续组合判断与最终覆盖合同见下文“文件与职责”。实际平台恢复资格
+时钟；协议 28 的持续组合判断与最终覆盖合同见下文“文件与职责”。实际平台恢复资格
 须另有准确原生证据，不能由源码检查推断。
 
 ## 从历史任务创建分支
 
-`fork-preview` 与 `fork-create` 接受严格静止、冻结协议 27 的明确父实例，以及精确逻辑步骤 N；
+`fork-preview` 与 `fork-create` 接受严格静止、冻结协议 28 的明确父实例，以及精确逻辑步骤 N；
 不要求最近 A 已返回 `finish` 或研究已完成。新分支从 N 首次冻结科学输入在新 session 重跑，
 N 输出和后缀不作为输入继承，不能选择任意 attempt 断点。普通、FINAL、正式审查、工程修复
 及已有 continuation 的任务边界见[架构中的分支语义](ARCHITECTURE.zh-CN.md#历史任务分支)。
@@ -523,7 +544,7 @@ cold 包，也不从当前草稿或另一 run 猜造历史科学原件。
 
 ## 受管本地实验
 
-协议 27 的普通原生 Worker 同样需要实际可用的 Linux `bwrap` 只读挂载能力，以保护共享输入、
+协议 28 的普通原生 Worker 同样需要实际可用的 Linux `bwrap` 只读挂载能力，以保护共享输入、
 选定 Skill 与动态 collect/wake 目录。自定义 launcher 也须保护；准确注册的模块启动器
 在宿主准备后，于最终科学进程施加同一挂载。其 provider/module 身份无论是否选择 Skill
 均冻结；普通包装脚本不能据名字豁免。不能挂载时明确拒绝启动，
@@ -663,7 +684,7 @@ token 参考轮数须有足够完整样本及已知余额；缺失或滞后如�
 普通结束/交付和 protected FINAL 的 final_coverage，每机制只必填 mechanism_ref、
 status（deep/screened_pending/ruled_out/unexplored）、reason，理由合并深度依据和未答问题；
 limitations 保留输入与资源缺口。准确覆盖完整冻结机制集合，不从候选或调用成功推断科学深度，
-也不授权新实验。当前协议 27 不支持更早协议的隐式读取或迁移。
+也不授权新实验。当前协议 28 不支持更早协议的隐式读取或迁移。
 
 广度预算应依据普通探索可用量及 `work/budget-status.json`；当前 protected FINAL 模式按 provider 已报告消费计算 token 余额，未知账单继续列为未知，不估算扣费，也不扣旧收口预留。旧预算内收口格式不受支持。真实执行未知仍须先按原调用核对。初始调用机会不预留实际资源，首次昂贵调用仍可能耗尽余额；使用已有执行配置 `max_seconds` 和 W 阶段时间/token 目标约束，控制不自动分配广度比例或强制科学机制数。
 初始/额外机会只保护初筛公平，不是所有后续调用的总额度。相同 H 范围与既有约束允许时，A 可用 `continue_w` 请求下一有限阶段；问题、机制或约束需要变化时才修订 H，明确次数限制和真实执行准入继续适用。
@@ -828,7 +849,7 @@ runner 意外退出时，本地 watchdog 仅清理能精确核对的标准进程
 JSON 必须恰有 `H/W/A/E` 四个对象，每个对象恰有正整数 `max_observed_tokens`
 和正有限数 `max_seconds`。没有节点策略默认数值；操作者必须为每个角色明确冻结两项目标。
 应保留参数所依据的已观察成本或试用假设；历史最大完成事件不是下一次请求的成本保证。
-当前协议 27 的 `--node-budget-mode` 仅接受 `soft`；API prepare 同样拒绝 hard。旧协议实例不受支持，不提供兼容读取或迁移。
+当前协议 28 的 `--node-budget-mode` 仅接受 `soft`；API prepare 同样拒绝 hard。旧协议实例不受支持，不提供兼容读取或迁移。
 
 H/W/A/E 单节点 token 目标统一为软上限，W 的 token/time 目标分别取该策略与原 search policy 的较小值。
 启动前核对共享余额与原节点锚点，不预付整个节点 token 额度。运行中的节点达到 input+output

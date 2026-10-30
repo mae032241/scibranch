@@ -28,8 +28,8 @@ def continuing_stage(tmp_path, *, max_tokens=100000):
     record=execution.record(root,2)
     c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),budget_slice=anchor))
     config=experiments.configure(root,2,'local_execution:command',dict(run_argv=[sys.executable]),tmp_path/'config-2.json')
-    run(root,config,'P')
-    record,_=output(root,findings('P'),intent='continue');stopped_native(root,record)
+    run(root,config,'h001.m1')
+    record,_=output(root,findings('h001.m1'),intent='continue');stopped_native(root,record)
     meter=c.read(record/'usage.json');outcome=c.read(record/'native-outcome.json')
     outcome['budget_slice']=dict(role='W',limits=budget.node_limits(root,job),usage_observed=True,
         dispatches=1,advance_seconds=0.,observed_tokens=meter['input_tokens']+meter['output_tokens'],**meter)

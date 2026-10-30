@@ -8,13 +8,13 @@ host-owned Git code capture. Declared project bases use ordinary Git worktree
 checks, without control reading or hashing every base file. Approval/idempotency helpers must
 not traverse scientific files, code, logs, observations, inputs, results, Skills or
 archives. Explicit scientific tools may use their own algorithms
-on selected evidence; that is separate from control identity. Protocol 27 uses
+on selected evidence; that is separate from control identity. Protocol 28 uses
 `record_ref = {"path": "/absolute/original"}` and
 `file_ref = {"path": "/absolute/original", "size_bytes": N}`. Control bindings use
 `*_ref` fields; paths, producers and lifecycle identities replace content digests.
 Legacy retained object paths use UUIDs, without content deduplication or hash caches.
 Fork manifest v2 retains this reference contract. Independent archive and whole-instance
-cold checkpoint packages are retired. Only current protocol 27 instances with
+cold checkpoint packages are retired. Only current protocol 28 instances with
 worker/lineage view 1, soft budgets and final-A policy v1 are supported. Earlier
 formats are rejected without compatibility reading, migration or owner reactivation. One-off engineering rescue commands, their historical execution exceptions and derived correction of old usage receipts are retired. Instances relying on those rescue records are unsupported; current same-session attempt metering, ordinary restart recovery and budget-amendment continuation remain supported. Read-only Linux mounts protect selected
 inputs in the scientific namespace; trusted same-UID code remains a soft boundary,
@@ -116,6 +116,16 @@ scientific response; this neither changes the sealed W declaration nor
 requires another experiment or registration. Tasks without H search commitments
 do not invent mechanism coverage.
 
+Protocol 28 H `search_plan.focus` uses `{"index": 1, "action": "screen"}`:
+`index` is a 1-based integer selecting the same payload's `commitments`, on the
+first H and every revision. `null` is allowed only with `screen`, retaining shallow
+screening across mechanisms; an empty commitment list requires that null screen.
+A revision selects an existing mechanism by including its commitment with the
+canonical `existing_ref`; omitted commitments retain the prior breadth. Control
+assigns stable references such as `h001.m1` independently of UI sorting. Subsequent
+A `next_focus.mechanism_ref`, W `--mechanism` and `mechanism_findings[].mechanism`
+use those exact canonical references. Display labels never resolve identities.
+
 Scientific commitment and disposition lists have no fixed four-item or 128-mechanism
 capacity. The configured initial-call opportunities, exact extra-call grants,
 accepted-call consumption, finite execution budgets and unknown-call reconciliation
@@ -177,6 +187,14 @@ screened_pending, ruled_out or unexplored) and reason. The reason explains evide
 and unanswered questions; limitations retains missing inputs and resources. The same
 gate applies to finish/deliver and protected FINAL, without authorizing new experiments.
 Neither candidate presence nor successful calls imply scientific depth.
+
+Narrow output repair changes only diagnosed JSON/layout fields and returns the
+complete original JSON with the other scientific plan unchanged. Repair budget
+hints describe the current repair allowance: `remaining_observed_tokens`,
+`remaining_active_seconds` and `previous_consumed_observed_tokens` retain consumed
+usage; `token_usage_unknown` preserves missing metering. That allowance neither
+requests nor authorizes replay of an earlier experiment. New prompts use these
+field names. Protocol 27 instances are rejected without compatibility reading or migration.
 
 Budget choices use current ordinary-work availability and the runtime
 `work/budget-status.json`. With protected FINAL, provider-reported consumption
@@ -401,7 +419,7 @@ an explicit, file-scoped working copy under `work/`, never a pre-copied input tr
 Source ownership is supplied by its lifecycle, not inferred from mode or link
 count. Mode 0400 alone is not hostile same-user write isolation.
 
-Protocol 27 protects shared inputs at the final native launch boundary with Linux
+Protocol 28 protects shared inputs at the final native launch boundary with Linux
 read-only mounts, including custom protocol argv. An exactly registered module
 launcher retains host preparation and submission service ownership, then applies
 the same protection at its final scientific namespace. Its provider/module identity
@@ -531,7 +549,7 @@ Deterministic curve and figure algorithms are self-contained Skill scripts;
   scientific explanation; its rows, `keep`, rationale and evidence-step formatting
   do not grant or gate delivery. Actual audit and delivery actions still require
   an exact available candidate, qualification and execution permission. Null
-  does not authorize delivery. Protocol 27 rejects earlier frozen protocols without
+  does not authorize delivery. Protocol 28 rejects earlier frozen protocols without
   migrating their original bytes.
 - One advancing writer per instance; read views neither call models nor own scientific/budget state.
 - Exact immutable originals, configuration and calls; revisions inherit no prior qualification or approval.
@@ -727,7 +745,7 @@ exact identity checks and independent execution authorization still apply.
 Shared budget checks for new nodes remain unchanged. Author
 closeout token permits are also soft targets; their finite time limits remain
 enforced. Actual usage remains accounted without creating a new shared allowance.
-Protocol 27 accepts only soft node settings and final-A policy v1. Older protocols,
+Protocol 28 accepts only soft node settings and final-A policy v1. Older protocols,
 hard settings and missing final-A policies are rejected without migration. A denied start
 advances the existing control journal to durable `FINAL` (`closeout_begin` mode
 `final`); it never reclassifies an ordinary A as final from the remaining balance.

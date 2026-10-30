@@ -27,8 +27,8 @@ def scene(tmp_path,*,begin_closeout=True):
                 inputs=[],source_roots=[str(root)],readonly_inputs_version=1)))
     finish(root,1,'H',[],action='experiment',search_choice=dict(scope='One unfinished scientific mechanism',
         commitments=[dict(label='P',minimal_test='A discriminating observation remains necessary',existing_ref=None)],
-        focus=dict(label=None,action='screen')))
-    finish(root,2,'W',[1],mechanism_findings=[dict(mechanism='P',basis='blocked',
+        focus=dict(index=None,action='screen')))
+    finish(root,2,'W',[1],mechanism_findings=[dict(mechanism='h001.m1',basis='blocked',
         finding='This fixture retains a concrete missing observation and does not claim scientific screening.')])
     baseline=search.project(root,3)
     assert baseline['focus']==dict(mechanism_ref='h001.m1',action='screen')

@@ -29,7 +29,7 @@ def prepared(tmp_path,*,search_enabled=True,completed=True):
         **({} if search_enabled else dict(search_policy=None)))
     plan=dict(scope='Two scientific explanations',commitments=[dict(label=label,
         minimal_test='A contradictory observation would reopen this explanation.',existing_ref=None)
-        for label in ('Main','Competitor')],focus=dict(label='Main',action='improve'))
+        for label in ('Main','Competitor')],focus=dict(index=1,action='improve'))
     finish(root,1,'H',[],action='experiment',search_choice=plan if search_enabled else None)
     if completed:finish(root,2,'W',[1],text='A completed bounded contribution with unresolved alternatives.')
     return root

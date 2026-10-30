@@ -26,7 +26,7 @@ def transport():
         "    from scidiscovery.research_loop import execution\n"
         "    assert not (execution.origin(root,job['step'])/'result-identity.json').exists()")
     source = source.replace('result=e.dispatch(config,script)',
-                            "result=e.dispatch(config,script,mechanism='P')")
+                            "result=e.dispatch(config,script,mechanism='h001.m1')")
     source = source.replace(
         "script.write_text('print(\"public discriminating observation\")\\n')",
         "script.write_text('raise SystemExit(3)\\n' if job['step']==2 and os.environ.get('SCID_TASK_UNIT_PREFIX_FAILED')=='1' else 'print(\"public discriminating observation\")\\n')")
@@ -41,7 +41,7 @@ def transport():
         "            reason='This no-model observation fixture declares no scientifically suitable candidate.')\n"
         "            for row in task['candidate_nomination_mechanisms'] if row['status']!='waived'])\n"
         "    if job['search']['focus']['action']=='screen':\n"
-        "        payload['mechanism_findings']=[{'mechanism':'P','basis':'observed',"
+        "        payload['mechanism_findings']=[{'mechanism':'h001.m1','basis':'observed',"
         "'finding':'The registered observation is available; this transport fixture establishes no target efficacy.'}]")
 
 
@@ -68,7 +68,7 @@ def prefix(tmp_path, action, monkeypatch, *, custom=False):
     finish(root,1,'H',[],action='experiment',search_choice=dict(
         scope='One explicitly authorized scientific mechanism',
         commitments=[dict(label='P',minimal_test='A discriminating observation with required checks',existing_ref=None)],
-        focus=dict(label='P',action='improve')))
+        focus=dict(index=1,action='improve')))
     monkeypatch.setenv('SCID_U2_FAKE_TURNS','1')
     monkeypatch.setenv('SCID_TASK_UNIT_PREFIX_FAILED','1' if action=='repair' else '0')
     c.build_job(root,2,'W',[1])

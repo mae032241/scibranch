@@ -219,8 +219,9 @@ def optional_reference_diagnostics(root,job,payload):
 def schema(role, protocol=None):
     if role not in {'H','A'}:raise ValueError('Only H and A declare scientific search choices')
     return dict(type=['object','null'],description=(
-        'Optional mechanism changes and the next W focus. H uses commitments (label, minimal_test, optional existing_ref) and focus (label, action); '
-        'A uses dispositions (mechanism_ref, status, reason) and next_focus (mechanism_ref, action). '
+        'Optional mechanism changes and the next W focus. H uses commitments (label, minimal_test, optional existing_ref) and focus (index, action): '
+        'index is a 1-based integer in this payload\'s commitments, or null for the retained breadth screen. Omissions retain earlier mechanisms. '
+        'A uses dispositions (mechanism_ref, status, reason) and next_focus (exact listed mechanism_ref or null, action). '
         'Actions: screen, improve, repair, validate. Scientific comparison and remaining gaps belong in scientific_result and limitations.'))
 
 
@@ -386,12 +387,16 @@ def _choice(job,payload):
             if (not isinstance(row,dict) or any(not isinstance(row.get(key),str) for key in ('mechanism_ref','status','reason'))
                     or row['status'] not in {'screened','deferred','waived','pending'}):unresolved('dispositions')
             result['dispositions'].append({key:row[key] for key in ('mechanism_ref','status','reason')})
-    key='focus' if role=='H' else 'next_focus';name='label' if role=='H' else 'mechanism_ref'
+    key='focus' if role=='H' else 'next_focus';name='index' if role=='H' else 'mechanism_ref'
     focus=value.get(key)
     if focus is not None:
         if (not isinstance(focus,dict) or not isinstance(focus.get('action'),str) or focus['action'] not in MODES
-                or focus.get(name) is not None and not isinstance(focus[name],str)):unresolved(key)
-        focus={name:focus.get(name),'action':focus['action']}
+                or name not in focus or 'label' in focus):unresolved(key)
+        selected=focus[name]
+        if role=='H':
+            if selected is not None and (type(selected) is not int or not 1<=selected<=len(result['commitments'])):unresolved(key)
+        elif selected is not None and not isinstance(selected,str):unresolved(key)
+        focus={name:selected,'action':focus['action']}
     result[key]=focus
     return result
 

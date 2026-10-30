@@ -44,7 +44,7 @@ def _caller_correction(root,job,record):
     choices=[control[index+1] for index,value in enumerate(control[:-1]) if value=='--mechanism']
     choice=choices[-1] if choices else None
     matches=[row['mechanism_ref'] for row in search['breadth']['mechanisms']
-        if choice in (row['mechanism_ref'],row['label'])]
+        if choice==row['mechanism_ref']]
     # A misspelled mechanism is itself correctable. Bind the task's original
     # focus for the repair message, never an inferred replacement submission.
     ref=matches[0] if len(matches)==1 else search['focus']['mechanism_ref']
@@ -311,12 +311,10 @@ def assessment(root,job,science,record,*,source_attempt=None):
     expected={row['mechanism_ref'] for row in _obligations(job)}
     known={row['mechanism_ref'] for row in facts['evidence']}
     blocked=set();findings=science.get('mechanism_findings')
-    mechanisms=job['search']['breadth']['mechanisms']
     for row in findings if isinstance(findings,list) else []:
         if (not isinstance(row,dict) or row.get('basis')!='blocked' or not isinstance(row.get('finding'),str)
                 or not row['finding'].strip() or not isinstance(row.get('mechanism'),str)):continue
-        matches=[item['mechanism_ref'] for item in mechanisms if row['mechanism'] in (item['mechanism_ref'],item['label'])]
-        if len(matches)==1 and matches[0] in expected:blocked.add(matches[0])
+        if row['mechanism'] in expected:blocked.add(row['mechanism'])
     missing=sorted(expected-known-blocked)
     reason=('work_evidence_capacity' if facts['capacity'] else 'original_execution_unknown' if facts['unknown'] or facts['prior_unknown']
         else 'worker_decision' if science.get('stage_intent')=='decision'

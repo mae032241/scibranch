@@ -22,7 +22,7 @@ def test_sealed_current_h_configures_registered_cov_and_final_a(tmp_path,executi
         model='no-model',reasoning_effort='high',search_policy=search.DEFAULT_POLICY,node_budget_mode='soft',
         history_observer=dict(adapter=str(Path(cov_lineage.__file__).resolve()),contract_version=2,
             config=dict(runs='runs',calls='project/nodes',evaluation_key='covshift-public-val-v1')))
-    plan=dict(scope='One original mechanism',commitments=[dict(label='P',minimal_test='One bounded experiment',existing_ref=None)],focus=dict(label=None,action='screen'))
+    plan=dict(scope='One original mechanism',commitments=[dict(label='P',minimal_test='One bounded experiment',existing_ref=None)],focus=dict(index=None,action='screen'))
     finish(root,1,'H',[],action='experiment',search_choice=plan)
     assert 'exploration_order_version' not in c.settings(root)
     job=c.build_job(root,2,'W',[1]);record=execution.record(root,2)
@@ -43,11 +43,11 @@ def test_sealed_current_h_configures_registered_cov_and_final_a(tmp_path,executi
     script=c.workspace(root,2)/'work/payload.json';script.write_text('{}')
     env=dict(os.environ,PYTHONPATH=str(Path(cov_lineage.__file__).parents[1])+os.pathsep+os.environ.get('PYTHONPATH',''))
     command=[sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(config)]
-    reply=subprocess.run([*command,'run','--script',str(script),'--new-plan','--mechanism','P'],env=env,capture_output=True,text=True,timeout=20)
+    reply=subprocess.run([*command,'run','--script',str(script),'--new-plan','--mechanism','h001.m1'],env=env,capture_output=True,text=True,timeout=20)
     assert reply.returncode==0,(reply.stdout,reply.stderr)
     result=json.loads(reply.stdout)
     assert result['status']=='known_success'
-    finish(root,2,'W',[1],mechanism_findings=[dict(mechanism='P',basis='observed',finding='The bounded fixture observation is available; target adequacy remains untested.')],
+    finish(root,2,'W',[1],mechanism_findings=[dict(mechanism='h001.m1',basis='observed',finding='The bounded fixture observation is available; target adequacy remains untested.')],
         candidate_nominations=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref='h001.m1',
             reason='The exact public call is retained; this transport fixture makes no scientific suitability nomination.')]),
         preserve_native_intent=True)

@@ -701,7 +701,7 @@ def output_request(root, step, record, *, source_attempt=None, verify_task=True)
     if outcome.get('output_status') == 'missing':
         if raw.exists() or raw.is_symlink() or (record / 'result.pending.json').exists() or (record / 'result.pending.json').is_symlink():
             raise ValueError('Missing final output identity changed')
-        error = OutputRepairRequired('missing_output', 'Return the required final scientific JSON; the completed work and checkpoints are already retained.')
+        error = OutputRepairRequired('missing_output', 'Return complete scientific JSON; preserve original facts/plans/limits. No work this repair turn; reuse prior results/checkpoints only if they exist.')
     else:
         if c.file_ref(c.regular(raw, limit=None)) != outcome.get('raw_ref'):
             raise ValueError('Original final output changed before repair')

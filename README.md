@@ -116,7 +116,7 @@ commands are retired. Historical packages remain read-only; they are not automat
 migrated, restored or reactivated. Ordinary execution checkpoints and original-call
 recovery remain supported; checkpoints do not retain or restore lost drafts.
 
-All H/W/A/E node token budgets and W stage targets are advisory: reaching a target requests a bounded conclusion without rejecting new managed experiments or forcing A review. Actual input plus output is fully accounted; no whole-node token allocation is prepaid. Current protocol 27 accepts only soft node settings and the frozen final-A completion policy. Earlier instance formats are unsupported; no compatibility reader or migration is provided. Shared budget checks for new nodes, finite execution time, permissions and cleanup limits remain enforced.
+All H/W/A/E node token budgets and W stage targets are advisory: reaching a target requests a bounded conclusion without rejecting new managed experiments or forcing A review. Actual input plus output is fully accounted; no whole-node token allocation is prepaid. Current protocol 28 accepts only soft node settings and the frozen final-A completion policy. Earlier instance formats are unsupported; no compatibility reader or migration is provided. Shared budget checks for new nodes, finite execution time, permissions and cleanup limits remain enforced.
 
 New instances freeze a final-A completion policy with one A per FINAL cycle: insufficient, zero or
 exceeded shared token, time or step budgets do not deny the final A's admission,
@@ -131,7 +131,8 @@ Scientific responses require only `summary`, `scientific_result`, `limitations`,
 plus H/A routing (`next_action`, `route_reason`) or W's `stage_intent`.
 Other scientific content stays open. Search retains mechanism declarations,
 explicit dispositions and focus, real call opportunities and independent W→A
-investment counts. A explains competing routes, candidate criteria and unanswered
+investment counts. H selects a commitment by its 1-based payload index; A/W use
+exact stable mechanism references such as `h001.m1`, never display labels. A explains competing routes, candidate criteria and unanswered
 questions in ordinary scientific prose; no separate portfolio, coverage or criteria
 checklist is required. Exact candidate identity and delivery qualification still
 apply. See the [architecture](docs/ARCHITECTURE.md).

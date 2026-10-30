@@ -90,6 +90,21 @@ saving a configuration does not recover the clock or reset consumption.
 无法核对未闭合区间，这些操作仍可使用。新节点应用配置、实际预算修订和执行仍须通过
 原有时钟与预算校验；保存配置不会恢复时钟或重置消费。
 
+Current instances use protocol 28. H selects a mechanism with the 1-based
+`search_plan.focus.index` into the same payload's `commitments`, on initial and
+revised plans. Null is only a multi-mechanism shallow `screen`. Reusing a mechanism
+requires its canonical `existing_ref` in that payload; omitted mechanisms retain
+breadth. A/W use task-provided exact stable references such as `h001.m1` rather
+than display labels. See the [CLI examples](ROOTLESS_CLI.zh-CN.md#机制编号与精确引用).
+Repair advice reports the remaining repair allowance and prior consumed usage; it
+does not authorize replaying old experiments. New prompts use the explicit remaining
+and consumed-usage field names. Protocol 27 instances are unsupported, without compatibility reading or migration. Never
+change an old instance's settings version to bypass the contract.
+
+当前实例采用协议 28；首次 H 与每次修订都以同次 commitments 的 1 起始编号选机制，
+后续 A/W 使用任务给出的稳定精确引用。null screen 保留多机制浅筛，遗漏机制不删除广度。
+补正剩余额度不代表重跑旧实验，新提示显式区分剩余量和既有消费；协议 27 实例拒绝读取，不迁移、不手改旧实例版本。
+
 ## Declaration fields / 声明字段
 
 Unknown tables and fields are rejected. Except for the exact absolute

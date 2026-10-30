@@ -10,7 +10,7 @@ from test_default_cli_output_repair import cli, prepare_cli, nomination_diagnost
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('fault,code',[('author-focus','science_focus_unauthorized'),
+@pytest.mark.parametrize('fault,code',[('author-focus','science_choice_unresolved'),
     ('author-selection','implementation_unresolved')])
 def test_consumed_author_choice_resumes_same_task_and_session_before_worker(tmp_path,execution_registry,fault,code):
     root,home,env=prepare_cli(tmp_path,fault=fault)

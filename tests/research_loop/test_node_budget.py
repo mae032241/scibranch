@@ -29,7 +29,7 @@ task=json.loads((work/'science-task.json').read_text())
 config=json.loads(pathlib.Path(sys.argv[0]).with_suffix('.json').read_text())
 with (work/'work/launches.txt').open('a') as stream:stream.write('launch\\n')
 payload={'summary':'A bounded finding','scientific_result':'Original fixture observation','limitations':['No scientific effectiveness claim']}
-if 'implementation_selection' in task['final_response']:payload['implementation_selection']=None
+payload['implementation_selection']=None
 if role=='H':payload.update(next_action='wait',route_reason='No further work required',search_plan=None)
 if role=='W':
  job=json.loads(pathlib.Path(os.environ['THIN_HWA_JOB_MANIFEST']).read_text())
@@ -78,7 +78,7 @@ def target(root, role, *, with_search=False):
     action = {'W': 'experiment', 'A': 'analyze', 'E': 'extract'}[role]
     plan = (dict(scope='Discriminating mechanism', commitments=[dict(label='Mechanism',
                 minimal_test='Bounded screen', existing_ref=None)],
-                focus=dict(label='Mechanism', action='screen')) if with_search else None)
+                focus=dict(index=1, action='screen')) if with_search else None)
     finish(root, 1, 'H', [], action=action, search_choice=plan)
     return 2
 

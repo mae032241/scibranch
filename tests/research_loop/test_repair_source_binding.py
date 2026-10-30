@@ -12,16 +12,16 @@ from test_history_handoff import finish
 
 def revision(*, label='P', minimal_test='A corrected discriminating prediction', scope='Revised scientific scope'):
     return dict(scope=scope, commitments=[dict(label=label, minimal_test=minimal_test, existing_ref='h001.m1')],
-                focus=dict(label='h001.m1', action='repair'))
+                focus=dict(index=1, action='repair'))
 
 
 def original(tmp_path, *, cov=False, failed=True):
     root=prepare(tmp_path,cov=cov)
     h(root,labels=('P','Q','R','S'))
     _,config=worker(root,tmp_path,2,[1],cov=cov)
-    observed=run(root,config,'P',failed=failed)
-    for label in ('Q','R','S'):run(root,config,label)
-    finish(root,2,'W',[1],mechanism_findings=findings('P','Q','R','S'))
+    observed=run(root,config,'h001.m1',failed=failed)
+    for ref in ('h001.m2','h001.m3','h001.m4'):run(root,config,ref)
+    finish(root,2,'W',[1],mechanism_findings=findings('h001.m1','h001.m2','h001.m3','h001.m4'))
     return root,config,observed
 
 
@@ -63,7 +63,7 @@ def test_cov_revised_h_repairs_exact_old_combination_without_inheriting_screenin
     public=c.science_view(job,root)['repair_observation']
     assert public['source_step']==2 and public['authorization_step']==4
     assert 'sha256' not in json.dumps(public) and 'snapshot' not in json.dumps(public)
-    restored=run(root,repair,choice['commitments'][0]['label'])
+    restored=run(root,repair,'h001.m1')
     assert restored['mechanism_binding']['source_h']==4
     finish(root,5,'W',[4])
     assert receipt(root,5)['search_status']=='applied'
@@ -120,8 +120,8 @@ def test_repair_missing_direct_source_is_unresolved_before_dependent_w(tmp_path,
 def test_multiple_known_calls_require_exact_source_input_selection(tmp_path,execution_registry):
     root=prepare(tmp_path);h(root,labels=('P',))
     _,config=worker(root,tmp_path,2,[1])
-    first=run(root,config,'P',failed=True);second=run(root,config,'P',failed=True)
-    finish(root,2,'W',[1],mechanism_findings=findings('P'))
+    first=run(root,config,'h001.m1',failed=True);second=run(root,config,'h001.m1',failed=True)
+    finish(root,2,'W',[1],mechanism_findings=findings('h001.m1'))
     a(root,3,[1,2],action='revise_h')
     job=c.build_job(root,4,'H',[1,2,3])
     payload=dict(next_action='experiment',route_reason='Restore one exact discriminating observation',search_plan=revision())
@@ -137,11 +137,11 @@ def test_exact_selected_input_selects_only_its_original_call(tmp_path,execution_
     work=c.workspace(root,2)
     source=work/'artifacts'/'failure.py'
     source.write_text('raise SystemExit(3)\n')
-    exact=experiments.dispatch(config,source,new=True,mechanism='P')
+    exact=experiments.dispatch(config,source,new=True,mechanism='h001.m1')
     # Distinct accepted input has a distinct source identity.
     other=work/'work'/'other.py';other.write_text('raise SystemExit(4)\n')
-    experiments.dispatch(config,other,new=True,mechanism='P')
-    finish(root,2,'W',[1],files={'failure.py':'raise SystemExit(3)\n'},mechanism_findings=findings('P'))
+    experiments.dispatch(config,other,new=True,mechanism='h001.m1')
+    finish(root,2,'W',[1],files={'failure.py':'raise SystemExit(3)\n'},mechanism_findings=findings('h001.m1'))
     a(root,3,[1,2],action='revise_h')
     selection=next(row['id'] for row in history.implementation_options(root,2) if row['label']=='failure.py')
     finish(root,4,'H',[1,2,3] if direct else [1,3],action='experiment',search_choice=revision(),selection=[selection])
@@ -154,8 +154,8 @@ def test_exact_selected_input_selects_only_its_original_call(tmp_path,execution_
 def test_equal_output_bytes_do_not_select_a_different_accepted_input(tmp_path,execution_registry):
     root=prepare(tmp_path);h(root,labels=('P',))
     _,config=worker(root,tmp_path,2,[1])
-    run(root,config,'P',failed=True);run(root,config,'P',failed=True)
-    finish(root,2,'W',[1],files={'copy.py':'raise SystemExit(3)\n'},mechanism_findings=findings('P'))
+    run(root,config,'h001.m1',failed=True);run(root,config,'h001.m1',failed=True)
+    finish(root,2,'W',[1],files={'copy.py':'raise SystemExit(3)\n'},mechanism_findings=findings('h001.m1'))
     a(root,3,[1,2],action='revise_h')
     selection=next(row['id'] for row in history.implementation_options(root,2) if row['label']=='copy.py')
     finish(root,4,'H',[1,2,3],action='experiment',search_choice=revision(),selection=[selection])
@@ -173,15 +173,15 @@ def test_archive_alias_of_new_output_cannot_select_its_original_input_call(tmp_p
         '(out/"original.py").write_text("raise SystemExit(3)\\n")\n'
         '(out/"result.json").write_text(json.dumps(dict(version=1,metrics=[],outputs=['
         'dict(path="artifacts/original.py",label="A distinct output object")])))\n')
-    generated=experiments.dispatch(config,generator,new=True,mechanism='P',
+    generated=experiments.dispatch(config,generator,new=True,mechanism='h001.m1',
         command_options=dict(experiment_directory=str(experiment)))
     rows=history.managed_calls(root,job)
     output=next(item for item in history.scientific_outputs(root,job,rows[0]) if item['name']=='original.py')
     archive=root/output['path']
-    executed=experiments.dispatch(config,archive,new=True,mechanism='P')
+    executed=experiments.dispatch(config,archive,new=True,mechanism='h001.m1')
     assert generated['call_id']!=executed['call_id'] and executed['status']=='known_failed'
     intent=execution.record(root,2)/'native-intent.json';original_intent=intent.read_bytes()
-    finish(root,2,'W',[1],mechanism_findings=findings('P'),preserve_native_intent=True)
+    finish(root,2,'W',[1],mechanism_findings=findings('h001.m1'),preserve_native_intent=True)
     assert intent.read_bytes()==original_intent
     sealed=c.read(execution.record(root,2)/'result-identity.json')
     material=next(item for item in sealed['materials'] if item['path'].endswith('/original.py'))

@@ -35,7 +35,7 @@ def prepare(tmp_path, *, cov=False, initial_calls=1, portfolio=False, qualified_
 def h(root, step=1, parents=(), labels=('P','Q','R'), existing=None):
     choice=dict(scope='Competing mechanisms for the original scientific question',
         commitments=[dict(label=label,minimal_test=f'Prediction for {label}; priority follows its discriminating observability',
-            existing_ref=existing if index==0 else None) for index,label in enumerate(labels)],focus=dict(label=None,action='screen'))
+            existing_ref=existing if index==0 else None) for index,label in enumerate(labels)],focus=dict(index=None,action='screen'))
     finish(root,step,'H',list(parents),action='experiment',search_choice=choice)
 
 
@@ -55,7 +55,7 @@ def worker(root, tmp_path, step, parents, *, cov=False, qualified_local=False):
     return job,c.read(output) if cov else configured
 
 
-def run(root, config, label, *, failed=False, client_path=None, qualified_local=False):
+def run(root, config, mechanism, *, failed=False, client_path=None, qualified_local=False):
     if 'scope' not in config:
         if client_path is None:
             raise ValueError('Scientific execution client requires its exact configured path')
@@ -66,7 +66,7 @@ def run(root, config, label, *, failed=False, client_path=None, qualified_local=
     workspace=c.workspace(root,config['scope']['step'])
     code=workspace/'code';code.mkdir(exist_ok=True)
     index=len(experiments.Records(config).calls())
-    source=code/f'{label}-{index}.payload'
+    source=code/f'{mechanism}-{index}.payload'
     source.write_text(json.dumps(dict(mode='failed' if failed else 'success')) if 'runs_root' in config
         else 'raise SystemExit(3)\n' if failed else 'print("mechanical fixture only")\n')
     options=None
@@ -75,8 +75,8 @@ def run(root, config, label, *, failed=False, client_path=None, qualified_local=
         options=dict(experiment_directory=str(runtime))
     if config['execution_interface']['executor']=='local_execution:command':
         from breadth_execution_fixtures import run as qualified_run
-        return qualified_run(root,config,source,label,runtime)
-    return experiments.dispatch(config,source,new=True,mechanism=label,command_options=options)
+        return qualified_run(root,config,source,mechanism,runtime)
+    return experiments.dispatch(config,source,new=True,mechanism=mechanism,command_options=options)
 
 
 def findings(*observed,blocked=()):
@@ -107,15 +107,15 @@ def test_multi_mechanism_cov_originals_bind_candidates_and_a_screens_exactly(tmp
     root=prepare(tmp_path,cov=True);h(root,labels=('P','Q'))
     job,config=worker(root,tmp_path,2,[1],cov=True)
     assert config['scope']['mechanism_ref'] is None
-    p=run(root,config,'P',failed=True)
+    p=run(root,config,'h001.m1',failed=True)
     assert p['status']=='known_failed'
-    with pytest.raises(breadth.OpportunityRequired):run(root,config,'P')
-    q=run(root,config,'Q')
+    with pytest.raises(breadth.OpportunityRequired):run(root,config,'h001.m1')
+    q=run(root,config,'h001.m2')
     assert q['status']=='known_success'
     assert p['scope']==q['scope']==config['scope']
     assert p['mechanism_binding']['mechanism_ref']=='h001.m1'
     assert q['mechanism_binding']['mechanism_ref']=='h001.m2'
-    finish(root,2,'W',[1],mechanism_findings=findings('P','Q'))
+    finish(root,2,'W',[1],mechanism_findings=findings('h001.m1','h001.m2'))
     state=search.project(root,3)
     assert all(row['status']=='pending' for row in state['mechanisms'].values())
     graph=lineage.build(root,3)
@@ -144,32 +144,32 @@ def test_large_h_combination_binds_complete_registered_w_scope(tmp_path, executi
 
 def test_generic_cross_w_once_a_grant_and_same_ref_revision_do_not_refund(tmp_path,execution_registry):
     root=prepare(tmp_path);h(root)
-    _,first=worker(root,tmp_path,2,[1]);run(root,first,'P',failed=True)
-    finish(root,2,'W',[1],mechanism_findings=findings('P',blocked=('Q','R')));a(root,3,[1,2],focus='h001.m1')
+    _,first=worker(root,tmp_path,2,[1]);run(root,first,'h001.m1',failed=True)
+    finish(root,2,'W',[1],mechanism_findings=findings('h001.m1',blocked=('h001.m2','h001.m3')));a(root,3,[1,2],focus='h001.m1')
     _,second=worker(root,tmp_path,4,[1,2,3])
     assert second['breadth']['baseline'][0]['accepted_count']==1
-    granted=run(root,second,'P')
+    granted=run(root,second,'h001.m1')
     assert granted['mechanism_binding']['grant']['source_a']==3
-    with pytest.raises(breadth.OpportunityRequired):run(root,second,'P')
-    finish(root,4,'W',[1,2,3],mechanism_findings=findings('P',blocked=('Q','R')));a(root,5,[1,4])
+    with pytest.raises(breadth.OpportunityRequired):run(root,second,'h001.m1')
+    finish(root,4,'W',[1,2,3],mechanism_findings=findings('h001.m1',blocked=('h001.m2','h001.m3')));a(root,5,[1,4])
     _,third=worker(root,tmp_path,6,[1,4,5])
     assert third['breadth']['grant']['used_calls']==1
-    with pytest.raises(breadth.OpportunityRequired):run(root,third,'P')
-    run(root,third,'Q');finish(root,6,'W',[1,4,5],mechanism_findings=findings('P','Q',blocked=('R',)))
+    with pytest.raises(breadth.OpportunityRequired):run(root,third,'h001.m1')
+    run(root,third,'h001.m2');finish(root,6,'W',[1,4,5],mechanism_findings=findings('h001.m1','h001.m2',blocked=('h001.m3',)))
     h(root,7,[1,6],labels=('Renamed P',),existing='h001.m1')
     _,fourth=worker(root,tmp_path,8,[7])
     count={row['mechanism_ref']:row['accepted_count'] for row in fourth['breadth']['baseline']}
     assert count=={'h001.m1':2,'h001.m2':1,'h001.m3':0}
     assert fourth['breadth']['grant'] is None
-    with pytest.raises(breadth.OpportunityRequired):run(root,fourth,'Renamed P')
-    run(root,fourth,'R')
+    with pytest.raises(breadth.OpportunityRequired):run(root,fourth,'h001.m1')
+    run(root,fourth,'h001.m3')
     assert len(experiments.Records(fourth).calls())==1
 
 
 def test_a_cannot_screen_unexecuted_branch(tmp_path,execution_registry):
     root=prepare(tmp_path);h(root,labels=('P','Q'))
-    _,config=worker(root,tmp_path,2,[1]);run(root,config,'P')
-    finish(root,2,'W',[1],mechanism_findings=findings('P',blocked=('Q',)));job=c.build_job(root,3,'A',[1,2])
+    _,config=worker(root,tmp_path,2,[1]);run(root,config,'h001.m1')
+    finish(root,2,'W',[1],mechanism_findings=findings('h001.m1',blocked=('h001.m2',)));job=c.build_job(root,3,'A',[1,2])
     result=search.interpret(root,job,dict(next_action='continue_w',route_reason='Assess the exact W',search_review=dict(
         dispositions=[dict(mechanism_ref='h001.m2',status='screened',reason='Claimed scientific screening')],next_focus=None)))
     assert dict(code='screen_source_unavailable',subject='h001.m2') in result['diagnostics']
@@ -193,7 +193,7 @@ def test_multi_mechanism_q_repair_uses_exact_w_and_preserves_single_science_cycl
     root=prepare(tmp_path,portfolio=True);h(root,labels=('P','Q'))
     job,config=worker(root,tmp_path,2,[1])
     assert job['search']['focus']['mechanism_ref']=='h001.m1'
-    run(root,config,'Q',failed=True);finish(root,2,'W',[1],mechanism_findings=findings('Q',blocked=('P',)))
+    run(root,config,'h001.m2',failed=True);finish(root,2,'W',[1],mechanism_findings=findings('h001.m2',blocked=('h001.m1',)))
     before=search.project(root,3)
     assessed=search.portfolio_view(before,3,prospective=True)
     assert assessed['last_assessed_branch']=='h001.m2'
@@ -205,7 +205,7 @@ def test_multi_mechanism_q_repair_uses_exact_w_and_preserves_single_science_cycl
     repaired,next_config=worker(root,tmp_path,4,[1,2,3])
     assert repaired['search']['repair_binding']=='available' and repaired['search']['repair_root']==2
     assert search.launch_reason(root,repaired) is None
-    run(root,next_config,'Q');finish(root,4,'W',[1,2,3])
+    run(root,next_config,'h001.m2');finish(root,4,'W',[1,2,3])
     a(root,5,[1,4],dispositions=[dict(mechanism_ref='h001.m2',status='screened',reason='The repaired exact mechanism was scientifically assessed')])
     final=search.project(root,6)
     assert len(final['portfolio']['seen_w'])==1 and len(final['order']['seen_w'])==1
