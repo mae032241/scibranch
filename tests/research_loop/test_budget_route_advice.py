@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, guidance, native
+from scidiscovery.research_loop import backends, contracts as c, guidance, native
 from test_history_handoff import finish
 from test_scientific_guidance import prepare
 
@@ -36,28 +36,27 @@ def test_role_planning_uses_control_allowance_without_rewriting_science(tmp_path
     assert prompt.count(guidance.STAGE_PLANNING[role])==1
     assert guidance.STAGE_PLANNING[role] not in instruction
     if role=='A':
-        assert 'first-screen fairness, not total calls' in prompt
-        assert 'zero alone is no denial/H trigger' in prompt
-        assert 'continue_w for scoped science' in prompt
-        assert 'revise_h for question/mechanism/constraint changes' in prompt
-        assert 'No successor budgets/caps' in prompt
-        assert 'H/A suggestions are not control limits' in prompt
+        assert 'protect screening, not total calls' in prompt
+        assert 'zero denies nothing' in prompt
+        assert 'continue_w: scoped decision/gap + reevaluation, not fixed recipes' in prompt
+        assert 'W owns methods/grids' in prompt
+        assert 'revise_h: question/mechanism/constraint changes' in prompt
+        assert 'No H/A caps; control allowances govern' in prompt
+        assert 'continue_w=decision/gap plus reevaluation triggers' in instruction
     elif role=='H':
         assert 'Own questions/mechanisms/evidence and reevaluation' in prompt
         assert 'no downstream token/time budgets or execution/call/audit caps' in prompt
         assert 'Retain scientific counts, user/task requirements and native per-call caps' in prompt
     else:
         assert prompt.count('Implement/validate incrementally')==1
-        assert 'size next work from evidence/current budget' in prompt
-        assert 'scientific stall, scope change or actual runtime refusal' in prompt
+        assert 'use evidence/current budget' in prompt
         assert 'within scientific scope/control allowance' in prompt
-        assert 'H/A estimates add no runtime caps' in prompt
-        assert 'Return to A for scientific stall' in prompt
+        assert 'H/A add no caps; honor work-unit returns' in prompt
         assert prompt.count('Prefer 10-30s waits on pending original sessions within deadlines.')==1
         assert 'Return to independent A' in instruction
         assert 'A suggests methods' in instruction
     if role in 'HA':
-        assert 'Control config/live allowances govern' in prompt
+        assert ('Control config/live allowances govern' if role=='H' else 'control allowances govern') in prompt
         assert 'Budget all work before routing' not in prompt
         assert 'Budget own work' not in prompt
         assert 'exhausted explicit H call cap' not in prompt
@@ -106,6 +105,43 @@ def test_custom_frozen_instruction_is_retained_with_launcher_level_budget_advice
     assert 'Retain scientific counts, user/task requirements and native per-call caps' in prompt
     assert 'Control config/live allowances govern' in prompt
     assert prompt.count(guidance.STAGE_PLANNING['H'])==1
+
+
+@pytest.mark.parametrize('unit',['screen','improve','validate','repair'])
+@pytest.mark.parametrize('backend_name',['codex','protocol'])
+def test_work_unit_task_retains_exact_requirements_with_decision_led_improvement(tmp_path,unit,backend_name):
+    root,job,_,work=request_scene(tmp_path,'W')
+    # Quantitative scientific requirements remain binding even when ordinary
+    # improvement can adapt methods after a suggested local comparison.
+    job=dict(job,instruction='Keep five required comparisons and the exact validation split.',
+        scientific_work_unit=guidance.WORK_UNITS[unit])
+    task=c.science_view(job,root)
+    c.write(work/'science-task.json',task)
+    originals={path:path.read_bytes() for path in
+        (root/'settings.json',root/'jobs'/f"{job['step']:03d}.json",work/'science-task.json')}
+    backend=backends.selected(dict(native_backend=backend_name,
+        native_launcher_argv=['codex'] if backend_name=='codex' else ['independent']),
+        schema_transport='prompt' if backend_name=='codex' else None)
+    prompt,instruction,schema=native.render_scientific_request(job,task,{},backend_name=backend.name,
+        instruction_transport=backend.instruction_transport)
+    schema_path=work/'response.schema.json';c.write(schema_path,schema)
+    packet=backend.request(prompt,schema=schema_path,profile={},work=work,response_schema=schema)
+    assert packet and schema==c.result_schema('W',job['handoff_protocol'],**c.response_options(job))
+    assert task['question']==job['instruction']+'\nWork unit: '+guidance.WORK_UNITS[unit]
+    assert 'within scientific scope/control allowance' in prompt
+    assert 'honor work-unit returns' in prompt and 'Return to independent A' in instruction
+    assert 'reconcile unknown calls, never replay' in instruction
+    if unit=='improve':
+        assert 'follow findings/global unmet goals beyond a recipe/contrast' in task['question']
+        assert 'required independent judgment, strategic choices/tradeoffs' in task['question']
+        assert 'direction-changing counterevidence' in task['question']
+        assert 'stall/scope change/blocker or actual limits' in task['question']
+    else:
+        assert 'beyond a recipe/contrast' not in task['question']
+        if unit=='screen':assert 'report observations or obstacles' in task['question']
+        elif unit=='validate':assert 'stop when resolved or blocked, without a new search' in task['question']
+        else:assert 'Repair the exact failed observation' in task['question'] and 'never replay' in task['question']
+    assert all(path.read_bytes()==value for path,value in originals.items())
 
 
 @pytest.mark.parametrize('transport',['prompt','developer'])

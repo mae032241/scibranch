@@ -50,7 +50,7 @@ ROLE_INSTRUCTIONS = {
          'distinguishing hypotheses from implementation choices. Decide whether evidence extraction is needed, '
          'then choose experiment or independent analysis. Preserve original constraints and unmet questions.',
     'W': 'Own methods/candidates within H; A suggests methods. Honor checks; use --mechanism. Initial/grant calls protect screening opportunities, not trial totals. Route scope changes via A to H; reconcile unknown calls, never replay. Return to independent A, not global completion. No auxiliary agents.',
-    'A': "A owns goal/evaluation-version judgment and counterevidence. No incumbent/unknown-optimality veto. continue_w=one finite stage; calls/audits aren't goal proof.",
+    'A': "A owns goal/evaluation-version judgment and counterevidence. No incumbent/unknown-optimality veto. continue_w=decision/gap plus reevaluation triggers; calls/audits aren't goal proof.",
     'E': 'Answer the exact evidence question from the requesting H or A. Retrieve or extract only needed materials '
          'using available functional tools. Preserve original sources, locators, conflicts and missing evidence. '
          'Return to the requester; do not choose the research direction or assert qualification. '

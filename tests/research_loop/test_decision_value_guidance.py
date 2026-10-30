@@ -1,24 +1,27 @@
 """Scientific advice stays frozen and reaches the native role instruction."""
 import json
+import sys
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, controller, decision, guidance, native
-from test_history_handoff import finish
+from scidiscovery.research_loop import contracts as c, controller, decision, guidance, native, search
+from test_history_handoff import finish, fixture_portfolio_review
+from test_node_budget import policy as node_policy
 
 COV_USAGE = (' Cov public tools: exp run [--script FILE] --new-plan or --parent-plan NAME; '
              'exp lineage-status. Other exp commands keep their public meanings.')
 
 
-def prepare(tmp_path, advice, *, marker=1):
+def prepare(tmp_path, advice, *, marker=1, search_policy=None, launcher=None, **options):
     public = tmp_path / 'public'
     public.mkdir()
     objective = public / 'objective.md'
     objective.write_text('Keep data separation and the required five comparisons; resolve the target-condition gap.')
     root = tmp_path / 'instance'
-    controller.prepare(root, objective, public, ['never-launched'], max_tokens=100_000,
+    controller.prepare(root, objective, public, launcher or ['never-launched'], max_tokens=100_000,
                        max_seconds=3600, max_steps=8, model='fixture', reasoning_effort='high',
-                       search_policy=None, role_guidance=advice, handoff_authority_version=marker)
+                       search_policy=search_policy, role_guidance=advice, handoff_authority_version=marker,
+                       **options)
     return root
 
 
@@ -54,7 +57,7 @@ def test_current_role_advice_reaches_frozen_science_view_with_original_constrain
     assert 'W owns methods/grids' in guidance.DEFAULT['H']
     assert 'differing predictions, the discriminating signal, priority and reopening condition' in guidance.DEFAULT['H']
     assert 'compare 2-3 mechanisms' in guidance.DEFAULT['H'] and 'this is no quota' in guidance.DEFAULT['H']
-    assert 'Preserve constraints, limits and omitted commitments' in guidance.DEFAULT['H']
+    assert 'Preserve user/task constraints and commitments' in guidance.DEFAULT['H']
 
 
 def test_actual_domain_usage_fits_existing_total_bound_and_only_w_receives_it(tmp_path):
@@ -109,3 +112,138 @@ def test_prepared_literal_and_current_fallback_are_not_rewritten(tmp_path, monke
     assert instruction.startswith(expected+'\n') and prompt.startswith(expected+'\n')
     assert 'role_guidance' not in view and 'role_instruction' not in view
     assert all(path.read_bytes() == raw for path, raw in originals.items())
+
+
+def assessment_with_comparison_recipe(root, action, next_action='continue_w'):
+    """Seal authored A science with its optional request, without a native call."""
+    job = c.build_job(root, 3, 'A', [1, 2])
+    record = c.host_record(c.workspace(root, 3))
+    instruction = 'Resolve the target-condition gap: compare the proposed 2x2 grid, then return to A.'
+    payload = dict(summary='The broad H goal remains unmet',
+        scientific_result='The initial observation has not resolved the target-condition gap; no global completion or candidate selection is justified.',
+        limitations=['Synthetic scientific claims only; no model or experiment executed.'],
+        next_action=next_action, route_reason=instruction,
+        search_review=dict(dispositions=[], next_focus=dict(mechanism_ref='h001.m1', action=action)),
+        decision_request=dict(decision='mechanism', question='Which related change resolves the target-condition gap?',
+            change_criterion='Retained fair controls show that the target-condition gap is resolved.'),
+        worker_request=dict(proposed_grid='2x2: two candidate methods by two target conditions',
+            return_point='Return to A after the four comparisons.'))
+    fixture_portfolio_review(root, job, payload)
+    c.write(record/'native-intent.json', dict(task_ref=c.record_ref(root/'jobs/003.json')))
+    c.write(record/'science-output.json', payload)
+    c.write(record/'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
+    c.write(record/'native-outcome.json', dict(returncode=0, stop_reason=None, native_started=False,
+        usage=native.usage(root), raw_ref=c.file_ref(record/'science-output.json')))
+    c.seal_result(root, 3)
+    return instruction, record
+
+
+def comparison_recipe_stage(tmp_path, action, *, next_action='continue_w'):
+    root = prepare(tmp_path, guidance.DEFAULT, search_policy=search.DEFAULT_POLICY, launcher=[sys.executable],
+        node_budget_mode='soft', node_budget_policy=node_policy(),
+        worker_fragment_policy=dict(context='same_session'),
+        resume_policy=dict(max_attempts=2, protocol='codex_exec_resume', usage_scope='turn', output_repair=True))
+    finish(root, 1, 'H', [], action='experiment',
+        text='Investigate related scientific improvements until the target-condition gap is resolved; preserve all required controls.',
+        search_choice=dict(scope='Resolve the target-condition gap within this mechanism',
+            commitments=[dict(label='Related candidate changes', minimal_test='Fair target-condition comparison', existing_ref=None)],
+            focus=dict(index=1, action='improve')))
+    finish(root, 2, 'W', [1], text='The initial comparison leaves the target-condition gap unresolved.')
+    instruction, record = assessment_with_comparison_recipe(root, action, next_action)
+    return root, instruction, record
+
+
+def test_improve_a_comparison_recipe_preserves_local_scientific_iterations_and_originals(tmp_path, monkeypatch):
+    root, instruction, record = comparison_recipe_stage(tmp_path, 'improve')
+    paths = [root/'settings.json', root/'jobs/003.json', record/'science-output.json',
+        record/'result-identity.json', c.host_record(c.workspace(root, 1))/'science-output.json']
+    originals = {path: path.read_bytes() for path in paths}
+    job = c.build_job(root, 4, 'W', [1, 2, 3], instruction=instruction)
+    work = c.workspace(root, 4)
+    task = c.read(work/'science-task.json')
+    context = task['decision_context']
+    assert context['source_original'] == 'inputs/parents/003/conclusion.json'
+    assert context['source_role'] == 'A' and context['source_action'] == 'continue_w'
+    assert context['original_instruction'] == instruction == job['instruction']
+    authority = context['authority']
+    assert 'A selects global direction and decision-changing evidence' in authority
+    assert 'Concrete execution methods are proposals' in authority
+    assert 'Original user constraints and H scope/discriminating commitments remain binding' in authority
+    assert 'W owns execution design and H owns mechanism revision' in authority
+    assert job['search']['focus'] == dict(mechanism_ref='h001.m1', action='improve')
+    assert search.launch_reason(root, job) is None
+    assert job['scientific_work_unit'] == guidance.WORK_UNITS['improve']
+    assert job['scientific_work_unit'] in task['question']
+    assert 'In H, follow findings/global unmet goals beyond a recipe/contrast' in task['question']
+    assert 'Return to A for required independent judgment, strategic choices/tradeoffs' in task['question']
+    assert 'direction-changing counterevidence, stall/scope change/blocker or actual limits' in task['question']
+    assert 'Retain spent budgets' in task['question']
+    assert task['stage_continuation']['status'] == 'configured'
+    assert task['stage_response'].endswith('continue=authorized same-stage work.')
+    assert 'Return to independent A, not global completion' in job['native_role_instruction']
+    # A's complete optional proposal is the same bound original, not a rewritten
+    # four-comparison quota or a substituted scientific question.
+    assert c.read(record/'science-output.json')['worker_request']['return_point'] == 'Return to A after the four comparisons.'
+    assert any(row['path'] == context['source_original'] for row in job['direct_originals'])
+    assert task['global']['objective'] == 'inputs/global/objective.md'
+    objective = next(row for row in job['global_materials'] if row['path'] == task['global']['objective'])
+    assert (root/objective['source']).read_bytes() == (tmp_path/'public/objective.md').read_bytes()
+    assert b'required five comparisons' in (root/objective['source']).read_bytes()
+    for intent in ({}, dict(continuation_kind='fragment')):
+        prompt, _, schema = native.render_scientific_request(job, task, intent, backend_name='codex',
+            instruction_transport='prompt')
+        assert 'stage_intent:continue|review|decision' in prompt
+        assert schema['properties']['stage_intent']['enum'] == ['continue', 'review', 'decision']
+        assert 'next_action' not in schema['properties']
+    frozen = {path: path.read_bytes() for path in (root/'jobs/004.json', work/'science-task.json')}
+    monkeypatch.setitem(guidance.WORK_UNITS, 'improve', 'Future guidance must not replace this accepted work unit.')
+    assert c.build_job(root, 4, 'W', [1, 2, 3], instruction=instruction) == job
+    assert all(path.read_bytes() == raw for path, raw in {**originals, **frozen}.items())
+
+
+@pytest.mark.parametrize('action', ['screen', 'validate', 'repair'])
+def test_a_bounded_work_units_do_not_gain_improve_followup_authority(tmp_path, action):
+    root, instruction, _ = comparison_recipe_stage(tmp_path, action)
+    job = c.build_job(root, 4, 'W', [1, 2, 3], instruction=instruction)
+    task = c.read(c.workspace(root, 4)/'science-task.json')
+    if action == 'repair':
+        # A's request cannot manufacture an exact failed observation or a
+        # launchable repair focus. The original denial remains authoritative.
+        assert job['search']['focus'] is None
+        assert 'scientific_work_unit' not in job
+        denials = [row['code'] for row in job['search']['intent_diagnostics']]
+        assert any(code.startswith('search_repair_source_') for code in denials)
+        assert search.launch_reason(root, job) == denials[0]
+    else:
+        assert job['search']['focus']['action'] == action
+        assert job['scientific_work_unit'] == guidance.WORK_UNITS[action]
+        assert guidance.WORK_UNITS[action] in task['question']
+    assert 'return-after-comparison' not in task['decision_context']['authority']
+    assert 'related observation-driven follow-ups' not in task['decision_context']['authority']
+    assert 'beyond a recipe/contrast' not in task['question']
+
+
+def test_a_mechanism_revision_keeps_h_ownership_without_w_followup_authority(tmp_path):
+    root, instruction, _ = comparison_recipe_stage(tmp_path, 'improve', next_action='revise_h')
+    job = c.build_job(root, 4, 'H', [1, 2, 3], instruction=instruction)
+    task = c.read(c.workspace(root, 4)/'science-task.json')
+    assert task['decision_context']['source_action'] == 'revise_h'
+    assert task['decision_context']['original_instruction'] == instruction
+    assert 'H owns mechanism revision' in task['decision_context']['authority']
+    assert 'related observation-driven follow-ups' not in task['decision_context']['authority']
+    assert 'Revise the qualitative mechanism matrix' in task['question']
+    assert 'beyond a recipe/contrast' not in task['question']
+
+
+def test_initial_screen_keeps_its_independent_assessment_boundary(tmp_path):
+    root = prepare(tmp_path, guidance.DEFAULT, search_policy=search.DEFAULT_POLICY)
+    finish(root, 1, 'H', [], action='experiment', search_choice=dict(
+        scope='Compare mechanisms before selecting a main line',
+        commitments=[dict(label='Initial mechanism', minimal_test='Cheap discriminating comparison', existing_ref=None)],
+        focus=dict(index=1, action='screen')))
+    job = c.build_job(root, 2, 'W', [1])
+    task = c.read(c.workspace(root, 2)/'science-task.json')
+    assert job['scientific_work_unit'] == guidance.WORK_UNITS['screen']
+    assert 'decision_context' not in task
+    assert 'Return to independent A, not global completion' in job['native_role_instruction']
+    assert task['stage_response'].startswith('stage_intent: review=A-ready;')
