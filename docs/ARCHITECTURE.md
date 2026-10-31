@@ -141,14 +141,17 @@ deferral rather than scientific rejection. H compares plausible mechanisms befor
 concentrating and explains any single-mechanism scope; parameter trial counts alone
 do not establish evidence across mechanisms. Control does not grade these reasons.
 
-Normal H planning distinguishes assumptions and failure modes, and revisits live
-alternatives after screening as findings or stalls warrant. Normal A planning
-checks whether proxy, validation and audit evidence addresses the original goal;
-conditional ranking reversals and repeated same-family tuning can motivate a
-bounded public comparison that can change the decision. Methods and improvement
-within H remain W work; mechanism, assumption or criterion revisions return to H.
-Evidence can also support concentration, deferral or finite closure. This is
-scientific advice, with no new response fields, quotas or admission gates.
+Normal A planning checks whether proxy, validation and audit evidence addresses
+the original goal, including conditional ranking reversals and same-family tuning.
+A goal-relevant hypothesis missing from the current mechanisms or a scientific
+bottleneck calls for `revise_h`, even while current methods still improve. A gives
+H the gap, retained evidence and decision question. H revises, reopens or adds
+mechanisms with distinct assumptions or failure modes and discriminating tests,
+revisiting live alternatives beyond screening. Within adequate H scope, bounded
+methods, improvement and implementation repair remain W work via `continue_w`.
+Missing inputs remain missing; evidence can also support concentration, deferral
+or finite closure. This is scientific advice, with no new response fields, quotas
+or admission gates.
 Custom and prepared role literals remain frozen; current launcher planning advice
 does not authorize new work during protected FINAL, closeout or output repair.
 Role advice, shared A evidence judgment, normal-stage planning and response field

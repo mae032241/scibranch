@@ -27,8 +27,8 @@ OPPORTUNITY = {
 # Current launcher advice is separate from the immutable scientific literal.
 # This plans work only; it never changes H scope or execution admission.
 STAGE_PLANNING = {
-    'H': 'Choose mechanisms that differ in key assumptions or failure modes, not labels or parameter variants. Revisit live alternatives after screening when findings or stalls warrant. H owns questions, mechanisms and criteria; W owns methods and grids. Do not allocate downstream token/time budgets or execution/call/audit caps; control allowances govern.',
-    'A': 'Read W and prior A deltas, discover only missing names and retain useful scripts in artifacts/. Check goal alignment of proxies, validation and audits, conditional rank reversals and same-family tuning. Request bounded public work: continue_w for W methods/improvement and reassessment; revise_h for H mechanisms, criteria or assumptions.',
+    'H': 'Choose mechanisms that differ in key assumptions or failure modes, not labels or parameter variants. Use retained evidence and A gaps to revise, reopen or add mechanisms and discriminating tests, revisiting live alternatives beyond screening. H owns questions, mechanisms and criteria; W owns methods and grids. Do not allocate downstream token/time budgets or execution/call/audit caps; control allowances govern.',
+    'A': 'Read A deltas; retain useful scripts in artifacts/. Check proxy, validation and audit fit to goal, conditional rank reversals and same-family tuning. For a hypothesis gap, scientific bottleneck or changed assumptions/criteria, revise_h with gap, evidence and question despite method gains; otherwise continue_w for bounded public method work.',
     'W': 'Implement/validate incrementally within scientific scope/control allowance; use evidence/current budget. H/A add no caps; honor work-unit returns.',
 }
 

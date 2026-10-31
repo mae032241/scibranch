@@ -77,7 +77,9 @@ def test_normal_prepared_scientific_request_delivers_sustained_breadth_and_froze
         assert concept in reading
         assert concept not in transmitted
     if role == 'H':
-        for concept in ('key assumptions or failure modes', 'Revisit live alternatives after screening'):
+        for concept in ('key assumptions or failure modes',
+                'Use retained evidence and A gaps to revise, reopen or add mechanisms',
+                'discriminating tests', 'revisiting live alternatives beyond screening'):
             assert concept in transmitted
     else:
         assert 'portfolio_assessment' in task
@@ -87,30 +89,37 @@ def test_normal_prepared_scientific_request_delivers_sustained_breadth_and_froze
         assert 'uncertainty' not in task['portfolio_response'].lower()
         assert transmitted.count(c.AUTHOR_EVIDENCE_GUIDANCE) == 1
         assert c.AUTHOR_EVIDENCE_GUIDANCE not in json.dumps(task)
-        for concept in ('W and prior A deltas', 'missing names',
-                'conditional rank', 'same-family tuning', 'bounded public', 'decision-changing',
-                'continue_w', 'revise_h'):
+        for concept in ('Read A deltas', 'conditional rank', 'same-family tuning',
+                'hypothesis gap, scientific bottleneck or changed assumptions/criteria',
+                'revise_h with gap, evidence and question despite method gains',
+                'otherwise continue_w for bounded public method work'):
             assert concept in transmitted
 
 
 @pytest.mark.parametrize('role', ['H', 'A'])
-@pytest.mark.parametrize('gate', ['final_return', 'closeout', 'final_report', 'final_only'])
-def test_existing_final_and_closeout_gates_suppress_new_work_planning(tmp_path, role, gate):
+@pytest.mark.parametrize('gate', ['final_return', 'closeout', 'final_report', 'final_only',
+    'output_repair', 'work_repair'])
+def test_existing_final_closeout_and_repair_gates_suppress_new_work_planning(tmp_path, role, gate):
     root = prepare(tmp_path, guidance.DEFAULT)
     job = c.build_job(root, 1, role, [])
     task = c.read(c.workspace(root, 1) / 'science-task.json')
     options = {}
+    intent = {}
     if gate == 'final_return':
         options['final_return'] = True
     elif gate == 'closeout':
         job = dict(job, purpose='closeout')
+    elif gate in {'output_repair', 'work_repair'}:
+        intent[gate] = dict(code='fixture_diagnostic', diagnostic='Preserve the original scientific scope.')
     else:
         job = dict(job, **{gate: True})
-    prompt, _, _ = native.render_scientific_request(job, task, {}, backend_name='codex',
+    prompt, _, _ = native.render_scientific_request(job, task, intent, backend_name='codex',
         instruction_transport='prompt', **options)
     assert guidance.STAGE_PLANNING[role] not in prompt
     if gate == 'final_return':
         assert 'Protected FINAL: conclude now; no new role/audit/experiment.' in prompt
+    elif gate == 'output_repair':
+        assert 'No work/rerun/resubmit this turn' in prompt
 
 
 def plan(*, revised=False):
@@ -124,11 +133,11 @@ def plan(*, revised=False):
         commitments=commitments, focus=dict(index=2 if revised else 1, action='screen'))
 
 
-def assess(root, action, *, main_line='h001.m1'):
+def assess(root, action, *, main_line='h001.m1', revision_reason=None):
     """Seal explicit synthetic scientific judgment using the production consumers."""
     job = c.build_job(root, 3, 'A', [1, 2])
     record = c.host_record(c.workspace(root, 3))
-    reason = ('The retained comparison leaves an interface-history alternative outside the current H scope.'
+    reason = (revision_reason or 'The retained comparison leaves an interface-history alternative outside the current H scope.'
         if action == 'revise_h' else
         'Synthetic evidence supports the retained main line; no feasible competing discriminator changes this bounded decision. '
         'Retain the missing target evidence and reopen when the stated limitation changes.')
@@ -172,22 +181,46 @@ def initial_screen(tmp_path, *, competing=False):
 
 
 @pytest.mark.process_e2e
-def test_a_revision_adds_distinct_route_with_stable_refs_and_fresh_h_ordinal(tmp_path, execution_registry):
+@pytest.mark.parametrize('revision_reason', [
+    pytest.param('The current method continues to improve, but a goal-relevant mechanism gap remains: '
+        'the retained W thickness comparison cannot address interface history outside the current H scope. '
+        'Revisit that missing causal explanation using the retained evidence and the decision question.',
+        id='mechanism-gap-despite-method-improvement'),
+    pytest.param('The current method continues to improve, but a scientific bottleneck remains: '
+        'the retained W thickness comparison cannot distinguish transport from an interface-history effect. '
+        'Revise the assumptions and discriminator using the retained evidence and the decision question.',
+        id='scientific-bottleneck-despite-method-improvement'),
+])
+def test_a_gap_or_bottleneck_revision_adds_distinct_route_with_stable_refs_and_fresh_h_ordinal(
+        tmp_path, execution_registry, revision_reason):
     root = initial_screen(tmp_path)
-    record = assess(root, 'revise_h')
-    original = (record / 'science-output.json').read_bytes()
-    assert c.read(record / 'science-output.json')['portfolio_review']['main_line'] == 'h001.m1'
-    h_job = c.build_job(root, 4, 'H', [1, 2, 3], instruction=c.read(record / 'science-output.json')['route_reason'])
+    record = assess(root, 'revise_h', revision_reason=revision_reason)
+    paths = [root / 'jobs/003.json', record / 'science-output.json', record / 'result-identity.json']
+    originals = {path: path.read_bytes() for path in paths}
+    payload = c.validate(c.workspace(root, 3))
+    assert payload['next_action'] == 'revise_h'
+    assert payload['scientific_result'] == payload['route_reason'] == revision_reason
+    assert payload['decision_request'] == dict(decision='mechanism',
+        question='Which causal explanation resolves the original goal?',
+        change_criterion='A matched public discriminator changes the mechanism choice.')
+    assert payload['search_review']['next_focus'] is None
+    assert payload['portfolio_review']['main_line'] == 'h001.m1'
+    h_job = c.build_job(root, 4, 'H', [1, 2, 3], instruction=payload['route_reason'])
     h_task = c.read(c.workspace(root, 4) / 'science-task.json')
     assert h_task['decision_context']['source_action'] == 'revise_h'
+    assert h_task['decision_context']['original_instruction'] == revision_reason
+    assert h_task['decision_context']['source_original'] == 'inputs/parents/003/conclusion.json'
+    assert any(row['path'] == 'inputs/parents/003/conclusion.json' for row in h_job['direct_originals'])
     finish(root, 4, 'H', [1, 2, 3], action='experiment', search_choice=plan(revised=True))
     state = search.project(root, 5)
     assert set(state['mechanisms']) == {'h001.m1', 'h004.m2'}
     assert state['mechanisms']['h001.m1']['original_h'] == 1
     assert state['mechanisms']['h001.m1']['source_h'] == 4
     assert state['mechanisms']['h004.m2']['label'] == 'Interface-state explanation'
+    assert state['mechanisms']['h004.m2']['original_h'] == 4
     assert state['focus'] == dict(mechanism_ref='h004.m2', action='screen')
     job, config = worker(root, tmp_path, 5, [4], qualified_local=True)
+    assert [row['path'] for row in job['direct_refs']] == ['inputs/parents/004/conclusion.json']
     assert job['search']['focus'] == dict(mechanism_ref='h004.m2', action='screen')
     assert job['scientific_work_unit'] == guidance.WORK_UNITS['screen']
     assert search.launch_reason(root, job) is None
@@ -195,7 +228,7 @@ def test_a_revision_adds_distinct_route_with_stable_refs_and_fresh_h_ordinal(tmp
     assert accepted['mechanism_binding']['mechanism_ref'] == 'h004.m2'
     finish(root, 5, 'W', [4], mechanism_findings=findings('h004.m2', blocked=('h001.m1',)),
         preserve_native_intent=True)
-    assert (record / 'science-output.json').read_bytes() == original
+    assert all(path.read_bytes() == original for path, original in originals.items())
     assert c.read(root / 'jobs/004.json') == h_job
 
 

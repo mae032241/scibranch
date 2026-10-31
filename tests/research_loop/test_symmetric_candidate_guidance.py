@@ -104,9 +104,10 @@ def test_a_breadth_judgment_reaches_actual_native_prompt_with_custom_guidance(tm
     work = c.workspace(root, 1)
     task = c.read(work / 'science-task.json')
     judgment = guidance.STAGE_PLANNING['A']
-    for concept in ('Read W and prior A deltas', 'discover only missing names',
-            'conditional rank reversals', 'bounded public work',
-            'continue_w', 'revise_h', 'reassessment'):
+    for concept in ('Read A deltas', 'conditional rank reversals', 'same-family tuning',
+            'hypothesis gap, scientific bottleneck or changed assumptions/criteria',
+            'revise_h with gap, evidence and question despite method gains',
+            'otherwise continue_w for bounded public method work'):
         assert concept.lower() in judgment.lower()
     record = execution.origin(root, 1)
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json'),
