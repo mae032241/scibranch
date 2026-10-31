@@ -34,34 +34,105 @@ def _producer(root, path):
         return int(Path(parts[1]).stem)
     if len(parts) == 3 and parts[:2] == ('host-history', 'observations') and Path(parts[2]).stem.isdecimal():
         return int(Path(parts[2]).stem)
+    if len(parts) > 2 and parts[:2] == ('host-history', 'execution-recoveries') and parts[2].isdecimal():
+        return int(parts[2])
     return None
 
 
 @contextmanager
 def _counts(monkeypatch, root, current):
     counts = Counter()
+    root = Path(root).absolute()
+    original_stat = os.stat
+    def relative_parts(path):
+        try:
+            return Path(path).absolute().relative_to(root).parts
+        except (TypeError, ValueError):
+            return None
     def category(step):
         if step is None:
             return 'other'
         return ('ancient' if step < current-1 else 'direct' if step == current-1
             else 'current' if step == current else 'next')
     def file_category(path):
-        try:
-            parts = Path(path).absolute().relative_to(root).parts
-            if parts[0] == 'control-ledger':
-                return 'ledger'
-            if parts[:2] == ('host-history', 'objects'):
-                return 'history_context'
-        except (TypeError, ValueError, IndexError):
-            pass
+        parts = relative_parts(path)
+        if parts and parts[0] == 'control-ledger':
+            return 'ledger'
+        if parts and parts[:2] == ('host-history', 'objects'):
+            return 'history_context'
         return category(_producer(root, path))
+    def area(parts):
+        if parts and parts[0] in ('jobs', 'native-evidence'):
+            return parts[0].replace('-', '_')
+        if parts[:2] == ('host-history', 'execution-recoveries'):
+            return 'execution_recovery'
+        if parts[:2] == ('host-delivery', 'audit-recovery'):
+            return 'audit_recovery'
+        if 'candidate-audit' in parts:
+            return 'candidate_audit'
+        return 'other'
+    def filesystem(operation, path):
+        parts = relative_parts(path)
+        if parts is not None:
+            owner = file_category(path)
+            counts[f'{operation}_{owner}'] += 1
+            counts[f'{operation}_area_{area(parts)}_{owner}'] += 1
+    class Entry:
+        """Preserve DirEntry behavior while separating metadata requests."""
+        def __init__(self, entry):
+            self.entry = entry
+        def __getattr__(self, name):
+            return getattr(self.entry, name)
+        def __fspath__(self):
+            return os.fspath(self.entry)
+        def stat(self, *, follow_symlinks=True):
+            filesystem('direntry_stat' if follow_symlinks else 'direntry_lstat', self.entry.path)
+            return self.entry.stat(follow_symlinks=follow_symlinks)
+        def is_dir(self, *, follow_symlinks=True):
+            filesystem('direntry_is_dir', self.entry.path)
+            return self.entry.is_dir(follow_symlinks=follow_symlinks)
+        def is_file(self, *, follow_symlinks=True):
+            filesystem('direntry_is_file', self.entry.path)
+            return self.entry.is_file(follow_symlinks=follow_symlinks)
+        def is_symlink(self):
+            filesystem('direntry_is_symlink', self.entry.path)
+            return self.entry.is_symlink()
+    class Scan:
+        def __init__(self, iterator):
+            self.iterator = iterator
+        def __iter__(self):
+            return self
+        def __next__(self):
+            entry = next(self.iterator)
+            filesystem('scandir_entries', entry.path)
+            return Entry(entry)
+        def __enter__(self):
+            self.iterator.__enter__()
+            return self
+        def __exit__(self, *args):
+            return self.iterator.__exit__(*args)
+        def close(self):
+            self.iterator.close()
     with monkeypatch.context() as patch:
+        for name in ('stat', 'lstat'):
+            original = getattr(os, name)
+            def stat(path, *args, _original=original, _name=name, **kwargs):
+                operation = 'lstat' if _name == 'stat' and kwargs.get('follow_symlinks') is False else _name
+                filesystem(operation, path)
+                return _original(path, *args, **kwargs)
+            patch.setattr(os, name, stat)
+        original_scandir = os.scandir
+        def scandir(path='.'):
+            filesystem('scandir_calls', path)
+            return Scan(original_scandir(path))
+        patch.setattr(os, 'scandir', scandir)
         for name in ('read', 'read_scientific_output'):
             original = getattr(c, name)
             def read(path, *args, _original=original, _name=name, **kwargs):
                 owner = file_category(path)
                 counts[f'{_name}_{owner}'] += 1
-                counts[f'{_name}_bytes_{owner}'] += Path(path).stat().st_size
+                # The spy's byte measurement must not inflate production stat counts.
+                counts[f'{_name}_bytes_{owner}'] += original_stat(path).st_size
                 if owner == 'ancient':
                     frame = sys._getframe(1)
                     counts[f'ancient_read_caller::{frame.f_code.co_filename}::{frame.f_lineno}::{frame.f_code.co_name}'] += 1
@@ -172,10 +243,13 @@ def test_synthetic_handoff_scaling(tmp_path, monkeypatch):
     output = Path(os.environ.get('SCID_TEST_LOG_DIR', str(tmp_path))) / 'handoff-scaling.json'
     output.parent.mkdir(parents=True, exist_ok=True)
     report = dict(scope='Synthetic E handoffs at bounded prefix lengths 2/8/16/32; no scientific performance claim.',
-        instrumentation='c.read/read_scientific_output, explicit deep gates, current inventory owner and ledger reader only; counting overhead included in wall times.',
+        instrumentation='c.read/read_scientific_output, explicit deep gates, current inventory owner, ledger reader, os.scandir calls/yielded entries and os.stat/lstat; counting overhead included in wall times.',
         limitations=['Prefix setup excluded from per-handoff timing but remains inside the supervised process budget.',
             'Cold samples complete the next prepared job after dropping the warm scope, so their prefix has one extra sealed node.',
             'All current findings/artifacts and direct-parent counts/bytes are fixed; generated history/context growth is reported without exemption.',
+            'Filesystem counts cover paths inside this instance; stat/lstat count Python calls, and DirEntry metadata requests are separate because they may use cached metadata.',
+            'Directory calls and entries are grouped by jobs, native-evidence, candidate audit, audit recovery, execution recovery and other paths; entries retain ancient/direct/current/next attribution when their path carries a step.',
+            'This handoff sample does not enter controller._run; startup and pending discovery require their own observation.',
             'One instrumented sample per scale and mode; no wall-time threshold or overall O(1) conclusion.'],
         samples=[])
     def save():
@@ -210,6 +284,10 @@ def test_synthetic_handoff_scaling(tmp_path, monkeypatch):
         rows = [row for row in report['samples'] if row['mode'] == mode]
         old_reads = [sum(value for key, value in row['counts'].items()
             if key in ('read_ancient', 'read_scientific_output_ancient')) for row in rows]
+        filesystem_keys = sorted({key for row in rows for key in row['counts']
+            if key.startswith(('scandir_', 'stat_', 'lstat_', 'direntry_'))})
+        filesystem_counts = {key: [row['counts'].get(key, 0) for row in rows]
+            for key in filesystem_keys}
         report['growth'][mode] = dict(prefix_nodes=[row['accepted_prefix_nodes'] for row in rows],
             wall_seconds=[row['seconds'] for row in rows],
             job_bytes=[row['job_bytes'] for row in rows], ancient_json_reads=old_reads,
@@ -224,8 +302,11 @@ def test_synthetic_handoff_scaling(tmp_path, monkeypatch):
             ledger_events_loaded=[row['counts'].get('ledger_events_loaded', 0) for row in rows],
             source_sequence_calls=[row['counts'].get('source_sequence_calls', 0) for row in rows],
             source_sequence_nodes_returned=[row['counts'].get('source_sequence_nodes_returned', 0) for row in rows],
+            filesystem_counts=filesystem_counts,
             generated_context_grows=rows[-1]['job_bytes'] > rows[0]['job_bytes'],
             ancient_json_io_grows=old_reads[-1] > old_reads[0],
+            ancient_filesystem_work_grows=any(values[-1] > values[0]
+                for key, values in filesystem_counts.items() if key.endswith('_ancient')),
             requirement='Overall constant handoff cost is not established; any context/old-IO growth remains a scaling gap.')
     save()
     direct_shapes = {(row['direct_parent_count'], row['direct_material_count'],
