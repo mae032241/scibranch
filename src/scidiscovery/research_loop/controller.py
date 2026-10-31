@@ -15,7 +15,7 @@ import uuid
 
 from . import budget, contracts, history, native, runtime, search, correction, semantic, execution, continuation, guidance, checkpoint, role_share, shortlist, engineering, worker_delivery
 from .output_repair import OutputRepairRequired
-from . import managed_wait, configuration_updates
+from . import managed_wait, configuration_updates, handoff_state
 
 
 def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str], *,
@@ -420,7 +420,8 @@ def _local_writer(root, *, descriptor=None):
             raise RuntimeError("This research loop already has a running controller") from error
         token = _controller_writers.set(_controller_writers.get() | {(os.getpid(), str(Path(root).resolve()))})
         try:
-            yield
+            with handoff_state.scope(root):
+                yield
         finally:
             _controller_writers.reset(token)
     finally:
@@ -798,7 +799,7 @@ def _route(root, step, role, result, job, current_h, current_w):
         if (not isinstance(target, dict) or target.get("role") not in {"H", "A"}
                 or type(target.get("step")) is not int or not 0 < target["step"] < step):
             raise ValueError("Extraction has no exact scientific requester")
-        requester = contracts.validate(contracts.workspace(root, target["step"]))
+        requester = handoff_state.read_sealed(root, target["step"])
         if requester["role"] != target["role"] or requester["next_action"] != "extract":
             raise ValueError("Extraction requester identity differs")
         route = (target["role"], _parents(current_h, current_w, target["step"], step),
@@ -892,6 +893,46 @@ def _continue_wait(root, step, job, result, next_role, target):
     return True
 
 
+def _save_route(root, completed, route, current_h, current_w, *, resumed):
+    """Publish accepted routing facts once; cold loading never renews the gates."""
+    contracts.write(Path(root) / 'host-history/controller-route.json', dict(
+        version=1, goal_id=contracts.settings(root)['goal_id'],
+        source=dict(step=completed, seal_ref=dict(path=str(Path(root)/'native-evidence'/f'{completed:03d}'/'result-identity.json'))),
+        completed=completed, current_h=current_h, current_w=current_w,
+        resume_seq=(resumed or {}).get('seq'),
+        route=dict(zip(('role', 'parents', 'instruction', 'evidence_return',
+            'correction_request', 'author_correction'), route))))
+
+
+def _saved_route(root, *, first_step, resumed):
+    path=Path(root) / 'host-history/controller-route.json'
+    if not path.exists():return None
+    value=contracts.read(contracts.regular(path))
+    if value.get('resume_seq')!=(resumed or {}).get('seq'):
+        return None
+    completed=value.get('completed')
+    if (value.get('version')!=1 or type(completed) is not int or completed<1
+            or value.get('goal_id')!=contracts.settings(root)['goal_id']
+            or value.get('source')!=dict(step=completed,seal_ref=dict(path=str(
+                Path(root)/'native-evidence'/f'{completed:03d}'/'result-identity.json')))):
+        raise ValueError('Saved controller route lost its exact instance or source seal')
+    if completed<first_step:return None
+    # Only the latest accepted seal is read. Its predecessor's originals and
+    # scientific gates remain closed, including when source files are absent.
+    handoff_state.read_sealed(root,value['completed'])
+    return value
+
+
+def _terminal_route(root, settings, step, result, role):
+    if role == 'H' and result.get('next_action') == 'wait' and not budget.execution_blocked(root):
+        return _start_budget_closeout(root, step, step + 1, 'H', 'scientific_wait')
+    if settings.get('delivery_policy') is not None and result.get('next_action') == 'deliver':
+        return _start_closeout(root, step, step + 1, 'scientific_deliver', authorization_step=step)
+    action = 'finish' if result.get('next_action') == 'deliver' else result['next_action']
+    return _finish(root, settings, action, step, result,
+        reason='Scientific role suggestion; overall goal success is not asserted')
+
+
 def _run(root, *, continue_wait=None):
     from .protocol import require_current
     require_current(root)
@@ -936,12 +977,43 @@ def _run(root, *, continue_wait=None):
             cursor[key] for key in ('role','parents','instruction','evidence_return','correction_request','author_correction'))
         source_steps = [ref['step'] for ref in cursor['source_refs']]
         completed = max(source_steps,default=0)
-        last = contracts.validate(contracts.workspace(root,completed)) if completed else None
+        last = handoff_state.read_sealed(root, completed) if completed else None
         for number in source_steps:
             source_role = fork_runtime.source_job(root, number)['role']
             if source_role == 'H': current_h = number
             if source_role == 'W': current_w = number
         first_step = resumed['first_step']
+    saved = _saved_route(root, first_step=first_step, resumed=resumed)
+    if saved is not None:
+        completed=saved['completed'];current_h=saved['current_h'];current_w=saved['current_w']
+        last=handoff_state.read_sealed(root,completed)
+        cursor=saved['route']
+        role,parents,instruction,evidence_return,correction_request,author_correction = (
+            cursor[key] for key in ('role','parents','instruction','evidence_return','correction_request','author_correction'))
+        first_step=completed+1
+        if role is None:
+            job=contracts.read(root/'jobs'/f'{completed:03d}.json')
+            if _continue_wait(root,completed,job,last,None,continue_wait):
+                role='A';parents=_parents(current_h,current_w,completed)
+                instruction='The operator explicitly requested continuation from the retained wait. Reassess the original goal, evidence and remaining limitations before choosing the next scientific route.'
+                # This explicit continuation is a new admission boundary. The
+                # saved terminal route stays closed; only its proposed new A
+                # spends today's role allowance, with the repeat waiver.
+                admitted=role_share.effective_route(root,completed,last,job,
+                    (role,parents,instruction,evidence_return,current_h,current_w,correction_request,author_correction),
+                    allow_repeat=True)
+                route,share_stop=admitted[:-1],admitted[-1]
+                if share_stop is not None:
+                    if budget.execution_blocked(root):
+                        return _finish(root,settings,'waiting_execution',completed,last,
+                            reason='Original execution remains live or unknown; optional admission refused: '+share_stop,
+                            next_role='H')
+                    route=role_share.reconsider(root,completed,job,route,share_stop)
+                role,parents,instruction,evidence_return,current_h,current_w,correction_request,author_correction=route
+                _save_route(root,completed,(role,parents,instruction,evidence_return,correction_request,author_correction),
+                    current_h,current_w,resumed=resumed)
+            else:
+                return _terminal_route(root,settings,completed,last,job['role'])
     def start_final(cutoff, step, blocked_role, reason, *, pending=None):
         route = pending if pending is not None else (role,parents,instruction,evidence_return,correction_request,author_correction)
         cursor = None
@@ -956,6 +1028,25 @@ def _run(root, *, continue_wait=None):
         record = _record(root, step)
         work = contracts.workspace(root, step)
         identity = record / "result-identity.json"
+        successor_path=root/'jobs'/f'{step+1:03d}.json'
+        if identity.exists() and successor_path.exists():
+            # The frozen successor records the routing decision already made
+            # for this seal, including correction/refusal outcomes. Recover that
+            # saved fact without replaying the author's historical gates.
+            job=contracts.read(root/'jobs'/f'{step:03d}.json')
+            successor=contracts.read(contracts.regular(successor_path))
+            if job['role']=='H':current_h=step
+            if job['role']=='W':current_w=step
+            completed=step;last=handoff_state.read_sealed(root,step)
+            role=successor['role']
+            parents=[int(Path(ref['path']).parts[2]) for ref in successor['direct_refs']]
+            instruction=successor.get('instruction','')
+            evidence_return=successor.get('evidence_return')
+            correction_request=successor.get('correction_request')
+            author_correction=successor.get('author_correction')
+            _save_route(root,completed,(role,parents,instruction,evidence_return,correction_request,author_correction),
+                current_h,current_w,resumed=resumed)
+            continue
         if not identity.exists():
             retained = any(path.exists() for path in (record / "native-intent.json",
                 record / "native-outcome.json", record / "science-output.json", record / "result.json"))
@@ -1103,13 +1194,10 @@ def _run(root, *, continue_wait=None):
                 return _finish(root, settings, "native_outcome_unsealed", completed, last,
                     reason="Native work returned without a complete seal", next_role=role)
         try:
-            outcome = contracts.native_outcome(execution.record(root, step))
-            if (type(outcome.get("returncode")) is not int or outcome["returncode"] != 0 or outcome.get("stop_reason")
-                    or outcome['usage'].get('blocking_unknown_steps',outcome['usage']['unknown_steps'])
-                    and not budget.native_completion_known(outcome, contracts.settings(root))):
-                raise ValueError("Native outcome is ineligible for sealed continuation")
-            job = _check_job(root, settings, step, role, parents, instruction, evidence_return, correction_request, author_correction)
-            result = contracts.validate(work)
+            # seal_result already closed terminal, task and current-input
+            # verification. Loading the saved seal never renews those checks.
+            job = contracts.read(root / 'jobs' / f'{step:03d}.json')
+            result = handoff_state.read_sealed(root, step)
             if result["role"] != role:
                 raise ValueError("Sealed result role differs from its job")
             final = _final_a_result(root, job, result)
@@ -1159,14 +1247,10 @@ def _run(root, *, continue_wait=None):
              next_correction, next_author) = role_share.reconsider(root, step, job,
                 (next_role,next_parents,next_instruction,next_return,current_h,current_w,next_correction,next_author),
                 share_stop)
+        _save_route(root,completed,(next_role,next_parents,next_instruction,next_return,next_correction,next_author),
+            current_h,current_w,resumed=resumed)
         if next_role is None:
-            if role == 'H' and result.get('next_action') == 'wait' and not budget.execution_blocked(root):
-                return _start_budget_closeout(root, completed, step + 1, 'H', 'scientific_wait')
-            if settings.get('delivery_policy') is not None and result.get('next_action') == 'deliver':
-                return _start_closeout(root, completed, step + 1, 'scientific_deliver', authorization_step=step)
-            action = 'finish' if result.get('next_action') == 'deliver' else result["next_action"]
-            return _finish(root, settings, action, completed, last,
-                reason="Scientific role suggestion; overall goal success is not asserted")
+            return _terminal_route(root,settings,completed,last,role)
         role, parents, instruction, evidence_return, correction_request = next_role, next_parents, next_instruction, next_return, next_correction
         author_correction = next_author
     return start_final(completed, completed + 1, role, 'bounded_steps_exhausted')
@@ -1184,7 +1268,7 @@ def _closeout_result(root, status, *, reason=None, step=None, read_only=False):
         for path in sorted((root / 'jobs').glob('*.json')):
             job = contracts.read(path)
             if (job.get('purpose') == 'closeout' or job.get('final_only')) and (begin['first_step'] <= job['step'] if begin['mode'] == 'final' else True) and (_record(root, job['step']) / 'result-identity.json').exists():
-                contracts.validate(contracts.workspace(root, job['step']))
+                handoff_state.read_sealed(root, job['step'])
                 closed.append(job['step'])
     cutoff = begin['source_cutoff'] if begin else 0
     previous = history.candidate_overview(history.rebuild(root, cutoff + 1, write_cache=False))
@@ -1200,7 +1284,7 @@ def _closeout_result(root, status, *, reason=None, step=None, read_only=False):
         or last_action['intent']['action_kind']=='submit' and last_outcome['status']=='confirmed'))
     if not read_only:
         budget.inactive(root, status)
-    last_science = contracts.validate(contracts.workspace(root, last)) if last is not None else None
+    last_science = handoff_state.read_sealed(root, last) if last is not None else None
     if status == 'closeout_status':
         final = budget.final_a_barrier(root)
         if final is not None and last == final['step'] and (_record(root, last) / 'result-identity.json').exists():
@@ -1441,7 +1525,7 @@ def _run_final(root, begin):
             number = int(path.stem)
             if number >= step or not (_record(root, number) / 'result-identity.json').exists():
                 continue
-            contracts.validate(contracts.workspace(root, number))
+            handoff_state.read_sealed(root, number)
             accepted.append(number)
     has_worker = any(fork_runtime.source_job(root, number)['role'] == 'W' for number in accepted)
     path = root / 'jobs' / f'{step:03d}.json'
@@ -1502,7 +1586,7 @@ def _run_final(root, begin):
             _native_call(root, step, launch=True)
     except (budget.NodeBudgetUnavailable, continuation.ResumeUnavailable, OutputRepairRequired, RuntimeError, ValueError) as error:
         return _closeout_result(root, 'closeout_native_unsealed', reason=str(error), step=step)
-    result=_final_a_result(root,job,contracts.validate(contracts.workspace(root,step)))
+    result=_final_a_result(root,job,handoff_state.read_sealed(root, step))
     if result is None:
         return _closeout_result(root,'closeout_native_unsealed',reason='final_return_not_authorized',step=step)
     return result
@@ -1527,7 +1611,7 @@ def _collect_final_a(root, accepted):
                 return _closeout_result(root, 'closeout_native_unsealed', reason=str(error), step=step)
             return _finish(root, contracts.settings(root), 'native_outcome_unsealed', step-1, None,
                            reason=str(error), next_role='A')
-    return _final_a_result(root, job, contracts.validate(contracts.workspace(root, step)))
+    return _final_a_result(root, job, handoff_state.read_sealed(root, step))
 
 
 def _start_closeout(root, cutoff, first_step, reason, *, export_only=False, authorization_step=None):
@@ -1542,9 +1626,7 @@ def _start_closeout(root, cutoff, first_step, reason, *, export_only=False, auth
         return _closeout_result(root, 'closeout_blocked', reason='Original execution remains live or unknown')
     if (root / 'pause.request').exists() or correction.gate(root, cutoff) is not None:
         return _closeout_result(root, 'closeout_blocked', reason='Original pause requires its existing release or exact ack')
-    # Validate the exact prefix, never globally ignore a stopped scientific node.
-    for step in range(1, cutoff + 1):
-        contracts.validate(contracts.workspace(root, step))
+    # The cutoff consists of accepted seals; admission consumes their saved facts.
     settings = configuration_updates.current(root)
     policy = settings.get('delivery_policy')
     configured = not export_only and policy is not None and policy['adapter'] is not None
@@ -1651,7 +1733,7 @@ def _run_direct_delivery(root, begin):
     from . import delivery
     step=begin['authorization_step']
     job=contracts.read(root/'jobs'/f'{step:03d}.json')
-    result=contracts.validate(contracts.workspace(root,step))
+    result=handoff_state.read_sealed(root, step)
     if job['role']!='A' or job.get('purpose') is not None or result['next_action']!='deliver' or step!=begin['source_cutoff']:
         raise ValueError('Original direct delivery authorization changed')
     try:
@@ -1823,7 +1905,7 @@ def _run_closeout(root):
                         reason=_closeout_native_reason(root, step,
                             'Original closeout native outcome remains unsealed; reconcile the same original without replay'))
         job = contracts.read(path)
-        result = contracts.validate(contracts.workspace(root, step))
+        result = handoff_state.read_sealed(root, step)
         final = _final_a_result(root, job, result)
         if final is not None:
             return final
@@ -1918,7 +2000,7 @@ def closeout(root, *, export_only=False):
             first = max([fork['next_step'], *steps]) + 1
             inherited = [source for source in originals.source_sequence(root, first) if source.inherited]
             for source in inherited:
-                contracts.validate(contracts.workspace(root, source.step))
+                handoff_state.read_sealed(root, source.step)
             cutoff = max((source.step for source in inherited
                 if not originals.source_job(source).get('final_only')), default=0)
             resumed = budget.normal_resume(root)
@@ -1928,7 +2010,7 @@ def closeout(root, *, export_only=False):
         for step in steps:
             record = _record(root, step)
             if (record / 'result-identity.json').exists():
-                contracts.validate(contracts.workspace(root, step))
+                handoff_state.read_sealed(root, step)
                 if fork is None or not fork_runtime.source_job(root, step).get('final_only'):
                     cutoff = step
             elif not export_only and (record / 'native-intent.json').exists() and _terminal_success(root, execution.record(root, step)):

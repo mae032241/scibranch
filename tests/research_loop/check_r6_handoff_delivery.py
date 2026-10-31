@@ -133,8 +133,12 @@ def test_r6_authored_shape_needs_output_clarification_not_scientific_reexecution
     assert not isinstance(caught.value, WorkRepairRequired), (
         f"{case['id']}: existing authored findings were misclassified as missing scientific work: "
         f'{caught.value}')
+    # Recognizing a layout ambiguity cannot qualify any of its authored claims.
+    delivery = worker_delivery.assessment(root, job, science, record)
+    assert delivery['status'] == 'incomplete' and delivery['missing'] and delivery['blocked'] == []
     request = continuation.output_request(root, 2, record)
-    assert request['code'] != 'worker_delivery_incomplete'
+    assert request['code'] == 'worker_delivery_shape'
+    assert 'no new work' in request['diagnostic']
     assert 'work_evidence_ref' not in request
     assert continuation._completed_work_request(root, 2, record, 0,
         [c.read(record / 'native-intent.json')]) is None

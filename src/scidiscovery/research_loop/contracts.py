@@ -330,11 +330,12 @@ def response_instructions(job):
         if job.get('purpose')=='closeout':
             fields['closeout_response']=('FINAL: follow action options; no new work/audit.' if job.get('final_only') else 'Closeout: deliver/audit/finish/wait; no exploration.')
     elif job['role']=='W':
-        fields['delivery_requirements']='Managed originals persist; cite directly, no copies. Retain other outputs/receipts; report gaps.'
-        fields['stage_response']='stage_intent: review=A-ready; decision=partial obstacle; continue=authorized same-stage work.'
+        fields['delivery_requirements']='Cite managed originals; retain other outputs/receipts and gaps.'
+        fields['stage_response']=('stage_intent: review=A-ready; decision=partial obstacle; continue=work. '
+            'Optional blocker: mechanism_findings:[{mechanism:"<ref>",basis:"blocked",finding:"<obstacle>"}].')
         fields['stage_continuation']=dict(status='configured' if job.get('worker_fragment_policy') else 'unavailable',
             context=(job.get('worker_fragment_policy') or {}).get('context'),
-            permission='Requires original terminal/session, known usage and remaining authorization.')
+            permission='Needs terminal/session, known usage and authorization.')
     return fields
 
 
@@ -1905,7 +1906,8 @@ def seal_result(root: Path, step: int):
     job_path = root / 'jobs' / f'{step:03d}.json'
     job = read(job_path)
     if (record / 'result-identity.json').exists():
-        result = validate(work)
+        from . import handoff_state
+        result = handoff_state.read_sealed(root, step)
         from . import history
         history.refresh(root, step + 1)
         return result

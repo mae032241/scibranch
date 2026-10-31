@@ -1007,7 +1007,7 @@ def validate_manifest(child_root, *, full=False):
 
 
 def selected_task(child_root, *, full=False):
-    manifest = validate_manifest(child_root, full=full)
+    manifest = validate_manifest(child_root, full=True) if full else o._manifest(child_root)
     source = o.selected_source(child_root)
     job = o.source_job(source)
     from .protocol import require_job_format
@@ -1025,7 +1025,7 @@ def bootstrap(child_root):
 
 
 def prefix_nodes(child_root):
-    manifest = validate_manifest(child_root)
+    manifest = o._manifest(child_root)
     result = []
     snapshot = o._snapshot(manifest)
     for row in manifest['prefix_entries']:

@@ -1,7 +1,7 @@
-"""Explicit r6 handoff regression checks; intentional red baseline.
+"""Explicit r6 handoff regression checks with the original recorded corpus.
 
 Run this file by its exact path with pytest. Its ``check_`` name keeps the
-unfixed cost regressions out of default collection. No wall-time threshold,
+cost acceptance cases out of default collection. No wall-time threshold,
 xfail or explicit skip hides a known defect. Process checks require the existing
 Local launch capability, native executable and bwrap; a dependency skip means
 NOT RUN, never pass or reproduced RED. No model or live research instance runs.
@@ -9,6 +9,7 @@ NOT RUN, never pass or reproduced RED. No model or live research instance runs.
 from collections import Counter
 from contextlib import contextmanager
 from copy import deepcopy
+from contextvars import Context
 
 import pytest
 
@@ -102,7 +103,7 @@ def _match_costs(monkeypatch):
         finally:
             scopes.pop()
 
-    def counted_retained(root, row, proof):
+    def counted_retained(root, row, proof, **kwargs):
         nonlocal depth
         # Some output publication calls use the same matcher outside status;
         # each such independent lookup receives its own index-build allowance.
@@ -114,7 +115,7 @@ def _match_costs(monkeypatch):
         counts['lookups'] += 1
         depth += 1
         try:
-            return retained(root, row, proof)
+            return retained(root, row, proof, **kwargs)
         finally:
             depth -= 1
 
@@ -133,13 +134,31 @@ def _match_costs(monkeypatch):
 
 @pytest.mark.process_e2e
 def test_r6_projection_matches_originals_in_linear_work(r6_cost_scene, monkeypatch):
+    """A projection consumes saved bindings without matching old originals again."""
     root, evidence, _ = r6_cost_scene
     before_step = max(row['step'] for row in evidence['nodes']) + 1
     with _match_costs(monkeypatch) as counts:
         projection = lineage.project(root, before_step)
     assert len(projection['sources']) == 8
     assert sum(projection['search_state']['opportunity_counts'].values()) == 6
-    assert counts['lookups'] > 0, 'The real projection must exercise retained native-original binding'
+    assert counts['lookups']==counts['comparisons']==counts['candidate_entries']==0,dict(counts)
+
+
+@pytest.mark.process_e2e
+def test_r6_native_proof_matching_uses_linear_work(r6_cost_scene,monkeypatch):
+    """Explicit fresh verification still binds all six real managed call rows."""
+    root,evidence,_=r6_cost_scene
+    calls=[]
+    for node in evidence['nodes']:
+        if node['role']!='W':continue
+        job,_,seal,_=history._source(root,node['step'])
+        observed=history.read_observation(root,job,seal)
+        calls.extend(observed['managed_calls'])
+    assert len(calls)==sum(node.get('managed_call_count',0) for node in evidence['nodes'])==6
+    with _match_costs(monkeypatch) as counts:
+        for row in calls:
+            assert history.managed_status(root,row,verify_files=False)==row['status']
+    assert counts['lookups']>0, 'Fresh verification must exercise exact retained native-original binding'
     bound = 2 * (counts['candidate_entries'] + counts['lookups'])
     assert counts['comparisons'] <= bound, (
         f'Original matching repeats candidate scans: measured={dict(counts)}, '
@@ -171,3 +190,30 @@ def test_unknown_original_is_read_only_and_never_replayed(r6_cost_scene, monkeyp
     assert history.managed_status(root, row) == 'unknown'
     assert {key: row[key] for key in identity} == identity
     assert accepted_path.read_bytes() == before
+
+
+@pytest.mark.process_e2e
+def test_cold_r6_search_rebuild_reuses_sealed_decisions_without_old_checks(r6_cost_scene, monkeypatch):
+    from scidiscovery import archive_io
+    from scidiscovery.research_loop import contracts as c, experiments, handoff_state, semantic
+    root,_,_=r6_cost_scene
+    assert len(handoff_state.current(root).search)<=2, 'Do not retain one growing state copy per old node'
+    expected=search.project(root,9)
+    snapshot=root/'host-history/search-state.json'
+    assert snapshot.exists()
+    snapshot.unlink()  # Only a disposable derived cursor, never an original.
+    def forbidden(*args,**kwargs):
+        raise AssertionError('Cold search rebuild reopened historical verification or interpretation')
+    with monkeypatch.context() as patch:
+        for name in ('validate','validate_original','science_payload','_sealed_science'):
+            patch.setattr(c,name,forbidden)
+        patch.setattr(history,'managed_status',forbidden)
+        patch.setattr(history,'direct_sources',forbidden)
+        patch.setattr(experiments,'verify_observation',forbidden)
+        patch.setattr(archive_io,'stat_file',forbidden)
+        patch.setattr(semantic,'outcome',forbidden)
+        patch.setattr(search,'interpret',forbidden)
+        def restore():
+            with handoff_state.scope(root):return search.project(root,9)
+        assert Context().run(restore)==expected
+    assert not snapshot.exists(), 'A read-only rebuild must not publish new state'

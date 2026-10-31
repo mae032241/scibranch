@@ -533,9 +533,9 @@ def run_native(root: Path, step: int, attempt=0):
             limits=control_budget.snapshot(root,settings)
             view_context=_shared_view_context(root,job,intent,limits,final_return=final_return,
                 author_permit=permit if intent.get('continuation_kind')=='author_closeout' else None)
-            shared_input_views.selected_code_mounts(root,job,work,context=view_context,exports=code_exports)
+            selected_code=shared_input_views.selected_code_mounts(root,job,work,context=view_context,exports=code_exports)
             if namespace_launcher is None:
-                args=shared_input_views.wrap(root,job,work,args,context=view_context)
+                args=shared_input_views.wrap(root,job,work,args,context=view_context,selected_code=selected_code)
             else:
                 # Registered host preparation/bridge stays in its host view.
                 # Its frozen module owns the final scientific namespace seam.

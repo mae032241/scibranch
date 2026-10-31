@@ -84,9 +84,10 @@ def local_steps(root, *, include_native=False):
 def bootstrap(root):
     if not is_fork(root):
         return None
-    from . import fork_sources
-    fork_sources.validate_manifest(root)
-    boot = copy.deepcopy(fork_sources.bootstrap(root))
+    from . import originals
+    # Fork creation validates and freezes this manifest. Resuming its saved
+    # route does not reopen the inherited closure or its original files.
+    boot = copy.deepcopy(originals._manifest(root)['bootstrap'])
     boot['route']['evidence_return'] = _bound_return(
         boot['route'].get('evidence_return'), boot['selected_task_ref']['origin_identity'])
     return boot
@@ -226,7 +227,7 @@ def selected_science_view(root, job):
 
 def _selected_files(root, selected):
     from . import contracts as c, fork_sources, originals, project_layout
-    manifest = fork_sources.validate_manifest(root)
+    manifest = originals._manifest(root)
     source = selected['source']
     layout=project_layout.code_roots(selected['job'].get('project'),c.workspace(Path(source.original_root),source.step))
     prefixes=[row['source'].relative_to(source.original_root).as_posix()+'/' for row in layout['editable']]
@@ -309,7 +310,7 @@ def _publish_selected(root, work, job):
 
 def validate_selected_job(root, work, job):
     """Validate exact inherited inputs rather than reconstructing a later context."""
-    from . import contracts as c, fork_sources, execution_authority
+    from . import contracts as c, fork_sources, execution_authority, originals
     selected = fork_sources.selected_task(root)
     expected = _selected_base(root, selected)
     original_statements = expected.pop('user_guidance', [])
@@ -326,4 +327,14 @@ def validate_selected_job(root, work, job):
             raise ValueError('Fork advice differs from its exact applied user original')
     if c.read(c.regular(Path(work) / 'science-task.json')) != selected_science_view(root, job):
         raise ValueError('Fork scientific task projection changed')
+    source=selected['source']
+    for ref in [*job.get('global_materials',[]),*job.get('direct_refs',[]),
+            *job.get('direct_materials',[]),*job.get('history',{}).get('execution_recovery_materials',[])]:
+        originals.resolve_ref(source,dict(ref,path=f'project/nodes/{source.step:03d}/'+ref['path']))
+    for ref in job.get('direct_originals',job.get('direct_refs',[])):
+        producer=originals.dependency(source,int(Path(ref['path']).parts[2]))
+        seal=c.read(originals.source_record(producer,'result-identity.json'))
+        if ref['size_bytes']!=seal['raw_ref']['size_bytes']:
+            raise ValueError('Fork direct original changed its exact producer')
+        originals.resolve_ref(producer,seal['raw_ref'])
     execution_authority.validate_job(root, job)

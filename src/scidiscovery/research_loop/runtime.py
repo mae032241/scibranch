@@ -276,8 +276,10 @@ def _run(root, step, attempt=0):
         if not process_matches(contracts.read(record / 'watchdog-process.json'), binding):
             raise RuntimeError('Local cleanup watchdog identity is unavailable; no native launch')
         from .native import run_native
+        from . import handoff_state
         try:
-            run_native(root, step, attempt)
+            with handoff_state.scope(root):
+                run_native(root, step, attempt)
         finally:
             try:
                 from . import checkpoint

@@ -18,6 +18,23 @@ def prefix(root,step):
     return inherited + [ref for ref in local if ref not in inherited]
 
 
+def sealed_values(root, refs):
+    """Load accepted recovery facts without reopening past original checks."""
+    from . import originals, handoff_state
+    state=handoff_state.current(root)
+    values=[]
+    for ref in refs:
+        key=str(ref)
+        value=state.recoveries.get(key) if state is not None else None
+        if value is None:
+            with handoff_state.loading():
+                source=originals.for_origin(root,ref['origin_identity']) if 'origin_identity' in ref else None
+                value=c.read(originals.resolve_ref(source,ref) if source is not None else Path(root)/ref['path'])
+            if state is not None:state.recoveries[key]=value
+        values.append(value)
+    return values
+
+
 def validate(root,refs,*,originals=True):
     if not isinstance(refs,list):raise ValueError('Execution recovery prefix must be a list')
     values=[];seen=set();chains={};sources={};pending={}
@@ -266,7 +283,9 @@ def call_view(root,sources,refs,*,originals=True,validated=None,original_rows=No
         observed=c.read(source_originals.resolve_ref(source, seal['observations'])) if seal.get('observations') else {}
         for row in observed.get('managed_calls',[]):
             result[(job['step'],row['call_id'])]=dict(row=row,phase='original',native_state=None)
-    for value in (validate(root,list(refs),originals=originals) if validated is None else validated):
+    from . import handoff_state
+    values=(sealed_values(root,list(refs)) if handoff_state.loading_sealed() else validate(root,list(refs),originals=originals)) if validated is None else validated
+    for value in values:
         if value.get('version')==2:
             result[(value['source_step'],value['call_id'])]=value
         else:
@@ -274,7 +293,33 @@ def call_view(root,sources,refs,*,originals=True,validated=None,original_rows=No
     return result
 
 
+def _saved_pending_rows(root,sources):
+    from . import originals, handoff_state
+    result={};state=handoff_state.current(root)
+    for job,_,seal,_ in sources:
+        key=('pending',job['step'])
+        if state is not None and key in state.records:
+            result.update(state.records[key]);continue
+        rows={};ref=seal.get('pending_executions')
+        if ref is not None:
+            source=originals.node(root,job['step'])
+            value=c.read(originals.resolve_ref(source,ref))
+            if value.get('complete') is False and value.get('unavailable_reason') and not value.get('allocations') and not value.get('host_preparations'):
+                raise history.ObserverIntegrityError('Original pending namespace was unavailable; no clean execution state can be proved')
+            calls=[row['call_id'] for row in value.get('allocations',[]) if row['disposition']=='possibly_prepared']
+            for binding in value.get('host_preparations',[]):
+                owner=originals.source_for_ref(source,binding)
+                calls.append(c.read(originals.resolve_ref(owner,binding))['call_id'])
+            rows={(job['step'],call):dict(row=None,phase='original_prepare_unknown',native_state=None) for call in calls}
+        if state is not None:state.records[key]=rows
+        result.update(rows)
+    return result
+
+
 def sealed_pending_rows(root,sources):
+    from . import handoff_state
+    if handoff_state.loading_sealed():
+        return _saved_pending_rows(root,sources)
     """Small sealed control metadata only; callers explicitly select source seals."""
     from . import qualification as q
     result={}

@@ -188,8 +188,7 @@ def _proof(root, source, *, context=None, source_kind='mutable', previous=None):
 
 def source_control_ref(source, relative):
     from . import originals
-    originals.original_ref(source,relative)
-    return dict(path=str(Path(source.original_root)/relative))
+    return dict(path=str(Path(source.original_root)/originals.relative(relative)))
 
 
 def source_seal_ref(source):
@@ -203,13 +202,47 @@ def _same_original(root, original, retained):
             or original['file_stat']==retained['file_stat']))
 
 
-def _retained_original(root, row, proof):
-    candidates=[row[key] for key in ('accepted','completed','terminal','observation','retirement') if row.get(key) is not None]
-    candidates.extend(row.get('originals', [])); candidates.extend(row.get('outputs', []))
-    matches={item['snapshot']: item for item in candidates if _same_original(root, proof, item)}
-    if len(matches)!=1:
-        raise ObserverIntegrityError('Original has no exact retained path binding')
-    return next(iter(matches.values()))
+def _retained_resolver(root, row):
+    """Resolve native proofs with one lazy, verification-local retained index."""
+    root=Path(root);index=None
+    def remember(summary,position,item):
+        # Two different snapshots already prove ambiguity. A sole snapshot
+        # retains the last descriptor, as the original candidate fold did.
+        snapshot=item['snapshot']
+        if snapshot in summary or len(summary)<2:summary[snapshot]=(position,item)
+    def stat_key(item):
+        value=item['file_stat']
+        return (type(value),tuple(value)) if isinstance(value,(list,tuple)) else value
+    def resolve(proof):
+        nonlocal index
+        if index is None:
+            index={}
+            candidates=[row[key] for key in ('accepted','completed','terminal','observation','retirement') if row.get(key) is not None]
+            candidates.extend(row.get('originals',[]));candidates.extend(row.get('outputs',[]))
+            for position,item in enumerate(candidates):
+                key=(root/item['path'],item.get('size_bytes'))
+                bucket=index.setdefault(key,dict(all={},missing={},stats={}))
+                remember(bucket['all'],position,item)
+                summary=(bucket['stats'].setdefault(stat_key(item),{}) if 'file_stat' in item else bucket['missing'])
+                remember(summary,position,item)
+        bucket=index.get((root/proof['path'],proof.get('size_bytes')))
+        summaries=(() if bucket is None else (bucket['all'],) if 'file_stat' not in proof
+            else (bucket['missing'],bucket['stats'].get(stat_key(proof),{})))
+        matches={}
+        for summary in summaries:
+            for snapshot,candidate in summary.items():
+                if snapshot not in matches or candidate[0]>matches[snapshot][0]:matches[snapshot]=candidate
+        if len(matches)!=1:
+            raise ObserverIntegrityError('Original has no exact retained path binding')
+        retained=next(iter(matches.values()))[1]
+        if not _same_original(root,proof,retained):
+            raise ObserverIntegrityError('Original has no exact retained path binding')
+        return retained
+    return resolve
+
+
+def _retained_original(root, row, proof, *, lookup=None):
+    return (lookup if lookup is not None else _retained_resolver(root,row))(proof)
 
 
 def _snapshot(proof):
@@ -305,6 +338,9 @@ def managed_status(root, row, *, context=None, verify_files=True):
         source = originals.node(root, step)
         validate_managed_original(source,originals.source_job(source),[row],controls_only=not verify_files)
         return row['status']
+    lookup=_retained_resolver(root,row)
+    def native_proof(proof):
+        return root/_retained_original(root,row,proof,lookup=lookup)['snapshot']
     for name in ('accepted','completed','terminal','observation','retirement'):
         if row.get(name) is not None:_validate_proof(root,row[name],context=context)
     if row.get('retirement') is not None:
@@ -315,7 +351,7 @@ def managed_status(root, row, *, context=None, verify_files=True):
         if not _same_original(root, value.get('accepted', {}), row['accepted']):
             raise ObserverIntegrityError('Retirement differs from the archived accepted call')
         try:
-            experiments.verify_retirement(value,lambda item:root/_retained_original(root,row,item)['snapshot'],
+            experiments.verify_retirement(value,native_proof,
                 interface=_execution_interface(root,accepted),context=context,verify_files=verify_files)
         except (ValueError,OSError,KeyError,TypeError) as error:
             raise ObserverIntegrityError('Archived permanent retirement proof changed') from error
@@ -330,8 +366,7 @@ def managed_status(root, row, *, context=None, verify_files=True):
                 or not _same_original(root, value['completed'], row['completed'])):
             raise ObserverIntegrityError('Managed observation differs from archived call originals')
         try:
-            return experiments.verify_observation(value,lambda proof:
-                root/_retained_original(root,row,proof)['snapshot'],interface=interface,context=context,
+            return experiments.verify_observation(value,native_proof,interface=interface,context=context,
                 verify_files=verify_files and not ('code_version' in accepted and experiments._local_original_observation(
                     dict(execution_interface=interface),value)))
         except (ValueError,OSError,KeyError,TypeError) as error:
@@ -368,10 +403,11 @@ def scientific_outputs(root, job, call, *, verify_files=True):
         record = f'native-evidence/{job["step"]:03d}' + (f'/continuations/{attempt:03d}' if attempt else '')
         config = c.read(originals.resolve_ref(source, dict(path=record + '/experiment-config.json')))
         observed = c.read(archived_ref(call['observation']))
+        lookup=_retained_resolver(source.original_root,call)
         archived = dict(observed, completed=dict(observed['completed'], path=str(archived_ref(call['completed']))),
-            outputs=[dict(item, path=str(originals.resolve_ref(source, dict(item, path=_retained_original(source.original_root,call,item)['snapshot']))))
+            outputs=[dict(item, path=str(originals.resolve_ref(source, dict(item, path=_retained_original(source.original_root,call,item,lookup=lookup)['snapshot']))))
                 for item in observed['outputs']],
-            **(dict(scientific_outputs=[dict(item,path=str(originals.resolve_ref(source,dict(item,path=_retained_original(source.original_root,call,item)['snapshot']))))
+            **(dict(scientific_outputs=[dict(item,path=str(originals.resolve_ref(source,dict(item,path=_retained_original(source.original_root,call,item,lookup=lookup)['snapshot']))))
                 for item in observed['scientific_outputs']]) if 'scientific_outputs' in observed else {}))
         result = []
         for descriptor in experiments.scientific_outputs(config, archived):
@@ -394,10 +430,11 @@ def scientific_outputs(root, job, call, *, verify_files=True):
     if config['execution_interface']!=_execution_interface(root,accepted):
         raise ObserverIntegrityError('Scientific output interface changed')
     observed=c.read(c.regular(root/call['observation']['snapshot']))
+    lookup=_retained_resolver(root,call)
     archived=dict(observed,completed=dict(observed['completed'],path=str(root/call['completed']['snapshot'])),
-        outputs=[dict(item,path=str(root/_retained_original(root,call,item)['snapshot']))
+        outputs=[dict(item,path=str(root/_retained_original(root,call,item,lookup=lookup)['snapshot']))
         for item in observed['outputs']],
-        **(dict(scientific_outputs=[dict(item,path=str(root/_retained_original(root,call,item)['snapshot']))
+        **(dict(scientific_outputs=[dict(item,path=str(root/_retained_original(root,call,item,lookup=lookup)['snapshot']))
             for item in observed['scientific_outputs']]) if 'scientific_outputs' in observed else {}))
     result=[]
     for descriptor in experiments.scientific_outputs(config,archived):
@@ -592,7 +629,7 @@ def validate_managed_original(source,job,rows,*,controls_only=False):
             raise ObserverIntegrityError('Inherited managed original has no exact archived bytes')
         return originals.resolve_ref(source, dict(proof, path=proof['snapshot']))
     def native_proof(proof):
-        retained=_retained_original(source.original_root,row,proof)
+        retained=_retained_original(source.original_root,row,proof,lookup=lookup)
         actual=proof_path(retained)
         path=Path(retained['snapshot'])
         if path.is_absolute():
@@ -611,6 +648,7 @@ def validate_managed_original(source,job,rows,*,controls_only=False):
         if row['call_id'] in seen or row['scope'] != scope:
             raise ObserverIntegrityError('Inherited managed call escaped its exact stage owner')
         seen.add(row['call_id'])
+        lookup=_retained_resolver(source.original_root,row)
         for key in ('accepted', 'completed', 'terminal', 'observation', 'retirement'):
             if row.get(key) is not None:
                 proof_path(row[key])
@@ -900,9 +938,9 @@ def _capture(root, job, payload, materials):
     from . import originals
     for receipt in job.get('history', {}).get('nodes', []):
         prior_source = originals.node(root, receipt['step'])
-        old_seal = c.read(originals.source_record(prior_source, 'result-identity.json'))
+        prior_job,_,old_seal,_ = _source(root,receipt['step'])
         if old_seal.get('observations'):
-            prior = read_observation(root, originals.source_job(prior_source), old_seal)
+            prior = read_observation(root, prior_job, old_seal)
             known.update(row['id'] for row in prior['candidates'])
             known_contexts.update(row['call_id'] for row in prior.get('contexts', []))
             prior_contexts.extend(prior.get('contexts', []))
@@ -1071,42 +1109,13 @@ def capture(root, job, payload, materials):
 
 
 def _source(root, step, *, resolve_choices=True):
-    from . import originals
-    if originals.inherited(root, step):
-        source = originals.node(root, step)
-        c.validate_original(source,controls_only=True)
-        job = originals.source_job(source)
-        seal_path = originals.source_record(source, 'result-identity.json')
-        seal = c.read(seal_path)
-        from . import candidate_refs
-        raw=originals.resolve_ref(source,seal['raw_ref'])
-        _sealed_raw_ref(raw,seal)
-        payload=c.read_scientific_output(raw)
-        if resolve_choices:
-            payload = candidate_refs.control_payload(job, payload, root=root, source=source)
-            mapping = candidate_refs.source_input_mapping(source, job)
-            if job['role'] == 'W' and seal.get('observations'):
-                observed = c.read(originals.resolve_ref(source, seal['observations']))
-                mapping.update({row['id']: candidate_refs.origin_candidate(source.origin_identity, row['id'])
-                    for row in observed['candidates']})
-            payload = candidate_refs.public_science_fields(payload, mapping)
-        return candidate_refs.source_job_view(source, job), payload, seal, source_seal_ref(source)
-    source=originals.node(root,step)
-    record=c.host_record(c.workspace(root,step))
-    seal_path=c.regular(record/'result-identity.json')
-    seal=c.read(seal_path)
-    c.validate_original(source,controls_only=True)
-    raw=originals.resolve_ref(source,seal['raw_ref'])
-    _sealed_raw_ref(raw,seal)
-    job=originals.source_job(source)
-    from . import candidate_refs
-    payload=c.read_scientific_output(raw)
-    return job, candidate_refs.control_payload(job,payload,root=root) if resolve_choices else payload, seal, c.record_ref(seal_path)
+    """Load an already sealed source; its historical verification is closed."""
+    from . import handoff_state
+    return handoff_state.source(root, step, resolve_choices=resolve_choices)
 
 
 def direct_sources(root, job):
-    """Verify frozen input ownership, without asserting scientific support."""
-    from . import budget
+    """Check current direct bindings and load their accepted producer facts."""
     sources, seen = [], set()
     for ref in job['direct_refs']:
         match = re.fullmatch(r'inputs/parents/([0-9]{3,})/conclusion\.json', ref['path'])
@@ -1117,32 +1126,14 @@ def direct_sources(root, job):
             raise ValueError('Direct scientific input identity is ambiguous')
         seen.add(step)
         source, payload, seal, _ = _source(root, step)
-        record = c.host_record(c.workspace(root, step))
         from . import originals
-        original = originals.node(root, step)
         chooser = originals.node(root, job['step']) if originals.inherited(root, job['step']) else None
         input_path = (originals.resolve_ref(chooser, dict(ref, path=f'project/nodes/{job["step"]:03d}/' + ref['path']))
             if chooser is not None else originals.resolve_root_ref(root,dict(ref,
                 path=str(c.workspace(root,job['step'])/ref['path']))))
-        native_record = (Path(original.original_root) / (original.native_record or f'native-evidence/{step:03d}')
-            if original.inherited else execution.record(root, step))
-        intent = c.read(originals.source_record(original, 'native-intent.json')
-            if original.inherited else native_record / 'native-intent.json')
-        outcome_record = (originals.source_record(original, 'native-outcome.json').parent
-            if original.inherited else native_record)
-        outcome = c.native_outcome(outcome_record, original_record=native_record,
-            output_path=originals.resolve_ref(original, seal['raw_ref']) if original.inherited else None)
-        raw_ref = c._native_output_identity(root, step, intent, outcome,
-            **(dict(source=original) if original.inherited else {}))
         if (c.regular(input_path).stat().st_size != ref['size_bytes']
-                or next((row for row in job.get('direct_originals',job['direct_refs']) if row['path']==ref['path']),None) is None
-                or intent['task_ref'] != seal['job_ref']
-                or type(outcome.get('returncode')) is not int or outcome['returncode'] != 0
-                or outcome.get('stop_reason')
-                or outcome.get('usage', {}).get('unknown_steps') != [] and not budget.native_completion_known(outcome, originals.source_settings(original))
-                or raw_ref != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}
-                or c.read(originals.source_record(original, 'result.json')) != c.result_projection(source, payload)):
-            raise ValueError('Direct scientific original or terminal identity changed')
+                or next((row for row in job.get('direct_originals',job['direct_refs']) if row['path']==ref['path']),None) is None):
+            raise ValueError('Direct scientific input binding changed')
         sources.append((source, payload, seal))
     return sources
 
@@ -1219,8 +1210,28 @@ def source_sequence(root, before_step, *, source_cutoff=None, extra_steps=()):
     """Recreate small node projections from originals; caches are not authority."""
     from . import originals
     if (Path(root) / originals.MANIFEST).exists():
-        sources = originals.source_sequence(root, before_step,
-            source_cutoff=source_cutoff, extra_steps=extra_steps)
+        from . import handoff_state
+        state=handoff_state.current(root)
+        if state is None:
+            sources = originals.source_sequence(root,before_step,
+                source_cutoff=source_cutoff,extra_steps=extra_steps)
+        else:
+            if state.sequence is None:
+                state.sequence=originals.source_sequence(root,before_step)
+                state.sequence_before=before_step
+                state.handles.update((source.step,source) for source in state.sequence)
+            elif before_step>state.sequence_before:
+                state.sequence.extend(originals.node(root,step) for step in range(state.sequence_before,before_step))
+                state.sequence_before=before_step
+            sources=[source for source in state.sequence if source.step<before_step]
+            if source_cutoff is not None:
+                if (type(source_cutoff) is not int or not 0<=source_cutoff<before_step
+                        or list(extra_steps)!=sorted(set(extra_steps))
+                        or any(type(step) is not int or not source_cutoff<step<before_step for step in extra_steps)):
+                    raise ValueError('Invalid frozen scientific source cutoff')
+                sources=[source for source in sources if source.step<=source_cutoff or source.step in extra_steps]
+            elif extra_steps:
+                raise ValueError('Ordinary history cannot skip scientific originals')
         from . import budget
         resume = budget.normal_resume(root, before_step)
         if resume is not None:
@@ -1284,11 +1295,14 @@ def records_from_sources(root, sources, *, write_cache=True, include_details=Tru
             conclusion_pages=[])
         # Source authors retain the complete original scientific fields.
         # Only the index excerpt is shortened; current roles can read text pages.
-        raw = c.regular(c._execution_raw(root,step))
-        raw_ref = _sealed_raw_ref(raw,seal)
+        raw_ref = {key: seal['raw_ref'][key] for key in ('path', 'size_bytes')}
+        raw = None
         detail = []
         if include_details:
-            text = raw.read_text(encoding='utf-8')
+            from . import handoff_state, originals
+            with handoff_state.loading():
+                raw = originals.resolve_ref(originals.node(root,step),seal['raw_ref'])
+                text = raw.read_text(encoding='utf-8')
             detail = [dict(step=step, role=job['role'], source='node:%03d/scientific-output' % step,
                            part=index + 1, parts=(len(text) + TEXT_CHARS - 1) // TEXT_CHARS,
                            text=text[start:start + TEXT_CHARS])
@@ -1384,41 +1398,18 @@ def bind(root,step,protocol=None,*,source_cutoff=None,extra_steps=()):
 
 
 def validate(root, work, binding):
+    """History bindings were closed when published; verify only new recoveries.
+
+    Navigation pages and old node seals are not current scientific inputs. Exact
+    direct and selected originals are checked separately by the task contract.
+    """
     from . import execution_recovery
-    recoveries=execution_recovery.validate(root,binding.get('execution_recoveries',[]))
+    recoveries = execution_recovery.sealed_values(root, binding.get('execution_recoveries', []))
     if any(value['source_step'] not in {row['step'] for row in binding['nodes']} for value in recoveries):
         raise ObserverIntegrityError('Execution recovery is outside the frozen scientific prefix')
-    for item in binding.get('execution_recovery_materials',[]):
-        path=work/item['path']
-        if (not item['path'].startswith('inputs/recovered/') or '..' in Path(item['path']).parts
-                or c.regular(path).stat().st_size!=item['size_bytes'] or path.stat().st_size!=item['size_bytes']):
-            raise ObserverIntegrityError('Bound execution recovery material changed')
-    if binding.get('audit_projection_version') == 1:
-        from . import candidate_audit
-        sources = [_source(root, row['step']) for row in binding['nodes']]
-        expected = candidate_audit.collect_refs(root, sources, step=int(work.name), adjacent=binding.get('adjacent_audit'))
-        if binding['audit_receipts'] != expected:
-            raise ValueError('Frozen audit receipts differ from their sealed prefix anchors')
-    for row in binding['nodes']:
-        _, _, _, seal_sha = _source(root, row['step'])
-        if seal_sha != row['seal_ref']:
-            raise ValueError('Frozen historical node identity changed')
-    for row in binding['files']:
-        from . import originals
-        path = originals.resolve_root_ref(root,dict(row,path=str(work/row['path'])))
-        limit=MAX_PAGE_BYTES
-        if row.get('kind')=='scientific_original':
-            match=re.fullmatch(r'inputs/(?:history/nodes|parents)/([0-9]{3,})/scientific-original\.json',row['path'])
-            if (match is None or row['path'] not in {f'inputs/history/nodes/{int(match[1]):03d}/scientific-original.json',
-                        f'inputs/parents/{int(match[1]):03d}/scientific-original.json'}
-                    or not any(ref['step']==int(match[1]) for ref in binding['nodes'])):
-                raise ValueError('Bound scientific original has no exact history source')
-            _,_,seal,_=_source(root,int(match[1]),resolve_choices=False)
-            if set(row)-{'source'}!={'path','size_bytes','kind'} or row['size_bytes']!=seal['raw_ref']['size_bytes']:
-                raise ValueError('Bound scientific original differs from its sealed source')
-            limit=None
-        if c.regular(path, limit=limit).stat().st_size != row['size_bytes'] or path.stat().st_size != row['size_bytes']:
-            raise ValueError('Bound scientific history page changed')
+    from . import originals
+    for material in binding.get('execution_recovery_materials', []):
+        originals.material_path(root, material)
 
 
 def validate_recommendation(job, payload, *, root=None):
@@ -1433,42 +1424,9 @@ def validate_recommendation(job, payload, *, root=None):
 
 
 def read_observation(root, job, seal):
-    """Read the owner's path/hash receipt and verify its exact source binding."""
-    root = Path(root).resolve()
-    from . import originals
-    if originals.inherited(root, job['step']):
-        source = originals.node(root, job['step'])
-        receipt = seal.get('observations')
-        if receipt is None:
-            return None
-        if receipt['path'] != f'host-history/observations/{job["step"]:03d}.json':
-            raise ObserverIntegrityError('Inherited observation escaped its exact producer')
-        value = c.read(originals.resolve_ref(source, receipt))
-        config = originals.source_settings(source).get('history_observer') or _managed_config(job, root)
-        if config is None or value['binding'] != _observer_binding(_sealed_raw_ref(originals.source_raw(source),seal), config):
-            raise ObserverIntegrityError('Inherited observation lost its exact source binding')
-        from . import candidate_refs
-        return candidate_refs.source_observation(source, originals.source_job(source), value)
-    if job.get('formal_review'):
-        if seal.get('observations') is not None:raise ValueError('Formal review has an ordinary observer snapshot')
-        return
-    receipt = seal.get('observations')
-    config = c.settings(root, job).get('history_observer') or _managed_config(job,root,controls_only=True)
-    if config is None:
-        if receipt is not None:
-            raise ValueError('Unconfigured observer snapshot in scientific seal')
-        return
-    if receipt is None:
-        raise ValueError('Configured observer snapshot missing from scientific seal')
-    path = root / receipt['path']
-    expected = root / 'host-history/observations' / f'{job["step"]:03d}.json'
-    if path != expected or c.regular(path).stat().st_size != receipt.get('size_bytes',path.stat().st_size):
-        raise ObserverIntegrityError('Sealed observer snapshot changed')
-    value = c.read(path)
-    raw_ref=_sealed_raw_ref(originals.resolve_root_ref(root,seal['raw_ref']),seal)
-    if value['binding'] != _observer_binding(raw_ref, config):
-        raise ValueError('Observer snapshot source binding changed')
-    return value
+    """Read the observation already accepted by this exact source seal."""
+    from . import handoff_state
+    return handoff_state.observation(root, job, seal)
 
 
 def validate_observation(root, job, seal):
@@ -1480,6 +1438,8 @@ def validate_observation(root, job, seal):
         return
     observer_input_sources(root, job, value)
     config = c.settings(root, job).get('history_observer') or _managed_config(job,root)
+    if value.get('binding') != _observer_binding({key:seal['raw_ref'][key] for key in ('path','size_bytes')},config):
+        raise ObserverIntegrityError('Observer snapshot source binding changed')
     if _managed_config(job,root):
         validate_managed(root,job,value['managed_calls'])
     proofs = [proof for row in value['candidates'] for proof in row['evidence']]
@@ -1590,6 +1550,14 @@ def _validate_proof(root, proof, *, context=None):
 
 
 def refresh(root, before_step):
+    """Publish disposable summaries only at the owned seal boundary."""
+    from . import handoff_state
+    with handoff_state.scope(root):
+        _refresh(root,before_step)
+        handoff_state.publish_search(root)
+
+
+def _refresh(root, before_step):
     """Update disposable projections after every seal, including a terminal A."""
     from .protocol import require_current
     require_current(root)

@@ -51,23 +51,37 @@ Cov 独立插件使用同一目标和 `--installation-cohort cov`。日志属于
 并记录八节点拓扑、六个受管调用及交接时间。模型、数据集、原生会话、认证和宿主路径不进入
 测试集。原调用的科学结论与资格不随样例复制；测试使用新建的机械夹具原件，原始 r6 不变。
 
-`check_r6_handoff_costs.py` 检查已核验历史前缀的读取次数和原件查找比较次数；
+`check_r6_handoff_costs.py` 检查已封存历史前缀的读取次数和原件查找比较次数；
 `check_r6_handoff_delivery.py` 检查首次 W 的阻断声明是否可发现，以及字段补正、实际缺工作、
 明确阻断、旧 H 证据和未知调用的分类。`check_` 入口须显式选择，不进入默认测试发现。
-当前生产缺陷尚未修复，相关断言应失败；没有 xfail 将缺陷隐藏成通过。
+`check_r6_handoff_incremental.py` 对照 2、8、16 节点前缀，检查冷恢复、下一节点封存及挂载准备
+不重查旧原件，当前输入变化仍拒绝，并覆盖保存路线与同一历史截面的新对账。
+`check_handoff_passive_provenance.py` 检查冷启动后的受限、未知来源传播，禁止重跑旧执行、
+来源门槛或解析无关的旧科学正文，同时保留当前所选文件的精确来源及损坏拒绝。
+`check_r6_handoff_file_bindings.py` 用各节点不同内容的同名小文件，核对八节点、六调用的精确
+原件关系，以及追加节点、选择旧成果、只读挂载、冷恢复和 fork 后的来源映射。
+`check_r6_handoff_acceptance.py` 保存同一八节点六调用流程的 build/seal 秒数，供修复前后比较。
+这些断言用于修复验收；没有 xfail 将缺陷隐藏成通过。
 
 性能断言使用结构计数：已有源集合的 fold 不再读源，project 每个源最多读取一次；
-每次独立原件核验的查找工作须有界于候选清单与查找请求数量之和。r6 实测秒数和坏计数只作
+已封存历史的投影不重新匹配原件；当前独立原件核验的查找工作须有界于候选清单与查找请求
+数量之和。删除派生搜索游标后，冷重建仍只折叠保存事实，不能重跑科学门槛或原件查验。
+文件关系的完整比对属于测试预言，不加回生产交接。r6 实测秒数和修复前坏计数只作
 来源记录，不作为机器相关的性能门槛。路径、大小、文件 stat 和歧义拒绝仍有正反例。
 
 使用原有串行监督入口，输出目录须为新的仓库本地目录：
 
 ```sh
 python scripts/run_tests.py --lane source --output .trial/r6-handoff-source \
-  tests/research_loop/check_r6_handoff_costs.py
+  tests/research_loop/check_r6_handoff_costs.py \
+  tests/research_loop/check_r6_handoff_incremental.py \
+  tests/research_loop/check_handoff_passive_provenance.py
 python scripts/run_tests.py --lane process --output .trial/r6-handoff-process \
   tests/research_loop/check_r6_handoff_costs.py \
   tests/research_loop/check_r6_handoff_delivery.py
+python scripts/run_tests.py --lane process --output .trial/r6-handoff-bindings \
+  tests/research_loop/check_r6_handoff_file_bindings.py \
+  tests/research_loop/check_r6_handoff_acceptance.py
 ```
 
 进程用例复用当前 Local 测试环境，需要已支持的 Codex 可执行文件、bwrap 和 Linux namespace。

@@ -189,7 +189,12 @@ def _inputs(root, job):
     if job.get('fork_source') is not None:
         source = originals.selected_source(root)
         original = originals.source_job(source)
-        document = _original_inputs(source, original)
+        # The selected task's provenance was closed by its original seal. A
+        # new binding preserves those saved edges; it does not replay that
+        # producer's own input checks through the inherited prefix.
+        document = (copy.deepcopy(_source_read(source, original['source_provenance']))
+            if original.get('source_provenance') is not None else
+            dict(version=1, step=original['step'], edges=[], scope=SCOPE))
         for edge in document['edges']:
             if edge['kind'] == 'producer':
                 producer = originals.dependency(source, edge['step'], seal_ref=edge['seal'])
@@ -272,6 +277,23 @@ def _declaration(root, sources, index, memo, *, public=False, verify_inputs=True
     return row['restriction']
 
 
+def _saved_input_restriction(job):
+    """Read the input restriction already closed with this scientific task."""
+    saved = job.get('source_restrictions') or {}
+    state = saved.get('restriction')
+    return state if state in ('clear', 'restricted', 'unknown') else 'unknown'
+
+
+def _saved_output_restriction(job, proof):
+    """Reduce saved host facts without renewing a producer's old admission."""
+    if proof is None:
+        return 'unknown'
+    additional = proof.get('additional_input_restriction')
+    if additional not in ('clear', 'restricted', 'unknown'):
+        additional = 'unknown'
+    return inherited_restriction([_saved_input_restriction(job), additional])
+
+
 def _restriction(root, document, active, memo, sources, *, verify_inputs=True):
     key = document['step']
     if key in active:
@@ -292,39 +314,15 @@ def _restriction(root, document, active, memo, sources, *, verify_inputs=True):
             from . import originals
             if 'origin_identity' in edge['seal'] or originals.inherited(root, edge['step']):
                 source = originals.for_origin(root, edge['seal']['origin_identity'], step=edge['step']) if 'origin_identity' in edge['seal'] else originals.node(root, edge['step'])
-                c.validate_original(source,controls_only=True)
                 states.append(original_status(source,controls_only=True)['restriction'])
                 continue
             seal = _read(root, edge['seal'])
             step = edge['step']
             job_path = root / 'jobs' / f'{step:03d}.json'
-            record = c.host_record(c.workspace(root, step))
-            native_record=Path(seal['raw_ref']['path']).parent
-            if not native_record.is_relative_to(root/'native-evidence'/f'{step:03d}'):
-                raise IntegrityError('Source producer lost its exact native attempt')
-            intent=c.read(c.regular(native_record/'native-intent.json'))
-            outcome=c.native_outcome(native_record)
-            raw_ref={key:seal['raw_ref'][key] for key in ('path','size_bytes')}
-            if (seal['job_ref']!=c.record_ref(c.regular(job_path))
-                    or seal['result_ref']!=c.file_ref(c.regular(record/'result.json'))
-                    or intent.get('task_ref')!=seal['job_ref'] or outcome.get('raw_ref')!=raw_ref
-                    or raw_ref['path']!=str(native_record/'science-output.json')
-                    or type(outcome.get('returncode')) is not int or outcome['returncode']!=0):
-                raise IntegrityError('Source producer differs from its exact scientific seal')
-            parent = c.read(job_path)
+            parent = c.read(c.regular(job_path))
             ref = seal.get('source_provenance')
-            if ref is None:
-                states.append('unknown')
-                continue
-            proof = _read(root, ref)
-            expected = _output(root,parent,seal,managed_coverage=proof.get('managed_input_coverage'),controls_only=True)
-            if proof != expected:
-                raise IntegrityError('Source proof differs from its original producer')
-            inputs = parent.get('source_provenance')
-            validate_inputs(root, parent)
-            state = (status(root, parent)['restriction'] if parent.get('fork_source') is not None else
-                _restriction(root,_read(root,inputs),active,memo,sources,verify_inputs=False) if inputs else 'unknown')
-            states.append(inherited_restriction([state, proof['additional_input_restriction']]))
+            proof = _read(root, ref) if ref is not None else None
+            states.append(_saved_output_restriction(parent, proof))
         else:
             states.append('unknown')
     result = inherited_restriction(states)
@@ -448,6 +446,8 @@ def _original_input_status(source,*,active=None,controls_only=False):
     if key in active:
         raise IntegrityError('Original source provenance cycle')
     job = originals.source_job(source)
+    if controls_only:
+        return dict(restriction=_saved_input_restriction(job), scope=SCOPE)
     if job.get('fork_source') is not None:
         original = originals.source_for_ref(source, job['fork_source']['job'])
         originals.resolve_ref(original, job['fork_source']['job'])
@@ -481,6 +481,9 @@ def original_status(source,*,active=None,controls_only=False):
     from . import originals
     job = originals.source_job(source)
     seal = c.read(originals.source_record(source, 'result-identity.json'))
+    if controls_only:
+        proof = _source_read(source, seal['source_provenance']) if seal.get('source_provenance') else None
+        return dict(restriction=_saved_output_restriction(job, proof), scope=SCOPE)
     validate_original(source,job,seal,controls_only=controls_only)
     input_status = _original_input_status(source,active=active,controls_only=controls_only)
     states = [input_status['restriction']]
@@ -576,25 +579,25 @@ def output_status(root, step, material=None):
     root = Path(root).resolve()
     from . import originals
     if material is not None:
-        material=c._public_materials(root,[material])[0]
+        material={key:value for key,value in material.items() if key!='file_stat'}
+    source = None
     if originals.inherited(root, step):
         source = originals.node(root, step)
-        c.validate_original(source,controls_only=True)
         seal = c.read(originals.source_record(source, 'result-identity.json'))
-        if material is not None and not any({key:value for key,value in row.items() if key!='file_stat'}==material for row in seal['materials']):
+    else:
+        job=c.read(root/'jobs'/f'{step:03d}.json')
+        seal=c.read(c.host_record(c.workspace(root,step))/'result-identity.json')
+    if material is not None:
+        matches=[row for row in seal['materials']
+            if {key:value for key,value in row.items() if key!='file_stat'}==material]
+        if len(matches)!=1:
             raise IntegrityError('Material is not an exact original of the named producer')
-        if material is not None:c._public_materials(root,[material],source=source)
+        c._public_materials(root,matches,source=source)
+    if source is not None:
         return dict(original_status(source,controls_only=True),missing_reason=None)
-    work = c.workspace(root, step)
-    from . import history
-    job,_,seal,_=history._source(root,step)
-    if material is not None and not any({key:value for key,value in row.items() if key!='file_stat'}==material for row in seal['materials']):
-        raise IntegrityError('Material is not an exact original of the named producer')
-    if material is not None:c._public_materials(root,[material])
     ref = seal.get('source_provenance')
     if ref is None:
         return dict(restriction='unknown', missing_reason='legacy_producer_without_source_proof', scope=SCOPE)
-    validate_outputs(root,job,seal,controls_only=True)
     proof = _read(root, ref)
-    state = inherited_restriction([status(root, job)['restriction'], proof['additional_input_restriction']])
+    state = _saved_output_restriction(job, proof)
     return dict(restriction=state, missing_reason=proof['missing_reason'], scope=SCOPE)

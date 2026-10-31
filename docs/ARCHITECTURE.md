@@ -328,6 +328,17 @@ read-only dynamic root. These Local and node-owned raw/artifact originals are se
 actual writers are confirmed stopped. Repeated collection, observation, checkpoint
 and history views preserve first destinations and saved proofs; actual content
 consumption verifies the selected original without copying or refreshing it.
+Sealing closes a node's verification. Ordinary handoff, loading and restart
+read its saved results, observations and accepted control decisions without
+revalidating the historical files or rerunning scientific gates. Controller
+route and search cursors carry accepted decisions forward; a missing derived
+cursor can be rebuilt from saved facts without granting new qualification.
+New verification covers the current node and its actual declared inputs,
+including recovered materials, independently of the historical node count.
+Source restrictions propagate saved input and output facts; passive provenance
+reads do not reopen producer execution or ancestry gates. Missing restriction
+facts remain unknown, and restricted sources cannot become clear by inheritance.
+History navigation and readonly mount bindings reuse the recorded originals.
 Checkpoints do not seal current drafts. Fragment checkpoints neither retain draft contents nor
 restore deleted or lost drafts; continuation depends on drafts still present in the existing workspace.
 Required selected-control checks remain, and output errors do not rewrite a known

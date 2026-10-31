@@ -265,69 +265,47 @@ def _pin_holders(root, work, holders):
         atomic_files.replace_bytes(path,(json.dumps(value,sort_keys=True)+'\n').encode(),mode=0o400)
 
 
-def _host_aliases(root, work, inventory):
-    """Known framework aliases only; never recursively search another workspace.
+def _host_aliases(root, work, inventory, job):
+    """Protect the current job's framework aliases and publication holders.
 
-    Private call/compilation holders are readonly to the Worker. Their existing
-    host owners publish outside its namespace; managed children receive only the
-    exact accepted artifacts exception through their independent launch view.
+    Historical nodes retain their sealed bindings. Only sources actually selected
+    for this launch enter the mount plan; old jobs and attempts are not reopened.
     """
-    from . import contracts as c, experiment_client
+    from . import contracts as c, execution, experiment_client
     aliases=[];holders=[]
     def existing(path):
         inventory.check()
         if path.exists() or path.is_symlink():
             aliases.append(_exact(path))
-    jobs=root/'jobs'
-    if not jobs.exists():return aliases
-    with os.scandir(_exact(jobs)) as entries:
-        for entry in entries:
-            inventory.check()
-            path=Path(entry.path)
-            if path.suffix!='.json':continue
-            if not path.stem.isdecimal() or path.name!=f'{int(path.stem):03d}.json':
-                raise _unsupported('the known job namespace changed')
-            declared=c.read(c.regular(_exact(path),limit=32*1024*1024))
-            step=declared.get('step')
-            if type(step) is not int or step<=0 or path.name!=f'{step:03d}.json':
-                raise _unsupported('a known job identity changed')
-            node=c.workspace(root,step)
-            for relative in ('inputs','conclusion.json',*[f'work/{name}' for name in DYNAMIC_ROOTS]):
-                existing(node/relative)
-            origin=c.host_record(node)
-            records=[origin]
-            continued=origin/'continuations'
-            if continued.exists():
-                with os.scandir(_exact(continued)) as attempts:
-                    for attempt in attempts:
-                        inventory.check();record=Path(attempt.path)
-                        if not record.name.isdecimal() or record.name!=f'{int(record.name):03d}':
-                            raise _unsupported('the known continuation namespace changed')
-                        _identity(record);records.append(record)
-            for record in records:
-                for name in ('science-result.schema.json','science-output.json','author-science-context'):
-                    existing(record/name)
-            for number in ('001','002'):
-                existing(root/'host-recovery/author-context'/f'{step:03d}'/number/'author-science-context')
-            if declared.get('role')!='W':continue
-            record_directory=experiment_client.record_directory(root,step)
-            private=root/'host-runtime/experiment-control'/f'{step:03d}'
-            for holder in (record_directory,private/'scientific-output-views',
-                    private/'implementations',origin/'compiled-implementations'):
-                inventory.check();_exact(holder).mkdir(parents=True,exist_ok=True,mode=0o700)
-                _identity(holder);aliases.append(holder);holders.append(holder)
-            # Legacy package aliases have an explicit compiler output inventory;
-            # do not inventory arbitrary scientific artifacts or scratch trees.
-            with os.scandir(origin/'compiled-implementations') as implementations:
-                for implementation in implementations:
-                    inventory.check();directory=_exact(Path(implementation.path))
-                    compiler=directory/'compiler.json'
-                    if not compiler.exists():continue
-                    value=c.read(c.regular(compiler,limit=32*1024*1024))
-                    output=Path(value['output']['path'])
-                    if not output.is_relative_to(root):
-                        raise _unsupported('a retained compiler alias escaped its instance')
-                    existing(output)
+    step=job['step']
+    node=c.workspace(root,step)
+    for relative in ('inputs','conclusion.json',*[f'work/{name}' for name in DYNAMIC_ROOTS]):
+        existing(node/relative)
+    origin=c.host_record(node)
+    record=execution.record(root,step)
+    for current in dict.fromkeys((origin,record)):
+        for name in ('science-result.schema.json','science-output.json','author-science-context'):
+            existing(current/name)
+    for number in ('001','002'):
+        existing(root/'host-recovery/author-context'/f'{step:03d}'/number/'author-science-context')
+    if job.get('role')=='W':
+        record_directory=experiment_client.record_directory(root,step)
+        private=root/'host-runtime/experiment-control'/f'{step:03d}'
+        for holder in (record_directory,private/'scientific-output-views',
+                private/'implementations',origin/'compiled-implementations'):
+            inventory.check();_exact(holder).mkdir(parents=True,exist_ok=True,mode=0o700)
+            _identity(holder);aliases.append(holder);holders.append(holder)
+        # Legacy outputs belong only to this current job's compiler inventory.
+        with os.scandir(origin/'compiled-implementations') as implementations:
+            for implementation in implementations:
+                inventory.check();directory=_exact(Path(implementation.path))
+                compiler=directory/'compiler.json'
+                if not compiler.exists():continue
+                value=c.read(c.regular(compiler,limit=32*1024*1024))
+                output=Path(value['output']['path'])
+                if not output.is_relative_to(root):
+                    raise _unsupported('a retained compiler alias escaped its instance')
+                existing(output)
     _pin_holders(root,work,holders)
     return aliases
 
@@ -464,7 +442,7 @@ def logical_original(root, job, path):
     return None
 
 
-def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=False, include_skills=True, context=None):
+def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=False, include_skills=True, context=None, selected_code=None):
     """Final ro overlays after ALL writable/context mappings.
 
     Explicit readonly (source,target) mappings override the default same target.
@@ -495,19 +473,32 @@ def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=Fal
     # sources; these final overlays follow wider context and backend mappings.
     from . import contracts as c, experiment_client, originals
     declared = {}
+    historical_sources = set()
+    current_sources = set()
+    history_files = {item['path']: item for item in job.get('history', {}).get('files', [])}
+    actual_paths = {item['path'] for item in [*job.get('global_materials', []),
+        *job.get('direct_refs', []), *job.get('direct_materials', []),
+        *job.get('history', {}).get('execution_recovery_materials', []),
+        *[row['material'] for row in job.get('selected_inputs', [])]]}
     for item in experiment_client._input_rows(job):
         logical = originals.relative(item['path'])
         destination = str(target / logical)
         bound = dict(item, source=item.get('source', str(work / logical)))
-        source = originals.material_path(root, bound)
+        # These are published navigation/control pages, already bound by the
+        # job. Actual direct/global/recovery inputs still use the exact resolver.
+        historical = item['path'] not in actual_paths and history_files.get(item['path']) == item
+        source = (Path(bound['source']) if historical else originals.material_path(root, bound))
+        (historical_sources if historical else current_sources).add(source)
         if destination in declared and declared[destination] != source:
             raise _unsupported('a declared logical input has ambiguous sources')
         declared[destination] = source
     if job.get('delivery_sources', {}).get('catalogue'):
         catalogue = c.regular(work / 'inputs/delivery-candidates.json')
         declared[str(target / 'inputs/delivery-candidates.json')] = catalogue
+        current_sources.add(catalogue)
     for source, destination in _wake_mappings(root, job, target):
         declared[str(destination)] = source
+        current_sources.add(source)
     author = _author_context(root, job)
     if author is not None:
         from . import author_closeout
@@ -518,12 +509,21 @@ def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=Fal
             source = (author_closeout._check(root, item['display']) if item['kind'] in {'task', 'framework'}
                 else author_closeout._context_source(root, item['source']))
             declared[str(target / display.relative_to(directory))] = source
-    for source, destination, _, _ in selected_code_mounts(root, job, work,
-            target_work=target, context=context):
+            current_sources.add(source)
+    code_mounts = (selected_code_mounts(root, job, work, target_work=target, context=context)
+        if selected_code is None else selected_code)
+    for source, destination, _, _ in code_mounts:
         declared[str(destination)] = source
+        current_sources.add(source)
     for destination, source in declared.items():
         mappings[destination] = source
-        protected_sources.append(source)
+        if source not in historical_sources or source in current_sources:
+            protected_sources.append(source)
+    if private:
+        # The full-host view exposes canonical aliases too. Mount the saved
+        # history paths readonly without reopening their old inode proofs.
+        for source in sorted(historical_sources, key=str):
+            mappings[str(source)] = source
     # Trusted launchers already verify exact accepted source identities. Their
     # explicit file mappings take priority at this same final overlay seam.
     for source, destination in mounts:
@@ -533,7 +533,7 @@ def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=Fal
     project_overlap(job.get('project'), [(source, Path(destination)) for destination, source in mappings.items()])
     _dynamic_mountpoints(work, target, declared, context=context)
     inventory = _Inventory(context)
-    host_aliases=_host_aliases(root,work,inventory) if private else []
+    host_aliases=_host_aliases(root,work,inventory,job) if private else []
     protected = set()
     for path in host_aliases:
         inventory.check();info=path.lstat()
@@ -629,7 +629,7 @@ def ensure_capability(*, context=None):
     return program
 
 
-def wrap(root, job, work, argv, *, context=None):
+def wrap(root, job, work, argv, *, context=None, selected_code=None):
     """All local native argv, including opaque protocol/custom launchers."""
     program = ensure_capability(context=context)
     holder, ancestors = _private_git_arguments(root)
@@ -654,7 +654,7 @@ def wrap(root, job, work, argv, *, context=None):
     controls = [program, '--unshare-user', '--unshare-pid', '--die-with-parent', '--bind', '/', '/', '--proc', '/proc',
         '--dev', '/dev',
         *ancestors, *workspace_arguments(root, work), *project_mounts,
-        *mount_arguments(root, job, work, private=True, context=context),
+        *mount_arguments(root, job, work, private=True, context=context, selected_code=selected_code),
         '--ro-bind', str(holder), str(holder)]
     return _BwrapCommand([*controls, '--', *argv], command_index=len(controls))
 

@@ -151,8 +151,10 @@ def _completed_work_request(root, step, record, source_attempt, prior_intents):
             **c.response_options(job))
         # A valid continuation fragment retains its original fragment route.
         if science.get('stage_intent') == 'continue':return None
-        if worker_delivery.assessment(root,job,science,record,source_attempt=source_attempt)['status']!='incomplete':
+        delivery=worker_delivery.assessment(root,job,science,record,source_attempt=source_attempt)
+        if delivery['status']!='incomplete':
             return None
+        worker_delivery.require_output_clarification(science,delivery)
         request = output_request(root, step, record, source_attempt=source_attempt, verify_task=False)
     except OutputRepairRequired:
         return None
@@ -654,6 +656,7 @@ def seal_or_repair(root, step):
                 review_required = review['requested'] and review['enforced']
                 from . import worker_delivery
                 delivery=worker_delivery.assessment(root,job,science,record)
+                if science['stage_intent']!='continue':worker_delivery.require_output_clarification(science,delivery)
                 if delivery['status']=='partial':
                     checkpoint.end_stage(root,job,record,delivery['reason'])
                     return c.seal_result(root,step)

@@ -254,7 +254,8 @@ def _screen_refs(root,source,seal,state):
     for row in facts['evidence']:
         ref=row['mechanism_ref'];current=state['mechanisms'].get(ref)
         if current is None:continue
-        binding=worker_delivery.accepted_original(root,row['accepted'],source=owner)['mechanism_binding'];step=current['source_h']
+        accepted=row['accepted'];accepted_owner=originals.source_for_ref(owner,accepted)
+        binding=c.read(originals.sealed_path(accepted_owner,dict(accepted,path=accepted['snapshot'])))['mechanism_binding'];step=current['source_h']
         if step not in hashes:hashes[step]=history.source_seal_ref(originals.node(root,step))
         if binding['source_h']==step and binding['source_h_ref']==hashes[step]:refs.add(ref)
     return refs
@@ -490,49 +491,148 @@ def assess_payload(root,job,payload):
     return interpret(root,job,payload)['diagnostics']
 
 
+def _sealed_portfolio_applicable(root,job,state):
+    frozen=job.get('portfolio_context')
+    if frozen is not None:
+        return frozen['required_for_completed_w']
+    if job['role']!='A' or job.get('formal_review') or job.get('purpose')=='formal_review':return False
+    final=bool(job.get('final_report') or job.get('purpose')=='closeout' or job.get('final_only'))
+    direct={int(Path(ref['path']).parts[2]) for ref in job['direct_refs']}
+    eligible=[]
+    for receipt in job.get('history',{}).get('nodes',[]):
+        source,payload,_,_=history._source(root,receipt['step'])
+        if source['role']=='W' and payload.get('stage_intent')=='review' and (source['step'] in direct or final):
+            eligible.append(source['step'])
+    if final and not any(step in direct for step in eligible):
+        pending=state['portfolio']['pending_w']
+        eligible=[step for step in eligible if pending and step==pending['step']]
+    return bool(eligible and state['mechanisms'])
+
+
+def _sealed_assessed(root,job,state):
+    if job['role']!='A' or job.get('purpose') is not None:return None
+    original=history._source(root,job['author_correction']['root']['step'])[0] if job.get('author_correction') else job
+    if original['role']!='A':return None
+    rows=[history._source(root,int(Path(ref['path']).parts[2])) for ref in job['direct_refs']]
+    rows=[row for row in rows if row[0]['role']=='W']
+    if len(rows)!=1:return None
+    source,_,seal,_=rows[0];step=source['step']
+    if not any(ref['path']==f'inputs/parents/{step:03d}/conclusion.json' for ref in original['direct_refs']):return None
+    focus=(source.get('search') or {}).get('focus')
+    if focus is None:return None
+    owner=originals.node(root,step)
+    identity=(step,str(originals.sealed_path(owner,dict(path=f'native-evidence/{step:03d}/result-identity.json'))))
+    return dict(identity=identity,mechanism_ref=focus['mechanism_ref'],allocation=source['search']['allocation'],
+        breadth=bool(source['search'].get('breadth')),mechanism_refs=sorted(_managed_refs(root,source,seal,state)))
+
+
 def apply_source(root,job,payload,seal,state):
-    """Replay the exact sealed control decision, without rejudging old science."""
-    from .protocol import CURRENT
+    """Reduce accepted sealed choices; never reinterpret or requalify history."""
     receipt=seal['control_outcome']
-    if job.get('handoff_protocol')!=CURRENT or receipt.get('binding_protocol')!=CURRENT:
-        raise ValueError('Control interpretation binding changed')
-    if job.get('purpose')=='formal_review' or job.get('formal_review') or job.get('engineering_repair'):return
-    statuses=[receipt.get(key) for key in ('search_status','selection_status','decision_status')]
-    if (any(status not in {'applied','unresolved'} for status in statuses) or not isinstance(receipt.get('diagnostics'),list)
-            or not {'resolved_focus','resolved_allocation'}<=receipt.keys()):
-        raise ValueError('Sealed control interpretation is incomplete')
-    valid=all(status=='applied' for status in statuses)
+    if job.get('purpose')=='formal_review' or job.get('formal_review') or job.get('engineering_repair'):
+        return
+    valid=all(receipt.get(key)=='applied' for key in ('search_status','selection_status','decision_status'))
     if valid:
-        # Original I/O, frozen observations and exact provenance still validate.
-        # Scientific diagnostics under today's thin parser cannot rewrite a
-        # previously sealed author decision.
-        result=interpret(root,job,payload,state=state)
-        state.clear();state.update(result['state'])
-        focus=copy.deepcopy(receipt['resolved_focus'])
-        allocation=copy.deepcopy(receipt['resolved_allocation'])
-        if focus is not None and (not isinstance(focus,dict) or set(focus)!={'mechanism_ref','action'}
-                or not isinstance(focus['mechanism_ref'],str) or focus['mechanism_ref'] not in state['authorized']
-                or not isinstance(focus['action'],str) or focus['action'] not in MODES):
-            raise ValueError('Sealed focus escaped its declared mechanism authority')
-        if allocation is not None and (not isinstance(allocation,dict) or set(allocation)!={'mechanism_ref','planned_step'}
-                or not isinstance(allocation['mechanism_ref'],str) or allocation['mechanism_ref'] not in state['authorized']
-                or type(allocation['planned_step']) is not int or not 0<allocation['planned_step']<=job['step']
-                or focus is None or allocation['mechanism_ref']!=focus['mechanism_ref']):
-            raise ValueError('Sealed allocation escaped its declared mechanism authority')
-        state['focus']=focus
-        state['order']['allocation']=allocation
-        state['order']['diagnostics']=copy.deepcopy(receipt['diagnostics'])
+        if job.get('purpose')=='closeout' or job.get('final_report'):
+            from .scientific_intent import resolve_discriminating_work
+            if _sealed_portfolio_applicable(root,job,state):
+                state['order']['discriminating_work']=resolve_discriminating_work(state,job,payload)
+            state['focus']=copy.deepcopy(receipt['resolved_focus'])
+            state['order']['allocation']=copy.deepcopy(receipt['resolved_allocation'])
+            state['order']['diagnostics']=copy.deepcopy(receipt.get('diagnostics',[]))
+            return
+        if job['role']=='H':state['current_h']=job['step']
+        mechanisms=state['mechanisms'];remaining=state['order']['remaining']
+        if job['role']=='H' and isinstance(payload.get('search_plan'),dict):
+            plan=payload['search_plan'];state['current_h']=job['step']
+            for index,item in enumerate(plan.get('commitments',[]),1):
+                ref=item.get('existing_ref') or f'h{job["step"]:03d}.m{index}'
+                prior=mechanisms.get(ref)
+                if prior is None:
+                    mechanisms[ref]=dict(status='pending',original_h=job['step'])
+                else:
+                    prior['status']='pending';prior.pop('disposition',None)
+                    if state.get('extra_grant') and state['extra_grant']['mechanism_ref']==ref:
+                        state['extra_grant']=None
+                mechanisms[ref].update(label=item['label'],minimal_test=item['minimal_test'],source_h=job['step'])
+                pending=next((row for row in remaining if row['mechanism_ref']==ref),None)
+                if pending is None:remaining.append(dict(mechanism_ref=ref,planned_step=job['step']))
+                else:pending['planned_step']=job['step']
+                state['authorized'].add(ref)
+            if plan.get('scope') is not None:state['scope']=plan['scope']
+            focus=plan.get('focus')
+            state['plan']=dict(scope=plan.get('scope'),
+                commitments=[dict(label=item['label'],minimal_test=item['minimal_test'],existing_ref=item.get('existing_ref')) for item in plan.get('commitments',[])],
+                focus={key:focus[key] for key in ('index','action')} if focus is not None else None)
+        elif job['role']=='A':
+            review=payload.get('search_review') or {}
+            for item in review.get('dispositions',[]):
+                ref=item['mechanism_ref']
+                if mechanisms[ref]['status']!=item['status']:
+                    mechanisms[ref]['status']=item['status']
+                    mechanisms[ref]['disposition']=dict(reason=item['reason'],source_a=job['step'])
+                    if item['status']=='pending' and not any(row['mechanism_ref']==ref for row in remaining):
+                        remaining.append(dict(mechanism_ref=ref,planned_step=job['step']))
+            assessed=_sealed_assessed(root,job,state)
+            if assessed and payload.get('next_action') not in {'audit','formal_review','extract','wait'}:
+                focus=receipt.get('resolved_focus')
+                same_repair=focus and focus['action']=='repair' and focus['mechanism_ref'] in (assessed['mechanism_refs'] or [assessed['mechanism_ref']])
+                if not same_repair and assessed['identity'] not in state['order']['seen_w']:
+                    if assessed['breadth']:
+                        disposed={item['mechanism_ref'] for item in review.get('dispositions',[]) if item['status'] in {'screened','deferred','waived'}}
+                        remaining[:]=[row for row in remaining if row['mechanism_ref'] not in disposed]
+                    elif assessed['allocation'] is not None:
+                        remaining[:]=[row for row in remaining if row!=assessed['allocation']]
+                    state['order']['seen_w'].add(assessed['identity'])
+        remaining[:]=[row for row in remaining if mechanisms[row['mechanism_ref']]['status']!='waived']
+        from .scientific_intent import resolve_discriminating_work
+        if _sealed_portfolio_applicable(root,job,state):
+            state['order']['discriminating_work']=resolve_discriminating_work(state,job,payload)
+        state['focus']=copy.deepcopy(receipt['resolved_focus'])
+        state['order']['allocation']=copy.deepcopy(receipt['resolved_allocation'])
         review=payload.get('search_review')
-        next_focus=review.get('next_focus') if isinstance(review,dict) else None
-        if job['role']=='A' and focus is not None and isinstance(next_focus,dict) and next_focus.get('mechanism_ref') is not None:
-            state['extra_grant']=dict(mechanism_ref=focus['mechanism_ref'],source_a=job['step'])
+        if job['role']=='A' and state['focus'] is not None and isinstance(review,dict) and isinstance(review.get('next_focus'),dict) and review['next_focus'].get('mechanism_ref') is not None:
+            state['extra_grant']=dict(mechanism_ref=state['focus']['mechanism_ref'],source_a=job['step'])
     else:
-        state['focus']=None
-        state['order']['allocation']=None
-        state['order']['diagnostics']=copy.deepcopy(receipt['diagnostics'])
+        state['focus']=None;state['order']['allocation']=None
+    state['order']['diagnostics']=copy.deepcopy(receipt.get('diagnostics',[]))
 
 
 def fold(root,sources,*,recovery_refs=()):
+    """Advance the sealed reducer only for sources beyond its saved cursor."""
+    from . import handoff_state
+    sources=list(sources)
+    steps=tuple(row[0]['step'] for row in sources)
+    refs=list(recovery_refs)
+    context=handoff_state.current(root)
+    key=(steps,json.dumps(refs,sort_keys=True))
+    if context is not None and key in context.search:
+        return copy.deepcopy(context.search[key])
+    initial=None;completed=0
+    if context is not None:
+        for (prior_steps,prior_refs),value in reversed(list(context.search.items())):
+            if len(prior_steps)<len(steps) and steps[:len(prior_steps)]==prior_steps:
+                initial=value;completed=prior_steps[-1] if prior_steps else 0
+                break
+    snapshot=Path(root)/'host-history/search-state.json'
+    if initial is None and snapshot.exists():
+        saved=c.read(snapshot)
+        prior=tuple(saved['steps'])
+        if steps[:len(prior)]==prior:
+            initial=handoff_state.decode_search(saved['state'])
+            completed=prior[-1] if prior else 0
+            if prior==steps and saved['recovery_refs']==refs:
+                if context is not None:handoff_state.remember_search(context,key,initial)
+                return copy.deepcopy(initial)
+    with handoff_state.loading():
+        state=_fold(root,sources,recovery_refs=refs,initial=initial,completed=completed)
+    if context is not None:handoff_state.remember_search(context,key,copy.deepcopy(state))
+    # Disposable reducer state stores summaries and identity references only.
+    # Sealed results and observations remain the scientific evidence originals.
+    return state
+
+
+def _fold(root,sources,*,recovery_refs=(), initial=None, completed=0):
     from . import execution_recovery
     sources=list(sources)
     def ref_key(ref):
@@ -546,14 +646,22 @@ def fold(root,sources,*,recovery_refs=()):
             prior=all_refs.setdefault(ref_key(ref),ref)
             if prior!=ref:raise ValueError('Frozen execution recovery prefixes disagree')
     ordered=[all_refs[key] for key in sorted(all_refs)]
-    checked=execution_recovery.validate(root,ordered)
+    checked=execution_recovery.sealed_values(root,ordered)
     cache={ref_key(ref):value for ref,value in zip(ordered,checked)}
     state=dict(opportunity_counts={},opportunity_grants={},opportunity_unknown=False,extra_grant=None,mechanisms={},current_h=None,scope=None,plan=None,authorized=set(),focus=None,accepted_slices=[],repairs={},
         order=dict(remaining=[],seen_w=set(),allocation=None,diagnostics=[],discriminating_work=[]))
     state['portfolio']=dict(invested={},deferred={},seen_w=set(),pending_w=None,last_branch=None,last_decision_step=None,cycles=[],mainline_reviews=[])
+    if initial is not None:
+        state=copy.deepcopy(initial)
     original_rows={}
     scientific_sources={job['step']:(job,payload,seal,sha) for job,payload,seal,sha in sources}
     for job,payload,seal,seal_sha in sources:
+        if job['step'] <= completed:
+            observed=history.read_observation(root,job,seal) or {}
+            original_rows.update(execution_recovery.sealed_pending_rows(root,[(job,payload,seal,seal_sha)]))
+            for row in observed.get('managed_calls',[]):
+                original_rows[(job['step'],row['call_id'])]=dict(row=row,phase='original',native_state=None)
+            continue
         # Scientific claims see exactly their own frozen mechanical input prefix.
         _execution_opportunities(root,state,original_rows,source_refs[job['step']],cache)
         if originals.source_settings(originals.node(root,job['step'])).get('search_policy') is not None:apply_source(root,job,payload,seal,state)

@@ -29,7 +29,7 @@ OPPORTUNITY = {
 STAGE_PLANNING = {
     'H': 'Choose mechanisms that differ in key assumptions or failure modes, not labels or parameter variants. Use retained evidence and A gaps to revise, reopen or add mechanisms and discriminating tests, revisiting live alternatives beyond screening. H owns questions, mechanisms and criteria; W owns methods and grids. Do not allocate downstream token/time budgets or execution/call/audit caps; control allowances govern.',
     'A': 'Read A deltas; retain useful scripts in artifacts/. Check proxy, validation and audit fit to goal, conditional rank reversals and same-family tuning. For a hypothesis gap, scientific bottleneck or changed assumptions/criteria, revise_h with gap, evidence and question despite method gains; otherwise continue_w for bounded public method work.',
-    'W': 'Implement/validate incrementally within scientific scope/control allowance; use evidence/current budget. H/A add no caps; honor work-unit returns.',
+    'W': 'Work incrementally; use evidence/current budget and honor work-unit returns. H/A add no caps.',
 }
 
 

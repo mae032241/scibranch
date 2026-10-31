@@ -184,6 +184,29 @@ def test_no_resume_or_node_budget_retains_partial_known_original_without_replace
     before=tree(root);c.validate(c.workspace(root,2));assert tree(root)==before
 
 
+def test_structured_output_ambiguity_at_review_boundary_cannot_become_work_exit(tmp_path,execution_registry,monkeypatch):
+    root,job,config=scene(tmp_path);run(root,config,'h001.m1')
+    record,payload=output(root,[dict(mechanism_ref='h001.m2',finding='Retained description',
+        obstacle='The author has not explicitly classified this obstacle.')])
+    stopped_native(root,record)
+    worker_delivery.capture(root,job,record)
+    assert c.settings(root).get('resume_policy') is None
+    before=tree(root)
+    monkeypatch.setattr(checkpoint,'enabled',lambda *args:True)
+    monkeypatch.setattr(checkpoint,'validate',lambda *args:dict(science=dict(status='present')))
+    monkeypatch.setattr(continuation,'fragment_review',lambda *args:dict(requested=True,enforced=True,reason='review_requested'))
+    def forbidden(*args,**kwargs):
+        pytest.fail('Output clarification cannot accept scientific work or a host work exit')
+    monkeypatch.setattr(continuation,'_work_exit',forbidden)
+    monkeypatch.setattr(runtime,'start',forbidden)
+    with pytest.raises(OutputRepairRequired) as caught:
+        continuation.seal_or_repair(root,2)
+    assert not isinstance(caught.value,WorkRepairRequired)
+    assert caught.value.request()['code']=='worker_delivery_shape'
+    assert tree(root)==before and len(execution.records(root,2))==1
+    assert len(experiments_calls(config))==1
+
+
 def experiments_calls(config):
     from scidiscovery.research_loop import experiments
     return experiments.Records(config).calls()

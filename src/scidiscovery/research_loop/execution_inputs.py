@@ -170,8 +170,7 @@ def _producer(root, material, *, source=None, controls_only=False):
     if source is not None:
         job = originals.source_job(source)
         matches = []
-        edges = (q._read(root, job['source_provenance'], source=source)['edges'] if controls_only
-            else q._original_inputs(source, job)['edges'])
+        edges = q._read(root, job['source_provenance'], source=source)['edges']
         for edge in edges:
             if edge['kind'] != 'producer':continue
             owner = originals.dependency(source, edge['step'], seal_ref=edge['seal'])
@@ -190,7 +189,6 @@ def _producer(root, material, *, source=None, controls_only=False):
         if len(parts) >= 4 and parts[:2] == ('inputs', 'parents') and parts[2].isdecimal():
             source = originals.node(root, int(parts[2]))
             if source.inherited:
-                c.validate_original(source, controls_only=controls_only)
                 seal = c.read(originals.source_record(source, 'result-identity.json'))
                 _sealed_material(root, seal, material, source=source, controls_only=controls_only)
                 if not controls_only:originals.material_path(root, material)
@@ -209,11 +207,9 @@ def _producer(root, material, *, source=None, controls_only=False):
     _sealed_material(root, seal, material, controls_only=controls_only)
     record = c.host_record(c.workspace(root, step))
     if (seal['job_ref'] != c.record_ref(root / 'jobs' / f'{step:03d}.json')
-            or seal['result_ref'] != c.file_ref(record / 'result.json')):
+            or seal['result_ref'].get('path') != str(record / 'result.json')):
         raise q.IntegrityError('Scientific input producer or original bytes changed')
     if not controls_only:
-        if originals.resolve_root_ref(root, seal['raw_ref']) != c._execution_raw(root, step):
-            raise q.IntegrityError('Scientific input producer original bytes changed')
         originals.material_path(root, material)
     return dict(instance_id=c.settings(root)['goal_id'], producer_step=step,
         producer_seal=q._ref(root, path), material_path=material['path'],

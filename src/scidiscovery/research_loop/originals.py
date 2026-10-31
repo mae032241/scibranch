@@ -45,6 +45,10 @@ def local_identity(root):
 
 
 def _manifest(root):
+    from . import handoff_state
+    state=handoff_state.current(root)
+    if state is not None and state.fork_manifest is not None:
+        return state.fork_manifest
     root = files.check_path(Path(root).absolute())
     path = root / MANIFEST
     if not path.exists():
@@ -52,6 +56,12 @@ def _manifest(root):
     value = _json(path)
     if value.get('version') != 2 or value.get('kind') != 'scientific_fork':
         raise ValueError('Unsupported fork source manifest')
+    if state is not None:
+        # Publication closes this binding for the controller scope. Absence is
+        # never cached: a new fork can still publish its manifest in this scope.
+        state.fork_manifest=value
+        for row in value.get('prefix_entries',[]):
+            state.fork_prefix.setdefault(row['step'],[]).append(row)
     return value
 
 
@@ -122,8 +132,27 @@ def context_root(source):
     return root
 
 
+def _source_snapshot(root, manifest):
+    from . import handoff_state
+    state=handoff_state.current(root)
+    if state is not None and state.fork_manifest is manifest:
+        if state.fork_snapshot is None:
+            state.fork_snapshot=_snapshot(manifest)
+        return state.fork_snapshot
+    return _snapshot(manifest)
+
+
+def _prefix_rows(root, manifest, step):
+    if manifest is None:return ()
+    from . import handoff_state
+    state=handoff_state.current(root)
+    if state is not None and state.fork_manifest is manifest:
+        return state.fork_prefix.get(step,())
+    return [row for row in manifest['prefix_entries'] if row['step']==step]
+
+
 def _source(root, manifest, identity, step, *, snapshot=None):
-    snapshot = _snapshot(manifest) if snapshot is None else snapshot
+    snapshot = _source_snapshot(root,manifest) if snapshot is None else snapshot
     return _snapshot_source(Path(root) / FORK_DIRECTORY, snapshot, identity, step)
 
 
@@ -137,6 +166,16 @@ def _snapshot_source(storage_root, snapshot, identity, step):
 
 
 def node(root, step):
+    from . import handoff_state
+    state=handoff_state.current(root)
+    if state is not None and step in state.handles:
+        return state.handles[step]
+    source=_node(root,step)
+    if state is not None:state.handles[step]=source
+    return source
+
+
+def _node(root, step):
     if type(step) is not int or step < 1:
         raise ValueError('Exact positive logical step required')
     root = files.check_path(Path(root).absolute())
@@ -144,7 +183,7 @@ def node(root, step):
     if local.exists():
         return NodeSource(local_identity(root), step, str(root), root)
     manifest = _manifest(root)
-    matches = ([] if manifest is None else [row for row in manifest['prefix_entries'] if row['step'] == step])
+    matches = _prefix_rows(root,manifest,step)
     if len(matches) != 1:
         raise ValueError('Scientific node has no unique visible original')
     return _source(root, manifest, matches[0]['origin_identity'], step)
@@ -169,8 +208,12 @@ def for_origin(root, identity, *, step=1):
 
 
 def inherited(root, step):
+    from . import handoff_state
+    state=handoff_state.current(root)
+    if state is not None and step in state.handles:
+        return state.handles[step].inherited
     manifest = _manifest(root)
-    return (manifest is not None and any(row['step'] == step for row in manifest['prefix_entries'])
+    return (bool(_prefix_rows(root,manifest,step))
         and not (Path(root) / 'jobs' / f'{step:03d}.json').exists())
 
 
@@ -469,6 +512,9 @@ def has_original(source, path):
 
 
 def resolve_ref(source, ref, *, context=None):
+    from . import handoff_state
+    if handoff_state.loading_sealed():
+        return sealed_path(source, ref)
     if context is not None: context.remaining_seconds()
     if not isinstance(source, NodeSource) or not isinstance(ref, dict):
         raise ValueError('Exact original handle and reference required')
@@ -520,6 +566,23 @@ def resolve_ref(source, ref, *, context=None):
     if expected is not ref and 'file_stat' in ref and entry.get('visibility') in {'scientific_input','historical_science'}:
         _check_identity(actual, ref, context=context)
     return actual
+
+def sealed_path(source, ref):
+    """Locate an accepted sealed binding without reopening its verification."""
+    raw = Path(ref.get('source', ref['path']))
+    own = Path(source.original_root)
+    if raw.is_absolute() and not raw.is_relative_to(own):
+        return raw
+    path = relative(raw.relative_to(own).as_posix() if raw.is_absolute() else str(raw))
+    if source.entries is None:
+        return source.storage_root / path
+    entries = source._index.get((identity_key(source.origin_identity), path), ())
+    if len(entries) != 1:
+        return own / path
+    entry = entries[0]
+    return (own / path if entry.get('visibility') in {'scientific_input', 'historical_science'}
+        else source.storage_root / entry['storage_path'])
+
 
 def original_ref(source, path):
     path = relative(path)
@@ -602,7 +665,7 @@ def source_sequence(root, before_step, *, source_cutoff=None, extra_steps=()):
         steps = {step for step in steps if step <= source_cutoff} | set(extra_steps)
     elif extra_steps:
         raise ValueError('Extra nodes require an exact cutoff')
-    snapshot = _snapshot(manifest) if manifest is not None else None
+    snapshot = _source_snapshot(root,manifest) if manifest is not None else None
     inherited_by_step = {row['step']: row for row in inherited}
     identity = None
     result = []

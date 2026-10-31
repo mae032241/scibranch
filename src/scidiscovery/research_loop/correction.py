@@ -27,7 +27,7 @@ def schema(protocol=None):
         description='Scientific progress judgment for the exact assessed final stage; null means unknown. Explain support in ordinary science; control binds originals and counts, not scientific correctness.')
 
 
-def _proofs(root, job, assessment):
+def _proofs(root, job, assessment, *, sealed=False):
     if assessment is None:
         return set()
     if (not isinstance(assessment, dict) or set(assessment) != {'verdict'}
@@ -36,19 +36,26 @@ def _proofs(root, job, assessment):
         return set()  # Unparseable scientific advice is not progress evidence.
     if assessment['verdict'] != 'progress':
         return set()
-    sources = history.direct_sources(root, job)
+    def direct_sources(job):
+        if not sealed:
+            return history.direct_sources(root, job)
+        # These parent bindings were checked when the assessment was sealed.
+        # Reducing its saved progress verdict cannot reopen its old inputs.
+        return [history._source(root, int(ref['path'].split('/')[2]))[:3]
+            for ref in job['direct_refs']]
+    sources = direct_sources(job)
     current = next((row for row in sources if row[0]['step'] == job['step'] - 1), None)
     if current is None:
         return set()
     source, payload, seal = current
     if source['role'] == 'A' and payload.get('next_action') == 'audit':
-        return _proofs(root, source, assessment)
+        return _proofs(root, source, assessment, sealed=sealed)
     if source['role'] == 'W' or (source['role'] == 'H' and payload.get('next_action') == 'analyze' and not source.get('author_correction')):
         return {seal['raw_ref']['path']}
     if source['role'] == 'E':
         target = source.get('evidence_return') or {}
         requester = next((row for row in sources if row[0]['step'] == target.get('step')), None)
-        e_sources = history.direct_sources(root, source)
+        e_sources = direct_sources(source)
         if (target.get('role') == 'A' and requester is not None and requester[0]['role'] == 'A'
                 and requester[1].get('next_action') == 'extract'
                 and any(row[0]['step'] == target['step'] for row in e_sources)):
@@ -192,19 +199,6 @@ def project(root, before_step=None):
         step = source.step
         record = originals.source_record(source, 'result-identity.json').parent
         job, payload, seal, _ = history._source(root, step)
-        outcome = c.native_outcome(originals.source_record(source, 'native-outcome.json').parent,
-            original_record=Path(seal['raw_ref']['path']).parent,
-            output_path=originals.resolve_ref(source, seal['raw_ref']))
-        intent = c.read(originals.source_record(source, 'native-intent.json'))
-        if (intent.get('task_ref') != seal['job_ref']
-                or type(outcome.get('returncode')) is not int or outcome['returncode'] != 0
-                or outcome.get('stop_reason')
-                or outcome.get('usage', {}).get('blocking_unknown_steps', outcome.get('usage', {}).get('unknown_steps')) != []
-                    and not budget.native_completion_known(outcome, originals.source_settings(source))
-                or outcome.get('raw_ref') != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}):
-            raise ValueError('Correction replay requires verified original terminal nodes')
-        if c.read(originals.source_record(source, 'result.json')) != c.result_projection(job, payload):
-            raise ValueError('Correction result differs from original scientific fields')
         request = job.get('correction_request')
         if (job['role'] == 'H' and request is not None
                 and payload.get('next_action') in {'experiment', 'analyze'}
@@ -238,7 +232,7 @@ def project(root, before_step=None):
             continue
         limits = policy(historical_limits)
         assessment = c.scientific_field(job,payload,'progress_assessment')
-        proof = _proofs(root, job, assessment)
+        proof = _proofs(root, job, assessment, sealed=True)
         verdict = (assessment or {}).get('verdict', 'unknown')
         if verdict == 'progress' and not proof - used:
             verdict = 'unknown'

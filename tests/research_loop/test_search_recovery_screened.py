@@ -179,13 +179,14 @@ def test_fork_a_screens_exact_inherited_recovered_w(tmp_path, execution_registry
     with pytest.raises((ValueError, OSError)):
         search._screen_refs(child, source, wrong, state)
 
-    # The full producer seal still verifies the original inode and timestamps;
-    # matching bytes and the delivery locator alone cannot pass this barrier.
+    # Reading saved eligibility trusts the seal. Actual consumption by the
+    # current A must still reject a replaced direct-input original.
     raw = originals.source_raw(owner)
     original = raw.read_bytes()
     replacement = raw.with_name('same-bytes-replacement.json')
     replacement.write_bytes(original)
     replacement.chmod(0o400)
     replacement.replace(raw)
+    assert search._screen_refs(child, source, seal, state) == {'h001.m1'}
     with pytest.raises(ValueError, match='identity changed'):
-        search._screen_refs(child, source, seal, state)
+        c._validate_inputs(child, c.workspace(child, 3), c.read(child / 'jobs/003.json'))
