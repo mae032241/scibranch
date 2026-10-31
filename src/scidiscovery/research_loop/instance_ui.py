@@ -1439,16 +1439,46 @@ class InstanceUI:
             body += self._form(token, 'fork-create', fields, '创建暂停的新分支')
         return (problem.status if problem else 200), self._page('从第 ' + str(step) + ' 阶段分叉', body, live=False), {}
 
-    def _materials_page(self, step, after):
-        page=display.materials(self.root,step,after=after)
-        body=self._navigation() + '<p>第 '+str(step)+' 阶段的研究文件，可逐项下载。</p><ul>'
-        for item in page['items']:
-            body += ('<li><a href="/nodes/'+str(step)+'/materials/'+str(item['index'])+'">'
-                +html.escape(item['name'])+'</a> ('+str(item['size_bytes'])+' bytes)</li>')
-        body+='</ul><p>'+str(page['total'])+' 份研究文件。'+html.escape(page['scope'])+'</p>'
+    def _materials_page(self, step, after, directory=''):
+        page = display.materials(self.root, step, after=after, directory=directory)
+        base = '/nodes/' + str(step) + '/materials'
+
+        def href(path, *, after=None):
+            query = ('dir=' + quote(path, safe='')) if path else ''
+            if after is not None:
+                query += ('&' if query else '') + 'after=' + str(after)
+            return base + ('?' + query if query else '')
+
+        crumbs = [ui.link('研究文件根目录', base)]
+        parts = directory.split('/') if directory else []
+        for index, part in enumerate(parts):
+            path = '/'.join(parts[:index + 1])
+            crumbs.append(ui.link(part, href(path)) if index < len(parts) - 1
+                else '<span aria-current="page">' + html.escape(part) + '</span>')
+        body = self._navigation() + '<p>第 ' + str(step) + ' 阶段的研究文件，按原目录浏览并逐项下载。</p>'
+        body += '<nav aria-label="研究文件目录">' + ' / '.join(crumbs) + '</nav>'
+        if directory:
+            body += '<p>' + ui.link('上一级', href('/'.join(parts[:-1]))) + '</p>'
+        if page['items']:
+            body += '<ul class="material-entries">'
+            for item in page['items']:
+                if item['kind'] == 'directory':
+                    body += '<li class="material-directory">' + ui.link(item['name'] + '/', href(item['path']))
+                    body += '（含 ' + str(item['file_count']) + ' 份研究文件）</li>'
+                else:
+                    body += '<li class="material-file">' + ui.link(item['name'], base + '/' + str(item['index']))
+                    body += ' (' + str(item['size_bytes']) + ' bytes)</li>'
+            body += '</ul>'
+        elif page['total']:
+            body += '<p>当前页没有项目。' + ui.link('返回本目录首页', href(directory)) + '</p>'
+        else:
+            body += '<p>当前目录没有研究文件或子目录。</p>'
+        body += ('<p>当前目录共 ' + str(page['total']) + ' 项（子目录与文件），本阶段共 '
+            + str(page['total_files']) + ' 份研究文件。</p>')
         if page['next_after'] is not None:
-            body += '<a href="/nodes/'+str(step)+'/materials?after='+str(page['next_after'])+'">后续研究文件</a>'
-        return 200,self._page('研究文件下载',body,live=False),{}
+            body += ui.link('查看本目录后续项目', href(directory, after=page['next_after']))
+        body += '<p>' + ui.link('返回第 ' + str(step) + ' 阶段', '/nodes/' + str(step)) + '</p>'
+        return 200, self._page('研究文件下载', body, live=False), {}
 
     def _sealed_steps(self, after=0, limit=None):
         from . import fork_runtime, fork_sources
@@ -1667,7 +1697,7 @@ class InstanceUI:
             own = len(seal.get('materials') or [])
             scope = ('截至本阶段的最近 ' + str(ui_view.WINDOW) + ' 个已封存阶段共 ') if materials['truncated'] else '截至本阶段，各阶段共 '
             section += ('<p>本阶段 ' + str(own) + ' 份；' + scope + str(total) + ' 份研究文件。'
-                        '分组浏览属于后续改进，这里按阶段提供下载入口。</p><ul class="material-steps">')
+                        '按阶段进入后，可继续按原目录浏览并下载。</p><ul class="material-steps">')
             for number, count in materials['rows']:
                 if count:
                     section += '<li>' + ui.link('第 ' + str(number) + ' 阶段 · ' + str(count) + ' 份', '/nodes/' + str(number) + '/materials') + '</li>'
@@ -1839,13 +1869,13 @@ class InstanceUI:
             if parts[1:]==['science'] and not parsed.query:
                 return 200,display.science(self.root,step),{'Content-Type':'application/json; charset=utf-8'}
             if parts[1:]==['materials']:
-                query=parse_qs(parsed.query,strict_parsing=True) if parsed.query else {}
-                if set(query)-{'after'} or any(len(values)!=1 for values in query.values()):
+                query=parse_qs(parsed.query,strict_parsing=True,keep_blank_values=True) if parsed.query else {}
+                if set(query)-{'after', 'dir'} or any(len(values)!=1 for values in query.values()):
                     raise ValueError('Exact scientific deliverable continuation required')
                 after=query.get('after',['0'])[0]
                 if not after.isascii() or not after.isdecimal():
                     raise ValueError('Exact scientific deliverable continuation required')
-                return self._materials_page(step,int(after))
+                return self._materials_page(step,int(after),query.get('dir',[''])[0])
             if len(parts)==3 and parts[1]=='materials' and not parsed.query:
                 if not parts[2].isascii() or not parts[2].isdecimal() or int(parts[2])<=0:
                     raise ValueError('Exact scientific deliverable index required')

@@ -1080,6 +1080,7 @@ and validation must agree; engineering failures must not be disguised as scienti
 rejection or an invitation to retry. Bounds and failure evidence survive recovery.
 Read views and UI render the same sealed scientific bytes without rewriting them.
 CLI result/materials/artifact and the webpage use the same exact-original API; downloads refuse existing destinations. Webpage configuration, explicit instance choices, queued budget changes and guidance use public interfaces and never infer an instance by discovery or recency.
+The webpage groups each node's sealed logical material names into directories, including experiment subdirectories. Each directory page lists at most 20 immediate children, directories first with descendant file counts, and provides breadcrumbs and parent navigation. This display projection does not scan or move files; file links retain their original seal ordinals and the CLI's flat materials listing remains unchanged.
 
 ### Instance UI control and display
 

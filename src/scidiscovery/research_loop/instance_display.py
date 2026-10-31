@@ -151,16 +151,28 @@ def _label(material, step):
     return logical.removeprefix(prefix)
 
 
-def materials(root, step, *, after=0, limit=20):
+def materials(root, step, *, after=0, limit=20, directory=None):
     if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 100:
         raise ValueError('Exact scientific deliverable continuation required')
+    if directory is not None:
+        from .instance_science import _directory, _directory_items
+        directory = _directory(directory)
     rows = _saved(root, step)[2]['materials']
-    page = [dict(index=number + 1, name=_label(row, step), size_bytes=row['size_bytes'])
-            for number, row in enumerate(rows[after:after + limit], after)]
+    if directory is None:
+        page = [dict(index=number + 1, name=_label(row, step), size_bytes=row['size_bytes'])
+                for number, row in enumerate(rows[after:after + limit], after)]
+        total = len(rows)
+    else:
+        entries = _directory_items(rows, step, directory)
+        page = entries[after:after + limit]
+        total = len(entries)
     last = after + len(page)
-    return dict(step=step, items=page, total=len(rows), after=after,
-                next_after=last if last < len(rows) else None,
+    result = dict(step=step, items=page, total=total, after=after,
+                next_after=last if last < total else None,
                 scope='Saved scientific deliverables; viewing does not grant scientific qualification or execution permission.')
+    if directory is not None:
+        result.update(directory=directory, total_files=len(rows))
+    return result
 
 
 def _object(root, relative):

@@ -128,18 +128,62 @@ def _label(material, step):
     return logical.removeprefix(prefix)
 
 
-def materials(root, step, *, after=0, limit=20):
+def _directory(value):
+    if (not isinstance(value, str) or value == '.' or '\\' in value
+            or value and (PurePosixPath(value).is_absolute()
+                          or '..' in PurePosixPath(value).parts
+                          or PurePosixPath(value).as_posix() != value)):
+        raise ValueError('Exact scientific deliverable directory required')
+    return value
+
+
+def _directory_items(rows, step, directory):
+    prefix = directory+'/' if directory else ''
+    folders = {}
+    files = []
+    found = not directory
+    for number, row in enumerate(rows, 1):
+        name = _label(row, step)
+        if not name.startswith(prefix):
+            continue
+        found = True
+        relative = name.removeprefix(prefix)
+        child, separator, _ = relative.partition('/')
+        if separator:
+            if child not in folders:
+                folders[child] = dict(kind='directory', name=child, path=prefix+child, file_count=0)
+            folders[child]['file_count'] += 1
+        else:
+            files.append(dict(kind='file', index=number, name=child, path=name, size_bytes=row['size_bytes']))
+    if not found:
+        raise ValueError('Scientific deliverable directory is unavailable')
+    return ([folders[name] for name in sorted(folders)]
+            + sorted(files, key=lambda row: (row['name'], row['index'])))
+
+
+def materials(root, step, *, after=0, limit=20, directory=None):
     if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 100:
         raise ValueError('Exact scientific deliverable continuation required')
+    if directory is not None:
+        directory = _directory(directory)
     _, seal, raw, proof = _sealed(root, step)
     with Original(raw, proof):
         pass
     rows = seal['materials']
-    page = [dict(index=number+1, name=_label(row,step), size_bytes=row['size_bytes'])
-            for number,row in enumerate(rows[after:after+limit], after)]
+    if directory is None:
+        page = [dict(index=number+1, name=_label(row,step), size_bytes=row['size_bytes'])
+                for number,row in enumerate(rows[after:after+limit], after)]
+        total = len(rows)
+    else:
+        entries = _directory_items(rows, step, directory)
+        page = entries[after:after+limit]
+        total = len(entries)
     last = after+len(page)
-    return dict(step=step, items=page, total=len(rows), after=after, next_after=last if last<len(rows) else None,
+    result = dict(step=step, items=page, total=total, after=after, next_after=last if last<total else None,
         scope='Exact sealed scientific deliverables; original membership is not scientific qualification or execution permission.')
+    if directory is not None:
+        result.update(directory=directory, total_files=len(rows))
+    return result
 
 
 def artifact(root, step, index):

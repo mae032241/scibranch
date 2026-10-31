@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import html
 import re
 import threading
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import pytest
 
@@ -416,6 +416,134 @@ def test_read_cookie_opens_only_sealed_science_and_attachment_members(tmp_path,m
     with pytest.raises(PermissionError):ui.get('/nodes/1/materials/1',host='other.invalid',cookie=cookie)
 
 
+def _materials_session(tmp_path, names):
+    from test_instance_science import directory_scene
+    root = directory_scene(tmp_path, names)
+    key = tmp_path / 'directory-browser.key'
+    key.write_bytes(b'fixture-directory-browser-key-32bytes'); key.chmod(0o600)
+    ui, _ = session(root, key)
+    _, _, headers = ui.get('/view?' + urlencode({'token': ui.read_token}), host=ui.host)
+    return root, ui, headers['Set-Cookie']
+
+
+def test_material_directories_use_breadcrumbs_encoded_names_and_original_download_indexes(tmp_path):
+    from test_instance_science import read
+    special = '实验 & %20+<记录>'
+    names = ['root-note.txt', 'experiments/call-b/artifacts/curve.csv',
+        'experiments/call-a/artifacts/curve.csv', 'experiments/call-a/log.txt',
+        special + '/literal%20&+.txt', 'reports/finding.txt']
+    root, ui, cookie = _materials_session(tmp_path, names)
+    base = '/nodes/1/materials'
+    page = ui.get(base, host=ui.host, cookie=cookie)[1].decode()
+    assert page.count('class="material-directory"') == 3
+    assert page.index('class="material-directory"') < page.index('class="material-file"')
+    assert '当前目录共 4 项（子目录与文件），本阶段共 6 份研究文件' in page
+    assert 'Saved scientific deliverables' not in page
+    assert 'experiments/call-a/artifacts/curve.csv' not in page
+    assert '含 3 份研究文件' in page
+    encoded = base + '?dir=' + quote(special, safe='')
+    assert 'href="' + encoded + '"' in page and html.escape(special) + '/' in page
+    folder = ui.get(encoded, host=ui.host, cookie=cookie)[1].decode()
+    assert 'aria-current="page">' + html.escape(special) in folder
+    assert '>literal%20&amp;+.txt</a>' in folder and base + '/5' in folder
+    assert '<记录>' not in folder and str(root) not in folder
+    assert 'href="' + base + '">上一级</a>' in folder
+    for call, ordinal in [('call-a', 3), ('call-b', 2)]:
+        target = base + '?' + urlencode({'dir': 'experiments/' + call + '/artifacts'})
+        current = ui.get(target, host=ui.host, cookie=cookie)[1].decode()
+        assert 'href="' + base + '/' + str(ordinal) + '">curve.csv</a>' in current
+        assert 'href="' + base + '?dir=experiments">experiments</a>' in current
+        assert 'href="' + base + '?dir=experiments%2F' + call + '">上一级</a>' in current
+        assert 'aria-current="page">artifacts</span>' in current
+        original = ui.get(base + '/' + str(ordinal), host=ui.host, cookie=cookie)[1]
+        assert read(original) == ('Exact directory fixture: ' + names[ordinal - 1]).encode()
+    ui.translation.close()
+
+
+def test_material_directory_pagination_keeps_folder_context_and_twenty_entry_bound(tmp_path):
+    names = []
+    for number in range(23):
+        names.extend([f'collection/item-{number:02d}.txt', f'collection/folder-{number:02d}/data.csv'])
+    _, ui, cookie = _materials_session(tmp_path, names)
+    target = '/nodes/1/materials?dir=collection'
+    entries = []; pages = 0
+    while target:
+        page = ui.get(target, host=ui.host, cookie=cookie)[1].decode()
+        rows = re.findall(r'<li class="material-(directory|file)"><a href="([^"]+)">([^<]+)</a>', page)
+        assert 0 < len(rows) <= 20
+        assert '当前目录共 46 项（子目录与文件），本阶段共 46 份研究文件' in page
+        assert 'href="/nodes/1/materials">研究文件根目录</a>' in page
+        assert 'aria-current="page">collection</span>' in page
+        entries.extend(rows); pages += 1
+        more = re.search(r'<a href="([^"]+)">查看本目录后续项目</a>', page)
+        target = html.unescape(more[1]) if more else None
+        if target:
+            assert target.startswith('/nodes/1/materials?dir=collection&after=')
+        assert pages <= 3
+    assert pages == 3 and len(entries) == 46
+    assert [kind for kind, _, _ in entries] == ['directory'] * 23 + ['file'] * 23
+    assert [name for _, _, name in entries[:23]] == [f'folder-{number:02d}/' for number in range(23)]
+    assert [href for _, href, _ in entries[23:]] == ['/nodes/1/materials/' + str(number) for number in range(1, 46, 2)]
+    ui.translation.close()
+
+
+def test_material_directory_empty_invalid_and_unsealed_routes_preserve_read_gates(tmp_path):
+    from scidiscovery.research_loop import contracts as c
+    root, ui, cookie = _materials_session(tmp_path, [])
+    base = '/nodes/1/materials'
+    empty = ui.get(base + '?dir=', host=ui.host, cookie=cookie)[1].decode()
+    assert '当前目录没有研究文件或子目录' in empty
+    assert '当前目录共 0 项（子目录与文件），本阶段共 0 份研究文件' in empty
+    for query in ('dir=..', 'dir=%2F', 'dir=.%2Fexperiments', 'dir=experiments%2F..',
+        'dir=experiments%5Ccall-a', 'dir=unknown', 'dir=&dir=', 'dir=x&dir=y',
+        'dir=&unknown=', 'after=', 'after=0&after=1'):
+        with pytest.raises(ValueError):
+            ui.get(base + '?' + query, host=ui.host, cookie=cookie)
+    with pytest.raises(PermissionError):
+        ui.get(base + '?dir=', host=ui.host)
+    # Saved directory metadata does not requalify or reopen the science body.
+    raw = root / 'native-evidence/001/science-output.json'
+    raw.chmod(0o600); raw.write_bytes(b'{}')
+    assert ui.get(base + '?dir=', host=ui.host, cookie=cookie)[1].decode() == empty
+    ui.translation.close()
+
+    # Use a genuine unsealed node, independent of the synthetic membership fixture.
+    unsealed_base = tmp_path / 'unsealed'; unsealed_base.mkdir()
+    unsealed_root, key = prepare(unsealed_base, enabled=False)
+    c.build_job(unsealed_root, 1, 'H', [])
+    unsealed_ui, _ = session(unsealed_root, key)
+    _, _, headers = unsealed_ui.get('/view?' + urlencode({'token': unsealed_ui.read_token}), host=unsealed_ui.host)
+    with pytest.raises(ValueError, match='missing|unavailable'):
+        unsealed_ui.get(base + '?dir=', host=unsealed_ui.host, cookie=headers['Set-Cookie'])
+    unsealed_ui.translation.close()
+
+
+def test_material_directory_navigation_keeps_mounted_instance_scope(tmp_path):
+    from test_instance_science import read
+    root, standalone, _ = _materials_session(tmp_path, ['experiment & one/curve.csv'])
+    standalone.translation.close()
+    workspace = tmp_path / 'workspace'; workspace.mkdir()
+    ui = InstanceUI(workspace, secret_file=standalone.secret_file, workspace=True, instance_roots=[root])
+    ui.host = '127.0.0.1:18754'
+    child = ui._child(1)
+    _, _, headers = ui.get('/instances/1/view?' + urlencode({'token':child.read_token}), host=ui.host)
+    cookie = headers['Set-Cookie']
+    base = '/instances/1/nodes/1/materials'
+    page = ui.get(base, host=ui.host, cookie=cookie)[1].decode()
+    folder = base + '?dir=experiment%20%26%20one'
+    assert 'href="' + folder + '"' in page
+    nested = ui.get(folder, host=ui.host, cookie=cookie)[1].decode()
+    assert 'href="' + base + '">研究文件根目录</a>' in nested
+    assert 'href="' + base + '">上一级</a>' in nested
+    assert 'href="' + base + '/1">curve.csv</a>' in nested
+    assert 'href="/nodes/' not in nested
+    original = ui.get(base + '/1', host=ui.host, cookie=cookie)[1]
+    assert read(original) == b'Exact directory fixture: experiment & one/curve.csv'
+    with pytest.raises(PermissionError):
+        ui.get(base + '?dir=experiment%20%26%20one', host=ui.host)
+    ui.translation.close()
+
+
 @pytest.mark.process_e2e
 def test_loopback_science_download_uses_existing_browser_scope_and_safe_headers(tmp_path,monkeypatch):
     import http.client
@@ -423,7 +551,9 @@ def test_loopback_science_download_uses_existing_browser_scope_and_safe_headers(
     root,key=prepare(tmp_path,enabled=False)
     authored=b'<svg onload="never execute"/>'
     untrusted=authored.decode()+'<script>window.untrustedFixture=true</script>'
-    finish(root,1,'H',[],action='analyze',text=untrusted,files={'figure.svg':authored.decode()})
+    folder = 'z experiments & %20+试验'
+    finish(root,1,'H',[],action='analyze',text=untrusted,
+        files={'figure.svg':authored.decode(), folder + '/curve.csv':'x,y\n1,2\n'})
     ui=InstanceUI(root,secret_file=key);ready=threading.Event();servers=[];errors=[]
     server_type=instance_ui.ThreadingHTTPServer
     class Server(server_type):
@@ -444,6 +574,8 @@ def test_loopback_science_download_uses_existing_browser_scope_and_safe_headers(
         recovery=response.read()
         assert b'management_url' in recovery and b'?token=' not in recovery
         assert b'data-live-url' not in recovery and b'<script>' not in recovery
+        connection.request('GET', '/nodes/1/materials?dir=' + quote(folder, safe=''))
+        response=connection.getresponse(); assert response.status==403; response.read()
         connection.request('GET','/view?'+urlencode({'token':ui.read_token}))
         response=connection.getresponse();assert response.status==200
         cookie=response.getheader('Set-Cookie').split(';',1)[0];response.read()
@@ -466,6 +598,26 @@ def test_loopback_science_download_uses_existing_browser_scope_and_safe_headers(
             asset=connection.getresponse()
             assert asset.status==200 and 'javascript' in asset.getheader('Content-Type')
             assert asset.read()
+        connection.request('GET', '/nodes/1/materials', headers={'Cookie':cookie})
+        response=connection.getresponse()
+        assert response.status==200 and response.getheader('X-Content-Type-Options')=='nosniff'
+        directory_page=response.read().decode()
+        folder_route='/nodes/1/materials?dir=' + quote(folder, safe='')
+        assert 'href="' + folder_route + '"' in directory_page
+        assert 'class="material-directory"' in directory_page
+        connection.request('GET', folder_route, headers={'Cookie':cookie})
+        response=connection.getresponse()
+        assert response.status==200 and "script-src 'self'" in response.getheader('Content-Security-Policy')
+        folder_page=response.read().decode()
+        assert 'href="/nodes/1/materials">上一级</a>' in folder_page
+        assert 'aria-current="page">' + html.escape(folder) in folder_page
+        curve=re.search(r'href="(/nodes/1/materials/[0-9]+)">curve.csv</a>', folder_page)
+        assert curve is not None and 'figure.svg' not in folder_page
+        connection.request('GET', curve[1], headers={'Cookie':cookie})
+        response=connection.getresponse()
+        assert response.status==200 and response.getheader('Content-Type')=='application/octet-stream'
+        assert response.getheader('Content-Disposition').endswith(quote(folder + '/curve.csv', safe=''))
+        assert response.read()==b'x,y\n1,2\n'
         connection.request('GET','/nodes/1/materials/1',headers={'Cookie':cookie})
         response=connection.getresponse()
         assert response.status==200 and response.getheader('Content-Disposition').startswith('attachment;')
