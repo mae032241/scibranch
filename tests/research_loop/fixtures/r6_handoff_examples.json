@@ -1,0 +1,622 @@
+{
+  "version": 1,
+  "provenance": {
+    "source_case": "web_cov_20261031_r6",
+    "source_commit": "9e1b866",
+    "purpose": "Portable control regression examples derived from public scientific output shapes, frozen node topology and observed handoff timing. Not scientific qualification or execution permission.",
+    "source_originals": "Local retained r6 originals remain unchanged; this file contains selected fields, not a transferable research instance.",
+    "omitted": [
+      "host paths",
+      "credentials",
+      "native sessions",
+      "datasets",
+      "models",
+      "hidden scores",
+      "full execution records"
+    ],
+    "timing_scope": "Observed file modification-time phase boundaries, not wall-time assertions. Additional native repair turns excluded from control gaps."
+  },
+  "nodes": [
+    {
+      "step": 1,
+      "role": "H",
+      "parents": []
+    },
+    {
+      "step": 2,
+      "role": "W",
+      "parents": [
+        1
+      ],
+      "coverage_obligation": [
+        {
+          "mechanism_ref": "h001.m1",
+          "source_h": 1
+        },
+        {
+          "mechanism_ref": "h001.m2",
+          "source_h": 1
+        },
+        {
+          "mechanism_ref": "h001.m3",
+          "source_h": 1
+        }
+      ],
+      "focus": {
+        "mechanism_ref": "h001.m1",
+        "action": "screen"
+      },
+      "managed_call_count": 3
+    },
+    {
+      "step": 3,
+      "role": "A",
+      "parents": [
+        1,
+        2
+      ]
+    },
+    {
+      "step": 4,
+      "role": "H",
+      "parents": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "step": 5,
+      "role": "W",
+      "parents": [
+        4
+      ],
+      "coverage_obligation": [
+        {
+          "mechanism_ref": "h001.m1",
+          "source_h": 4
+        },
+        {
+          "mechanism_ref": "h001.m2",
+          "source_h": 4
+        },
+        {
+          "mechanism_ref": "h001.m3",
+          "source_h": 4
+        },
+        {
+          "mechanism_ref": "h004.m4",
+          "source_h": 4
+        },
+        {
+          "mechanism_ref": "h004.m5",
+          "source_h": 4
+        }
+      ],
+      "focus": {
+        "mechanism_ref": "h001.m1",
+        "action": "screen"
+      },
+      "managed_call_count": 2
+    },
+    {
+      "step": 6,
+      "role": "A",
+      "parents": [
+        4,
+        5
+      ]
+    },
+    {
+      "step": 7,
+      "role": "H",
+      "parents": [
+        4,
+        5,
+        6
+      ]
+    },
+    {
+      "step": 8,
+      "role": "W",
+      "parents": [
+        7
+      ],
+      "coverage_obligation": [
+        {
+          "mechanism_ref": "h001.m1",
+          "source_h": 7
+        },
+        {
+          "mechanism_ref": "h001.m2",
+          "source_h": 7
+        },
+        {
+          "mechanism_ref": "h001.m3",
+          "source_h": 7
+        },
+        {
+          "mechanism_ref": "h004.m4",
+          "source_h": 7
+        },
+        {
+          "mechanism_ref": "h004.m5",
+          "source_h": 7
+        },
+        {
+          "mechanism_ref": "h007.m6",
+          "source_h": 7
+        }
+      ],
+      "focus": {
+        "mechanism_ref": "h001.m1",
+        "action": "screen"
+      },
+      "managed_call_count": 1
+    }
+  ],
+  "mechanisms": [
+    {
+      "mechanism_ref": "h001.m1",
+      "label": "Independent sparse inverse regression",
+      "introduced_h": 1
+    },
+    {
+      "mechanism_ref": "h001.m2",
+      "label": "Jointly regularized inverse regression",
+      "introduced_h": 1
+    },
+    {
+      "mechanism_ref": "h001.m3",
+      "label": "Estimated forward operator with greedy sparse recovery",
+      "introduced_h": 1
+    },
+    {
+      "mechanism_ref": "h004.m4",
+      "label": "Support-revising sparse inversion under a fixed forward operator",
+      "introduced_h": 4
+    },
+    {
+      "mechanism_ref": "h004.m5",
+      "label": "Sparse inversion accounting for operator uncertainty",
+      "introduced_h": 4
+    },
+    {
+      "mechanism_ref": "h007.m6",
+      "label": "Coefficient stabilization on a fixed inferred support",
+      "introduced_h": 7
+    }
+  ],
+  "timings": [
+    {
+      "source_step": 1,
+      "next_step": 2,
+      "source_role": "H",
+      "final_attempt": 0,
+      "seal_seconds": 0.176002,
+      "prepare_and_start_seconds": 0.902421,
+      "total_control_seconds": 1.078423
+    },
+    {
+      "source_step": 2,
+      "next_step": 3,
+      "source_role": "W",
+      "final_attempt": 0,
+      "seal_seconds": 2.581901,
+      "prepare_and_start_seconds": 2.107842,
+      "total_control_seconds": 4.689743
+    },
+    {
+      "source_step": 3,
+      "next_step": 4,
+      "source_role": "A",
+      "final_attempt": 0,
+      "seal_seconds": 2.060381,
+      "prepare_and_start_seconds": 6.42341,
+      "total_control_seconds": 8.483791
+    },
+    {
+      "source_step": 4,
+      "next_step": 5,
+      "source_role": "H",
+      "final_attempt": 0,
+      "seal_seconds": 2.614635,
+      "prepare_and_start_seconds": 14.147025,
+      "total_control_seconds": 16.76166
+    },
+    {
+      "source_step": 5,
+      "next_step": 6,
+      "source_role": "W",
+      "final_attempt": 2,
+      "seal_seconds": 9.887338,
+      "prepare_and_start_seconds": 9.4016,
+      "total_control_seconds": 19.288939
+    },
+    {
+      "source_step": 6,
+      "next_step": 7,
+      "source_role": "A",
+      "final_attempt": 0,
+      "seal_seconds": 4.941211,
+      "prepare_and_start_seconds": 14.322881,
+      "total_control_seconds": 19.264092
+    },
+    {
+      "source_step": 7,
+      "next_step": 8,
+      "source_role": "H",
+      "final_attempt": 0,
+      "seal_seconds": 20.221611,
+      "prepare_and_start_seconds": 36.096578,
+      "total_control_seconds": 56.31819
+    },
+    {
+      "source_step": 8,
+      "next_step": 9,
+      "source_role": "W",
+      "final_attempt": 1,
+      "seal_seconds": 23.21121,
+      "prepare_and_start_seconds": 52.269226,
+      "total_control_seconds": 75.480437
+    }
+  ],
+  "delivery_cases": [
+    {
+      "id": "w005-attempt-000",
+      "step": 5,
+      "attempt": 0,
+      "payload": {
+        "summary": "Completed both authorized screens with 13 successful native runs and 13 audits, all with leakage_flag=false. Return to independent A review.",
+        "scientific_result": "Support revision produced small gains that weakened under mismatch. Explicit operator uncertainty improved additive-shift recovery while sacrificing some clean validation performance. The selected support-revising model achieved validation/audit recovery of 0.9066/0.9130; the selected uncertainty model achieved 0.9024/0.9195. Reproduced OMP validation recovery was 0.904858. Across three additive-0.30 operator realizations, uncertainty-aware recovery averaged 0.787052 versus OMP's 0.771557, improving in every realization. Under gain-0.30 changes, it averaged 0.784904 versus 0.775576, but lost in one realization. These are conditional improvements, not established hidden-test gains.",
+        "limitations": [
+          "Hidden-test recovery, reward and the hidden operator relationship remain unknown.",
+          "Two overlapping training partitions and three realizations per operator class provide limited coverage. Row bootstrap intervals do not measure population uncertainty across operators.",
+          "Previously inspected validation is not a fresh blind evaluation; selection used training-only evidence.",
+          "Historical inverse-model files were unavailable, preventing exact reuse.",
+          "The uncertainty method combines covariance modeling, coefficient shrinkage and support weighting; its gains do not isolate covariance modeling from ordinary regularization.",
+          "The uncertainty model does not estimate or calibrate the test operator.",
+          "Eight-experiment audited-score stagnation remains unmet; global completion is not established.",
+          "Budget feedback requested review near the soft target. Billing is partial, unknown usage is not zero, and remaining-resource estimates grant no additional calls."
+        ],
+        "stage_intent": "review",
+        "mechanism_findings": [
+          {
+            "mechanism_ref": "h001.m1",
+            "finding": "Independent Lasso refits remained weak: clean validation recovery 0.123149 and additive-0.30 mean 0.100474.",
+            "obstacle": "Historical selected model files were unavailable. These refits are separate comparators and do not exactly reproduce the historical candidate."
+          },
+          {
+            "mechanism_ref": "h001.m2",
+            "finding": "Joint regression refits slightly exceeded independent regression but substantially trailed sparse inversion: clean recovery 0.125871 and additive-0.30 mean 0.103333.",
+            "obstacle": "Exact retained-model reuse was unavailable."
+          },
+          {
+            "mechanism_ref": "h001.m3",
+            "finding": "Reconstructed normalized OMP k=6 exactly reproduced reported validation recovery, 0.904858. It remained the common reference across both screens."
+          },
+          {
+            "mechanism_ref": "h004.m4",
+            "finding": "Seven settings covered subspace pursuit, hard-threshold pursuit and convex sparse initialization with debiasing. Training-only selection chose subspace pursuit k=6. Its validation advantage over OMP was 0.001696 clean, but averaged -0.001132 under additive-0.30 mismatch. Support revision alone did not consistently recover the remaining error."
+          },
+          {
+            "mechanism_ref": "h004.m5",
+            "finding": "Six settings explicitly represented signal-dependent additive or gain uncertainty in residual covariance. Training-only selection chose additive uncertainty tau=0.10 with k=6. Under additive-0.30 mismatch, false-positive relative energy fell from 0.110687 for matched ordinary subspace pursuit to 0.096004. Stronger uncertainty settings impaired clean recovery."
+          }
+        ]
+      },
+      "obligation_refs": [
+        "h001.m1",
+        "h001.m2",
+        "h001.m3",
+        "h004.m4",
+        "h004.m5"
+      ],
+      "expected_kind": "output_repair",
+      "current_observed_kind": "work_repair",
+      "source_record": "native-evidence/005/science-output.json"
+    },
+    {
+      "id": "w005-attempt-001",
+      "step": 5,
+      "attempt": 1,
+      "payload": {
+        "summary": "Reported explicit observations and reuse obstacles for all five assigned mechanisms using retained results. Both original managed calls are known_success; no experiments were replayed.",
+        "scientific_result": "On identical validation rows, reconstructed independent regression, joint regression and OMP achieved recovery of 0.123149, 0.125871 and 0.904858. Forward sparse inversion retained its large advantage across the tested repeated shifts. Support revision gave small, condition-dependent improvements. The selected uncertainty method improved additive-0.30 recovery to 0.787052 versus OMP's 0.771557, with a slight clean-validation loss. These findings support conditional comparison by independent A, not global completion.",
+        "limitations": [
+          "Exact historical inverse-model reuse and repeated-shift adaptive-OMP comparison remain obstructed by unavailable artifacts.",
+          "Hidden-test performance, reward and the hidden operator relationship remain unknown.",
+          "Two overlapping training partitions and three realizations per shift class provide limited coverage; row bootstrap intervals do not establish between-operator population uncertainty.",
+          "Previously inspected validation is not a fresh blind evaluation.",
+          "The uncertainty method combines covariance modeling, shrinkage and support weighting; its gains do not isolate covariance modeling from ordinary regularization.",
+          "Eight-experiment audited-score stagnation remains unmet.",
+          "The soft token target has been reached. Billing remains partial with unknown usage; no further experimental calls were made."
+        ],
+        "stage_intent": "review",
+        "mechanism_observations": [
+          {
+            "mechanism_ref": "h001.m1",
+            "observation": "The independent Lasso comparator was fitted and evaluated within both completed managed screens. Its training-only comparison score was 0.075149. Validation recovery was 0.123149 clean, 0.100474 averaged across three additive-0.30 realizations, and 0.102443 across three gain-0.30 realizations. It did not overtake forward sparse recovery.",
+            "obstacle": "The historical selected model and original training source are not mounted. This comparator uses the reported alpha=0.008 but is a reconstruction, not exact retained-model reuse; its clean score differs from the historical 0.128027.",
+            "evidence": [
+              "work/retained-experiments/0002-9188fcb6146a44a697b47d6bdcfef7d7/outputs/screen_report.json#/validation/clean/methods/independent_refit",
+              "work/analysis/comparison.json#/validation/uncertainty"
+            ]
+          },
+          {
+            "mechanism_ref": "h001.m2",
+            "observation": "The joint-regression comparator was fitted and evaluated within both completed managed screens. Its training-only comparison score was 0.078287. Validation recovery was 0.125871 clean, 0.103333 averaged across three additive-0.30 realizations, and 0.105250 across three gain-0.30 realizations. It slightly exceeded independent regression but remained substantially below forward recovery.",
+            "obstacle": "The historical selected model and original training source are unavailable. This MultiTaskLasso reconstruction uses the reported alpha=0.1 but does not exactly reproduce the historical 0.133245 validation score.",
+            "evidence": [
+              "work/retained-experiments/0002-9188fcb6146a44a697b47d6bdcfef7d7/outputs/screen_report.json#/validation/clean/methods/joint_refit",
+              "work/analysis/comparison.json#/validation/uncertainty"
+            ]
+          },
+          {
+            "mechanism_ref": "h001.m3",
+            "observation": "The reconstructed fixed-k=6 normalized OMP control exactly reproduced historical validation recovery, 0.904858. Across the new shared realizations it averaged 0.771557 under additive-0.30 mismatch and 0.775576 under gain-0.30 mismatch. Clean relative squared-error components were omitted energy 0.064286, selected-coordinate coefficient error 0.011566 and false-positive energy 0.036962, measured before clipping. These observations establish the common reference and show that coefficient error alone does not explain its remaining loss.",
+            "obstacle": "Historical adaptive-OMP model/source files are unavailable. No repeated-shift adaptive comparison was performed; the prior fixed/adaptive comparison remains attributed to A's retained assessment.",
+            "evidence": [
+              "work/retained-experiments/0002-9188fcb6146a44a697b47d6bdcfef7d7/outputs/screen_report.json#/validation/clean/methods/omp6",
+              "work/analysis/comparison.json#/development/support",
+              "inputs/history/nodes/003/scientific-original.json"
+            ]
+          },
+          {
+            "mechanism_ref": "h004.m4",
+            "observation": "Seven support-revising settings completed native runs and nonflagged audits. Training-only selection chose subspace pursuit k=6, with validation/audit recovery 0.9066/0.9130. Its validation advantage over OMP was 0.001696 clean but averaged -0.001132 under additive-0.30 mismatch. Support revision alone did not consistently resolve the remaining error.",
+            "evidence": [
+              "work/retained-experiments/0001-f51bf27d87354f358fef823363fa9835/outputs/screen_report.json"
+            ]
+          },
+          {
+            "mechanism_ref": "h004.m5",
+            "observation": "Six explicit operator-uncertainty settings completed native runs and nonflagged audits. Training-only selection chose tau=0.10, k=6, with validation/audit recovery 0.9024/0.9195. Additive-0.30 recovery improved over OMP in all three realizations. Gain-0.30 recovery averaged 0.784904 but lost to OMP in one realization. Stronger uncertainty settings impaired clean performance.",
+            "evidence": [
+              "work/retained-experiments/0002-9188fcb6146a44a697b47d6bdcfef7d7/outputs/screen_report.json"
+            ]
+          }
+        ]
+      },
+      "obligation_refs": [
+        "h001.m1",
+        "h001.m2",
+        "h001.m3",
+        "h004.m4",
+        "h004.m5"
+      ],
+      "expected_kind": "output_repair",
+      "current_observed_kind": "work_repair",
+      "source_record": "native-evidence/005/continuations/001/science-output.json"
+    },
+    {
+      "id": "w005-attempt-002",
+      "step": 5,
+      "attempt": 2,
+      "payload": {
+        "summary": "Retained comparator observations are available for all three historical mechanisms. Exact historical-artifact reuse remains blocked and is explicitly reported below. No completed experiments were resubmitted.",
+        "scientific_result": "Reconstructed independent regression, joint regression and OMP scored 0.123149, 0.125871 and 0.904858 on identical validation rows. Across three additive-0.30 realizations they averaged 0.100474, 0.103333 and 0.771557. The selected uncertainty method reached 0.787052 under those additive shifts, with a slight clean-performance loss. Both managed screens completed successfully; all 13 new native audits reported leakage_flag=false.",
+        "limitations": [
+          "Exact historical-artifact reuse and repeated-shift adaptive-OMP evaluation remain incomplete.",
+          "Hidden-test recovery, reward and the hidden operator relationship remain unknown.",
+          "Two overlapping training partitions and three realizations per shift class provide limited coverage.",
+          "Uncertainty treatment combines covariance modeling, shrinkage and support weighting; their contributions are not isolated.",
+          "There are 25 recorded successful native runs, but only five experiments since the latest audit improvement; eight-experiment stagnation remains unmet.",
+          "The soft token target is exceeded. Billing is partial, unknown usage is not zero, and resource estimates provide no additional execution permission."
+        ],
+        "stage_intent": "review",
+        "mechanism_findings": [
+          {
+            "mechanism": "h001.m1",
+            "basis": "blocked",
+            "finding": "Exact selected-Lasso reuse is blocked because its historical model and training source are not mounted, and no additional call allowance is recorded for this mechanism. Existing completed screens nevertheless provide a reconstructed alpha=0.008 comparator: recovery 0.123149 clean, 0.100474 under additive-0.30 and 0.102443 under gain-0.30. It remained substantially below forward recovery. This reconstruction does not exactly reproduce the historical candidate.",
+            "evidence": [
+              "work/retained-experiments/0002-9188fcb6146a44a697b47d6bdcfef7d7/outputs/screen_report.json#/validation/clean/methods/independent_refit",
+              "work/analysis/comparison.json#/validation/uncertainty",
+              "inputs/lineage/mechanisms/0001.json"
+            ]
+          },
+          {
+            "mechanism": "h001.m2",
+            "basis": "blocked",
+            "finding": "Exact selected-joint-model reuse is blocked because its historical model and training source are unavailable, and no additional call allowance is recorded. Existing completed screens contain a MultiTaskLasso alpha=0.1 reconstruction: recovery 0.125871 clean, 0.103333 under additive-0.30 and 0.105250 under gain-0.30. Its small advantage over independent regression did not reverse the ranking against sparse inversion.",
+            "evidence": [
+              "work/retained-experiments/0002-9188fcb6146a44a697b47d6bdcfef7d7/outputs/screen_report.json#/validation/clean/methods/joint_refit",
+              "work/analysis/comparison.json#/validation/uncertainty",
+              "inputs/lineage/mechanisms/0001.json"
+            ]
+          },
+          {
+            "mechanism": "h001.m3",
+            "basis": "blocked",
+            "finding": "Exact historical fixed/adaptive model reuse and a repeated-shift adaptive comparison are blocked by unavailable model/source artifacts and no recorded additional call allowance. The fixed-k=6 reconstruction already evaluated in both completed screens exactly reproduced historical clean recovery, 0.904858. Its additive-0.30 and gain-0.30 means were 0.771557 and 0.775576. Clean unclipped relative error comprised omitted energy 0.064286, coefficient error 0.011566 and false-positive energy 0.036962. The historical adaptive comparison remains attributed to A rather than claimed as newly reproduced.",
+            "evidence": [
+              "work/retained-experiments/0002-9188fcb6146a44a697b47d6bdcfef7d7/outputs/screen_report.json#/validation/clean/methods/omp6",
+              "inputs/history/nodes/003/scientific-original.json",
+              "inputs/lineage/mechanisms/0001.json"
+            ]
+          },
+          {
+            "mechanism": "h004.m4",
+            "basis": "observed",
+            "finding": "Seven support-revising settings completed native runs and nonflagged audits. Training-selected subspace pursuit k=6 achieved validation/audit recovery 0.9066/0.9130. Its small clean advantage did not persist under additive-0.30 mismatch.",
+            "call_id": "0001-f51bf27d87354f358fef823363fa9835"
+          },
+          {
+            "mechanism": "h004.m5",
+            "basis": "observed",
+            "finding": "Six operator-uncertainty settings completed native runs and nonflagged audits. Training-selected tau=0.10, k=6 achieved validation/audit recovery 0.9024/0.9195 and improved additive-0.30 recovery over OMP in all three realizations. Gain-shift results included a rank reversal.",
+            "call_id": "0002-9188fcb6146a44a697b47d6bdcfef7d7"
+          }
+        ]
+      },
+      "obligation_refs": [
+        "h001.m1",
+        "h001.m2",
+        "h001.m3",
+        "h004.m4",
+        "h004.m5"
+      ],
+      "expected_kind": "partial",
+      "current_observed_kind": "partial",
+      "source_record": "native-evidence/005/continuations/002/science-output.json"
+    },
+    {
+      "id": "w008-attempt-000",
+      "step": 8,
+      "attempt": 0,
+      "payload": {
+        "summary": "Completed the authorized shared screen. Recommend SP-support ridge for independent A review under the declared development criterion.",
+        "scientific_result": "Constant ridge on fixed SP6 supports scored 0.822129 on training-only development, versus 0.817729 for the retained uncertainty package. Across five additional training resamples, its advantage was 0.003768, with conditional row-cluster 95% interval [0.002510, 0.004983], exceeding the prespecified 0.002 margin. Stabilization improved shifted recovery primarily by reducing false-positive energy, while sacrificing clean recovery. Energy association and measurement-noise geometry supplied no consistent incremental benefit. Support-revision effects varied by operator. Three new native runs and submissions succeeded with leakage_flag=false.",
+        "limitations": [
+          "Training resamples use overlapping fits and previously exposed data; they are not fresh independent evaluation.",
+          "Row-cluster intervals condition on fitted models, chosen penalties and tested operators; they do not establish operator-population confidence.",
+          "Validation rankings reverse across operators. The aggregate validation advantage over the uncertainty package remains inconclusive.",
+          "Equal scenario weighting is a development convention; hidden-shift geometry, recovery and reward remain unknown.",
+          "Historical prediction reuse is exact, but original historical training sources remain unavailable.",
+          "Native honesty audits test a specific leakage pattern; they are not independent estimates of shifted performance.",
+          "Billing remains partial with unknown in-flight usage; remaining estimates grant no additional execution permission."
+        ],
+        "stage_intent": "review",
+        "mechanism_observations": [
+          {
+            "mechanism_ref": "h001.m1",
+            "finding": "Exact retained independent-regression model scored 0.128027 clean, 0.107112 additive and 0.108985 gain; it substantially trails sparse inversion."
+          },
+          {
+            "mechanism_ref": "h001.m2",
+            "finding": "Exact retained joint-regression model scored 0.133245 clean, 0.112784 additive and 0.114443 gain; its small advantage over independent regression does not close the gap."
+          },
+          {
+            "mechanism_ref": "h001.m3",
+            "finding": "Exact fixed OMP scored 0.904858/0.771557/0.775576 across clean/additive/gain. Retained adaptive OMP scored 0.904214/0.671390/0.684960, revealing substantial shift sensitivity."
+          },
+          {
+            "mechanism_ref": "h004.m4",
+            "finding": "With common ridge coefficients, initial SP support revision improved clean resample recovery by 0.002566 and reduced omitted true energy. Shifted gains were smaller and inconsistent. L1 remains a strong clean rival."
+          },
+          {
+            "mechanism_ref": "h004.m5",
+            "finding": "At k=6 and tau=0.1, uncertainty-stage support reconsideration produced mixed effects. Associated energy penalties and measurement-specific noise weighting showed no consistent advantage over matched controls."
+          },
+          {
+            "mechanism_ref": "h007.m6",
+            "finding": "Fixed-SP-support ridge improved resample additive/gain recovery over least-squares by 0.015590/0.018584, with omitted energy unchanged. Clean recovery decreased by 0.004195."
+          }
+        ]
+      },
+      "obligation_refs": [
+        "h001.m1",
+        "h001.m2",
+        "h001.m3",
+        "h004.m4",
+        "h004.m5",
+        "h007.m6"
+      ],
+      "expected_kind": "output_repair",
+      "current_observed_kind": "work_repair",
+      "source_record": "native-evidence/008/science-output.json"
+    },
+    {
+      "id": "w008-attempt-001",
+      "step": 8,
+      "attempt": 1,
+      "payload": {
+        "summary": "Completed the missing assigned observations by reusing the successful shared screen and retained models. No experiments were resubmitted.",
+        "scientific_result": "Fixed-SP-support ridge led the declared training-only development criterion at 0.822129, versus 0.817729 for the uncertainty package. Its advantage across five additional training resamples was 0.003768, with conditional row-cluster 95% interval [0.002510, 0.004983]. Coefficient stabilization explains substantial shifted recovery gains; uncertainty-specific dependence and support reconsideration supplied no consistent additional advantage. All six mechanisms now have explicit findings.",
+        "limitations": [
+          "Training resamples use overlapping fits and previously exposed data; conditional row intervals do not establish generalization across operator distributions.",
+          "Validation comparisons remain exposed and include operator-specific ranking reversals.",
+          "Historical predictions use exact restored models, but original historical training sources remain unavailable.",
+          "Native honesty audits test a specific leakage pattern, not hidden-shift performance.",
+          "Hidden recovery and reward remain unknown; independent A review and configured delivery remain outstanding.",
+          "The soft token target has been exceeded. Billing remains partial with unknown in-flight usage; no additional execution allowance is inferred."
+        ],
+        "stage_intent": "review",
+        "mechanism_findings": [
+          {
+            "mechanism": "h001.m1",
+            "basis": "reused",
+            "finding": "The shared screen evaluated the exact restored independent-regression model on common validation observations. Recovery was 0.128027 clean, 0.107112 averaged across three additive shifts, and 0.108985 across three gain shifts. It substantially trails sparse inversion. Historical model availability is resolved; original training-source reproduction remains unavailable.",
+            "evidence": [
+              "work/retained-experiments/0001-ea54027f8da1401a97e90a6bb2cadc7b/outputs/screen_report.json#/validation/clean/methods/historical_independent",
+              "work/analysis/summary.json#/classes/validation"
+            ]
+          },
+          {
+            "mechanism": "h001.m2",
+            "basis": "reused",
+            "finding": "The exact restored joint-regression model scored 0.133245 clean, 0.112784 under additive shifts and 0.114443 under gain shifts on the same validation cases. Shared inverse regularization slightly improves on independent regression but does not approach sparse forward recovery. Original historical training-source reproduction remains unavailable.",
+            "evidence": [
+              "work/retained-experiments/0001-ea54027f8da1401a97e90a6bb2cadc7b/outputs/screen_report.json#/validation/clean/methods/historical_joint",
+              "work/analysis/summary.json#/classes/validation"
+            ]
+          },
+          {
+            "mechanism": "h001.m3",
+            "basis": "reused",
+            "finding": "Exact retained fixed OMP scored 0.904858/0.771557/0.775576 across clean/additive/gain conditions. Exact retained adaptive OMP scored 0.904214/0.671390/0.684960. Thus the historical adaptive rule retains clean performance but deteriorates substantially under these repeated operator shifts. Fixed-OMP reconstruction matched retained predictions within 8.19e-14.",
+            "evidence": [
+              "work/retained-experiments/0001-ea54027f8da1401a97e90a6bb2cadc7b/outputs/screen_report.json#/validation",
+              "work/analysis/summary.json#/per_validation_operator",
+              "work/analysis/summary.json#/numerical_checks"
+            ]
+          },
+          {
+            "mechanism": "h004.m4",
+            "basis": "reused",
+            "finding": "With the same ridge penalty and estimated operator, initial SP support revision improved clean resample recovery over OMP by 0.002566 and reduced omitted true energy by 0.001476. Additive/gain recovery improvements were smaller, 0.000854/0.000246, with operator-dependent reversals. L1 remains a strong clean rival at 0.914229 validation recovery. Support correction helps conditionally but does not explain all stabilization gains.",
+            "evidence": [
+              "work/analysis/summary.json#/contrasts/replication",
+              "work/analysis/summary.json#/conditional_pooled_contrasts/replication",
+              "work/retained-experiments/0001-ea54027f8da1401a97e90a6bb2cadc7b/outputs/contrasts.json"
+            ]
+          },
+          {
+            "mechanism": "h004.m5",
+            "basis": "reused",
+            "finding": "Matched comparisons now cover the selected k=6, tau=0.1 configuration. Across resamples, associated energy penalties versus distribution-matched permuted penalties changed aggregate recovery by -0.000116, with conditional interval [-0.000620, 0.000395]. Heterogeneous noise weighting versus isotropic treatment changed recovery by -0.000084. Uncertainty-stage support reconsideration produced mixed effects. These probes supply no consistent uncertainty-specific incremental benefit and do not identify a physical uncertainty cause.",
+            "evidence": [
+              "work/analysis/summary.json#/conditional_pooled_contrasts/replication",
+              "work/retained-experiments/0001-ea54027f8da1401a97e90a6bb2cadc7b/outputs/contrasts.json",
+              "work/retained-experiments/0001-ea54027f8da1401a97e90a6bb2cadc7b/outputs/sources/design.json"
+            ]
+          },
+          {
+            "mechanism": "h007.m6",
+            "basis": "observed",
+            "call_id": "0001-ea54027f8da1401a97e90a6bb2cadc7b",
+            "finding": "Fixed-SP-support ridge improved additive/gain resample recovery over least-squares by 0.015590/0.018584 while holding omitted energy unchanged. Reduced false-positive energy supplied most of the improvement; clean recovery decreased by 0.004195. Three coefficient-rule models completed native runs and submissions with finite audits and leakage_flag=false.",
+            "evidence": [
+              "work/analysis/summary.json#/contrasts/replication",
+              "work/retained-experiments/0001-ea54027f8da1401a97e90a6bb2cadc7b/outputs/native_summary.json"
+            ]
+          }
+        ]
+      },
+      "obligation_refs": [
+        "h001.m1",
+        "h001.m2",
+        "h001.m3",
+        "h004.m4",
+        "h004.m5",
+        "h007.m6"
+      ],
+      "expected_kind": "incomplete_or_budget_partial",
+      "current_observed_kind": "budget_partial",
+      "source_record": "native-evidence/008/continuations/001/science-output.json",
+      "observed_stage_end_reason": "worker_resume_budget_unavailable"
+    }
+  ],
+  "profile_observations": {
+    "operation": "lineage.project(root,before_step=9,include_details=False)",
+    "source_nodes": 8,
+    "distinct_managed_calls": 6,
+    "wall_seconds_with_profiler": 4.7436402550083585,
+    "history_source_calls": 24,
+    "verify_observation_calls": 69,
+    "retained_original_lookups": 690,
+    "original_comparisons": 62328,
+    "qualification": "A measured baseline example only, never an expected pass threshold."
+  }
+}

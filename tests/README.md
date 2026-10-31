@@ -45,6 +45,36 @@ Cov 独立插件使用同一目标和 `--installation-cohort cov`。日志属于
 
 默认日志目录为仓库内 `.trial/lifecycle-validation-<UTC时间>-<随机后缀>`；`--output .trial/<新目录>` 可指定仓库内的新目录，相对路径以仓库根目录为基准，既有目录拒绝覆盖。每批保留 `runner.log` 和 `guard/` 原始证据，聚合 `summary.json` 记录命令、退出码、原始 guard 结果及未运行批次。只有退出码为 0、guard 报告 passed 且清理完成才通过；Ctrl-C/TERM 会转交现有 guard 并等待收尾。这是五项专项回归，不是功能全量、真实模型 Worker、solver 或 SSH 验收。
 
+## r6 交接缺陷的显式回归集
+
+`research_loop/fixtures/r6_handoff_examples.json` 从 Cov r6 的公开科学输出提取五份交接样例，
+并记录八节点拓扑、六个受管调用及交接时间。模型、数据集、原生会话、认证和宿主路径不进入
+测试集。原调用的科学结论与资格不随样例复制；测试使用新建的机械夹具原件，原始 r6 不变。
+
+`check_r6_handoff_costs.py` 检查已核验历史前缀的读取次数和原件查找比较次数；
+`check_r6_handoff_delivery.py` 检查首次 W 的阻断声明是否可发现，以及字段补正、实际缺工作、
+明确阻断、旧 H 证据和未知调用的分类。`check_` 入口须显式选择，不进入默认测试发现。
+当前生产缺陷尚未修复，相关断言应失败；没有 xfail 将缺陷隐藏成通过。
+
+性能断言使用结构计数：已有源集合的 fold 不再读源，project 每个源最多读取一次；
+每次独立原件核验的查找工作须有界于候选清单与查找请求数量之和。r6 实测秒数和坏计数只作
+来源记录，不作为机器相关的性能门槛。路径、大小、文件 stat 和歧义拒绝仍有正反例。
+
+使用原有串行监督入口，输出目录须为新的仓库本地目录：
+
+```sh
+python scripts/run_tests.py --lane source --output .trial/r6-handoff-source \
+  tests/research_loop/check_r6_handoff_costs.py
+python scripts/run_tests.py --lane process --output .trial/r6-handoff-process \
+  tests/research_loop/check_r6_handoff_costs.py \
+  tests/research_loop/check_r6_handoff_delivery.py
+```
+
+进程用例复用当前 Local 测试环境，需要已支持的 Codex 可执行文件、bwrap 和 Linux namespace。
+它只做能力检查并运行小型机械命令，不调用模型，不复制用户认证或原生 HOME；临时原生目录
+属于夹具。缺少依赖导致的 skip 是未运行，不能算通过或成功复现。测试初始化异常也须单列，
+只有到达目标行为断言的失败才是有效的缺陷基线。修复时应逐条使失败断言转绿，并保持对照通过。
+
 ## 资源与支持边界
 
 `scripts/run_tests.py` 现有RSS、可用内存采样和超时止损不是内核聚合硬内存限制。安装与功能分组不能替代资源隔离；是否具备资源域隔离须由具体运行环境证明，不能从测试通过推断。
