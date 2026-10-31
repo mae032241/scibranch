@@ -101,8 +101,6 @@ def binding(root, step, role, retained):
         if retained is not None:
             values = retained.get('user_guidance', [])
         else:
-            bound = {row['guidance_id'] for path in (Path(root) / 'jobs').glob('*.json')
-                     for row in contracts.read(contracts.regular(path)).get('user_guidance', [])}
             for path in sorted((Path(root) / 'host-control' / 'guidance').glob('*.json')):
                 value = contracts.read(contracts.regular(path))
                 revoked = Path(root) / 'host-control' / 'guidance-revocations' / f'{value["guidance_id"]}.json'
@@ -111,18 +109,26 @@ def binding(root, step, role, retained):
                 if (value['status'] == 'applied' and value.get('scope') == 'research'
                         and value['target'] in {'global', role} and (value['effective_step'] or 1) <= step):
                     values.append(value)
-                elif (value['status'] == 'pending' and value['guidance_id'] not in bound
+                elif (value['status'] == 'pending'
                         and value['target'] in {'global', role} and (value['effective_step'] or 1) <= step):
                     values.append(dict(value, status='applied', applied_step=step, applied_role=role))
         values.sort(key=lambda row: row.get('sequence', 0))
         yield values
-        for value in values:
-            path = _path(root, value['guidance_id'])
-            current = contracts.read(contracts.regular(path))
-            if current['revision'] != value['revision']:
-                raise ValueError('Frozen guidance revision changed')
-            if current['status'] == 'pending':
-                contracts.write(path, value)
+
+
+def apply_job(root, job):
+    """Apply the advice bound to this published task under its accept lock.
+
+    A retained task repeats this exact write after an interrupted publication;
+    no other job needs to be opened to establish its binding.
+    """
+    for value in job.get('user_guidance', []):
+        path = _path(root, value['guidance_id'])
+        current = contracts.read(contracts.regular(path))
+        if current['revision'] != value['revision']:
+            raise ValueError('Frozen guidance revision changed')
+        if current['status'] == 'pending':
+            contracts.write(path, value)
 
 
 def public(job):

@@ -1081,8 +1081,10 @@ class Records:
         else:
             recovery_admission()
         from . import breadth
-        return breadth.admit(self.config.get('breadth'),mechanism,self.config['scope'],
-            [self.accepted(path.name) for path in calls])
+        opportunities=breadth.validate(self.config.get('breadth'))
+        rows={row['mechanism_ref']:row for row in opportunities['mechanisms']} if opportunities else {}
+        return breadth.admit(opportunities,mechanism,self.config['scope'],
+            [self.accepted(path.name,_validated_breadth=True,_breadth_rows=rows) for path in calls])
 
     @_configuration_effect
     def preflight(self, *, expected_calls, mechanism=None):
@@ -1204,7 +1206,7 @@ class Records:
         # payloads/logs remain quota-bound; receipt bytes count in the next scan.
         write(directory / filename, value)
 
-    def accepted(self,call_id):
+    def accepted(self,call_id,*,_validated_breadth=False,_breadth_rows=None):
         """Read accepted control identity without reopening scientific payloads."""
         value=json.loads(read(self.directory(call_id)/'accepted.json'))
         if (not isinstance(value,dict) or value.get('call_id')!=call_id
@@ -1212,7 +1214,8 @@ class Records:
                 or value['scope']!=self.config['scope']):
             raise IntegrityError('Accepted execution binding changed')
         from . import breadth
-        try:breadth.check_binding(self.config.get('breadth'),value.get('mechanism_binding'),self.config['scope'])
+        try:breadth.check_binding(self.config.get('breadth'),value.get('mechanism_binding'),self.config['scope'],
+            _validated=_validated_breadth,_rows=_breadth_rows)
         except ValueError as error:raise IntegrityError('Accepted scientific mechanism binding changed') from error
         parent=value.get('parent')
         if not isinstance(parent,dict) or 'candidate_id' not in parent:
@@ -1846,10 +1849,9 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, pa
     _require_new_execution(config)
     opportunities=breadth.validate(config.get('breadth'))
     if opportunities is not None and not opportunities['prior_unknown']:
-        matches=[row for row in opportunities['mechanisms'] if mechanism==row['mechanism_ref']]
-        if len(matches)!=1:
-            problem='matches multiple mechanisms' if matches else 'does not select a declared mechanism'
-            raise CallerError(f'The --mechanism choice {problem}; choose one exact mechanism_ref listed in this task.')
+        try:mechanism=breadth.resolve_choice(opportunities,mechanism,config['scope'])['mechanism_ref']
+        except breadth.OpportunityRequired as error:
+            raise CallerError('Choose one mechanism number from this task frozen catalog.') from error
     try:records.preflight(expected_calls=expected_calls,mechanism=mechanism)
     except (ReviewRequired,breadth.OpportunityRequired) as error:_raise_admission_refusal(error)
     except ConcurrentExecution:return None

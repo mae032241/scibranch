@@ -143,7 +143,7 @@ def payload_path(config, path):
 
 def _input_rows(job):
     return [*job.get('global_materials',[]),*job.get('direct_refs',[]),*job.get('direct_materials',[]),
-        *job.get('history',{}).get('files',[]),
+        *job.get('history',{}).get('inputs',[]),
         *job.get('history',{}).get('execution_recovery_materials',[]),
         *[row['material'] for row in job.get('selected_inputs',[])]]
 

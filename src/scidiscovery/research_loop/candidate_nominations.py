@@ -47,11 +47,11 @@ def applicable(job):
     return job['role']=='W' and bool(job.get('candidate_nomination_mechanisms'))
 
 
-def resolve(root, job, declaration, *, source=None):
+def resolve(root, job, declaration, *, source=None, inventory=None):
     """Resolve only the declared candidate slots, preserving unresolvable advice."""
     value=_preview(declaration)
     if value is None:return None
-    from . import candidate_refs, generic_results, history, originals
+    from . import candidate_refs, generic_results, handoff_state, originals
     value=copy.deepcopy(value);current=None;retained=None
     for row in [*value.get('representatives',[]),*value.get('extras',[])]:
         if not isinstance(row,dict):continue
@@ -62,17 +62,24 @@ def resolve(root, job, declaration, *, source=None):
         elif isinstance(candidate,dict) and (root is not None or source is not None and source.inherited):
             if current is None:
                 if source is not None and source.inherited:
-                    if originals.source_job(source)!=job:
-                        raise ValueError('Candidate nominations differ from their exact source task')
-                    seal=c.read(originals.source_record(source,'result-identity.json'))
-                    observed=history.validate_observation_original(source,job,seal,controls_only=True)
+                    with handoff_state.loading():
+                        if originals.source_job(source)!=job:
+                            raise ValueError('Candidate nominations differ from their exact source task')
+                        seal=c.read(originals.source_record(source,'result-identity.json'))
+                        observed=(c.read(originals.resolve_ref(source,seal['observations']))
+                            if seal.get('observations') is not None else None)
                     current=(observed or {}).get('managed_calls',[])
                     retained=({row['id'] for row in (observed or {}).get('candidates',[])}
                         & {row['id'] for row in generic_results.candidates(current)})
                 else:
                     seal_path=c.host_record(c.workspace(root,job['step']))/'result-identity.json'
-                    receipt=c.read(c.regular(seal_path)).get('observations') if seal_path.exists() else None
-                    current=(c.read(c.regular(root/receipt['path']))['managed_calls'] if receipt else history.managed_calls(root,job))
+                    if seal_path.exists():
+                        receipt=c.read(c.regular(seal_path)).get('observations')
+                        current=(c.read(c.regular(root/receipt['path']))['managed_calls'] if receipt else [])
+                    else:
+                        if inventory is None:
+                            raise ValueError('Current candidate nominations require their accepted inventory')
+                        current=inventory.managed_calls
             matches=[generic_results.identity(call,item) for call in current
                 if call['call_id']==candidate.get('call_id') for item in generic_results.declarations(call)
                 if isinstance(item,dict) and item.get('artifact')==candidate.get('artifact')]
@@ -80,7 +87,7 @@ def resolve(root, job, declaration, *, source=None):
     return value
 
 
-def require(root, job, payload):
+def require(root, job, payload, *, inventory):
     """Candidate previews are optional advice, never an output-repair gate."""
     return None
 
@@ -106,6 +113,39 @@ def project(records, state):
         for ref,item in mechanisms.items() if item['status']=='waived' and item.get('disposition')]
     return dict(source_step=latest['step'] if latest else None,**value,pending_mechanisms=pending,waived=waived,
         mechanism_sources=sources)
+
+
+def table_project(summary):
+    """Project the same optional advice from the current small breadth snapshot."""
+    table=summary['table'];mechanisms=table['mechanisms'];nominations=table['nominations']
+    declared=nominations['by_mechanism_ref']
+    value=dict(representatives=[],extras=copy.deepcopy(nominations['latest_extras']),gaps=[])
+    sources={}
+    for ref,item in sorted(declared.items(),key=lambda pair:pair[1]['order']):
+        value[item['kind']].append(copy.deepcopy(item['declaration']))
+        sources[ref]=item['source_step']
+    return dict(source_step=nominations['source_step'],**value,
+        pending_mechanisms=[ref for ref,item in mechanisms.items() if item['status']!='waived' and ref not in declared],
+        waived=[dict(mechanism_ref=ref,reason=item['disposition']['reason'],source_a=item['disposition']['source_a'])
+            for ref,item in mechanisms.items() if item['status']=='waived' and item.get('disposition')],
+        mechanism_sources=sources)
+
+
+def source_table_projection(summary,resolve_public):
+    """Public nomination detail; candidate mapping is an explicit caller read."""
+    value=table_project(summary);stored=summary['table']['nominations']
+    result=dict(source_step=value['source_step'],representatives=[],extras=[],gaps=[],
+        pending_mechanisms=value['pending_mechanisms'],waived=value['waived'])
+    for kind in ('representatives','gaps','extras'):
+        for declaration in value[kind]:
+            record=stored if kind=='extras' else stored['by_mechanism_ref'][declaration['mechanism_ref']]
+            row=copy.deepcopy(declaration);step=record['source_step']
+            row.update(source_step=step,original=f'inputs/history/nodes/{record["origin_identity"]["goal_id"]}/{step:03d}/science.json')
+            reason=row['reason'];row['reason']=reason.encode()[:512].decode('utf-8',errors='ignore')
+            row['reason_truncated']=row['reason']!=reason
+            if 'candidate' in row:row['candidate_id']=resolve_public(row.pop('candidate'))
+            result[kind].append(row)
+    return result
 
 
 def page_rows(value):

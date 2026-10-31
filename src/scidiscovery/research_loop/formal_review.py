@@ -9,7 +9,7 @@ from typing import get_args
 
 from . import configuration_updates
 from ..operations import review_rules
-from . import contracts as c, execution, qualification as q
+from . import contracts as c, execution, handoff_state, qualification as q
 
 QUESTION = ('Assess the exact supplied artifact against the original objective and constraints. '
             'Identify supported claims, counterevidence, missing evidence and limitations; no favorable verdict is presumed.')
@@ -330,7 +330,7 @@ def _subject(root, selected):
     from . import originals
     source = originals.node(root, step)
     if not source.inherited:
-        c.validate(c.workspace(root, step))
+        handoff_state.read_sealed(root, step)
     path = originals.source_record(source, 'result-identity.json')
     seal = c.read(path)
     if item['origin_result_ref'] != seal['result_ref']:
@@ -428,7 +428,10 @@ def request_route(root, job, payload, parents):
         ref = q._save(root, record / 'formal-review-unavailable.json', dict(requester=requester, failure=value,failure_key=failure_key))
         return ('A', sorted(set([*parents,job['step']])), 'Choose a scientific next action; formal review is unavailable: '+reason,
                 dict(kind='formal_review_unavailable', unavailable=ref))
-    ref = q._save(root, record / 'formal-review-request.json', dict(requester=requester, **value))
+    from . import accepted_budget
+    head=accepted_budget.read(root)
+    ref = q._save(root, record / 'formal-review-request.json', dict(requester=requester,
+        prefix=head['prefix'],breadth_snapshot=head['search_ref'],**value))
     return 'A', [value['subject']['producer_step']], value['question'], dict(kind='formal_review', request=ref)
 
 
@@ -484,8 +487,7 @@ def input_binding(root, reference):
             steps.append(item['original']['producer_step'])
     return dict(materials=materials, selected=[selected],
         **(dict(compiler_scientific_materials=scientific,scientific_source_steps=sorted(set(steps))) if compiled else {}),
-        history=dict(nodes=[dict(step=subject['producer_step'], seal_ref=history.source_seal_ref(producer))],
-                     files=[], candidate_ids=[], view={}))
+        history=dict(prefix=request['prefix'],breadth_snapshot=request['breadth_snapshot'],inputs=[],view={}))
 
 
 def unavailable(root, step):
@@ -543,13 +545,13 @@ def choice_constraints(root, job, references=None):
     return dict(launcher_supported=backend.complete_authorship, unavailable=references)
 
 
-def validate_choice(root, job, payload):
+def validate_choice(root, job, payload, *, inventory):
     """A known unavailable request is an output repair, never another A dispatch."""
     choices=job.get('formal_review_choices')
     if choices is None or payload.get('next_action')!='formal_review':
         return
     from .output_repair import OutputRepairRequired
-    selected=c.selected_inputs(c.workspace(root,job['step']),payload,job)
+    selected=c.selected_inputs(inventory)
     value=_request_value(root,selected,job)
     if value['subject'] is None:
         raise OutputRepairRequired('formal_review_unavailable',
@@ -572,7 +574,8 @@ def public_choices(root, job):
         object_id=None
         if subject is not None:
             seal=q._read(root,subject['producer_seal'])
-            materials=sorted(seal['materials'],key=lambda row:row['path'])
+            materials=sorted(({key:value for key,value in row.items() if key!='file_stat'}
+                for row in seal['materials']),key=lambda row:row['path'])
             if subject['material'] not in materials:
                 raise q.IntegrityError('Unavailable subject differs from its producer original')
             from . import originals
@@ -735,13 +738,16 @@ def require_review(root, subject, receipt):
         if 'origin_identity' in receipt else originals.node(root, proof['review_step']))
     job = originals.source_job(context)
     if context.inherited:
-        c.validate_original(context)
+        # A receipt's exact origin can differ from the visible node at the
+        # same logical label in this fork. Read that saved original directly.
+        with handoff_state.loading():
+            c.read(originals.source_record(context, 'result.json'))
         seal = c.read(originals.source_record(context, 'result-identity.json'))
         request = c.read(originals.resolve_ref(originals.source_for_ref(context, job['formal_review']), job['formal_review']))
         bound_receipt = dict(seal.get('formal_review') or {})
         bound_receipt.setdefault('origin_identity', context.origin_identity)
     else:
-        c.validate(c.workspace(root, job['step']))
+        handoff_state.read_sealed(root, job['step'])
         seal = c.read(c.host_record(c.workspace(root, job['step'])) / 'result-identity.json')
         request = q._read(root, job['formal_review'])
         bound_receipt = seal.get('formal_review')

@@ -33,24 +33,8 @@ def configured(root, job=None):
 
 def usage(root, through_step):
     """Sum published attempt usage through this exact routing boundary."""
-    totals = dict(H=0, W=0, A=0, E=0, closeout=0)
-    unknown = []
-    from . import fork_runtime
-    for step in fork_runtime.local_steps(root):
-        if step > through_step:
-            break
-        path = root / 'jobs' / f'{step:03d}.json'
-        job = c.read(c.regular(path))
-        key = 'closeout' if job.get('purpose') == 'closeout' else job['role']
-        for record in execution.records(root, step):
-            if not (record / 'native-intent.json').exists():
-                continue
-            if not (record / 'usage.json').exists():
-                unknown.append(step)
-                continue
-            meter = c.read(c.regular(record / 'usage.json'))
-            totals[key] += meter['input_tokens'] + meter['output_tokens']
-    return dict(totals, thinking=totals['H'] + totals['A'], unknown_steps=sorted(set(unknown)))
+    from . import accepted_budget
+    return accepted_budget.role_usage(root, through_step)
 
 
 def _required(root, step, job, result, role, correction_request):
@@ -99,8 +83,10 @@ def effective_route(root, step, result, job, route, *, allow_repeat=False):
                 retained_job.get('evidence_return'), current_h, current_w,
                 retained_job.get('correction_request'), retained, None)
         intent = execution.origin(root, step + 1) / 'native-intent.json'
-        if intent.exists():
-            if c.read(c.regular(intent)).get('task_ref') != c.record_ref(path):
+        from . import accepted_budget
+        accepted = accepted_budget.native_attempt(root, step+1, intent.parent)
+        if accepted is not None:
+            if accepted['intent'].get('task_ref') != c.record_ref(path):
                 raise ValueError('Accepted successor task identity changed')
             # Replay the original accepted route; controller._check_job still
             # verifies it exactly. Today's shares gate only new admission.

@@ -10,12 +10,11 @@ from . import contracts as c, history, search
 MAX_DIAGNOSTICS = 8
 MAX_AUTHOR_CORRECTIONS = 2
 
-def author_choices(root,job,payload):
+def author_choices(root,job,payload,*,inventory):
     """The same prospective consumers serve sealing and original-output repair."""
     enabled=c.settings(root,job).get('search_policy') is not None and not job.get('formal_review') and not job.get('final_report')
     interpretation=search.interpret(root,job,payload) if enabled else dict(focus=None,allocation=None,diagnostics=[])
-    selection=[]
-    c.selected_inputs(c.workspace(root,job['step']),payload,job,selection)
+    selection=inventory.selection_diagnostics
     # Interpretation reports either authored mechanism/route consumption or an
     # unavailable scientific observation/repair authority. Only the latter
     # needs a new scientific reconsideration rather than fixing this response.
@@ -30,13 +29,13 @@ def author_choices(root,job,payload):
     return interpretation,selection
 
 
-def outcome(root,job,payload):
+def outcome(root,job,payload,*,inventory):
     from .protocol import CURRENT
     if type(job.get('handoff_protocol')) is not int or job['handoff_protocol']!=CURRENT:
         raise ValueError('Current scientific interpretation required')
     from . import formal_review
-    formal_review.validate_choice(root,job,payload)
-    interpretation,selection=author_choices(root,job,payload)
+    formal_review.validate_choice(root,job,payload,inventory=inventory)
+    interpretation,selection=author_choices(root,job,payload,inventory=inventory)
     search.require_portfolio_review(root,job,payload,interpretation=interpretation)
     from . import candidate_nominations
     candidate_nominations.require_final_coverage(root,job,payload)
@@ -46,7 +45,7 @@ def outcome(root,job,payload):
     delivery=None
     if job['role']=='W':
         from . import worker_delivery
-        delivery=worker_delivery.require_delivery(root,job,payload,execution.record(root,job['step']))
+        delivery=worker_delivery.require_delivery(root,job,payload,inventory.record,inventory=inventory)
     rows=[*diagnostics,*selection,*requests,*history.validate_recommendation(job,payload,root=root)]
     rows.extend(search.optional_reference_diagnostics(root,job,payload))
     rows.extend(row for row in c.scientific_diagnostics(job,payload) if row not in rows)

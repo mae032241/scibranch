@@ -41,6 +41,9 @@ def accepted_intents(root, step):
     task = c.record_ref(c.regular(root/'jobs'/f'{step:03d}.json'))
     previous = None
     if (first/'native-intent.json').exists():
+        from . import accepted_budget
+        if accepted_budget.native_attempt(root,step,first) is None:
+            raise ValueError('Original native intent has not been accepted')
         value = c.read(c.regular(first/'native-intent.json'))
         if not isinstance(value, dict):
             raise ValueError('Original accepted native intent must be an object')
@@ -61,6 +64,9 @@ def accepted_intents(root, step):
         if not file.exists():
             if any(path.iterdir()):raise ValueError('Unaccepted continuation has unexpected execution facts')
             continue
+        from . import accepted_budget
+        if accepted_budget.native_attempt(root,step,path) is None:
+            raise ValueError('Original native intent has not been accepted')
         value = c.read(c.regular(file))
         if not isinstance(value, dict):
             raise ValueError('Accepted native continuation intent must be an object')
@@ -77,6 +83,14 @@ def accepted_intents(root, step):
 
 
 def records(root, step):
+    """Read accepted attempt identities; acceptance does not recur on a read."""
+    first=origin(root,step)
+    accepted=[path for path,_ in accepted_intents(root,step)]
+    return accepted or [first]
+
+
+def validate_records(root, step):
+    """Full original-chain acceptance, owned by current inventory admission."""
     root = Path(root)
     first = origin(root, step)
     result = [first]
@@ -200,10 +214,6 @@ def record(root, step, attempt=None):
     if seal.exists() and c.read(c.regular(seal)).get('execution_ref') != _reference(chain):
         raise ValueError('Sealed native execution reference changed')
     current = chain[-1]
-    if len(chain) > 1 and (current / 'native-outcome.json').exists():
-        outcome = c.native_outcome(current)
-        if outcome.get('returncode') == 0 and not outcome.get('stop_reason'):
-            _terminal(root, step, chain, outcome)
     return current
 
 
@@ -245,6 +255,18 @@ def schema_transport(root, step, attempt=0):
 
 
 def _terminal(root, step, chain, outcome):
+    """Explicit independent audit of the complete retained chain."""
+    accept_current_terminal(root,step,chain,outcome)
+    from . import continuation
+    continuation.validate_repair_chain(root,step,chain)
+    continuation.validate_fragment_chain(root,step,chain)
+    for number,path in enumerate(chain[1:],1):
+        intent=c.read(path/'native-intent.json')
+        if intent.get('continuation_kind')=='execution_wake':
+            continuation.validate_wake(root,step,intent,chain[number-1])
+
+
+def accept_current_terminal(root, step, chain, outcome):
     """A terminal continuation cannot rebind its accepted intent before seal."""
     current = chain[-1]
     binding = c.record_ref(c.regular(current / 'native-intent.json'))
@@ -263,13 +285,9 @@ def _terminal(root, step, chain, outcome):
         process_boot = receipt['boot_id']
     from . import budget
     budget._attempt_consumption(root, c.read(root / 'jobs' / f'{step:03d}.json'), chain)
-    from . import continuation
-    continuation.validate_repair_chain(root, step, chain)
-    continuation.validate_fragment_chain(root, step, chain)
     author_turn=False
     for number, path in enumerate(chain[1:],1):
         intent=c.read(path/'native-intent.json')
-        if intent.get('continuation_kind')=='execution_wake':continuation.validate_wake(root,step,intent,chain[number-1])
         if intent.get('continuation_kind')=='author_closeout':author_turn=True
     if author_turn:
         # records() already validated every author intent, permit, projection,

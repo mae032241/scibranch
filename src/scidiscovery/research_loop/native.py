@@ -113,31 +113,8 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
 
 def usage(root: Path, *, budget_events=None):
     """Sum distinct node meters, never re-add cumulative observations."""
-    totals = dict(input_tokens=0, cached_input_tokens=0, output_tokens=0)
-    unknown = []
-    from . import fork_runtime
-    for step in fork_runtime.local_steps(root, include_native=True):
-        for record in execution.records(root, step):
-            if not (record / 'native-intent.json').exists():continue
-            meter = record / 'usage.json'
-            if not meter.exists():
-                if step not in unknown:unknown.append(step)
-                continue
-            value = read(meter)
-            if _usage_event(dict(type='turn.completed', usage=value)) != value:
-                raise ValueError('Native usage observation changed')
-            observation = record / 'usage-observation.json'
-            outcome = record / 'native-outcome.json'
-            metadata = native_outcome(record).get('metering') if outcome.exists() else None
-            if metadata is None and observation.exists():metadata = read(observation)
-            if metadata is not None and metadata.get('coverage') == 'unknown' and step not in unknown:
-                unknown.append(step)
-            if (record / 'interruption.json').exists() and not outcome.exists() and step not in unknown:
-                unknown.append(step)
-            for key in totals:totals[key] += value[key]
-    result=dict(**totals, observed_tokens=totals['input_tokens'] + totals['output_tokens'], unknown_steps=unknown)
-    result.update(control_budget.usage_accounting(root,result,events=budget_events))
-    return result
+    from . import accepted_budget
+    return accepted_budget.usage(root, head=budget_events.state if budget_events is not None else None)
 
 def _complete_reported_tokens(root,step):
     """Strict advisory sample: missing endpoint/coverage never contributes zero."""
@@ -168,39 +145,27 @@ def _complete_reported_tokens(root,step):
 
 def cycle_token_advice(root,state,*,usage_snapshot=None,budget_snapshot=None):
     """Reported-token reference only, independent of admission and shared clocks."""
-    from . import fork_runtime
-    root=Path(root);samples=[];excluded=0;excluded_samples=[];reasons=[];meters={}
-    local=set(fork_runtime.local_steps(root,include_native=True))
-    for step in sorted(local):
-        if not (execution.origin(root,step)/'native-intent.json').exists():continue
-        try:meters[step]=_complete_reported_tokens(root,step)
-        except (OSError,ValueError,KeyError,TypeError):meters[step]=(None,'attempt_history_unavailable')
-        if meters[step][1]:reasons.append(meters[step][1])
-    for cycle in state['portfolio'].get('cycles',[]):
-        nodes=[cycle['w_step'],*cycle['a_steps']]
-        if cycle.get('sample_exclusion'):
-            excluded+=1;excluded_samples.append(dict(w_step=cycle['w_step'],a_steps=list(cycle['a_steps']),reason=cycle['sample_exclusion']));continue
-        if any(step not in local for step in nodes):continue
-        if any(meters.get(step,(None,'missing'))[0] is None for step in nodes):
-            excluded+=1;excluded_samples.append(dict(w_step=cycle['w_step'],a_steps=list(cycle['a_steps']),reason='incomplete_cycle_meter'));continue
-        samples.append(dict(w_step=cycle['w_step'],a_steps=list(cycle['a_steps']),
-            science_refs=[dict(source_step=step,pointer='/scientific_result') for step in dict.fromkeys(nodes)],
-            reported_tokens=sum(meters[step][0] for step in dict.fromkeys(nodes))))
-    if len(samples)<2:reasons.append('insufficient_complete_local_cycles')
+    from . import accepted_budget
+    head = accepted_budget.read(root)
+    advice = head['search']['portfolio']['token_advice']
+    samples = [dict(w_step=row['w_step'], a_steps=[row['a_step']],
+        science_refs=[dict(source_step=step,pointer='/scientific_result') for step in (row['w_step'],row['a_step'])],
+        reported_tokens=row['reported_tokens']) for row in advice['samples']]
+    reasons = []
+    if advice['complete_sample_count'] < 2:reasons.append('insufficient_complete_local_cycles')
     current=usage(root) if usage_snapshot is None else usage_snapshot
     limits=control_budget.snapshot(root) if budget_snapshot is None else budget_snapshot
-    if current.get('unknown_steps') or current.get('reserved_unknown_steps') or current.get('blocking_unknown_steps'):
+    if current.get('blocking_unknown_count', bool(current.get('unknown_steps'))) or current.get('reserved_unknown_steps'):
         reasons.append('usage_unknown')
     spent=current.get('accounted_tokens',current.get('observed_tokens'));ceiling=limits.get('max_tokens')
     remaining=max(0,ceiling-spent) if type(ceiling) is int and type(spent) is int and spent>=0 else None
     if remaining is None:reasons.append('current_balance_unavailable')
-    mean=sum(row['reported_tokens'] for row in samples)/len(samples) if samples else None
+    mean=advice['reported_tokens_sum']/advice['complete_sample_count'] if advice['complete_sample_count'] else None
     if mean is not None and mean<=0:reasons.append('nonpositive_sample_mean')
     reasons=list(dict.fromkeys(reasons));available=not reasons
-    accepted_count=sum(1 for step in local for record in execution.records(root,step) if (record/'native-intent.json').exists())
-    return dict(accounted_tokens=spent,max_tokens=ceiling,accepted_attempt_count=accepted_count,status='available' if available else 'unavailable',reference_cycles=remaining/mean if available else None,
-        minimum_samples=2,complete_sample_count=len(samples),excluded_sample_count=excluded,reasons=reasons,
-        mean_reported_tokens=mean,remaining_reported_tokens=remaining,samples=samples,excluded_samples=excluded_samples,
+    return dict(accounted_tokens=spent,max_tokens=ceiling,accepted_attempt_count=head['dispatch_count'],status='available' if available else 'unavailable',reference_cycles=remaining/mean if available else None,
+        minimum_samples=2,complete_sample_count=advice['complete_sample_count'],excluded_sample_count=advice['excluded_sample_count'],reasons=reasons,
+        mean_reported_tokens=mean,remaining_reported_tokens=remaining,samples=samples,excluded_samples=[],
         scope='Reported native W/A tokens in complete child-local cycles only; inherited costs, H/E/audit/external calls and shared time are excluded from sample averages. Remaining balance includes current local usage. Not an execution grant or guarantee; existing time, steps and FINAL limits apply.')
 
 def _usage_event(event):
@@ -242,11 +207,13 @@ def execute_native(root: Path, step: int, *, final_report=None):
                        **(dict(budget_slice=node_anchor) if node_anchor is not None else {})), stream)
         stream.flush()
         os.fsync(stream.fileno())
+    from . import accepted_budget
+    accepted_budget.accept_native(root,step,record,read(record/'native-intent.json'))
     runtime.start(root, step)
     return wait_native(root, step)
 
 
-def wait_native(root: Path, step: int, *, _reentry_started=False):
+def wait_native(root: Path, step: int, *, _reentry_started=False, inventory=None):
     """Completion polling is transport; only the original outcome can seal."""
     record = execution.record(root, step)
     startup_until = time.monotonic() + 5
@@ -256,6 +223,7 @@ def wait_native(root: Path, step: int, *, _reentry_started=False):
         if (record/managed_wait.NAME).exists() and not (execution.origin(root,step)/'result-identity.json').exists():
             managed_wait.wait_and_wake(root,step)
             record=execution.record(root,step);startup_until=time.monotonic()+5
+            inventory=None
             continue
         state = runtime.node_state(root, step)
         if state == 'unstarted' and read(record / 'native-intent.json').get('continuation_kind') in {'reentry','automatic_recovery'} and not reentry_started:
@@ -267,6 +235,7 @@ def wait_native(root: Path, step: int, *, _reentry_started=False):
             from . import continuation
             continuation.reenter(root, step)
             record = execution.record(root, step)
+            inventory=None
             reentry_started = True
             startup_until = time.monotonic() + 5
             continue
@@ -284,16 +253,19 @@ def wait_native(root: Path, step: int, *, _reentry_started=False):
                 refused = control_budget.prelaunch_budget_reason(root, step, record)
                 if refused is not None:
                     raise control_budget.NodeBudgetUnavailable(refused)
-                if job['role']=='W' and fragments and not (record/'checkpoint.json').exists():
-                    raise continuation.ResumeUnavailable('worker_fragment_checkpoint_unavailable')
-                decision = continuation.automatic_decision(root, step)
+                from . import contracts as c
+                if inventory is None:inventory=c.accept_current_inventory(root,step)
+                elif inventory.root!=root or inventory.job!=job or inventory.record!=record:
+                    raise ValueError('Current inventory belongs to another task or attempt')
+                decision = continuation.automatic_decision(root, step,inventory=inventory)
                 if decision['action'] in {'continue','retry'}:
-                    raise continuation.AutomaticRecoveryRequired(decision)
-            try:result = continuation.seal_or_repair(root, step)
+                    raise continuation.AutomaticRecoveryRequired(decision,inventory=inventory)
+            try:result = continuation.seal_or_repair(root, step,inventory=inventory)
             except managed_wait.ExecutionWaiting:
                 continue
             if result.get('fragment_continuation') is True:
                 record = execution.record(root, step)
+                inventory=None
                 startup_until = time.monotonic() + 5
                 continue
             return result

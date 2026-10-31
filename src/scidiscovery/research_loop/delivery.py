@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import time
 
-from . import budget, contracts as c, history, originals, runtime
+from . import budget, contracts as c, handoff_state, history, originals, runtime
 from .instance_owner import effect as owner_effect
 
 class _Deadline:
@@ -232,13 +232,29 @@ def rebind_sources(root, refs, *, job=None):
     return _catalogue_sources(root, refs['source_nodes'], job=job) if refs is not None else None
 
 
+def candidate_source_nodes(root, job, candidate_id):
+    """Address only the selected candidate's already accepted producer."""
+    from . import accepted_prefix
+    prefix=accepted_prefix.for_job(job)
+    candidate=accepted_prefix.candidate(root,prefix,candidate_id)
+    member=accepted_prefix.member(root,prefix,candidate['first_step'],origin=candidate.get('origin_identity'))
+    return [dict(step=candidate['first_step'],seal_ref=member['seal_ref'])]
+
+
 def selected_sources(root, refs, candidate_id, *, prepare=False, job=None):
     """Reuse one immutable resolution, or prepare exactly one candidate's originals."""
     if not refs.get('catalogue'):
         return refs
-    if candidate_id not in {row['candidate_id'] for row in refs['items']}:
-        raise DeliveryUnresolved('delivery_source_unavailable')
-    key = f'{refs["items"].index(next(row for row in refs["items"] if row["candidate_id"] == candidate_id)):04d}-{(job or {}).get("step", 0):03d}-{((job or {}).get("configuration_revision") or {}).get("revision", 0):06d}'
+    if job is not None:
+        from . import candidate_refs
+        if not candidate_refs.is_available(root,job,candidate_id):
+            raise DeliveryUnresolved('delivery_source_unavailable')
+        key=security.request_digest(dict(candidate_id=candidate_id,step=job['step'],
+            configuration_revision=job.get('configuration_revision')))
+    else:
+        if candidate_id not in {row['candidate_id'] for row in refs['items']}:
+            raise DeliveryUnresolved('delivery_source_unavailable')
+        key = f'{refs["items"].index(next(row for row in refs["items"] if row["candidate_id"] == candidate_id)):04d}-000-000000'
     path = root / 'host-delivery/resolved' / (key + '.json')
     if not path.exists():
         if not prepare:
@@ -256,7 +272,8 @@ def selected_sources(root, refs, candidate_id, *, prepare=False, job=None):
         c.write(path, value)
         path.chmod(0o400)
     value = c.read(c.regular(path, limit=None))
-    if value['source_nodes'] != refs['source_nodes'] or any(row['candidate_id'] != candidate_id for row in value['items']):
+    expected=candidate_source_nodes(root,job,candidate_id) if job is not None else refs['source_nodes']
+    if value['source_nodes'] != expected or any(row['candidate_id'] != candidate_id for row in value['items']):
         raise ValueError('Selected delivery originals differ from their catalogue')
     return validate_sources(root, value, job=job)
 
@@ -288,6 +305,8 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
     from .protocol import require_current
     require_current(root)
     root = Path(root).resolve()
+    if candidate_id is not None and job is not None:
+        source_nodes=candidate_source_nodes(root,job,candidate_id)
     remaining = budget.snapshot(root)['seconds_remaining']
     allowance = min(SOURCE_SECONDS, _settings(root, job)['delivery_policy']['cleanup_seconds'])
     if budget.final_a_barrier(root) is None and (budget.closeout_state(root)['begin'] or {}).get('mode') != 'final':
@@ -679,7 +698,7 @@ def _choice(root, job, result):
         raise DeliveryUnresolved('delivery_authorization_required')
     from . import candidate_refs
     chosen=result.get('candidate_recommendation')
-    if chosen is not None and (not isinstance(chosen,str) or chosen not in candidate_refs.available_ids(root,job)):
+    if chosen is not None and (not isinstance(chosen,str) or not candidate_refs.is_available(root,job,chosen)):
         raise DeliveryUnresolved('selection_candidate_unavailable')
     from . import shortlist
     if _settings(root, job).get('selection_policy') is not None:
@@ -730,7 +749,7 @@ def binding(root, job, result):
     path = root / 'jobs' / f'{job["step"]:03d}.json'
     if c.read(path) != job:
         raise ValueError('Delivery decision job changed')
-    raw = c.validate(c.workspace(root, job['step']))
+    raw = handoff_state.read_sealed(root, job['step'])
     chosen = result.get('candidate_recommendation')
     if chosen != raw.get('candidate_recommendation'):
         raise ValueError('Delivery choice differs from sealed original')
@@ -948,7 +967,7 @@ def _staged(root, spec, source, operation_id, stage, *, job=None, context=None):
     inventory=storage.Inventory(_settings(root,job).get('storage_policy'),context=context)
     (stage/'inputs/harness').mkdir(parents=True)
     (stage/'scratch').mkdir()
-    nodes=(job or {}).get('delivery_sources',{}).get('source_nodes',(job or {}).get('history',{}).get('nodes',[]))
+    nodes=candidate_source_nodes(root,job,source['candidate_id']) if job is not None else []
     _verify_selected_originals(root,source,nodes,context=context)
     objects={}
     for name,proof in source['objects'].items():
@@ -1042,7 +1061,7 @@ def invoke(root, intent, max_seconds, *, on_process=None, audit_only=False):
     spec = _adapter(root, job, context=_Deadline(deadline))
     if audit_only:
         candidate_audit.validate_binding(root, intent)
-    elif binding(root, job, c.validate(c.workspace(root, step))) != bound:
+    elif binding(root, job, handoff_state.read_sealed(root, step)) != bound:
         raise ValueError('Delivery input binding changed')
     if intent['action_kind'] not in (('audit',) if audit_only else ('submit', 'confirm')):
         raise ValueError('Unknown delivery action')

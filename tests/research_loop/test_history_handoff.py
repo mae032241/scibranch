@@ -118,6 +118,8 @@ def finish(root, step, role, parents, text='A bounded scientific finding', actio
         assert contracts.read(contracts.regular(record/'native-intent.json'))['task_ref']==task_ref
     else:
         contracts.write(record / 'native-intent.json', dict(task_ref=task_ref))
+    from scidiscovery.research_loop import accepted_budget
+    accepted_budget.accept_native(root,step,record,contracts.read(contracts.regular(record/'native-intent.json')))
     contracts.write(record / 'science-output.json', payload)
     contracts.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
     contracts.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, native_started=False,

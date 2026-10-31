@@ -75,7 +75,7 @@ def _science(root, job, originals):
     return dict(status='present', diagnostic=None), payload
 
 
-def capture(root, job, record):
+def _capture(root, job, record, *, inventory):
     """Reference this stopped attempt and already-sealed terminal outputs.
 
     The caller must first establish that this attempt's native originals have
@@ -95,8 +95,7 @@ def capture(root, job, record):
     worker_delivery.writers_stopped(root,job,record)
     destination = record / 'checkpoint.json'
     if destination.exists() or destination.is_symlink():
-        return validate(root, job, record)
-    if worker_delivery.repair_applicable(job) and (record/'science-output.json').exists():worker_delivery.capture(root,job,record)
+        return _validate(root, job, record,inventory=inventory)
     originals, missing = [], []
     for name in NATIVE_ORIGINALS:
         path = record / name
@@ -110,13 +109,13 @@ def capture(root, job, record):
     work = c.workspace(root, job['step'])
     materials = []
     try:
-        for call in history.managed_calls(root,job):
+        for call in history.managed_calls(inventory):
             accepted=c.read(root/call['accepted']['snapshot'])
             attempt=accepted.get('native_attempt')
             if not isinstance(attempt,dict) or type(attempt.get('number')) is not int:
                 raise history.ObserverIntegrityError('Checkpoint output has no exact accepted native attempt')
             if attempt['number']>binding['attempt'] or call['status'] not in {'known_success','known_failed'}:continue
-            outputs=history.scientific_outputs(root,job,call)
+            outputs=history.scientific_outputs(inventory,call)
             for output in outputs:
                 history._validate_proof(root,output)
                 row=dict(source=str(root/output['snapshot']),
@@ -139,10 +138,10 @@ def capture(root, job, record):
                  scope='Stopped native originals and sealed terminal outputs only; mutable drafts are not retained. Not a stage seal, scientific qualification or restart permission.')
     c.write(destination, value)
     destination.chmod(0o400)
-    return validate(root, job, record)
+    return _validate(root, job, record,inventory=inventory)
 
 
-def validate(root, job, record):
+def _validate(root, job, record, *, inventory):
     """Verify this stopped attempt and saved originals without reading drafts."""
     from .protocol import require_current
     require_current(root,job)
@@ -175,14 +174,14 @@ def validate(root, job, record):
         if (len(parts)>=4 and parts[0]=='experiments' and parts[2]=='artifacts'
                 and '..' not in parts and name.as_posix()==row['name']):
             selected.setdefault(parts[1],[]).append(row)
-    calls=history.managed_calls(root,job,call_ids=list(selected)) if selected else []
+    calls=history.managed_calls(inventory,call_ids=list(selected)) if selected else []
     for call in calls:
         accepted=c.read(root/call['accepted']['snapshot'])
         attempt=accepted.get('native_attempt')
         if (not isinstance(attempt,dict) or type(attempt.get('number')) is not int
                 or attempt['number']>value['binding']['attempt'] or call['status'] not in {'known_success','known_failed'}):
             raise ValueError('Fragment terminal output lost its original native attempt')
-        outputs=history.scientific_outputs(root,job,call)
+        outputs=history.scientific_outputs(inventory,call)
         for row in selected[call['call_id']]:
             name=row['name'].split('/',3)[3]
             matches=[output for output in outputs if output['name']==name]
@@ -196,17 +195,23 @@ def validate(root, job, record):
     return value
 
 
+def validate(root,job,record,*,inventory):
+    if record!=inventory.record or job!=inventory.job:
+        raise ValueError('Checkpoint belongs to another accepted inventory')
+    return inventory.checkpoint
+
+
 def _clip(value, limit):
     data = value.encode('utf-8')
     return data[:limit].decode('utf-8', errors='ignore'), len(data) > limit
 
 
-def end_stage(root, job, record, reason, *, work_exit=None):
+def end_stage(root, job, record, reason, *, inventory, work_exit=None):
     """Record why control ended this stage without rewriting scientific bytes."""
     from .protocol import require_current
     require_current(root,job)
     root, record = Path(root), Path(record)
-    saved = validate(root, job, record)
+    saved = validate(root, job, record,inventory=inventory)
     value = dict(version=VERSION, binding=saved['binding'], reason=reason,
                  checkpoint_ref=c.record_ref(record / 'checkpoint.json'),
                  raw_ref=c.file_ref(c.regular(record / 'science-output.json')),
@@ -241,7 +246,7 @@ def brief(root, job, record):
     originals stay in the checkpoint; omissions never become inferred evidence.
     """
     root, record = Path(root), Path(record)
-    value = validate(root, job, record)
+    value = c.read(c.regular(record/'checkpoint.json'))
     _, science = _science(root, job, value['originals'])
     result = dict(task='science-task.json', science_status=value['science']['status'], scientific_summary=None,
                   current_understanding=None, limitations=[], omitted_limitations=0, direct_files=[],

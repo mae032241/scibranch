@@ -16,9 +16,10 @@ class ResumeUnavailable(ValueError):
 
 class AutomaticRecoveryRequired(RuntimeError):
     """Return one finite recovery decision to the owning controller writer."""
-    def __init__(self, decision):
+    def __init__(self, decision, *, inventory=None):
         super().__init__(decision['reason'])
         self.decision = decision
+        self.inventory = inventory
 
 
 def automatic_source(root, step, record):
@@ -128,8 +129,9 @@ def _automatic_session(root, step, record, outcome):
     return session(root, step, record, home=identity.get('home') or retained.get('home'), session_path=path)
 
 
-def _completed_work_request(root, step, record, source_attempt, prior_intents):
+def _completed_work_request(root, step, record, source_attempt, prior_intents, *, inventory):
     """Only the existing exact W delivery contract can reopen completed work."""
+    if inventory is None:return None
     job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
     if (job['role'] != 'W' or job.get('formal_review') or job.get('final_only')
             or job.get('purpose') == 'closeout'
@@ -151,17 +153,17 @@ def _completed_work_request(root, step, record, source_attempt, prior_intents):
             **c.response_options(job))
         # A valid continuation fragment retains its original fragment route.
         if science.get('stage_intent') == 'continue':return None
-        delivery=worker_delivery.assessment(root,job,science,record,source_attempt=source_attempt)
+        delivery=worker_delivery.assessment(root,job,science,record,inventory=inventory,source_attempt=source_attempt)
         if delivery['status']!='incomplete':
             return None
         worker_delivery.require_output_clarification(science,delivery)
-        request = output_request(root, step, record, source_attempt=source_attempt, verify_task=False)
+        request = output_request(root, step, record,inventory=inventory, source_attempt=source_attempt, verify_task=False)
     except OutputRepairRequired:
         return None
     return request if request['code'] == 'worker_delivery_incomplete' else None
 
 
-def automatic_decision(root, step):
+def automatic_decision(root, step, *, inventory=None):
     """One read-only arbiter; existing successful repair/fragment paths win."""
     from . import backends, native_recovery
     root = Path(root)
@@ -186,7 +188,7 @@ def automatic_decision(root, step):
     work_request = None
     if completed:
         work_request = _completed_work_request(root, step, last, len(paths)-1,
-            [c.read(c.regular(path / 'native-intent.json')) for path in paths])
+            [c.read(c.regular(path / 'native-intent.json')) for path in paths],inventory=inventory)
         if work_request is None:return dict(base, reason='automatic_recovery_completed_turn')
         if checkpoint.enabled(root,job):
             review=fragment_review(root,job)
@@ -227,8 +229,8 @@ def automatic_decision(root, step):
         if runtime.process_matches(receipt, binding):return dict(base, reason='worker_resume_original_running')
     from . import history, execution_recovery
     if execution_recovery.pending(root):return stop('automatic_recovery_managed_execution_pending')
-    if job['role'] == 'W' and any(row['status'] not in {'known_success','known_failed','not_submitted'}
-            for row in history.managed_calls(root, job)):
+    if job['role'] == 'W' and inventory is not None and any(row['status'] not in {'known_success','known_failed','not_submitted'}
+            for row in history.managed_calls(inventory)):
         return stop('automatic_recovery_managed_execution_pending')
     outcome = format_outcome or automatic_source(root, step, last)
     try:_automatic_session(root, step, last, outcome);available = True
@@ -247,7 +249,7 @@ def automatic_decision(root, step):
     return dict(base, **decided)
 
 
-def validate_automatic(root, step, intent, *, prior_record=None, prior_intents=None):
+def validate_automatic(root, step, intent, *, prior_record=None, prior_intents=None, inventory=None):
     from . import native_recovery
     request = intent.get('automatic_recovery')
     settings = configuration_updates.for_step(root, step)
@@ -269,7 +271,7 @@ def validate_automatic(root, step, intent, *, prior_record=None, prior_intents=N
     prior_intent = prior_intents[-1]
     work_request = (_accepted_repair_request(root,step,intent,prior_record) if intent.get('work_repair') is not None else None)
     if work_request is None and outcome.get('terminal_observed') is True:
-        work_request=_completed_work_request(root,step,prior_record,intent['attempt']-1,prior_intents)
+        work_request=_completed_work_request(root,step,prior_record,intent['attempt']-1,prior_intents,inventory=inventory)
     if work_request is not None:
         if (outcome.get('terminal_observed') is not True or (prior_record/'stage-end.json').exists()
                 or any(item.get('continuation_kind') in {'author_closeout','execution_wake'}
@@ -313,20 +315,20 @@ def validate_automatic(root, step, intent, *, prior_record=None, prior_intents=N
         raise ValueError('Automatic recovery changed its original session')
 
 
-def automatic_start(root, step, decision, *, recovery_wait=None):
+def automatic_start(root, step, decision, *, inventory=None, recovery_wait=None):
     with budget._operator_writer(root):
-        return _automatic_start_locked(root, step, decision, recovery_wait=recovery_wait)
+        return _automatic_start_locked(root, step, decision, inventory=inventory,recovery_wait=recovery_wait)
 
 
-def _automatic_start_locked(root, step, decision, *, recovery_wait=None):
+def _automatic_start_locked(root, step, decision, *, inventory=None, recovery_wait=None):
     """Accept one replacement under the existing owner/controller writer."""
     from . import profiles, native_recovery
     root = Path(root)
-    current = automatic_decision(root, step)
+    current = automatic_decision(root, step,inventory=inventory)
     if current != decision or current['action'] not in {'continue','retry'}:
         raise ResumeUnavailable('automatic_recovery_decision_stale')
     validate_launcher(root, step)
-    job = validate_task(root, step)
+    job = validate_task(root, step,inventory=inventory)
     paths = execution.records(root, step);last = paths[-1]
     from . import fork_runtime
     if any((execution.origin(root, later) / 'native-intent.json').exists()
@@ -349,7 +351,7 @@ def _automatic_start_locked(root, step, decision, *, recovery_wait=None):
             raise ValueError('Automatic recovery wait differs from its durable original')
         request['wait_record'] = recovery_wait['record_ref']
     budget.transition(root, 'advance', 'accepted_automatic_recovery')
-    anchor = budget.accept_continuation(root, job, paths, automatic_recovery=current)
+    anchor = budget.accept_continuation(root, job, paths, automatic_recovery=current,inventory=inventory)
     settings = configuration_updates.for_step(root, step)
     binding = profiles.binding(settings, job)
     profiles.validate_intent(settings, job, c.read(c.regular(paths[0] / 'native-intent.json')))
@@ -364,9 +366,11 @@ def _automatic_start_locked(root, step, decision, *, recovery_wait=None):
     if not request['startup_retry']:
         intent['session'] = _automatic_session(root, step, last, c.read(last / 'native-outcome.json'))
     validate_automatic(root, step, intent, prior_record=last,
-        prior_intents=[c.read(c.regular(path / 'native-intent.json')) for path in paths])
+        prior_intents=[c.read(c.regular(path / 'native-intent.json')) for path in paths],inventory=inventory)
     with (record / 'native-intent.json').open('x') as stream:
         json.dump(intent, stream);stream.flush();os.fsync(stream.fileno())
+    from . import accepted_budget
+    accepted_budget.accept_native(root,step,record,intent)
     runtime.start(root, step, number)
     return intent
 
@@ -427,9 +431,10 @@ def validate_wake_policy(root, step):
 
 
 
-def validate_task(root, step):
+def validate_task(root, step, *, inventory=None):
     job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
-    c._validate_inputs(root, c.workspace(root, step), job)
+    if inventory is not None and (inventory.job!=job or inventory.job['step']!=step):
+        raise ValueError('Current inventory belongs to another task')
     # This is the original call's frozen transport input. Rebuilding it with a
     # later scientific contract would change a retained task during recovery.
     c.regular(execution.origin(root, step) / 'science-result.schema.json', limit=None)
@@ -541,12 +546,13 @@ def reenter(root, step):
 
 
 def _reenter_locked(root, step):
+    inventory=None
     from .protocol import require_current
     require_current(root)
     # Reentry continues an already accepted full task. The policy's output-only
     # restriction still governs new repairs/wakes, not this interrupted task.
     validate_launcher(root, step)
-    job = validate_task(root, step)
+    job = validate_task(root, step,inventory=inventory)
     require_current(root, job)
     paths = execution.records(root, step); prior = paths[-1]
     state = runtime.node_state(root, step)
@@ -596,26 +602,27 @@ def _reenter_locked(root, step):
     validate_reentry(root, job, intent, prior)
     with (record / 'native-intent.json').open('x') as stream:
         json.dump(intent, stream);stream.flush();os.fsync(stream.fileno())
+    from . import accepted_budget
+    accepted_budget.accept_native(root,step,record,intent)
     runtime.start(root, step, number)
     return intent
 
 
 
-def _work_exit(root,job,record,reason):
+def _work_exit(root,job,record,reason,*,inventory):
     from . import worker_delivery
     paths=execution.records(root,job['step'])
     _eligible_original(root,job['step'],paths,successful=True,wait_runner=True,
         budgeted=budget.node_limits(root,job) is not None)
     proof=worker_delivery.authorize_exit(root,job,record,reason)
-    if not (record/'checkpoint.json').exists():checkpoint.capture(root,job,record)
-    checkpoint.end_stage(root,job,record,reason,work_exit=proof)
-    return c.seal_result(root,job['step'])
+    checkpoint.end_stage(root,job,record,reason,inventory=inventory,work_exit=proof)
+    return c.seal_result(root,job['step'],inventory=inventory)
 
 
-def finish_automatic_work(root, step, decision, reason):
+def finish_automatic_work(root, step, decision, reason, *, inventory):
     """Retain the exact completed contribution at a verified host boundary."""
     with budget._operator_writer(root):
-        current=automatic_decision(root,step)
+        current=automatic_decision(root,step,inventory=inventory)
         if (current!=decision or current.get('work_repair') is None
                 or current['action'] not in {'continue','stop'}):
             raise ResumeUnavailable('automatic_recovery_decision_stale')
@@ -624,11 +631,11 @@ def finish_automatic_work(root, step, decision, reason):
             raise ValueError('Automatic work exit requires a verified original host budget or continue cap')
         if reason=='automatic_recovery_continue_limit' and current['reason']!=reason:
             raise ValueError('Automatic work exit has no exhausted original continue cap')
-        job=validate_task(root,step)
-        return _work_exit(Path(root),job,execution.record(root,step),reason)
+        job=validate_task(root,step,inventory=inventory)
+        return _work_exit(Path(root),job,execution.record(root,step),reason,inventory=inventory)
 
 
-def seal_or_repair(root, step):
+def seal_or_repair(root, step, *, inventory):
     """Try the original seal first; only a frozen opt-in can accept a repair turn."""
     from .protocol import require_current
     require_current(root)
@@ -636,73 +643,75 @@ def seal_or_repair(root, step):
     require_current(root,_contracts.read(_contracts.regular(Path(root)/'jobs'/f'{step:03d}.json')))
     try:
         job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
+        if inventory is None or not inventory.science_available:return c.seal_result(root,step,inventory=inventory)
         if not (execution.origin(root,step)/'result-identity.json').exists():
             from . import managed_wait
-            managed_wait.before_seal(root,job,execution.record(root,step))
+            managed_wait.before_seal(root,job,execution.record(root,step),inventory=inventory)
         if checkpoint.enabled(root, job) and not (execution.origin(root, step) / 'result-identity.json').exists():
             record = execution.record(root, step)
             if (record / 'stage-end.json').exists():
                 checkpoint.stage_end(root, job, record)
-                return c.seal_result(root, step)
-            saved = checkpoint.validate(root, job, record)
+                return c.seal_result(root, step,inventory=inventory)
+            saved = checkpoint.validate(root, job, record,inventory=inventory)
             outcome = c.native_outcome(record)
             if (outcome.get('returncode') == 0 and not outcome.get('stop_reason')
                     and (not outcome['usage']['unknown_steps'] or budget.native_completion_known(outcome, configuration_updates.for_step(root, step)))):
                 if saved['science']['status'] != 'present':
                     # c.seal_result provides the bound output diagnosis/repair.
-                    return c.seal_result(root, step)
+                    return c.seal_result(root, step,inventory=inventory)
                 science = c.science_payload(record / 'science-output.json', 'W', job.get('handoff_protocol', 1))
                 review = fragment_review(root, job)
                 review_required = review['requested'] and review['enforced']
                 from . import worker_delivery
-                delivery=worker_delivery.assessment(root,job,science,record)
+                delivery=worker_delivery.assessment(root,job,science,record,inventory=inventory)
                 if science['stage_intent']!='continue':worker_delivery.require_output_clarification(science,delivery)
                 if delivery['status']=='partial':
-                    checkpoint.end_stage(root,job,record,delivery['reason'])
-                    return c.seal_result(root,step)
+                    checkpoint.end_stage(root,job,record,delivery['reason'],inventory=inventory)
+                    return c.seal_result(root,step,inventory=inventory)
                 if delivery['status']=='incomplete' and review_required:
-                    return _work_exit(root,job,record,review['reason'])
-                if science['stage_intent']!='continue':worker_delivery.require_delivery(root,job,science,record)
+                    return _work_exit(root,job,record,review['reason'],inventory=inventory)
+                if science['stage_intent']!='continue':worker_delivery.require_delivery(root,job,science,record,inventory=inventory)
                 if checkpoint.disposition(science, review_requested=review_required) == 'continue':
                     try:
-                        fragment_start(root, step)
+                        fragment_start(root, step,inventory=inventory)
                     except budget.NodeBudgetUnavailable as error:
                         # A valid scientific contribution is retained at the
                         # original budget boundary, without another native turn.
-                        if delivery['status']=='incomplete':return _work_exit(root,job,record,error.reason)
-                        checkpoint.end_stage(root, job, record, error.reason)
-                        return c.seal_result(root, step)
+                        if delivery['status']=='incomplete':return _work_exit(root,job,record,error.reason,inventory=inventory)
+                        checkpoint.end_stage(root, job, record, error.reason,inventory=inventory)
+                        return c.seal_result(root, step,inventory=inventory)
                     except ResumeUnavailable as error:
                         if str(error) != 'worker_fragment_review_requested':
                             raise
-                        if delivery['status']=='incomplete':return _work_exit(root,job,record,error.review_reason)
-                        checkpoint.end_stage(root, job, record, error.review_reason)
-                        return c.seal_result(root, step)
+                        if delivery['status']=='incomplete':return _work_exit(root,job,record,error.review_reason,inventory=inventory)
+                        checkpoint.end_stage(root, job, record, error.review_reason,inventory=inventory)
+                        return c.seal_result(root, step,inventory=inventory)
                     return dict(fragment_continuation=True)
-                checkpoint.end_stage(root, job, record, review['reason'] if review_required else 'worker_requested')
-        return c.seal_result(root, step)
-    except WorkRepairRequired:
+                checkpoint.end_stage(root, job, record, review['reason'] if review_required else 'worker_requested',inventory=inventory)
+        return c.seal_result(root, step,inventory=inventory)
+    except WorkRepairRequired as error:
+        inventory=error.inventory
         job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'));record=execution.record(root,step)
-        decision=automatic_decision(root,step)
-        if decision['action'] in {'continue','retry'}:raise AutomaticRecoveryRequired(decision)
+        decision=automatic_decision(root,step,inventory=inventory)
+        if decision['action'] in {'continue','retry'}:raise AutomaticRecoveryRequired(decision,inventory=inventory)
         if decision['reason']=='automatic_recovery_continue_limit' and decision.get('work_repair') is not None:
-            return _work_exit(root,job,record,decision['reason'])
-        try:return start(root,step)
-        except budget.NodeBudgetUnavailable as error:return _work_exit(root,job,record,error.reason)
+            return _work_exit(root,job,record,decision['reason'],inventory=inventory)
+        try:return start(root,step,inventory=inventory)
+        except budget.NodeBudgetUnavailable as error:return _work_exit(root,job,record,error.reason,inventory=inventory)
         except ResumeUnavailable as error:
-            return _work_exit(root,job,record,str(error))
+            return _work_exit(root,job,record,str(error),inventory=inventory)
     except OutputRepairRequired:
         if not (configuration_updates.for_step(root, step).get('resume_policy') or {}).get('output_repair', False):
             raise
-        try:return start(root, step)
+        try:return start(root, step,inventory=inventory)
         except ResumeUnavailable as error:
             error.status='output_repair_unavailable'
             raise
 
 
-def output_request(root, step, record, *, source_attempt=None, verify_task=True):
+def output_request(root, step, record, *, inventory, source_attempt=None, verify_task=True):
     """Recompute a repair binding from verified original final-response bytes."""
-    job = validate_task(root, step) if verify_task else c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
+    job = validate_task(root, step,inventory=inventory) if verify_task else c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
     if source_attempt is None:source_attempt = len(execution.records(root, step)) - 1
     outcome = c.native_outcome(record)
     if (type(outcome.get('returncode')) is not int or outcome['returncode'] != 0
@@ -717,23 +726,27 @@ def output_request(root, step, record, *, source_attempt=None, verify_task=True)
     else:
         if c.file_ref(c.regular(raw, limit=None)) != outcome.get('raw_ref'):
             raise ValueError('Original final output changed before repair')
+        if inventory is not None and inventory.output_error is not None:
+            error=inventory.output_error
+            return dict(**error.request(),source_attempt=source_attempt,
+                outcome_ref=c.record_ref(record/'native-outcome.json'),raw_ref=outcome.get('raw_ref'))
         try:
             science=c.science_payload(raw, job['role'], job.get('handoff_protocol', 1), 'selection' in job,**c.response_options(job))
             from . import candidate_refs
-            science=candidate_refs.control_payload(job,science,root=root)
+            science=candidate_refs.control_payload(job,science,root=root,inventory=inventory)
             from . import formal_review
-            formal_review.validate_choice(root,job,science)
+            formal_review.validate_choice(root,job,science,inventory=inventory)
             from . import semantic
-            interpretation,_=semantic.author_choices(root,job,science)
+            interpretation,_=semantic.author_choices(root,job,science,inventory=inventory)
             if job['role']=='A' and not job.get('formal_review'):
                 from . import search,candidate_nominations
                 search.require_portfolio_review(root,job,science,interpretation=interpretation)
                 candidate_nominations.require_final_coverage(root,job,science)
             if job['role']=='W':
                 from . import worker_delivery, candidate_nominations
-                worker_delivery.require_delivery(root,job,science,record,source_attempt=source_attempt)
-                candidate_nominations.require(root,job,science)
-            c.material_inventory(root, step)
+                worker_delivery.require_delivery(root,job,science,record,inventory=inventory,source_attempt=source_attempt)
+                candidate_nominations.require(root,job,science,inventory=inventory)
+            if inventory is not None:inventory.materials
         except OutputRepairRequired as failure:
             error = failure
         else:
@@ -780,13 +793,13 @@ def _accepted_repair_request(root,step,intent,prior):
     return request
 
 
-def validate_repair(root, step, intent, *, prior_record=None, prior_intents=None, verify_task=True):
+def validate_repair(root, step, intent, *, prior_record=None, prior_intents=None, verify_task=True, inventory=None):
     request = intent.get('work_repair') or intent.get('output_repair')
     if request is None:
         return
     automatic_work = intent.get('continuation_kind') == 'automatic_recovery' and intent.get('work_repair') is not None
     if automatic_work:
-        validate_automatic(root, step, intent, prior_record=prior_record, prior_intents=prior_intents)
+        validate_automatic(root, step, intent, prior_record=prior_record, prior_intents=prior_intents,inventory=inventory)
         return
     if (configuration_updates.for_step(root, step).get('resume_policy') or {}).get('output_only') and intent.get('work_repair') is not None:
         raise ValueError('Output-only policy does not authorize scientific work repair')
@@ -795,7 +808,7 @@ def validate_repair(root, step, intent, *, prior_record=None, prior_intents=None
     prior = prior_record if prior_record is not None else execution.records(root, step)[intent['attempt'] - 1]
     expected=_accepted_repair_request(root,step,intent,prior)
     if expected is None:
-        expected=output_request(root,step,prior,source_attempt=intent['attempt']-1,verify_task=verify_task)
+        expected=output_request(root,step,prior,inventory=inventory,source_attempt=intent['attempt']-1,verify_task=verify_task)
     if request != expected:
         raise ValueError('Accepted output repair differs from its original response failure')
 
@@ -819,7 +832,7 @@ def validate_fragment_chain(root, step, chain):
         if intent.get('continuation_kind') != 'fragment':
             continue
         prior = chain[number - 1]
-        saved = checkpoint.validate(root, job, prior)
+        saved = c.read(c.regular(prior/'checkpoint.json'))
         original = c.native_outcome(prior)
         science = c.science_payload(prior / 'science-output.json', 'W', job.get('handoff_protocol', 1))
         if (saved['science']['status'] != 'present' or science.get('stage_intent') != 'continue'
@@ -875,7 +888,7 @@ def _eligible_original(root, step, paths, *, successful=False, wait_runner=False
         raise ResumeUnavailable('worker_resume_usage_unknown')
 
 
-def fragment_start(root, step):
+def fragment_start(root, step, *, inventory):
     """Accept the next successful W fragment, never a failure retry or new job."""
     from .protocol import require_current
     require_current(root)
@@ -883,7 +896,7 @@ def fragment_start(root, step):
     require_current(root,_contracts.read(_contracts.regular(Path(root)/'jobs'/f'{step:03d}.json')))
     root = Path(root)
     if validate_launcher(root, step).get('output_only'):raise ResumeUnavailable('worker_resume_output_only')
-    job = validate_task(root, step)
+    job = validate_task(root, step,inventory=inventory)
     if not checkpoint.enabled(root, job):
         raise ResumeUnavailable('worker_fragments_unavailable')
     if (execution.origin(root, step) / 'result-identity.json').exists():
@@ -900,7 +913,7 @@ def fragment_start(root, step):
             raise ResumeUnavailable('worker_resume_successor_present')
     paths = execution.records(root, step)
     last = paths[-1]
-    saved = checkpoint.validate(root, job, last)
+    saved = checkpoint.validate(root, job, last,inventory=inventory)
     science = c.science_payload(last / 'science-output.json', 'W', job.get('handoff_protocol', 1))
     if saved['science']['status'] != 'present' or checkpoint.disposition(science) != 'continue':
         raise ResumeUnavailable('worker_fragment_not_continuing')
@@ -917,7 +930,7 @@ def fragment_start(root, step):
     profiles.validate_intent(settings, job, c.read(paths[0] / 'native-intent.json'))
     # All previous targets and shared authorization are cumulatively consumed.
     budget.transition(root, 'advance', 'accepted_worker_fragment')
-    anchor = budget.accept_continuation(root, job, paths)
+    anchor = budget.accept_continuation(root, job, paths,inventory=inventory)
     number = len(paths)
     record = execution.origin(root, step) / 'continuations' / f'{number:03d}'
     record.mkdir(parents=True, exist_ok=True)
@@ -931,17 +944,19 @@ def fragment_start(root, step):
         intent['native_home'] = str(root / 'native-homes' / f'{step:03d}' / f'context-{number:03d}')
     with (record / 'native-intent.json').open('x') as stream:
         json.dump(intent, stream);stream.flush();os.fsync(stream.fileno())
+    from . import accepted_budget
+    accepted_budget.accept_native(root,step,record,intent)
     runtime.start(root, step, number)
     return intent
 
 
-def start(root, step):
+def start(root, step, *, inventory=None):
     from .protocol import require_current
     require_current(root)
     from . import contracts as _contracts
     require_current(root,_contracts.read(_contracts.regular(Path(root)/'jobs'/f'{step:03d}.json')))
     if (execution.origin(root, step) / 'result-identity.json').exists():
-        return c.validate(c.workspace(root, step))
+        return c.read(execution.origin(root,step)/'result.json')
     paths = execution.records(root, step)
     if runtime.node_state(root, step) == 'interrupted':
         reenter(root, step)
@@ -950,6 +965,7 @@ def start(root, step):
         return native.wait_native(root, step)  # An accepted attempt is collected before cap checks.
     last = paths[-1]
     outcome = c.native_outcome(last)
+    if inventory is None:inventory=c.accept_current_inventory(root,step)
     repair = None
     work_repair=False
     if outcome.get('returncode') == 0 and not outcome.get('stop_reason'):
@@ -960,21 +976,22 @@ def start(root, step):
                 job=c.read(root/'jobs'/f'{step:03d}.json')
                 science=c.science_payload(last/'science-output.json','W',job.get('handoff_protocol',1),**c.response_options(job))
                 from . import candidate_refs, worker_delivery, candidate_nominations
-                science=candidate_refs.control_payload(job,science,root=root)
+                science=candidate_refs.control_payload(job,science,root=root,inventory=inventory)
                 if science['stage_intent']!='continue' or (last/'stage-end.json').exists():
-                    worker_delivery.require_delivery(root,job,science,last)
-                    candidate_nominations.require(root,job,science)
-                if (last/'stage-end.json').exists():return c.seal_result(root, step)
-                return native.wait_native(root,step)
-            return c.seal_result(root, step)
-        except WorkRepairRequired:
-            repair=output_request(root,step,last)
+                    worker_delivery.require_delivery(root,job,science,last,inventory=inventory)
+                    candidate_nominations.require(root,job,science,inventory=inventory)
+                if (last/'stage-end.json').exists():return c.seal_result(root, step,inventory=inventory)
+                return native.wait_native(root,step,inventory=inventory)
+            return c.seal_result(root, step,inventory=inventory)
+        except WorkRepairRequired as error:
+            inventory=error.inventory
+            repair=output_request(root,step,last,inventory=inventory)
             work_repair=True
         except OutputRepairRequired:
             limits = validate_launcher(root, step)
             if not limits.get('output_repair', False):
                 raise
-            repair = output_request(root, step, last)
+            repair = output_request(root, step, last,inventory=inventory)
     limits = validate_launcher(root, step)
     closeout = budget.closeout_state(root)['begin']
     job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
@@ -1004,15 +1021,20 @@ def start(root, step):
     profiles.validate_intent(settings, job, original_intent)
     number = len(paths)
     budget.transition(root, 'advance', 'explicit_worker_continuation')
-    anchor = budget.accept_continuation(root, job, paths, output_repair=repair if not work_repair else None)
+    anchor = budget.accept_continuation(root, job, paths, output_repair=repair if not work_repair else None,inventory=inventory)
     record = execution.origin(root, step) / 'continuations' / f'{number:03d}'
     record.mkdir(parents=True, exist_ok=True)
     intent = dict(step=step, attempt=number, continuation_kind='repair', **profile_binding, task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json'),
                   root_intent_ref=c.record_ref(paths[0] / 'native-intent.json'), previous=execution.proof(last),
                   session=session_ref, budget_slice=anchor,
                   **({('work_repair' if work_repair else 'output_repair'):repair} if repair is not None else {}))
+    validate_repair(root,step,intent,prior_record=last,
+        prior_intents=[c.read(path/'native-intent.json') for path in paths],
+        verify_task=False,inventory=inventory)
     with (record / 'native-intent.json').open('x') as stream:
         json.dump(intent, stream);stream.flush();os.fsync(stream.fileno())
+    from . import accepted_budget
+    accepted_budget.accept_native(root,step,record,intent)
     runtime.start(root, step, number)
     return native.wait_native(root, step)
 
@@ -1037,10 +1059,10 @@ def validate_wake(root,step,intent,prior):
     if request['observations']!=expected:raise ValueError('Execution wake differs from the same original terminal observations')
 
 
-def wake_start(root,step,observations):
+def wake_start(root,step,observations,*,inventory=None):
     """Resume one successful suspended native turn, sharing original finite authorization."""
     from . import managed_wait, experiments
-    limits=validate_wake_policy(root, step);job=validate_task(root,step);paths=execution.records(root,step);last=paths[-1]
+    limits=validate_wake_policy(root, step);job=validate_task(root,step,inventory=inventory);paths=execution.records(root,step);last=paths[-1]
     if (execution.origin(root,step)/'result-identity.json').exists():raise ResumeUnavailable('execution_wake_stage_already_sealed')
     if (root/'pause.request').exists() or budget.closeout_state(root)['begin'] is not None:
         raise ResumeUnavailable('worker_resume_paused_or_closeout')
@@ -1069,5 +1091,7 @@ def wake_start(root,step,observations):
     validate_wake(root,step,intent,last)
     with (record/'native-intent.json').open('x') as stream:
         json.dump(intent,stream);stream.flush();os.fsync(stream.fileno())
+    from . import accepted_budget
+    accepted_budget.accept_native(root,step,record,intent)
     runtime.start(root,step,number)
     return intent

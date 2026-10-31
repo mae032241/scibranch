@@ -578,7 +578,7 @@ def capture(root, job, materials):
     from . import originals
     for saved in materials:
         row = {key: value for key, value in saved.items() if key != 'file_stat'}
-        if row['source'] in seen or _implementation_client(row, root=root) is None:
+        if row['source'] in seen or _implementation_client(saved, root=root) is None:
             continue
         parts = Path(row['path']).parts
         if len(parts) < 4 or parts[:2] != ('inputs', 'parents') or not parts[2].isdecimal():

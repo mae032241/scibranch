@@ -56,7 +56,6 @@ def _frozen_sources(root,job,*,source_rows=None):
         rows[step]=row
     for source,payload,seal in _direct_assessment_sources(root,job,prepared):
         step=source['step']
-        if prepared is not None and step not in rows:raise ValueError('Prepared direct original is outside its frozen prefix')
         row=history._source(root,step) if prepared is None else prepared[step]
         if step in rows and rows[step][2]!=seal:raise ValueError('Scientific direct prefix changed')
         rows[step]=row
@@ -87,11 +86,13 @@ def assessment_context(root,job,*,state=None,source_rows=None):
         return empty
     sources=_frozen_sources(root,job,source_rows=source_rows)
     if state is None:
-        from . import execution_recovery
-        state=fold(root,[sources[key] for key in sorted(sources)],recovery_refs=originals.recovery_refs(originals.node(root,job['step']),job))
+        state=current_state(root,job)
     prepared=None if source_rows is None else {row[0]['step']:row for row in source_rows}
     direct={source['step'] for source,_,_ in _direct_assessment_sources(root,job,prepared)}
     final=bool(job.get('final_report') or job.get('purpose')=='closeout' or job.get('final_only'))
+    pending=(state.get('portfolio') or {}).get('pending_w')
+    if final and pending and pending['step'] not in sources:
+        sources[pending['step']]=history._source(root,pending['step'])
     eligible=[row for step,row in sources.items() if row[0]['role']=='W' and row[1].get('stage_intent')=='review'
         and (step in direct or final)]
     # A final summary without a direct W can assess only the still-pending
@@ -100,7 +101,7 @@ def assessment_context(root,job,*,state=None,source_rows=None):
     if final and not any(row[0]['step'] in direct for row in eligible):
         pending=(state.get('portfolio') or {}).get('pending_w')
         eligible=[row for row in eligible if pending is not None and row[0]['step']==pending['step']]
-    result=dict(applicable=bool(eligible and state['mechanisms']),mechanisms=copy.deepcopy(state['mechanisms']),
+    result=dict(applicable=bool(eligible and state.get('summary',{}).get('mechanism_count',len(state['mechanisms']))),mechanisms=copy.deepcopy(state['mechanisms']),
         completed_w=[dict(step=row[0]['step'],limitations=copy.deepcopy(row[1].get('limitations',[])),
             delivery=copy.deepcopy(row[2].get('control_outcome',{}).get('worker_delivery'))) for row in eligible],
         discriminating_work=copy.deepcopy(state['order'].get('discriminating_work',[])),sources=sources,final=final)
@@ -108,7 +109,7 @@ def assessment_context(root,job,*,state=None,source_rows=None):
     if source_rows is None and frozen is not None and (
             frozen['required_for_completed_w']!=result['applicable']
             or frozen['assessed_w']!=[dict(source_step=row['step'],pointer='/scientific_result') for row in result['completed_w']]
-            or frozen['active_work_count']!=sum(row['status']!='withdrawn' for row in result['discriminating_work'])):
+            or frozen['active_work_count']!=state.get('summary',{}).get('work_count',sum(row['status']!='withdrawn' for row in result['discriminating_work']))):
         raise ValueError('Portfolio context differs from its frozen scientific originals')
     return result
 
@@ -116,11 +117,19 @@ def assessment_context(root,job,*,state=None,source_rows=None):
 def validate_science_refs(root,job,refs):
     """Check identity and author-visible fields only, never scientific merit."""
     if not refs:return []
-    sources=_frozen_sources(root,job)
+    sources={}
     for ref in refs:
         if not isinstance(ref,dict) or not {'source_step','pointer'}<=ref.keys() or type(ref['source_step']) is not int:
             raise UnresolvedScientificReference('Scientific evidence needs source_step and RFC6901 pointer')
-        row=sources.get(ref['source_step']);pointer=ref['pointer']
+        step=ref['source_step']
+        if step not in sources:
+            from . import accepted_prefix
+            try:
+                accepted_prefix.member(root,accepted_prefix.for_job(job),step)
+                sources[step]=history._source(root,step)
+            except (ValueError,FileNotFoundError):
+                raise UnresolvedScientificReference('Scientific evidence is outside the frozen visible prefix') from None
+        row=sources.get(step);pointer=ref['pointer']
         if row is None or not isinstance(pointer,str) or not pointer.startswith('/') or re.search(r'~(?![01])',pointer):
             raise UnresolvedScientificReference('Scientific evidence is outside the frozen visible prefix')
         source,payload,_,_=row
@@ -145,7 +154,7 @@ def require_portfolio_review(root,job,payload,*,context=None,interpretation=None
     """A real, small completeness gate for every substantive completed-W review."""
     from .output_repair import OutputRepairRequired
     if job['role']!='A' or payload.get('next_action')=='wait':return None
-    context=assessment_context(root,job) if context is None else context
+    context=assessment_context(root,job,state=(interpretation or {}).get('state')) if context is None else context
     if not context['applicable']:return None
     def reject(detail):
         raise OutputRepairRequired('portfolio_review_incomplete','Correct portfolio_review in this same A output: '+detail+
@@ -337,7 +346,8 @@ def _repair_choice(root,job,ref,*,payload=None):
 
 def _repair_diagnostic(root,state,choice,job):
     if choice['status']!='available':return 'search_repair_source_'+choice['status']
-    if state['repairs'].get(choice['root'],0)>=c.settings(root,job)['search_policy']['max_requested_repairs']:
+    count=state['_repair_get'](choice['root']) if state.get('summary') is not None else state['repairs'].get(choice['root'],0)
+    if count>=c.settings(root,job)['search_policy']['max_requested_repairs']:
         return 'search_repair_limit'
     return None
 
@@ -470,7 +480,7 @@ def _apply_science(root,job,payload,state,diagnostics):
 
 def interpret(root,job,payload,*,state=None):
     """One prospective interpretation; callers do not publish its mutations."""
-    state=copy.deepcopy(project(root,job['step']) if state is None else state)
+    state=copy.deepcopy(current_state(root,job,payload) if state is None else state)
     if job.get('purpose')=='formal_review' or job.get('formal_review') or job.get('engineering_repair'):
         return dict(state=state,focus=None,allocation=None,diagnostics=[])
     if job.get('purpose')=='closeout' or job.get('final_report'):
@@ -718,6 +728,7 @@ def _execution_opportunities(root,state,original_rows,refs,cache):
 
 
 def project(root,before_step):
+    """Explicit full historical audit; normal handoffs use current_state."""
     from . import execution_recovery
     refs=(originals.frozen_recovery_refs(root,before_step) if (Path(root)/originals.MANIFEST).exists()
         else execution_recovery.prefix(root,before_step))
@@ -725,36 +736,73 @@ def project(root,before_step):
 
 
 
+def current_state(root,job,payload=None):
+    from . import accepted_search
+    refs,works=accepted_search.requested_refs(job,payload)
+    state=accepted_search.state(root,job['step'],refs=refs,work_refs=works)
+    for source,_,_ in history.direct_sources(root,job) if job.get('direct_refs') else []:
+        if source['role']!='W':continue
+        fact=state['_node_get'](source['step'])
+        if fact and fact.get('assessed'):
+            owner=originals.node(root,source['step'])
+            identity=(source['step'],c.record_path(originals.source_record(owner,'result-identity.json')))
+            state['order']['seen_w'].add(identity)
+    return state
+
+
+def _current_combination(root,state):
+    """Current H declaration and an exact explicit focus, never all old Hs."""
+    step=state['current_h'];refs=[]
+    if step is not None:
+        refs=[ref for ref,item in state['mechanisms'].items() if item['source_h']==step]
+    focus=state.get('focus')
+    if focus and focus['mechanism_ref'] not in refs:refs.append(focus['mechanism_ref'])
+    for ref in refs:
+        if ref not in state['mechanisms']:
+            item=state['_point_get'](ref)
+            if item is None:raise ValueError('Current H mechanism original is missing')
+            state['mechanisms'][ref]=item;state['authorized'].add(ref)
+            state['opportunity_counts'][ref]=item['accepted_calls']
+    state['combination_refs']=refs
+
+
 def _breadth(root,state,limits,focus):
     from . import breadth
+    if state.get('summary') is None:raise ValueError('Current accepted scientific point state required')
     # Keep H declaration order across revisions; never discard authorized pending items.
-    refs=[item['mechanism_ref'] for item in state['order']['remaining'] if item['mechanism_ref'] in state['authorized']]
-    refs+= [ref for ref in state['mechanisms'] if ref in state['authorized'] and ref not in refs]
+    refs=list(state.get('combination_refs',[]))
     if focus and focus['action']!='screen':refs=[focus['mechanism_ref']]
     if not refs:return None
     mechanisms=[]
     for ref in refs:
         item=state['mechanisms'][ref];step=item['source_h']
         mechanisms.append(dict(mechanism_ref=ref,label=item['label'],source_h=step,
-            source_h_ref=history.source_seal_ref(originals.node(root,step)),
-            minimal_test=item['minimal_test'],status=item['status']))
+            source_h_ref=item['source_h_ref'],
+            minimal_test=item['minimal_test'],status=item['status'],ordinal=item['ordinal'],origin_ref=item['origin_ref'],source_goal_id=item['source_origin_identity']['goal_id']))
     declared=state.get('extra_grant');grant=None
     if declared and declared['mechanism_ref'] in refs:
-        step=declared['source_a'];sha=history.source_seal_ref(originals.node(root,step))
-        grant=dict(declared,source_a_ref=sha,extra_calls=1,used_calls=min(1,state['opportunity_grants'].get((step,sha['path']),0)))
-    return breadth.validate(dict(version=1,initial_calls=limits.get('initial_calls',1),mechanisms=mechanisms,
+        step=declared['source_a'];sha=declared['source_a_ref']
+        grant=dict(mechanism_ref=declared['mechanism_ref'],source_a=step,source_a_ref=sha,extra_calls=1,
+            used_calls=min(1,declared.get('used_calls',state['opportunity_grants'].get((step,sha['path']),0))))
+    value=dict(version=2,initial_calls=limits.get('initial_calls',1),mechanisms=mechanisms,
         baseline=[dict(mechanism_ref=ref,accepted_count=state['opportunity_counts'].get(ref,0)) for ref in refs],
-        grant=grant,prior_unknown=state['opportunity_unknown']))
+        grant=grant,prior_unknown=state['opportunity_unknown'])
+    in_scope=sum(state['mechanisms'][ref]['status'] not in {'deferred','waived'} and state['opportunity_counts'].get(ref,0)<limits.get('initial_calls',1) for ref in refs)
+    value['outside_initial_owed']=max(0,state['summary']['owed_count']-in_scope)
+    value['catalog']=state['_catalog']
+    return breadth.validate(value)
 
 
 def bind(root,step,role,protocol=None,*,write_pages=True,state=None,unified=True):
     limits=configuration_updates.for_new_job(root,step).get('search_policy')
     if limits is None:return None
-    state=project(root,step) if state is None else state
+    state=current_state(root,dict(step=step,role=role)) if state is None else state
+    if state.get('summary') is None:raise ValueError('Current accepted scientific point state required')
+    if role=='W' and state.get('summary') is not None:_current_combination(root,state)
     focus=state['focus'] if role=='W' else None
     repair_root=repair_binding=repair_source=repair_authorization=None
     if focus is not None and focus['action']=='repair':
-        chooser,payload,_,_=next(source for source in reversed(history.source_sequence(root,step)) if source[0]['role'] in {'H','A'})
+        chooser,payload,_,_=history._source(root,state['summary']['last_science']['step'])
         chooser_step=chooser['step'];chooser_source=originals.node(root,chooser_step)
         choice=_repair_choice(root,chooser,focus['mechanism_ref'],payload=payload)
         repair_binding,repair_root,repair_source=choice['status'],choice['root'],choice['source']
@@ -762,8 +810,8 @@ def bind(root,step,role,protocol=None,*,write_pages=True,state=None,unified=True
         repair_authorization=dict(step=chooser_step,job_ref=history.source_control_ref(chooser_source,f'jobs/{chooser_step:03d}.json'),seal_ref=c.record_ref(seal))
     obligation=[]
     if role=='W' and focus and focus['action']=='screen':
-        obligation=[dict(mechanism_ref=ref,source_h=item['source_h'],source_h_ref=history.source_seal_ref(originals.node(root,item['source_h'])))
-            for ref,item in state['mechanisms'].items() if ref in state['authorized'] and item['status']=='pending']
+        obligation=[dict(mechanism_ref=ref,source_h=item['source_h'],source_h_ref=item['source_h_ref'])
+            for ref,item in state['mechanisms'].items() if ref in state.get('combination_refs',state['authorized']) and item['status']=='pending']
     return dict(coverage_obligation=obligation,focus=focus,allocation=copy.deepcopy(state['order']['allocation']),unfinished_plan=copy.deepcopy(state['order']['remaining']),
         breadth=_breadth(root,state,limits,focus) if role=='W' else None,intent_diagnostics=state['order']['diagnostics'],repair_root=repair_root,repair_binding=repair_binding,repair_source=repair_source,repair_authorization=repair_authorization,limits=policy(limits),files=[])
 
@@ -773,12 +821,14 @@ def launch_reason(root,job):
     if job.get('engineering_repair'):return None
     if job.get('input_selection_status')=='unresolved':return 'implementation_unresolved'
     if c.settings(root, job).get('search_policy') is None:return None
-    bound=job['search'];focus=bound['focus'];state=project(root,job['step'])
+    bound=job['search'];focus=bound['focus'];state=current_state(root,job)
     if bound['intent_diagnostics']:return bound['intent_diagnostics'][0]['code']
     if focus is None:return 'science_plan_empty'
     if focus['mechanism_ref'] not in state['authorized']:return 'search_focus_outside_h_scope'
     if focus['action']=='repair' and bound['repair_binding']!='available':return 'search_repair_source_'+bound['repair_binding']
-    if focus['action']=='repair' and state['repairs'].get(bound['repair_root'],0)>=bound['limits']['max_requested_repairs']:return 'search_repair_limit'
+    if focus['action']=='repair':
+        count=state['_repair_get'](bound['repair_root']) if state.get('summary') is not None else state['repairs'].get(bound['repair_root'],0)
+        if count>=bound['limits']['max_requested_repairs']:return 'search_repair_limit'
     return None
 
 
@@ -920,6 +970,30 @@ def _portfolio_update(root, job, payload, seal, state, seal_sha=None):
 
 
 def portfolio_view(state,threshold,*,prospective=False,version=2):
+    if state.get('summary') is not None:
+        summary=state['summary'];actual=summary['portfolio'];count=actual['completed_cycle_count'];pending=actual['pending_w']
+        hypothetical=bool(prospective and pending and pending.get('completed',True))
+        if hypothetical:
+            cycle=state['_node_get'](pending['cycle_root'])
+            hypothetical=bool(cycle and not cycle['portfolio_assessed'])
+        overdue=actual['overdue_count']
+        if hypothetical and threshold is not None:
+            next_cycle=count+1
+            overdue+=sum(item['status']!='waived' and item.get('due_cycle')==next_cycle for item in state['mechanisms'].values())
+            work=state['_node_get'](pending['step'])
+            for ref in work.get('branches',[pending['branch']]):
+                item=state['mechanisms'].get(ref) or state['_point_get'](ref)
+                if item and item['status']!='waived' and item.get('due_cycle') is not None and item['due_cycle']<=next_cycle:overdue-=1
+        branches=actual.get('last_branches',[]);branch_count=actual.get('last_branch_count',len(branches))
+        return dict(version=2,review_after_cycles=threshold,last_assessed_branch=actual['last_branch'],
+            last_assessed_branches=branches,last_assessed_branch_count=branch_count,last_assessed_branches_omitted_count=max(0,branch_count-len(branches)),
+            completed_cycles=count,completed_cycle_count=count,cycles_if_assessed=count+int(hypothetical),
+            participation=[dict(mechanism_ref=ref,participated_cycles=item.get('participated_cycles',0),participation_fraction=item.get('participated_cycles',0)/count if count else None) for ref,item in state['mechanisms'].items()],
+            pending_assessment=bool(pending),pending_w=(dict(source_step=pending['step'],mechanism_refs=pending['branches'],completed=pending.get('completed',True)) if pending else None),
+            main_line=actual['main_line'],mainline_streak=actual['mainline_streak'],mainline_source=actual['mainline_source'],
+            overdue_count_if_assessed=overdue,review_reminder=bool(overdue),
+            unexcluded_count=actual['unexcluded_count'],last_decision_step=actual['last_decision_step'],
+            scope='Counts cover the accepted portfolio. Participation rows are explicitly addressed mechanisms; public navigation retains every original. Counts do not authorize execution or rank scientific merit.')
     actual=state['portfolio'];portfolio=copy.deepcopy(actual)
     pending=actual['pending_w'];count=len(actual['seen_w'])
     hypothetical=bool(prospective and pending and pending.get('completed',True) and pending['identity'] not in actual['seen_w'])

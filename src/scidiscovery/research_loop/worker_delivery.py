@@ -114,29 +114,43 @@ def writers_stopped(root,job,record):
 
 
 def _prefix_calls(root,job):
-    """Use the task's already sealed predecessors and exact recovery prefix."""
-    from . import originals,execution_recovery
-    from . import handoff_state
-    with handoff_state.loading():
-        recovered=execution_recovery.resolved(root,originals.recovery_refs(originals.node(root,job['step']),job))
-    for receipt in job['history']['nodes']:
-        owner,_,seal,seal_ref=history._source(root,receipt['step'])
-        if seal_ref!=receipt['seal_ref']:
-            raise history.ObserverIntegrityError('Worker evidence prefix changed')
-        source=originals.node(root,receipt['step'])
-        observed=history.read_observation(root,owner,seal)
-        for row in (observed or {}).get('managed_calls',[]):
-            yield source,recovered.get((source.step,row['call_id']),row)
+    """Read one accepted terminal pointer for each required current-H mechanism."""
+    from . import originals
+    needed=_obligations(job)
+    if not needed:return
+    snapshot=c.read(originals.resolve_root_ref(root,job['history']['breadth_snapshot']))
+    mechanisms=snapshot['table']['mechanisms']
+    for target in needed:
+        mechanism=mechanisms.get(target['mechanism_ref'])
+        pointer=None if mechanism is None else mechanism.get('last_terminal')
+        if pointer is None:continue
+        binding=pointer['mechanism_binding']
+        if any(binding.get(key)!=target[key] for key in ('mechanism_ref','source_h','source_h_ref')):
+            continue
+        source=originals.for_origin(root,pointer['origin_identity'],step=pointer['source_step'])
+        if pointer.get('recovery_ref') is not None:
+            row=c.read(originals.resolve_root_ref(root,pointer['recovery_ref']))['row']
+        else:
+            observation=c.read(originals.resolve_ref(source,pointer['observation_ref']))
+            index=pointer['call_index']
+            if type(index) is not int or not 0<=index<len(observation['managed_calls']):
+                raise history.ObserverIntegrityError('Worker terminal pointer lost its exact observation slot')
+            row=observation['managed_calls'][index]
+        if (not isinstance(row,dict) or row.get('call_id')!=pointer['call_id']
+                or row.get('mechanism_binding')!=binding
+                or row.get('status') not in {'known_success','known_failed'}):
+            raise history.ObserverIntegrityError('Worker terminal pointer changed its accepted original call')
+        yield source,row
 
 
 def _evidence(source,row):
     proofs={key:row[key] for key in ('accepted','completed','terminal')}
     if 'observation' in row:proofs['observation']=row['observation']
     if source.inherited:
-        proofs={key:(dict(proof,origin_identity=source.origin_identity) if proof is not None else None)
+        proofs={key:({'origin_identity':source.origin_identity,**proof} if proof is not None else None)
             for key,proof in proofs.items()}
     for key in ('originals','outputs'):
-        proofs[key]=[dict(item,origin_identity=source.origin_identity) if source.inherited else dict(item)
+        proofs[key]=[{'origin_identity':source.origin_identity,**item} if source.inherited else dict(item)
                      for item in row.get(key,[])]
     return dict(mechanism_ref=row['mechanism_binding']['mechanism_ref'],**proofs)
 
@@ -148,7 +162,7 @@ def accepted_original(root,proof,*,source=None):
     return c.read(originals.resolve_ref(owner,ref) if owner is not None else originals.resolve_root_ref(root,ref))
 
 
-def capture(root,job,record,*,correction=None):
+def _capture(root,job,record,*,inventory,correction=None):
     """The native owner calls this only after its attempt has stopped writing.
 
     This is one attempt's fact original, not a new call index or mutable balance.
@@ -164,7 +178,7 @@ def capture(root,job,record,*,correction=None):
     number=execution.records(root,job['step']).index(record)
     binding=dict(job_ref=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json'),
         raw_ref=c.file_ref(c.regular(record/'science-output.json',limit=None)),source_attempt=number)
-    if path.exists():return validate(root,job,record)
+    if path.exists():return _validate(root,job,record,inventory=inventory)
     writers_stopped(root,job,record)
     needed={row['mechanism_ref'] for row in _obligations(job)}
     rows=[];unknown=[];capacity=False
@@ -173,7 +187,7 @@ def capture(root,job,record,*,correction=None):
         if row.get('mechanism_binding') is None:continue
         ref=row['mechanism_binding']['mechanism_ref']
         if ref in needed and row['status'] in {'known_success','known_failed'}:rows.append((_evidence(source,row),row['mechanism_binding']))
-    for row in history.managed_calls(root,job):
+    for row in history.managed_calls(inventory):
         accepted=c.read(root/row['accepted']['snapshot'])
         attempt=accepted.get('native_attempt')
         if not isinstance(attempt,dict) or type(attempt.get('number')) is not int:
@@ -200,7 +214,7 @@ def capture(root,job,record,*,correction=None):
         prior_unknown=((job.get('search') or {}).get('breadth') or {}).get('prior_unknown',False),
         capacity=capacity,omitted_evidence=0,omitted_unknown=0)
     c.write(path,value);path.chmod(0o400)
-    return validate(root,job,record)
+    return value
 
 
 def _evidence_key(row):
@@ -208,7 +222,7 @@ def _evidence_key(row):
     return (json.dumps(proof.get('origin_identity'),sort_keys=True),proof['path'],proof.get('snapshot'))
 
 
-def validate(root,job,record,*,source_attempt=None):
+def _validate(root,job,record,*,inventory,source_attempt=None):
     value=c.read(c.regular(record/FACT_NAME,limit=None))
     if source_attempt is None:source_attempt=execution.records(root,job['step']).index(record)
     else:
@@ -242,7 +256,7 @@ def validate(root,job,record,*,source_attempt=None):
         else:
             if current is None:
                 current={}
-                for call in history.managed_calls(root,job):
+                for call in history.managed_calls(inventory):
                     proofs={key:call[key] for key in ('accepted','completed','terminal')}
                     if 'observation' in call:proofs['observation']=call['observation']
                     proofs.update(originals=call.get('originals',[]),outputs=call.get('outputs',[]))
@@ -262,6 +276,14 @@ def validate(root,job,record,*,source_attempt=None):
     return value
 
 
+def validate(root,job,record,*,inventory,source_attempt=None):
+    if record!=inventory.record or job!=inventory.job:
+        raise history.ObserverIntegrityError('Worker facts belong to another accepted inventory')
+    if source_attempt is not None and source_attempt!=inventory.attempt:
+        raise history.ObserverIntegrityError('Worker fact source attempt changed its accepted original')
+    return inventory.delivery
+
+
 def validate_original(root,owner,job,seal,*,controls_only=False):
     """Read a producer's sealed delivery facts without renewing old checks."""
     from . import originals
@@ -277,15 +299,15 @@ def validate_original(root,owner,job,seal,*,controls_only=False):
     return facts
 
 
-def assessment(root,job,science,record,*,source_attempt=None):
+def assessment(root,job,science,record,*,inventory,source_attempt=None):
     """Coverage of this task's own authored findings; no scientific screened verdict."""
     if not repair_applicable(job):return dict(status='not_applicable',missing=[],blocked=[],reason=None)
     correction=_caller_correction(root,job,record)
     if not applicable(job) and correction is None:
         return dict(status='not_applicable',missing=[],blocked=[],reason=None)
     if not applicable(job) and not (record/FACT_NAME).exists():
-        capture(root,job,record,correction=correction)
-    facts=validate(root,job,record,source_attempt=source_attempt)
+        None  # The owner supplies accepted delivery facts in inventory.
+    facts=validate(root,job,record,inventory=inventory,source_attempt=source_attempt)
     if facts['capacity'] or facts['unknown'] or facts['prior_unknown']:correction=None
     if not applicable(job):
         return dict(status='incomplete' if correction else 'not_applicable',
@@ -313,9 +335,9 @@ def assessment(root,job,science,record,*,source_attempt=None):
         **(dict(caller_correction=correction) if correction is not None else {}))
 
 
-def require_delivery(root,job,science,record,*,source_attempt=None):
+def require_delivery(root,job,science,record,*,inventory,source_attempt=None):
     """Missing actual work can continue; no finding table is required."""
-    result=assessment(root,job,science,record,source_attempt=source_attempt)
+    result=assessment(root,job,science,record,inventory=inventory,source_attempt=source_attempt)
     require_output_clarification(science,result)
     if result['status']=='incomplete':
         ending=record/'stage-end.json'
@@ -328,8 +350,10 @@ def require_delivery(root,job,science,record,*,source_attempt=None):
                 return dict(result,status='partial',reason=reason)
         diagnosis=('Correct the unaccepted request for '+result['caller_correction']['mechanism_ref']+': '+
             result['caller_correction']['diagnostic']+'. ' if result.get('caller_correction') else '')
-        raise WorkRepairRequired(diagnosis+'Complete the missing assigned observations: '+', '.join(result['missing'])+
+        error=WorkRepairRequired(diagnosis+'Complete the missing assigned observations: '+', '.join(result['missing'])+
             '. Reuse retained results and reconcile original calls; do not resubmit completed experiments.')
+        error.inventory=inventory
+        raise error
     return result
 
 
@@ -380,7 +404,7 @@ def authorize_exit(root,job,record,reason):
         used=native_recovery.counters(c.read(path/'native-intent.json') for path in paths[:number+1])
         if policy.get('automatic_recovery') is not None and limits['enabled'] and used['continues']>=limits['max_continues']:
             return dict(value,kind='automatic_continue_cap',max_continues=limits['max_continues'],counters=used)
-    if reason.startswith('worker_resume_') and reason not in {'worker_resume_terminal_ineligible','worker_resume_original_running','worker_resume_usage_unknown'}:
+    if reason in {'worker_resume_unsupported_backend','worker_resume_thread_unavailable','worker_resume_session_unavailable'}:
         try:continuation.session(root,job['step'],record)
         except continuation.ResumeUnavailable as error:
             if str(error)==reason:return dict(value,kind='session',native_jsonl=_original(root,record/'native.jsonl'))

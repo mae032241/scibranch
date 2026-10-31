@@ -52,7 +52,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
             _identity_root: Path | None = None,
             _public_identity_root: Path | None = None,
             _user_update_texts: list[str] | None = None,
-            _source_facts_factory=None, _on_created=None) -> dict:
+            _source_facts_factory=None, _on_created=None, _fork_search_seed=None) -> dict:
     """Freeze an explicit goal and finite launch budgets in a fresh directory."""
     from . import candidate_nominations
     from . import storage_policy as storage
@@ -376,6 +376,17 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
             contracts.write(root / "settings.json", settings)
             contracts.write(root / "settings-identity.json",
                             dict(path="settings.json"))
+            from . import accepted_budget, accepted_prefix
+            from . import accepted_search
+            search_seed=accepted_search.empty() if _fork_search_seed is None else _fork_search_seed
+            if _fork_search_seed is None:
+                prefix_seed,search_rows=None,None
+            else:
+                prefix_seed,search_rows,search_seed=accepted_prefix.fork_seed(
+                    root,settings,search_seed=search_seed,identity_root=identity_root)
+            search_ref=accepted_prefix.initialize(root,search_seed=search_seed,identity_root=identity_root)
+            accepted_budget.initialize(root,settings,identity_root=identity_root,search_seed=search_seed,
+                search_ref=search_ref,prefix_seed=prefix_seed,search_rows=search_rows)
             with storage.mutation(root,0,policy=storage_limits,context=storage.Deadline(max_seconds)):
                 pass
     return settings
@@ -526,7 +537,7 @@ def _recovery_remaining(saved, policy):
         return remaining
 
 
-def _wait_automatic_recovery(root, step, decision):
+def _wait_automatic_recovery(root, step, decision, *, inventory):
     require_writer(root)
     path, saved = _recovery_state(root, step, decision)
     policy = configuration_updates.for_step(root, step)['resume_policy']['automatic_recovery']
@@ -551,7 +562,7 @@ def _wait_automatic_recovery(root, step, decision):
         if decision.get('format_fallback') is True and remaining <= 0:
             # Only negotiation of this already accepted final return can pass
             # its consumed shared clock; the original per-call clock remains.
-            current=continuation.automatic_decision(root,step)
+            current=continuation.automatic_decision(root,step,inventory=inventory)
             original=contracts.read(contracts.regular(execution.origin(root,step)/'native-intent.json'))
             if current == decision and (original.get('budget_slice') or {}).get('final_return') is not None:
                 job=contracts.read(contracts.regular(root/'jobs'/f'{step:03d}.json'))
@@ -592,7 +603,7 @@ def _wait_automatic_recovery(root, step, decision):
                 contracts.write(path, saved)
         saved['status'] = 'ready'
         contracts.write(path, saved)
-        current = continuation.automatic_decision(root, step)
+        current = continuation.automatic_decision(root, step,inventory=inventory)
         if current['action'] not in {'retry', 'continue'}:
             paused = (root / 'pause.request').exists()
             saved.update(status='paused' if paused else 'stopped', next_attempt_at=None, limitation=current['reason'])
@@ -601,7 +612,7 @@ def _wait_automatic_recovery(root, step, decision):
                 budget.transition(root, 'paused', 'automatic_recovery_paused')
             raise _AutomaticRecoveryUnavailable(current['reason'], paused=paused)
         try:
-            continuation.automatic_start(root, step, current,
+            continuation.automatic_start(root, step, current,inventory=inventory,
                 recovery_wait=dict(waited_seconds=saved['local_wait_seconds'], record_ref=contracts.record_ref(path)))
         except continuation.ResumeUnavailable as error:
             paused = (root / 'pause.request').exists()
@@ -624,15 +635,17 @@ def _wait_automatic_recovery(root, step, decision):
 def _native_call(root, step, *, launch=False, operation=None):
     """One controller consumer owns all automatic recovery scheduling."""
     call = operation if operation is not None else native.execute_native if launch else native.wait_native
+    inventory=None
     while True:
         try:
             return call(root, step)
         except continuation.AutomaticRecoveryRequired as error:
+            inventory=error.inventory
             try:
-                _wait_automatic_recovery(root, step, error.decision)
+                _wait_automatic_recovery(root, step, error.decision,inventory=error.inventory)
             except budget.NodeBudgetUnavailable as stopped:
                 if error.decision.get('work_repair') is not None:
-                    return continuation.finish_automatic_work(root, step, error.decision, stopped.reason)
+                    return continuation.finish_automatic_work(root, step, error.decision, stopped.reason,inventory=error.inventory)
                 raise
             # automatic_start has already spawned this accepted attempt. Its
             # receipts can still be unpublished; collection must not spawn it
@@ -645,7 +658,7 @@ def _native_call(root, step, *, launch=False, operation=None):
             # arbiter's stop reason so the UI can explain why no retry occurs.
             stopped = None
             try:
-                decision = continuation.automatic_decision(root, step)
+                decision = continuation.automatic_decision(root, step,inventory=None)
                 if decision.get('action') == 'stop' and decision.get('source_record'):
                     path, saved = _recovery_state(root, step, decision)
                     paused = (root / 'pause.request').exists()
@@ -936,6 +949,8 @@ def _terminal_route(root, settings, step, result, role):
 def _run(root, *, continue_wait=None):
     from .protocol import require_current
     require_current(root)
+    from . import accepted_prefix
+    accepted_prefix.reconcile(root)
     from . import candidate_audit
     candidate_audit.settle_preflights(root)
     from . import fork_runtime
@@ -984,6 +999,23 @@ def _run(root, *, continue_wait=None):
             if source_role == 'W': current_w = number
         first_step = resumed['first_step']
     saved = _saved_route(root, first_step=first_step, resumed=resumed)
+    if saved is None:
+        from . import accepted_budget
+        head=accepted_budget.read(root)
+        slot=head['current_job']
+        if slot is not None and slot['step']>=first_step:
+            job=contracts.read(contracts.regular(root/'jobs'/f'{slot["step"]:03d}.json'))
+            role=job['role']
+            parents=[int(Path(ref['path']).parts[2]) for ref in job['direct_refs']]
+            instruction=job.get('instruction','')
+            evidence_return=job.get('evidence_return')
+            correction_request=job.get('correction_request')
+            author_correction=job.get('author_correction')
+            current_h=head['search']['last_h']
+            current_w=head['search']['last_w']
+            completed=head['prefix']['tip']['step'] if head['prefix']['tip'] is not None else 0
+            last=handoff_state.read_sealed(root,completed) if completed else None
+            first_step=slot['step']
     if saved is not None:
         completed=saved['completed'];current_h=saved['current_h'];current_w=saved['current_w']
         last=handoff_state.read_sealed(root,completed)
@@ -1071,18 +1103,22 @@ def _run(root, *, continue_wait=None):
                         if _budget_denied(error.reason):
                             return start_final(completed, step, role, error.reason)
                         return _finish(root, settings, error.reason, completed, last, next_role=role)
-                    except Exception:
+                    except Exception as error:
                         if not _terminal_success(root, execution.record(root, step)):
                             return _finish(root, settings, "native_outcome_unsealed", completed, last,
                                 reason="Original execution lost its verified completion; preserved without replay",
                                 next_role=role)
+                        return _finish(root, settings, "seal_pending", completed, last,
+                            reason=f"Native turn completed; host sealing requires repair: {_seal_reason(error)}",
+                            next_role=role)
                 if not _terminal_success(root, execution.record(root, step)):
                     return _finish(root, settings, "native_outcome_unsealed", completed, last,
                         reason="Retain the original native work; its terminal scientific output is unverified",
                         next_role=role)
                 try:
                     _check_job(root, settings, step, role, parents, instruction, evidence_return, correction_request, author_correction)
-                    continuation.seal_or_repair(root, step)
+                    if not (execution.origin(root,step)/'result-identity.json').exists():
+                        continuation.seal_or_repair(root,step,inventory=contracts.accept_current_inventory(root,step))
                 except managed_wait.ExecutionWaiting as error:
                     return _finish(root,settings,'waiting_execution',completed,last,reason=error.reason,next_role=role)
                 except continuation.ResumeUnavailable as error:
@@ -1418,8 +1454,9 @@ def _final_a_result(root, job, result):
     begin = budget.closeout_state(root)['begin']
     policy = settings.get('delivery_policy')
     if result.get('next_action') != 'deliver' or policy is None or policy['adapter'] is None:
-        from . import fork_runtime
-        has_worker = any(fork_runtime.source_job(root, row['step'])['role'] == 'W' for row in job['history']['nodes'])
+        from . import originals
+        frozen=contracts.read(originals.resolve_root_ref(root,job['history']['breadth_snapshot']))
+        has_worker = frozen['last_w'] is not None
         reason = ('accepted_worker_evidence_unavailable' if not has_worker else
                   'delivery_unavailable' if policy is None or policy['adapter'] is None else 'candidate_originals_unavailable')
         if begin is not None:

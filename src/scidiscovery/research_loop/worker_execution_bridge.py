@@ -80,6 +80,9 @@ def _arguments(arguments, work, config=None):
         if option not in VALUE_OPTIONS or index+1>=len(arguments):
             raise CallerError('Check required options with exp help <command>; separate scientific script arguments with --.')
         value=arguments[index+1]
+        if option=='--mechanism' and arguments[0] in {'run','compile'}:
+            if re.fullmatch(r'[1-9][0-9]*',value) is None:
+                raise CallerError('Use the exact positive decimal mechanism number from the frozen public catalog.')
         if option in PATH_OPTIONS:
             path=Path(value)
             if not path.is_absolute():path=work/path

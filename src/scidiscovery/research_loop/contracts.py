@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 import fcntl
 import json
 import os
@@ -463,13 +464,9 @@ def _parent_view(job, ref, root=None, *, limitation_bytes=1024):
         payload=read_scientific_output(path)
         view['role']=originals.source_job(owner)['role']
         view['limitations'],view['limitations_omitted_count']=_whole_limitations(payload['limitations'],byte_limit=limitation_bytes)
-        from . import history
-        binding=job['history']
-        nodes=[row for row in binding['nodes'] if row['step']==parent_step]
-        alias=f'inputs/history/nodes/{parent_step:03d}/0001.json'
-        if (nodes==[dict(step=parent_step,seal_ref=history.source_seal_ref(owner))]
-                and any(row['path']==alias for row in binding['files'])):
-            view['history_alias']=alias
+        from . import accepted_prefix
+        member=accepted_prefix.member(root,accepted_prefix.for_job(job),parent_step)
+        view['history_alias']='inputs/history/'+str(Path(member['navigation']['path']).parent/'science.json')
     return view
 
 
@@ -484,8 +481,6 @@ def material_name(work, row):
     if (not normalized.parts or normalized.is_absolute() or '..' in normalized.parts
             or '\\' in local or normalized.as_posix() != local):
         raise ValueError('Scientific entry point has no canonical public output path')
-    from . import originals
-    originals.material_path(work.parents[2], row)
     return local if local.startswith('experiments/') else 'artifacts/'+local
 
 
@@ -552,7 +547,7 @@ def _public_materials(root, materials, *, source=None):
     return rows
 
 
-def selected_inputs(work, payload, job, diagnostics=None):
+def _accept_selected_inputs(work, payload, job, diagnostics=None):
     """Resolve explicit reuse intent against this role's already frozen inputs."""
     from .protocol import require_job_format
     require_job_format(job)
@@ -571,7 +566,7 @@ def selected_inputs(work, payload, job, diagnostics=None):
             if diagnostics is not None:
                 diagnostics.append(dict(code='implementation_unresolved', subject='inherited unresolved choice'))
             return []
-        choices = [(row['label'], row['material']) for row in job.get('selected_inputs', [])]
+        return job.get('selected_inputs', [])
     else:
         from . import history
         unresolved = []
@@ -579,11 +574,11 @@ def selected_inputs(work, payload, job, diagnostics=None):
             try:
                 from . import candidate_refs
                 canonical=candidate_refs.resolve_reference(root,job,object_id)
-                if canonical in candidate_refs.available_ids(root, job):
-                    matches=[item['material'] for item in history.candidate_materials(root,job) if item['candidate_id']==canonical]
+                if candidate_refs.is_available(root,job,canonical):
+                    matches=[item['material'] for item in history.candidate_materials(root,job,candidate_id=canonical)]
                     if len(matches)!=1:raise history.UnresolvedImplementation('Candidate has no unique exact implementation')
                     row=matches[0]
-                else:row = history.resolve_implementation(root, object_id, job['history']['nodes'])
+                else:row = history.resolve_implementation(root, object_id, job['history']['prefix'])
             except ValueError as error:
                 if not isinstance(error,history.UnresolvedImplementation) and str(error) not in {
                         'Candidate reference is outside this frozen scientific task','Use the listed scientific candidate reference'}:
@@ -628,6 +623,11 @@ def selected_inputs(work, payload, job, diagnostics=None):
     return selected
 
 
+def selected_inputs(inventory):
+    """Read the current owner's accepted selection; never inspect materials."""
+    return inventory.selected_inputs
+
+
 def _decision_context(root, job):
     """Label the exact immediate scientific source; do not parse its prose."""
     if (job['role'] not in {'W', 'H'} or job.get('purpose') is not None
@@ -656,12 +656,11 @@ def _assessment_handoff(root, job):
             or job.get('final_only') or job.get('formal_review') or job.get('fork_source')
             or job.get('author_correction') or job.get('correction_request')):
         return None
-    from . import originals, history
-    receipts = {row['step']: row['seal_ref'] for row in job['history']['nodes']}
+    from . import originals, history,accepted_prefix
 
     def source(step):
         owner = originals.node(root, step)
-        if receipts.get(step) != history.source_seal_ref(owner):
+        if accepted_prefix.member(root,accepted_prefix.for_job(job),step)['seal_ref'] != history.source_seal_ref(owner):
             raise ValueError('Assessment source is outside its exact frozen history')
         return originals.source_job(owner)
 
@@ -677,7 +676,7 @@ def _assessment_handoff(root, job):
             return None  # No implicit choice between scientific scopes.
         if refs:
             view['current_' + role.lower()] = refs[0]
-    context = _decision_context(root, current)
+    context = current.get('decision_context')
     previous_a = None
     relation = 'context_only'
     if current['role'] == 'E':
@@ -706,7 +705,7 @@ def _assessment_handoff(root, job):
             if parent['role'] == 'H':
                 payload = read_scientific_output(_execution_raw(root, predecessor))
                 if payload.get('next_action') == 'experiment' and current['instruction'] == payload.get('route_reason'):
-                    context = _decision_context(root, parent)
+                    context = parent.get('decision_context')
     if context is not None:
         step = int(Path(context['source_original']).parts[2])
         previous_a = source(step)
@@ -718,14 +717,13 @@ def _assessment_handoff(root, job):
                 and not prior.get('author_correction') and not prior.get('correction_request')):
             seal = read(originals.source_record(originals.node(root, step), 'result-identity.json'))
             view['previous_a'] = dict(step=step,
-                original=f'inputs/history/nodes/{step:03d}/scientific-original.json',
+                original=f'inputs/context/{step:03d}/scientific-original.json',
                 relation=relation, materials=[row['path'] for row in seal['materials']])
             combined = {row['path']: row for row in [*job['direct_materials'], *seal['materials']]}
             if output_quota_exceeded(settings(root, job), (row['size_bytes'] for row in combined.values())):
                 view['previous_a'].update(materials=[], materials_unavailable_reason='input_material_bound')
-            index = f'inputs/history/implementations/{step:03d}/0001.json'
-            if any(row['path'] == index for row in job['history']['files']):
-                view['previous_a']['implementations'] = index
+            view['previous_a']['implementations']='inputs/history/'+accepted_prefix.member(
+                root,accepted_prefix.for_job(job),step)['navigation']['path']
     return view
 
 
@@ -751,7 +749,8 @@ def _role_lineage(job, parents=()):
         mechanisms['focus']=None
         mechanisms['authorized_count']=len(rows)
         mechanisms['overview']=[dict(mechanism_ref=row['mechanism_ref'],label=row['label'],
-            status=row['status'],original=f'inputs/history/nodes/{row["source_h"]:03d}/0001.json') for row in rows[:4]]
+            status=row['status'],original='inputs/history/nodes/'+row['source_goal_id']+
+                f'/{row["source_h"]:03d}/science.json') for row in rows[:4]]
         mechanisms['overview_omitted_count']=max(0,len(rows)-4)
         action=((job.get('search') or {}).get('focus') or {}).get('action')
         mechanisms['task_action']=action
@@ -901,7 +900,97 @@ def science_view(job, root=None):
     return candidate_refs.public_fields(view,candidate_refs.for_job(job))
 
 
-def material_inventory(root: Path, step: int):
+@dataclass
+class CurrentInventory:
+    root: Path
+    job: dict
+    record: Path
+    attempt: int
+    managed_calls: list
+    scientific_outputs: dict
+    input_coverage: list | None = None
+    additional_inputs: bool = False
+    delivery: dict | None = None
+    checkpoint: dict | None = None
+    materials: list = field(default_factory=list)
+    mutable_materials: list = field(default_factory=list)
+    observation: dict | None = None
+    science_available: bool = False
+    selected_inputs: list = field(default_factory=list)
+    selection_diagnostics: list = field(default_factory=list)
+    output_error: Exception | None = None
+
+
+def accept_current_inventory(root: Path, step: int):
+    """The sole current-node observation/acceptance owner after writers stop."""
+    from . import execution, worker_delivery, history, checkpoint
+    from .output_repair import OutputRepairRequired
+    root=Path(root)
+    job=read(regular(root/'jobs'/f'{step:03d}.json'))
+    if (root/'native-evidence'/f'{step:03d}'/'result-identity.json').exists():
+        raise ValueError('Sealed scientific facts must be read from their accepted result')
+    record=execution.record(root,step)
+    worker_delivery.writers_stopped(root,job,record)
+    outcome=native_outcome(record)
+    from . import accepted_budget
+    meter=read(regular(record/'usage.json')) if (record/'usage.json').exists() else None
+    accepted_budget.accept_terminal(root,step,record,meter=meter,
+        unknown=meter is None or step in outcome.get('usage',{}).get('unknown_steps',[]),
+        metering=outcome.get('metering'))
+    raw=record/'science-output.json';pending=record/'result.pending.json'
+    if (not raw.exists() and not raw.is_symlink() and pending.exists() and not pending.is_symlink()
+            and outcome.get('returncode')==0 and outcome.get('stop_reason') is None
+            and outcome.get('cleanup')=='observed_group_cleaned'
+            and outcome.get('raw_ref')==dict(path=str(raw),size_bytes=regular(pending).stat().st_size)):
+        os.link(regular(pending),raw,follow_symlinks=False)
+    calls=(history._observe_managed_calls(root,job) if history._managed_config(job,root) else [])
+    history._validate_managed(root,job,calls)
+    outputs={row['call_id']:history._observe_scientific_outputs(root,job,row)
+        for row in calls if row['status'] in {'known_success','known_failed'}}
+    inventory=CurrentInventory(root,job,record,
+        int(record.name) if record.parent.name=='continuations' else 0,calls,outputs)
+    needs_checkpoint=(job['role']=='W' and (checkpoint.enabled(root,job)
+        or worker_delivery.applicable(job) or job.get('managed_execution_wait')))
+    if not raw.exists():
+        if needs_checkpoint:inventory.checkpoint=checkpoint._capture(root,job,record,inventory=inventory)
+        return inventory
+    inventory.science_available=True
+    _validate_inputs(root,workspace(root,step),job)
+    try:
+        from . import candidate_refs
+        payload=candidate_refs.control_payload(job,science_payload(raw,job['role'],job['handoff_protocol'],
+            'selection' in job,**response_options(job)),root=root,inventory=inventory)
+        inventory.selected_inputs=_accept_selected_inputs(workspace(root,step),payload,job,inventory.selection_diagnostics)
+    except OutputRepairRequired as error:
+        # The existing bounded output-repair owner diagnoses malformed science;
+        # no selection or scientific qualification is inferred from it here.
+        inventory.output_error=error
+    chain=execution.records(root,step)
+    if len(chain)>1 and outcome.get('returncode')==0 and not outcome.get('stop_reason'):
+        execution.accept_current_terminal(root,step,chain,outcome)
+    inventory.input_coverage=history._accept_managed_input_coverage(root,job,calls) if calls else None
+    if worker_delivery.repair_applicable(job) and (record/'science-output.json').exists():
+        inventory.delivery=worker_delivery._capture(root,job,record,inventory=inventory)
+    if needs_checkpoint:
+        inventory.checkpoint=checkpoint._capture(root,job,record,inventory=inventory)
+    try:
+        inventory.materials,inventory.mutable_materials=material_inventory(root,step,inventory=inventory)
+    except OutputRepairRequired as error:
+        if inventory.output_error is None:inventory.output_error=error
+    return inventory
+
+
+def accept_recovery_call(root, job, call_id, *, context=None):
+    """Accept only this operation's newly changed original execution facts."""
+    from . import history
+    rows=history._observe_managed_calls(root,job,call_ids=[call_id],context=context)
+    if len(rows)!=1 or rows[0]['call_id']!=call_id:
+        raise ValueError('Recovered original accepted record is unavailable')
+    history._validate_managed(root,job,rows,context=context)
+    return rows[0]
+
+
+def material_inventory(root: Path, step: int, *, inventory):
     """Validate stopped-node originals and layout without changing permissions."""
     job=read(regular(root/'jobs'/f'{step:03d}.json'))
     policy = settings(root, job)
@@ -910,7 +999,6 @@ def material_inventory(root: Path, step: int):
     from . import execution
     record=execution.record(root,step)
     from . import worker_delivery
-    worker_delivery.writers_stopped(root,job,record)
     if (record/'native-intent.json').exists():
         intent=read(regular(record/'native-intent.json'))
         if intent.get('author_context_version')==1:
@@ -978,9 +1066,9 @@ def material_inventory(root: Path, step: int):
     job=read(root/'jobs'/f'{step:03d}.json')
     if job['role']=='W':
         from . import history
-        for call in history.managed_calls(root,job):
+        for call in history.managed_calls(inventory):
             if call['status'] not in {'known_success','known_failed'}:continue
-            outputs=history.scientific_outputs(root,job,call)
+            outputs=history.scientific_outputs(inventory,call)
             for item in outputs:
                 if item.get('retention')!='archived':raise ValueError('Managed deliverable original unavailable')
                 add(root/item['path'],f'experiments/{call["call_id"]}/artifacts/{item["name"]}',source_kind='managed_frozen')
@@ -1008,9 +1096,9 @@ def material_inventory(root: Path, step: int):
     return sorted(rows, key=lambda row: row['path']), mutable
 
 
-def collect_materials(root: Path, step: int):
+def collect_materials(root: Path, step: int, *, inventory):
     """Seal this stopped node's validated deliverables at their original paths."""
-    rows, mutable = material_inventory(root, step)
+    rows, mutable = inventory.materials, inventory.mutable_materials
     # Inventory, budgets and all original bindings must be valid before the
     # first permission change. IO failures in the sealing pass can still leave
     # partially changed modes; this is not a filesystem transaction.
@@ -1193,6 +1281,25 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         raise ValueError('Parents must be exact distinct preceding nodes')
     from .protocol import require_current
     require_current(root)
+    from . import accepted_prefix
+    accepted_prefix.reconcile(root)
+    retained_path=Path(root)/'jobs'/f'{step:03d}.json'
+    if retained_path.exists():
+        retained=read(regular(retained_path))
+        requested=dict(role=role,instruction=instruction,evidence_return=evidence_return,
+            correction_request=correction_request,author_correction=author_correction)
+        expected_purpose='formal_review' if (evidence_return or {}).get('kind')=='formal_review' else purpose
+        if (any(retained.get(key)!=value for key,value in requested.items())
+                or [int(Path(ref['path']).parts[2]) for ref in retained['direct_refs']]!=parents
+                or retained.get('purpose')!=expected_purpose or retained.get('source_cutoff')!=source_cutoff
+                or retained.get('delivery_sources')!=delivery_sources
+                or retained.get('final_report')!=final_report):
+            raise ValueError('Frozen scientific task changed')
+        from . import accepted_budget
+        accepted_budget.accept_job(root,step,retained)
+        return retained
+    from . import handoff_state
+    handoff_state.begin_job(root,step)
     from . import budget
     if budget.final_a_barrier(root, before_step=step) is not None:
         raise ValueError('Final A return permits no further scientific task')
@@ -1248,12 +1355,15 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         from . import originals
         originals.resolve_root_ref(root, dict(item, path=item['source']))
     refs, materials, entry_points, selected = [], [], [], []
+    parent_sources=[]
     if review_binding is not None:
         materials=review_binding['materials'];selected=review_binding['selected']
     for parent in ([] if review_binding is not None else parents):
         source_work = workspace(root, parent)
         from . import history
-        history._source(root,parent)
+        accepted_prefix.member(root,accepted_prefix.current(root),parent)
+        parent_source=history._source(root,parent)
+        parent_sources.append(parent_source)
         # Pass the author's science, not the controller envelope and its parent
         # references. Historical lineage remains in the host-owned node tree.
         source = _execution_raw(root, parent)
@@ -1261,7 +1371,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         (work / Path(ref['path']).parent / 'artifacts').mkdir(parents=True,exist_ok=True)
         refs.append(ref)
         from . import originals
-        parent_seal = read(originals.source_record(originals.node(root, parent), 'result-identity.json'))
+        parent_seal = parent_source[2]
         materials.extend(_public_materials(root, parent_seal['materials']))
         entry_points.extend(parent_seal.get('entry_points', []))
         # Reuse is an instruction to the immediate next node, not persistent
@@ -1390,7 +1500,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     else:
         job['history'],state=lineage.bind(root,step,role,protocol,source_cutoff=final_report['source_cutoff'] if final_report else source_cutoff,extra_steps=extra_steps,selection_protocol=selection_protocol,
             audit_projection_version=audit_projection_version,adjacent_audit=job.get('candidate_audit'),
-            worker_view_version=1,assessment_job=job if role=='A' else None)
+            worker_view_version=1,assessment_job=job if role=='A' else None,source_rows=parent_sources)
         options = [item for parent in parents for item in history.implementation_options(root, parent)]
     if retained is not None:
         if 'assessment_handoff' in retained:
@@ -1401,10 +1511,10 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
             job['assessment_handoff'] = handoff
             original = _assessment_original(root, handoff)
             if original is not None:
-                bound = [row for row in job['history']['files'] if row['path'] == original['path']]
+                bound = [row for row in job['history']['inputs'] if row['path'] == original['path']]
                 if not bound:
                     input_inventory.entry(); input_inventory.file(original['size_bytes'])
-                    job['history']['files'].append(original)
+                    job['history']['inputs'].append(original)
                 elif bound != [original]:
                     raise ValueError('Assessment original differs from its exact producer')
     prior = job.get('assessment_handoff', {}).get('previous_a')
@@ -1428,8 +1538,8 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         original_path=str(Path(original['path']).parent/'scientific-original.json')
         public=scientific_projection(reported,original_path)
         # A logical raw link resolves to the sealed parent original.
-        if public!=reported and not any(row['path']==original_path for row in job['history']['files']):
-            job['history']['files'].append(dict(path=original_path,source=str(source),
+        if public!=reported and not any(row['path']==original_path for row in job['history']['inputs']):
+            job['history']['inputs'].append(dict(path=original_path,source=str(source),
                 size_bytes=original['size_bytes'],kind='scientific_original'))
         target=work/original['path']
         if target.exists():
@@ -1533,6 +1643,8 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
                     policy=policy.get('storage_policy'),context=input_inventory.context)
             else:
                 write(path, value)
+    from . import accepted_budget
+    accepted_budget.accept_job(root,step,job)
     skill_supply.project(root, policy, job)
     return job
 
@@ -1650,7 +1762,7 @@ def validate_original(source, *, _active=None, _memo=None, controls_only=False):
 
 def validate(work: Path):
     root = work.parents[2]
-    from . import originals
+    from . import originals, execution
     if originals.inherited(root, int(work.name)):
         return validate_original(originals.node(root, int(work.name)))
     job_path = root / 'jobs' / f'{int(work.name):03d}.json'
@@ -1659,6 +1771,16 @@ def validate(work: Path):
     require_current(root, job)
     record = host_record(work)
     seal = read(regular(record / 'result-identity.json'))
+    from . import history
+    observed=(read(root/seal['observations']['path']) if seal.get('observations') else {})
+    calls=observed.get('managed_calls',[])
+    history._validate_managed(root,job,calls)
+    inventory=CurrentInventory(root,job,execution.record(root,job['step']),
+        len(execution.records(root,job['step']))-1,calls,{})
+    if (seal.get('control_outcome') or {}).get('worker_delivery',{}).get('facts_ref'):
+        from . import worker_delivery
+        inventory.delivery=worker_delivery._validate(root,job,inventory.record,inventory=inventory)
+
     from . import execution
     native_record = execution.record(root, job['step'])
     intent = read(regular(native_record / 'native-intent.json'))
@@ -1686,7 +1808,7 @@ def validate(work: Path):
         from . import worker_delivery
         if delivery_facts!=record_ref(regular(native_record/worker_delivery.FACT_NAME)):
             raise ValueError('Final W scientific evidence differs from its seal')
-        worker_delivery.validate(root,job,native_record,source_attempt=intent.get('attempt',0))
+        worker_delivery.validate(root,job,native_record,inventory=inventory,source_attempt=intent.get('attempt',0))
     from . import correction
     correction.validate_payload(root, job, payload)
     if read(result) != result_projection(job, payload):
@@ -1696,7 +1818,7 @@ def validate(work: Path):
         raise ValueError('Scientific deliverable entry points changed')
     if seal.get('unresolved_links') != unresolved:
         raise ValueError('Scientific unresolved link receipt changed')
-    if seal.get('selected_inputs', []) != selected_inputs(work, payload, job):
+    if seal.get('selected_inputs', []) != _accept_selected_inputs(work, payload, job):
         raise ValueError('Selected implementation receipts changed')
     _validate_inputs(root, work, job)
     from . import execution_inputs
@@ -1709,7 +1831,7 @@ def validate(work: Path):
     from . import formal_review
     formal_review.validate_seal(root,job,payload,seal)
     from . import history
-    history.validate_observation(root, job, seal)
+    history.validate_observation(root, job, seal,inventory=inventory)
     for ref in seal['materials']:
         path = regular(originals.material_path(root, ref))
         if path.stat().st_size != ref['size_bytes']:
@@ -1740,6 +1862,8 @@ def _validate_task_view(root, work, job):
 
 
 def _validate_inputs(root, work, job):
+    if read(regular(Path(root)/'jobs'/f'{job["step"]:03d}.json'))!=job:
+        raise ValueError('Scientific inputs differ from their accepted canonical job')
     if job.get('fork_source') is not None:
         from . import fork_runtime, qualification, formal_review, engineering, execution_authority
         fork_runtime.validate_selected_job(root, work, job)
@@ -1748,18 +1872,19 @@ def _validate_inputs(root, work, job):
         formal_review.validate_job(root, job)
         engineering.validate_job(root, job)
         return
-    from . import budget
+    from . import budget,accepted_budget,accepted_prefix
     report = budget.validate_final_report_inputs(root, job)
-    report_steps = ([*budget.scientific_steps(root,report['source_cutoff']+1), *sorted(int(Path(ref['path']).parts[2])
-        for ref in job['direct_refs'] if int(Path(ref['path']).parts[2]) > report['source_cutoff'])] if report else [])
-    if report is not None and ([row['step'] for row in job['history']['nodes']] != report_steps or 'search' in job):
+    accepted=accepted_budget.read(root).row(f'job/{job["step"]:03d}')
+    if accepted is None or accepted['prefix']!=accepted_prefix.for_job(job):
+        raise ValueError('Scientific input prefix differs from its accepted job')
+    if accepted['input_search_ref']!=job['history']['breadth_snapshot']:
+        raise ValueError('Scientific breadth input differs from its accepted snapshot')
+    if report is not None and 'search' in job:
         raise ValueError('Final report input history changed its exact sealed prefix')
     resumed = budget.normal_resume(root,job['step'])
     expected_resume = (budget._event_ref(root,resumed) if resumed is not None and job.get('purpose') in (None,'formal_review') and not job.get('final_report') else None)
     if job.get('normal_resume') != expected_resume:
         raise ValueError('Scientific task changed its exact normal resume boundary')
-    if expected_resume is not None and not job.get('formal_review') and [row['step'] for row in job['history']['nodes']] != budget.scientific_steps(root,job['step']):
-        raise ValueError('Resumed scientific history changed its journal-bound accepted sequence')
     from . import formal_review
     formal_review.validate_job(root,job)
     from . import execution_authority
@@ -1782,8 +1907,6 @@ def _validate_inputs(root, work, job):
                 or job['history'].get('adjacent_audit') != job.get('candidate_audit')):
             raise ValueError('Frozen audit projection differs from its task boundary')
     if job.get('handoff_authority_version') == 1:
-        if job.get('decision_context') != _decision_context(root, job):
-            raise ValueError('Scientific handoff source authority changed')
         if job.get('role_guidance') and job.get('native_role_instruction') != job['role_guidance']:
             raise ValueError('Native role instruction differs from its frozen scientific guidance')
     _validate_task_view(root,work,job)
@@ -1809,10 +1932,8 @@ def _validate_inputs(root, work, job):
                 expected_sources = delivery.catalogue_sources(root,nodes)
             if job.get('delivery_sources') != expected_sources:
                 raise ValueError('Closeout candidate originals differ from their immutable preparation')
-        expected_steps = [*budget.scientific_steps(root,job['source_cutoff']+1), *sorted(int(ref['path'].split('/')[2])
-            for ref in job['direct_refs'] if int(ref['path'].split('/')[2]) > job['source_cutoff'])]
-        if [row['step'] for row in job['history']['nodes']] != expected_steps:
-            raise ValueError('Closeout history differs from its frozen science prefix and direct authors')
+        for ref in job['direct_refs']:
+            accepted_prefix.member(root,accepted_prefix.for_job(job),int(Path(ref['path']).parts[2]))
         delivery.validate_sources(root, job['delivery_sources'], job=job)
         if job['delivery_sources'].get('catalogue'):
             from . import candidate_refs
@@ -1829,17 +1950,13 @@ def _validate_inputs(root, work, job):
     correction.validate_job(root, job)
     from . import semantic
     semantic.validate_job(root, job)
-    if job.get('purpose') is None and not job.get('final_report') and not job.get('engineering_repair') and policy.get('search_policy') is not None:
-        from . import search
-        if job.get('search') != search.bind(root, job['step'], job['role'], job['handoff_protocol'], unified=True):
-            raise ValueError('Frozen scientific search binding changed')
     from . import history
     history.validate(root, work, job['history'])
     if 'assessment_handoff' in job:
         if job['assessment_handoff'] != _assessment_handoff(root, job):
             raise ValueError('Assessment sources changed their exact W/H decision lineage')
         original = _assessment_original(root, job['assessment_handoff'])
-        if original is not None and [row for row in job['history']['files'] if row['path'] == original['path']] != [original]:
+        if original is not None and [row for row in job['history']['inputs'] if row['path'] == original['path']] != [original]:
             raise ValueError('Assessment original differs from its exact producer')
         prior = job['assessment_handoff'].get('previous_a')
         if prior is not None and not set(prior['materials']) <= {row['path'] for row in job['direct_materials']}:
@@ -1898,7 +2015,7 @@ def _validate_inputs(root, work, job):
 
 
 @owner_effect
-def seal_result(root: Path, step: int):
+def seal_result(root: Path, step: int, *, inventory=None):
     from .protocol import require_current
     require_current(root,read(regular(Path(root)/'jobs'/f'{step:03d}.json')))
     work = workspace(root, step)
@@ -1906,20 +2023,18 @@ def seal_result(root: Path, step: int):
     job_path = root / 'jobs' / f'{step:03d}.json'
     job = read(job_path)
     if (record / 'result-identity.json').exists():
-        from . import handoff_state
-        result = handoff_state.read_sealed(root, step)
-        from . import history
-        history.refresh(root, step + 1)
-        return result
+        from . import handoff_state,accepted_prefix
+        accepted_prefix.reconcile(root)
+        return handoff_state.read_sealed(root, step)
     from . import execution
-    native_record = execution.record(root, step)
+    if inventory is None:inventory=accept_current_inventory(root,step)
+    if inventory.root!=root or inventory.job!=job or execution.record(root,step)!=inventory.record:raise ValueError('Current inventory belongs to another task or attempt')
+    native_record = inventory.record
     intent = read(regular(native_record / 'native-intent.json'))
     if intent['task_ref'] != record_ref(regular(job_path)):
         raise ValueError('Native launch task changed')
-    _validate_inputs(root, work, job)
     outcome = native_outcome(native_record)
     from . import worker_delivery
-    worker_delivery.writers_stopped(root,job,native_record)
     # Collect the same completed call. Keep its pending output and receipt as
     # retained originals; publishing the scientific bytes never starts a turn.
     raw_path = native_record / 'science-output.json'
@@ -1957,27 +2072,38 @@ def seal_result(root: Path, step: int):
     raw = regular(raw_path)
     if native_raw_ref != file_ref(raw):
         raise ValueError('Terminal scientific output is unverified or changed')
+    if inventory.output_error is not None:
+        raise inventory.output_error
     from . import candidate_refs
-    value = envelope(job, candidate_refs.control_payload(job,science_payload(raw, job['role'], job['handoff_protocol'], 'selection' in job,**response_options(job)),root=root))
+    value = envelope(job, candidate_refs.control_payload(job,science_payload(raw, job['role'], job['handoff_protocol'], 'selection' in job,**response_options(job)),root=root,inventory=inventory))
     if job['role']=='W':
         from . import managed_wait
-        managed_wait.before_seal(root,job,native_record)
+        managed_wait.before_seal(root,job,native_record,inventory=inventory)
         if worker_delivery.applicable(job):
             from . import checkpoint
             if not (native_record/'checkpoint.json').exists():
-                checkpoint.capture(root,job,native_record)
-            else:checkpoint.validate(root,job,native_record)
+                inventory.checkpoint
+            else:checkpoint.validate(root,job,native_record,inventory=inventory)
         from . import candidate_nominations
-        candidate_nominations.require(root,job,value)
+        candidate_nominations.require(root,job,value,inventory=inventory)
     control = None
     from . import semantic
-    control = semantic.outcome(root, job, value)
+    from .output_repair import WorkRepairRequired, OutputRepairRequired
+    try:
+        control = semantic.outcome(root, job, value,inventory=inventory)
+    except WorkRepairRequired as error:
+        error.inventory=inventory
+        raise
+    except OutputRepairRequired as error:
+        error.inventory=inventory
+        inventory.output_error=error
+        raise
     from . import correction
     correction.validate_payload(root, job, value)
-    materials = collect_materials(root, step)
+    materials = collect_materials(root, step,inventory=inventory)
     unresolved = dict(items=[], omitted_count=0)
     entry_points = artifact_entry_points(work, value, materials, job['handoff_protocol'], unresolved)
-    selected = selected_inputs(work, value, job)
+    selected = selected_inputs(inventory)
     observations = None
     from . import history
     history.validate_recommendation(job, value, root=root)
@@ -1985,7 +2111,7 @@ def seal_result(root: Path, step: int):
     # Freeze the final attempt only after delivery/repair gates, and before
     # result snapshots or conclusions. A busy namespace leaves these untouched.
     pending_executions = capture_pending(root, job)
-    observations = history.capture(root, job, value, materials)
+    observations = history.capture(root, job, value, materials,inventory=inventory)
     if raw.stat().st_mode & 0o777 != 0o400:raw.chmod(0o400)
     from . import experiments
     raw_ref=experiments.proof(raw)
@@ -2000,6 +2126,13 @@ def seal_result(root: Path, step: int):
           unresolved_links=unresolved,
           **(dict(selected_inputs=selected) if selected else {}),
           **(dict(observations=observations) if observations else {}))
+    observed_inputs=history.validate_observation(root,job,seal,inventory=inventory)
+    inventory.observation=observations
+    if observations is not None:
+        observer_unknown=(settings(root,job).get('history_observer') is not None and
+            (observed_inputs is None or not observed_inputs['complete']))
+        inventory.additional_inputs=((bool(inventory.managed_calls) if inventory.input_coverage is None else
+            not all(row['complete'] for row in inventory.input_coverage)) or observer_unknown)
     final_completion = _final_a_seal(native_record, outcome)
     if final_completion is not None:
         seal['final_a_completion'] = final_completion
@@ -2011,16 +2144,35 @@ def seal_result(root: Path, step: int):
         seal['pending_executions'] = pending_executions
     if 'source_provenance' in job:
         from . import qualification
-        seal['source_provenance'] = qualification.seal_outputs(root, job, seal)
+        seal['source_provenance'] = qualification.seal_outputs(root, job, seal,inventory=inventory)
     if job.get('formal_review_version')==1:
         from . import formal_review
         seal['native_authorship']=formal_review.capture_participants(root,job)
         if job.get('formal_review'):
             seal['formal_review']=formal_review.seal_review(root,job,value,seal)
+    # These are the remaining publication gates. Captures above already checked
+    # the exact current inputs, execution, selection, material and compilation
+    # originals; publication must not reopen that same complete acceptance.
+    conclusion=work/'conclusion.json'
+    if (conclusion.exists() or conclusion.is_symlink()) and regular(conclusion).stat().st_size!=raw_ref['size_bytes']:
+        raise ValueError('Saved scientific conclusion projection changed')
+    if not isinstance(control,dict):
+        raise ValueError('Current scientific attempt has no control outcome')
+    delivery_facts=(control.get('worker_delivery') or {}).get('facts_ref')
+    if delivery_facts is not None:
+        if delivery_facts!=record_ref(regular(native_record/worker_delivery.FACT_NAME)):
+            raise ValueError('Final W scientific evidence differs from its seal')
+        worker_delivery.validate(root,job,native_record,inventory=inventory,source_attempt=intent.get('attempt',0))
+    if pending_executions is not None:
+        from .execution_resume import verify_pending_set
+        verify_pending_set(root,seal)
+    from . import formal_review
+    formal_review.validate_seal(root,job,value,seal)
+    from . import accepted_prefix
+    pending_public=accepted_prefix.prepare_node(root,job,value,seal,inventory=inventory)
     write(record / 'result-identity.json', seal)
-    result = validate(work)
-    history.refresh(root, step + 1)
-    return result
+    accepted_prefix.commit_node(root,pending_public)
+    return read(record/'result.json')
 
 
 def _execution_raw(root, step):

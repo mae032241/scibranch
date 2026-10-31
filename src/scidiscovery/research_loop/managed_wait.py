@@ -141,7 +141,6 @@ def validate(root,job,record):
             or value['checkpoint_ref']!=c.record_ref(c.regular(record/'checkpoint.json'))
             or value['outcome_ref']!=c.record_ref(c.regular(record/'native-outcome.json'))):
         raise e.IntegrityError('Execution waiting checkpoint changed')
-    checkpoint.validate(root,job,record)
     if not isinstance(value['calls'],list) or not value['calls']:
         raise e.IntegrityError('Execution waiting requires original calls')
     seen=set()
@@ -157,7 +156,7 @@ def validate(root,job,record):
     return value
 
 
-def before_seal(root,job,record):
+def before_seal(root,job,record,*,inventory):
     """Only original bound execution facts may suspend a successful W turn."""
     if job['role']!='W':return
     outcome=c.native_outcome(record)
@@ -193,7 +192,7 @@ def before_seal(root,job,record):
     if not calls:return
     from . import worker_delivery
     worker_delivery.writers_stopped(root,job,record)
-    checkpoint.capture(root,job,record)
+    if inventory.checkpoint is None:raise e.IntegrityError('Owner checkpoint is unavailable')
     value=dict(job_ref=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json'),
         checkpoint_ref=c.record_ref(record/'checkpoint.json'),outcome_ref=c.record_ref(record/'native-outcome.json'),calls=calls)
     c.write(record/NAME,value);(record/NAME).chmod(0o400)

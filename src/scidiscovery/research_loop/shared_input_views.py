@@ -475,7 +475,12 @@ def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=Fal
     declared = {}
     historical_sources = set()
     current_sources = set()
-    history_files = {item['path']: item for item in job.get('history', {}).get('files', [])}
+    from . import accepted_prefix
+    history_files = {item['path']:item for item in accepted_prefix.input_rows(job)}
+    if not job.get('formal_review'):
+        public=accepted_prefix.visibility(root,accepted_prefix.for_job(job))
+        declared[str(target/'inputs/history')]=public
+        historical_sources.add(public)
     actual_paths = {item['path'] for item in [*job.get('global_materials', []),
         *job.get('direct_refs', []), *job.get('direct_materials', []),
         *job.get('history', {}).get('execution_recovery_materials', []),

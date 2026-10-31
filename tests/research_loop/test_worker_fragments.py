@@ -195,9 +195,9 @@ def test_host_review_overrides_continuation_without_rewriting_science():
         checkpoint.disposition(dict(stage_intent='finish'))
 
 
-FRAGMENT_FAKE = r'''import json,os,pathlib,sys
-from scidiscovery.research_loop import experiments as e
+FRAGMENT_FAKE = r'''import json,os,pathlib,sys,subprocess
 from scidiscovery.research_loop import contracts as c
+from scidiscovery.research_loop.worker_execution_bridge import SUBMISSION_DIRECTORY
 args=sys.argv[1:];prompt=sys.stdin.read()
 work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE']);home=pathlib.Path(os.environ['THIN_HWA_NATIVE_HOME'])
 jobpath=pathlib.Path(os.environ['THIN_HWA_JOB_MANIFEST']);job=json.loads(jobpath.read_text());root=jobpath.parent.parent
@@ -214,16 +214,23 @@ else:
 print(json.dumps({'type':'thread.started','thread_id':thread}),flush=True)
 case=os.environ.get('SCID_U2_FAKE_CASE','normal')
 if role=='W':
-    config=e.configure(root,job['step'],'local_execution:command',{'run_argv':[sys.executable],'cwd':str(work)},work/'work/lineage-config.json')
+    def exp(arguments):
+        response=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.worker_execution_bridge',
+            '--submission-directory',str(work/SUBMISSION_DIRECTORY),*arguments],capture_output=True,text=True)
+        assert response.returncode==0,(response.stdout,response.stderr)
+        return json.loads(response.stdout)
     if number==0:
-        script=work/'work/public.py';script.write_text('print("public discriminating observation")\n')
-        result=e.dispatch(config,script);assert result['status']=='known_success'
+        code=work/'code';code.mkdir(exist_ok=True)
+        script=code/'public.py'
+        script.write_text('from pathlib import Path\nprint("public discriminating observation")\nPath("artifacts/current.txt").write_text("first fragment result")\nPath("artifacts/result.json").write_text('+repr(json.dumps(dict(version=1,metrics=[],outputs=[dict(path='artifacts/current.txt')])))+')\n')
+        result=exp(['run','--experiment-dir',str(work/'experiments/original-fragment'),'--script',str(script)])
+        assert result['status']=='known_success'
         (work/'work/original-call').write_text(result['call_id'])
         (work/'artifacts/current.txt').write_text('first fragment result')
     else:
-        call=(work/'work/original-call').read_text();adapter=e.load(config)
-        assert adapter.status_details(call)['state']=='succeeded'
-        assert adapter.collect_original(call)
+        call=(work/'work/original-call').read_text()
+        assert exp(['query','--call-id',call])['state']=='succeeded'
+        assert exp(['collect','--call-id',call])['status']=='collected'
         (work/'artifacts/current.txt').write_text('later fragment result')
         assert 'work/science-resume.json' in prompt or case in {'missing','failure'}
         if 'work/science-resume.json' in prompt:
@@ -266,7 +273,7 @@ def internal_fragment_instance(tmp_path, monkeypatch, execution_registry):
         root = tmp_path / ('instance-' + context)
         controller.prepare(root, goal, public, [sys.executable, str(launcher)],
             max_tokens=max_tokens, max_seconds=120, max_steps=steps, model='no-model', reasoning_effort='high',
-            search_policy=None, node_budget_mode='soft',
+            search_policy=None, node_budget_mode='soft',experiment_mode='local',
             node_budget_policy={role:dict(max_observed_tokens=cap,max_seconds=30) for role in 'HWAE'},
             resume_policy=dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn',output_repair=True),
             worker_fragment_policy=dict(context=context))
@@ -274,10 +281,25 @@ def internal_fragment_instance(tmp_path, monkeypatch, execution_registry):
     return prepare
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('context', ['same_session', 'new_context'])
 def test_internal_runner_two_fragments_keep_one_w_stage_and_original_call(internal_fragment_instance, context):
     root = internal_fragment_instance(context=context)
-    assert controller.run(root)['status'] == 'finish'
+    result=controller.run(root)
+    diagnostic={}
+    diagnostic_path=None
+    if result['status']!='finish':
+        for step in (1,2):
+            for name in ('native-outcome.json','native.stderr','runner.stderr'):
+                path=root/'native-evidence'/f'{step:03d}'/name
+                if path.is_file():
+                    with path.open('rb') as stream:
+                        stream.seek(0,2);stream.seek(max(0,stream.tell()-2000))
+                        diagnostic[path.relative_to(root).as_posix()]=stream.read(2000).decode(errors='replace')
+        diagnostic_path=Path(os.environ.get('SCID_TEST_LOG_DIR',str(root.parent)))/f'fragment-{context}-diagnostic.json'
+        diagnostic_path.parent.mkdir(parents=True,exist_ok=True)
+        diagnostic_path.write_text(json.dumps(dict(result=result,native_diagnostics=diagnostic),ensure_ascii=False,indent=2)+'\n')
+    assert result['status'] == 'finish',str(diagnostic_path)
     jobs = [c.read(path) for path in sorted((root / 'jobs').glob('*.json'))]
     assert [job['role'] for job in jobs] == ['H', 'W', 'A']
     chain = execution.records(root, 2)
@@ -289,7 +311,10 @@ def test_internal_runner_two_fragments_keep_one_w_stage_and_original_call(intern
     assert configs[0]['scope']['execution_key'] == c.record_ref(root / 'jobs/002.json')
     calls = list((experiment_client.record_directory(root,2) / 'calls').iterdir())
     assert len(calls) == 1
-    first = checkpoint.validate(root, jobs[1], chain[0])
+    first = c.read(c.regular(chain[0] / 'checkpoint.json'))
+    assert first['binding'] == dict(step=2,attempt=0,job_ref=c.record_ref(root/'jobs/002.json'),
+        stage_owner=c.record_ref(root/'jobs/002.json'),record='native-evidence/002')
+    assert c.read(chain[1]/'native-intent.json')['fragment_checkpoint'] == dict(path='native-evidence/002/checkpoint.json')
     assert (root / first['materials'][0]['original']['snapshot']).read_text() == 'first fragment result'
     assert c.validate(c.workspace(root, 2))['role'] == 'W'
     threads = [c.read(path / 'native-outcome.json')['thread_id'] for path in chain]
@@ -336,12 +361,32 @@ def test_review_rechecked_after_original_writer_stops(internal_fragment_instance
     assert c.read(execution.raw(root, 2))['stage_intent'] == 'continue'
 
 
+@pytest.mark.process_e2e
 def test_missing_science_repairs_output_without_replaying_original_call(internal_fragment_instance, monkeypatch):
     monkeypatch.setenv('SCID_U2_FAKE_CASE', 'missing')
     root = internal_fragment_instance()
-    assert controller.run(root)['status'] == 'finish'
+    result=controller.run(root)
+    diagnostic={}
+    diagnostic_path=None
+    if result['status']!='finish':
+        for step in (1,2):
+            for name in ('native-outcome.json','native.stderr','runner.stderr'):
+                path=root/'native-evidence'/f'{step:03d}'/name
+                if path.is_file():
+                    with path.open('rb') as stream:
+                        stream.seek(0,2);stream.seek(max(0,stream.tell()-2000))
+                        diagnostic[path.relative_to(root).as_posix()]=stream.read(2000).decode(errors='replace')
+        diagnostic_path=Path(os.environ.get('SCID_TEST_LOG_DIR',str(root.parent)))/'fragment-missing-diagnostic.json'
+        diagnostic_path.parent.mkdir(parents=True,exist_ok=True)
+        diagnostic_path.write_text(json.dumps(dict(result=result,native_diagnostics=diagnostic),ensure_ascii=False,indent=2)+'\n')
+    assert result['status'] == 'finish',str(diagnostic_path)
     chain = execution.records(root, 2)
-    assert len(chain) == 2 and checkpoint.validate(root, c.read(root / 'jobs/002.json'), chain[0])['science']['status'] == 'missing'
+    assert len(chain) == 2
+    first = c.read(c.regular(chain[0] / 'checkpoint.json'))
+    assert first['science']['status'] == 'missing'
+    assert first['binding'] == dict(step=2,attempt=0,job_ref=c.record_ref(root/'jobs/002.json'),
+        stage_owner=c.record_ref(root/'jobs/002.json'),record='native-evidence/002')
+    assert any(row['path']=='native-evidence/002/native-intent.json' for row in first['originals'])
     assert c.read(chain[1] / 'native-intent.json')['continuation_kind'] == 'repair'
     assert len(list((experiment_client.record_directory(root,2) / 'calls').iterdir())) == 1
 

@@ -114,9 +114,8 @@ def resolve(root, target, receipts, *, current=None):
     if current is not None and step == current['step']:
         rows = current['materials']
     else:
-        receipt = next((row for row in receipts if row['step'] == step), None)
-        if receipt is None:
-            raise ValueError('Historical implementation is outside the frozen history')
+        from . import accepted_prefix
+        receipt=accepted_prefix.member(root,receipts,step)
         from . import originals
         path = originals.source_record(originals.node(root, step), 'result-identity.json')
         if source_seal_ref(originals.node(root, step)) != receipt['seal_ref']:
@@ -386,7 +385,7 @@ def _managed_outputs(interface, completed, observed):
 
 
 @_job_storage
-def scientific_outputs(root, job, call, *, verify_files=True):
+def _observe_scientific_outputs(root, job, call, *, verify_files=True):
     """Publish selected scientific assets from the full verified call archive."""
     from . import experiments, execution
     root=Path(root)
@@ -449,6 +448,23 @@ def scientific_outputs(root, job, call, *, verify_files=True):
     return result
 
 
+def managed_calls(inventory, *, call_ids=None):
+    """Consume the owner-accepted current call list; never observe originals."""
+    if call_ids is None:return inventory.managed_calls
+    if not isinstance(call_ids,(list,tuple)) or len(set(call_ids))!=len(call_ids):
+        raise ObserverIntegrityError('Managed selection requires distinct exact original call IDs')
+    indexed={row['call_id']:row for row in inventory.managed_calls}
+    return [indexed[item] for item in call_ids]
+
+
+def scientific_outputs(inventory, call):
+    return inventory.scientific_outputs[call['call_id']]
+
+
+def managed_input_coverage(root, job, rows, *, inventory):
+    return inventory.input_coverage
+
+
 def _observed_original_refs(accepted, observed):
     originals=[observed[key] for key in ('accepted','completed','submission')]+observed['proofs']
     if accepted.get('execution_authority') is not None:originals.append(accepted['execution_authority'])
@@ -462,7 +478,7 @@ def _observed_original_refs(accepted, observed):
 
 
 @_job_storage
-def managed_calls(root, job, *, context=None, call_ids=None):
+def _observe_managed_calls(root, job, *, context=None, call_ids=None):
     """Capture small common receipts, independent of domain candidates or observers."""
     from . import experiments, breadth, generic_results
     from .experiment_client import record_directory
@@ -530,7 +546,7 @@ def managed_calls(root, job, *, context=None, call_ids=None):
     return result
 
 
-def validate_managed(root, job, rows, *, context=None, verify_files=True):
+def _validate_managed(root, job, rows, *, context=None, verify_files=True):
     from . import originals
     if originals.inherited(root, job['step']):
         return validate_managed_original(originals.node(root,job['step']),job,rows,controls_only=not verify_files)
@@ -699,11 +715,10 @@ def _check_source_subject(declared, binding):
         raise ObserverIntegrityError('Managed declared inputs omitted their exact authorized package')
 
 
-def managed_input_coverage(root, job, rows):
+def _accept_managed_input_coverage(root, job, rows):
     """Capture coverage by existing input edges after validating original calls."""
     from . import execution_authority as authority, execution_inputs, qualification as q
     root = Path(root).resolve()
-    validate_managed(root, job, rows)
     result = []; memo = {}
     for row in rows:
         accepted = c.read(root / row['accepted']['snapshot'])
@@ -882,7 +897,7 @@ def validate_input_coverage(root,job,rows,published,*,source=None,controls_only=
 
 
 @_job_storage
-def _capture(root, job, payload, materials):
+def _capture(root, job, payload, materials, *, inventory):
     """Snapshot mechanical adapter facts once, before the scientific seal."""
     config = c.settings(root, job).get('history_observer')
     if config is None:
@@ -895,7 +910,7 @@ def _capture(root, job, payload, materials):
             if c.read(c.regular(path)).get('binding')!=binding:
                 raise ObserverIntegrityError('Retained managed snapshot binding changed')
         else:
-            rows=managed_calls(root,job)
+            rows=managed_calls(inventory)
             from . import generic_results
             diagnostics=[]
             snapshot=dict(binding=binding,candidates=generic_results.candidates(rows,diagnostics=diagnostics),current_candidate=None,actual_submission=None,contexts=[],managed_calls=rows,
@@ -946,7 +961,7 @@ def _capture(root, job, payload, materials):
             prior_contexts.extend(prior.get('contexts', []))
             remember_outputs(prior.get('managed_calls',[]),prior_source)
             remember_proofs(prior,prior_source)
-    current_calls=managed_calls(root,job) if _managed_config(job,root) else None
+    current_calls=managed_calls(inventory) if _managed_config(job,root) else None
     if current_calls is not None:
         remember_outputs(current_calls,originals.node(root,job['step']))
     request = dict(root=str(root), step=job['step'], config=config['config'], materials=materials,
@@ -1071,20 +1086,20 @@ def _capture(root, job, payload, materials):
     return dict(path=path.relative_to(root).as_posix())
 
 
-def capture(root, job, payload, materials):
+def capture(root, job, payload, materials, *, inventory):
     """Optional adapter failures never discard original science."""
     if job.get('formal_review'):return None
     from .protocol import require_current
     require_current(root,job)
     config = c.settings(root, job).get('history_observer')
     if config is None:
-        return _capture(root,job,payload,materials) if _managed_config(job,root) else None
+        return _capture(root,job,payload,materials,inventory=inventory) if _managed_config(job,root) else None
     adapter = c.regular(Path(config['adapter']))
     path = root / 'host-history/observations' / f'{job["step"]:03d}.json'
     if path.exists():
-        return _capture(root, job, payload, materials)  # Never repair an uncertain snapshot.
+        return _capture(root, job, payload, materials,inventory=inventory)  # Never repair an uncertain snapshot.
     try:
-        return _capture(root, job, payload, materials)
+        return _capture(root, job, payload, materials,inventory=inventory)
     except ObserverIntegrityError:
         raise
     except (OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired) as error:
@@ -1100,7 +1115,7 @@ def capture(root, job, payload, materials):
                      diagnostic=dict(failure_type=type(error).__name__, error_code=code))
         if _managed_config(job,root):
             from . import generic_results
-            value['managed_calls']=managed_calls(root,job)
+            value['managed_calls']=managed_calls(inventory)
             diagnostics=[]
             value['candidates']=generic_results.candidates(value['managed_calls'],diagnostics=diagnostics)
             if diagnostics:value['candidate_diagnostics']=diagnostics
@@ -1115,7 +1130,11 @@ def _source(root, step, *, resolve_choices=True):
 
 
 def direct_sources(root, job):
-    """Check current direct bindings and load their accepted producer facts."""
+    """Read accepted direct producers through their real original bindings.
+
+    The native-only conclusion aliases are presentation paths. They need not
+    have a physical host file and never establish the producer's identity.
+    """
     sources, seen = [], set()
     for ref in job['direct_refs']:
         match = re.fullmatch(r'inputs/parents/([0-9]{3,})/conclusion\.json', ref['path'])
@@ -1127,13 +1146,13 @@ def direct_sources(root, job):
         seen.add(step)
         source, payload, seal, _ = _source(root, step)
         from . import originals
-        chooser = originals.node(root, job['step']) if originals.inherited(root, job['step']) else None
-        input_path = (originals.resolve_ref(chooser, dict(ref, path=f'project/nodes/{job["step"]:03d}/' + ref['path']))
-            if chooser is not None else originals.resolve_root_ref(root,dict(ref,
-                path=str(c.workspace(root,job['step'])/ref['path']))))
-        if (c.regular(input_path).stat().st_size != ref['size_bytes']
-                or next((row for row in job.get('direct_originals',job['direct_refs']) if row['path']==ref['path']),None) is None):
+        declared=[row for row in job.get('direct_originals',job['direct_refs']) if row['path']==ref['path']]
+        if len(declared)!=1 or declared[0]['size_bytes']!=seal['raw_ref']['size_bytes']:
             raise ValueError('Direct scientific input binding changed')
+        owner=originals.node(root,step)
+        input_path=originals.resolve_ref(owner,seal['raw_ref'])
+        if c.regular(input_path).stat().st_size!=declared[0]['size_bytes']:
+            raise ValueError('Direct scientific original changed')
         sources.append((source, payload, seal))
     return sources
 
@@ -1152,7 +1171,9 @@ def resolve_implementation(root, object_id, receipts):
     if match is None:
         raise UnresolvedImplementation('Implementation selection requires a listed scientific object ID')
     step, index = int(match[2]), int(match[3])
-    receipt = next((row for row in receipts if row['step'] == step), None)
+    from . import accepted_prefix
+    try:receipt=accepted_prefix.member(root,receipts,step)
+    except FileNotFoundError:receipt=None
     job, _, seal, seal_sha = _source(root, step) if receipt else (None, None, None, None)
     if receipt is not None and seal_sha != receipt['seal_ref']:
         raise ValueError('Historical node seal changed')
@@ -1163,47 +1184,17 @@ def resolve_implementation(root, object_id, receipts):
     return c._public_materials(root,[sorted(seal['materials'], key=lambda row: row['path'])[index - 1]])[0]
 
 
-def candidate_materials(root, job):
+def candidate_materials(root, job, *, candidate_id):
     """Resolve existing candidate/artifact bindings without comparing equal bytes.
 
     A managed candidate names one output in one original call. The corresponding
     material retains that exact call in its logical path, even for equal bytes.
     Observer candidates may already name an exact historical implementation.
     """
-    from . import generic_results
-    receipts=job.get('history',{}).get('nodes',[]);result=[]
-    for receipt in receipts:
-        source,_,seal,seal_sha=_source(root,receipt['step'],resolve_choices=False)
-        if seal_sha!=receipt['seal_ref']:raise ObserverIntegrityError('Candidate source seal changed')
-        observation=read_observation(root,source,seal)
-        if observation is None:continue
-        for candidate in observation['candidates']:
-            material=None
-            if candidate.get('implementation') is not None:
-                material=resolve(root,candidate['implementation'],receipts)
-            else:
-                members=[(call,item) for call in observation.get('managed_calls',[])
-                    for item in generic_results.declarations(call)
-                    if isinstance(item,dict) and isinstance(item.get('artifact'),str)
-                    and generic_results.identity(call,item)==candidate['id']]
-                if len(members)!=1:continue
-                call,declared=members[0]
-                outputs=[item for item in call.get('outputs',[]) if 'artifacts/'+item['name']==declared['artifact']]
-                if len(outputs)!=1:continue
-                output=outputs[0]
-                path=f'inputs/parents/{source["step"]:03d}/artifacts/experiments/{call["call_id"]}/artifacts/{output["name"]}'
-                matches=[row for row in seal['materials'] if row['path']==path
-                    and all(row[key]==output[key] for key in ('size_bytes',))]
-                if len(matches)!=1:continue
-                material=c._public_materials(root,matches)[0]
-            owner_step=int(Path(material['path']).parts[2])
-            owner,_,owner_seal,_=_source(root,owner_step,resolve_choices=False)
-            index=next((number for number,row in enumerate(sorted(owner_seal['materials'],key=lambda row:row['path']),1)
-                if {key:value for key,value in row.items() if key!='file_stat'}==material),None)
-            if index is not None:
-                result.append(dict(candidate_id=candidate['id'],material=material,
-                    implementation_id=f'{owner["role"]}{owner_step:03d}-I{index:03d}'))
-    return result
+    from . import accepted_prefix
+    row=accepted_prefix.candidate(root,accepted_prefix.for_job(job),candidate_id)
+    binding=row.get('binding')
+    return [] if binding is None else [dict(candidate_id=row['observation']['id'],**binding)]
 
 
 def source_sequence(root, before_step, *, source_cutoff=None, extra_steps=()):
@@ -1405,8 +1396,8 @@ def validate(root, work, binding):
     """
     from . import execution_recovery
     recoveries = execution_recovery.sealed_values(root, binding.get('execution_recoveries', []))
-    if any(value['source_step'] not in {row['step'] for row in binding['nodes']} for value in recoveries):
-        raise ObserverIntegrityError('Execution recovery is outside the frozen scientific prefix')
+    from . import accepted_prefix
+    for value in recoveries:accepted_prefix.member(root,binding['prefix'],value['source_step'])
     from . import originals
     for material in binding.get('execution_recovery_materials', []):
         originals.material_path(root, material)
@@ -1417,7 +1408,7 @@ def validate_recommendation(job, payload, *, root=None):
     if job.get('handoff_protocol', 1) >= 9 and payload.get('next_action') == 'audit':
         return []  # An unavailable audit request preserves science and returns a host diagnostic.
     from . import candidate_refs
-    if recommendation is not None and (job['role'] != 'A' or recommendation not in candidate_refs.available_ids(root, job)):
+    if recommendation is not None and (job['role'] != 'A' or not candidate_refs.is_available(root,job,recommendation)):
         subject=recommendation if isinstance(recommendation,str) and c.json_field_representable('reference',recommendation) else 'candidate_recommendation'
         return [dict(code='candidate_recommendation_unresolved',subject=subject)]
     return []
@@ -1429,19 +1420,20 @@ def read_observation(root, job, seal):
     return handoff_state.observation(root, job, seal)
 
 
-def validate_observation(root, job, seal):
+def validate_observation(root, job, seal, *, inventory):
     from . import originals
     if originals.inherited(root, job['step']):
         return validate_observation_original(originals.node(root, job['step']), originals.source_job(originals.node(root, job['step'])), seal)
     value = read_observation(root, job, seal)
     if value is None:
         return
-    observer_input_sources(root, job, value)
+    input_sources=observer_input_sources(root, job, value)
     config = c.settings(root, job).get('history_observer') or _managed_config(job,root)
     if value.get('binding') != _observer_binding({key:seal['raw_ref'][key] for key in ('path','size_bytes')},config):
         raise ObserverIntegrityError('Observer snapshot source binding changed')
     if _managed_config(job,root):
-        validate_managed(root,job,value['managed_calls'])
+        if value['managed_calls']!=inventory.managed_calls:
+            raise ObserverIntegrityError('Observer calls differ from the accepted current inventory')
     proofs = [proof for row in value['candidates'] for proof in row['evidence']]
     for field in ('current_candidate', 'actual_submission'):
         if value.get(field):
@@ -1455,6 +1447,7 @@ def validate_observation(root, job, seal):
             proofs.extend(lineage.context_artifacts(context))
     for proof in proofs:
         _validate_proof(root, proof)
+    return input_sources
 
 
 def validate_observation_original(source,job,seal,*,controls_only=False):
@@ -1551,14 +1544,24 @@ def _validate_proof(root, proof, *, context=None):
 
 def refresh(root, before_step):
     """Publish disposable summaries only at the owned seal boundary."""
-    from . import handoff_state
-    with handoff_state.scope(root):
-        _refresh(root,before_step)
-        handoff_state.publish_search(root)
+    _refresh(root,before_step)
 
 
 def _refresh(root, before_step):
     """Update disposable projections after every seal, including a terminal A."""
+    from . import accepted_budget
+    state=accepted_budget.read(root)
+    summary=state['search']
+    overview=dict(coverage=dict(status=summary['coverage'],note='Accepted facts; read public node navigation for complete original science.'),
+        candidate_count=summary['candidate_count'],current_candidate=summary['current_candidate'],
+        a_recommended=summary['a_recommended'],historical_a_recommendation=summary['historical_a_recommendation'],
+        actual_submission=summary['actual_submission'],node_count=state['prefix']['count'])
+    destination=Path(root)/'host-history/overview.json'
+    if not destination.exists() or c.read(c.regular(destination))!=overview:c.write(destination,overview)
+
+
+def render_audit_overview(root, before_step):
+    """Explicit full-history audit, outside ordinary scientific handoff."""
     from .protocol import require_current
     require_current(root)
     latest = c.read(root / 'jobs' / f'{before_step-1:03d}.json') if before_step > 1 else {}

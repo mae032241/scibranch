@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
+import stat
 
 _active = ContextVar('research_handoff_state', default=None)
 _loading = ContextVar('research_loading_sealed', default=False)
@@ -15,6 +16,7 @@ _loading = ContextVar('research_loading_sealed', default=False)
 @dataclass
 class State:
     root: Path
+    task_step: int | None = None
     sources: dict = field(default_factory=dict)
     handles: dict = field(default_factory=dict)
     fork_manifest: dict | None = None
@@ -32,6 +34,17 @@ class State:
 def current(root):
     state = _active.get()
     return state if state is not None and state.root == Path(root).absolute() else None
+
+
+def begin_job(root,step):
+    """Keep disposable reads local to one task, never an accumulating prefix."""
+    state=current(root)
+    if state is None or state.task_step==step:return
+    state.task_step=step
+    for name in ('sources','handles','observations','results','records','search','recoveries'):
+        getattr(state,name).clear()
+    state.sequence=None
+    state.sequence_before=1
 
 
 @contextmanager
@@ -61,6 +74,17 @@ def loading_sealed():
     return _loading.get()
 
 
+def _accepted_marker(root, step, owner):
+    """Require the published acceptance marker, without replaying its checks."""
+    state=current(root)
+    if state is not None and (step in state.results or any(key[0]==step for key in state.sources)):
+        return
+    from . import originals
+    path=originals.source_record(owner,'result-identity.json')
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise ValueError('Scientific result has no regular acceptance marker')
+
+
 def source(root, step, *, resolve_choices=True):
     from . import contracts as c, originals, candidate_refs
     state = current(root)
@@ -69,6 +93,7 @@ def source(root, step, *, resolve_choices=True):
         return state.sources[key]
     with loading():
         owner = originals.node(root, step)
+        _accepted_marker(root,step,owner)
         job = originals.source_job(owner)
         seal_path = originals.source_record(owner, 'result-identity.json')
         seal = c.read(seal_path)
@@ -115,7 +140,9 @@ def read_sealed(root, step):
     if state is not None and step in state.results:
         return state.results[step]
     with loading():
-        value = c.read(originals.source_record(originals.node(root, step), 'result.json'))
+        owner=originals.node(root,step)
+        _accepted_marker(root,step,owner)
+        value = c.read(originals.source_record(owner, 'result.json'))
     if state is not None:
         state.results[step] = value
     return value

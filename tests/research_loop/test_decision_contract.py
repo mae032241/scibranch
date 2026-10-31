@@ -3,7 +3,7 @@ import copy
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, controller, decision, native, protocol
+from scidiscovery.research_loop import accepted_budget, contracts as c, controller, decision, native, protocol
 from test_history_handoff import finish, fixture_portfolio_review, fixture_final_coverage
 
 REQUEST = dict(decision='candidate', question='Should the candidate be retained under the declared target condition?',
@@ -38,6 +38,7 @@ def author(root, step, parents, request, *, action='continue_w', review=None, om
     fixture_portfolio_review(root, job, payload)
     fixture_final_coverage(root, job, payload)
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json')))
+    accepted_budget.accept_native(root,step,record,c.read(c.regular(record/'native-intent.json')))
     c.write(record / 'science-output.json', payload)
     c.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
     c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, native_started=False, usage=native.usage(root),

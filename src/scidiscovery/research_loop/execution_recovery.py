@@ -250,27 +250,46 @@ def _validate_event(root,ref,value,chains,*,originals=True,sources=None,pending=
 
 def append(root,base,phase,*,row=None,query=None,native_state=None,submission=None,context=None):
     """Only actual fact changes append; caller owns the controller writer."""
-    root=Path(root);refs=prefix(root,budget.historical_step_limit(root)+1)
-    values=validate(root,refs,originals=False)
-    local_values=[value for ref,value in zip(refs,values) if 'origin_identity' not in ref]
-    chain=[value for value in local_values if value.get('version')==2 and
-           (value['source_step'],value['call_id'])==(base['source_step'],base['call_id'])]
-    if chain and all(chain[-1].get(key)==item for key,item in dict(phase=phase,row=row,native_state=native_state,submission=submission).items()):
-        return next(ref for ref in refs if 'origin_identity' not in ref and c.read(root/ref['path'])==chain[-1])
+    from . import accepted_budget,accepted_search,originals
+    root=Path(root);state=accepted_budget.read(root)
+    indexed=state.row(f'execution-recovery/{base["source_step"]:03d}/{base["call_id"]}')
+    previous=None if indexed is None else indexed['ref']
+    prior=None if previous is None else c.read(c.regular(root/previous['path']))
+    if prior is not None and all(prior.get(key)==item for key,item in dict(phase=phase,row=row,native_state=native_state,submission=submission).items()):
+        return previous
     directory=root/DIRECTORY/f'{base["source_step"]:03d}'/base['call_id']
-    previous=None if not chain else dict(path=(directory/f'{len(chain):06d}.json').relative_to(root).as_posix())
+    number=1 if previous is None else int(Path(previous['path']).stem)+1
     value=dict(base,version=2,previous=previous,phase=phase,row=row,query=query,native_state=native_state,submission=submission)
-    path=directory/f'{len(chain)+1:06d}.json'
+    path=directory/f'{number:06d}.json'
     # Validate the prospective value with the same validator before publication.
     ref=dict(path=path.relative_to(root).as_posix())
     chains={}
-    for old_ref,old in zip(refs,values):
-        if 'origin_identity' not in old_ref and old.get('version')==2:
-            _validate_event(root,old_ref,old,chains,originals=False)
-    _validate_event(root,ref,value,chains,context=context)
+    if prior is not None:
+        chains[(base['source_step'],base['call_id'])]=dict(ref=previous,number=number-1,phase=prior['phase'],value=prior)
+    _validate_event(root,ref,value,chains,originals=False,context=context)
     if context is not None:context.remaining_seconds()
     c.write(path,value);path.chmod(0o400)
+    delta=None
+    if row is not None and accepted_budget.search_row(root,accepted_search.key('call',f'{base["source_step"]}:{base["call_id"]}'),head=state) is not None:
+        delta=accepted_search.prepare_recovery(summary=state['search'],lookup=lambda key:accepted_budget.search_row(root,key,head=state),
+            step=base['source_step'],call_id=base['call_id'],resolved=row,
+            recovery_ref=dict(ref,origin_identity=originals.local_identity(root)))
+    search_ref=None
+    if delta is not None:
+        snapshot=directory/'snapshots'/f'{number:06d}.json'
+        from . import accepted_prefix
+        accepted_prefix._write_once(snapshot,delta['summary'])
+        search_ref=dict(origin_identity=originals.local_identity(root),
+            path=snapshot.relative_to(root).as_posix(),size_bytes=snapshot.stat().st_size)
+    accepted_budget.publish_recovery(root,step=base['source_step'],call_id=base['call_id'],
+        recovery_ref=ref,search_delta=delta,search_ref=search_ref)
     return ref
+
+
+def latest(root,step,call_id):
+    from . import accepted_budget
+    value=accepted_budget.read(root).row(f'execution-recovery/{step:03d}/{call_id}')
+    return None if value is None else c.read(c.regular(Path(root)/value['ref']['path']))
 
 
 def call_view(root,sources,refs,*,originals=True,validated=None,original_rows=None):

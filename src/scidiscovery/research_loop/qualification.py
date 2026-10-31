@@ -520,6 +520,11 @@ def _output(root,job,seal,*,managed_coverage=None,source=None,controls_only=Fals
             additional_inputs = not all(row['complete'] for row in managed_coverage) or observer_unknown
     elif managed_coverage is not None:
         raise IntegrityError('Managed input coverage has no original observation')
+    return _output_document(job, seal, managed_coverage, additional_inputs)
+
+
+def _output_document(job, seal, managed_coverage, additional_inputs):
+    """Publish source facts already accepted by their owning boundary."""
     return dict(version=1, step=job['step'], job_ref=seal['job_ref'],
                 result_ref=seal['result_ref'], raw_ref={key:seal['raw_ref'][key] for key in ('path','size_bytes')},
                 materials=[{key:value for key,value in row.items() if key!='file_stat'}
@@ -532,18 +537,11 @@ def _output(root,job,seal,*,managed_coverage=None,source=None,controls_only=Fals
                 scope=SCOPE)
 
 
-def seal_outputs(root, job, seal):
+def seal_outputs(root, job, seal, *, inventory):
     root = Path(root).resolve()
     path = c.host_record(c.workspace(root, job['step'])) / 'provenance.json'
-    coverage = None
-    if path.exists():
-        coverage = c.read(_file(path)).get('managed_input_coverage')
-    elif seal.get('observations') is not None:
-        from . import history
-        observation = history.read_observation(root, job, seal)
-        if observation.get('managed_calls'):
-            coverage = history.managed_input_coverage(root, job, observation['managed_calls'])
-    return _save(root, path, _output(root, job, seal, managed_coverage=coverage))
+    return _save(root, path, _output_document(job, seal,
+        inventory.input_coverage, inventory.additional_inputs))
 
 
 def validate_outputs(root,job,seal,*,source=None,controls_only=False):

@@ -353,6 +353,9 @@ def _prepare(plan, request, transaction, *, _on_created=None):
     _source_call(fork_sources.copy_source, plan, source_store)
     document = research_config.to_document(Path(request['parent_root']), plan['selected_settings'])
     snapshot = originals._snapshot(plan)
+    breadth_ref=plan['cut']['history']['breadth_snapshot']
+    breadth_owner=originals._snapshot_source(source_store,snapshot,breadth_ref['origin_identity'],request['step'])
+    breadth_seed=c.read(_source_call(originals.resolve_ref,breadth_owner,breadth_ref))
     global_paths = []
     for row in plan.get('selected_globals', []):
         reference = row['original_ref']
@@ -409,7 +412,7 @@ def _prepare(plan, request, transaction, *, _on_created=None):
                 **{key: transfer[key] for key in ('step', 'call_id', 'code_version')}, context=context)
         return _child_source_facts(storage_root, global_materials, plan)
     settings = controller.prepare(**options, _existing_settings=selected_settings, _identity_root=final,
-        _source_facts_factory=source_facts, _on_created=register_created)
+        _source_facts_factory=source_facts, _on_created=register_created,_fork_search_seed=breadth_seed)
     settings = c.settings(stage)
     changed = fork_runtime.changed_task_settings(selected_settings, settings)
     if changed:

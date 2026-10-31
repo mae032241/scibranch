@@ -297,7 +297,7 @@ def _logical_input(root, path, *, source=None, context=None):
         if any(row!=materials[0] for row in materials):raise ValueError('Logical input has conflicting originals')
         host=source.storage_root.parents[1] if source is not None and source.inherited else root
         return material_path(host,materials[0])
-    rows=[row for row in [*job.get('global_materials',[]),*job.get('history',{}).get('files',[]),
+    rows=[row for row in [*job.get('global_materials',[]),*job.get('history',{}).get('inputs',[]),
         *job.get('history',{}).get('execution_recovery_materials',[])] if row['path']==logical]
     if rows:
         if any(row!=rows[0] for row in rows):raise ValueError('Logical input has conflicting originals')
@@ -336,7 +336,7 @@ def _declared_science(source, actual, ref, *, context=None):
     job=source_job(source)
     rows=[*job.get('global_materials',[]),*job.get('direct_materials',[]),
         *[item['material'] for item in job.get('selected_inputs',[])],
-        *job.get('history',{}).get('files',[]),
+        *job.get('history',{}).get('inputs',[]),
         *job.get('history',{}).get('execution_recovery_materials',[])]
     proofs=[]
     for row in rows:

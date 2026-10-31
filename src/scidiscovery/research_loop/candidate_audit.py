@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 
 from . import configuration_updates
-from . import budget, contracts as c, delivery, execution, native
+from . import budget, contracts as c, delivery, execution, handoff_state, native
 
 SCOPE = 'Adapter-scoped qualification, not target evidence or submission.'
 
@@ -74,7 +74,7 @@ def require_eligibility(root, intent):
     if decision != _decision(root,decision['step']):
         raise ValueError('Candidate audit scientific author changed')
     job = c.read(c.regular(root/'jobs'/f'{decision["step"]:03d}.json'))
-    raw = c.validate(c.workspace(root,decision['step']))
+    raw = handoff_state.read_sealed(root,decision['step'])
     if job.get('purpose') is not None:
         from . import engineering
         marker = job['closeout_begin']
@@ -300,10 +300,11 @@ def _unavailable_input(root,job,chosen,rows):
     """Identity of the exact candidate's sealed originals, independent of later A nodes."""
     from . import history
     sources=[]
-    for receipt in job['history']['nodes']:
+    for receipt in delivery.candidate_source_nodes(root,job,chosen):
         _,_,seal,seal_sha=history._source(root,receipt['step'])
+        if seal_sha!=receipt['seal_ref']:raise ValueError('Candidate audit producer scientific seal changed')
         observed=seal.get('observations')
-        if observed is not None and any(row['id']==chosen for row in c.read(root/observed['path'])['candidates']):
+        if observed is not None:
             sources.append(dict(step=receipt['step'],seal_ref=seal_sha,observation=observed))
     return json.dumps(dict(settings_ref=c.record_ref(root/'settings.json'),
         candidate_id=chosen,sources=sources,unavailable=rows), sort_keys=True)
@@ -355,7 +356,8 @@ def execute(root, job, payload):
         return None if cleanup else 'candidate_audit_unknown'
     if not enabled(configuration_updates.for_job(root, job)):
         return finish('unavailable', 'candidate_audit_disabled')
-    if chosen is None or chosen not in job['history']['candidate_ids']:
+    from . import candidate_refs
+    if chosen is None or not isinstance(chosen,str) or not candidate_refs.is_available(root,job,chosen):
         return finish('unavailable', 'candidate_unavailable')
     policy = configuration_updates.for_job(root, job).get('delivery_policy')
     if policy is None or policy['adapter'] is None:
@@ -390,9 +392,10 @@ def execute(root, job, payload):
     intent['advance_seconds']=budget.snapshot(root)['advance_seconds']
     _save(directory / 'intent.json', intent)
     try:
-        if not job.get('delivery_sources'):resolved = json.dumps(job['history']['nodes'], sort_keys=True)
+        source_nodes=delivery.candidate_source_nodes(root,job,chosen)
+        if not job.get('delivery_sources'):resolved = json.dumps(source_nodes, sort_keys=True)
         refs = (delivery.selected_sources(root, job['delivery_sources'], chosen, prepare=True, job=job)
-            if job.get('delivery_sources') else delivery.freeze_sources(root, job['history']['nodes'], candidate_id=chosen, job=job))
+            if job.get('delivery_sources') else delivery.freeze_sources(root, source_nodes, candidate_id=chosen, job=job))
         rows = [row for row in refs['items'] if row['candidate_id'] == chosen and row['status'] == 'audit_pending']
         if len(rows)!=1:
             _save(directory/'sources.json',refs)

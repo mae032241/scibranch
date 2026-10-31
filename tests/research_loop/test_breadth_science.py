@@ -40,9 +40,11 @@ def h(root, step=1, parents=(), labels=('P','Q','R'), existing=None):
 
 
 def worker(root, tmp_path, step, parents, *, cov=False, qualified_local=False):
+    from scidiscovery.research_loop import accepted_budget
     job=c.build_job(root,step,'W',parents);record=execution.record(root,step)
     c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),
         search_slice=search.accept(root,job)))
+    accepted_budget.accept_native(root,step,record,c.read(c.regular(record/'native-intent.json')))
     output=c.workspace(root,step)/'work/experiment-config.json' if not cov else tmp_path/f'config-{step}.json'
     assert not (cov and qualified_local)
     if cov:

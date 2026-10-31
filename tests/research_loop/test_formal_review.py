@@ -9,6 +9,15 @@ from scidiscovery.research_loop import budget, contracts as c, controller, forma
 from test_history_handoff import finish
 
 
+def choice_inventory(root,job,payload):
+    """Accept this test response's exact selection once, outside consumers."""
+    work=c.workspace(root,job['step'])
+    diagnostics=[]
+    selected=c._accept_selected_inputs(work,payload,job,diagnostics)
+    return c.CurrentInventory(root,job,c.host_record(work),0,[],{},
+        selected_inputs=selected,selection_diagnostics=diagnostics)
+
+
 # This independent local process supplies protocol-shaped native/session events.
 # It never calls a model, backend or solver. Its identities are synthetic.
 LAUNCHER = '''import json,os,pathlib,sys,uuid
@@ -183,8 +192,8 @@ def test_unavailable_review_does_not_force_delivery_closeout_across_extraction(t
         cleanup_seconds=0,submit_seconds=0,confirm_seconds=0,adapter=None)
     root,_=scripted(tmp_path,monkeypatch,missing=True,unavailable_route='extract',delivery_policy=policy)
     result=controller.run(root)
-    assert result['status']=='final_a_completed',result
-    assert result['goal_completion']=='not_asserted' and result['submission_result']['status']=='unsubmitted'
+    assert result['status']=='finish' and result['last_step']==6,result
+    assert result['goal_completion']=='not_asserted'
     assert [c.validate(c.workspace(root,step))['role'] for step in range(1,7)]==['H','W','A','A','E','A']
     assert [c.read(root/'jobs'/f'{step:03d}.json')['role'] for step in (4,5,6)]==['A','E','A']
     requester=c.validate(c.workspace(root,4))
@@ -192,31 +201,30 @@ def test_unavailable_review_does_not_force_delivery_closeout_across_extraction(t
     assert c.read(root/'jobs/005.json')['evidence_return']==dict(role='A',step=4)
     assert c.read(root/'jobs/006.json')['instruction']==requester['route_reason']
     state=budget.closeout_state(root)
-    assert state['begin']['stop_reason']=='scientific_finish' and state['begin']['source_cutoff']==6
-    assert state['begin']['mode']=='final' and state['begin']['first_step']==7
-    final=c.read(root/'jobs/007.json')
-    assert final['role']=='A' and final['final_only']
-    assert final['final_report']==dict(source_cutoff=6,stopped_original=None)
-    assert budget.final_a_barrier(root)['step']==7
-    assert state['actions']==[] and not (root/'jobs/008.json').exists()
+    assert state['begin'] is None and state['actions']==[]
+    assert budget.final_a_barrier(root) is None
+    assert not (root/'jobs/007.json').exists()
     job=c.read(root/'jobs/006.json')
     assert job['formal_review_choices']['unavailable']==c.read(root/'jobs/004.json')['formal_review_choices']['unavailable']
     assert 'author_correction' not in job
     science=c.validate(c.workspace(root,6))
     from scidiscovery.research_loop.output_repair import OutputRepairRequired
+    request=dict(science,next_action='formal_review',implementation_selection=['W002-I001'])
+    inventory=choice_inventory(root,job,request)
     with pytest.raises(OutputRepairRequired,match='exact subject and identity'):
-        review.validate_choice(root,job,dict(science,next_action='formal_review',implementation_selection=['W002-I001']))
+        review.validate_choice(root,job,request,inventory=inventory)
     limits=budget.snapshot(root)
     assert limits['max_tokens']==2000 and limits['max_seconds']==60
     assert limits['consumed_seconds']>0 and limits['seconds_remaining']<60
     assert not list((root/'native-evidence').glob('*/formal-review.json'))
-    originals={path:path.read_bytes() for step in range(1,8) for path in
+    originals={path:path.read_bytes() for step in range(1,7) for path in
         (root/'jobs'/f'{step:03d}.json',c.host_record(c.workspace(root,step))/'result-identity.json')}
     repeated=controller.run(root)
-    assert repeated['status']=='final_a_completed' and repeated['last_step']==7
-    assert repeated['source_cutoff']==6 and repeated['submission_result']['status']=='unsubmitted'
+    assert repeated['status']=='finish' and repeated['last_step']==6
+    assert repeated['goal_completion']=='not_asserted'
     assert all(path.read_bytes()==data for path,data in originals.items())
-    assert budget.closeout_state(root)['actions']==[] and not (root/'jobs/008.json').exists()
+    assert budget.closeout_state(root)['begin'] is None and budget.closeout_state(root)['actions']==[]
+    assert budget.final_a_barrier(root) is None and not (root/'jobs/007.json').exists()
 
 
 def test_review_choice_rejects_known_failure_but_new_subject_can_use_same_output(tmp_path,monkeypatch):
@@ -230,28 +238,41 @@ def test_review_choice_rejects_known_failure_but_new_subject_can_use_same_output
     route8=semantic.effective_route(root,3,c.validate(c.workspace(root,3)),job,(*route,1,2,None))
     assert route8[7] is None
     child=c.build_job(root,4,'A',route8[1],instruction=route8[2],evidence_return=route8[3])
-    with pytest.raises(OutputRepairRequired,match='exact subject and identity'):
+    with pytest.raises(OutputRepairRequired,match='exact subject and identity') as rejected:
         finish(root,4,'A',route8[1],action='formal_review',selection=['W002-I001'])
     record=c.host_record(c.workspace(root,4))
     assert not (record/'result-identity.json').exists()
-    repair=continuation.output_request(root,4,record)
+    retained={path:path.read_bytes() for path in (record/'native-intent.json',
+        record/'science-output.json',record/'native-outcome.json')}
+    inventory=rejected.value.inventory
+    repair=continuation.output_request(root,4,record,inventory=inventory)
     assert repair['code']=='formal_review_unavailable'
     for selection in (None,[],['W002-I001','W002-I002'],['W999-I001']):
+        request=dict(next_action='formal_review',implementation_selection=selection)
+        inventory=choice_inventory(root,child,request)
         with pytest.raises(OutputRepairRequired):
-            review.validate_choice(root,child,dict(next_action='formal_review',implementation_selection=selection))
+            review.validate_choice(root,child,request,inventory=inventory)
     # Isolate key comparison only: newly verified identity is a changed fact,
     # not qualification. No fake identity is persisted into a native receipt.
     with monkeypatch.context() as changed_identity:
         changed_identity.setattr(review,'authors',lambda *args:dict(complete=True,participants=[['fixture','new-identity']]))
-        review.validate_choice(root,child,dict(next_action='formal_review',implementation_selection=['W002-I001']))
+        request=dict(next_action='formal_review',implementation_selection=['W002-I001'])
+        inventory=choice_inventory(root,child,request)
+        review.validate_choice(root,child,request,inventory=inventory)
     # Same frozen job and same output fields: a different exact material may
     # request review. It still has no verified author and grants no qualification.
-    child,_,_=finish(root,4,'A',route8[1],action='formal_review',selection=['W002-I002'])
-    changed=review.request_route(root,child,c.validate(c.workspace(root,4)),[1,2,4])
-    assert changed[3]['kind']=='formal_review_unavailable'
-    assert review.unavailable(root,3)['failure_key']!=review.unavailable(root,4)['failure_key']
+    request=dict(next_action='formal_review',implementation_selection=['W002-I002'])
+    inventory=choice_inventory(root,child,request)
+    review.validate_choice(root,child,request,inventory=inventory)
+    changed=review._request_value(root,inventory.selected_inputs,child)
+    assert changed['reason'] is not None  # A new subject still has no qualified author.
+    assert changed['subject']['material']!=review.unavailable(root,3)['failure_key']['subject']['material']
+    assert review.unavailable(root,3)['failure_key']!=review._failure_key(changed)
+    assert all(path.read_bytes()==contents for path,contents in retained.items())
+    assert not (record/'result-identity.json').exists()
+    assert not (record/'formal-review-unavailable.json').exists()
     assert child['formal_review_choices']['unavailable']==c.read(root/'jobs/004.json')['formal_review_choices']['unavailable']
-    assert len(child['formal_review_choices']['unavailable'])==1 # Future failure never changes old job.
+    assert len(child['formal_review_choices']['unavailable'])==1 # A hypothetical new subject cannot change the frozen job.
     reference=child['formal_review_choices']['unavailable'][0]
     original=(root/reference['path']).read_bytes()
     (root/reference['path']).chmod(0o600) # Deliberate test-only mutation of a frozen original.

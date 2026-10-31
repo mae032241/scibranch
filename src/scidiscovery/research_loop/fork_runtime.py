@@ -173,6 +173,13 @@ def _selected_base(root, selected, *, bind_inputs=False):
     if job['goal_text'] != revision['objective']:
         raise ValueError('Fork cannot replace the selected original scientific objective')
     job['fork_source'] = _selected_identity(selected)
+    from . import accepted_budget
+    head=accepted_budget.read(root)
+    admitted=head.row(f'job/{job["step"]:03d}')
+    job['history']['prefix']=copy.deepcopy(head['prefix'] if admitted is None else admitted['prefix'])
+    job['history']['breadth_snapshot']=copy.deepcopy(head['search_ref'] if admitted is None else admitted['input_search_ref'])
+    if (job.get('search') or {}).get('breadth'):
+        job['search']['breadth']['catalog']['prefix']=copy.deepcopy(job['history']['prefix'])
     if job.get('delivery_sources') is not None:
         from . import delivery
         job['delivery_sources'] = delivery.rebind_sources(root, job['delivery_sources'], job=job)
@@ -253,6 +260,8 @@ def build_selected_job(root, step):
     if path.exists():
         job = c.read(c.regular(path))
         validate_selected_job(root, c.workspace(root, step), job)
+        from . import accepted_budget
+        accepted_budget.accept_job(root,step,job)
         from . import skill_supply
         skill_supply.project(root, configuration_updates.for_job(root, job), job)
         return job
@@ -290,6 +299,8 @@ def build_selected_job(root, step):
             if combined:
                 job['user_guidance'] = combined
             _publish_selected(root, work, job)
+    from . import accepted_budget
+    accepted_budget.accept_job(root,step,job)
     from . import skill_supply
     skill_supply.project(root, frozen, job)
     return job

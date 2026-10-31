@@ -45,11 +45,47 @@ def _boundary(root, begin):
 
 
 def _members(root, begin, before_step=None):
-    from . import history, engineering
+    from . import accepted_prefix, engineering
     repaired=[step for step in engineering.steps(root,before_step) if step>begin['source_cutoff']]
-    end=max(repaired,default=begin['source_cutoff'])+1
-    records = selection.public_inputs(history.rebuild(root,end,source_cutoff=begin['source_cutoff'],extra_steps=repaired,write_cache=False))
-    return selection.shortlist(records)
+    prefix=accepted_prefix.current(root)
+    directory=accepted_prefix.visibility(root,prefix)
+    node=accepted_prefix.navigation(root,prefix)
+    nodes=[];seen=set()
+    while node is not None:
+        step=node['step']
+        if step in seen:raise ValueError('Candidate catalogue navigation is cyclic')
+        seen.add(step)
+        if step<=begin['source_cutoff'] or step in repaired:nodes.append(node)
+        previous=node['previous']
+        node=c.read(c.regular(directory/previous)) if previous is not None else None
+    members=[];known=set()
+    for node in reversed(nodes):
+        for entity in node['entities']:
+            if entity['kind']!='candidate':continue
+            candidate=accepted_prefix.candidate(root,prefix,entity['reference'])
+            fact=candidate['observation'];identity=fact['id']
+            if identity in known:continue
+            if candidate['first_step']>begin['source_cutoff'] and candidate['first_step'] not in repaired:continue
+            known.add(identity)
+            members.append(dict(candidate_id=identity,metric=fact['metric'],evaluation_key=fact['evaluation_key'],
+                direction=fact['direction'],status=fact['status'],first_step=candidate['first_step']))
+    assessed=None;recommended=None
+    if begin['source_cutoff']:
+        member=accepted_prefix.member(root,prefix,begin['source_cutoff'])
+        source=originals.for_origin(root,member['origin_identity'],step=begin['source_cutoff'])
+        if history.source_seal_ref(source)!=member['seal_ref']:
+            raise ValueError('Final candidate catalogue source seal changed')
+        seal=c.read(originals.source_record(source,'result-identity.json'))
+        snapshot_ref=seal['breadth_snapshot']
+        snapshot_owner=originals.source_for_ref(source,snapshot_ref)
+        snapshot=c.read(originals.resolve_ref(snapshot_owner,snapshot_ref))
+        assessed=snapshot['latest_a_step']
+        recommendation=snapshot.get('a_recommended')
+        if recommendation is not None:
+            recommended=accepted_prefix.candidate(root,prefix,recommendation['candidate_id'])['observation']['id']
+    return dict(version=2,candidate_count=len(members),latest_a_step=assessed,a_recommended=recommended,
+        unassessed_count=sum(assessed is None or row['first_step']>=assessed for row in members),
+        members=members,rule=selection.SHORTLIST_RULE,source_prefix=prefix)
 
 
 def screen(root, begin, before_step=None):
@@ -62,11 +98,12 @@ def screen(root, begin, before_step=None):
     if final.exists():
         return None
     path = directory / 'shortlist.json'
-    computed = dict(_members(root, begin,before_step), closeout_begin=_boundary(root, begin))
     if path.exists():
-        if c.read(c.regular(path)) != computed:
+        computed=c.read(c.regular(path))
+        if computed.get('closeout_begin')!=_boundary(root,begin):
             raise ValueError('Control catalogue differs from its sealed public prefix')
     else:
+        computed = dict(_members(root, begin,before_step), closeout_begin=_boundary(root, begin))
         _save(path, computed)
     # Do not prepare catalogue sources or qualify a candidate before A names it.
     # Existing bound receipts remain available in the frozen history audit index.
@@ -80,16 +117,40 @@ def screen(root, begin, before_step=None):
 
 def bind_normal(root, job):
     """Freeze the exact comparison input before an ordinary A sees its task."""
-    from . import history
+    from . import accepted_prefix
     directory=_directory(root,normal_step=job['step'])
     path=directory/'shortlist.json'
-    computed=dict(selection.shortlist(selection.public_inputs(history.rebuild(root,job['step'],write_cache=False))),
-        source_nodes=job['history']['nodes'])
+    prefix=accepted_prefix.for_job(job)
+    snapshot=c.read(originals.resolve_root_ref(root,job['history']['breadth_snapshot']))
+    identities=[]
+    for field in ('current_candidate','a_recommended','historical_a_recommendation','actual_submission'):
+        item=snapshot.get(field)
+        identity=item.get('candidate_id') if isinstance(item,dict) else None
+        if identity is not None and identity not in identities:identities.append(identity)
+    nominations=job['history'].get('view',{}).get('candidates',{}).get('nominations') or {}
+    for kind in ('reps','extras'):
+        for item in nominations.get(kind,[]):
+            identity=item.get('candidate_id')
+            if identity is not None and identity not in identities:identities.append(identity)
+    members=[];known=set()
+    for identity in identities:
+        candidate=accepted_prefix.candidate(root,prefix,identity)
+        fact=candidate['observation']
+        if fact['id'] in known:continue
+        known.add(fact['id'])
+        members.append(dict(candidate_id=fact['id'],metric=fact['metric'],evaluation_key=fact['evaluation_key'],
+            direction=fact['direction'],status=fact['status'],first_step=candidate['first_step']))
+    computed=dict(version=2,candidate_count=snapshot['candidate_count'],latest_a_step=snapshot['latest_a_step'],
+        a_recommended=(snapshot.get('a_recommended') or {}).get('candidate_id'),members=members,
+        rule=('Inline rows preview explicit current candidate pointers. Every candidate in the frozen '
+            'public history remains selectable by its exact reference; A owns scientific comparison and choice.'),
+        source_prefix=prefix)
     if path.exists():
         if c.read(c.regular(path))!=computed:raise ValueError('Ordinary A comparison input changed')
     else:_save(path,computed)
     final=directory/'screen.json'
-    frozen=dict(version=2,public_view_version=3,shortlist_ref=c.record_ref(path),source_nodes=computed['source_nodes'],
+    frozen=dict(version=2,public_view_version=3,shortlist_ref=c.record_ref(path),source_prefix=prefix,
+        candidate_count=computed['candidate_count'],rule=computed['rule'],
         rows=[dict(member,smoke=dict(status='not_run',note='explicit_candidate_required'),
             audit=dict(status='not_run',note='read_exact_candidate_audit_receipts')) for member in computed['members']])
     if final.exists():
@@ -138,7 +199,7 @@ def _screen(root, mark, *, job=None):
         raise ValueError('Unsupported frozen candidate catalogue')
     if mark.get('normal_step') is not None and job is not None:
         owner_job=originals.source_job(source) if source is not None else job
-        if mark['normal_step']!=owner_job['step'] or value.get('source_nodes')!=owner_job['history']['nodes']:
+        if mark['normal_step']!=owner_job['step'] or value.get('source_prefix')!=owner_job['history']['prefix']:
             raise ValueError('Ordinary A catalogue differs from its exact scientific input')
     original=directory/'shortlist.json'
     if source is not None:
@@ -157,7 +218,7 @@ def public_table(root, mark):
             evaluation_version=row['evaluation_key'], direction=row['direction'], status=row['status'],
             first_step=row['first_step'], smoke=row['smoke']['status'], audit=row['audit']['status'])
             for row in value['rows']],
-        rule=selection.SHORTLIST_RULE,
+        rule=value.get('rule',selection.SHORTLIST_RULE),
         fields=('candidate_comparison optionally records scientifically relevant alternatives in your chosen order. '
             'Apply the same original-goal criteria and explain relevant omissions or unresolved alternatives in your scientific reasoning. '
             'For delivery explicitly name candidate_recommendation and explain your scientific reasoning in scientific_result. '
@@ -189,6 +250,10 @@ def choice(root, job, payload):
     chosen = payload.get('candidate_recommendation')
     if chosen is None:raise delivery.DeliveryUnresolved('delivery_no_decision')
     value = _screen(root, job['selection'], job=job)
+    if job['selection'].get('normal_step') is not None:
+        from . import candidate_refs
+        if not candidate_refs.is_available(root,job,chosen):raise delivery.DeliveryUnresolved('selection_candidate_unavailable')
+        return chosen
     members = [row['candidate_id'] for row in value['rows']]
     if chosen not in members:raise delivery.DeliveryUnresolved('selection_candidate_unavailable')
     return chosen

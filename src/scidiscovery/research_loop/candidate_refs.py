@@ -143,8 +143,17 @@ def _input_mapping(root, job, source=None):
 
 
 def available_ids(root, job, *, source=None):
-    mapping = _input_mapping(root, job, source)
-    return [mapping.get(item, item) for item in job.get('history', {}).get('candidate_ids', [])]
+    raise ValueError('Candidate membership requires an exact point identity')
+
+
+def is_available(root,job,identity):
+    from . import accepted_prefix
+    try:accepted_prefix.candidate(root,accepted_prefix.for_job(job),identity)
+    except FileNotFoundError:return False
+    except ValueError as error:
+        if str(error)=='Candidate reference is outside this frozen scientific task':return False
+        raise
+    return True
 
 
 def references(records):
@@ -180,6 +189,12 @@ def for_job(job):
 
 
 def public_reference(root, job, identity):
+    if isinstance(identity,str) and root is not None and 'prefix' in job.get('history',{}):
+        from . import accepted_prefix
+        try:return accepted_prefix.candidate(root,accepted_prefix.for_job(job),identity).get('public_reference',identity)
+        except FileNotFoundError:pass
+        except ValueError:
+            if _MACHINE_CANDIDATE.fullmatch(identity):raise
     mapping=for_job(job)
     if identity in mapping:return mapping[identity]
     if job.get('worker_view_version')==1 and isinstance(identity,str) and _MACHINE_CANDIDATE.fullmatch(identity):
@@ -232,6 +247,17 @@ def resolve_reference(root, job, identity, *, source=None):
     if identity is not None and not isinstance(identity,str):
         raise ValueError('Candidate reference must name one exact scientific object')
     if job.get('worker_view_version')!=1:return identity
+    if root is not None and isinstance(identity,str) and 'prefix' in job.get('history',{}):
+        from . import accepted_prefix
+        try:return accepted_prefix.candidate(root,accepted_prefix.for_job(job),identity)['observation']['id']
+        except FileNotFoundError:
+            if _REFERENCE.fullmatch(identity):raise ValueError('Candidate reference is outside this frozen scientific task')
+            return identity
+        except ValueError as error:
+            if str(error)=='Candidate reference is outside this frozen scientific task':
+                if _REFERENCE.fullmatch(identity):raise
+                return identity
+            raise
     mapping=for_job(job);inverse={ref:canonical for canonical,ref in mapping.items()}
     if len(inverse)!=len(mapping):raise ValueError('Candidate reference is ambiguous')
     inputs = _input_mapping(root, job, source)
@@ -243,7 +269,7 @@ def resolve_reference(root, job, identity, *, source=None):
     return identity
 
 
-def control_payload(job, payload, *, root=None, source=None):
+def control_payload(job, payload, *, root=None, source=None, inventory=None):
     """Resolve only structured author choices; preserve the original return bytes."""
     if job.get('worker_view_version')!=1:return payload
     def resolve(identity):
@@ -252,11 +278,11 @@ def control_payload(job, payload, *, root=None, source=None):
     value=copy.deepcopy(payload)
     if job['role']=='W' and 'candidate_nominations' in value:
         from . import candidate_nominations
-        value['candidate_nominations']=candidate_nominations.resolve(root,job,value['candidate_nominations'],source=source)
+        value['candidate_nominations']=candidate_nominations.resolve(root,job,value['candidate_nominations'],source=source,inventory=inventory)
     if 'candidate_recommendation' in value:value['candidate_recommendation']=resolve(value['candidate_recommendation'])
     if root is not None and isinstance(value.get('candidate_recommendation'),str) and re.fullmatch(r'[HWAE]\d{3,}-I\d{3,}',value['candidate_recommendation']):
         from . import history
-        matches={row['candidate_id'] for row in history.candidate_materials(root,job)
-            if row['implementation_id']==value['candidate_recommendation']}
-        if len(matches)==1:value['candidate_recommendation']=matches.pop()
+        from . import accepted_prefix
+        match=accepted_prefix.candidate_for_implementation(root,accepted_prefix.for_job(job),value['candidate_recommendation'])
+        if match is not None:value['candidate_recommendation']=match
     return value

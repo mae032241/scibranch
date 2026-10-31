@@ -73,11 +73,14 @@ def _read_reference(root, ref):
     expected = f'host-control/configuration/revisions/{ref["revision"]:06d}.json'
     if ref['path'] != expected:
         raise ValueError('Configuration revision location changed')
-    path = c.regular(Path(root) / expected)
-    values = revisions(root, through=ref['revision'])
-    if ref['revision'] > len(values):
-        raise ValueError('Configuration revision is missing')
-    return copy.deepcopy(values[ref['revision'] - 1]['settings'])
+    from . import accepted_budget
+    accepted = accepted_budget.read(root).row(f'configuration/{ref["revision"]:06d}')
+    if accepted is None or accepted['ref'] != dict(path=expected):
+        raise ValueError('Configuration revision has not been accepted')
+    value = c.read(c.regular(Path(root) / expected))
+    if value.get('revision') != ref['revision']:
+        raise ValueError('Configuration revision is missing or changed')
+    return copy.deepcopy(value['settings'])
 
 
 def settings_path(root, job):
@@ -100,9 +103,14 @@ def for_step(root, step):
 
 def _reservation(root, step):
     path = _directory(root) / 'bindings' / f'{step:06d}.json'
-    if not path.exists():
+    from . import accepted_budget
+    row = accepted_budget.read(root).row(f'configuration-binding/{step:06d}')
+    if row is None:
+        if path.exists():
+            raise ValueError('Unaccepted configuration binding requires original-call reconciliation')
         return None
-    row = c.read(c.regular(path))
+    if not path.exists() or c.read(c.regular(path)) != row:
+        raise ValueError('Accepted configuration binding original changed')
     if set(row) != {'step', 'configuration_revision'} or row['step'] != step:
         raise ValueError('Configuration node binding changed')
     if row['configuration_revision'] is not None:
@@ -121,8 +129,17 @@ def for_new_job(root, step):
 
 def current(root):
     """Pure policy read: latest saved snapshot, without budget admission reads."""
-    values = revisions(root)
-    return copy.deepcopy(values[-1]['settings']) if values else c.settings(Path(root))
+    from . import accepted_budget
+    selected = accepted_budget.read(root)['configuration']
+    if selected is None:
+        return c.settings(Path(root))
+    return _read_reference(root, dict(revision=selected['revision'], **selected['ref']))
+
+
+def _current_revision(root):
+    from . import accepted_budget
+    selected = accepted_budget.read(root)['configuration']
+    return None if selected is None else c.read(Path(root)/selected['ref']['path'])
 
 
 def editable(root):
@@ -170,6 +187,14 @@ def status(root):
 
 def _resource_authorization_revision(root, events):
     from . import budget
+    from . import accepted_budget
+    if isinstance(events, accepted_budget.AcceptedEvents):
+        resource = events.state['resource']
+        if resource is None:
+            return None
+        event = events.state.event(resource['grant_ref'])
+        return budget._resource_ref(root, event) if (event.get('previous_grant') is not None
+            or event.get('operation_id') is not None) else None
     # Initial seeding only materializes the frozen grant; later grants revise it.
     changes = [event for event in events if event['kind'] == 'resource_grant'
                and (event.get('previous_grant') is not None or event.get('operation_id') is not None)]
@@ -253,6 +278,8 @@ def submit(root, configuration, *, base=None, expected_revision=None,
         identity.chmod(0o400)
         staged.chmod(0o400)
         os.replace(staged, path)
+        from . import accepted_budget
+        accepted_budget.accept_configuration(root, dict(path=path.relative_to(root).as_posix()), row)
         return dict(status(root), status='configuration_saved')
 
 
@@ -272,23 +299,24 @@ def bind_new_job(root, step):
         reserved = _reservation(root, step)
         if reserved is not None:
             return reserved['configuration_revision']
-        values = revisions(root)
+        current = _current_revision(root)
+        values = [] if current is None else [current]
         fork_runtime.preflight_selected_settings(root,
             values[-1]['settings'] if values else c.settings(root), step=step)
         ref = _reference(root, values[-1]) if values else None
-        previously_bound = {(_reservation(root, int(path.stem))['configuration_revision'] or {}).get('revision', 0)
-                            for path in (_directory(root) / 'bindings').glob('*.json')}
-        if values and values[-1]['revision'] not in previously_bound:
+        from . import accepted_budget
+        head = accepted_budget.read(root)
+        if values and values[-1]['revision'] > head['applied_configuration']:
             row = values[-1]
             settings = row['settings']
             changed = row.get('budget_changes', {})
             operation = f'configuration-{row["revision"]}'
             resource_operation = operation + '-resources'
             events, _ = budget._events(root)
-            applied = next((event for event in events if event['kind'] == 'budget_amend'
-                            and event.get('operation_id') == operation), None)
-            resource_applied = next((event for event in events if event['kind'] == 'resource_grant'
-                                     and event.get('operation_id') == resource_operation), None)
+            prior = events.state.row('operation/'+operation)
+            applied = events.state.event(prior['ref']) if prior is not None else None
+            prior = events.state.row('operation/'+resource_operation)
+            resource_applied = events.state.event(prior['ref']) if prior is not None else None
             # Check both predecessors before applying either part of this save.
             # Matching numeric values do not erase a later operator decision.
             if changed and applied is None and row.get('budget_baseline') != budget.authorization_revision(root):
@@ -308,6 +336,6 @@ def bind_new_job(root, step):
                 budget.amend_execution_grant(root, allowance=settings['execution_resource_policy']['allowance'],
                     authorization_note=row['authorization_note'], operation_id=resource_operation)
         binding = _directory(root) / 'bindings' / f'{step:06d}.json'
-        c.write(binding, dict(step=step, configuration_revision=ref))
+        accepted_budget.accept_configuration_binding(root, step, dict(step=step, configuration_revision=ref))
         binding.chmod(0o400)
         return ref

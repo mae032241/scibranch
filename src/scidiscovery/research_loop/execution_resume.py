@@ -611,8 +611,7 @@ def resume(root,step,call_id,*,max_seconds,authorization_note,request_valid_seco
     authority._host_context(config)
     if original['binding']['interface']!=config['execution_interface'] or original['binding']['scope']!=config['scope']:
         raise q.IntegrityError('Recovery implementation differs from original allocation')
-    refs=recovery.prefix(root,budget.historical_step_limit(root)+1)
-    prior=recovery.call_view(root,[],refs).get((step,call_id))
+    prior=recovery.latest(root,step,call_id)
     if prior is not None and prior['phase'] in {'terminal','not_submitted'}:
         if prior['phase']=='terminal':
             observed=e.Records(config).directory(call_id)/'execution-observation.json'
@@ -660,7 +659,8 @@ def resume(root,step,call_id,*,max_seconds,authorization_note,request_valid_seco
         binding=original['binding'].get('mechanism_binding')
         accepted=records.accept(prepared,metadata,config['execution_interface'],expected_calls=[p.name for p in records.calls()],
             mechanism=binding['mechanism_ref'] if binding else None,recovery_admission=operation.check,operation_context=operation.context)
-        _publish(root,job,operation.base,adapter,query=False,context=operation.context)
+        row=c.accept_recovery_call(root,job,call_id,context=operation.context)
+        _publish(root,job,operation.base,adapter,row=row,query=False,context=operation.context)
         adapter.dispatch_lease(accepted)
         external,state=adapter.submit(prepared);records.bind_external(call_id,external,state)
         prior=operation.base
@@ -675,22 +675,22 @@ def resume(root,step,call_id,*,max_seconds,authorization_note,request_valid_seco
         if execution_status(details.get('state')) in {'known_success','known_failed'}:
             e.record_observation(config,adapter,call_id,operation_context=operation.context)
     if (prior is not None and prior.get('version')==2) or operation.base is not None:
-        _publish(root,job,operation.base or {key:prior[key] for key in ('source_step','call_id','scope','seal_ref','pending_set','allocation','request','decision','admission','origin')},adapter,context=operation.context)
+        row=c.accept_recovery_call(root,job,call_id,context=operation.context)
+        _publish(root,job,operation.base or {key:prior[key] for key in ('source_step','call_id','scope','seal_ref','pending_set','allocation','request','decision','admission','origin')},adapter,row=row,context=operation.context)
     else:
         return recovery.create(root,step)
     return dict(status='execution_resume_recorded',call_id=call_id,note='Original execution facts appended; the sealed scientific conclusion is unchanged.')
 
 
-def _publish(root,job,base,adapter,*,query=True,context=None):
-    from . import history,execution_recovery as recovery,experiments as e
-    rows=[row for row in history.managed_calls(root,job,context=context) if row['call_id']==base['call_id']]
-    if len(rows)!=1:raise q.IntegrityError('Recovered original accepted record is unavailable')
-    row=rows[0];detail=adapter.status_details(base['call_id']) if query else None
+def _publish(root,job,base,adapter,*,row,query=True,context=None):
+    from . import execution_recovery as recovery,experiments as e
+    if row['call_id']!=base['call_id']:raise q.IntegrityError('Recovered original accepted record is unavailable')
+    detail=adapter.status_details(base['call_id']) if query else None
     state=detail.get('state') if detail else None
     phase='terminal' if row['status'] in {'known_success','known_failed'} else 'not_submitted' if row['status']=='not_submitted' else 'status' if query else 'accepted'
     path=experiment_client.record_directory(root,job['step'])/'calls'/base['call_id']/'submission.json'
     submission=q._ref(root,path) if path.exists() else None
-    current=recovery.call_view(root,[],recovery.prefix(root,budget.historical_step_limit(root)+1),originals=False).get((job['step'],base['call_id']))
+    current=recovery.latest(root,job['step'],base['call_id'])
     if current is not None and all(current.get(key)==value for key,value in
             dict(phase=phase,row=row,native_state=state,submission=submission).items()):return
     proof=None

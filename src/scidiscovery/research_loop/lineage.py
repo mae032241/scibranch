@@ -369,7 +369,7 @@ def public_relations(graph, sources):
     return rows
 
 
-def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), selection_protocol=0,
+def render_audit_binding(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), selection_protocol=0,
          audit_projection_version=0, adjacent_audit=None, worker_view_version=1,assessment_job=None):
     from .protocol import require_current, _current, UnsupportedProtocol
     require_current(root)
@@ -671,3 +671,69 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
                 if context['applicable'] else
                 'Historical navigation only; this task requires no portfolio_review or active-work updates. Retain unresolved questions and exact scientific sources. Navigation grants no new scientific work.'))
     return binding,state
+
+
+def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), selection_protocol=0,
+         audit_projection_version=0, adjacent_audit=None, worker_view_version=1,assessment_job=None,source_rows=None):
+    """Bind a constant prefix reference and the selected current scientific state.
+
+    Complete history is the branch-owned public node navigation. Rendering an
+    entire audit is an explicit separate operation, never a task-build helper.
+    """
+    from . import accepted_budget, accepted_prefix, accepted_search
+    from .protocol import require_current
+    require_current(root)
+    head=accepted_budget.read(root)
+    prefix=head['prefix']
+    if source_cutoff is not None and source_cutoff!=prefix['cutoff']:
+        raise ValueError('A historical cut requires its own frozen branch visibility')
+    if extra_steps:
+        raise ValueError('A noncontiguous scientific cut requires explicit branch membership')
+    accepted_prefix.visibility(root,prefix)
+    state=accepted_search.state(root,step,head=head)
+    summary=state['summary']
+    tip=accepted_prefix.navigation(root,prefix)
+    recent=[] if tip is None else tip.get('recent',[])[-2:]
+    index=('inputs/history/'+prefix['tip']['navigation']['path'] if prefix['tip'] else None)
+    candidates=dict(selection_protocol=selection_protocol,scope='Accepted public facts; not scientific qualification.',
+        count=summary['candidate_count'],candidate_count=summary['candidate_count'],
+        coverage=summary['coverage'],current_candidate=summary['current_candidate'],
+        a_recommended=summary['a_recommended'],historical_a_recommendation=summary['historical_a_recommendation'],
+        actual_submission=summary['actual_submission'],candidate_facts=[],
+        candidate_facts_omitted_count=summary['candidate_count'],public_audits=[],audits_omitted_count=0,
+        index=index)
+    from . import candidate_nominations,candidate_refs
+    nominations=candidate_nominations.table_project(summary)
+    nomination_aliases={}
+    for row in [*nominations['representatives'],*nominations['extras']]:
+        identity=row['candidate']
+        if identity in nomination_aliases or len(identity)>160:continue
+        try:original=accepted_prefix.candidate(root,prefix,identity)
+        except (ValueError,FileNotFoundError):continue
+        nomination_aliases[identity]=original.get('public_reference',identity)
+    candidates['nominations']=candidate_refs.public_fields(
+        candidate_nominations.preview(nominations,'inputs/history/breadth-table.json'),nomination_aliases)
+    enabled=configuration_updates.for_new_job(root,step).get('search_policy') is not None
+    mechanisms=dict(availability='available' if enabled or summary['mechanism_count'] else 'unavailable',
+        count=summary['mechanism_count'],pending_count=summary['pending_count'],focus=summary['focus'],
+        catalog=dict(path='inputs/history/breadth-table.json',number_field='ordinal',
+            max_ordinal=summary['mechanism_count'],count=summary['mechanism_count']),
+        index='inputs/history/breadth-table.json',unfinished_plan=dict(remaining_count=summary['remaining_count'],
+            remaining=[],omitted_count=summary['remaining_count'],index=index))
+    view=dict(indexes=dict(nodes=index,candidates=index,mechanisms=index,relations=index),
+        node_count=prefix['count'],recent=recent,recent_omitted_count=max(0,prefix['count']-len(recent)),
+        mechanisms=mechanisms,candidates=candidates,
+        relationships=dict(count=summary['relation_count'],coverage=summary['coverage'],
+            scope='Declared relationships; read exact node navigation for original facts.'),
+        access='Read the indexed node and its previous links for complete history; exact public entity pages support point choices. Unread history remains unknown.')
+    binding=dict(prefix=prefix,breadth_snapshot=head['search_ref'],inputs=[],view=bounded_brief(view))
+    if audit_projection_version==1:
+        binding.update(audit_projection_version=1,adjacent_audit=adjacent_audit,
+            audit_receipts=[adjacent_audit] if adjacent_audit is not None else [])
+    if assessment_job is not None and role=='A' and enabled:
+        context=search.assessment_context(root,dict(assessment_job,history=binding),state=state,source_rows=source_rows)
+        binding['portfolio_assessment']=dict(required_for_completed_w=context['applicable'],
+            assessed_w=[dict(source_step=row['step'],pointer='/scientific_result') for row in context['completed_w']],
+            active_work_count=summary['work_count'],work_index=index,
+            instruction='Assess the exact completed W and all active work; use public point pages and preserve unresolved evidence.')
+    return binding,state if enabled or summary['mechanism_count'] else None

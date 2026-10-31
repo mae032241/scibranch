@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import time
 
-from . import contracts, history, originals
+from . import accepted_budget, contracts, history, originals
 
 
 def clock_stamp():
@@ -46,11 +46,13 @@ def _duration(before, after, *, legacy_elapsed=False, exclude_downtime=False):
 
 def _paused_checkpoint(root, settings, events):
     from . import qualification as q
-    phase = next((event['phase'] for event in reversed(events) if event['kind'] == 'clock'), 'paused')
+    phase = (events.state['clock']['phase'] if isinstance(events, accepted_budget.AcceptedEvents) else
+        next((event['phase'] for event in reversed(events) if event['kind'] == 'clock'), 'paused'))
     if settings.get('time_budget_basis') != 'active' or phase != 'paused':
         raise ValueError('Cold clock continuation requires an active budget already paused')
     started = Path(root) / 'host-started.json'
-    head = (dict(seq=events[-1]['seq'], ref=q._ref(root, Path(root) / 'control-ledger' / f'{events[-1]["seq"]:06d}.json'))
+    seq = events.state['seq'] if isinstance(events, accepted_budget.AcceptedEvents) else events[-1]['seq'] if events else 0
+    head = (dict(seq=seq, ref=q._ref(root, Path(root) / 'control-ledger' / f'{seq:06d}.json'))
             if events else None)
     return dict(version=1, basis='active', phase='paused', head=head,
                 started=q._ref(root, started) if started.exists() else None)
@@ -70,13 +72,21 @@ def _verify_reanchor(root, settings, event, previous):
             or checkpoint['settings_ref'] != q._ref(root, Path(root) / 'settings.json')
             or checkpoint['budget'] != _paused_checkpoint(root, settings, previous)):
         raise ValueError('Cold clock continuation lost its original ledger or settings')
-    before = previous[-1] if previous else contracts.read(Path(root) / 'host-started.json') if checkpoint['budget']['started'] else None
+    before = ((previous.state['last_stamp'] or previous.state['clock']['start']) if isinstance(previous, accepted_budget.AcceptedEvents) else
+        previous[-1] if previous else contracts.read(Path(root) / 'host-started.json') if checkpoint['budget']['started'] else None)
     if before is None or before['boot_id'] == event['boot_id']:
         raise ValueError('Cold clock continuation must bridge an original paused boot')
 
 
 def _events(root, *, resources=False):
-    return _read_events(root, contracts.settings(root), resources=resources)
+    state = accepted_budget.read(root)
+    events = accepted_budget.AcceptedEvents(state)
+    return (events, state.parent, accepted_budget.resource_view(state)) if resources else (events, state.parent)
+
+
+def audit_events(root, *, resources=False):
+    """Explicit full control-log audit; ordinary control consumes its head."""
+    return _read_events(Path(root), contracts.settings(root), resources=resources)
 
 
 def _read_events(root, settings, *, resources=False):
@@ -94,8 +104,7 @@ def _read_events(root, settings, *, resources=False):
                 or type(event.get('at_boottime')) not in (int, float)
                 or not math.isfinite(event['at_boottime']) or event['at_boottime'] < 0
                 or not isinstance(event.get('boot_id'), str) or not event['boot_id']
-                or event.get('kind') not in {'clock', 'budget_amend', 'closeout_begin', 'closeout_resume', 'action_intent', 'action_outcome',
-                    'final_a_return', 'resource_grant', 'resource_reserve', 'resource_rebind', 'resource_bind', 'resource_settle', 'resource_release'}):
+                or event.get('kind') not in accepted_budget.EVENT_KINDS):
             raise ValueError('Control ledger identity, sequence or time changed')
         if 'reanchor' in event:
             _verify_reanchor(root, settings, event, events)
@@ -197,14 +206,15 @@ def _resource_settings(root):
     its immutable origin remains the baseline for all later accounting.
     """
     settings = contracts.settings(root)
+    state = accepted_budget.read(root)
+    resource = state['resource']
+    if resource is not None:
+        saved = contracts.read(Path(root)/resource['settings_ref']['path'])
+        return saved.get('settings', saved)
     if settings.get('execution_resource_policy') is not None:
         return settings
     from . import configuration_updates
-    for index, path in enumerate(sorted((Path(root) / 'host-control/configuration/revisions').glob('*.json')), 1):
-        row = configuration_updates.revisions(root, through=index)[-1]
-        if row['settings'].get('execution_resource_policy') is not None:
-            return row['settings']
-    return settings
+    return configuration_updates.current(root)
 
 
 def _resource_owner(settings):
@@ -336,8 +346,8 @@ def _amend_execution_grant_locked(root, *, allowance, authorization_note, operat
     with _ledger_writer(root):
         events, parent, (grants, _) = _events(root, resources=True)
         if operation_id is not None:
-            prior = next((event for event in events if event['kind'] == 'resource_grant'
-                          and event.get('operation_id') == operation_id), None)
+            operation = events.state.row('operation/'+operation_id)
+            prior = events.state.event(operation['ref']) if operation is not None else None
             if prior is not None:
                 if prior['allowance'] != allowance or prior['owner'] != owner:
                     raise ValueError('Execution resource amendment operation changed')
@@ -362,9 +372,10 @@ def reserve_execution(root, *, binding, request_ref, decision_ref, budget, grant
     verified_rebind=None
     if unprepared_recovery is not None:
         from .execution_resume import verify_rebind
-        for original in execution_accounting(root)['reservations']:
-            if (original['binding']['call_id']==binding['call_id'] and original['binding']['scope']==binding['scope']
-                    and original['binding']!=binding):
+        found = accepted_budget.resource_for_call(accepted_budget.read(root), binding)
+        if found is not None:
+            _, original = found
+            if original['binding']['scope'] == binding['scope'] and original['binding'] != binding:
                 verify_rebind(root,unprepared_recovery,original['binding'],binding)
                 verified_rebind=(original['ref'],original['binding'])
     with _ledger_writer(root,context=operation_context):
@@ -377,8 +388,8 @@ def reserve_execution(root, *, binding, request_ref, decision_ref, budget, grant
             if original['budget'] != budget or original['released'] or original['binding']!=binding:
                 raise ValueError('Original execution reservation cannot be replaced')
             return original['ref']
-        same=[(key,row) for key,row in reservations.items() if row['binding']['call_id']==binding['call_id']
-              and row['binding']['scope']==binding['scope']]
+        found = accepted_budget.resource_for_call(events.state, binding)
+        same = [found] if found is not None and found[1]['binding']['scope'] == binding['scope'] else []
         if same:
             from .execution_resume import verify_rebind
             if len(same)!=1:
@@ -389,7 +400,7 @@ def reserve_execution(root, *, binding, request_ref, decision_ref, budget, grant
             if original['binding']==binding:return original['ref']
             if unprepared_recovery is None or original['bound'] is not None or original['actual']:
                 raise ValueError('Accepted reservation cannot change authority')
-            total={key:sum(({**item['budget'],**item['actual']}).get(key,0) for item in reservations.values() if not item['released']) for key in budget}
+            total = events.state['resource']['held']
             if any(total[key]>min(effective_allowance[key],grant['allowance'][key]) for key in budget):
                 raise ValueError('Current cumulative resource allowance cannot authorize the held reservation')
             if verified_rebind!=(original['ref'],original['binding']):
@@ -400,10 +411,8 @@ def reserve_execution(root, *, binding, request_ref, decision_ref, budget, grant
                     binding=binding,proof=unprepared_recovery)
             return original['ref']
         remaining = {key: min(effective_allowance[key], grant['allowance'][key]) for key in budget}
-        for original in reservations.values():
-            if not original['released']:
-                for key, amount in {**original['budget'], **original['actual']}.items():
-                    remaining[key] -= amount
+        for key, amount in events.state['resource']['held'].items():
+            remaining[key] -= amount
         if any(budget[key] > remaining[key] for key in budget):
             raise ValueError('Cumulative execution resources are insufficient')
         event = _append(root, settings, events, parent, kind='resource_reserve', owner=owner,
@@ -414,6 +423,13 @@ def reserve_execution(root, *, binding, request_ref, decision_ref, budget, grant
 
 def _reserved(state, reservation):
     _, rows = state
+    if isinstance(rows, accepted_budget.ResourceRows):
+        event = rows.state.event(reservation)
+        identity = event['reservation_id']
+        row = rows.get(identity)
+        if row is None or row['ref'] != reservation:
+            raise ValueError('Exact execution reservation is unavailable')
+        return identity, row
     matches = [(key, row) for key, row in rows.items() if row['ref'] == reservation]
     if len(matches) != 1:
         raise ValueError('Exact execution reservation is unavailable')
@@ -497,7 +513,23 @@ def release_execution(root, *, reservation, retirement):
 
 def execution_accounting(root):
     root = Path(root).resolve(); settings = _resource_settings(root); owner = _resource_owner(settings)
-    _, _, (grants, reservations) = _events(root, resources=True)
+    events, _, (grants, reservations) = _events(root, resources=True)
+    grant = grants.get(owner['key'])
+    remaining = dict(grant['allowance']) if grant else dict(settings['execution_resource_policy']['allowance'])
+    if events.state['resource'] is not None:
+        for key, amount in events.state['resource']['held'].items():
+            remaining[key] -= amount
+    count = 0 if events.state['resource'] is None else events.state['resource']['reservation_count']
+    return dict(owner=owner, grant=grant, remaining=remaining, reservation_count=count,
+        reservations_omitted_count=count, **(dict(reservations=[]) if not count else {}))
+
+
+def audit_execution_accounting(root):
+    """Explicit historical listing, never called by new admission."""
+    root = Path(root).resolve()
+    settings = _resource_settings(root)
+    owner = _resource_owner(settings)
+    _, _, (grants, reservations) = audit_events(root, resources=True)
     grant = grants.get(owner['key'])
     remaining = dict(grant['allowance']) if grant else dict(settings['execution_resource_policy']['allowance'])
     for row in reservations.values():
@@ -517,9 +549,9 @@ def authorization_revision(root):
     """Only explicit ceiling amendments revise authority; clocks never do."""
     root = Path(root).resolve(); settings = contracts.settings(root)
     events, _ = _events(root)
-    changes = [event for event in events if event['kind'] == 'budget_amend']
-    if changes:
-        return _resource_ref(root, changes[-1])
+    reference = events.state['latest'].get('budget_amend')
+    if reference is not None:
+        return _resource_ref(root, events.event(reference))
     from . import qualification as q
     return q._ref(root, root / 'settings.json')
 
@@ -561,6 +593,10 @@ def _ledger_writer(root, *, context=None):
 def _append(root, settings, events, parent, **fields):
     from .protocol import require_current
     require_current(root)
+    if isinstance(events, accepted_budget.AcceptedEvents):
+        if 'reanchor' in fields:
+            _verify_reanchor(root, settings, dict(fields, **clock_stamp()), events)
+        return accepted_budget.append_budget_event(root, events, **fields)
     stamp = clock_stamp()
     event = dict(seq=len(events) + 1, parent_ref=parent,
                  settings_ref=contracts.record_ref(root / 'settings.json'), **stamp, **fields)
@@ -611,6 +647,10 @@ def reanchor_paused_checkpoint(root, checkpoint_ref, transfer_ref):
 
 def _ceiling_limits(settings, events):
     """Fold verified immutable amendments without sampling current consumption."""
+    if isinstance(events, accepted_budget.AcceptedEvents):
+        state = events.state
+        return ({key: state['ceilings'][key] for key in ('max_tokens', 'max_seconds')},
+            state['ceilings']['max_steps'], state['historical_max_steps'])
     limits = dict(max_tokens=settings['max_tokens'], max_seconds=settings['max_seconds'])
     max_steps = historical_steps = settings['max_steps']
     for event in events:
@@ -639,7 +679,7 @@ def snapshot(root, settings=None, *, sample_stamp=None):
     original = contracts.settings(root)
     if settings is not None and any(settings.get(key) != original.get(key) for key in ('goal_id', 'objective', 'public_root', 'global_materials')):
         raise ValueError('Budget view differs from original research identity')
-    events, _ = _read_events(root, original)
+    events, _ = _events(root)
     return _snapshot(root, original, events, sample_stamp=sample_stamp)
 
 
@@ -785,6 +825,30 @@ def _clock_durations(start, events, now, *, basis, duration=None, advance_floors
 
 
 def _snapshot(root, settings, events, *, sample_stamp=None):
+    if isinstance(events, accepted_budget.AcceptedEvents):
+        state = events.state
+        clock = state['clock']
+        start = clock['start']
+        now = (clock_stamp() if state['seq'] or start is not None else None) if sample_stamp is None else sample_stamp
+        if state['last_stamp'] is not None and now is not None:
+            _duration(state['last_stamp'], now, legacy_elapsed=clock['basis'] == 'elapsed')
+        if start is not None and now is not None and not clock['bridged']:
+            _duration(start, now, legacy_elapsed=clock['basis'] == 'elapsed')
+        durations, phase, tail = accepted_budget.clock_sample(clock, now)
+        elapsed = (None if clock['bridged'] else _duration(start, now,
+            legacy_elapsed=clock['basis'] == 'elapsed') if start is not None else 0.)
+        if clock['basis'] == 'elapsed' and start is not None:
+            elapsed = _duration(dict(at_unix=start['at_unix']), now)
+        consumed = durations['advance']+durations['waiting'] if clock['basis'] == 'active' else elapsed
+        return dict(state['ceilings'], original_max_steps=settings['max_steps'], time_budget_basis=clock['basis'],
+            advance_seconds=durations['advance'], waiting_seconds=durations['waiting'],
+            paused_seconds=durations['paused'], unclassified_seconds=durations['unclassified'],
+            elapsed_seconds=elapsed, consumed_seconds=consumed,
+            seconds_remaining=max(0., state['ceilings']['max_seconds']-consumed), clock_phase=phase,
+            ledger_events=state['seq'], historical_time='unknown_before_ledger' if clock['basis'] == 'elapsed'
+                else 'recorded_active_with_unmeasured_paused_gap' if clock['bridged'] else 'recorded',
+            **(dict(unmeasured_paused_gap=True) if clock['bridged'] else {}),
+            **(dict(unmeasured_shutdown_tail=True) if tail else {}))
     basis = settings.get('time_budget_basis', 'elapsed')
     if basis not in {'active', 'elapsed'}:
         raise ValueError('Unknown frozen time-budget basis')
@@ -828,19 +892,19 @@ def status_snapshot(root):
     if settings.get('time_budget_basis', 'elapsed') != 'active':
         return snapshot(root, settings)
     events, _ = _events(root)
-    phase = next((event['phase'] for event in reversed(events) if event['kind'] == 'clock'), 'paused')
+    phase = events.state['clock']['phase']
     if phase != 'paused':
-        return snapshot(root, settings)
+        return _snapshot(root, settings, events)
     started = root / 'host-started.json'
-    stamp = events[-1] if events else contracts.read(started) if started.exists() else None
-    if started.exists() and not any(event['kind'] == 'clock' for event in events):
+    stamp = events.state['last_stamp'] if events else contracts.read(started) if started.exists() else None
+    if started.exists() and not events.state['clock']['clock_seen']:
         start = contracts.read(started)
         if (stamp is None or start.get('boot_id') == stamp.get('boot_id')
                 and start.get('at_boottime', 0.) > stamp.get('at_boottime', 0.)):
             # A pre-start configuration fact is not the initial paused clock's
             # endpoint. Both choices are saved facts; never sample now here.
             stamp = start
-    value = snapshot(root, settings, sample_stamp=stamp)
+    value = _snapshot(root, settings, events, sample_stamp=stamp)
     if started.exists():
         value.update(paused_seconds=None, elapsed_seconds=None)
     return value
@@ -861,8 +925,8 @@ def transition(root, phase, reason, *, operation_context=None):
     with _ledger_writer(root,context=operation_context):
         events, parent = _events(root)
         # Check rollback even when the phase is unchanged.
-        snapshot(root, settings)
-        current = next((item['phase'] for item in reversed(events) if item['kind'] == 'clock'), None)
+        _snapshot(root, settings, events)
+        current = events.state['clock']['phase'] if events.state['clock']['clock_seen'] else None
         if current != phase:
             _append(root, settings, events, parent, kind='clock', phase=phase, reason=reason)
 
@@ -908,10 +972,15 @@ def execution_blocked(root, *, ignore_operation=None, include_managed=True, igno
                         or runtime.process_matches(identity, action['intent']['operation_id'])
                         or _delivery_group_live(identity)):
                     return True
-    if any(op != ignore_operation for op in state['unresolved_operations']):
+    unresolved = state['unresolved_operation_count']
+    if ignore_operation is not None:
+        ignored = accepted_budget.read(root).row('delivery-operation/'+ignore_operation)
+        unresolved -= int(ignored is not None and ignored['pending'] > 0)
+    if unresolved > 0:
         return True
-    from . import fork_runtime
-    for step in fork_runtime.local_steps(root, include_native=True):
+    state_head = accepted_budget.read(root)
+    current_native = state_head['current_native']
+    for step in (() if current_native is None else (current_native['step'],)):
         try:
             record = execution.record(root, step)
             if not (record / 'native-intent.json').exists():
@@ -1013,8 +1082,7 @@ def historical_step_limit(root):
     root = Path(root)
     settings = contracts.settings(root)
     events, _ = _events(root)
-    return max(_ceiling_limits(settings, events)[2],
-               max((int(path.stem) for path in (root / 'jobs').glob('*.json')), default=0))
+    return max(_ceiling_limits(settings, events)[2], events.state['max_local_step'])
 
 
 step_limit = effective_max_steps
@@ -1022,18 +1090,15 @@ step_limit = effective_max_steps
 
 def task_step_available(root, step):
     """Check a new task's resource count independently of its logical label."""
-    from . import fork_runtime
-    if not fork_runtime.is_fork(root):
+    state = accepted_budget.read(root)
+    if not state['is_fork']:
         return step <= step_limit(root)
-    additional = int(step not in fork_runtime.local_steps(root))
+    additional = int(state.row(f'job/{step:03d}') is None)
     return used_steps(root) + additional <= step_limit(root)
 
 
 def usage_accounting(root, meter, *, events=None):
     """Retain reported consumption and unknown coverage without estimated fees."""
-    root = Path(root).resolve()
-    if events is None:
-        events, _ = _events(root)
     # Missing billing coverage neither invents usage nor grants replay;
     # unresolved execution is checked through its own retained facts.
     return dict(reserved_tokens=0, accounted_tokens=meter['observed_tokens'],
@@ -1077,10 +1142,11 @@ def _amend_locked(root, *, max_tokens=None, max_seconds=None, max_steps=None, au
     with _ledger_writer(root):
         events, parent = _events(root)
         if operation_id is not None:
-            prior = next((event for event in events if event.get('operation_id') == operation_id), None)
+            operation = events.state.row('operation/'+operation_id)
+            prior = events.state.event(operation['ref']) if operation is not None else None
             if prior is not None:
                 return dict(status='budget_amended', amendment_seq=prior['seq'], before=prior['before'], after=prior['after'], consumption='retained')
-        value = snapshot(root, settings)
+        value = _snapshot(root, settings, events)
         before = {key: value[key] for key in ('max_tokens', 'max_seconds')}
         after = dict(before, **({} if max_tokens is None else dict(max_tokens=max_tokens)),
                      **({} if max_seconds is None else dict(max_seconds=max_seconds)))
@@ -1165,7 +1231,8 @@ def _final_a_reserve(settings, job, events):
         return dict(tokens=0, seconds=0., steps=0)
     preparation = 0.
     if job.get('purpose') == 'closeout':
-        begin = next((row for row in reversed(events) if row['kind'] == 'closeout_begin'), None)
+        begin = (events.state['closeout'] if isinstance(events, accepted_budget.AcceptedEvents) else
+            next((row for row in reversed(events) if row['kind'] == 'closeout_begin'), None))
         if (begin is None or begin['mode'] not in {'model', 'final'} or job.get('source_cutoff') != begin['source_cutoff']
                 or job['step'] < begin['first_step']):
             raise ValueError('Final A has no original model closeout boundary')
@@ -1346,15 +1413,28 @@ def final_a_usage_unknown(accepted, usage, *, ignore_step=None):
         stopped = accepted['selection']['stopped_original']
         if stopped is not None:
             allowed.add(stopped['step'])
-    return any(step not in allowed for step in usage.get('blocking_unknown_steps', usage['unknown_steps']))
+    return _usage_unknown(usage, allowed)
+
+
+def _usage_unknown(usage, allowed=()):
+    known = set(usage.get('blocking_unknown_steps', usage.get('unknown_steps', [])))
+    count = usage.get('blocking_unknown_count', len(known))
+    return count-len(known.intersection(allowed)) > 0
 
 
 def _active_final(events):
+    if isinstance(events, accepted_budget.AcceptedEvents):
+        phase = events.state['closeout']
+        return phase if phase is not None and phase['mode'] == 'final' else None
     phase = next((row for row in reversed(events) if row['kind'] in {'closeout_begin','closeout_resume'}), None)
     return phase if phase is not None and phase['kind'] == 'closeout_begin' and phase['mode'] == 'final' else None
 
 
 def _final_boundary(events, job):
+    if isinstance(events, accepted_budget.AcceptedEvents):
+        row = events.state['closeout']
+        return row if (row is not None and row['mode'] == 'final' and job.get('role') == 'A'
+            and job.get('formal_review') is None and job.get('final_only') and job['step'] == row['first_step']) else None
     return next((row for row in reversed(events) if row['kind'] == 'closeout_begin' and row['mode'] == 'final'
         and job.get('role') == 'A' and job.get('formal_review') is None and job.get('final_only')
         and job['step'] == row['first_step']), None)
@@ -1363,6 +1443,9 @@ def _final_boundary(events, job):
 def normal_resume(root, before_step=None, *, events=None):
     if events is None:
         events, _ = _events(root)
+    if isinstance(events, accepted_budget.AcceptedEvents):
+        row = events.state['resume']
+        return events.event(row['ref']) if row is not None and (before_step is None or row['first_step'] <= before_step) else None
     return next((row for row in reversed(events) if row['kind'] == 'closeout_resume'
         and (before_step is None or row['first_step'] <= before_step)), None)
 
@@ -1372,7 +1455,7 @@ def _event_ref(root, event):
 
 
 def _validate_cursor(root, cursor, before_step, events):
-    from . import fork_runtime
+    from . import fork_runtime, handoff_state
     fields = {'role','parents','instruction','evidence_return','correction_request','author_correction','source_refs'}
     if (not isinstance(cursor,dict) or set(cursor) != fields or cursor['role'] not in ('H','W','A','E')
             or not isinstance(cursor['instruction'],str) or not isinstance(cursor['parents'],list)
@@ -1382,9 +1465,13 @@ def _validate_cursor(root, cursor, before_step, events):
     for ref in cursor['source_refs']:
         number = ref.get('step')
         if (set(ref) != {'step','seal_ref'} or type(number) is not int or number <= 0
-                or not isinstance(ref['seal_ref'], dict) or set(ref['seal_ref']) != {'path'}
-                or fork_runtime.source_job(root, number).get('final_only')):
+                or not isinstance(ref['seal_ref'], dict) or set(ref['seal_ref']) != {'path'}):
             raise ValueError('Final resume source differs from declared normal science')
+        # These jobs describe the already accepted sequence. Reading their
+        # saved route flags does not reopen original scientific verification.
+        with handoff_state.loading():
+            if fork_runtime.source_job(root, number).get('final_only'):
+                raise ValueError('Final resume source differs from declared normal science')
         steps.append(number)
     resumed = normal_resume(root,before_step,events=events)
     if resumed is None:
@@ -1397,27 +1484,30 @@ def _validate_cursor(root, cursor, before_step, events):
         if (Path(root)/'jobs'/f'{number:03d}.json').exists()
         and not contracts.read(Path(root)/'jobs'/f'{number:03d}.json').get('final_only')]
     if fork_runtime.is_fork(root):
-        expected = fork_runtime.science_steps(root, before_step)
+        with handoff_state.loading():
+            expected = fork_runtime.science_steps(root, before_step)
     if (steps != sorted(set(steps)) or any(number not in steps for number in cursor['parents']) or steps != expected):
         raise ValueError('Final resume parents are outside its exact declared sequence')
 
 
 def require_cursor_eligibility(root, cursor, before_step, events):
-    """Check accepted seals at the routing boundary, never during grant replay."""
+    """Bind the saved accepted sequence without revalidating its old science.
+
+    FINAL routing retains exact source seals and parents. New execution still
+    passes its current admission fences; old seals do not renew that permission.
+    """
     _validate_cursor(root,cursor,before_step,events)
     if cursor['source_refs'] != _normal_source_refs(root,before_step,events):
         raise ValueError('Final resume source differs from accepted normal science')
-    for ref in cursor['source_refs']:
-        from . import fork_runtime
-        if (Path(root)/'jobs'/f'{ref["step"]:03d}.json').exists():
-            contracts.validate(contracts.workspace(root,ref['step']))
-        elif not fork_runtime.is_fork(root):
-            raise ValueError('Final resume scientific original is missing')
-        elif history.source_seal_ref(originals.node(root,ref['step'])) != ref['seal_ref']:
-            raise ValueError('Final resume inherited scientific original changed')
 
 
 def _threshold_raised(events, after_seq):
+    if isinstance(events, accepted_budget.AcceptedEvents):
+        ref = events.state['explicit_amendment']
+        latest = events.event(ref) if ref is not None else None
+        return latest is not None and latest['seq'] > after_seq and (any(
+            latest['after'][key] > latest['before'][key] for key in ('max_tokens','max_seconds'))
+            or latest.get('after_max_steps',0) > latest.get('before_max_steps',0))
     latest = next((row for row in reversed(events) if row['kind'] == 'budget_amend' and row['seq'] > after_seq
                    and not str(row.get('operation_id', '')).startswith('configuration-')), None)
     return latest is not None and (any(latest['after'][key] > latest['before'][key] for key in ('max_tokens','max_seconds'))
@@ -1428,6 +1518,8 @@ def _validate_resume_event(root, event, previous):
     if 'reconciliation_ref' in event:
         raise ValueError('FINAL reconciliation rescue events are no longer supported')
     begin = _active_final(previous)
+    if begin is not None and isinstance(previous, accepted_budget.AcceptedEvents):
+        begin = previous.event(begin['ref'])
     if (begin is None or begin.get('resume_cursor') is None
             or event.get('source_final') != _event_ref(root,begin)
             or type(event.get('first_step')) is not int or event['first_step'] <= begin['first_step']
@@ -1441,6 +1533,9 @@ def resume_final(root, begin, first_step):
     settings = contracts.settings(root)
     with _ledger_writer(root):
         events,parent = _events(root)
+        current = _active_final(events)
+        if current is not None and begin['seq'] == current['seq']:
+            begin = events.event(current['ref'])
         value = dict(kind='closeout_resume', source_final=_event_ref(root,begin), first_step=first_step)
         # Validate before publication, preserving the original final cycle.
         probe = dict(value,seq=len(events)+1)
@@ -1452,6 +1547,17 @@ def resume_final(root, begin, first_step):
 def resume_cursor(root, resume, *, events=None):
     if events is None:
         events,_ = _events(root)
+    if isinstance(events, accepted_budget.AcceptedEvents):
+        saved = events.state['resume']
+        original = events.event(saved['ref']) if saved is not None else None
+        if saved is None or (resume != original and resume != saved):
+            raise ValueError('Normal resume must be the exact accepted journal event')
+        if _event_ref(root, original) != dict(seq=saved['seq'], record=saved['ref']):
+            raise ValueError('Normal resume changed its accepted journal reference')
+        begin = events.event(original['source_final']['record'])
+        if original['source_final'] != _event_ref(root, begin):
+            raise ValueError('Normal resume changed its final source')
+        return begin['resume_cursor']
     if not any(row['kind'] == 'closeout_resume' and row == resume for row in events):
         raise ValueError('Normal resume must be the exact immutable journal event')
     begin = next(row for row in events if row['seq'] == resume['source_final']['seq'])
@@ -1461,10 +1567,11 @@ def resume_cursor(root, resume, *, events=None):
 
 
 def _normal_source_refs(root, before_step, events):
-    from . import fork_runtime
+    from . import fork_runtime, handoff_state
     if fork_runtime.is_fork(root):
-        return [dict(step=number, seal_ref=history.source_seal_ref(originals.node(root,number)))
-            for number in fork_runtime.science_steps(root, before_step)]
+        with handoff_state.loading():
+            return [dict(step=number, seal_ref=history.source_seal_ref(originals.node(root,number)))
+                for number in fork_runtime.science_steps(root, before_step)]
     resumed = normal_resume(root,before_step,events=events)
     if resumed is None:
         refs,first = [],1
@@ -1511,7 +1618,7 @@ def _validate_final_a_event(root, settings, event, previous):
     fields = {'seq', 'parent_ref', 'settings_ref', 'at_unix', 'at_boottime', 'boot_id',
               'kind', 'version', 'step', 'attempt', 'basis', 'anchor', 'selection', 'reserve'}
     _final_a_policy(settings)
-    if (set(event) - {'uptime_accounting', 'observed_advance_seconds'} != fields
+    if (set(event) - {'uptime_accounting', 'observed_advance_seconds','head_updates','index_updates','control_files'} != fields
             or type(event['version']) is not int or event['version'] != 2
             or type(event['step']) is not int or event['step'] <= 0
             or type(event['attempt']) is not int or event['attempt'] != 0
@@ -1556,8 +1663,15 @@ def final_a_return(root, job, intent, *, events=None):
     if events is None:
         events, _ = _events(root)
     marker = (intent.get('budget_slice') or {}).get('final_return')
-    accepted = next((row for row in events if row['kind'] == 'final_a_return'
-        and (row['seq'] == marker.get('seq') if isinstance(marker,dict) else row['step'] == job['step'])), None)
+    if isinstance(events, accepted_budget.AcceptedEvents):
+        accepted = events.state['final_return']
+        if isinstance(marker, dict) and (accepted is None or accepted['seq'] != marker.get('seq')):
+            accepted = events.event(marker['record'])
+        if accepted is not None and accepted['step'] != job['step']:
+            accepted = None
+    else:
+        accepted = next((row for row in events if row['kind'] == 'final_a_return'
+            and (row['seq'] == marker.get('seq') if isinstance(marker,dict) else row['step'] == job['step'])), None)
     if marker is None:
         if accepted is not None and accepted['step'] == job['step']:
             raise ValueError('Final A return reference is missing from its original intent')
@@ -1627,6 +1741,9 @@ def final_a_barrier(root, *, before_step=None, events=None):
     """Only the active FINAL cycle bars normal science."""
     if events is None:
         events,_ = _events(root)
+    if isinstance(events, accepted_budget.AcceptedEvents):
+        row = events.state['final_return']
+        return row if row is not None and (before_step is None or row['step'] < before_step) else None
     active = _active_final(events)
     return next((row for row in reversed(events) if row['kind'] == 'final_a_return'
         and (active is not None and row['step'] == active['first_step'])
@@ -1639,8 +1756,7 @@ def _accept_final_a(root, job, anchor, limits, *, final_report=None):
     with _ledger_writer(root):
         events, parent = _events(root)
         active = _active_final(events)
-        accepted = next((row for row in events if row['kind'] == 'final_a_return'
-            and (active is not None and row['step'] == active['first_step'])), None)
+        accepted = events.state['final_return'] if active is not None else None
         if accepted is not None:
             if accepted['step'] != job['step'] or accepted['anchor']['task_ref'] != anchor['task_ref']:
                 raise NodeBudgetUnavailable('final_a_return_consumed')
@@ -1775,7 +1891,8 @@ def require_final_a_delivery_eligibility(root, decision, binding):
     if marker is None:return None
     step = decision['step']
     job = contracts.read(contracts.regular(Path(root)/'jobs'/f'{step:03d}.json'))
-    result = contracts.validate(contracts.workspace(root,step))
+    from . import handoff_state
+    result = handoff_state.read_sealed(root,step)
     from . import delivery
     if binding != delivery.binding(root,job,result):
         raise ValueError('Final delivery must retain its exact original binding')
@@ -1880,12 +1997,12 @@ def node_admission(root, job, *, ignore_step=None, intent=None, final_report=Non
     original = contracts.settings(root)
     node_mode(root, settings=original)
     settings = configuration_updates.for_new_job(root, job['step']) if 'configuration_revision' not in job else contracts.settings(root, job)
-    events, _ = _read_events(root, original)
+    events, _ = _events(root)
     policy = node_limits(root, job, settings=settings)
     barrier = final_a_barrier(root, events=events)
     if not normal_resume_check and barrier is not None and barrier['step'] != job['step']:
         return 'final_a_return_consumed'
-    begin = closeout_state(root, events=events)['begin']
+    begin = events.state['closeout']
     if not normal_resume_check and begin is not None and begin['mode'] == 'final' and (job.get('role') != 'A' or job['step'] != begin['first_step']):
         return 'final_a_return_consumed'
     if job.get('final_only') and (begin is None or begin['mode'] != 'final' or job['step'] != begin['first_step']):
@@ -1925,7 +2042,7 @@ def node_admission(root, job, *, ignore_step=None, intent=None, final_report=Non
     if final_report is None and limits['max_tokens'] - meter.get('accounted_tokens', meter['observed_tokens']) <= 0:
         return 'node_budget_unavailable_tokens'
     if job.get('purpose') == 'closeout':
-        begin = closeout_state(root, events=events)['begin']
+        begin = events.state['closeout']
         if begin is None or begin['mode'] not in {'model', 'final'} or begin['source_cutoff'] != job['source_cutoff']:
             raise ValueError('Closeout node has no exact model boundary')
         floor = closeout_floor(settings, preparation_seconds=begin['preparation_seconds'])
@@ -1969,14 +2086,14 @@ def _observe_node_clock(root):
     with _ledger_writer(root):
         settings = contracts.settings(root)
         events, parent = _events(root)
-        phase = next((event['phase'] for event in reversed(events) if event['kind'] == 'clock'),
-            'paused' if settings.get('time_budget_basis', 'elapsed') == 'active' else None)
+        phase = events.state['clock']['phase']
         if settings.get('time_budget_basis', 'elapsed') != 'active':
             stamp = clock_stamp()
             return _snapshot(root, settings, events, sample_stamp=stamp), stamp
         event = _append(root, settings, events, parent, kind='clock', phase=phase,
             reason='accepted_native_budget_observation')
-        return _snapshot(root, settings, [*events, event], sample_stamp=event), event
+        updated, _ = _events(root)
+        return _snapshot(root, settings, updated, sample_stamp=event), event
 
 
 def stop_node(root, job, intent, limits, meter):
@@ -2000,7 +2117,7 @@ def node_report(root, job, intent, meter):
                 limits=intent['budget_slice']['limits'])
 
 
-def accept_continuation(root, job, paths, *, output_repair=None, automatic_recovery=None):
+def accept_continuation(root, job, paths, *, output_repair=None, automatic_recovery=None, inventory=None):
     from .protocol import require_current
     require_current(root,job)
     final=final_a_barrier(root)
@@ -2008,12 +2125,12 @@ def accept_continuation(root, job, paths, *, output_repair=None, automatic_recov
     if final is not None:
         from . import continuation
         if (final['step']!=job['step'] or not format_retry and
-                (output_repair is None or output_repair!=continuation.output_request(root,job['step'],paths[-1]))):
+                (output_repair is None or output_repair!=continuation.output_request(root,job['step'],paths[-1],inventory=inventory))):
             raise NodeBudgetUnavailable('final_a_return_consumed')
     from . import native
     if automatic_recovery is not None:
         from . import continuation
-        current = continuation.automatic_decision(root, job['step'])
+        current = continuation.automatic_decision(root, job['step'], inventory=inventory)
         if current != automatic_recovery or current.get('action') not in {'continue', 'retry'}:
             raise ValueError('Automatic recovery budget admission lost its exact source decision')
     tokens, seconds = _attempt_consumption(root, job, paths, automatic_recovery=automatic_recovery)
@@ -2033,9 +2150,7 @@ def accept_continuation(root, job, paths, *, output_repair=None, automatic_recov
     node_mode(root)
     reserve = (closeout_floor(settings, preparation_seconds=closeout_state(root)['begin']['preparation_seconds'])
         if job.get('purpose') == 'closeout' else delivery_reserve(settings)) or dict(tokens=0, seconds=0, steps=0)
-    unknown = meter.get('blocking_unknown_steps', meter['unknown_steps'])
-    if automatic_recovery is not None:
-        unknown = [step for step in unknown if step != job['step']]
+    unknown = _usage_unknown(meter, (job['step'],) if automatic_recovery is not None else ())
     if (unknown
             or limits['max_tokens'] - meter.get('accounted_tokens', meter['observed_tokens']) <= reserve['tokens']
             or limits['seconds_remaining'] <= reserve['seconds']
@@ -2051,6 +2166,24 @@ def closeout_state(root, *, events=None):
     """Only immutable control facts; no second balance or mutable mode file."""
     if events is None:
         events, _ = _events(root)
+    if isinstance(events, accepted_budget.AcceptedEvents):
+        state = events.state
+        actions = []
+        refs = [state['action_first'], state['action_last']]
+        for ref in refs:
+            if ref is not None:
+                intent = events.event(ref)
+                row = accepted_budget.action(root, intent['action_id'], head=state)
+                if row not in actions:
+                    actions.append(row)
+        begin = events.event(state['closeout']['ref']) if state['closeout'] is not None else None
+        resumed = events.event(state['resume']['ref']) if state['resume'] is not None else None
+        return dict(begin=begin, resume=resumed, actions=actions,
+            action_count=state['final_action_count'], unresolved_operation_count=state['unresolved_actions'],
+            unresolved_operations=([state['first_unresolved_operation']]
+                if state['first_unresolved_operation'] is not None else []),
+            unresolved_operations_omitted_count=max(0, state['unresolved_actions']
+                - int(state['first_unresolved_operation'] is not None)))
     begin, resumed, actions, operations = None, None, {}, {}
     for event in events:
         if event['kind'] == 'closeout_begin':
@@ -2105,6 +2238,13 @@ def closeout_floor(settings, *, preparation_seconds=0.):
 
 
 def used_steps(root, *, events=None):
+    state = accepted_budget.read(root) if events is None else events.state
+    return ((state['prepared_count'] if state['is_fork'] else state['max_local_step'])
+        + state['continuation_count'] + state['action_count'] + state['audit_count'])
+
+
+def audit_used_steps(root, *, events=None):
+    """Explicit audit of historical prepared originals, outside admission."""
     from . import execution
     from . import fork_runtime
     prepared = fork_runtime.local_steps(root)
@@ -2140,7 +2280,7 @@ def exploration_admission(root, job, *, ignore_step=None, intent=None,
     if meter is None:
         meter = native.usage(root)
     node = node_limits(root, job, settings=settings)
-    if any(step != ignore_step for step in meter.get('blocking_unknown_steps', meter['unknown_steps'])):
+    if _usage_unknown(meter, () if ignore_step is None else (ignore_step,)):
         return 'usage_unknown'
     node_mode(root, settings=settings)
     if limits['max_tokens'] - meter.get('accounted_tokens', meter['observed_tokens']) <= reserve['tokens']:
@@ -2161,7 +2301,7 @@ def begin_closeout(root, cutoff, first_step, reason, *, export_only=False, deliv
     settings = contracts.settings(root)
     with _ledger_writer(root):
         events, parent = _events(root)
-        existing = closeout_state(root)['begin']
+        existing = closeout_state(root, events=events)['begin']
         if existing is not None:
             if not final_only or existing['mode'] != 'model':
                 return existing
@@ -2195,7 +2335,7 @@ def accept_action(root, kind, operation_id, decision, binding, max_seconds):
         raise NodeBudgetUnavailable('final_a_return_consumed')
     # The final exception covers shared billing, not unresolved execution:
     # the original-effect gate above and the sealed-choice gate still apply.
-    if final_return is None and (meter.get('blocking_unknown_steps', meter['unknown_steps'])
+    if final_return is None and (_usage_unknown(meter)
             or meter.get('accounted_tokens', meter['observed_tokens']) >= limits['max_tokens']):
         raise NodeBudgetUnavailable('closeout_budget_unavailable')
     if final_return is None and (limits['seconds_remaining'] < max_seconds or used_steps(root) >= step_limit(root)):
@@ -2204,6 +2344,8 @@ def accept_action(root, kind, operation_id, decision, binding, max_seconds):
         events, parent = _events(root)
         action_id = f'action-{len(events) + 1:06d}'
         if final_return is not None:
+            if events.state['final_confirmed']:
+                raise NodeBudgetUnavailable('final_a_delivery_already_confirmed')
             actions = [row for row in events if row['kind'] == 'action_intent' and row.get('final_return') == final_return]
             if kind != ('submit' if not actions else 'confirm'):
                 raise NodeBudgetUnavailable('final_a_delivery_reserve_exhausted')
@@ -2379,7 +2521,7 @@ def review_configuration(root,job):
     record=execution.record(root,job['step'])
     intent=contracts.read(contracts.regular(record/'native-intent.json'))
     meter=contracts.read(record/'usage.json') if (record/'usage.json').exists() else dict(input_tokens=0,cached_input_tokens=0,output_tokens=0)
-    publish_review(root,job,intent,snapshot(Path(root)),meter,observed=(record/'usage.json').exists())
+    publish_review(root,job,intent,None,meter,observed=(record/'usage.json').exists())
     return dict(version=experiments.ADMISSION_VERSION,mode='soft',directory=str(directory),
         stage_anchor=contracts.record_ref(Path(root)/'jobs'/f'{job["step"]:03d}.json'))
 
@@ -2424,7 +2566,7 @@ def publish_review(root,job,intent,limits,meter,*,observed):
         # Soft stage targets advise the Worker; only the original shared window
         # bounds admission and optional managed execution time reservations.
         remaining=available_seconds
-        reason=('shared_usage_unknown' if any(step!=job['step'] for step in shared.get('blocking_unknown_steps', shared['unknown_steps'])) else
+        reason=('shared_usage_unknown' if _usage_unknown(shared, (job['step'],)) else
             'reserve_reached' if available_seconds<=0 or available_tokens<=0 else
             'target_time_reached' if targets and duration>=targets['max_seconds'] else
             'target_tokens_reached' if targets and consumed>=targets['max_observed_tokens'] else None)

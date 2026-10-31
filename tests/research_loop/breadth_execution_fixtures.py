@@ -36,7 +36,11 @@ def run(root, config, source, mechanism, runtime):
     path = work / 'work/experiment-config.json'
     assert experiment_client.resolve(path, c.read(path)) == config
     launch = _launch(root, step, attempt)
-    arguments = ['run', '--script', str(source), '--new-plan', '--mechanism', mechanism,
+    # Fixture callers retain canonical identities; the public CLI accepts the
+    # ordinal frozen in this exact job's breadth, never a later live catalog.
+    choice = next((str(row['ordinal']) for row in (config.get('breadth') or {}).get('mechanisms', [])
+        if row['mechanism_ref'] == mechanism), mechanism)
+    arguments = ['run', '--script', str(source), '--new-plan', '--mechanism', choice,
         '--experiment-dir', str(runtime)]
     with bridge.serve(work / bridge.SUBMISSION_DIRECTORY, path, work, launch=launch) as endpoint:
         reply = bridge.client(endpoint, arguments)

@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from scidiscovery.research_loop import (
-    contracts as c, controller, experiment_client, fork_runtime, fork_service, handoff_state,
+    accepted_prefix, contracts as c, controller, experiment_client, fork_runtime, fork_service, handoff_state,
     history, lineage, originals, shared_input_views,
 )
 from execution_fixtures import execution_registry
@@ -125,9 +125,26 @@ def _sealed_relationships(root, saved, before_step):
     assert len({tuple(_saved(path)['file_stat'][:2]) for path in seen}) == 6
 
 
-def _history_files(job):
-    return {row['path']: _saved(row['source']) for row in job['history']['files']
-        if row['path'].startswith('inputs/history/nodes/')}
+def _history_files(root, job):
+    """Explicit oracle over the frozen cut, outside the production handoff."""
+    prefix = accepted_prefix.for_job(job)
+    public = accepted_prefix.visibility(root, prefix)
+    ordinals = Path(root) / accepted_prefix.MEMBERS / accepted_prefix._view_key(prefix) / 'ordinals'
+    files = {}
+    for ordinal in range(1, prefix['count'] + 1):
+        link = c.read(c.regular(ordinals / f'{ordinal:09d}.json'))
+        member = accepted_prefix.member(root, prefix, link['step'], origin=link['origin_identity'])
+        assert member['ordinal'] == ordinal
+        directory = Path(member['navigation']['path']).parent
+        source = originals.node(root, link['step'])
+        seal = c.read(originals.source_record(source, 'result-identity.json'))
+        assert member['seal_ref'] == history.source_seal_ref(source)
+        for name, proof in (('science.json', seal['result_ref']), ('scientific-original.json', seal['raw_ref'])):
+            logical = Path('inputs/history') / directory / name
+            alias = public / directory / name
+            assert alias.samefile(originals.resolve_ref(source, proof))
+            files[logical.as_posix()] = _saved(alias)
+    return files
 
 
 def _readonly_bindings(root, job, expected_history):
@@ -136,9 +153,13 @@ def _readonly_bindings(root, job, expected_history):
         private=True, include_skills=False, selected_code=[])
     mounts = {Path(arguments[index + 2]): Path(arguments[index + 1])
         for index, argument in enumerate(arguments) if argument == '--ro-bind'}
+    public = accepted_prefix.visibility(root, accepted_prefix.for_job(job))
+    assert mounts[work / 'inputs/history'] == public
+    assert mounts[public] == public
     for logical, saved in expected_history.items():
-        assert mounts[work / logical] == saved['path']
-        assert mounts[saved['path']] == saved['path']
+        relative = Path(logical).relative_to('inputs/history')
+        assert (mounts[work / 'inputs/history'] / relative).samefile(saved['path'])
+        assert (mounts[public] / relative).samefile(saved['path'])
         _unchanged(saved)
     for material in job['direct_materials']:
         assert mounts[work / material['path']] == Path(material['source'])
@@ -150,8 +171,9 @@ def test_r6_append_and_cold_restore_preserve_exact_file_relationships(r6_bound_s
     root, _, _, saved = r6_bound_scene
     _sealed_relationships(root, saved, 9)
     job9 = c.build_job(root, 9, 'A', [7, 8])
-    old_history = _history_files(job9)
-    assert old_history and len({Path(path).parts[3] for path in old_history}) == 8
+    old_history = _history_files(root, job9)
+    assert len(old_history) == 16
+    assert len({Path(path).parts[4] for path in old_history}) == 8
     _readonly_bindings(root, job9, old_history)
     # Select an old exact producer even though every node has binding.txt.
     source_seal = c.read(root / 'native-evidence/002/result-identity.json')
@@ -179,8 +201,9 @@ def test_r6_append_and_cold_restore_preserve_exact_file_relationships(r6_bound_s
                 assert material['path'] == 'inputs/parents/002/artifacts/binding.txt'
                 assert originals.material_path(root, material) == saved[2]['artifact']['path']
                 _unchanged(saved[2]['artifact'])
+                current_history = _history_files(root, job)
                 for logical, original in old_history.items():
-                    assert _history_files(job)[logical] == original
+                    assert current_history[logical] == original
                 mounts = _readonly_bindings(root, job, old_history)
                 assert mounts[c.workspace(root, job['step']) / material['path']] == saved[2]['artifact']['path']
                 c._validate_inputs(root, c.workspace(root, job['step']), job)

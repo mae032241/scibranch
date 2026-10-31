@@ -210,3 +210,42 @@ def shortlist(records):
     return dict(version=2, candidate_count=len(items), latest_a_step=assessed, a_recommended=recommended,
                 unassessed_count=sum(assessed is None or step >= assessed for step in first.values()),
                 members=members, rule=SHORTLIST_RULE)
+
+
+def accepted_project(summary, lookup, *, candidate_ids=(), delivery=None):
+    """Project explicit candidate addresses from the canonical accepted head.
+
+    The population count is complete; inline facts are the requested selection,
+    with public navigation supplying every original independently of this view.
+    No iteration over the retained candidate index is implied by this API.
+    """
+    from . import accepted_search
+    facts = []
+    seen = set()
+    for identity in candidate_ids:
+        _id(identity)
+        if identity in seen:continue
+        seen.add(identity)
+        row = lookup(accepted_search.key('candidate', identity))
+        if row is None:raise ValueError('Requested candidate is outside accepted facts')
+        fact = row['observation']
+        _public_keys(fact)
+        facts.append(dict(fact))
+    observed = summary['observation_count']
+    coverage = 'partial' if summary['partial_observation_count'] else 'complete' if observed else 'unknown'
+    actual = summary['actual_submission']
+    if actual is not None:
+        actual = dict(candidate_id=actual['candidate_id'],
+            artifact_retention=actual.get('artifact', {}).get('retention', actual.get('artifact_retention', 'unknown')),
+            observed_at=actual['observed_at'])
+    return dict(scope='observed_only', coverage=coverage, candidate_count=summary['candidate_count'],
+        current_candidate=summary['current_candidate'], latest_a_step=summary['latest_a_step'],
+        a_recommended=summary['a_recommended'], historical_a_recommendation=summary['historical_a_recommendation'],
+        observed_actual_submission=actual,
+        delivery=delivery or dict(state='unknown', current_confirmed=None, last_confirmed=None),
+        candidate_facts=facts, candidate_facts_omitted_count=summary['candidate_count']-len(facts),
+        failed_candidate_count=summary['failed_candidate_count'], unknown_candidate_count=summary['unknown_candidate_count'],
+        public_audits=[], audits_omitted_count=None, public_audits_status='not_projected',
+        candidate_alerts=[dict(candidate_id=item['id'], status=item['status']) for item in facts if item['status'] in {'failed','unknown'}],
+        candidate_alerts_omitted_count=summary['failed_candidate_count']+summary['unknown_candidate_count']-sum(item['status'] in {'failed','unknown'} for item in facts),
+        limitation='Inline candidates are explicitly addressed original facts. The public candidate index retains every candidate without scientific ranking; A owns suitability and selection.')

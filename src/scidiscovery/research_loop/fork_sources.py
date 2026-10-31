@@ -406,8 +406,16 @@ class _Closure:
                 'request', 'intent', 'outcome', 'header', 'decision', 'admission',
                 'allocation', 'pending_set', 'query', 'seal_ref', 'host_preparation',
                 'original_permit', 'original_intent',
-                'original_experiment_config', 'settings'):
+                'original_experiment_config', 'settings', 'breadth_snapshot'):
             follow(value.get(name))
+        follow(value.get('history',{}).get('breadth_snapshot'))
+        table=value.get('table')
+        for mechanism in (table.get('mechanisms',{}) if isinstance(table,dict) else {}).values():
+            terminal=mechanism.get('last_terminal')
+            if terminal is not None:
+                follow(dict(terminal['observation_ref'],
+                    origin_identity=terminal['origin_identity']))
+                follow(terminal.get('recovery_ref'))
         for name in ('execution_qualifications',):
             for proof in value.get(name, []):
                 follow(proof)
@@ -840,8 +848,32 @@ def inspect_source(parent_root, selected_job_ref):
         if any(selected_job_ref.get(field) != job_ref[field] for field in ('origin_identity', 'path', 'size_bytes')):
             raise ValueError('Selected fork job identity changed')
     prefix = []
-    visible_sources = {item.step: item for item in o.source_sequence(root, step)}
-    science_nodes = list(job.get('history', {}).get('nodes', []))
+    visible_sources = {}
+    science_nodes = []
+    frozen_prefix=job.get('history',{}).get('prefix')
+    if frozen_prefix is not None:
+        from . import accepted_prefix
+        namespace=accepted_prefix._view_key(frozen_prefix)
+        owner=o.source_for_ref(source,dict(origin_identity=frozen_prefix['branch'],path='settings.json'))
+        for ordinal in range(1,frozen_prefix['count']+1):
+            ordinal_ref=closure.add(owner,f'{accepted_prefix.MEMBERS}/{namespace}/ordinals/{ordinal:09d}.json')
+            binding=_json(o.resolve_ref(owner,ordinal_ref))
+            member_ref=closure.add(owner,f'{accepted_prefix.MEMBERS}/{namespace}/'
+                f'{o.identity_key(binding["origin_identity"])}/{binding["step"]:03d}.json')
+            member=_json(o.resolve_ref(owner,member_ref))
+            if (member['branch']!=frozen_prefix['branch'] or member['ordinal']!=ordinal
+                    or member['step']>frozen_prefix['cutoff']):
+                raise ValueError('Fork history member crosses its frozen input cut')
+            nav_ref=closure.add(owner,frozen_prefix['visibility_root']['path']+'/'+member['navigation']['path'])
+            event_owner=o.source_for_ref(owner,member['scientific_event'])
+            event_path=Path(member['scientific_event']['path'])
+            if event_path.is_absolute():event_path=event_path.relative_to(event_owner.original_root)
+            event_ref=closure.add(event_owner,o.relative(event_path.as_posix()))
+            science_nodes.append(dict(step=member['step'],seal_ref=dict(member['seal_ref'],
+                origin_identity=member['origin_identity']),member_ref=member_ref,navigation_ref=nav_ref,
+                scientific_event=event_ref))
+    else:
+        raise ValueError('Fork task lacks its exact accepted input prefix')
     if job.get('formal_review') is not None:
         # A reviewer sees its neutral subject binding. Host routing and science
         # investment retain the requester's exact accepted prefix separately.
@@ -858,7 +890,10 @@ def inspect_source(parent_root, selected_job_ref):
         ancestor = visible_sources.get(row['step']) or o.dependency(source, row['step'], seal_ref=row['seal_ref'])
         if ancestor is None:
             raise ValueError('Selected history has no exact visible sealed original')
-        prefix.append(closure.sealed(ancestor, row['seal_ref']))
+        entry=dict(closure.sealed(ancestor, row['seal_ref']))
+        for name in ('member_ref','navigation_ref','scientific_event'):
+            if name in row:entry[name]=row[name]
+        prefix.append(entry)
         visible_sources[row['step']] = ancestor
     if len({row['step'] for row in prefix}) != len(prefix):
         raise ValueError('Selected task history is ambiguous')
