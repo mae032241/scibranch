@@ -675,15 +675,30 @@ def render_audit_binding(root, step, role, protocol, *, source_cutoff=None, extr
 
 def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), selection_protocol=0,
          audit_projection_version=0, adjacent_audit=None, worker_view_version=1,assessment_job=None,source_rows=None):
+    """Independent binding entry produces its base, current head and policy."""
+    from . import accepted_budget
+    from .protocol import require_current_base
+    base = c.settings(root)
+    require_current_base(root, base=base)
+    head = accepted_budget.load(root, base=base)
+    policy = configuration_updates.policy_for_new_job(root, step, base=base, head=head)
+    return bind_from_facts(root, step, role, protocol, base=base, head=head, policy=policy,
+        source_cutoff=source_cutoff, extra_steps=extra_steps, selection_protocol=selection_protocol,
+        audit_projection_version=audit_projection_version, adjacent_audit=adjacent_audit,
+        worker_view_version=worker_view_version, assessment_job=assessment_job, source_rows=source_rows)
+
+
+def bind_from_facts(root, step, role, protocol, *, base, head, policy,
+         source_cutoff=None, extra_steps=(), selection_protocol=0,
+         audit_projection_version=0, adjacent_audit=None, worker_view_version=1,assessment_job=None,source_rows=None):
     """Bind a constant prefix reference and the selected current scientific state.
 
     Complete history is the branch-owned public node navigation. Rendering an
     entire audit is an explicit separate operation, never a task-build helper.
     """
-    from . import accepted_budget, accepted_prefix, accepted_search
-    from .protocol import require_current
-    require_current(root)
-    head=accepted_budget.read(root)
+    from . import accepted_prefix, accepted_search
+    from .protocol import require_current_base
+    require_current_base(root, base=base)
     prefix=head['prefix']
     if source_cutoff is not None and source_cutoff!=prefix['cutoff']:
         raise ValueError('A historical cut requires its own frozen branch visibility')
@@ -713,7 +728,7 @@ def bind(root, step, role, protocol, *, source_cutoff=None, extra_steps=(), sele
         nomination_aliases[identity]=original.get('public_reference',identity)
     candidates['nominations']=candidate_refs.public_fields(
         candidate_nominations.preview(nominations,'inputs/history/breadth-table.json'),nomination_aliases)
-    enabled=configuration_updates.for_new_job(root,step).get('search_policy') is not None
+    enabled=policy.get('search_policy') is not None
     mechanisms=dict(availability='available' if enabled or summary['mechanism_count'] else 'unavailable',
         count=summary['mechanism_count'],pending_count=summary['pending_count'],focus=summary['focus'],
         catalog=dict(path='inputs/history/breadth-table.json',number_field='ordinal',

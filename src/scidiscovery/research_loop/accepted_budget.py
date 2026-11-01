@@ -138,9 +138,10 @@ def clock_sample(clock, now):
 
 class AcceptedState(dict):
     """One explicit accepted-head observation, never a process-global cache."""
-    def __init__(self, root, value, *, pending=None):
+    def __init__(self, root, value, *, base, pending=None):
         super().__init__(value)
         self.root = Path(root)
+        self.base = base
         self.pending = pending
 
     @property
@@ -271,7 +272,7 @@ def initialize(root, settings, *, search_seed, search_ref, identity_root=None,
         _replace(_row_path(root,key), dict(seq=0, previous_seq=0, previous=None,
             current=copy.deepcopy(row)))
     atomic_files.publish_bytes(path, _bytes(value))
-    return AcceptedState(root, value)
+    return AcceptedState(root, value, base=settings)
 
 
 def _apply(state, event):
@@ -294,7 +295,7 @@ def _apply(state, event):
         raise ValueError('Invalid new advancement observation')
     if 'reanchor' in event:
         from . import budget
-        budget._verify_reanchor(state.root, c.settings(state.root), event, AcceptedEvents(state))
+        budget._verify_reanchor(state.root, state.base, event, AcceptedEvents(state))
     if state['last_stamp'] is not None and 'reanchor' not in event:
         _duration(state['last_stamp'], event, legacy_elapsed=state['clock']['basis'] == 'elapsed')
     value = copy.deepcopy(dict(state))
@@ -311,10 +312,16 @@ def _apply(state, event):
     value['head_ref'] = dict(path=str(Path(state['logical_root'])/'control-ledger'/f'{event["seq"]:06d}.json'))
     value['last_stamp'] = {key: event[key] for key in ('at_unix', 'at_boottime', 'boot_id')}
     value['latest'][event['kind']] = value['head_ref']
-    return AcceptedState(state.root, value, pending=event)
+    return AcceptedState(state.root, value, base=state.base, pending=event)
 
 
 def read(root):
+    """Independent entry: produce the original settings and one fresh head."""
+    return load(root, base=c.settings(root))
+
+
+def load(root, *, base):
+    """Read a fresh mutable head using the caller's original settings fact."""
     root = Path(root)
     path = root / HEAD
     if not path.exists():
@@ -323,11 +330,10 @@ def read(root):
     if (value.get('version') != 2 or 'active_audit' not in value
             or 'delivery_preparation' not in value):
         raise ValueError('Unsupported accepted budget state')
-    settings = c.settings(root)
-    if (value['instance_id'] != settings['goal_id']
+    if (value['instance_id'] != base['goal_id']
             or value['settings_ref'] != dict(path=str(Path(value['logical_root'])/'settings.json'))):
         raise ValueError('Accepted budget head lost its original research identity')
-    state = AcceptedState(root, value)
+    state = AcceptedState(root, value, base=base)
     if state['clock']['start'] is None and (root/'host-started.json').exists():
         start = c.read(root/'host-started.json')
         state['clock'] = _clock(start, state['clock']['basis'])
@@ -614,10 +620,14 @@ def resource_delta(state, reference, kind, fields):
 
 
 def accept_job(root, step, job):
+    return accept_job_from_base(root, step, job, base=c.settings(root))
+
+
+def accept_job_from_base(root, step, job, *, base):
     from . import budget
     root = Path(root)
-    with budget._ledger_writer(root):
-        state = recover(root, read(root))
+    with budget._ledger_writer_from_base(root, base=base):
+        state = recover(root, load(root, base=base))
         prior = state.row(f'job/{step:03d}')
         reference = c.record_ref(root/'jobs'/f'{step:03d}.json')
         if prior is not None:
@@ -710,8 +720,8 @@ def accept_authority(root, *, step, call_id, path, value, supersedes=None, opera
         raise ValueError('Exact authority allocation or request original required')
     reference = dict(path=relative, size_bytes=len(
         (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)+'\n').encode('utf-8')))
-    with budget._ledger_writer(root, context=operation_context):
-        state = recover(root, read(root))
+    with budget._ledger_writer(root, context=operation_context) as base:
+        state = recover(root, load(root, base=base))
         calls = copy.deepcopy(authority_calls(state, step))
         job = state.row(f'job/{step:03d}')
         if (job['role'] != 'W' or value.get('call_id') != call_id
@@ -760,8 +770,8 @@ def accept_native(root, step, record, intent):
     root, record = Path(root), Path(record)
     relative = record.relative_to(root).as_posix()
     key = 'attempt/'+relative.replace('/', ':')
-    with budget._ledger_writer(root):
-        state = recover(root, read(root))
+    with budget._ledger_writer(root) as base:
+        state = recover(root, load(root, base=base))
         prior = state.row(key)
         if prior is not None:
             if prior['intent'] != intent:
@@ -796,8 +806,8 @@ def accept_terminal(root, step, record, *, meter, unknown, metering=None):
     relative = record.relative_to(root).as_posix()
     unknown = bool(unknown or meter is None or isinstance(metering, dict) and metering.get('coverage') == 'unknown')
     key = 'attempt/'+relative.replace('/', ':')
-    with budget._ledger_writer(root):
-        state = recover(root, read(root))
+    with budget._ledger_writer(root) as base:
+        state = recover(root, load(root, base=base))
         row = state.row(key)
         if row is None or row['step'] != step:
             raise ValueError('An orphan native file is not an accepted attempt')
@@ -943,8 +953,8 @@ def publish_recovery(root, *, step, call_id, recovery_ref, search_delta, search_
     from . import budget
     if (search_delta is None) != (search_ref is None):
         raise ValueError('Recovery search facts require their exact saved snapshot reference')
-    with budget._ledger_writer(Path(root)):
-        state = recover(root, read(root))
+    with budget._ledger_writer(Path(root)) as base:
+        state = recover(root, load(root, base=base))
         key = f'execution-recovery/{step:03d}/{call_id}'
         prior = state.row(key)
         if prior is not None and prior['ref'] == recovery_ref:
@@ -968,8 +978,8 @@ def accept_audit(root, *, step, operation_id, path, intent):
     if relative not in expected or intent.get('operation_id') != operation_id:
         raise ValueError('Audit acceptance lost its exact original declaration')
     pointer = dict(step=step, operation_id=operation_id)
-    with budget._ledger_writer(root):
-        state = recover(root, read(root))
+    with budget._ledger_writer(root) as base:
+        state = recover(root, load(root, base=base))
         if state['active_audit'] is not None and state['active_audit'] != pointer:
             raise ValueError('Another accepted audit remains active')
         if path.exists():
@@ -987,8 +997,8 @@ def finish_audit(root, operation_id):
     """Release only an exact original whose audit and retry cleanup are known."""
     from . import budget, candidate_audit, audit_recovery
     root = Path(root)
-    with budget._ledger_writer(root):
-        state = recover(root, read(root))
+    with budget._ledger_writer(root) as base:
+        state = recover(root, load(root, base=base))
         pointer = state['active_audit']
         if pointer is None or pointer['operation_id'] != operation_id:
             return state
@@ -1011,8 +1021,8 @@ def accept_preparation_failure(root, value):
     """Keep the existing preparation count, last original and first unknown cleanup."""
     from . import budget
     root = Path(root)
-    with budget._ledger_writer(root):
-        state = recover(root, read(root))
+    with budget._ledger_writer(root) as base:
+        state = recover(root, load(root, base=base))
         prior = state['delivery_preparation']
         count = prior['count']+1
         relative = f'host-delivery/preparation/{count:03d}.json'
@@ -1027,8 +1037,8 @@ def accept_preparation_failure(root, value):
 
 def accept_configuration(root, reference, row):
     from . import budget
-    with budget._ledger_writer(Path(root)):
-        state = recover(root, read(root))
+    with budget._ledger_writer(Path(root)) as base:
+        state = recover(root, load(root, base=base))
         current = state['configuration']
         if current is not None and current['revision'] == row['revision']:
             if current['ref'] != reference:
@@ -1043,9 +1053,13 @@ def accept_configuration(root, reference, row):
 
 
 def accept_configuration_binding(root, step, binding):
+    return accept_configuration_binding_from_base(root, step, binding, base=c.settings(root))
+
+
+def accept_configuration_binding_from_base(root, step, binding, *, base):
     from . import budget
-    with budget._ledger_writer(Path(root)):
-        state = recover(root, read(root))
+    with budget._ledger_writer_from_base(Path(root), base=base):
+        state = recover(root, load(root, base=base))
         existing = state.row(f'configuration-binding/{step:06d}')
         if existing is not None:
             if existing != binding:
@@ -1062,8 +1076,8 @@ def accept_configuration_binding(root, step, binding):
 def publish_scientific_seal(root, step, *, prefix, role, result_ref, search_ref, search_delta=None):
     from . import budget
     root = Path(root)
-    with budget._ledger_writer(root):
-        state = recover(root, read(root))
+    with budget._ledger_writer(root) as base:
+        state = recover(root, load(root, base=base))
         job = state.row(f'job/{step:03d}')
         if job is None or job['role'] != role:
             raise ValueError('Scientific seal has no exact accepted job')

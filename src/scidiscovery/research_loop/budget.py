@@ -80,6 +80,11 @@ def _verify_reanchor(root, settings, event, previous):
 
 def _events(root, *, resources=False):
     state = accepted_budget.read(root)
+    return _events_from_state(state, resources=resources)
+
+
+def _events_from_state(state, *, resources=False):
+    """Project one accepted observation without loading another head or base."""
     events = accepted_budget.AcceptedEvents(state)
     return (events, state.parent, accepted_budget.resource_view(state)) if resources else (events, state.parent)
 
@@ -547,8 +552,12 @@ def execution_reservation(root, reservation):
 
 def authorization_revision(root):
     """Only explicit ceiling amendments revise authority; clocks never do."""
-    root = Path(root).resolve(); settings = contracts.settings(root)
     events, _ = _events(root)
+    return _authorization_revision(root, events)
+
+
+def _authorization_revision(root, events):
+    root = Path(root).resolve()
     reference = events.state['latest'].get('budget_amend')
     if reference is not None:
         return _resource_ref(root, events.event(reference))
@@ -572,10 +581,17 @@ def execution_available(root, job, limits, usage):
 
 @contextmanager
 def _ledger_writer(root, *, context=None):
-    from .protocol import require_current
+    """Independent writer entry; produce base once, retaining the live gates."""
+    with _ledger_writer_from_base(root, base=contracts.settings(root), context=context) as base:
+        yield base
+
+
+@contextmanager
+def _ledger_writer_from_base(root, *, base, context=None):
+    from .protocol import require_current_base
     from . import instance_owner
     with instance_owner.lease(root):
-        require_current(root)
+        require_current_base(root, base=base)
         fd = os.open(root / 'control-ledger.lock', os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
         try:
             if context is None:fcntl.flock(fd, fcntl.LOCK_EX)
@@ -585,14 +601,14 @@ def _ledger_writer(root, *, context=None):
                     try:
                         fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);break
                     except BlockingIOError:time.sleep(min(.05,context.remaining_seconds()))
-            yield
+            yield base
         finally:
             os.close(fd)
 
 
 def _append(root, settings, events, parent, **fields):
-    from .protocol import require_current
-    require_current(root)
+    from .protocol import require_current_base
+    require_current_base(root, base=events.state.base if isinstance(events, accepted_budget.AcceptedEvents) else settings)
     if isinstance(events, accepted_budget.AcceptedEvents):
         if 'reanchor' in fields:
             _verify_reanchor(root, settings, dict(fields, **clock_stamp()), events)
@@ -669,9 +685,8 @@ def _ceiling_limits(settings, events):
 def ceilings(root):
     """Read verified operator ceilings without sampling live consumption."""
     root = Path(root)
-    settings = contracts.settings(root)
     events, _ = _events(root)
-    limits, max_steps, _ = _ceiling_limits(settings, events)
+    limits, max_steps, _ = _ceiling_limits(events.state.base, events)
     return dict(**limits, max_steps=max_steps)
 
 
@@ -679,7 +694,7 @@ def snapshot(root, settings=None, *, sample_stamp=None):
     original = contracts.settings(root)
     if settings is not None and any(settings.get(key) != original.get(key) for key in ('goal_id', 'objective', 'public_root', 'global_materials')):
         raise ValueError('Budget view differs from original research identity')
-    events, _ = _events(root)
+    events, _ = _events_from_state(accepted_budget.load(root, base=original))
     return _snapshot(root, original, events, sample_stamp=sample_stamp)
 
 

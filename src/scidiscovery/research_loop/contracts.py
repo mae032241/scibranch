@@ -219,12 +219,10 @@ def file_ref(path):
 def settings(root: Path, job=None):
     root = Path(root)
     if job is not None:
-        from . import originals
-        if (not job.get('fork_source') and type(job.get('step')) is int and job['step'] > 0
-                and originals.inherited(root, job['step'])):
-            return originals.source_settings(originals.node(root, job['step']))
-        from . import configuration_updates
-        return configuration_updates.for_job(root, job)
+        from . import accepted_budget
+        base = settings(root)
+        head = accepted_budget.load(root, base=base) if job.get('configuration_revision') is not None else None
+        return settings_for_job(root, job, base=base, head=head)
     path = regular(root / 'settings.json')
     identity = read(regular(root / 'settings-identity.json'))
     # Parse the exact frozen control locator. No content fingerprint is computed.
@@ -232,6 +230,15 @@ def settings(root: Path, job=None):
     if {key:value for key,value in identity.items() if key!='cold_owner'} != dict(path='settings.json'):
         raise ValueError('Frozen instance settings changed')
     return json.loads(data)
+
+
+def settings_for_job(root, job, *, base, head):
+    """Select one exact policy using the operation owner's existing facts."""
+    from . import originals, configuration_updates
+    if (not job.get('fork_source') and type(job.get('step')) is int and job['step'] > 0
+            and originals.inherited(root, job['step'])):
+        return originals.source_settings(originals.node(root, job['step']))
+    return configuration_updates.policy_for_job(root, job, base=base, head=head)
 
 
 def workspace(root: Path, step: int):
@@ -1002,13 +1009,15 @@ def material_inventory(root: Path, step: int, *, inventory):
     job=read(regular(root/'jobs'/f'{step:03d}.json'))
     if inventory.root!=root or inventory.job!=job:
         raise ValueError('Current inventory belongs to another task or attempt')
-    policy = inventory.policy if inventory.policy is not None else settings(root, job)
     work = workspace(root, step)
     rows, mutable, destinations = [], [], {}
     from . import execution
     record=execution.record(root,step)
     if record!=inventory.record:
         raise ValueError('Current inventory belongs to another task or attempt')
+    if inventory.policy is None:
+        raise ValueError('Current inventory requires its produced policy')
+    policy = inventory.policy
     from . import worker_delivery
     if (record/'native-intent.json').exists():
         intent=(inventory.native_intent if inventory.native_intent is not None
@@ -1119,7 +1128,12 @@ def collect_materials(root: Path, step: int, *, inventory):
 
 def global_materials(root: Path):
     """Frozen original context shared by all nodes through read-only aliases."""
-    rows = settings(root)['global_materials']
+    return _global_materials(root, base=settings(root))
+
+
+def _global_materials(root, *, base):
+    """Check original material locations using the already loaded root base."""
+    rows = base['global_materials']
     for row in rows:
         source = regular(root / row['source'])
         if source.stat().st_size != row['size_bytes']:
@@ -1289,8 +1303,9 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         raise ValueError('Invalid scientific node')
     if len(parents) != len(set(parents)) or any(type(p) is not int or not 0 < p < step for p in parents):
         raise ValueError('Parents must be exact distinct preceding nodes')
-    from .protocol import require_current
-    require_current(root)
+    from .protocol import require_current_base
+    base = settings(root)
+    require_current_base(root, base=base)
     from . import accepted_prefix
     accepted_prefix.reconcile(root)
     retained_path=Path(root)/'jobs'/f'{step:03d}.json'
@@ -1306,14 +1321,17 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
                 or retained.get('final_report')!=final_report):
             raise ValueError('Frozen scientific task changed')
         from . import accepted_budget
-        accepted_budget.accept_job(root,step,retained)
+        accepted_budget.accept_job_from_base(root,step,retained,base=base)
         return retained
     from . import handoff_state
     handoff_state.begin_job(root,step)
     from . import budget
-    if budget.final_a_barrier(root, before_step=step) is not None:
+    from . import accepted_budget
+    head = accepted_budget.load(root, base=base)
+    events, _ = budget._events_from_state(head)
+    if budget.final_a_barrier(root, before_step=step, events=events) is not None:
         raise ValueError('Final A return permits no further scientific task')
-    phase = budget.closeout_state(root)['begin']
+    phase = budget.closeout_state(root, events=events)['begin']
     if phase is not None and phase['mode'] == 'final' and step >= phase['first_step'] and (
             role != 'A' or step != phase['first_step'] or purpose != 'closeout' and final_report is None):
         raise ValueError('FINAL permits only its explicit final A assignment')
@@ -1323,7 +1341,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
             final_report=final_report, direct_refs=[dict(path=f'inputs/parents/{parent:03d}/conclusion.json') for parent in parents]))
     if purpose is not None:
         from . import budget
-        begin=budget.closeout_state(root)['begin']
+        begin=phase
         if (purpose!='closeout' or role not in {'A','W'} or role=='W' and engineering_repair is None or begin is None or begin['mode'] not in {'model','final'}
                 or begin['mode']=='final' and (role!='A' or step!=begin['first_step'])
                 or source_cutoff!=begin['source_cutoff'] or step<begin['first_step'] or delivery_sources is None):
@@ -1338,10 +1356,9 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         engineering.admit(root,engineering_repair,step)
     job_path=root/'jobs'/f'{step:03d}.json'
     retained=read(regular(job_path)) if job_path.exists() else None
-    if retained is not None:require_current(root,retained)
     from . import configuration_updates
-    revision = configuration_updates.bind_new_job(root, step)
-    policy = configuration_updates.for_new_job(root, step)
+    revision, policy, head = configuration_updates.bind_new_job_facts(root, step, base=base)
+    events, _ = budget._events_from_state(head)
     protocol=CURRENT
     selection_protocol=1
     audit_projection_version=1 if policy.get('candidate_audit_policy') else 0
@@ -1357,7 +1374,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         raise ValueError('Scientific inputs must remain in their original owned workspace')
     (work / 'work').mkdir(exist_ok=True)
     (work / 'artifacts').mkdir(exist_ok=True)
-    globals_ = global_materials(root)
+    globals_ = _global_materials(root, base=base)
     from . import storage_policy as storage
     input_inventory=storage.Inventory(policy.get('storage_policy'),context=storage.Deadline(policy['max_seconds']))
     for item in globals_:
@@ -1436,7 +1453,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
                 record=record_ref(root / 'control-ledger' / f'{phase["seq"]:06d}.json'))
         elif retained is not None and 'closeout_begin' in retained:
             job['closeout_begin'] = retained['closeout_begin']
-    resumed = budget.normal_resume(root,step)
+    resumed = budget.normal_resume(root,step,events=events)
     if resumed is not None and purpose is None and final_report is None:
         job['normal_resume'] = budget._event_ref(root,resumed)
     if (retained is None and ((purpose == 'closeout' and begin['mode'] == 'final') or final_report is not None)
@@ -1508,7 +1525,8 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     elif review_binding is not None:
         job['history']=review_binding['history'];options=[]
     else:
-        job['history'],state=lineage.bind(root,step,role,protocol,source_cutoff=final_report['source_cutoff'] if final_report else source_cutoff,extra_steps=extra_steps,selection_protocol=selection_protocol,
+        job['history'],state=lineage.bind_from_facts(root,step,role,protocol,base=base,head=head,policy=policy,
+            source_cutoff=final_report['source_cutoff'] if final_report else source_cutoff,extra_steps=extra_steps,selection_protocol=selection_protocol,
             audit_projection_version=audit_projection_version,adjacent_audit=job.get('candidate_audit'),
             worker_view_version=1,assessment_job=job if role=='A' else None,source_rows=parent_sources)
         options = [item for parent in parents for item in history.implementation_options(root, parent)]
@@ -1654,7 +1672,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
             else:
                 write(path, value)
     from . import accepted_budget
-    accepted_budget.accept_job(root,step,job)
+    accepted_budget.accept_job_from_base(root,step,job,base=base)
     skill_supply.project(root, policy, job)
     return job
 
@@ -2045,7 +2063,9 @@ def seal_result(root: Path, step: int, *, inventory=None):
     if intent['task_ref'] != record_ref(regular(job_path)):
         raise ValueError('Native launch task changed')
     outcome=inventory.native_outcome if inventory.native_outcome is not None else native_outcome(native_record)
-    policy=inventory.policy if inventory.policy is not None else settings(root,job)
+    if inventory.policy is None:
+        raise ValueError('Current inventory requires its produced policy')
+    policy=inventory.policy
     from . import worker_delivery
     # Collect the same completed call. Keep its pending output and receipt as
     # retained originals; publishing the scientific bytes never starts a turn.

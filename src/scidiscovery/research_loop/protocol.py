@@ -65,22 +65,49 @@ def require_current(root, job=None):
     from . import contracts as c
 
     root = Path(root)
-    settings = require_settings_format(c.settings(root))
+    base = c.settings(root)
+    require_current_base(root, base=base)
+    if job is None:
+        return base
+    if not isinstance(job, dict):
+        raise UnsupportedProtocol('Scientific job')
+    _current(job.get('handoff_protocol'), 'Scientific job')
+    step = job.get('step')
+    if type(step) is not int or step <= 0:
+        raise ValueError('An exact frozen scientific job is required')
+    retained = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
+    _require_retained_job(job, retained=retained)
+    from . import accepted_budget
+    head = accepted_budget.load(root, base=base) if job.get('configuration_revision') is not None else None
+    policy = c.settings_for_job(root, job, base=base, head=head)
+    return require_settings_format(policy)
+
+
+def require_current_base(root, *, base):
+    """Validate the caller's base fact and the live owner, without loading it."""
+    require_settings_format(base)
     from .instance_owner import require_owner
     require_owner(root)
-    if job is not None:
-        if not isinstance(job, dict):
-            raise UnsupportedProtocol('Scientific job')
-        _current(job.get('handoff_protocol'), 'Scientific job')
-        step = job.get('step')
-        if type(step) is not int or step <= 0:
-            raise ValueError('An exact frozen scientific job is required')
-        retained = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
-        _current(retained.get('handoff_protocol'), 'Retained scientific job')
-        if retained != job:
-            raise ValueError('Scientific job differs from its frozen original')
-        require_job_format(job)
-    return require_settings_format(c.settings(root, job)) if job is not None else settings
+    return base
+
+
+def require_current_job(root, *, base, job, retained, policy):
+    """Consume the exact job and selected policy produced by this operation."""
+    require_current_base(root, base=base)
+    _require_retained_job(job, retained=retained)
+    return require_settings_format(policy)
+
+
+def _require_retained_job(job, *, retained):
+    if not isinstance(job, dict):
+        raise UnsupportedProtocol('Scientific job')
+    _current(job.get('handoff_protocol'), 'Scientific job')
+    if type(job.get('step')) is not int or job['step'] <= 0:
+        raise ValueError('An exact frozen scientific job is required')
+    _current(retained.get('handoff_protocol'), 'Retained scientific job')
+    if retained != job:
+        raise ValueError('Scientific job differs from its frozen original')
+    return require_job_format(job)
 
 
 

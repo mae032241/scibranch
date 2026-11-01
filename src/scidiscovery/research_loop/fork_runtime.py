@@ -30,15 +30,19 @@ def preflight_selected_settings(root, settings, *, step=None):
     """Check a proposed snapshot only while the selected task is unbound."""
     if not is_fork(root):
         return
-    from . import configuration_updates, fork_sources, originals
+    from . import accepted_budget, configuration_updates, fork_sources, originals
     manifest = originals._manifest(root)
     if manifest is None:
         raise ValueError('Fork manifest identity changed')
     selected_step = manifest['source']['step']
     if step is not None and step != selected_step:
         return
-    if ((Path(root) / 'jobs' / f'{selected_step:03d}.json').exists()
-            or configuration_updates._reservation(root, selected_step) is not None):
+    if (Path(root) / 'jobs' / f'{selected_step:03d}.json').exists():
+        return
+    head = accepted_budget.read(root)
+    reserved = configuration_updates._reservation(root, selected_step, head=head)
+    if reserved is not None:
+        configuration_updates.policy_for_job(root, reserved, base=head.base, head=head)
         return
     selected = fork_sources.selected_task(root)
     _validate_selected_settings(selected, settings)
@@ -157,11 +161,14 @@ def ensure_phase(root, boot):
 
 
 def _selected_base(root, selected, *, bind_inputs=False):
-    from . import contracts as c, configuration_updates, execution_authority, qualification
+    from . import accepted_budget, contracts as c, configuration_updates, execution_authority, qualification
     job = copy.deepcopy(selected['job'])
     revision = configuration_updates.for_new_job(root, job['step'])
     _validate_selected_settings(selected, revision)
-    binding = configuration_updates._reservation(root, job['step'])
+    binding_head = accepted_budget.read(root)
+    binding = configuration_updates._reservation(root, job['step'], head=binding_head)
+    if binding is not None:
+        configuration_updates.policy_for_job(root, binding, base=binding_head.base, head=binding_head)
     job.pop('configuration_revision', None)
     if binding is not None and binding['configuration_revision'] is not None:
         job['configuration_revision'] = binding['configuration_revision']
@@ -173,7 +180,6 @@ def _selected_base(root, selected, *, bind_inputs=False):
     if job['goal_text'] != revision['objective']:
         raise ValueError('Fork cannot replace the selected original scientific objective')
     job['fork_source'] = _selected_identity(selected)
-    from . import accepted_budget
     head=accepted_budget.read(root)
     admitted=head.row(f'job/{job["step"]:03d}')
     job['history']['prefix']=copy.deepcopy(head['prefix'] if admitted is None else admitted['prefix'])
