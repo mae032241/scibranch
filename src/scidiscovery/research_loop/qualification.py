@@ -212,6 +212,7 @@ def input_facts(root, job, *, base, head, sources, material_paths=None, review_b
         return fork_input_facts(source, original, document=document, producer_origins=producer_origins)
     declarations = _sources_from_base(root, base=base)
     steps = {int(Path(ref['path']).parts[2]) for ref in job['direct_refs']}
+    steps.update(int(Path(material['path']).parts[2]) for material in job['direct_materials'])
     steps.update(row['origin_step'] for row in job.get('selected_inputs', []))
     steps.update(row['step'] for row in job.get('delivery_sources', {}).get('source_nodes', []))
     if job.get('formal_review'):

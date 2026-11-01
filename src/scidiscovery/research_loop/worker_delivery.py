@@ -30,6 +30,13 @@ def _obligations(job):
         for row in search['breadth']['mechanisms'] if row['mechanism_ref']==focus]
 
 
+def _evidence_bindings(job):
+    """Retain reusable observations within this exact frozen comparison."""
+    if not applicable(job):return _obligations(job)
+    return [{key:row[key] for key in ('mechanism_ref','source_h','source_h_ref')}
+        for row in job['search']['breadth']['mechanisms']]
+
+
 def _caller_correction(root,job,record):
     if not repair_applicable(job):return None
     from . import worker_execution_bridge
@@ -44,7 +51,7 @@ def _caller_correction(root,job,record):
     choices=[control[index+1] for index,value in enumerate(control[:-1]) if value=='--mechanism']
     choice=choices[-1] if choices else None
     matches=[row['mechanism_ref'] for row in search['breadth']['mechanisms']
-        if choice==row['mechanism_ref']]
+        if choice==row['mechanism_ref'] or choice==str(row['ordinal'])]
     # A misspelled mechanism is itself correctable. Bind the task's original
     # focus for the repair message, never an inferred replacement submission.
     ref=matches[0] if len(matches)==1 else search['focus']['mechanism_ref']
@@ -133,7 +140,7 @@ def _writers_stopped(root,job,record,*,chain,intent,outcome):
 def _prefix_calls(root,job):
     """Read one accepted terminal pointer for each required current-H mechanism."""
     from . import originals
-    needed=_obligations(job)
+    needed=_evidence_bindings(job)
     if not needed:return
     snapshot=c.read(originals.resolve_root_ref(root,job['history']['breadth_snapshot']))
     mechanisms=snapshot['table']['mechanisms']
@@ -194,7 +201,7 @@ def _capture(root,job,record,*,inventory):
     binding=dict(job_ref=inventory.task_ref,
         raw_ref=c.file_ref(c.regular(record/'science-output.json',limit=None)),source_attempt=number)
     if path.exists():return _validate(root,job,record,inventory=inventory)
-    needed={row['mechanism_ref'] for row in _obligations(job)}
+    needed={row['mechanism_ref'] for row in _evidence_bindings(job)}
     rows=[];unknown=[];capacity=False
     # Frozen predecessor observations only, never recursively copy their assets.
     for source,row in _prefix_calls(root,job):
@@ -217,13 +224,14 @@ def _capture(root,job,record,*,inventory):
         elif row['status']=='unknown':unknown.append(proofs)
         # A verified permanent non-submission is neither an observation nor
         # unknown work. Its complete proof stays with the history owner.
-    # Keep one exact observation per required current-H mechanism.
-    obligations={row['mechanism_ref']:row for row in _obligations(job)};selected={}
+    # Preserve each original comparative call, including an earlier call cited
+    # by the author when a later call has the same execution binding.
+    obligations={row['mechanism_ref']:row for row in _evidence_bindings(job)};selected={}
     for row,mechanism in rows:
         original=row['accepted']
         if original.get('retention')!='archived':capacity=True;continue
         ref=row['mechanism_ref'];expected=obligations[ref]
-        if all(mechanism.get(key)==expected[key] for key in ('mechanism_ref','source_h','source_h_ref')):selected[ref]=row
+        if all(mechanism.get(key)==expected[key] for key in ('mechanism_ref','source_h','source_h_ref')):selected[_evidence_key(row)]=row
     value=dict(version=1,binding=binding,evidence=list(selected.values()),unknown=unknown,
         prior_unknown=((job.get('search') or {}).get('breadth') or {}).get('prior_unknown',False),
         capacity=capacity,omitted_evidence=0,omitted_unknown=0)
@@ -284,7 +292,7 @@ def _validate(root,job,record,*,inventory,source_attempt=None):
                 raise history.ObserverIntegrityError('Worker evidence has no exact current or frozen observation')
             mechanism=own[1]
         if 'mechanism_ref' in row:
-            target=next((item for item in _obligations(job) if item['mechanism_ref']==row['mechanism_ref']),None)
+            target=next((item for item in _evidence_bindings(job) if item['mechanism_ref']==row['mechanism_ref']),None)
             if target is None or mechanism is None or any(mechanism.get(key)!=target[key] for key in ('mechanism_ref','source_h','source_h_ref')):
                 raise history.ObserverIntegrityError('Worker observation differs from assigned H version')
     return value
@@ -313,6 +321,33 @@ def validate_original(root,owner,job,seal,*,controls_only=False):
     return facts
 
 
+def finding_coverage(science,evidence,mechanisms):
+    """Resolve authored observed call references from already qualified facts.
+
+    The call's execution binding remains unchanged. These are eligible authored
+    observations for A, never an inferred scientific screening disposition.
+    """
+    expected=set(mechanisms)
+    observed={row['mechanism_ref'] for row in evidence if row['mechanism_ref'] in expected}
+    calls={}
+    for row in evidence:
+        proof=row['accepted'];parts=Path(proof['path']).parts
+        if len(parts)<3 or parts[-3]!='calls' or parts[-1]!='accepted.json':continue
+        calls.setdefault(parts[-2],set()).add(_evidence_key(row))
+    blocked=set();declared=set()
+    findings=science.get('mechanism_findings')
+    for row in findings if isinstance(findings,list) else []:
+        if (not isinstance(row,dict) or not isinstance(row.get('mechanism'),str) or row['mechanism'] not in expected
+                or not isinstance(row.get('finding'),str) or not row['finding'].strip()):continue
+        ref=row['mechanism']
+        if row.get('basis')=='blocked':blocked.add(ref)
+        elif row.get('basis')=='observed':
+            declared.add(ref)
+            call_id=row.get('call_id')
+            if isinstance(call_id,str) and len(calls.get(call_id,()))==1:observed.add(ref)
+    return dict(observed=observed-blocked,blocked=blocked,unresolved=declared-observed-blocked)
+
+
 def assessment(root,job,science,record,*,inventory,source_attempt=None):
     """Coverage of this task's own authored findings; no scientific screened verdict."""
     if not repair_applicable(job):return dict(status='not_applicable',missing=[],blocked=[],reason=None)
@@ -328,12 +363,8 @@ def assessment(root,job,science,record,*,inventory,source_attempt=None):
             missing=[correction['mechanism_ref']] if correction else [],blocked=[],reason=None,
             **(dict(facts_ref=c.record_ref(c.regular(record/FACT_NAME)),caller_correction=correction) if correction else {}))
     expected={row['mechanism_ref'] for row in _obligations(job)}
-    known={row['mechanism_ref'] for row in facts['evidence']}
-    blocked=set();findings=science.get('mechanism_findings')
-    for row in findings if isinstance(findings,list) else []:
-        if (not isinstance(row,dict) or row.get('basis')!='blocked' or not isinstance(row.get('finding'),str)
-                or not row['finding'].strip() or not isinstance(row.get('mechanism'),str)):continue
-        if row['mechanism'] in expected:blocked.add(row['mechanism'])
+    coverage=finding_coverage(science,facts['evidence'],expected)
+    known=coverage['observed'];blocked=coverage['blocked']
     missing=sorted(expected-known-blocked)
     reason=('work_evidence_capacity' if facts['capacity'] else 'original_execution_unknown' if facts['unknown'] or facts['prior_unknown']
         else 'worker_decision' if science.get('stage_intent')=='decision'
@@ -346,6 +377,7 @@ def assessment(root,job,science,record,*,inventory,source_attempt=None):
         reason=None
     return dict(status='partial' if reason else 'incomplete' if missing else 'complete',missing=missing,blocked=sorted(blocked),reason=reason,
         facts_ref=c.record_ref(c.regular(record/FACT_NAME)),
+        **(dict(reference_clarification=sorted(coverage['unresolved'])) if facts['evidence'] and coverage['unresolved'] else {}),
         **(dict(caller_correction=correction) if correction is not None else {}))
 
 
@@ -378,6 +410,12 @@ def require_output_clarification(science,result):
     blocker nor an observation, and canonical reused claims still need originals.
     """
     if result['status']!='incomplete' or result.get('caller_correction'):return
+    if result.get('reference_clarification'):
+        from .output_repair import OutputRepairRequired
+        raise OutputRepairRequired('worker_delivery_reference',
+            'Clarify the existing observed findings for '+', '.join(result['reference_clarification'])+
+            ': cite the exact retained call_id that supports each observation, or preserve its blocker/partial decision. '
+            'Reuse the comparative call for every observation it supports. No new execution or registration is needed for this output repair.')
     missing=set(result['missing'])
     for field in ('mechanism_findings','mechanism_observations'):
         value=science.get(field)

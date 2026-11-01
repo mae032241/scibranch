@@ -5,6 +5,11 @@ from __future__ import annotations
 class OpportunityRequired(ValueError):
     code = 'scientific_opportunity_required'
 
+    def __init__(self,message,*,reason=None,available_mechanisms=()):
+        super().__init__(message)
+        self.reason=reason
+        self.available_mechanisms=list(available_mechanisms)
+
 
 def validate(value):
     if value is None:
@@ -125,38 +130,77 @@ def resolve_choice(value,choice,scope,*,head=None,_root=None,_focus=None,_valida
         source_goal_id=item['source_origin_identity']['goal_id'],accepted_count=item['accepted_calls'],_head=head,_root=root,_focus=focus)
 
 
+_REFUSALS={
+    'original_execution_unknown': 'Preserve the original unknown execution; resolve its identity before a new submission',
+    'mechanism_waived': 'This mechanism was scientifically waived by A',
+    'focused_mechanism_required': 'This scientific task permits only its frozen focused mechanism',
+    'initial_opportunities_owed': 'Other H mechanisms retain initial call opportunities; report the scientific question to A for justified extra allocation',
+    'mechanism_choice_required': 'Choose one mechanism number from this task frozen catalog',
+}
+
+
+def _availability(value,scope,accepted,*,head,focus):
+    """Use one accepted table for both admission and public numeric choices."""
+    from . import accepted_search
+    items=head['search']['table']['mechanisms']
+    counts={ref:item['accepted_calls'] for ref,item in items.items()}
+    owed=head['search']['owed_count']
+    grant=value['grant'];used=grant['used_calls'] if grant else 0
+    rows={row['mechanism_ref']:row for row in value['mechanisms']}
+    for original in accepted:
+        binding=check_binding(value,original.get('mechanism_binding'),scope,_validated=True,_rows=rows)
+        ref=binding['mechanism_ref'];item=items.get(ref)
+        if (item is None or binding['source_h']!=item['source_h']
+                or binding['source_h_ref']!=item['source_h_ref']
+                or binding['catalog_binding']!=dict(ordinal=item['ordinal'],origin_ref=item['origin_ref'],
+                    source_goal_id=item['source_origin_identity']['goal_id'])):
+            raise ValueError('Accepted scientific call changed its frozen catalog member')
+        before=accepted_search._owed(dict(item,accepted_calls=counts[ref]),value['initial_calls'])
+        counts[ref]+=1
+        owed+=int(accepted_search._owed(dict(item,accepted_calls=counts[ref]),value['initial_calls']))-int(before)
+        if binding['grant'] is not None:used+=1
+    focused=focus and focus['action']!='screen'
+    decisions={};available=[]
+    for ref,item in items.items():
+        extra=None
+        if head['search']['opportunity_unknown_count']:reason='original_execution_unknown'
+        elif focused and ref!=focus['mechanism_ref']:reason='focused_mechanism_required'
+        elif item['status']=='waived':reason='mechanism_waived'
+        else:
+            selected_owed=accepted_search._owed(dict(item,accepted_calls=counts[ref]),value['initial_calls'])
+            awaiting=not focused and owed-int(selected_owed)>0
+            if awaiting and counts[ref]>=value['initial_calls']:
+                if grant is None or grant['mechanism_ref']!=ref or used>=grant['extra_calls']:
+                    reason='initial_opportunities_owed'
+                else:
+                    reason=None;extra={key:grant[key] for key in ('source_a','source_a_ref')}
+            else:reason=None
+        decisions[ref]=dict(reason=reason,grant=extra)
+        if reason is None:
+            available.append(dict(number=str(item['ordinal']),mechanism_ref=ref))
+    return decisions,sorted(available,key=lambda row:int(row['number']))
+
+
 def admit(value, choice, scope, accepted):
     """Called under the common accept lock; only bounded original metadata is read."""
+    from . import accepted_budget,accepted_search
     validate(value)
     if value is None:
         if choice is not None:raise OpportunityRequired('No H mechanism combination is authorized for this stage')
         return None
-    selected=resolve_choice(value,choice,scope,_validated=True);ref=selected['mechanism_ref']
-    # Same-call recovery may resolve knowledge after this task was frozen.
-    # Only its canonical accepted delta may clear this mechanical refusal;
-    # neither a new request nor a rewritten scientific narrative can do so.
-    if selected['_head']['search']['opportunity_unknown_count']:
-        raise OpportunityRequired('Preserve the original unknown execution; resolve its identity before a new submission')
-    if selected['status'] == 'waived':raise OpportunityRequired('This mechanism was scientifically waived by A')
-    counts={ref:selected['accepted_count']};items={ref:selected}
-    owed=selected['_head']['search']['owed_count']
-    grant = value['grant'];used = grant['used_calls'] if grant else 0
-    rows={row['mechanism_ref']:row for row in value['mechanisms']}
-    for original in accepted:
-        binding = check_binding(value,original.get('mechanism_binding'),scope,_validated=True,_rows=rows)
-        other=binding['mechanism_ref']
-        if other not in counts:
-            item=resolve_choice(value,other,scope,head=selected['_head'],_root=selected['_root'],_focus=selected['_focus'],_validated=True);items[other]=item;counts[other]=item['accepted_count']
-        before=counts[other];counts[other]+=1
-        if items[other]['status'] not in {'deferred','waived'} and before<value['initial_calls']<=counts[other]:owed-=1
-        if binding['grant'] is not None:used += 1
-    selected_owed=selected['status'] not in {'deferred','waived'} and counts[ref]<value['initial_calls']
-    focused=selected['_focus'] and selected['_focus']['action']!='screen'
-    awaiting=False if focused else owed-int(selected_owed)>0
-    extra = None
-    if awaiting and counts[ref] >= value['initial_calls']:
-        if grant is None or grant['mechanism_ref'] != ref or used >= grant['extra_calls']:
-            raise OpportunityRequired('Other H mechanisms retain initial call opportunities; report the scientific question to A for justified extra allocation')
-        extra = {key:grant[key] for key in ('source_a','source_a_ref')}
-    return dict(mechanism_ref=ref,source_h=selected['source_h'],source_h_ref=selected['source_h_ref'],job_ref=scope['job_ref'],grant=extra,
+    root,focus=_catalog_root(value,scope)
+    head=accepted_budget.read(root)
+    # Validate the exact prefix once before using its already loaded table.
+    accepted_search.catalog_item(root,value['catalog'],1,head=head)
+    decisions,available=_availability(value,scope,accepted,head=head,focus=focus)
+    try:
+        selected=resolve_choice(value,choice,scope,head=head,_root=root,_focus=None,_validated=True)
+    except OpportunityRequired as error:
+        reason='original_execution_unknown' if head['search']['opportunity_unknown_count'] else 'mechanism_choice_required'
+        raise OpportunityRequired(_REFUSALS[reason],reason=reason,available_mechanisms=available) from error
+    ref=selected['mechanism_ref'];decision=decisions[ref]
+    if decision['reason'] is not None:
+        reason=decision['reason']
+        raise OpportunityRequired(_REFUSALS[reason],reason=reason,available_mechanisms=available)
+    return dict(mechanism_ref=ref,source_h=selected['source_h'],source_h_ref=selected['source_h_ref'],job_ref=scope['job_ref'],grant=decision['grant'],
         catalog_binding=dict(ordinal=selected['ordinal'],origin_ref=selected['origin_ref'],source_goal_id=selected['source_goal_id']))

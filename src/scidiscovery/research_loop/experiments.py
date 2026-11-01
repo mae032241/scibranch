@@ -94,8 +94,9 @@ class _AdmissionOpportunityRequired(breadth.OpportunityRequired):
 def _raise_admission_refusal(error):
     if isinstance(error, _BudgetAdmissionUnavailable):
         raise _AdmissionBudgetRefused(error._review_reason) from error
-    refusal = _AdmissionReviewRequired if isinstance(error, ReviewRequired) else _AdmissionOpportunityRequired
-    raise refusal(str(error)) from error
+    if isinstance(error,ReviewRequired):raise _AdmissionReviewRequired(str(error)) from error
+    raise _AdmissionOpportunityRequired(str(error),reason=error.reason,
+        available_mechanisms=error.available_mechanisms) from error
 
 
 class ConcurrentExecution(ValueError):
@@ -1090,7 +1091,7 @@ class Records:
     def preflight(self, *, expected_calls, mechanism=None):
         from . import storage_policy as storage
         with self.admission_lease(context=storage.Deadline(self.config['max_seconds'])):
-            self.admission_binding(mechanism,expected_calls=expected_calls)
+            return self.admission_binding(mechanism,expected_calls=expected_calls)
 
     @_configuration_effect
     def accept(self, descriptor, metadata, interface, *, expected_calls=None, mechanism=None, recovery_admission=None, operation_context=None, _local_preparation=False):
@@ -1847,14 +1848,10 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, pa
             and config['execution_interface']['executor']!='local_execution:command'):
         raise UnsupportedExecution('Project directory execution requires the managed Local runtime; compile a self-contained implementation JSON for this executor.')
     _require_new_execution(config)
-    opportunities=breadth.validate(config.get('breadth'))
-    if opportunities is not None and not opportunities['prior_unknown']:
-        try:mechanism=breadth.resolve_choice(opportunities,mechanism,config['scope'])['mechanism_ref']
-        except breadth.OpportunityRequired as error:
-            raise CallerError('Choose one mechanism number from this task frozen catalog.') from error
-    try:records.preflight(expected_calls=expected_calls,mechanism=mechanism)
+    try:binding=records.preflight(expected_calls=expected_calls,mechanism=mechanism)
     except (ReviewRequired,breadth.OpportunityRequired) as error:_raise_admission_refusal(error)
     except ConcurrentExecution:return None
+    if binding is not None:mechanism=binding['mechanism_ref']
     call_id = f'{len(expected_calls)+1:04d}-{uuid.uuid4().hex}'
     if config.get('host_execution_authority') is not None:
         from . import execution_authority
@@ -2427,7 +2424,10 @@ def main(argv=None):
         code=2
     except (_AdmissionOpportunityRequired,common._AdmissionOpportunityRequired) as error:
         result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
-            dict(status='unresolved',accepted=False,note=_diagnostic(error,'Choose an available authorized H mechanism before another request',config=feedback_config)))
+            dict(status='unresolved',accepted=False,reason=error.reason,
+                available_mechanisms=error.available_mechanisms,
+                note=_diagnostic(error,breadth._REFUSALS.get(error.reason,
+                    'Choose an available authorized H mechanism before another request'),config=feedback_config)))
         code=2
     except (ReviewRequired,common.ReviewRequired,breadth.OpportunityRequired) as error:
         result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else

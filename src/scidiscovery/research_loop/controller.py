@@ -221,7 +221,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     delivery_limits = None
     if delivery_policy is not None:
         from . import delivery
-        delivery_limits = delivery.policy(delivery_policy)
+        delivery_limits = delivery.policy(delivery_policy, root=identity_root)
         if node_limits is None:
             raise ValueError('Delivery requires explicitly frozen all-role node budgets')
     if candidate_audit_policy is not None:

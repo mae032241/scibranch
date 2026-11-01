@@ -78,6 +78,16 @@ to perform extra hash calculation, comparison, verification or prepare hash inve
 Workers write ordinary scientific files; control records their exact paths, producers
 and declared sizes privately on the host under the reference contract above.
 
+Reports and reusable diagnostic scripts belong in `artifacts/`; `work/` is scratch.
+Ordinary A/H relay their current material references through existing input bindings,
+including exact E request/return and selected forks. Null preserves that working
+set, `[]` clears it, and explicit IDs replace it. An accepted empty set is not
+refilled from older parents. New W outputs refresh the automatic set; W explicitly
+selects prior implementations needed after its result. Only references travel,
+not managed-original copies or entire ancestor workspaces. Implementation options
+show selection IDs and usable paths; compile arguments name paths, not IDs.
+Existing current-input bounds still apply.
+
 Local result metrics retain distinct nonempty names and explicit finite numeric
 values. `unit`, `evaluation_key`, `direction` and labels are optional scientific
 descriptions: control imposes no optimization enum or scientific text-length limit.
@@ -123,8 +133,11 @@ screening across mechanisms; an empty commitment list requires that null screen.
 A revision selects an existing mechanism by including its commitment with the
 canonical `existing_ref`; omitted commitments retain the prior breadth. Control
 assigns stable references such as `h001.m1` independently of UI sorting. Subsequent
-A `next_focus.mechanism_ref`, W `--mechanism` and `mechanism_findings[].mechanism`
-use those exact canonical references. Display labels never resolve identities.
+A `next_focus.mechanism_ref` and `mechanism_findings[].mechanism` use those exact
+canonical references. W `--mechanism` takes the positive decimal number from the
+frozen task catalog; control binds it to the exact mechanism and H source. Display
+labels never resolve identities. Refusals expose the fixed public reason and
+available numbers from the same admission calculation.
 
 Scientific commitment and disposition lists have no fixed four-item or 128-mechanism
 capacity. The configured initial-call opportunities, exact extra-call grants,
@@ -140,6 +153,14 @@ and constraints. Temporary relative underperformance or missing evidence support
 deferral rather than scientific rejection. H compares plausible mechanisms before
 concentrating and explains any single-mechanism scope; parameter trial counts alone
 do not establish evidence across mechanisms. Control does not grade these reasons.
+
+One retained comparative call can support several authored observed findings via
+their existing `call_id`; A still judges scientific screening. Execution keeps its
+single original mechanism binding and call count. Missing references after actual
+work request output clarification, not execution just to register evidence.
+Pending mechanisms retain initial opportunities; A-screened mechanisms need no
+separate call solely to consume an opportunity. Accepted breadth summary version 2
+records this rule; earlier summaries are rejected without replay or migration.
 
 Normal A planning checks whether proxy, validation and audit evidence addresses
 the original goal, including conditional ranking reversals and same-family tuning.

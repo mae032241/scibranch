@@ -16,6 +16,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import traceback
 
 from . import budget, contracts as c, handoff_state, history, originals, runtime
 from .instance_owner import effect as owner_effect
@@ -65,7 +66,7 @@ def _file(path, limit=None):
     return c.regular(path, limit=limit)
 
 
-def policy(value):
+def policy(value, *, root=None):
     keys = {'closeout_a', 'inflight_tokens', 'cleanup_seconds', 'submit_seconds', 'confirm_seconds', 'adapter'}
     if not isinstance(value, dict) or set(value) != keys:
         raise ValueError('Delivery requires explicit closeout, execution and transport ceilings')
@@ -109,6 +110,7 @@ def policy(value):
         raise ValueError('Launcher executable and original files must be frozen')
     if not isinstance(adapter['config'], dict) or not isinstance(adapter['target'], dict):
         raise ValueError('Adapter configuration and target must be bounded objects')
+    _local_directory(dict(adapter, adapter=str(script)), root=root)
     inputs = adapter['inputs']
     roots = adapter['source_roots']
     if not isinstance(inputs,list) or not isinstance(roots,list) or not roots:
@@ -155,6 +157,14 @@ def _settings(root, job=None):
     return configuration_updates.for_job(root, job) if job is not None else configuration_updates.current(root)
 
 
+def _local_directory(spec, *, root=None):
+    """Observe only the built-in directory adapter's explicit local target."""
+    from . import generic_delivery
+    if Path(spec['adapter']) == Path(generic_delivery.__file__).resolve():
+        return generic_delivery.directory_target(spec['target'], root=root)
+    return None
+
+
 def _adapter(root, job=None, *, context=None):
     spec = (_settings(root, job).get('delivery_policy') or {}).get('adapter')
     if spec is None:
@@ -180,10 +190,10 @@ def _adapter(root, job=None, *, context=None):
         if any(current.get(key) != proof[key] for key in ('path','size_bytes','file_stat') if key in proof):
             raise ValueError('Frozen delivery executable or public harness changed')
     from . import generic_delivery
-    if Path(spec['adapter']) == Path(generic_delivery.__file__).resolve():
-        target = Path(spec['target']['directory'])
-        if Path(root).resolve().is_relative_to(target):
-            raise ValueError('Directory delivery target must not expose the control root')
+    try:
+        _local_directory(spec, root=root)
+    except (OSError, ValueError) as error:
+        raise PreparationUnavailable(generic_delivery.PREFLIGHT_FAILED) from error
     from . import protocol
     source=Path(protocol.__file__).resolve()
     if any(item['label']=='scid-current-protocol' for item in spec['inputs']):raise ValueError('Reserved current protocol input label')
@@ -903,6 +913,11 @@ def _call(spec, request, seconds, *, on_process=None, evidence=None):
         except OSError as error:
             cleanup_code()  # Popen established that this leaf never started.
             if request.get('phase')=='audit':raise DeliveryUnresolved('delivery_audit_process_unavailable') from error
+            if request.get('phase') in {'promote', 'confirm'}:
+                errors.extend(str(error).encode()[-MAX_LEAF_TAIL:]);totals['stderr'] = len(errors)
+                keep('process_unavailable')
+                from . import generic_delivery
+                return generic_delivery.unstarted_result(request, 'delivery_process_unavailable')
             raise
         identity = None
         failed = False
@@ -1061,6 +1076,8 @@ def invoke(root, intent, max_seconds, *, on_process=None, audit_only=False):
     bound = intent['binding']
     if intent['operation_id'] != bound['operation_id'] or intent['decision'] != bound['decision']:
         raise ValueError('Delivery action identity differs from frozen decision')
+    if intent['action_kind'] not in (('audit',) if audit_only else ('submit', 'confirm')):
+        raise ValueError('Unknown delivery action')
     decision = bound['decision'];step = decision['step']
     record = c.host_record(c.workspace(root, step))
     for path, key in [(root / 'jobs' / f'{step:03d}.json', 'job_ref'),
@@ -1068,13 +1085,22 @@ def invoke(root, intent, max_seconds, *, on_process=None, audit_only=False):
         if (c.file_ref(_file(path)) if key=='raw_ref' else c.record_ref(_file(path))) != decision[key]:
             raise ValueError('Delivery scientific decision changed')
     job = c.read(root / 'jobs' / f'{step:03d}.json')
-    spec = _adapter(root, job, context=_Deadline(deadline))
+    try:
+        spec = _adapter(root, job, context=_Deadline(deadline))
+    except PreparationUnavailable as error:
+        from . import generic_delivery
+        if audit_only or error.code != generic_delivery.PREFLIGHT_FAILED:raise
+        diagnostic = traceback.format_exc().encode()
+        _keep(leaf_output(root), dict(operation_id=bound['operation_id'],
+            phase='promote' if intent['action_kind'] == 'submit' else 'confirm'),
+            'preflight_failed', None, dict(stderr=(len(diagnostic), diagnostic[-MAX_LEAF_TAIL:])))
+        # No leaf was dispatched for this accepted action. Confirmation still
+        # cannot decide whether the original, earlier submit had an effect.
+        return _result(bound, 'failed' if intent['action_kind'] == 'submit' else 'unknown', error.code)
     if audit_only:
         candidate_audit.validate_binding(root, intent)
     elif binding(root, job, handoff_state.read_sealed(root, step)) != bound:
         raise ValueError('Delivery input binding changed')
-    if intent['action_kind'] not in (('audit',) if audit_only else ('submit', 'confirm')):
-        raise ValueError('Unknown delivery action')
     with _stage(root, 'scid-delivery-') as directory:
         request = dict(_staged(root, spec, bound['source'], bound['operation_id'], Path(directory), job=job,
             context=_Deadline(deadline)), deadline_boottime=deadline)

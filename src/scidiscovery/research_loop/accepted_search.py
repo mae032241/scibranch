@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 
-VERSION = 1
+VERSION = 2
 
 
 def key(kind, identity):
@@ -97,7 +97,10 @@ class _Delta:
 
 
 def _owed(item, initial_calls):
-    return item['status'] not in {'deferred', 'waived'} and item.get('accepted_calls', 0) < initial_calls
+    # A may screen several authored observations from one comparative call.
+    # That disposition releases the opportunity without inventing more calls;
+    # reopening restores the ordinary check against the unchanged call count.
+    return item['status'] == 'pending' and item.get('accepted_calls', 0) < initial_calls
 
 
 def _status(delta, ref, item, status, initial_calls):

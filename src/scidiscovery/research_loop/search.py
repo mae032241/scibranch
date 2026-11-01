@@ -262,7 +262,7 @@ def _managed_refs(root,source,seal,state):
     return refs
 
 
-def _screen_refs(root,source,seal,state):
+def _screen_refs(root,source,seal,state,*,science):
     """A judges this final W's findings using its frozen, reusable observations.
 
     Reused proofs qualify scientific assessment only. They remain absent from
@@ -272,23 +272,22 @@ def _screen_refs(root,source,seal,state):
     if not worker_delivery.applicable(source):return _managed_refs(root,source,seal,state)
     owner=originals.node(root,source['step'])
     facts=worker_delivery.validate_original(root,owner,source,seal)
-    refs=set();hashes={}
-    for row in facts['evidence']:
-        ref=row['mechanism_ref'];current=state['mechanisms'].get(ref)
-        if current is None:continue
-        accepted=row['accepted'];accepted_owner=originals.source_for_ref(owner,accepted)
-        binding=c.read(originals.sealed_path(accepted_owner,dict(accepted,path=accepted['snapshot'])))['mechanism_binding'];step=current['source_h']
-        if step not in hashes:hashes[step]=history.source_seal_ref(originals.node(root,step))
-        if binding['source_h']==step and binding['source_h_ref']==hashes[step]:refs.add(ref)
-    return refs
+    # The sealed producer already checked every retained observation against
+    # this frozen task's H bindings. Compare those supplied bindings with the
+    # current accepted state instead of reopening the original call records.
+    targets={row['mechanism_ref'] for row in source['search']['breadth']['mechanisms']
+        if (current:=state['mechanisms'].get(row['mechanism_ref'])) is not None
+        and all(row[key]==current[key] for key in ('source_h','source_h_ref'))}
+    evidence=[row for row in facts['evidence'] if row['mechanism_ref'] in targets]
+    return worker_delivery.finding_coverage(science,evidence,targets)['observed']
 
 
 def _mechanism_sources(root,job,ref,state,*,screen=False):
     sources=[]
-    for source,_,seal in history.direct_sources(root,job):
+    for source,payload,seal in history.direct_sources(root,job):
         if source['role']!='W':continue
         if (source.get('search') or {}).get('breadth'):
-            refs=_screen_refs(root,source,seal,state) if screen else _managed_refs(root,source,seal,state)
+            refs=_screen_refs(root,source,seal,state,science=payload) if screen else _managed_refs(root,source,seal,state)
             if ref in refs:sources.append(source)
         elif ((source.get('search') or {}).get('focus') or {}).get('mechanism_ref')==ref and (not screen or source['search']['focus']['action']=='screen'):
             sources.append(source)
@@ -792,7 +791,7 @@ def _current_combination(root,state):
 
 
 def _breadth(root,state,limits,focus):
-    from . import breadth
+    from . import accepted_search, breadth
     if state.get('summary') is None:raise ValueError('Current accepted scientific point state required')
     # Keep H declaration order across revisions; never discard authorized pending items.
     refs=list(state.get('combination_refs',[]))
@@ -812,7 +811,8 @@ def _breadth(root,state,limits,focus):
     value=dict(version=2,initial_calls=limits.get('initial_calls',1),mechanisms=mechanisms,
         baseline=[dict(mechanism_ref=ref,accepted_count=state['opportunity_counts'].get(ref,0)) for ref in refs],
         grant=grant,prior_unknown=state['opportunity_unknown'])
-    in_scope=sum(state['mechanisms'][ref]['status'] not in {'deferred','waived'} and state['opportunity_counts'].get(ref,0)<limits.get('initial_calls',1) for ref in refs)
+    in_scope=sum(accepted_search._owed(dict(state['mechanisms'][ref],
+        accepted_calls=state['opportunity_counts'].get(ref,0)),limits.get('initial_calls',1)) for ref in refs)
     value['outside_initial_owed']=max(0,state['summary']['owed_count']-in_scope)
     value['catalog']=state['_catalog']
     return breadth.validate(value)
@@ -837,8 +837,15 @@ def bind(root,step,role,protocol=None,*,write_pages=True,state=None,unified=True
     if role=='W' and focus and focus['action']=='screen':
         obligation=[dict(mechanism_ref=ref,source_h=item['source_h'],source_h_ref=item['source_h_ref'])
             for ref,item in state['mechanisms'].items() if ref in state.get('combination_refs',state['authorized']) and item['status']=='pending']
+    bound_breadth=_breadth(root,state,limits,focus) if role=='W' else None
+    advice=None
+    if bound_breadth is not None:
+        from . import breadth
+        decisions,available=breadth._availability(bound_breadth,{},[],head=dict(search=state['summary']),focus=focus)
+        advice=dict(available_mechanisms=available[:4],omitted_count=max(0,len(available)-4),
+            focus_reason=decisions[focus['mechanism_ref']]['reason'] if focus else None)
     return dict(coverage_obligation=obligation,focus=focus,allocation=copy.deepcopy(state['order']['allocation']),unfinished_plan=copy.deepcopy(state['order']['remaining']),
-        breadth=_breadth(root,state,limits,focus) if role=='W' else None,intent_diagnostics=state['order']['diagnostics'],repair_root=repair_root,repair_binding=repair_binding,repair_source=repair_source,repair_authorization=repair_authorization,limits=policy(limits),files=[])
+        breadth=bound_breadth,admission_advice=advice,intent_diagnostics=state['order']['diagnostics'],repair_root=repair_root,repair_binding=repair_binding,repair_source=repair_source,repair_authorization=repair_authorization,limits=policy(limits),files=[])
 
 
 def launch_reason(root,job):

@@ -140,8 +140,9 @@ skill_set = "analysis"
 `index:null` 只允许 `screen`，保持多机制浅筛；空 commitments 只能使用 null screen。
 修订中要选择已有机制，须在同次 commitments 中显式填写其 canonical `existing_ref`，再用该项编号；
 省略的机制仍保留广度。控制分配 `h001.m1` 等稳定引用，不随 UI 排序改变。后续 A 的
-`next_focus.mechanism_ref`、W 的 `--mechanism h001.m1` 和
-`mechanism_findings[].mechanism` 都必须使用任务给出的精确引用，显示 label 不参与匹配。
+`next_focus.mechanism_ref` 和 `mechanism_findings[].mechanism` 使用任务给出的精确引用。
+W 的 `--mechanism 1` 使用冻结目录中的正整数编号，控制绑定准确机制及其 H 来源；显示 label
+不参与匹配。准入拒绝回执列出公开原因与当时可选编号，不因显示为 pending 就保证可执行。
 
 窄输出补正只修改诊断指出的 JSON/布局字段，返回完整原 JSON，其余科学计划保持原义。
 提示中的 `remaining_observed_tokens`、`remaining_active_seconds` 与
@@ -660,6 +661,10 @@ candidate、reason，缺口项 mechanism_ref、reason。候选沿现有科学引
 无外部交付 adapter 时可使用 `scid-research closeout --root /path/to/instance --export-only` 保留成果及限制，状态为 `exported_unsubmitted`。
 本地成果封存及交接不产生 cov 审计资格或外部提交确认。
 显式配置通用目录交付 adapter 后，A 的 `deliver` 可授权控制层解析精确输入和成果、封装并确认目标目录；该确认只证明本地目录交付。
+新实例启动脚本须先创建明确配置的本地交付目录，例如 `mkdir -p -- /path/to/new-run/delivery`，
+再执行 `config-check` 和 `prepare`。内置目录 adapter 的配置检查会拒绝不存在、非规范或暴露实例根的目标；
+不自动创建远端 provider 目标，也不在未知交付的恢复中重建目录或重提原操作。
+确定尚未启动交付就遇到的本地错误报告为 `failed` 并给出固定原因；对先前交付的确认仍可能是 unknown。
 适配器可用可选 `effect_scope` 声明公开效果范围（非空公开文本，不设固定长度上限）；内置目录 descriptor 明确只复制并确认已留存文件，不训练、不执行任务原生提交或科学审计。custom 未声明时为 `unknown`，不根据 argv 猜测。新 job 冻结公开 `configured_delivery`，同一任务续跑保留原声明；该描述不授执行权限或科学资格。W 在临时文件消失前将任务实际需要的成果与原生回执保存到既有声明输出，而非保留所有中间物；A 对照原任务交付要求、留存成果和实际范围明确缺口。FINAL 仍可交付最佳已有部分成果，不新增完成度硬门槛，也不让目录适配器补做缺失的训练、原生提交或审计。
 
 ## 文件与职责
@@ -737,16 +742,18 @@ native-evidence/<node>/           # 私有原生轨迹、schema、引用与封�
 
 控制层自动采集节点 `artifacts/` 及子实验成果和可选结论，规范为直接前驱成果目录。
 子实验模型不需要再复制到顶层。`work/`、输入和祖先材料不进入成果采集。
+需要后继使用的报告和可复用诊断脚本也须放入 `artifacts/`，在结论里提到临时路径不等于交付。
 默认交接包括全局文件、直接前驱结论、关键成果直达入口和成果目录，启动材料不逐项展开文件。
 角色在科学结论里自然使用 `[比较结果](artifacts/comparison.csv)` 这类相对 Markdown 链接；
 控制层验证它指向本节点已采集的成果，并解析为后继节点的实际路径。无需另填附件清单。
 普通文字路径不自动推断；外部链接与前驱材料引用保持科学原文，不冒充本节点新成果。
 封装、路径校验、来源记录、输出 schema 和封存回执只由控制层维护；科学内容不自动计算哈希。
 旧科学结论通过 `history` 给出的只读分页入口在当前节点按需读取，默认只投递不超过 4096 字节的历史简报。
-旧实现保留在原拥有节点。角色需要给后继复用时，在科学结论明确链接
-`[旧实现](history/nodes/002/artifacts/candidate.py#reuse-implementation)`，或标记当前已绑定的输入路径。
-控制层核对原件后仅转交该文件；普通历史引用不转交文件，历史结论里旧附件链接也不自动挂载。
-角色不计算身份、不复制旧材料，不继承祖先整包。旧实现虚拟入口并不表示当前节点已能读取代码。
+旧实现保留在原拥有节点。普通 A/H 的当前材料引用可沿转交链及准确 E 往返保留；
+`implementation_selection:null` 保留当前集合，`[]` 清空，明确 ID 列表替换。
+空集合不因路由还列有旧父节点而恢复。W 发布新结果后自动集合刷新，后续仍需使用的旧实现由 W
+显式选择保留。选项列出 ID 和实际输入路径；compile 使用文件路径，ID 用于选择。
+普通历史引用不自动挂载历史所有附件。角色不计算身份、不复制旧模型，也不继承祖先整包。
 
 新实例的成果采集默认不设单文件或单节点累计存储大小限制（冻结值为 null）。操作者可显式传入正整数 `--max-output-item-bytes`、`--max-output-total-bytes` 限制采集和直接交接；已有实例冻结的整数配额仍生效，不自动扩大。
 显式配额与模型紧凑视图限制分别执行，也不改变 token、时间或执行次数预算。声明目录之外的文件不自动获得证据资格。

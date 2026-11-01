@@ -662,6 +662,41 @@ def selected_inputs(inventory):
     return inventory.selected_inputs
 
 
+def _relayed_materials(job, payload, selected):
+    """Keep current inputs through direction, assessment and exact E returns."""
+    requester = job.get('evidence_return')
+    extraction_return = (job['role'] == 'E' and isinstance(requester, dict)
+        and requester.get('role') in {'A', 'H'} and type(requester.get('step')) is int
+        and 0 < requester['step'] < job['step']
+        and any(ref['path'] == f'inputs/parents/{requester["step"]:03d}/conclusion.json'
+            for ref in job['direct_refs']))
+    if ((job['role'] not in {'A', 'H'} and not extraction_return) or job.get('purpose') is not None
+            or any(job.get(key) for key in ('final_report', 'final_only', 'formal_review',
+                'author_correction', 'correction_request'))):
+        return None
+    if payload.get('implementation_selection') is None:
+        return [] if job.get('input_selection_status') == 'unresolved' else job['direct_materials']
+    return [row['material'] for row in selected]
+
+
+def _material_options(materials, *, sources):
+    """Expose current originals under their producer's unchanged object IDs."""
+    indexes, options = {}, []
+    for material in materials:
+        step = int(PurePosixPath(material['path']).parts[2])
+        if step not in indexes:
+            facts = sources[step]
+            indexes[step] = {row['path']: (index, row) for index, row in enumerate(
+                sorted(_public_materials(facts['seal']['materials']), key=lambda row: row['path']), 1)}
+        index, original = indexes[step][material['path']]
+        if original != material:
+            raise ValueError('Implementation option differs from its exact producer')
+        options.append(dict(id=f'{sources[step]["job"]["role"]}{step:03d}-I{index:03d}',
+            label=Path(material['path']).name.encode()[:160].decode('utf-8', errors='ignore'),
+            path=material['path']))
+    return options
+
+
 def _decision_context(job, *, sources):
     """Label the exact immediate scientific source; do not parse its prose."""
     if (job['role'] not in {'W', 'H'} or job.get('purpose') is not None
@@ -800,7 +835,7 @@ def _role_lineage(job, parents=()):
         mechanisms=view['mechanisms']
         mechanisms['focus']=None
         mechanisms['authorized_count']=len(rows)
-        mechanisms['overview']=[dict(mechanism_ref=row['mechanism_ref'],label=row['label'],
+        mechanisms['overview']=[dict(number=str(row['ordinal']),mechanism_ref=row['mechanism_ref'],label=row['label'],
             status=row['status'],original='inputs/history/nodes/'+row['source_goal_id']+
                 f'/{row["source_h"]:03d}/science.json') for row in rows[:4]]
         mechanisms['overview_omitted_count']=max(0,len(rows)-4)
@@ -809,6 +844,8 @@ def _role_lineage(job, parents=()):
         mechanisms['scope']=('Assigned shallow combination; each mechanism needs your own scientific finding or explicit obstacle.' if action=='screen' else
             'Assigned local '+str(action)+' task; findings and nominations cover only the assigned mechanisms. Do not repeat other mechanisms; their retained observations and gaps remain visible to A.')
         mechanisms['coverage_required_count']=len((job.get('search') or {}).get('coverage_obligation',[]))
+        if 'admission_advice' in job['search']:
+            mechanisms['admission']=job['search']['admission_advice']
         from .lineage import bounded_brief
         bounded_brief(view)
     # These routes share an exact sealed scientific producer, not necessarily
@@ -1550,6 +1587,12 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     parent_facts,parent_members,parent_views,material_paths={},{},{},{}
     if review_binding is not None:
         materials=review_binding['materials'];selected=review_binding['selected']
+    relay_predecessor = None
+    if review_binding is None and step - 1 in parents:
+        predecessor = _load_parent_source(root, step - 1, base=base,
+            sources=parent_facts, members=parent_members, prefix=head['prefix'])
+        if 'relayed_materials' in predecessor['seal']:
+            relay_predecessor = step - 1
     for parent in ([] if review_binding is not None else parents):
         facts=_load_parent_source(root,parent,base=base,sources=parent_facts,members=parent_members,
             prefix=head['prefix'],resolve_choices=True)
@@ -1562,6 +1605,8 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         refs.append(ref)
         from . import originals
         parent_seal = parent_source[2]
+        if relay_predecessor is not None and parent != relay_predecessor:
+            continue  # Older conclusions stay visible; the accepted relay owns current materials.
         for material in parent_seal['materials']:
             material_paths[material['path']]=originals.bound_material_path(root,material,
                 source=facts['owner'],seal=parent_seal)
@@ -1571,6 +1616,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         # baggage on a retained H ancestor in every later scientific cycle.
         if parent == step - 1:
             selected.extend(parent_seal.get('selected_inputs', []))
+            materials.extend(parent_seal.get('relayed_materials', []))
     unique = {}
     for item in [*materials, *[row['material'] for row in selected]]:
         if item['path'] in unique and unique[item['path']] != item:
@@ -1705,10 +1751,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
             source_cutoff=final_report['source_cutoff'] if final_report else source_cutoff,extra_steps=extra_steps,selection_protocol=selection_protocol,
             audit_projection_version=audit_projection_version,adjacent_audit=job.get('candidate_audit'),
             worker_view_version=1,assessment_job=job if role=='A' else None,source_rows=parent_sources)
-        options = [dict(id=f'{parent_job["role"]}{parent_job["step"]:03d}-I{index:03d}',
-            label=Path(row['path']).name.encode()[:160].decode('utf-8',errors='ignore'))
-            for parent_job,_,seal,_ in parent_sources
-            for index,row in enumerate(sorted(seal['materials'],key=lambda row:row['path']),1)]
+        options = []
     if retained is not None:
         if 'assessment_handoff' in retained:
             job['assessment_handoff'] = retained['assessment_handoff']
@@ -1741,6 +1784,8 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
             if not bound:
                 input_inventory.entry(); input_inventory.file(material['size_bytes'])
                 job['direct_materials'].append(material)
+    if review_binding is None and retained is None:
+        options = _material_options(job['direct_materials'], sources=parent_facts)
     from . import candidate_refs
     job['direct_originals']=refs
     job['direct_refs']=[]
@@ -1766,7 +1811,8 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     job['implementation_options'] = options[:16]
     job['implementation_options_omitted_count'] = retained.get('implementation_options_omitted_count',0) if retained is not None else max(0, len(options) - 16)
     if review_binding is None and retained is None:
-        job['history']['view']['implementation_options'] = [dict(id=row['id'], label=row['label'].encode()[:80].decode('utf-8',errors='ignore')) for row in options[:2]]
+        job['history']['view']['implementation_options'] = [dict(id=row['id'],
+            label=row['label'].encode()[:80].decode('utf-8',errors='ignore'), path=row['path']) for row in options[:2]]
         job['history']['view']['implementation_options_omitted_count'] = max(0,len(options)-2)
         lineage.bounded_brief(job['history']['view'])
     if retained is not None:
@@ -1946,6 +1992,9 @@ def validate_original(source, *, _active=None, _memo=None, controls_only=False):
             or raw_ref != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}):
         raise ValueError('Source terminal lost its exact original task/output')
     payload = read(result) if controls_only else _sealed_science(job,seal,raw,result,source=source)
+    if ('relayed_materials' in seal and seal['relayed_materials'] !=
+            _relayed_materials(job, payload, seal.get('selected_inputs', []))):
+        raise ValueError('Relayed material receipts changed')
     if not controls_only:
         for ref in [*job.get('global_materials', []), *job.get('direct_refs', []),
                     *job.get('direct_materials', []), *job.get('history', {}).get('files', []),
@@ -2039,6 +2088,9 @@ def validate(work: Path):
         raise ValueError('Scientific unresolved link receipt changed')
     if seal.get('selected_inputs', []) != _accept_selected_inputs(work, payload, job,_policy=inventory.policy):
         raise ValueError('Selected implementation receipts changed')
+    if ('relayed_materials' in seal and seal['relayed_materials'] !=
+            _relayed_materials(job, payload, seal.get('selected_inputs', []))):
+        raise ValueError('Relayed material receipts changed')
     _validate_inputs(root, work, job,_policy=inventory.policy)
     from . import execution_inputs
     execution_inputs.validate_seal(root, job, seal)
@@ -2355,6 +2407,7 @@ def _seal_result(root,step,*,inventory):
     unresolved = dict(items=[], omitted_count=0)
     entry_points = artifact_entry_points(work, value, materials, job['handoff_protocol'], unresolved)
     selected = selected_inputs(inventory)
+    relayed = _relayed_materials(job, inventory.payload, selected)
     observations = None
     from . import history
     history.validate_recommendation(job, value, root=root)
@@ -2378,6 +2431,7 @@ def _seal_result(root,step,*,inventory):
           **(dict(control_outcome=control) if control is not None else {}),
           unresolved_links=unresolved,
           **(dict(selected_inputs=selected) if selected else {}),
+          **(dict(relayed_materials=relayed) if relayed is not None else {}),
           **(dict(observations=observations) if observations else {}))
     observed_inputs=history.validate_current_observation(root,job,seal,inventory=inventory)
     inventory.observation=observations

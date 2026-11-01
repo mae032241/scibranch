@@ -91,7 +91,7 @@ def test_optional_finding_prose_retains_science_without_automatic_screening_or_r
     assert route[0]=='A'
     from scidiscovery.research_loop import search
     assert {row['status'] for row in search.project(root,3)['mechanisms'].values()}=={'pending'}
-    assert search._screen_refs(root,job,seal,search.project(root,3))=={'h001.m1','h001.m2'}
+    assert search._screen_refs(root,job,seal,search.project(root,3),science=payload)=={'h001.m1','h001.m2'}
     assert len(execution.records(root,2))==1 and len(experiments_calls(config))==2
 
 

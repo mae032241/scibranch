@@ -322,6 +322,7 @@ def read(root):
 
 def load(root, *, base):
     """Read a fresh mutable head using the caller's original settings fact."""
+    from . import accepted_search
     root = Path(root)
     path = root / HEAD
     if not path.exists():
@@ -330,6 +331,8 @@ def load(root, *, base):
     if (value.get('version') != 2 or 'active_audit' not in value
             or 'delivery_preparation' not in value):
         raise ValueError('Unsupported accepted budget state')
+    if (value.get('search') or {}).get('version') != accepted_search.VERSION:
+        raise ValueError('Unsupported accepted scientific summary version')
     if (value['instance_id'] != base['goal_id']
             or value['settings_ref'] != dict(path=str(Path(value['logical_root'])/'settings.json'))):
         raise ValueError('Accepted budget head lost its original research identity')

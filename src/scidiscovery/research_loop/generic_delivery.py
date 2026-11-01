@@ -12,12 +12,40 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
+
+
+PREFLIGHT_FAILED = 'delivery_local_preflight_failed'
+
+
+def directory_target(target, *, root=None):
+    """Load only the explicitly configured local directory's current metadata."""
+    if (not isinstance(target, dict) or set(target) != {'directory'}
+            or not isinstance(target['directory'], str) or not target['directory'].strip()):
+        raise ValueError('Delivery requires one explicit local target directory')
+    directory = Path(target['directory'])
+    observation = dict(resolved=directory.resolve(), is_directory=directory.is_dir())
+    return _validate_directory_target(directory, observation, root=root)
+
+
+def _validate_directory_target(directory, observation, *, root):
+    if (not directory.is_absolute() or observation['resolved'] != directory
+            or not observation['is_directory'] or directory == Path('/')):
+        raise ValueError('Delivery requires an existing explicit original target directory')
+    if root is not None and Path(root).absolute().is_relative_to(directory):
+        raise ValueError('Directory delivery target must not expose the control root')
+    return directory
+
+
+def unstarted_result(request, note=PREFLIGHT_FAILED):
+    """A failed local start says nothing about an earlier operation's effects."""
+    return dict(operation_id=request['operation_id'], candidate_id=request['candidate_id'],
+        artifact_ref=request['artifact_ref'],
+        status='failed' if request['phase'] == 'promote' else 'unknown', note=note)
 
 
 def descriptor(directory, *, python=sys.executable):
-    directory = Path(directory).absolute()
-    if directory.resolve() != directory or not directory.is_dir():
-        raise ValueError('Delivery requires an explicit original target directory')
+    directory = directory_target(dict(directory=str(Path(directory).absolute())))
     python = str(Path(python).absolute())
     if python == str(Path(sys.executable).absolute()):
         roots = [sys.base_prefix, sys.prefix]
@@ -118,10 +146,9 @@ def isolate(request, adapter):
     stage = Path(request['stage'])
     if stage.resolve() != stage or not stage.is_dir() or request['phase'] not in {'promote', 'confirm'}:
         raise ValueError('Exact isolated directory delivery stage required')
-    if set(request['target']) != {'directory'} or set(request['config']) != {'python', 'runtime_roots'}:
+    if set(request['config']) != {'python', 'runtime_roots'}:
         raise ValueError('Explicit directory target and runtime required')
-    target = Path(request['target']['directory'])
-    if target.resolve() != target or not target.is_dir():raise ValueError('Delivery target changed')
+    target = directory_target(request['target'])
     python = Path(request['config']['python'])
     proof = next(item for item in request['inputs'] if item['label'] == 'runtime-python')
     if str(python.absolute()) != proof['invoked_path'] or str(python.resolve()) != proof['path']:
@@ -166,12 +193,26 @@ def isolate(request, adapter):
     os.execv(bwrap, args)
 
 
+def isolated_entry(request, adapter):
+    """Only failures before the namespace exec are known to precede any effect.
+
+    Once exec succeeds this process no longer owns error handling: a failed
+    namespace or leaf remains uncertain to its caller. Keep arbitrary details
+    in host stderr and return only the fixed, identity-bound public result.
+    """
+    try:
+        with tempfile.TemporaryFile(mode='w+',encoding='utf-8') as stream:
+            json.dump(request,stream,allow_nan=False);stream.flush();stream.seek(0);os.dup2(stream.fileno(),0)
+            isolate(request, adapter)
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        print(json.dumps(unstarted_result(request), allow_nan=False))
+
+
 if __name__ == '__main__':
     request=json.load(sys.stdin)
     if sys.argv[1] == '--isolate':
-        with tempfile.TemporaryFile(mode='w+',encoding='utf-8') as stream:
-            json.dump(request,stream,allow_nan=False);stream.flush();stream.seek(0);os.dup2(stream.fileno(),0)
-            isolate(request, str(Path(sys.argv[2]).resolve()))
+        isolated_entry(request, str(Path(sys.argv[2]).resolve()))
     elif sys.argv[1:] == ['--leaf']:
         print(json.dumps(leaf(request), allow_nan=False))
     else:

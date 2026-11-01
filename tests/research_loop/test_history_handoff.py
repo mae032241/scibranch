@@ -207,14 +207,18 @@ def test_old_marker_paths_do_not_select_or_grant_input_authority(scene, target):
     assert not seal.get('selected_inputs') and not seal['entry_points']
     assert contracts.validate(work)['scientific_result'] == f'[implementation]({target}#reuse-implementation)'
     successor = contracts.build_job(scene, 4, 'H', [3])
-    assert not successor['direct_materials'] and not successor.get('selected_inputs')
+    assert {row['path'] for row in successor['direct_materials']} == {
+        REUSED, 'inputs/parents/002/artifacts/unused.txt'}
+    assert not successor.get('selected_inputs')  # Null relays inputs; prose selects nothing.
 
 
-def test_ordinary_citation_does_not_forward_old_inputs(scene):
+def test_ordinary_citation_leaves_the_null_material_relay_unchanged(scene):
     source(scene)
     finish(scene, 3, 'A', [2], text=f'[citation]({REUSED})')
     job = contracts.build_job(scene, 4, 'H', [3])
-    assert job['direct_materials'] == [] and not job.get('selected_inputs')
+    assert {row['path'] for row in job['direct_materials']} == {
+        REUSED, 'inputs/parents/002/artifacts/unused.txt'}
+    assert not job.get('selected_inputs')
 
 
 @pytest.mark.parametrize('changed', ['original', 'receipt'])

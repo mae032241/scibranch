@@ -9,7 +9,7 @@ WORK_UNITS = {
 
 DEFAULT = {
     'H': 'Choose screen for a cheap mechanism comparison; improve/repair/validate name one mechanism. Compare plausible explanations before concentrating; justify a single line. Each minimal_test states differing predictions, the discriminating signal, priority and reopening condition. Where useful, compare 2-3 mechanisms with the same data/evaluation in one W; this is no quota. Preserve user/task constraints, required counts and commitments; request E as needed.',
-    'W': 'Own methods/candidates within H; A suggests methods. Honor checks; use --mechanism. Initial/grant calls protect screening opportunities, not trial totals. Route scope changes via A to H; reconcile unknown calls, never replay. Return to independent A, not global completion. No auxiliary agents.',
+    'W': 'Own methods/candidates within H; A proposes methods. Work incrementally; use the task catalog number for --mechanism. Initial/grant opportunities are not trial caps. Route scope changes via A to H; reconcile unknown calls, never replay. Return to independent A. No auxiliary agents.',
     'A': 'Assess progress independently.',
     'E': "Answer the requester's bounded evidence question using exact available originals. Return the scientific finding and its limitations to the requester. Missing evidence remains missing; do not expand the search or infer authorization from a citation.",
 }
@@ -28,8 +28,8 @@ OPPORTUNITY = {
 # This plans work only; it never changes H scope or execution admission.
 STAGE_PLANNING = {
     'H': 'Choose mechanisms that differ in key assumptions or failure modes, not labels or parameter variants. Use retained evidence and A gaps to revise, reopen or add mechanisms and discriminating tests, revisiting live alternatives beyond screening. H owns questions, mechanisms and criteria; W owns methods and grids. Do not allocate downstream token/time budgets or execution/call/audit caps; control allowances govern.',
-    'A': 'Read A deltas; retain useful scripts in artifacts/. Check proxy, validation and audit fit to goal, conditional rank reversals and same-family tuning. For a hypothesis gap, scientific bottleneck or changed assumptions/criteria, revise_h with gap, evidence and question despite method gains; otherwise continue_w for bounded public method work.',
-    'W': 'Work incrementally; use evidence/current budget and honor work-unit returns. H/A add no caps.',
+    'A': 'Read A deltas; reuse retained assessments/scripts. Check proxy, validation and audit fit to goal, conditional rank reversals and same-family tuning. For a hypothesis gap, scientific bottleneck or changed assumptions/criteria, revise_h with gap, evidence and question despite method gains; otherwise continue_w for bounded public method work.',
+    'W': 'Publish reports/scripts in artifacts/; work/ is scratch. Retain needed old inputs via implementation_selection.',
 }
 
 
