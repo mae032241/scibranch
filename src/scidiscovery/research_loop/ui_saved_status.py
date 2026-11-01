@@ -372,38 +372,97 @@ def closeout(root, events=None, numbers=None):
 
 
 
-def portfolio_metrics(root,numbers,usage_value,budget_value,*,memo=None):
-    """Read the disposable saved projection; never rebuild science on a UI poll."""
-    try:overview=_saved_read(root/'host-history/overview.json',memo) or {}
-    except (OSError,ValueError,UnicodeError):overview={}
-    value=copy.deepcopy(overview.get('portfolio_metrics')) if isinstance(overview,dict) else None
-    if not isinstance(value,dict):
-        return dict(status='unavailable',reason='portfolio_snapshot_unavailable',partial=True,source_step=None)
-    sealed=[step for step in numbers if (root/'native-evidence'/f'{step:03d}'/'result-identity.json').exists()]
-    value['partial']=bool(value.get('partial')) or value.get('source_step')!=max(sealed,default=0)
-    advice=value.get('token_advice',{})
-    # Snapshot advice has no current authority. A new accepted attempt, missing
-    # endpoint or unreported meter invalidates the number until the next seal.
-    accepted=[record for step in numbers for record in attempts(root,step) if (record/'native-intent.json').exists()]
-    inflight=any(not (record/'native-outcome.json').exists() for record in accepted)
-    reasons=list(advice.get('reasons',[]))
-    if inflight:reasons.append('current_usage_inflight')
-    if usage_value.get('unknown_steps'):reasons.append('usage_unknown')
-    if value['partial']:reasons.append('portfolio_snapshot_stale')
-    spent=usage_value.get('accounted_tokens');ceiling=budget_value.get('max_tokens')
-    remaining=max(0,ceiling-spent) if type(ceiling) is int and type(spent) is int else None
-    same_usage=(spent==advice.get('accounted_tokens') and len(accepted)==advice.get('accepted_attempt_count'))
-    mean=advice.get('mean_reported_tokens')
-    if (not reasons and advice.get('status')=='available' and same_usage and remaining is not None
-            and type(mean) in (int,float) and math.isfinite(mean) and mean>0):
-        # Only the ceiling changed. Exact closed usage and complete samples are
-        # unchanged, so an amendment can update this pure display estimate.
-        advice.update(reference_cycles=remaining/mean,remaining_reported_tokens=remaining,max_tokens=ceiling)
-    elif remaining!=advice.get('remaining_reported_tokens') or not same_usage:
-        reasons.append('current_balance_changed')
-    if reasons:advice.update(status='unavailable',reference_cycles=None,reasons=list(dict.fromkeys(reasons)))
-    value['token_advice']=advice
+def portfolio_metrics_from_head(head, usage_value, budget_value):
+    """Pure UI arithmetic over one saved head and the caller's current balances."""
+    unavailable = dict(status='unavailable', reason='portfolio_snapshot_unavailable',
+        partial=True, source_step=None)
+    try:
+        if not isinstance(head, dict) or head.get('version') != 2:
+            return unavailable
+        summary = head['search']
+        actual, mechanisms = summary['portfolio'], summary['table']['mechanisms']
+        completed, source_step = actual['completed_cycle_count'], head['prefix']['cutoff']
+        work_count, accepted_count = summary['work_count'], head['dispatch_count']
+        if (summary.get('version') != 1 or not isinstance(mechanisms, dict)
+                or any(type(value) is not int or value < 0
+                    for value in (completed, source_step, work_count, accepted_count))):
+            return unavailable
+        participation = []
+        labels = []
+        for ref, item in mechanisms.items():
+            participated = item['participated_cycles']
+            if not isinstance(ref, str) or type(participated) is not int or not 0 <= participated <= completed:
+                return unavailable
+            participation.append(dict(mechanism_ref=ref, participated_cycles=participated,
+                participation_fraction=participated / completed if completed else None))
+            labels.append(dict(mechanism_ref=ref, label=item['label']))
+        pending = actual['pending_w']
+        portfolio = dict(completed_cycle_count=completed,
+            participation=participation, pending_assessment=bool(pending),
+            pending_w=(dict(source_step=pending['step'], mechanism_refs=copy.deepcopy(pending['branches']),
+                completed=pending.get('completed', True)) if pending else None),
+            main_line=actual['main_line'], mainline_streak=actual['mainline_streak'],
+            mainline_source=copy.deepcopy(actual['mainline_source']))
+        work = [copy.deepcopy(row) for name, row in summary['current_facts'].items()
+            if name.startswith('search/work/') and row['status'] != 'withdrawn']
+        inflight = head['current_native'] is not None
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return unavailable
+    value = dict(portfolio=portfolio, mechanisms=labels, discriminating_work=work,
+        active_work_count=work_count, source_step=source_step, partial=False)
+    value['token_advice'] = dict(status='unavailable', reference_cycles=None, minimum_samples=2,
+        complete_sample_count=None, excluded_sample_count=None, reasons=['no_current_usage_snapshot'], samples=[])
+    try:
+        saved_advice = actual['token_advice']
+        for key in ('complete_sample_count', 'excluded_sample_count'):
+            saved_count = saved_advice.get(key)
+            if type(saved_count) is int and saved_count >= 0:
+                value['token_advice'][key] = saved_count
+        sample_count = value['token_advice']['complete_sample_count']
+        excluded = value['token_advice']['excluded_sample_count']
+        reported = saved_advice['reported_tokens_sum']
+        if (any(type(value) is not int or value < 0 for value in (sample_count, excluded, reported))
+                or not isinstance(saved_advice['samples'], list)):
+            return value
+        samples = [dict(w_step=row['w_step'], a_steps=[row['a_step']], reported_tokens=row['reported_tokens'])
+            for row in saved_advice['samples']]
+        mean = reported / sample_count if sample_count else None
+        if mean is not None and not math.isfinite(mean):
+            return value
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+        return value
+    reasons = []
+    if sample_count < 2:
+        reasons.append('insufficient_complete_local_cycles')
+    if inflight:
+        reasons.append('current_usage_inflight')
+    if (usage_value.get('unknown_steps') or usage_value.get('blocking_unknown_count')
+            or usage_value.get('reserved_unknown_steps')):
+        reasons.append('usage_unknown')
+    spent = usage_value.get('accounted_tokens', usage_value.get('observed_tokens'))
+    ceiling = budget_value.get('max_tokens')
+    remaining = max(0, ceiling - spent) if type(ceiling) is int and type(spent) is int and spent >= 0 else None
+    if remaining is None:
+        reasons.append('current_balance_unavailable')
+    if mean is not None and mean <= 0:
+        reasons.append('nonpositive_sample_mean')
+    advice = dict(status='unavailable' if reasons else 'available', reference_cycles=None if reasons else remaining / mean,
+        accounted_tokens=spent, max_tokens=ceiling, accepted_attempt_count=accepted_count,
+        minimum_samples=2, complete_sample_count=sample_count, excluded_sample_count=excluded,
+        reasons=reasons, mean_reported_tokens=mean, remaining_reported_tokens=remaining,
+        samples=samples, excluded_samples=[],
+        scope='Reported native W/A tokens in complete child-local cycles only; inherited costs, H/E/audit/external calls and shared time are excluded from sample averages. Remaining balance includes current local usage. Not an execution grant or guarantee; existing time, steps and FINAL limits apply.')
+    value['token_advice'] = advice
     return value
+
+
+def portfolio_metrics(root, numbers, usage_value, budget_value, *, memo=None):
+    """Load the current saved head once; historical steps are not a UI input."""
+    try:
+        head = _saved_read(root / 'host-history/accepted-budget/head.json', memo)
+    except (OSError, ValueError, UnicodeError):
+        head = None
+    return portfolio_metrics_from_head(head, usage_value, budget_value)
 
 def status(root, *, after=0, limit=None, memo=None):
     settings = display.settings(root)

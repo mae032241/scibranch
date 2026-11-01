@@ -900,12 +900,14 @@ def breadth_metrics(view, clean):
             fraction_text=_trim(fraction * 100) + '%' if denominator and valid else '无完整周期样本' if denominator == 0 else '不可核实'))
     pending = portfolio.get('pending_w') or {}
     pending_step = source(pending.get('source_step'))
+    mainline_source = portfolio.get('mainline_source')
+    mainline_source = mainline_source if isinstance(mainline_source, dict) else {}
     result.update(completed_cycle_count=denominator, participation=participation,
         pending_assessment=bool(portfolio.get('pending_assessment')), pending_step=pending_step,
         pending_labels=[label(ref) for ref in pending.get('mechanism_refs') or []],
         main_line=label(portfolio.get('main_line')) if portfolio.get('main_line') is not None else None,
         mainline_streak=count(portfolio.get('mainline_streak')),
-        mainline_step=source((portfolio.get('mainline_source') or {}).get('source_step')))
+        mainline_step=source(mainline_source.get('source_step')))
     active = [row for row in saved.get('discriminating_work') or [] if row.get('status') != 'withdrawn']
     work = []
     for row in active[:8]:
@@ -918,7 +920,9 @@ def breadth_metrics(view, clean):
             reason=clean(update.get('reason') or deferral.get('reason') or '', 2000),
             trigger=clean(update.get('trigger') or deferral.get('trigger') or '', 1000),
             revisit=clean(update.get('revisit') or deferral.get('revisit') or '', 1000)))
-    result.update(work=work, active_work_count=len(active), work_omitted=max(0, len(active) - len(work)))
+    active_count = count(saved.get('active_work_count'))
+    active_count = max(len(active), active_count) if active_count is not None else len(active)
+    result.update(work=work, active_work_count=active_count, work_omitted=max(0, active_count - len(work)))
     advice = saved.get('token_advice') or {}
     value = advice.get('reference_cycles')
     sample_count, minimum = count(advice.get('complete_sample_count')), count(advice.get('minimum_samples'))

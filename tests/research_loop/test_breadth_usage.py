@@ -77,39 +77,38 @@ def test_inherited_cycles_do_not_charge_parent_tokens_to_child_sample(tmp_path,m
     assert all(row['w_step']<98 for row in result['samples'])
 
 
-def test_saved_metrics_keep_partial_and_invalidate_new_inflight_or_balance(tmp_path,monkeypatch):
-    root,state,records=sample(tmp_path,monkeypatch)
-    snapshot=dict(source_step=5,partial=True,portfolio=dict(completed_cycle_count=2),token_advice=advice(root,state))
-    c.write(root/'host-history/overview.json',dict(portfolio_metrics=snapshot))
-    (records[5][0]/'result-identity.json').write_text('{}')
-    monkeypatch.setattr(ui_saved_status,'attempts',lambda root,step:records[step])
-    result=ui_saved_status.portfolio_metrics(root,[5],dict(accounted_tokens=50,unknown_steps=[]),dict(max_tokens=250))
-    assert result['partial'] and result['token_advice']['status']=='unavailable'
-    snapshot['partial']=False;c.write(root/'host-history/overview.json',dict(portfolio_metrics=snapshot))
-    (records[4][0]/'native-outcome.json').unlink()
-    result=ui_saved_status.portfolio_metrics(root,[4,5],dict(accounted_tokens=50,unknown_steps=[]),dict(max_tokens=300))
-    assert result['token_advice']['reference_cycles'] is None
-    assert {'current_usage_inflight','current_balance_changed'}<=set(result['token_advice']['reasons'])
+def test_saved_metrics_keep_counts_and_invalidate_new_inflight_or_unknown_usage(tmp_path):
+    from test_ui_breadth_snapshot import HEAD, head_snapshot
+    head=head_snapshot(complete=2)
+    c.write(tmp_path/HEAD,head)
+    result=ui_saved_status.portfolio_metrics(tmp_path,[5],dict(accounted_tokens=50,unknown_steps=[5]),dict(max_tokens=250))
+    assert not result['partial'] and result['portfolio']['completed_cycle_count']==3
+    assert result['token_advice']['status']=='unavailable' and 'usage_unknown' in result['token_advice']['reasons']
+    head['current_native']=dict(status='open',step=6)
+    c.write(tmp_path/HEAD,head)
+    result=ui_saved_status.portfolio_metrics(tmp_path,[4,5],dict(accounted_tokens=50,unknown_steps=[]),dict(max_tokens=300))
+    assert result['portfolio']['completed_cycle_count']==3 and result['token_advice']['reference_cycles'] is None
+    assert 'current_usage_inflight' in result['token_advice']['reasons']
 
 
-def test_saved_complete_samples_recompute_after_ceiling_amendment_only(tmp_path,monkeypatch):
-    root,state,records=sample(tmp_path,monkeypatch)
-    c.write(root/'host-history/overview.json',dict(portfolio_metrics=dict(source_step=5,partial=False,
-        portfolio=dict(completed_cycle_count=2),token_advice=advice(root,state))))
-    (records[5][0]/'result-identity.json').write_text('{}')
-    monkeypatch.setattr(ui_saved_status,'attempts',lambda root,step:records[step])
-    result=ui_saved_status.portfolio_metrics(root,list(records),dict(accounted_tokens=50,unknown_steps=[]),dict(max_tokens=450))
+def test_saved_complete_samples_recompute_after_ceiling_amendment_only(tmp_path):
+    from test_ui_breadth_snapshot import HEAD, head_snapshot
+    head=head_snapshot(complete=2)
+    c.write(tmp_path/HEAD,head)
+    result=ui_saved_status.portfolio_metrics(tmp_path,[5],dict(accounted_tokens=50,unknown_steps=[]),dict(max_tokens=450))
     assert result['token_advice']['status']=='available' and result['token_advice']['reference_cycles']==20
-    assert result['portfolio']['completed_cycle_count']==2
+    assert result['portfolio']['completed_cycle_count']==3
     # A new accepted request invalidates this snapshot even if no new tokens
     # have reached the saved meter yet.
-    new=records[5][0]/'new-attempt';new.mkdir();(new/'native-intent.json').write_text('{}');records[5].append(new)
-    result=ui_saved_status.portfolio_metrics(root,list(records),dict(accounted_tokens=50,unknown_steps=[]),dict(max_tokens=450))
+    head['dispatch_count']+=1;head['current_native']=dict(status='open',step=6)
+    c.write(tmp_path/HEAD,head)
+    result=ui_saved_status.portfolio_metrics(tmp_path,[5],dict(accounted_tokens=50,unknown_steps=[]),dict(max_tokens=450))
     assert result['token_advice']['status']=='unavailable' and result['token_advice']['reference_cycles'] is None
 
 
 def test_corrupt_disposable_metrics_cache_is_unavailable(tmp_path):
-    root=tmp_path/'instance';(root/'host-history').mkdir(parents=True)
-    (root/'host-history/overview.json').write_text('{invalid')
+    from test_ui_breadth_snapshot import HEAD
+    root=tmp_path/'instance';(root/HEAD).parent.mkdir(parents=True)
+    (root/HEAD).write_text('{invalid')
     result=ui_saved_status.portfolio_metrics(root,[],dict(accounted_tokens=0),dict(max_tokens=100))
     assert result['status']=='unavailable' and result['partial'] and result['source_step'] is None
