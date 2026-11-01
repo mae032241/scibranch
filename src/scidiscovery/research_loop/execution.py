@@ -23,31 +23,49 @@ def proof(record):
 
 
 def _skill_intent(root, step, intent):
+    base = c.settings(Path(root))
+    job = c.read(c.regular(Path(root) / 'jobs' / f'{step:03d}.json'))
+    policy = configuration_updates.for_step(root, step)
+    return _skill_intent_for_job(job, intent, base=base, policy=policy)
+
+
+def _skill_intent_for_job(job, intent, *, base, policy):
     if ((intent.get('automatic_recovery') or {}).get('format_fallback') is not None
             and intent.get('continuation_kind') != 'automatic_recovery'):
         raise ValueError('Native format fallback requires a validated recovery intent')
-    if 'skill_binding' not in intent and c.settings(Path(root)).get('skills') is None:
+    if 'skill_binding' not in intent and base.get('skills') is None:
         return
-    settings = configuration_updates.for_step(root, step)
-    if settings.get('skills') is not None or 'skill_binding' in intent:
+    if policy.get('skills') is not None or 'skill_binding' in intent:
         from . import profiles
-        profiles.validate_intent(settings, c.read(c.regular(Path(root) / 'jobs' / f'{step:03d}.json')), intent)
+        profiles.validate_intent(policy, job, intent)
 
 
 def accepted_intents(root, step):
     """Enumerate accepted identities without traversing their execution results."""
+    from . import accepted_budget
+    root = Path(root)
+    base = c.settings(root)
+    head = accepted_budget.load(root, base=base)
+    job = c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
+    policy = c.settings_for_job(root, job, base=base, head=head)
+    yield from accepted_intents_from_facts(root, step, job=job, base=base,
+        policy=policy, head=head, task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'))
+
+
+def accepted_intents_from_facts(root, step, *, job, base, policy, head, task_ref):
+    """Read this operation's accepted chain using its exact job and policy."""
     root = Path(root)
     first = origin(root,step)
-    task = c.record_ref(c.regular(root/'jobs'/f'{step:03d}.json'))
+    task = task_ref
     previous = None
     if (first/'native-intent.json').exists():
         from . import accepted_budget
-        if accepted_budget.native_attempt(root,step,first) is None:
+        if accepted_budget.native_attempt(root,step,first,head=head) is None:
             raise ValueError('Original native intent has not been accepted')
         value = c.read(c.regular(first/'native-intent.json'))
         if not isinstance(value, dict):
             raise ValueError('Original accepted native intent must be an object')
-        _skill_intent(root, step, value)
+        _skill_intent_for_job(job, value, base=base, policy=policy)
         if (value.get('task_ref') != task or 'attempt' in value
                 or 'step' in value and (type(value['step']) is not int or value['step'] != step)):
             raise ValueError('Original accepted native intent identity changed')
@@ -65,17 +83,17 @@ def accepted_intents(root, step):
             if any(path.iterdir()):raise ValueError('Unaccepted continuation has unexpected execution facts')
             continue
         from . import accepted_budget
-        if accepted_budget.native_attempt(root,step,path) is None:
+        if accepted_budget.native_attempt(root,step,path,head=head) is None:
             raise ValueError('Original native intent has not been accepted')
         value = c.read(c.regular(file))
         if not isinstance(value, dict):
             raise ValueError('Accepted native continuation intent must be an object')
-        _skill_intent(root, step, value)
+        _skill_intent_for_job(job, value, base=base, policy=policy)
         if (previous is None or number != accepted+1 or type(value.get('attempt')) is not int
                 or value['attempt'] != number or value.get('task_ref') != task
                 or 'step' in value and (type(value['step']) is not int or value['step'] != step)
-                or value.get('root_intent_ref') != c.record_ref(c.regular(first/'native-intent.json'))
-                or (value.get('previous') or {}).get('native-intent.json') != c.record_ref(c.regular(previous/'native-intent.json'))):
+                or value.get('root_intent_ref') != dict(path=str(first/'native-intent.json'))
+                or (value.get('previous') or {}).get('native-intent.json') != dict(path=str(previous/'native-intent.json'))):
             raise ValueError('Accepted native continuation identity changed')
         accepted += 1
         previous = path
@@ -206,15 +224,25 @@ def reference(root, step):
 
 def record(root, step, attempt=None):
     chain = records(root, step)
-    if attempt is not None:
-        if type(attempt) is not int or not 0 <= attempt < len(chain):
-            raise ValueError('Unknown exact native attempt')
-        return chain[attempt]
+    if attempt is not None:return record_from_chain(chain, attempt)
     seal = origin(root, step) / 'result-identity.json'
     if seal.exists() and c.read(c.regular(seal)).get('execution_ref') != _reference(chain):
         raise ValueError('Sealed native execution reference changed')
     current = chain[-1]
     return current
+
+
+def record_from_chain(chain, attempt=None):
+    """Project an already accepted chain without reopening its originals."""
+    if attempt is None:return chain[-1]
+    if type(attempt) is not int or not 0 <= attempt < len(chain):
+        raise ValueError('Unknown exact native attempt')
+    return chain[attempt]
+
+
+def identity_from_chain(root, step, chain, attempt):
+    path = record_from_chain(chain, attempt)
+    return dict(path=str(path/'native-intent.json')) if attempt else dict(path=str(Path(root)/'jobs'/f'{step:03d}.json'))
 
 
 def raw(root, step):
@@ -268,14 +296,40 @@ def _terminal(root, step, chain, outcome):
 
 def accept_current_terminal(root, step, chain, outcome):
     """A terminal continuation cannot rebind its accepted intent before seal."""
+    root=Path(root)
+    job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
+    intents=[c.read(c.regular(path/'native-intent.json')) for path in chain]
+    policy=configuration_updates.for_step(root,step)
+    from . import budget
+    receipts=[budget._attempt_receipt(root,job,path,intent=intent)
+        for path,intent in zip(chain,intents)]
+    processes={name:c.read(c.regular(chain[-1]/name))
+        for name in ('runner-process.json','native-process.json')}
+    payload=(c.science_payload(chain[-1]/'science-output.json','W',policy['handoff_protocol'])
+        if any(intent.get('continuation_kind')=='author_closeout' for intent in intents[1:]) else None)
+    return _accept_current_terminal_from_facts(root,job,chain,intents,outcome,
+        processes=processes,receipts=receipts,policy=policy,payload=payload,
+        task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'))
+
+
+def accept_current_terminal_for_inventory(root,job,inventory,*,original_outcome,meter):
+    """Consume this owner's chain, current receipt and selected policy."""
+    from . import budget
+    receipts=[budget._attempt_receipt(root,job,path,intent=intent)
+        for path,intent in zip(inventory.chain[:-1],inventory.intents[:-1])]
+    receipts.append((inventory.record,inventory.native_intent,original_outcome,meter,False))
+    return _accept_current_terminal_from_facts(root,job,inventory.chain,inventory.intents,
+        inventory.native_outcome,processes=inventory.process_receipts,receipts=receipts,
+        policy=inventory.policy,payload=inventory.payload,task_ref=inventory.task_ref)
+
+
+def _accept_current_terminal_from_facts(root,job,chain,intents,outcome,*,processes,receipts,policy,payload,task_ref):
     current = chain[-1]
-    binding = c.record_ref(c.regular(current / 'native-intent.json'))
-    intent = c.read(current / 'native-intent.json')
+    binding = dict(path=str(current/'native-intent.json'))
     process_boot = None
     for name in ('runner-process.json', 'native-process.json'):
-        path = c.regular(current / name)
-        receipt = c.read(path)
-        if (c.record_ref(path) != outcome.get('execution_processes', {}).get(name)
+        receipt = processes.get(name,{})
+        if (dict(path=str(current/name)) != outcome.get('execution_processes', {}).get(name)
                 or receipt.get('task_ref') != binding
                 or not isinstance(receipt.get('boot_id'), str) or not receipt['boot_id']
                 or process_boot is not None and receipt['boot_id'] != process_boot
@@ -284,14 +338,10 @@ def accept_current_terminal(root, step, chain, outcome):
             raise ValueError('Terminal continuation differs from its accepted process identity')
         process_boot = receipt['boot_id']
     from . import budget
-    budget._attempt_consumption(root, c.read(root / 'jobs' / f'{step:03d}.json'), chain)
-    author_turn=False
-    for number, path in enumerate(chain[1:],1):
-        intent=c.read(path/'native-intent.json')
-        if intent.get('continuation_kind')=='author_closeout':author_turn=True
-    if author_turn:
+    budget._attempt_consumption_from_facts(root,job,receipts,policy=policy,
+        limits=budget.node_limits(root,job,settings=policy),task_ref=task_ref)
+    if any(intent.get('continuation_kind')=='author_closeout' for intent in intents[1:]) and payload is not None:
         # records() already validated every author intent, permit, projection,
         # call inventory and code digest in this very invocation. Check the one
         # current final response once; no verdict survives this record() call.
-        science=c.science_payload(current/'science-output.json','W',configuration_updates.for_step(root, step)['handoff_protocol'])
-        if science.get('stage_intent')=='continue':raise ValueError('Author closeout cannot reopen exploration')
+        if payload.get('stage_intent')=='continue':raise ValueError('Author closeout cannot reopen exploration')

@@ -1,5 +1,6 @@
 """Current inventory ownership and publication boundaries; no model execution."""
 from pathlib import Path
+import json
 import sys
 import pytest
 
@@ -7,6 +8,7 @@ from scidiscovery.research_loop import contracts as c, history, checkpoint, work
 from scidiscovery.research_loop import handoff_state, accepted_budget
 from scidiscovery.research_loop import semantic, budget, continuation, execution, native, configuration_updates
 from scidiscovery.research_loop import execution_inputs, experiments
+from scidiscovery.research_loop import backends, native_recovery, controller
 from scidiscovery.research_loop import execution_resume, execution_recovery, experiment_client
 from scidiscovery.research_loop.output_repair import OutputRepairRequired, WorkRepairRequired
 from test_history_handoff import scene, finish
@@ -45,7 +47,7 @@ def test_precommit_observation_gate_cannot_leave_a_seal(scene, monkeypatch):
     def refused(root, job, seal, *, inventory):
         assert not (root / 'native-evidence/001/result-identity.json').exists()
         raise ValueError('explicit observer acceptance failure')
-    monkeypatch.setattr(history, 'validate_observation', refused)
+    monkeypatch.setattr(history, 'validate_current_observation', refused)
     with pytest.raises(ValueError, match='explicit observer acceptance failure'):
         finish(scene, 1, 'H', [], action='wait')
     assert not (scene / 'native-evidence/001/result-identity.json').exists()
@@ -80,7 +82,8 @@ def test_partial_result_without_acceptance_marker_is_not_a_sealed_fact(scene):
 def test_selection_consumers_read_once_accepted_choices_and_diagnostics(scene, monkeypatch):
     job=c.build_job(scene,1,'H',[])
     selected=[dict(label='accepted input')]
-    inventory=c.CurrentInventory(scene,job,scene/'native-evidence/001',0,[],{},selected_inputs=selected)
+    inventory=c.CurrentInventory(scene,job,scene/'native-evidence/001',0,[],{},selected_inputs=selected,
+        interpretation=dict(focus=None,allocation=None,diagnostics=[]))
     def forbidden(*args,**kwargs):
         pytest.fail('A choice consumer repeated selection acceptance')
     monkeypatch.setattr(c,'_accept_selected_inputs',forbidden)
@@ -263,14 +266,14 @@ def test_owner_output_diagnosis_returns_to_same_repair_without_accepting_again(s
     else:
         def collision(*args,**kwargs):
             raise OutputRepairRequired('deliverable_path_collision','Remove the redundant author-owned copy')
-        monkeypatch.setattr(c,'material_inventory',collision)
+        monkeypatch.setattr(c,'_material_inventory',collision)
     inventory=c.accept_current_inventory(scene,1)
     assert isinstance(inventory.output_error,OutputRepairRequired)
     if fault=='layout_collision':assert inventory.output_error.code=='deliverable_path_collision'
     def forbidden(*args,**kwargs):
         pytest.fail('Output repair repeated the owner acceptance or layout diagnosis')
     monkeypatch.setattr(c,'accept_current_inventory',forbidden)
-    monkeypatch.setattr(c,'material_inventory',forbidden)
+    monkeypatch.setattr(c,'_material_inventory',forbidden)
     monkeypatch.setattr(configuration_updates,'for_step',lambda *args:dict(resume_policy=dict(output_repair=True)))
     def repair(root,step,*,inventory):
         assert inventory is accepted
@@ -289,11 +292,11 @@ def test_missing_scientific_output_keeps_native_checkpoint_without_input_or_draf
     (record/'science-output.json').unlink()
     outcome=c.read(record/'native-outcome.json')
     c.write(record/'native-outcome.json',dict(outcome,output_status='missing',raw_ref=None))
-    monkeypatch.setattr(checkpoint,'enabled',lambda *args:True)
+    monkeypatch.setattr(checkpoint,'enabled_for_policy',lambda *args,**kwargs:True)
     def forbidden(*args,**kwargs):
         pytest.fail('Missing science triggered draft, scientific-input or qualification acceptance')
-    monkeypatch.setattr(c,'_validate_inputs',forbidden)
-    monkeypatch.setattr(c,'material_inventory',forbidden)
+    monkeypatch.setattr(c,'_validate_inputs_from_facts',forbidden)
+    monkeypatch.setattr(c,'_material_inventory',forbidden)
     inventory=c.accept_current_inventory(scene,1)
     assert not inventory.science_available
     assert inventory.checkpoint['science']==dict(status='missing',diagnostic='missing_output')
@@ -375,13 +378,13 @@ def test_input_validation_rejects_a_caller_changed_search_before_consuming_accep
 
 def test_current_input_validation_reads_its_frozen_policy_once(scene,monkeypatch):
     job=c.build_job(scene,1,'H',[])
-    settings=c.settings
+    select=c.settings_for_job
     reads=[]
-    def observed(root,current=None):
+    def observed(root,current,*,base,head):
         if current is job and sys._getframe(1).f_code is c._validate_inputs.__code__:
             reads.append(current)
-        return settings(root,current)
-    monkeypatch.setattr(c,'settings',observed)
+        return select(root,current,base=base,head=head)
+    monkeypatch.setattr(c,'settings_for_job',observed)
     c._validate_inputs(scene,c.workspace(scene,1),job)
     assert reads==[job]
 
@@ -413,7 +416,7 @@ def test_inventory_material_and_observer_consumers_reuse_the_frozen_policy(scene
     config=dict(adapter_ref='registered-originals-v1')
     snapshot=dict(binding=history._observer_binding(raw_ref,config),candidates=[],managed_calls=[])
     monkeypatch.setattr(history,'read_observation',lambda *args:snapshot)
-    monkeypatch.setattr(history,'_managed_config',lambda *args:config)
+    monkeypatch.setattr(history,'_managed_config_for_inventory',lambda *args:config)
     assert history.validate_observation(scene,job,dict(raw_ref=raw_ref),inventory=inventory) is None
 
 
@@ -503,3 +506,184 @@ def test_configuration_head_is_shared_locally_and_job_revision_stays_exact(scene
     observed.clear()
     assert configuration_updates.for_job(scene,job)['model']=='fixture-first'
     assert len(observed)==1
+
+
+def test_current_owner_reads_each_native_original_once_and_seal_consumes_it(scene,monkeypatch):
+    seal=c.seal_result
+    monkeypatch.setattr(c,'seal_result',lambda *args,**kwargs:None)
+    job,work,record=finish(scene,1,'H',[],action='wait')
+    monkeypatch.setattr(c,'seal_result',seal)
+    originals={scene/'jobs/001.json',record/'native-intent.json',record/'native-outcome.json'}
+    read=c.read;science=c.read_scientific_output
+    reads={path:0 for path in originals};science_reads=[]
+    def observed(path):
+        path=Path(path)
+        if path in reads:reads[path]+=1
+        return read(path)
+    def observed_science(path):
+        if Path(path)==record/'science-output.json':science_reads.append(Path(path))
+        return science(path)
+    monkeypatch.setattr(c,'read',observed)
+    monkeypatch.setattr(c,'read_scientific_output',observed_science)
+    inventory=c.accept_current_inventory(scene,1)
+    assert reads=={path:1 for path in originals}
+    assert science_reads==[record/'science-output.json']
+    assert inventory.payload is not None
+    assert inventory.head['current_native'] is None
+    def consumed(path):
+        if Path(path) in originals:pytest.fail('A consumer reopened an accepted current native fact')
+        return read(path)
+    def forbidden(*args,**kwargs):pytest.fail('A consumer rebuilt the accepted chain or scientific payload')
+    monkeypatch.setattr(c,'read',consumed)
+    monkeypatch.setattr(c,'science_payload',forbidden)
+    monkeypatch.setattr(execution,'accepted_intents',forbidden)
+    monkeypatch.setattr(execution,'records',forbidden)
+    monkeypatch.setattr(execution,'record',forbidden)
+    monkeypatch.setattr(execution,'reference',forbidden)
+    c._material_inventory(scene,1,inventory=inventory)
+    assert seal(scene,1,inventory=inventory)['summary']=='A contribution'
+    assert (record/'result-identity.json').is_file()
+
+
+@pytest.mark.parametrize('fault',['valid','missing','malformed'])
+def test_current_checkpoint_reuses_one_real_stop_and_science_diagnosis(scene,monkeypatch,fault):
+    monkeypatch.setattr(c,'seal_result',lambda *args,**kwargs:None)
+    job,work,record=finish(scene,1,'W',[])
+    raw=record/'science-output.json'
+    if fault=='missing':
+        raw.unlink()
+        outcome=c.read(record/'native-outcome.json')
+        c.write(record/'native-outcome.json',dict(outcome,output_status='missing',raw_ref=None))
+    elif fault=='malformed':
+        raw.write_text('{broken')
+        outcome=c.read(record/'native-outcome.json')
+        c.write(record/'native-outcome.json',dict(outcome,raw_ref=c.file_ref(raw)))
+    monkeypatch.setattr(checkpoint,'enabled_for_policy',lambda *args,**kwargs:True)
+    stopped=worker_delivery._writers_stopped;calls=[]
+    def once(*args,**kwargs):
+        calls.append(args[2])
+        return stopped(*args,**kwargs)
+    def forbidden(*args,**kwargs):pytest.fail('A checkpoint consumer repeated the stop or science loader')
+    monkeypatch.setattr(worker_delivery,'_writers_stopped',once)
+    monkeypatch.setattr(worker_delivery,'writers_stopped',forbidden)
+    monkeypatch.setattr(checkpoint,'_binding',forbidden)
+    monkeypatch.setattr(checkpoint,'_science',forbidden)
+    inventory=c.accept_current_inventory(scene,1)
+    assert calls==[record]
+    expected='present' if fault=='valid' else 'missing' if fault=='missing' else 'invalid'
+    assert inventory.checkpoint['science']['status']==expected
+    if fault=='malformed':
+        assert inventory.payload is None and inventory.science_error is inventory.output_error
+        assert inventory.checkpoint['science']['diagnostic']==inventory.science_error.code
+
+
+def test_public_seal_rejects_inventory_after_a_new_attempt_without_rescanning_chain(scene,monkeypatch):
+    seal=c.seal_result
+    monkeypatch.setattr(c,'seal_result',lambda *args,**kwargs:None)
+    job,work,record=finish(scene,1,'H',[],action='wait')
+    inventory=c.accept_current_inventory(scene,1)
+    successor=record/'continuations/001'
+    successor.mkdir(parents=True)
+    intent=dict(task_ref=inventory.task_ref,attempt=1,step=1,continuation_kind='repair',
+        root_intent_ref=c.record_ref(record/'native-intent.json'),previous=execution.proof(record))
+    state=accepted_budget.accept_native(scene,1,successor,intent)
+    assert state.current_job['native_record']==successor.relative_to(scene).as_posix()
+    def forbidden(*args,**kwargs):pytest.fail('Stale-inventory admission rescanned the accepted chain')
+    monkeypatch.setattr(execution,'accepted_intents',forbidden)
+    monkeypatch.setattr(execution,'records',forbidden)
+    monkeypatch.setattr(execution,'record',forbidden)
+    with pytest.raises(ValueError,match='another task or attempt'):
+        seal(scene,1,inventory=inventory)
+    with pytest.raises(ValueError,match='another task or attempt'):
+        c.material_inventory(scene,1,inventory=inventory)
+    assert not (record/'result-identity.json').exists()
+
+
+def test_reconciled_terminal_owner_and_public_loader_each_read_usage_once(scene,monkeypatch):
+    monkeypatch.setattr(c,'seal_result',lambda *args,**kwargs:None)
+    job,work,record=finish(scene,1,'H',[],action='wait')
+    raw=record/'science-output.json'
+    text=raw.read_text()
+    raw.rename(record/'result.pending.json')
+    thread='11111111-2222-4333-8444-000000000001'
+    meter=dict(input_tokens=103,cached_input_tokens=80,output_tokens=17)
+    events=[dict(type='thread.started',thread_id=thread),dict(type='turn.started'),
+        dict(type='error',message='Reconnecting... 2/5'),
+        dict(type='item.completed',item=dict(type='agent_message',text=text)),
+        dict(type='turn.completed',usage=meter)]
+    backend=backends.selected(dict(native_launcher_argv=['codex']))
+    failures=[backend.event(event)['failure'] for event in events if backend.event(event).get('failure') is not None]
+    c.write(record/'native-outcome.json',dict(returncode=0,native_started=True,
+        cleanup='observed_group_cleaned',stop_reason='native_failure_event',native_backend='codex',
+        terminal_observed=True,native_failure=native_recovery.combine(failures),
+        native_activity_observed=True,thread_id=thread,
+        usage=dict(**meter,observed_tokens=120,unknown_steps=[1]),
+        metering=dict(coverage='unknown',reason='native_failure_event',tokens=meter,live_reason=None)))
+    c.write(record/'usage.json',meter)
+    (record/'native.jsonl').write_text(''.join(json.dumps(event)+'\n' for event in events))
+    for name,pid in [('native-process.json',999999998),('runner-process.json',999999999)]:
+        c.write(record/name,dict(task_ref=c.record_ref(scene/'jobs/001.json'),pid=pid,pgid=pid,sid=pid,
+            start_ticks=1,boot_id='retained-original-boot'))
+    read=c.read;observed=[]
+    def counted(path):
+        if Path(path)==record/'usage.json':observed.append(Path(path))
+        return read(path)
+    monkeypatch.setattr(c,'read',counted)
+    inventory=c.accept_current_inventory(scene,1)
+    assert inventory.native_outcome['stop_reason'] is None
+    assert inventory.native_outcome['metering']['coverage']=='terminal'
+    assert raw.samefile(record/'result.pending.json')
+    assert observed==[record/'usage.json']
+    observed.clear()
+    assert c.native_outcome(record)['stop_reason'] is None
+    assert observed==[record/'usage.json']
+
+
+def test_observer_snapshot_write_failure_discards_accepted_inputs_with_fallback(tmp_path,monkeypatch):
+    public=tmp_path/'public';public.mkdir()
+    objective=public/'objective.md';objective.write_text('Retain exact observed source contributions.')
+    adapter=tmp_path/'observer.py';adapter.write_text('# Trusted adapter fixture; never executed\n')
+    launcher=tmp_path/'codex';launcher.write_text('# Synthetic identity only; never executed\n');launcher.chmod(0o700)
+    root=tmp_path/'instance'
+    controller.prepare(root,objective,public,[str(launcher)],max_tokens=1000,max_seconds=60,max_steps=5,
+        model='fixture',reasoning_effort='high',search_policy=None,experiment_mode='external',
+        formal_review_policy={'version':1},source_restrictions=[dict(source=str(objective),restriction='clear')],
+        history_observer=dict(adapter=str(adapter),config={},source_contract=execution_inputs.SOURCE_CONTRACT))
+    seal=c.seal_result
+    monkeypatch.setattr(c,'seal_result',lambda *args,**kwargs:None)
+    job,work,record=finish(root,1,'H',[],action='wait',files={'source.txt':'An observed scientific source.'})
+    monkeypatch.setattr(c,'seal_result',seal)
+    thread='11111111-2222-4333-8444-000000000001'
+    home=tmp_path/'identity';session=home/'sessions'/(thread+'.jsonl');session.parent.mkdir(parents=True)
+    session.write_text(json.dumps(dict(type='session_meta',payload=dict(id=thread,cwd=str(work))))+'\n')
+    (record/'native.jsonl').write_text(json.dumps(dict(type='thread.started',thread_id=thread))+'\n')
+    outcome=c.read(record/'native-outcome.json')
+    c.write(record/'native-outcome.json',dict(outcome,thread_id=thread,
+        native_identity=dict(participant_scope='codex_exec_single_agent_v1',home=str(home),path=str(session))))
+    def observe(config,request):
+        origins=[row['origin'] for row in request['input_sources']['available'] if row['origin']['kind']=='producer']
+        return dict(candidates=[],current_candidate=None,actual_submission=None,
+            coverage=dict(status='complete',note='Display coverage alone is not source coverage.'),
+            input_sources=dict(version=1,complete=True,sources=origins))
+    monkeypatch.setattr(history,'read_adapter',observe)
+    accept=history._observer_input_sources_for_inventory;accepted=[]
+    def observed_acceptance(*args,**kwargs):
+        result=accept(*args,**kwargs)
+        accepted.append(result)
+        return result
+    monkeypatch.setattr(history,'_observer_input_sources_for_inventory',observed_acceptance)
+    path=root/'host-history/observations/001.json'
+    write=c.write;writes=[]
+    def fail_once(destination,value):
+        if Path(destination)==path:
+            writes.append(value['coverage']['status'])
+            if len(writes)==1:raise OSError('Synthetic first snapshot publication failure')
+        return write(destination,value)
+    monkeypatch.setattr(c,'write',fail_once)
+    inventory=c.accept_current_inventory(root,1)
+    seal(root,1,inventory=inventory)
+    assert len(accepted)==1 and accepted[0]['complete'] is True
+    assert writes==['complete','unavailable']
+    assert inventory.observation_document==c.read(path)
+    assert inventory.observation_document['coverage']['status']=='unavailable'
+    assert inventory.observation_inputs is None and inventory.additional_inputs

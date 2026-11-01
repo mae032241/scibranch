@@ -12,8 +12,9 @@ MAX_AUTHOR_CORRECTIONS = 2
 
 def author_choices(root,job,payload,*,inventory):
     """The same prospective consumers serve sealing and original-output repair."""
-    enabled=c.settings(root,job).get('search_policy') is not None and not job.get('formal_review') and not job.get('final_report')
-    interpretation=search.interpret(root,job,payload) if enabled else dict(focus=None,allocation=None,diagnostics=[])
+    if inventory.root!=Path(root) or inventory.job!=job:
+        raise ValueError('Current inventory belongs to another task or attempt')
+    interpretation=inventory.interpretation
     selection=inventory.selection_diagnostics
     # Interpretation reports either authored mechanism/route consumption or an
     # unavailable scientific observation/repair authority. Only the latter

@@ -801,12 +801,17 @@ def accept_native(root, step, record, intent):
 
 
 def accept_terminal(root, step, record, *, meter, unknown, metering=None):
+    return accept_terminal_from_base(root, step, record, base=c.settings(root),
+        meter=meter, unknown=unknown, metering=metering)
+
+
+def accept_terminal_from_base(root, step, record, *, base, meter, unknown, metering=None):
     from . import budget
     root, record = Path(root), Path(record)
     relative = record.relative_to(root).as_posix()
     unknown = bool(unknown or meter is None or isinstance(metering, dict) and metering.get('coverage') == 'unknown')
     key = 'attempt/'+relative.replace('/', ':')
-    with budget._ledger_writer(root) as base:
+    with budget._ledger_writer_from_base(root, base=base):
         state = recover(root, load(root, base=base))
         row = state.row(key)
         if row is None or row['step'] != step:

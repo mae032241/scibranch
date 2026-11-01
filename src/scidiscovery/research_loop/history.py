@@ -91,10 +91,41 @@ def observer_input_sources(root,job,observation,*,source=None,controls_only=Fals
     raw_ref=(dict(path=raw.relative_to(logical_root).as_posix(),
         size_bytes=observation['binding']['source_ref']['size_bytes']) if controls_only
         else q._ref(root,raw,source=source))
+    job_ref=q._ref(root,logical_root/'jobs'/f'{job["step"]:03d}.json',source=source)
+    if (not isinstance(original,dict) or set(original)!={'contract','job','raw','view'}
+            or original['job']!=job_ref or q._read(root,original['job'],source=source)!=job):
+        raise q.IntegrityError('Observer source view differs from its original task')
+    return _observer_input_sources_from_facts(root,job,observation,policy=policy,
+        job_ref=job_ref,raw=raw,raw_ref=raw_ref,source=source,controls_only=controls_only)
+
+
+def _observer_input_sources_for_inventory(root,job,observation,inventory):
+    from . import qualification as q
+    policy=_inventory_policy(root,job,inventory)
+    original=observation.get('input_sources')
+    config=policy.get('history_observer')
+    if config is None or config.get('source_contract') is None or original is None:
+        return _observer_input_sources_from_facts(root,job,observation,policy=policy,
+            job_ref=None,raw=None,raw_ref=None,source=None,controls_only=False)
+    raw=inventory.record/'science-output.json'
+    return _observer_input_sources_from_facts(root,job,observation,policy=policy,
+        job_ref=q._ref(root,root/'jobs'/f'{job["step"]:03d}.json'),raw=raw,
+        raw_ref=q._ref(root,raw),source=None,controls_only=False)
+
+
+def _observer_input_sources_from_facts(root,job,observation,*,policy,job_ref,raw,raw_ref,source,controls_only):
+    from . import qualification as q,execution_inputs
+    config=policy.get('history_observer');original=observation.get('input_sources')
+    if config is None or config.get('source_contract') is None:
+        if original is not None:raise q.IntegrityError('Observer input sources have no frozen trusted contract')
+        return None
+    contract=config['source_contract']
+    if contract['contract']!=execution_inputs.source_contract():
+        raise q.IntegrityError('Observer source contract changed')
+    if original is None:return None
     if (not isinstance(original, dict) or set(original) != {'contract','job','raw','view'}
             or original['contract'] != contract
-            or original['job'] != q._ref(root, logical_root / 'jobs' / f'{job["step"]:03d}.json', source=source)
-            or q._read(root, original['job'], source=source) != job or original['raw'] != raw_ref
+            or original['job'] != job_ref or original['raw'] != raw_ref
             or dict(path=str(raw),size_bytes=original['raw']['size_bytes']) != observation['binding']['source_ref']):
         raise q.IntegrityError('Observer source view differs from its original task')
     return execution_inputs.validate_source_view(root,job,original['view'],source=source,controls_only=controls_only)
@@ -299,10 +330,19 @@ def _managed_config(job,root=None,*,controls_only=False):
             origin=Path(root)/'native-evidence'/f'{job["step"]:03d}'
             if not record.is_relative_to(origin):raise ObserverIntegrityError('Managed source has no exact sealed native attempt')
         else:record=execution.record(root,job['step'])
+    return _managed_config_for_record(job,record)
+
+
+def _managed_config_for_record(job,record):
+    if job.get('formal_review'):return None
     configured = ((job.get('search') or {}).get('breadth') or 'experiment_mode' in job and
         (job['experiment_mode']=='local' and job['role']=='W'
          or record is not None and (record/'experiment-config.json').exists()))
     return dict(adapter_ref='registered-originals-v1') if configured else None
+
+
+def _managed_config_for_inventory(job,inventory):
+    return _managed_config_for_record(job,inventory.record)
 
 
 def _managed_proof(root,path,original,*,context=None,verify=True):
@@ -320,6 +360,13 @@ def _managed_proof(root,path,original,*,context=None,verify=True):
 
 def _execution_interface(root, accepted):
     from . import originals
+    if originals.inherited(root,accepted['scope']['step']):
+        return _original_interface(originals.node(root,accepted['scope']['step']),accepted)
+    return _execution_interface_from_chain(root,accepted,execution.records(root,accepted['scope']['step']))
+
+
+def _execution_interface_from_chain(root,accepted,chain):
+    from . import originals
     if originals.inherited(root, accepted['scope']['step']):
         return _original_interface(originals.node(root, accepted['scope']['step']), accepted)
     """The host-frozen interface chooses authority, never worker-written markers."""
@@ -327,10 +374,9 @@ def _execution_interface(root, accepted):
     number=attempt.get('number',0)
     # Interface identity participates in validating a terminal repair itself.
     # Reading result eligibility here would re-enter that same repair chain.
-    intents=list(execution.accepted_intents(root,accepted['scope']['step']))
-    if type(number) is not int or not 0<=number<len(intents):
+    if type(number) is not int or not 0<=number<len(chain):
         raise ObserverIntegrityError('Managed host execution attempt is not accepted')
-    path=intents[number][0]/'experiment-config.json'
+    path=chain[number]/'experiment-config.json'
     if not path.exists():raise ObserverIntegrityError('Managed host execution configuration missing')
     config=c.read(c.regular(path))
     if config.get('scope')!=accepted['scope'] or config.get('execution_interface')!=accepted.get('interface'):
@@ -340,6 +386,15 @@ def _execution_interface(root, accepted):
 
 def managed_status(root, row, *, context=None, verify_files=True):
     """One immutable terminal authority shared with Worker delivery and history."""
+    step=(row.get('scope') or {}).get('step')
+    from . import originals
+    chain=(execution.records(root,step) if (row.get('completed') is not None or row.get('retirement') is not None)
+        and type(step) is int and step>0
+        and not originals.inherited(root,step) else [])
+    return _managed_status_from_chain(root,row,chain=chain,context=context,verify_files=verify_files)
+
+
+def _managed_status_from_chain(root,row,*,chain,context=None,verify_files=True):
     from . import experiments
     from . import originals
     step = (row.get('scope') or {}).get('step')
@@ -361,13 +416,13 @@ def managed_status(root, row, *, context=None, verify_files=True):
             raise ObserverIntegrityError('Retirement differs from the archived accepted call')
         try:
             experiments.verify_retirement(value,native_proof,
-                interface=_execution_interface(root,accepted),context=context,verify_files=verify_files)
+                interface=_execution_interface_from_chain(root,accepted,chain),context=context,verify_files=verify_files)
         except (ValueError,OSError,KeyError,TypeError) as error:
             raise ObserverIntegrityError('Archived permanent retirement proof changed') from error
         return 'not_submitted'
     if row.get('completed') is None:return 'unknown'
     accepted=c.read(root/row['accepted']['snapshot']);completed=c.read(root/row['completed']['snapshot'])
-    interface=_execution_interface(root,accepted)
+    interface=_execution_interface_from_chain(root,accepted,chain)
     observation=row.get('observation')
     if observation is not None:
         value=c.read(root/observation['snapshot'])
@@ -396,6 +451,19 @@ def _managed_outputs(interface, completed, observed):
 
 @_job_storage
 def _observe_scientific_outputs(root, job, call, *, verify_files=True):
+    from . import originals
+    return _observe_scientific_outputs_from_chain(root,job,call,
+        chain=[] if originals.inherited(root,job['step']) else execution.records(root,job['step']),
+        verify_files=verify_files)
+
+
+@_job_storage
+def _observe_scientific_outputs_for_inventory(root,job,call,*,inventory,verify_files=True):
+    return _observe_scientific_outputs_from_chain(root,job,call,
+        chain=inventory.chain,verify_files=verify_files)
+
+
+def _observe_scientific_outputs_from_chain(root,job,call,*,chain,verify_files=True):
     """Publish selected scientific assets from the full verified call archive."""
     from . import experiments, execution
     root=Path(root)
@@ -428,15 +496,15 @@ def _observe_scientific_outputs(root, job, call, *, verify_files=True):
             result.append(dict(matches[0], path=matches[0]['snapshot'], name=descriptor.name,
                 origin_identity=source.origin_identity))
         return result
-    managed_status(root,call,verify_files=verify_files)  # Control originals remain mandatory.
+    _managed_status_from_chain(root,call,chain=chain,verify_files=verify_files)  # Control originals remain mandatory.
     if not verify_files:
         return [dict(row,path=row['snapshot']) for row in call.get('outputs',[])]
     if call.get('observation') is None:
         return call.get('outputs',[])
     accepted=c.read(c.regular(root/call['accepted']['snapshot']))
     attempt=(accepted.get('native_attempt') or {}).get('number',0)
-    config=c.read(c.regular(execution.record(root,job['step'],attempt)/'experiment-config.json'))
-    if config['execution_interface']!=_execution_interface(root,accepted):
+    config=c.read(c.regular(execution.record_from_chain(chain,attempt)/'experiment-config.json'))
+    if config['execution_interface']!=_execution_interface_from_chain(root,accepted,chain):
         raise ObserverIntegrityError('Scientific output interface changed')
     observed=c.read(c.regular(root/call['observation']['snapshot']))
     lookup=_retained_resolver(root,call)
@@ -489,12 +557,24 @@ def _observed_original_refs(accepted, observed):
 
 @_job_storage
 def _observe_managed_calls(root, job, *, context=None, call_ids=None):
+    from .protocol import stage_scope
+    return _observe_managed_calls_from_facts(root,job,chain=execution.records(root,job['step']),
+        scope=stage_scope(root,job),context=context,call_ids=call_ids)
+
+
+@_job_storage
+def _observe_managed_calls_for_inventory(root,job,*,inventory,context=None,call_ids=None):
+    from .protocol import stage_scope_for_job
+    return _observe_managed_calls_from_facts(root,job,chain=inventory.chain,
+        scope=stage_scope_for_job(root,job,task_ref=inventory.task_ref),context=context,call_ids=call_ids)
+
+
+def _observe_managed_calls_from_facts(root,job,*,chain,scope,context=None,call_ids=None):
     """Capture small common receipts, independent of domain candidates or observers."""
     from . import experiments, breadth, generic_results
     from .experiment_client import record_directory
     records=experiments.Records(dict(record_dir=str(record_directory(root,job['step']))))
-    from .protocol import stage_scope
-    scope=stage_scope(root,job);result=[]
+    result=[]
     if call_ids is not None and (not isinstance(call_ids,(list,tuple))
             or any(not isinstance(item,str) for item in call_ids) or len(set(call_ids))!=len(call_ids)):
         raise ObserverIntegrityError('Managed selection requires distinct exact original call IDs')
@@ -516,7 +596,7 @@ def _observe_managed_calls(root, job, *, context=None, call_ids=None):
         if observed_path.exists():
             observed=c.read(c.regular(observed_path))
             extra=_observed_original_refs(accepted,observed)
-        interface=_execution_interface(root,accepted)
+        interface=_execution_interface_from_chain(root,accepted,chain)
         direct=('code_version' in accepted and observed is not None
             and experiments._local_original_observation(dict(execution_interface=interface),observed))
         if direct:
@@ -533,7 +613,7 @@ def _observe_managed_calls(root, job, *, context=None, call_ids=None):
                 result_protocol=generic_results.protocol(interface),accepted=_proof(root,accepted_path.relative_to(root).as_posix(),context=context,source_kind='managed_frozen'),
                 completed=None,terminal=None,retirement=_proof(root,retired_path.relative_to(root).as_posix(),context=context,source_kind='managed_frozen'),
                 originals=[_managed_proof(root,item['path'],item,context=context) for item in originals])
-            row['status']=managed_status(root,row,context=context);result.append(row)
+            row['status']=_managed_status_from_chain(root,row,chain=chain,context=context);result.append(row)
             continue
         outputs=_managed_outputs(interface,value,observed)
         row=dict(call_id=directory.name,scope=scope,mechanism_binding=binding,status=state,
@@ -551,19 +631,33 @@ def _observe_managed_calls(root, job, *, context=None, call_ids=None):
                     **(dict(public_result=observed['public_result']) if observed is not None and 'public_result' in observed else {}),
                     **(dict(native_state=value['native_state']) if 'native_state' in value else {})))
                if 'result' in value or observed is not None else {}))
-        row['status']=managed_status(root,row,context=context)
+        row['status']=_managed_status_from_chain(root,row,chain=chain,context=context)
         result.append(row)
     return result
 
 
 def _validate_managed(root, job, rows, *, context=None, verify_files=True):
     from . import originals
+    if originals.inherited(root,job['step']):
+        return validate_managed_original(originals.node(root,job['step']),job,rows,controls_only=not verify_files)
+    from .protocol import stage_scope
+    return _validate_managed_from_facts(root,job,rows,chain=execution.records(root,job['step']),
+        scope=stage_scope(root,job),context=context,verify_files=verify_files)
+
+
+def _validate_managed_for_inventory(root,job,rows,*,inventory,context=None,verify_files=True):
+    from .protocol import stage_scope_for_job
+    return _validate_managed_from_facts(root,job,rows,chain=inventory.chain,
+        scope=stage_scope_for_job(root,job,task_ref=inventory.task_ref),context=context,verify_files=verify_files)
+
+
+def _validate_managed_from_facts(root,job,rows,*,chain,scope,context=None,verify_files=True):
+    from . import originals
     if originals.inherited(root, job['step']):
         return validate_managed_original(originals.node(root,job['step']),job,rows,controls_only=not verify_files)
     from . import breadth, generic_results
-    from .protocol import stage_scope
     if not isinstance(rows,list):raise ObserverIntegrityError('Managed receipt list required')
-    scope=stage_scope(root,job);seen=set()
+    seen=set()
     for row in rows:
         shapes=({'call_id','scope','mechanism_binding','status','accepted','completed','terminal'},
                 {'call_id','scope','mechanism_binding','status','accepted','completed','terminal','originals','outputs','execution'},
@@ -579,7 +673,7 @@ def _validate_managed(root, job, rows, *, context=None, verify_files=True):
         accepted=c.read(root/row['accepted']['snapshot'])
         if accepted.get('call_id')!=row['call_id'] or accepted.get('scope')!=scope or accepted.get('mechanism_binding')!=row['mechanism_binding']:
             raise ObserverIntegrityError('Managed receipt differs from accepted original')
-        if 'result_protocol' in row and row['result_protocol']!=generic_results.protocol(_execution_interface(root,accepted)):
+        if 'result_protocol' in row and row['result_protocol']!=generic_results.protocol(_execution_interface_from_chain(root,accepted,chain)):
             raise ObserverIntegrityError('Managed result protocol differs from frozen host interface')
         breadth.check_binding((job.get('search') or {}).get('breadth'),row['mechanism_binding'],scope)
         observed=c.read(root/row['observation']['snapshot']) if row.get('observation') is not None else None
@@ -612,7 +706,7 @@ def _validate_managed(root, job, rows, *, context=None, verify_files=True):
             if (len(row['originals'])!=len(originals) or any(any(proof[key]!=original[key] for key in ('size_bytes',))
                     for proof,original in zip(row['originals'],originals))):
                 raise ObserverIntegrityError('Managed input or log original changed')
-            outputs=_managed_outputs(_execution_interface(root,accepted),completed,observed)
+            outputs=_managed_outputs(_execution_interface_from_chain(root,accepted,chain),completed,observed)
             if len(row['outputs'])!=len(outputs):
                 raise ObserverIntegrityError('Managed outputs differ from completed original')
             for proof,original in zip(row['outputs'],outputs):
@@ -626,7 +720,7 @@ def _validate_managed(root, job, rows, *, context=None, verify_files=True):
                     for key in ('size_bytes',)) for item,original in zip(row['originals'],originals))):
                 raise ObserverIntegrityError('Retirement native originals differ from the frozen receipt')
         if row['status'] not in {'known_success','known_failed','not_submitted','unknown'}:raise ObserverIntegrityError('Managed state differs')
-        if row['status']!=managed_status(root,row,context=context,verify_files=verify_files):
+        if row['status']!=_managed_status_from_chain(root,row,chain=chain,context=context,verify_files=verify_files):
             raise ObserverIntegrityError('Managed state differs from verified execution observation')
 
 
@@ -912,13 +1006,14 @@ def _capture(root, job, payload, materials, *, inventory):
     policy=_inventory_policy(root,job,inventory)
     config = policy.get('history_observer')
     if config is None:
-        config=_managed_config(job,root)
+        config=_managed_config_for_inventory(job,inventory)
         if config is None:return None
-        raw_sha=c.file_ref(c.regular(execution.raw(root,job['step'])))
+        raw_sha=c.file_ref(c.regular(inventory.record/'science-output.json'))
         path=root/'host-history/observations'/f'{job["step"]:03d}.json'
         binding=_observer_binding(raw_sha,config)
         if path.exists():
-            if c.read(c.regular(path)).get('binding')!=binding:
+            snapshot=c.read(c.regular(path))
+            if snapshot.get('binding')!=binding:
                 raise ObserverIntegrityError('Retained managed snapshot binding changed')
         else:
             rows=managed_calls(inventory)
@@ -928,9 +1023,10 @@ def _capture(root, job, payload, materials, *, inventory):
                 coverage=dict(status='partial',note='Registered call originals and explicitly declared candidates only; scientific qualification is unobserved.'))
             if diagnostics:snapshot['candidate_diagnostics']=diagnostics
             c.write(path,snapshot)
+        inventory.observation_document,inventory.observation_inputs=snapshot,None
         return dict(path=path.relative_to(root).as_posix())
     adapter = c.regular(Path(config['adapter']))
-    raw = execution.raw(root, job['step'])
+    raw = inventory.record/'science-output.json'
     source_sha = c.file_ref(c.regular(raw))
     path = root / 'host-history/observations' / f'{job["step"]:03d}.json'
     binding = _observer_binding(source_sha, config)
@@ -938,6 +1034,8 @@ def _capture(root, job, payload, materials, *, inventory):
         stored = c.read(c.regular(path))
         if stored.get('binding') != binding:
             raise ObserverIntegrityError('Retained observer snapshot binding changed')
+        inputs=_observer_input_sources_for_inventory(root,job,stored,inventory)
+        inventory.observation_document,inventory.observation_inputs=stored,inputs
         return dict(path=path.relative_to(root).as_posix())
     known = set();known_contexts = set();prior_contexts = [];managed_outputs = {};previous_proofs = {}
     def remember_proofs(observation, owner):
@@ -972,12 +1070,13 @@ def _capture(root, job, payload, materials, *, inventory):
             prior_contexts.extend(prior.get('contexts', []))
             remember_outputs(prior.get('managed_calls',[]),prior_source)
             remember_proofs(prior,prior_source)
-    current_calls=managed_calls(inventory) if _managed_config(job,root) else None
+    current_calls=managed_calls(inventory) if _managed_config_for_inventory(job,inventory) else None
     if current_calls is not None:
         remember_outputs(current_calls,originals.node(root,job['step']))
     request = dict(root=str(root), step=job['step'], config=config['config'], materials=materials,
                    known_candidates=sorted(known),
                    **(dict(known_contexts=sorted(known_contexts)) if config.get('contract_version') == 2 else {}))
+    inputs=None
     if config.get('source_contract') is not None:
         from . import execution_inputs
         request['input_sources'] = dict(contract=execution_inputs.SOURCE_CONTRACT,
@@ -1082,8 +1181,8 @@ def _capture(root, job, payload, materials, *, inventory):
         from . import qualification as q
         snapshot['input_sources'] = dict(contract=config['source_contract'],
             job=q._ref(root, root / 'jobs' / f'{job["step"]:03d}.json'), raw=q._ref(root, raw), view=value['input_sources'])
-        observer_input_sources(root, job, snapshot,_policy=policy)
-    if _managed_config(job,root):
+        inputs=_observer_input_sources_for_inventory(root,job,snapshot,inventory)
+    if _managed_config_for_inventory(job,inventory):
         from . import generic_results
         snapshot['managed_calls']=current_calls
         diagnostics=[]
@@ -1094,17 +1193,16 @@ def _capture(root, job, payload, materials, *, inventory):
     if snapshot.get('candidate_diagnostics'):
         snapshot['coverage']=dict(status='partial',note='Some observer items have no verified binding; retained valid facts remain available.')
     c.write(path, snapshot)
+    inventory.observation_document,inventory.observation_inputs=snapshot,inputs
     return dict(path=path.relative_to(root).as_posix())
 
 
 def capture(root, job, payload, materials, *, inventory):
     """Optional adapter failures never discard original science."""
     if job.get('formal_review'):return None
-    from .protocol import require_current
-    require_current(root,job)
     config = _inventory_policy(root,job,inventory).get('history_observer')
     if config is None:
-        return _capture(root,job,payload,materials,inventory=inventory) if _managed_config(job,root) else None
+        return _capture(root,job,payload,materials,inventory=inventory) if _managed_config_for_inventory(job,inventory) else None
     adapter = c.regular(Path(config['adapter']))
     path = root / 'host-history/observations' / f'{job["step"]:03d}.json'
     if path.exists():
@@ -1118,19 +1216,20 @@ def capture(root, job, payload, materials, *, inventory):
                 'malformed' if isinstance(error, json.JSONDecodeError) else
                 'capacity' if 'capacity' in str(error) or 'bound' in str(error) else
                 'adapter_io' if isinstance(error, OSError) else 'invalid_output')
-        raw = execution.raw(root, job['step'])
+        raw = inventory.record/'science-output.json'
         value = dict(binding=_observer_binding(c.file_ref(c.regular(raw)),config),
                      candidates=[], current_candidate=None, actual_submission=None,
                      **(dict(contexts=[]) if config.get('contract_version') == 2 else {}),
                      coverage=dict(status='unavailable', note='Observer returned no verified facts; original science is retained.'),
                      diagnostic=dict(failure_type=type(error).__name__, error_code=code))
-        if _managed_config(job,root):
+        if _managed_config_for_inventory(job,inventory):
             from . import generic_results
             value['managed_calls']=managed_calls(inventory)
             diagnostics=[]
             value['candidates']=generic_results.candidates(value['managed_calls'],diagnostics=diagnostics)
             if diagnostics:value['candidate_diagnostics']=diagnostics
         c.write(path, value)
+        inventory.observation_document,inventory.observation_inputs=value,None
         return dict(path=path.relative_to(root).as_posix())
 
 
@@ -1436,14 +1535,23 @@ def validate_observation(root, job, seal, *, inventory):
     if originals.inherited(root, job['step']):
         return validate_observation_original(originals.node(root, job['step']), originals.source_job(originals.node(root, job['step'])), seal)
     value = read_observation(root, job, seal)
+    inputs=_observer_input_sources_for_inventory(root,job,value,inventory) if value is not None else None
+    return _validate_observation_value(root,job,seal,value,inventory=inventory,input_sources=inputs)
+
+
+def validate_current_observation(root,job,seal,*,inventory):
+    return _validate_observation_value(root,job,seal,inventory.observation_document,
+        inventory=inventory,input_sources=inventory.observation_inputs)
+
+
+def _validate_observation_value(root,job,seal,value,*,inventory,input_sources):
     if value is None:
         return
     policy=_inventory_policy(root,job,inventory)
-    input_sources=observer_input_sources(root, job, value,_policy=policy)
-    config = policy.get('history_observer') or _managed_config(job,root)
+    config = policy.get('history_observer') or _managed_config_for_inventory(job,inventory)
     if value.get('binding') != _observer_binding({key:seal['raw_ref'][key] for key in ('path','size_bytes')},config):
         raise ObserverIntegrityError('Observer snapshot source binding changed')
-    if _managed_config(job,root):
+    if _managed_config_for_inventory(job,inventory):
         if value['managed_calls']!=inventory.managed_calls:
             raise ObserverIntegrityError('Observer calls differ from the accepted current inventory')
     proofs = [proof for row in value['candidates'] for proof in row['evidence']]

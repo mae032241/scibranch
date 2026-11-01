@@ -1916,28 +1916,40 @@ def require_final_a_delivery_eligibility(root, decision, binding):
 
 def _attempt_consumption(root, job, paths, *, automatic_recovery=None, automatic_successor=None):
     """Derive cumulative consumption from exact completed native facts."""
+    policy=contracts.settings(root,job)
+    receipts=[_attempt_receipt(root,job,path,
+        intent=contracts.read(contracts.regular(path/'native-intent.json'))) for path in paths]
+    return _attempt_consumption_from_facts(root,job,receipts,policy=policy,
+        limits=node_limits(root,job,settings=policy),task_ref=contracts.record_ref(root/'jobs'/f'{job["step"]:03d}.json'),automatic_recovery=automatic_recovery,
+        automatic_successor=automatic_successor)
+
+
+def _attempt_receipt(root,job,path,*,intent):
+    """Load a required predecessor's receipt, retaining missing billing."""
+    interrupted=not (path/'native-outcome.json').exists()
+    if interrupted:
+        from . import continuation
+        saved=continuation.interruption(root,job,path)
+        original=dict(budget_slice=saved['budget_slice'])
+    else:original=contracts.read(contracts.regular(path/'native-outcome.json'))
+    meter=contracts.read(contracts.regular(path/'usage.json')) if (path/'usage.json').exists() else None
+    return path,intent,original,meter,interrupted
+
+
+def _attempt_consumption_from_facts(root,job,receipts,*,policy,limits,task_ref,
+        automatic_recovery=None,automatic_successor=None):
+    """Apply the original accounting predicates to the owner's read receipts."""
     from . import native
     tokens, seconds = 0, 0.
-    policy = node_limits(root, job)
-    for number, path in enumerate(paths):
-        intent = contracts.read(contracts.regular(path / 'native-intent.json'))
+    for number,(path,intent,original,meter,interrupted) in enumerate(receipts):
         anchor = intent.get('budget_slice', {})
-        interrupted = not (path / 'native-outcome.json').exists()
-        if interrupted:
+        if meter is None and not interrupted and not native_completion_known(dict(original,stop_reason=None),policy):
             from . import continuation
-            saved = continuation.interruption(root, job, path)
-            original = dict(budget_slice=saved['budget_slice'])
-        else:
-            original = contracts.read(contracts.regular(path / 'native-outcome.json'))
-        meter = contracts.read(contracts.regular(path / 'usage.json')) if (path/'usage.json').exists() else None
-        if meter is None and not interrupted and not native_completion_known(dict(original,stop_reason=None), contracts.settings(root, job)):
-            from . import continuation
-            successor = (contracts.read(contracts.regular(paths[number + 1] / 'native-intent.json'))
-                         if number + 1 < len(paths) else automatic_successor or {})
-            automatic = ((automatic_recovery is not None and number == len(paths) - 1)
+            successor = receipts[number+1][1] if number+1<len(receipts) else automatic_successor or {}
+            automatic = ((automatic_recovery is not None and number == len(receipts) - 1)
                          or successor.get('continuation_kind') == 'automatic_recovery')
             from . import native_recovery
-            negotiation = ((automatic_recovery or {}).get('format_fallback') is True and number == len(paths)-1
+            negotiation = ((automatic_recovery or {}).get('format_fallback') is True and number == len(receipts)-1
                 or (successor.get('automatic_recovery') or {}).get('format_fallback') is True)
             eligible = (continuation.format_source(root,job['step'],path) is not None if negotiation else
                 automatic and native_recovery.recoverable_source(continuation.automatic_source(root, job['step'], path)))
@@ -1948,10 +1960,10 @@ def _attempt_consumption(root, job, paths, *, automatic_recovery=None, automatic
         reported = meter or dict(input_tokens=0,cached_input_tokens=0,output_tokens=0)
         report = original.get('budget_slice', {})
         if (meter is not None and native._usage_event(dict(type='turn.completed', usage=meter)) != meter
-                or intent.get('task_ref') != contracts.record_ref(root / 'jobs' / f'{job["step"]:03d}.json')
-                or anchor.get('limits') != policy or anchor.get('role') != job['role']
+                or intent.get('task_ref') != task_ref
+                or anchor.get('limits') != limits or anchor.get('role') != job['role']
                 or anchor.get('previous_tokens', 0) != tokens or anchor.get('previous_seconds', 0.) != seconds
-                or bool(report.get('usage_observed')) != (meter is not None) or report.get('limits') != policy
+                or bool(report.get('usage_observed')) != (meter is not None) or report.get('limits') != limits
                 or report.get('role') != job['role'] or report.get('dispatches') != number + 1
                 or any(report.get(key) != reported[key] for key in ('input_tokens', 'cached_input_tokens', 'output_tokens'))):
             raise ValueError('Original node usage report or identity changed')

@@ -129,9 +129,15 @@ def stage_scope(root,job):
     if c.read(c.regular(path))!=job:
         raise ValueError('Scientific job differs from its frozen original')
     reference=c.record_ref(path)
+    return stage_scope_for_job(root,job,task_ref=reference)
+
+
+def stage_scope_for_job(root,job,*,task_ref):
+    """Project the canonical job identity already accepted by this owner."""
+    require_job_format(job)
     # Attempt zero's execution identity is the original job reference, including when
     # later native attempts exist. Scope identity must not load their policies.
     return dict(step=job['step'],role=job['role'],handoff_protocol=job['handoff_protocol'],
-        job_ref=reference,execution_key=reference,
+        job_ref=task_ref,execution_key=task_ref,
         mechanism_ref=(None if (job.get('search') or {}).get('breadth') is not None
             else ((job.get('search') or {}).get('focus') or {}).get('mechanism_ref')))

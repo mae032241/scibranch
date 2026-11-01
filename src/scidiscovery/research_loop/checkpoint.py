@@ -28,7 +28,11 @@ def policy(value):
 
 
 def enabled(root, job):
-    value = configuration_updates.for_job(root, job).get('worker_fragment_policy')
+    return enabled_for_policy(job,settings=configuration_updates.for_job(root,job))
+
+
+def enabled_for_policy(job,*,settings):
+    value = settings.get('worker_fragment_policy')
     if value is None or job['role'] != 'W':
         return False
     policy(value)
@@ -75,6 +79,25 @@ def _science(root, job, originals):
     return dict(status='present', diagnostic=None), payload
 
 
+def _binding_for_inventory(root,job,record,inventory):
+    c._inventory_identity(root,job['step'],inventory)
+    if job!=inventory.job or record!=inventory.record or job.get('role')!='W':
+        raise ValueError('Fragment must bind the exact original W scientific job')
+    return dict(step=job['step'],attempt=inventory.attempt,job_ref=inventory.task_ref,
+        stage_owner=inventory.task_ref,record=record.relative_to(root).as_posix())
+
+
+def _science_for_inventory(root,originals,inventory):
+    row=next((item for item in originals if Path(item['path']).name=='science-output.json'),None)
+    if row is None:return dict(status='missing',diagnostic='missing_output'),None
+    receipt=inventory.native_outcome
+    if not isinstance(receipt,dict) or receipt.get('raw_ref')!=dict(path=str(Path(root)/row['path']),size_bytes=row['size_bytes']):
+        return dict(status='unverified',diagnostic='unbound_final_output'),None
+    if inventory.science_error is not None:
+        return dict(status='invalid',diagnostic=inventory.science_error.code),None
+    return dict(status='present',diagnostic=None),inventory.payload
+
+
 def _capture(root, job, record, *, inventory):
     """Reference this stopped attempt and already-sealed terminal outputs.
 
@@ -87,12 +110,9 @@ def _capture(root, job, record, *, inventory):
     owned by later fragments and are never turned into a checkpoint snapshot.
     Managed call identity and candidate facts stay in their existing receipts.
     """
-    from .protocol import require_current
-    require_current(root,job)
     root, record = Path(root), Path(record)
-    binding = _binding(root, job, record)
+    binding = _binding_for_inventory(root,job,record,inventory)
     from . import worker_delivery, experiments
-    worker_delivery.writers_stopped(root,job,record)
     destination = record / 'checkpoint.json'
     if destination.exists() or destination.is_symlink():
         return _validate(root, job, record,inventory=inventory)
@@ -105,7 +125,7 @@ def _capture(root, job, record, *, inventory):
         original = c.regular(path)
         if original.stat().st_mode & 0o777 != 0o400:original.chmod(0o400)
         originals.append(dict(experiments.proof(original),path=original.relative_to(root).as_posix()))
-    science, _ = _science(root, job, originals)
+    science, _ = _science_for_inventory(root,originals,inventory)
     work = c.workspace(root, job['step'])
     materials = []
     try:
@@ -138,18 +158,19 @@ def _capture(root, job, record, *, inventory):
                  scope='Stopped native originals and sealed terminal outputs only; mutable drafts are not retained. Not a stage seal, scientific qualification or restart permission.')
     c.write(destination, value)
     destination.chmod(0o400)
-    return _validate(root, job, record,inventory=inventory)
+    return _validate_value(root,job,record,value,inventory=inventory)
 
 
 def _validate(root, job, record, *, inventory):
     """Verify this stopped attempt and saved originals without reading drafts."""
-    from .protocol import require_current
-    require_current(root,job)
     root, record = Path(root), Path(record)
-    from . import worker_delivery,experiments
-    worker_delivery.writers_stopped(root,job,record)
     value = c.read(c.regular(record / 'checkpoint.json'))
-    if value.get('version') != VERSION or value.get('binding') != _binding(root, job, record):
+    return _validate_value(root,job,record,value,inventory=inventory)
+
+
+def _validate_value(root,job,record,value,*,inventory):
+    from . import experiments
+    if value.get('version') != VERSION or value.get('binding') != _binding_for_inventory(root,job,record,inventory):
         raise ValueError('Fragment checkpoint binding changed')
     for row in value['originals']:
         path = root / row['path']
@@ -158,7 +179,7 @@ def _validate(root, job, record, *, inventory):
         actual=experiments.proof(c.regular(path))
         if any(actual[key]!=row.get(key) for key in ('size_bytes','file_stat')):
             raise ValueError('Fragment native original changed')
-    expected, _ = _science(root, job, value['originals'])
+    expected, _ = _science_for_inventory(root,value['originals'],inventory)
     if value['science'] != expected:
         raise ValueError('Fragment scientific output diagnosis changed')
     for row in value['materials']:

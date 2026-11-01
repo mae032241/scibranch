@@ -71,14 +71,28 @@ def _candidate(root,accepted,completed,terminal,observation=None):
 
 def writers_stopped(root,job,record):
     """Require this attempt's existing native, bridge and process stop facts."""
+    from . import accepted_budget
+    root,record=Path(root),Path(record)
+    base=c.settings(root);head=accepted_budget.load(root,base=base)
+    retained=c.read(c.regular(root/'jobs'/f'{job["step"]:03d}.json'))
+    if retained!=job:raise ValueError('Original native writer lost its exact scientific task')
+    policy=c.settings_for_job(root,job,base=base,head=head)
+    accepted=list(execution.accepted_intents_from_facts(root,job['step'],job=job,
+        base=base,policy=policy,head=head,task_ref=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json')))
+    chain=[path for path,_ in accepted]
+    number=chain.index(record)
+    return _writers_stopped(root,job,record,chain=chain,intent=accepted[number][1],
+        outcome=c.read(c.regular(record/'native-outcome.json')))
+
+
+def _writers_stopped(root,job,record,*,chain,intent,outcome):
+    """The current owner checks live processes once using its loaded originals."""
     from . import runtime
     root,record=Path(root),Path(record)
-    number=execution.records(root,job['step']).index(record)
-    identity=execution.identity(root,job['step'],number)
-    task=c.record_ref(c.regular(root/'jobs'/f'{job["step"]:03d}.json'))
-    intent=c.read(c.regular(record/'native-intent.json'))
-    outcome=c.read(c.regular(record/'native-outcome.json'))
-    if c.read(Path(task['path']))!=job or intent.get('task_ref')!=task:
+    number=chain.index(record)
+    identity=execution.identity_from_chain(root,job['step'],chain,number)
+    task=dict(path=str(root/'jobs'/f'{job["step"]:03d}.json'))
+    if intent.get('task_ref')!=task:
         raise ValueError('Original native writer lost its exact scientific task')
     started=outcome.get('native_started')
     if type(started) is not bool or started and outcome.get('cleanup')!='observed_group_cleaned':
@@ -94,10 +108,12 @@ def writers_stopped(root,job,record):
         raise ValueError('Original native outcome changed its process bindings')
     from . import worker_execution_bridge
     worker_execution_bridge.stopped(record,identity)
+    receipts={}
     for name in ('runner-process.json','native-process.json'):
         path=record/name
         if path.exists() or path.is_symlink():
             receipt=c.read(c.regular(path))
+            receipts[name]=receipt
             saved=outcome.get('execution_processes',{}).get(name)
             if (receipt.get('task_ref')!=identity or saved is not None and saved!=c.record_ref(path)
                     or not isinstance(receipt.get('boot_id'),str) or not receipt['boot_id']
@@ -111,6 +127,7 @@ def writers_stopped(root,job,record):
                 if runtime.process_matches(receipt,identity):continue
             if not runtime.process_matches(receipt,identity):continue
             raise ValueError('Original native writer still owns this attempt; no delivery snapshot can be captured')
+    return receipts
 
 
 def _prefix_calls(root,job):
@@ -162,24 +179,21 @@ def accepted_original(root,proof,*,source=None):
     return c.read(originals.resolve_ref(owner,ref) if owner is not None else originals.resolve_root_ref(root,ref))
 
 
-def _capture(root,job,record,*,inventory,correction=None):
+def _capture(root,job,record,*,inventory):
     """The native owner calls this only after its attempt has stopped writing.
 
     This is one attempt's fact original, not a new call index or mutable balance.
     Each proof uses the existing archive. Later calls/collections cannot change it.
     """
     if not repair_applicable(job):return None
+    correction=inventory.caller_correction
     if not applicable(job):
-        if correction is None:correction=_caller_correction(root,job,record)
         if correction is None:return None
-    from .protocol import require_current,stage_scope
-    require_current(root,job)
     root,record=Path(root),Path(record);path=record/FACT_NAME
-    number=execution.records(root,job['step']).index(record)
-    binding=dict(job_ref=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json'),
+    number=inventory.attempt
+    binding=dict(job_ref=inventory.task_ref,
         raw_ref=c.file_ref(c.regular(record/'science-output.json',limit=None)),source_attempt=number)
     if path.exists():return _validate(root,job,record,inventory=inventory)
-    writers_stopped(root,job,record)
     needed={row['mechanism_ref'] for row in _obligations(job)}
     rows=[];unknown=[];capacity=False
     # Frozen predecessor observations only, never recursively copy their assets.
@@ -224,18 +238,18 @@ def _evidence_key(row):
 
 def _validate(root,job,record,*,inventory,source_attempt=None):
     value=c.read(c.regular(record/FACT_NAME,limit=None))
-    if source_attempt is None:source_attempt=execution.records(root,job['step']).index(record)
+    if source_attempt is None:source_attempt=inventory.attempt
     else:
         if type(source_attempt) is not int or source_attempt<0:
             raise history.ObserverIntegrityError('Worker fact source attempt changed its accepted original')
         origin=execution.origin(root,job['step'])
         expected_record=origin if source_attempt==0 else origin/'continuations'/f'{source_attempt:03d}'
-        intent=c.read(c.regular(record/'native-intent.json'))
+        intent=inventory.native_intent
         if (record!=expected_record
                 or type(intent.get('attempt',0)) is not int or intent.get('attempt',0)!=source_attempt
-                or intent.get('task_ref')!=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json')):
+                or intent.get('task_ref')!=inventory.task_ref):
             raise history.ObserverIntegrityError('Worker fact source attempt changed its accepted original')
-    expected=dict(job_ref=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json'),
+    expected=dict(job_ref=inventory.task_ref,
         raw_ref=c.file_ref(c.regular(record/'science-output.json',limit=None)),
         source_attempt=source_attempt)
     if value.get('version')!=1 or value.get('binding')!=expected:raise history.ObserverIntegrityError('Worker fact snapshot binding changed')
@@ -302,7 +316,7 @@ def validate_original(root,owner,job,seal,*,controls_only=False):
 def assessment(root,job,science,record,*,inventory,source_attempt=None):
     """Coverage of this task's own authored findings; no scientific screened verdict."""
     if not repair_applicable(job):return dict(status='not_applicable',missing=[],blocked=[],reason=None)
-    correction=_caller_correction(root,job,record)
+    correction=inventory.caller_correction
     if not applicable(job) and correction is None:
         return dict(status='not_applicable',missing=[],blocked=[],reason=None)
     if not applicable(job) and not (record/FACT_NAME).exists():
