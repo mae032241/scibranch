@@ -130,24 +130,34 @@ def contexts(root, job, items, archive, previous=()):
 
 def build(root, before_step, *, sources=None, search_state=None):
     """Fold relations without rendering a default packet or updating authority."""
-    sources=history.source_sequence(root,before_step) if sources is None else sources
+    sources=list(history.source_sequence(root,before_step) if sources is None else sources)
     if search_state is None:
         from . import execution_recovery
         recovery_refs = (originals.frozen_recovery_refs(root, before_step) if (Path(root) / originals.MANIFEST).exists()
             else execution_recovery.prefix(root,before_step))
-        state=search.fold(root,sources,recovery_refs=recovery_refs)
-    else:
-        state=search_state
+        search_state=search.fold(root,sources,recovery_refs=recovery_refs)
+    source_facts={}
+    for job,_,seal,_ in sources:
+        source_facts[job['step']]=dict(owner=originals.node(root,job['step']),
+            observation_view=history.read_observation(root,job,seal) if seal.get('observations') else None)
+    return build_from_source_facts(root,before_step,sources=sources,source_facts=source_facts,
+        search_state=search_state)
+
+
+def build_from_source_facts(root, before_step, *, sources, source_facts, search_state):
+    """Build the same relations from this operation's accepted source views."""
+    state=search_state
     nodes=[];candidates={};edges=[];calls=set();coverage='complete';available={}
     for job,payload,seal,_ in sources:
-        step=job['step'];owner=originals.node(root,step)
+        step=job['step'];owner=source_facts[step]['owner']
         nodes.append(dict(step=step,role=job['role'],parents=[int(Path(r['path']).parts[2]) for r in job['direct_refs']],
                           source_ref=seal['raw_ref'],summary=payload['summary'],limitations=payload['limitations']))
         for selected in seal.get('selected_inputs',[]):
             edges.append(dict(kind='reuse',subject=dict(node=step),target=dict(node=selected['origin_step'],material=selected['material']),scope='declared_handoff_not_proven_read'))
         receipt=seal.get('observations')
         if not receipt:coverage='partial';continue
-        observation=history.read_observation(root, job, seal)
+        facts=source_facts[step]
+        observation=facts['observation_view']
         if observation['coverage']['status']!='complete':coverage='partial'
         for row in observation['candidates']:
             if row['id'] in candidates and candidates[row['id']]['observation']!=row:
@@ -239,19 +249,49 @@ def _clip(text, capacity):
 
 
 def project(root, before_step, *, source_cutoff=None, extra_steps=(), include_details=True):
+    """Independent lineage producer with one current-policy selection."""
+    from . import accepted_budget
+    base=c.settings(root)
+    head=accepted_budget.load(root,base=base)
+    path=Path(root)/'jobs'/f'{before_step:03d}.json'
+    job=c.read(c.regular(path)) if path.exists() else None
+    policy=(configuration_updates.policy_for_job(root,job,base=base,head=head) if job is not None
+        else configuration_updates.policy_for_new_job(root,before_step,base=base,head=head))
+    return load_project_for_policy(root,before_step,policy=policy,source_facts={},base=base,head=head,
+        job=job,source_cutoff=source_cutoff,
+        extra_steps=extra_steps,include_details=include_details)
+
+
+def load_project_for_policy(root, before_step, *, policy, source_facts, base, head, job=None, source_cutoff=None,
+                            extra_steps=(), include_details=True):
     """One verified source collection feeds all derived scientific navigation."""
-    sources=history.source_sequence(root,before_step,source_cutoff=source_cutoff,extra_steps=extra_steps)
-    from . import execution_recovery
-    recovery_refs = (originals.frozen_recovery_refs(root, before_step) if (Path(root) / originals.MANIFEST).exists()
-        else execution_recovery.prefix(root,before_step))
-    from . import handoff_state
-    with handoff_state.loading():
-        records=execution_recovery.project_records(root,history.records_from_sources(root,sources,write_cache=False,include_details=include_details),recovery_refs,sources=sources)
-    enabled=configuration_updates.for_new_job(root,before_step).get('search_policy') is not None
+    projection=load_source_records(root,before_step,source_facts=source_facts,base=base,head=head,
+        job=job,source_cutoff=source_cutoff,extra_steps=extra_steps,include_details=include_details)
+    sources,records,recovery_refs=projection['sources'],projection['records'],projection['recovery_refs']
+    enabled=policy.get('search_policy') is not None
     historical=any(job.get('search') is not None for job,_,_,_ in sources)
     state=search.fold(root,sources,recovery_refs=recovery_refs) if enabled or historical else None
-    graph=build(root,before_step,sources=sources,search_state=state)
-    return dict(sources=sources,records=records,search_state=state,graph=graph,candidates=candidate_view(records),recovery_refs=recovery_refs)
+    graph_state=state if state is not None else search.fold(root,sources,recovery_refs=recovery_refs)
+    graph=build_from_source_facts(root,before_step,sources=sources,source_facts=source_facts,
+        search_state=graph_state)
+    return dict(sources=sources,records=records,search_state=state,graph=graph,
+        candidates=candidate_view(records),recovery_refs=recovery_refs)
+
+
+def load_source_records(root, before_step, *, source_facts, base, head, job=None, source_cutoff=None,
+                        extra_steps=(), include_details=True):
+    """Produce selected history records without an unrequested graph or audit."""
+    sources=history.load_source_sequence_from_facts(root,before_step,source_facts=source_facts,
+        base=base,head=head,source_cutoff=source_cutoff,extra_steps=extra_steps)
+    from . import execution_recovery
+    recovery_refs = (originals.frozen_recovery_refs(root, before_step) if (Path(root) / originals.MANIFEST).exists()
+        else originals.recovery_refs(originals.node_from_base(root,before_step,base=base),job)
+            if job is not None else execution_recovery.prefix(root,before_step))
+    from . import handoff_state
+    with handoff_state.loading():
+        records=execution_recovery.project_records(root,history.load_records_from_source_facts(root,sources,
+            source_facts=source_facts,write_cache=False,include_details=include_details),recovery_refs,sources=sources)
+    return dict(sources=sources,records=records,recovery_refs=recovery_refs)
 
 
 def brief(records, state, graph, candidates, indexes, *, selection_protocol=0):

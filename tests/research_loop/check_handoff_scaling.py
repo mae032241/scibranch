@@ -142,9 +142,11 @@ def _counts(monkeypatch, root, current):
                 counts[f'physical::Path.read_text::{"/".join(parts)}'] += 1
             return original_read_text(path, *args, **kwargs)
         patch.setattr(Path, 'read_text', read_text)
-        for name in ('read', 'read_scientific_output'):
+        scientific_reader = ('read_scientific_source' if hasattr(c, 'read_scientific_source')
+            else 'read_scientific_output')
+        for name, label in (('read', 'read'), (scientific_reader, 'read_scientific_output')):
             original = getattr(c, name)
-            def read(path, *args, _original=original, _name=name, **kwargs):
+            def read(path, *args, _original=original, _name=label, **kwargs):
                 owner = file_category(path)
                 counts[f'{_name}_{owner}'] += 1
                 parts = relative_parts(path)
@@ -262,12 +264,13 @@ def test_synthetic_handoff_scaling(tmp_path, monkeypatch):
     output = Path(os.environ.get('SCID_TEST_LOG_DIR', str(tmp_path))) / 'handoff-scaling.json'
     output.parent.mkdir(parents=True, exist_ok=True)
     report = dict(scope='Synthetic E handoffs at bounded prefix lengths 2/8/16/32; no scientific performance claim.',
-        instrumentation='c.read/read_scientific_output with exact instance-relative paths, instance .json Path.read_text/read_bytes calls, settings.json Path.read_bytes, explicit deep gates, current inventory owner, ledger reader, os.scandir calls/yielded entries and os.stat/lstat; counting overhead included in wall times.',
+        instrumentation='c.read and the lowest available canonical scientific reader family (c.read_scientific_source when present, otherwise c.read_scientific_output) with stable read_scientific_output/path::c.read_scientific_output labels and exact instance-relative paths; logical counts overlap physical Path.read_text/read_bytes counts and must not be added; instance .json Path.read_text/read_bytes calls, settings.json Path.read_bytes, explicit deep gates, current inventory owner, ledger reader, os.scandir calls/yielded entries and os.stat/lstat; counting overhead included in wall times.',
         limitations=['Prefix setup excluded from per-handoff timing but remains inside the supervised process budget.',
             'Cold samples complete the next prepared job after dropping the warm scope, so their prefix has one extra sealed node.',
             'All current findings/artifacts and direct-parent counts/bytes are fixed; generated history/context growth is reported without exemption.',
             'Exact-path Counter keys use path::<entrypoint>::<instance-relative path>; c.read and c.read_scientific_output path counts duplicate their owner-category counts and must not be added to those totals.',
-            'c.read_scientific_output and settings.json Path.read_bytes counts are additional to c.read counts; the observed entrypoints do not cover every underlying IO operation.',
+            'Scientific reader family and settings.json Path.read_bytes counts are additional to c.read counts; the observed entrypoints do not cover every underlying IO operation.',
+            'The scientific reader selection is probe instrumentation for applying the same overlay to the old baseline, not a product compatibility mechanism; it spies only the lowest available family member to avoid parent/delegate double counting.',
             'physical::Path.read_text:: and physical::Path.read_bytes:: keys count .json reads inside this instance; they overlap c.read/path dimensions and must not be added to them. JSONL and streamed reads are not covered.',
             'Filesystem counts cover paths inside this instance; stat/lstat count Python calls, and DirEntry metadata requests are separate because they may use cached metadata.',
             'Directory calls and entries are grouped by jobs, native-evidence, candidate audit, audit recovery, execution recovery and other paths; entries retain ancient/direct/current/next attribution when their path carries a step.',

@@ -161,9 +161,16 @@ def decode_scientific_output(text: str):
     return value, '+'.join(normalization) or None
 
 
+def read_scientific_source(path: Path):
+    """Read one original once, retaining its exact text and parsed author view."""
+    text = path.read_text(encoding='utf-8')
+    payload, normalization = decode_scientific_output(text)
+    return dict(raw_text=text, payload=payload, normalization=normalization)
+
+
 def read_scientific_output(path: Path):
     """Read syntax only; sealed conclusions retain their accepted interpretation."""
-    return decode_scientific_output(path.read_text(encoding='utf-8'))[0]
+    return read_scientific_source(path)['payload']
 
 
 def write(path: Path, value):
@@ -819,6 +826,7 @@ def _role_lineage(job, parents=()):
 def science_view(job, root=None):
     """Independent presentation entrypoint; build passes its existing facts."""
     parents={}
+    qualified=[]
     if root is None or job.get('fork_source') is not None:
         policy={}
     else:
@@ -836,10 +844,15 @@ def science_view(job, root=None):
                     prefix=accepted_prefix.for_job(job))
                 parents[step]=dict(facts=source,member=members[step],
                     public=_accept_parent_public(root,job,ref,source=source))
-    return _science_view(job,root,parent_sources=parents,policy=policy)
+        from . import formal_review
+        owners=[row['facts']['owner'] for row in parents.values()]
+        for reference in job.get('execution_qualifications', [])[:3]:
+            _, proof=formal_review._receipt_original(root,reference,base=base,owners=owners)
+            qualified.append(proof['subject']['material']['path'])
+    return _science_view(job,root,parent_sources=parents,policy=policy,qualified_materials=qualified)
 
 
-def _science_view(job, root, *, parent_sources, policy):
+def _science_view(job, root, *, parent_sources, policy, qualified_materials):
     from .protocol import require_job_format
     require_job_format(job)
     if job.get('fork_source') is not None:
@@ -911,8 +924,7 @@ def _science_view(job, root, *, parent_sources, policy):
            if job.get('formal_review_version')==1 else {}),
         **(dict(source_restrictions=job['source_restrictions']) if 'source_restrictions' in job else {}),
         **(dict(execution_authority=dict(status='trusted_gate_required' if policy.get('execution_resource_policy') else 'authority_only_production_gate_unavailable',
-            qualified_materials=[read(Path(root) / ref['path'])['subject']['material']['path']
-                                 for ref in job.get('execution_qualifications', [])[:3]],
+            qualified_materials=qualified_materials[:3],
             qualified_materials_omitted_count=max(0, len(job.get('execution_qualifications', [])) - 3)))
            if job.get('execution_authority') is not None else {}),
         **(dict(engineering_repair=engineering.public(job['engineering_repair'])) if job.get('engineering_repair') else {}),
@@ -1146,6 +1158,19 @@ def _current_inventory_head(root,step,inventory):
         raise ValueError('Current inventory belongs to another task or attempt')
     inventory.head=head
     return head
+
+
+def _validate_current_inventory_owner(root,step,inventory,*,head):
+    """Consume the terminal writer's exact current owner without opening rows."""
+    _inventory_identity(root,step,inventory)
+    if head is None:
+        raise ValueError('Current inventory requires its produced accepted head')
+    current=head.current_job
+    relative=inventory.record.relative_to(root).as_posix()
+    if (current is None or current['step']!=step or current['native_record']!=relative
+            or current['job_ref']!=inventory.task_ref or current['status']!='terminal'
+            or head['current_native'] is not None):
+        raise ValueError('Current inventory belongs to another task or attempt')
 
 
 def _material_inventory(root: Path, step: int, *, inventory):
@@ -1805,7 +1830,8 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         job['source_provenance'],document=qualification.bind_inputs_from_facts(root,job,facts=inputs)
         job['source_restrictions']=qualification.status_from_facts(job,document,facts=inputs)
     from . import execution_authority
-    execution_authority.bind_job(root, job)
+    authority_facts=execution_authority.job_facts(root,job,base=base,policy=policy,sources=parent_facts)
+    execution_authority.bind_job(root,job,facts=authority_facts)
     if retained is None and policy.get('correction_policy') is not None:
         from . import correction
         job['control_cut'] = dict(correction_events=correction.freeze_prefix(root))
@@ -1817,11 +1843,11 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         from . import managed_wait
         job['managed_execution_wait'] = managed_wait.capability(root,job)
     from . import user_guidance
-    with user_guidance.binding(root, step, role, retained) as statements:
+    with user_guidance.binding_from_base(root,step,role,retained,base=base) as (statements,guidance_current):
         if statements:
             job['user_guidance'] = statements
         for path, value in ((root / 'jobs' / f'{step:03d}.json', job),
-                            (work / 'science-task.json', read(regular(work / 'science-task.json')) if retained is not None else _science_view(job,root,parent_sources=parent_views,policy=policy)),
+                            (work / 'science-task.json', read(regular(work / 'science-task.json')) if retained is not None else _science_view(job,root,parent_sources=parent_views,policy=policy,qualified_materials=authority_facts['qualified_materials'])),
                             (host_record(work) / 'science-result.schema.json', read(regular(host_record(work) / 'science-result.schema.json')) if retained is not None else result_schema(role, protocol, 'selection' in job,**response_options(job)))):
             if path.exists():
                 if read(regular(path)) != value:
@@ -1834,8 +1860,9 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
                     policy=policy.get('storage_policy'),context=input_inventory.context)
             else:
                 write(path, value)
-    from . import accepted_budget
-    accepted_budget.accept_job_from_base(root,step,job,base=base)
+        acceptance=accepted_budget.job_acceptance_facts(root,step,base=base)
+        head=accepted_budget.accept_job_from_facts(root,step,job,facts=acceptance,
+            guidance_current=guidance_current)
     skill_supply.project(root, policy, job)
     return job
 
@@ -2036,7 +2063,7 @@ def _validate_task_view(root, work, job):
     view=read(regular(work/'science-task.json'))
     if job.get('formal_review'):
         if view!=science_view(job,root):raise ValueError('Frozen formal review task changed')
-        return
+        return view
     expected_global=dict(objective='inputs/global/objective.md',
         updates=[row['path'] for row in job['global_materials'][1:]])
     parents=view.get('parents',[]) if isinstance(view,dict) else None
@@ -2051,6 +2078,7 @@ def _validate_task_view(root, work, job):
         raise ValueError('Frozen scientific task changed its exact parents')
     if 'assessment_handoff' in job and view.get('assessment_handoff') != job['assessment_handoff']:
         raise ValueError('Frozen scientific task changed its assessment sources')
+    return view
 
 
 def _validate_inputs(root, work, job, *, _policy=None):
@@ -2063,15 +2091,18 @@ def _validate_inputs(root, work, job, *, _policy=None):
     return _validate_inputs_from_facts(root,work,job,base=base,policy=policy,head=head)
 
 
-def _validate_inputs_from_facts(root,work,job,*,base,policy,head):
+def load_validated_input_facts(root,work,job,*,base,policy,head):
     if job.get('fork_source') is not None:
-        from . import fork_runtime, qualification, formal_review, engineering, execution_authority
-        fork_runtime.validate_selected_job(root, work, job)
-        document=qualification.validate_inputs(root, job)
-        execution_authority.validate_job(root, job)
+        from . import fork_runtime, fork_sources, formal_review, engineering
+        selected=fork_sources.selected_task(root)
+        facts=fork_runtime._load_selected_job_facts(root,work,job,base=base,policy=policy,head=head,
+            selected=selected)
+        document=facts['inputs']['document']
         formal_review.validate_job(root, job)
         engineering.validate_job(root, job)
-        return document
+        task_view=fork_runtime._selected_science_view(job,selected=selected,policy=policy,
+            qualified=facts['authority']['qualified_materials'])
+        return dict(document=document, sources=facts['sources'], inputs=facts['inputs'],task_view=task_view)
     from . import budget,accepted_budget,accepted_prefix
     events=budget._events_from_state(head)[0]
     report = budget._validate_final_report_inputs_from_facts(root,job,policy=policy,
@@ -2090,8 +2121,6 @@ def _validate_inputs_from_facts(root,work,job,*,base,policy,head):
         raise ValueError('Scientific task changed its exact normal resume boundary')
     from . import formal_review
     formal_review.validate_job(root,job)
-    from . import execution_authority
-    execution_authority.validate_job(root, job)
     from . import qualification
     sources,members={},{}
     for ref in job['direct_refs']:
@@ -2100,6 +2129,9 @@ def _validate_inputs_from_facts(root,work,job,*,base,policy,head):
             prefix=accepted_prefix.for_job(job))
     inputs=qualification.input_facts(root,job,base=base,head=head,sources=sources)
     document=qualification.validate_inputs_from_facts(root,job,facts=inputs)
+    from . import execution_authority
+    authority_facts=execution_authority.job_facts(root,job,base=base,policy=policy,sources=sources)
+    execution_authority.validate_job(root,job,facts=authority_facts)
     if 'source_provenance' in job and job.get('source_restrictions') != qualification.status_from_facts(job,document,facts=inputs):
         raise ValueError('Frozen source restriction view changed')
     if job.get('experiment_mode')!=policy.get('experiment_mode'):
@@ -2118,7 +2150,7 @@ def _validate_inputs_from_facts(root,work,job,*,base,policy,head):
     if job.get('handoff_authority_version') == 1:
         if job.get('role_guidance') and job.get('native_role_instruction') != job['role_guidance']:
             raise ValueError('Native role instruction differs from its frozen scientific guidance')
-    _validate_task_view(root,work,job)
+    task_view=_validate_task_view(root,work,job)
     if job['global_materials'] != _global_materials(root,base=base):
         raise ValueError('Bound global context changed')
     if job.get('purpose') == 'closeout':
@@ -2189,8 +2221,9 @@ def _validate_inputs_from_facts(root,work,job,*,base,policy,head):
         raise ValueError('Bound control diagnostics differ from their predecessor')
     if any(row['material'] not in job['direct_materials'] for row in expected):
         raise ValueError('Selected implementation is absent from bound materials')
+    global_paths={}
     for row in job['global_materials']:
-        originals.resolve_root_ref(root, dict(row,path=row['source']))
+        global_paths[row['path']]=originals.resolve_root_ref(root, dict(row,path=row['source']))
         if (work/row['path']).exists() and regular(work/row['path']).stat().st_size!=row['size_bytes']:
             raise ValueError('The global context read by this role changed')
     if [row['path'] for row in job.get('direct_originals',[])]!=[row['path'] for row in job['direct_refs']]:
@@ -2204,7 +2237,11 @@ def _validate_inputs_from_facts(root,work,job,*,base,policy,head):
     for ref in job['direct_materials']:
         if (work/ref['path']).exists() and regular(work/ref['path']).stat().st_size!=ref['size_bytes']:
             raise ValueError('The direct material actually read by this role changed')
-    return document
+    return dict(document=document, sources=sources, inputs=inputs,task_view=task_view,global_paths=global_paths)
+
+
+def _validate_inputs_from_facts(root,work,job,*,base,policy,head):
+    return load_validated_input_facts(root,work,job,base=base,policy=policy,head=head)['document']
 
 
 @owner_effect
@@ -2218,13 +2255,26 @@ def seal_result(root: Path, step: int, *, inventory=None):
         from . import handoff_state,accepted_prefix
         accepted_prefix.reconcile(root)
         return handoff_state.read_sealed(root, step)
-    if inventory is None:inventory=accept_current_inventory(root,step)
+    if inventory is None:
+        return seal_result_from_inventory(root,step,inventory=accept_current_inventory(root,step))
     _inventory_identity(root,step,inventory)
     if inventory.policy is None:
         raise ValueError('Current inventory requires its produced policy')
     head=_current_inventory_head(root,step,inventory)
     from .protocol import require_current_job
     require_current_job(root,base=head.base,job=inventory.job,retained=inventory.job,policy=inventory.policy)
+    return _seal_result(root,step,inventory=inventory)
+
+
+@owner_effect
+def seal_result_from_inventory(root: Path, step: int, *, inventory):
+    """Seal the inventory produced and terminally accepted by this operation."""
+    root=Path(root)
+    if inventory.base is None or inventory.policy is None:
+        raise ValueError('Current inventory requires its produced base and policy')
+    _validate_current_inventory_owner(root,step,inventory,head=inventory.head)
+    from .protocol import require_current_job
+    require_current_job(root,base=inventory.base,job=inventory.job,retained=inventory.job,policy=inventory.policy)
     return _seal_result(root,step,inventory=inventory)
 
 
@@ -2374,7 +2424,7 @@ def _seal_result(root,step,*,inventory):
     from . import accepted_prefix
     pending_public=accepted_prefix.prepare_node(root,job,value,seal,inventory=inventory)
     write(record / 'result-identity.json', seal)
-    accepted_prefix.commit_node_from_facts(root,pending_public,base=inventory.base,head=inventory.head)
+    accepted_prefix.commit_node_from_facts(root,pending_public,base=inventory.base,head=inventory.head,seal=seal)
     return projected
 
 

@@ -630,39 +630,61 @@ def accept_job(root, step, job):
 
 
 def accept_job_from_base(root, step, job, *, base):
-    from . import budget
+    from . import budget, user_guidance
     root = Path(root)
     with budget._ledger_writer_from_base(root, base=base):
-        state = recover(root, load(root, base=base))
-        prior = state.row(f'job/{step:03d}')
-        reference = c.record_ref(root/'jobs'/f'{step:03d}.json')
-        if prior is not None:
-            if prior['job_ref'] != reference:
-                raise ValueError('Prepared job changed its accepted identity')
-            authority_calls(state, step)
-            return state
-        current = state.current_job
-        if current is not None and current['status'] != 'sealed':
-            begin = state['closeout']
-            if (not job.get('final_only') or begin is None or begin['mode'] != 'final'
-                    or begin['first_step'] != step):
-                raise ValueError('Another accepted scientific job remains open')
-        row = dict(step=step, role=job['role'], job_ref=reference, status='prepared',
-            native_record=None, authority_calls={},
-            prefix=copy.deepcopy(state.prefix), purpose=job.get('purpose'), unknown_count=0,
-            reported_tokens=0, complete=True, input_search_ref=copy.deepcopy(state['search_ref']))
-        from . import user_guidance
-        user_guidance.apply_job(root, job)
-        _, state = append(root, state, kind='job_accept', fields=dict(step=step, job_ref=reference),
-            updates=dict(current_job=row, prepared_count=state['prepared_count']+1,
-                max_local_step=max(state['max_local_step'], step),
-                is_fork=(root/'host-runtime/fork/manifest.json').exists()), rows={f'job/{step:03d}': row})
+        facts = job_acceptance_facts(root, step, base=base)
+        current = (user_guidance.load_binding_facts(root, retained=job)[0]
+            if facts['prior'] is None else {})
+        return accept_job_from_facts(root, step, job, facts=facts, guidance_current=current)
+
+
+def job_acceptance_facts(root, step, *, base):
+    """Produce one fresh job-admission observation under the existing writer."""
+    from . import budget
+    root = Path(root)
+    state = recover(root, load(root, base=base))
+    prior = state.row(f'job/{step:03d}')
+    return dict(state=state, prior=prior,
+        reference=c.record_ref(root/'jobs'/f'{step:03d}.json'),
+        stamp=budget.clock_stamp() if prior is None else None,
+        is_fork=(root/'host-runtime/fork/manifest.json').exists())
+
+
+def accept_job_from_facts(root, step, job, *, facts, guidance_current):
+    """Consume the writer's admission facts without reopening any originals."""
+    from . import user_guidance
+    state, prior, reference = facts['state'], facts['prior'], facts['reference']
+    if prior is not None:
+        if prior['job_ref'] != reference:
+            raise ValueError('Prepared job changed its accepted identity')
+        _authority_calls_from_job(state, prior, step=step)
         return state
+    current = state.current_job
+    if current is not None and current['status'] != 'sealed':
+        begin = state['closeout']
+        if (not job.get('final_only') or begin is None or begin['mode'] != 'final'
+                or begin['first_step'] != step):
+            raise ValueError('Another accepted scientific job remains open')
+    row = dict(step=step, role=job['role'], job_ref=reference, status='prepared',
+        native_record=None, authority_calls={},
+        prefix=copy.deepcopy(state.prefix), purpose=job.get('purpose'), unknown_count=0,
+        reported_tokens=0, complete=True, input_search_ref=copy.deepcopy(state['search_ref']))
+    user_guidance.apply_job(root, job, current=guidance_current)
+    _, state = _append_prepared(root, state, kind='job_accept', stamp=facts['stamp'],
+        fields=dict(step=step, job_ref=reference),
+        updates=dict(current_job=row, prepared_count=state['prepared_count']+1,
+            max_local_step=max(state['max_local_step'], step), is_fork=facts['is_fork']),
+        index_updates={f'job/{step:03d}': dict(previous_seq=state['seq'], previous=prior, current=row)})
+    return state
 
 
 def authority_calls(state, step):
     """Exact originals accepted for this job, including pre-prepare allocations."""
-    job = state.row(f'job/{step:03d}')
+    return _authority_calls_from_job(state, state.row(f'job/{step:03d}'), step=step)
+
+
+def _authority_calls_from_job(state, job, *, step):
     if job is None or not isinstance(job.get('authority_calls'), dict):
         raise ValueError('Accepted job authority references are required')
     if (state.current_job is not None and state.current_job['step'] == step
@@ -834,7 +856,11 @@ def accept_terminal_from_base(root, step, record, *, base, meter, unknown, meter
                 raise ValueError('Invalid current terminal usage')
         previous_row = row
         job_key = f'job/{step:03d}'
-        previous_job = state.row(job_key)
+        previous_job = state.current_job
+        if (previous_job is None or previous_job['step'] != step
+                or previous_job.get('native_record') != relative
+                or previous_row['intent'].get('task_ref') != previous_job['job_ref']):
+            raise ValueError('Terminal accounting changed its current attempt')
         job = dict(previous_job)
         totals = dict(state['usage'])
         for name in ('input_tokens', 'cached_input_tokens', 'output_tokens'):
@@ -1096,7 +1122,11 @@ def publish_scientific_seal(root, step, *, prefix, role, result_ref, search_ref,
     root = Path(root)
     with budget._ledger_writer(root) as base:
         state = recover(root, load(root, base=base))
-        job = _scientific_publication_job(state,step,job_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),
+        job = state.current_job
+        if job is None or job['step'] != step:
+            job = state.row(f'job/{step:03d}')
+        job = _scientific_publication_job(state,step,job=job,
+            job_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),
             role=role,result_ref=result_ref,search_ref=search_ref)
         return _publish_scientific_seal(root,step,state,job=job,prefix=prefix,
             result_ref=result_ref,search_ref=search_ref,search_delta=search_delta)
@@ -1113,7 +1143,7 @@ def publish_scientific_seal_from_facts(root, step, *, base, previous_prefix, job
         state = recover(root, load(root, base=base))
         _validate_scientific_publication_owner(state,step,previous_prefix=previous_prefix,
             prefix=prefix,job_ref=job_ref)
-        job = _scientific_publication_job(state,step,job_ref=job_ref,role=role,
+        job = _scientific_publication_job(state,step,job=state.current_job,job_ref=job_ref,role=role,
             result_ref=result_ref,search_ref=search_ref)
         return _publish_scientific_seal(root,step,state,job=job,prefix=prefix,
             result_ref=result_ref,search_ref=search_ref,search_delta=search_delta)
@@ -1126,10 +1156,9 @@ def _validate_scientific_publication_owner(state, step, *, previous_prefix, pref
         raise ValueError('Accepted public publication lost its active view owner')
 
 
-def _scientific_publication_job(state, step, *, job_ref, role, result_ref, search_ref):
-    """Produce and admit the previous row before any public navigation writes."""
-    job = state.row(f'job/{step:03d}')
-    if job is None or job['role'] != role or job['job_ref'] != job_ref:
+def _scientific_publication_job(state, step, *, job, job_ref, role, result_ref, search_ref):
+    """Admit the supplied previous row before any public navigation writes."""
+    if job is None or job['step'] != step or job['role'] != role or job['job_ref'] != job_ref:
         raise ValueError('Scientific seal has no exact accepted job')
     if job['status'] == 'sealed':
         if job['result_ref'] != result_ref or job['output_search_ref'] != search_ref:

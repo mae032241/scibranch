@@ -85,7 +85,7 @@ def _accepted_marker(root, step, owner):
         raise ValueError('Scientific result has no regular acceptance marker')
 
 
-def sealed_facts(root, step, *, base=None, owner=None):
+def sealed_facts(root, step, *, base=None, owner=None, known=None):
     """Load one exact sealed producer; its authored body is loaded only on demand."""
     from . import contracts as c, originals
     if owner is None:
@@ -97,13 +97,13 @@ def sealed_facts(root, step, *, base=None, owner=None):
     key = (owner.origin_identity['goal_id'], owner.origin_identity['settings_ref']['path'],
         owner.original_root, str(owner.storage_root), step, seal_ref['path'], owner.native_record)
     state = current(root)
-    if state is not None and key in state.sources:
+    if known is None and state is not None and key in state.sources:
         return state.sources[key]
     with loading():
         _accepted_marker(root,step,owner)
-        job = originals.source_job(owner)
+        job = known['job'] if known is not None and 'job' in known else originals.source_job(owner)
         seal_path = originals.source_record(owner, 'result-identity.json')
-        seal = c.read(seal_path)
+        seal = known['seal'] if known is not None and 'seal' in known else c.read(seal_path)
         if seal['job_ref'] != dict(path=str(Path(owner.original_root) / f'jobs/{step:03d}.json')):
             raise ValueError('Source seal changed its exact original job')
         raw = Path(seal['raw_ref']['path'])
@@ -117,7 +117,8 @@ def sealed_facts(root, step, *, base=None, owner=None):
         if owner.native_record is not None and raw.parent != Path(owner.original_root) / owner.native_record:
             raise ValueError('Source seal differs from its retained native attempt')
         raw_path = originals.resolve_ref(owner, seal['raw_ref'])
-        facts = dict(owner=owner, job=job, seal=seal, seal_ref=seal_ref,
+        facts = {} if known is None else known
+        facts.update(owner=owner, job=job, seal=seal, seal_ref=seal_ref,
             seal_path=seal_path, raw_path=raw_path)
     if state is not None:
         state.sources[key] = facts
@@ -144,7 +145,8 @@ def source_facts_from_sealed(root, facts, *, resolve_choices=True):
     """Complete the owner's existing sealed facts without reopening metadata."""
     from . import contracts as c, candidate_refs
     if 'payload' not in facts:
-        facts['payload'] = c.read_scientific_output(facts['raw_path'])
+        original = c.read_scientific_source(facts['raw_path'])
+        facts.update(payload=original['payload'], raw_text=original['raw_text'])
     if resolve_choices and 'control' not in facts:
         job, payload, owner = facts['job'], facts['payload'], facts['owner']
         nominations = payload.get('candidate_nominations')
@@ -188,12 +190,19 @@ def observation(root, job, seal):
     receipt = seal.get('observations')
     if receipt is None:
         return None
-    from . import candidate_refs
-    state = current(root)
     step = job['step']
     facts = sealed_facts(root, step)
     if facts['seal'] != seal:
         raise ValueError('Observation belongs to another sealed source')
+    return observation_from_facts(root, facts)
+
+
+def observation_from_facts(root, facts):
+    """Load the saved observation using this owner's already accepted source."""
+    if facts['seal'].get('observations') is None:return None
+    from . import candidate_refs
+    state = current(root)
+    step = facts['job']['step']
     if 'observation_view' in facts:
         return facts['observation_view']
     with loading():

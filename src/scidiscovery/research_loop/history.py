@@ -1317,8 +1317,30 @@ def candidate_materials(root, job, *, candidate_id):
 
 
 def source_sequence(root, before_step, *, source_cutoff=None, extra_steps=()):
+    """Independent source collection with a local owner for each selected step."""
+    from . import accepted_budget
+    base = c.settings(root)
+    head = accepted_budget.load(root, base=base)
+    return load_source_sequence_from_facts(root, before_step, source_facts={},base=base,head=head,
+        source_cutoff=source_cutoff, extra_steps=extra_steps)
+
+
+def load_source_sequence_from_facts(root, before_step, *, source_facts, base, head,
+                                    source_cutoff=None, extra_steps=()):
     """Recreate small node projections from originals; caches are not authority."""
-    from . import originals
+    from . import originals, handoff_state, budget
+    events = budget._events_from_state(head)[0]
+    def selected(step):
+        if step not in source_facts:
+            source_facts[step] = handoff_state.source_facts(root, step, base=base)
+        else:
+            facts = source_facts[step]
+            if 'raw_path' not in facts:
+                # Selected-fork inputs may have produced only their exact
+                # owner; complete that same owner, never select a new origin.
+                handoff_state.sealed_facts(root, step, owner=facts['owner'], known=facts)
+            handoff_state.source_facts_from_sealed(root, facts)
+        return handoff_state.source_from_facts(source_facts[step])
     if (Path(root) / originals.MANIFEST).exists():
         from . import handoff_state
         state=handoff_state.current(root)
@@ -1342,20 +1364,18 @@ def source_sequence(root, before_step, *, source_cutoff=None, extra_steps=()):
                 sources=[source for source in sources if source.step<=source_cutoff or source.step in extra_steps]
             elif extra_steps:
                 raise ValueError('Ordinary history cannot skip scientific originals')
-        from . import budget
-        resume = budget.normal_resume(root, before_step)
+        resume = budget.normal_resume(root, before_step, events=events)
         if resume is not None:
-            steps = budget.scientific_steps(root, before_step, resume=resume)
+            steps = budget.scientific_steps(root, before_step, resume=resume, events=events)
             if source_cutoff is not None:
                 steps = [*[step for step in steps if step <= source_cutoff], *extra_steps]
             if set(steps) != {source.step for source in sources if source.step in steps}:
                 raise ValueError('Resumed scientific original is missing from its frozen fork prefix')
             sources = [source for source in sources if source.step in steps]
-        return [_source(root, source.step) for source in sources]
+        return [selected(source.step) for source in sources]
     sources = []
-    from . import budget
-    resume = budget.normal_resume(root,before_step)
-    normal_steps = budget.scientific_steps(root,before_step,resume=resume) if resume is not None else list(range(1,before_step))
+    resume = budget.normal_resume(root,before_step,events=events)
+    normal_steps = budget.scientific_steps(root,before_step,resume=resume,events=events) if resume is not None else list(range(1,before_step))
     if source_cutoff is None:
         steps = normal_steps
         if extra_steps:
@@ -1370,16 +1390,38 @@ def source_sequence(root, before_step, *, source_cutoff=None, extra_steps=()):
     for step in steps:
         if source_cutoff is not None:
             if step > source_cutoff:
-                extra = c.read(root / 'jobs' / f'{step:03d}.json')
+                known = source_facts.get(step)
+                extra = (known['job'] if known is not None and 'job' in known else
+                    c.read(root / 'jobs' / f'{step:03d}.json'))
                 report = extra.get('final_report')
                 final_report = (extra.get('final_only') and report is not None and report.get('source_cutoff') == source_cutoff)
                 if not final_report and (extra.get('purpose') != 'closeout' or extra.get('source_cutoff') != source_cutoff):
                     raise ValueError('Closeout history cannot include an unrelated stopped node')
-        sources.append(_source(root, step))
+                if known is None:
+                    source_facts[step] = dict(owner=originals.node_from_base(root,step,base=base),job=extra)
+                elif 'job' not in known:known['job'] = extra
+        sources.append(selected(step))
     return sources
 
 
 def records_from_sources(root, sources, *, write_cache=True, include_details=True):
+    """Independent record projection over explicitly supplied sealed rows."""
+    from . import handoff_state, originals
+    sources = list(sources)
+    loaded = {}
+    for job, _, seal, _ in sources:
+        facts = loaded[job['step']] = {}
+        if include_details:
+            with handoff_state.loading():
+                raw = originals.resolve_ref(originals.node(root,job['step']),seal['raw_ref'])
+                facts.update(raw_path=raw, raw_text=raw.read_text(encoding='utf-8'))
+        facts['observation_view'] = read_observation(root,job,seal) if seal.get('observations') else None
+    return load_records_from_source_facts(root, sources, source_facts=loaded,
+        write_cache=write_cache, include_details=include_details)
+
+
+def load_records_from_source_facts(root, sources, *, source_facts, write_cache=True, include_details=True):
+    """Project records from the operation's exact originals and saved receipts."""
     if write_cache:
         from .protocol import require_current
         require_current(root)
@@ -1409,10 +1451,8 @@ def records_from_sources(root, sources, *, write_cache=True, include_details=Tru
         raw = None
         detail = []
         if include_details:
-            from . import handoff_state, originals
-            with handoff_state.loading():
-                raw = originals.resolve_ref(originals.node(root,step),seal['raw_ref'])
-                text = raw.read_text(encoding='utf-8')
+            raw = source_facts[step]['raw_path']
+            text = source_facts[step]['raw_text']
             detail = [dict(step=step, role=job['role'], source='node:%03d/scientific-output' % step,
                            part=index + 1, parts=(len(text) + TEXT_CHARS - 1) // TEXT_CHARS,
                            text=text[start:start + TEXT_CHARS])
@@ -1421,7 +1461,10 @@ def records_from_sources(root, sources, *, write_cache=True, include_details=Tru
                 for index in range(len(detail))]
         observation = None
         if seal.get('observations'):
-            observation = read_observation(root, job, seal)
+            from . import handoff_state
+            facts = source_facts[step]
+            observation = (facts['observation_view'] if 'observation_view' in facts else
+                handoff_state.observation_from_facts(root, facts))
             if observation['binding']['source_ref'] != raw_ref:
                 raise ValueError('Observer snapshot differs from scientific source')
         row = dict(step=step, role=job['role'], seal_ref=seal_sha, view=view, detail=detail,

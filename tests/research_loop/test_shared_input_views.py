@@ -439,8 +439,11 @@ def _private_git_wrapper(tmp_path,monkeypatch,*,existing=False):
     def forbidden(*args,**kwargs):pytest.fail('A wrapper argv test reached a process or capability probe')
     monkeypatch.setattr(views,'ensure_capability',lambda **kwargs:'/argv-only/bwrap')
     for name in ('Popen','run','call'):monkeypatch.setattr(subprocess,name,forbidden)
-    data=['--ro-bind',str(work/'inputs'),str(work/'inputs')]
-    monkeypatch.setattr(views,'mount_arguments',lambda *args,**kwargs:list(data))
+    data=['--tmpfs',str(work/'inputs'),'--ro-bind',str(work/'inputs'),str(work/'inputs'),
+        '--remount-ro',str(work/'inputs')]
+    monkeypatch.setattr(views,'load_mount_facts',lambda *args,**kwargs:dict(
+        target=work,mappings={str(work/'inputs'):work/'inputs'},
+        input_mappings=[(work/'inputs',work/'inputs')],project_aliases=[]))
     return root,work,holder,data
 
 

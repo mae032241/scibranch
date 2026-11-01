@@ -339,7 +339,7 @@ def bind_new_job_facts(root, step, *, base):
     """
     from . import budget, fork_runtime
     root = Path(root).resolve()
-    with budget._operator_writer(root), _writer_from_base(root, base=base):
+    with budget._operator_writer_from_base(root, base=base), _writer_from_base(root, base=base):
         from . import accepted_budget
         head = accepted_budget.load(root, base=base)
         path = root / 'jobs' / f'{step:03d}.json'

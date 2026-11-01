@@ -63,26 +63,35 @@ def _assert_generation(root, before, after, key, previous):
 def test_terminal_writer_reads_each_previous_row_once(tmp_path, monkeypatch):
     root, record = _open_native(tmp_path)
     keys = (_attempt_key(root, record), 'job/001')
+    before = accepted.read(root)
+    previous_job = copy.deepcopy(before.current_job)
     paths = _observe_reads(monkeypatch)
 
-    _terminal(root, record)
+    after = _terminal(root, record)
 
     counts = {key: paths.count(accepted._row_path(root, key)) for key in keys}
-    assert counts == {key: 1 for key in keys}, counts
+    assert counts == {keys[0]: 1, keys[1]: 0}, counts
     assert paths.count(root/accepted.HEAD) == 1
+    assert before.current_job == previous_job
+    assert c.read(accepted._row_path(root, keys[1]))['previous'] == previous_job
+    assert after.current_job['status'] == 'terminal'
 
 
 def test_seal_writer_reads_job_previous_once(tmp_path, monkeypatch):
     root, record = _open_native(tmp_path)
     terminal = _terminal(root, record)
+    previous_job = copy.deepcopy(terminal.current_job)
     arguments = _seal_arguments(root, record, terminal)
     paths = _observe_reads(monkeypatch)
 
-    accepted.publish_scientific_seal(root, 1, **arguments)
+    sealed = accepted.publish_scientific_seal(root, 1, **arguments)
 
     job_reads = paths.count(accepted._row_path(root, 'job/001'))
-    assert job_reads == 1, job_reads
+    assert job_reads == 0, job_reads
     assert paths.count(root/accepted.HEAD) == 1
+    assert terminal.current_job == previous_job
+    assert c.read(accepted._row_path(root, 'job/001'))['previous'] == previous_job
+    assert sealed.current_job['status'] == 'sealed'
 
 
 @pytest.mark.parametrize('unknown', [False, True])

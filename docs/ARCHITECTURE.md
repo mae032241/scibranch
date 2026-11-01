@@ -346,7 +346,12 @@ Changes across the framework must preserve one producer for each immutable
 control fact or accepted scientific view. The operation owner loads and performs
 necessary acceptance once, then passes existing values or original references
 explicitly to internal consumers. Consumers reuse those facts without reopening
-the same records or repeating acceptance. Mutable control state is observed at
+the same records or repeating acceptance. Loading, acceptance and computation
+have separate interfaces: loaders acquire originals and filesystem observations;
+validators compare those values; consumers derive bindings and plans without
+filesystem reads, metadata probes or lazy record lookups. Existing publishers
+own necessary writes and retain their transaction boundaries.
+Mutable control state is observed at
 the actual writer or admission boundary; mutations return the new state for
 subsequent consumers. Every new node freshly selects and binds its effective
 configuration; retained nodes and continuations keep their exact bound revision.

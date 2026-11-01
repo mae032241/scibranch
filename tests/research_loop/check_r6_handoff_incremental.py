@@ -160,11 +160,11 @@ def _verification_counts(monkeypatch,root,length):
             counts[f"stat_{category(_producer(root,path))}"]+=1
             return stat_file(path,*args,**kwargs)
         patch.setattr(archive_io,'stat_file',counted_stat)
-        read_science=c.read_scientific_output
+        read_science=c.read_scientific_source
         def counted_science(path,*args,**kwargs):
             counts[f"science_read_{category(_producer(root,path))}"]+=1
             return read_science(path,*args,**kwargs)
-        patch.setattr(c,'read_scientific_output',counted_science)
+        patch.setattr(c,'read_scientific_source',counted_science)
         native_outcome=c.native_outcome
         def counted_outcome(record,*args,**kwargs):
             producer=_producer(root,record)

@@ -1,5 +1,6 @@
 """Sealing consumes its exact accepted policy, head and terminal receipts."""
 import copy
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +23,66 @@ def forbid_control_loaders(monkeypatch):
     monkeypatch.setattr(accepted_budget, 'load', unexpected)
     monkeypatch.setattr(budget, '_events', unexpected)
     return unexpected
+
+
+def test_current_inventory_owner_consumes_terminal_writer_facts(tmp_path, monkeypatch):
+    root = prepare(tmp_path)
+    job, intent = accept(root)
+    record = c.host_record(c.workspace(root, job['step']))
+    accepted_budget.accept_native(root, job['step'], record, intent)
+    complete(root, job, intent)
+    inventory = c.accept_current_inventory(root, job['step'])
+    unexpected = forbid_control_loaders(monkeypatch)
+    monkeypatch.setattr(c, 'read', unexpected)
+    monkeypatch.setattr(accepted_budget.AcceptedState, 'row', unexpected)
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'exists', unexpected)
+        patch.setattr(Path, 'stat', unexpected)
+        patch.setattr(Path, 'is_symlink', unexpected)
+        c._validate_current_inventory_owner(root, job['step'], inventory, head=inventory.head)
+
+
+@pytest.mark.parametrize('change', ['step', 'job_ref', 'native_record', 'status', 'current_native'])
+def test_current_inventory_owner_rejects_changed_terminal_facts(tmp_path, monkeypatch, change):
+    root = prepare(tmp_path)
+    job, intent = accept(root)
+    record = c.host_record(c.workspace(root, job['step']))
+    accepted_budget.accept_native(root, job['step'], record, intent)
+    complete(root, job, intent)
+    inventory = c.accept_current_inventory(root, job['step'])
+    head = accepted_budget.AcceptedState(root, copy.deepcopy(dict(inventory.head)), base=inventory.base)
+    if change == 'step':
+        head.current_job['step'] += 1
+    elif change == 'job_ref':
+        head.current_job['job_ref'] = dict(path='/different/job.json')
+    elif change == 'native_record':
+        head.current_job['native_record'] = 'different/native-record'
+    elif change == 'status':
+        head.current_job['status'] = 'prepared'
+    else:
+        head['current_native'] = dict(record=head.current_job['native_record'])
+    unexpected = forbid_control_loaders(monkeypatch)
+    monkeypatch.setattr(c, 'read', unexpected)
+    monkeypatch.setattr(accepted_budget.AcceptedState, 'row', unexpected)
+
+    with pytest.raises(ValueError, match='another task or attempt'):
+        c._validate_current_inventory_owner(root, job['step'], inventory, head=head)
+
+
+@pytest.mark.parametrize('status', ['terminal', 'sealed'])
+def test_scientific_publication_job_consumes_supplied_record(tmp_path, monkeypatch, status):
+    result = dict(path='/original/result.json')
+    search_ref = dict(path='/original/breadth-snapshot.json')
+    job = dict(step=1, role='E', job_ref=dict(path='/original/job.json'), status=status,
+        result_ref=result, output_search_ref=search_ref)
+    head = accepted_budget.AcceptedState(tmp_path,
+        dict(current_job=job, current_native=None), base={})
+    unexpected = forbid_control_loaders(monkeypatch)
+    monkeypatch.setattr(c, 'read', unexpected)
+    monkeypatch.setattr(accepted_budget.AcceptedState, 'row', unexpected)
+
+    assert accepted_budget._scientific_publication_job(head, 1, job=job,
+        job_ref=job['job_ref'], role='E', result_ref=result, search_ref=search_ref) is job
 
 
 def final_receipt_facts(*, missing_meter=False):

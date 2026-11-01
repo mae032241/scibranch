@@ -172,18 +172,30 @@ def _experiment_python(root, job, control_python):
     return dict(run_argv=list(argv),runtime_roots=python_environment.runtime_roots(argv[0]))
 
 
-def prepare(root, step, record, work, home, args, *, standard, resume_position=None, native_options=None):
+def prepare(root, step, record, work, home, args, *, standard, resume_position=None, native_options=None,
+            job=None, intent=None, settings=None):
     """Freeze one host-only attempt; unsupported launchers still support reads."""
     from . import contracts as c, execution, experiments as e
     snapshot=record/'native-execution-permissions.json'
+    if job is None:job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
+    if intent is None:
+        from . import shared_input_views
+        native=shared_input_views._load_native_facts(root,job)
+        if native['record']!=record:raise e.IntegrityError('Native preparation belongs to another attempt')
+        intent=native['intent']
+    attempt=intent.get('attempt',0)
+    expected=execution.origin(root,step)
+    if attempt:expected=expected/'continuations'/f'{attempt:03d}'
+    if record!=expected or intent.get('task_ref')!=c.record_ref(root/'jobs'/f'{step:03d}.json'):
+        raise e.IntegrityError('Native preparation belongs to another task or attempt')
     value=dict(version=1,task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),
-        native_attempt=dict(number=len(execution.records(root,step))-1,execution_key=execution.identity(root,step)),
+        native_attempt=dict(number=attempt,execution_key=c.record_ref(record/'native-intent.json') if attempt
+            else c.record_ref(root/'jobs'/f'{step:03d}.json')),
         intent=e.proof(record/'native-intent.json'),
         native_argv=list(args),home=str(home),workspace=str(work))
-    job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
     project=job.get('project')
     if project is not None:
-        frozen=c.settings(root,job)
+        frozen=c.settings(root,job) if settings is None else settings
         if frozen.get('project')!=project or frozen.get('native_options')!=native_options:
             raise e.IntegrityError('Project native policy differs from its frozen job')
         project_policy(frozen)
@@ -350,9 +362,14 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
     project_writes=shared_input_views.project_targets(project,writable=False)
     if _profile(value['policy'],policy_cwd,'/task-tmp',virtual=True,project_writes=project_writes)!=value['backend_permission_profile']['configuration']:
         raise e.IntegrityError('Accepted scientific cwd differs from its native permission projection')
+    input_sources=shared_input_views.load_source_facts(root,job,work)
+    if input_sources['native']['intent'].get('attempt',0)!=value['native_attempt']['number']:
+        raise e.IntegrityError('Scientific input facts belong to another native attempt')
     input_mounts=None
     if code_root is not None:
-        input_mounts=shared_input_views.mount_arguments(root,job,work,include_skills=False,context=context)
+        input_facts=shared_input_views.load_mount_facts(root,job,work,include_skills=False,
+            context=context,source_facts=input_sources)
+        input_mounts=shared_input_views.mount_arguments_from_facts(input_facts)
         targets=[Path(input_mounts[index+2]) for index,argument in enumerate(input_mounts)
             if argument in ('--bind','--ro-bind')]
         if any(target.is_relative_to(code_root) or code_root.is_relative_to(target) for target in targets):
@@ -416,8 +433,11 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
             artifacts=local_experiments.artifact_directory(config,accepted['call_id']),writable=False,context=context))
         shared_input_views.project_overlap(project,[(Path(input_mounts[index+1]),Path(input_mounts[index+2]))
             for index,argument in enumerate(input_mounts) if argument in ('--bind','--ro-bind')])
-    wrapped.extend(input_mounts if input_mounts is not None else
-        shared_input_views.mount_arguments(root,job,work,mounts=final_mounts,include_skills=False,context=context))
+    if input_mounts is None:
+        input_facts=shared_input_views.load_mount_facts(root,job,work,mounts=final_mounts,
+            include_skills=False,context=context,source_facts=input_sources)
+        input_mounts=shared_input_views.mount_arguments_from_facts(input_facts)
+    wrapped.extend(input_mounts)
     environment=dict(PATH='/usr/bin:/bin',HOME='/task-tmp',CODEX_HOME=str(backend),
         TMPDIR='/task-tmp',XDG_RUNTIME_DIR='/task-tmp',LANG='C.UTF-8',PYTHONDONTWRITEBYTECODE='1')
     for key,content in environment.items():wrapped.extend(['--setenv',key,content])

@@ -29,7 +29,7 @@ def test_interrupted_task_acceptance_applies_guidance_once_without_history_scan(
     advice = user_guidance.submit(scene, 'Retain the missing evidence.', target='E')
     apply = user_guidance.apply_job
 
-    def interrupted(root, job):
+    def interrupted(root, job, *, current):
         assert (root / 'jobs/001.json').is_file()
         raise OSError('fixture interruption after task publication')
 

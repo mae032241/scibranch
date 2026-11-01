@@ -3,6 +3,7 @@
 These host facts grant review qualification only. They do not grant execution,
 renew budgets, or establish independence for unobserved native helpers.
 """
+import copy
 import json
 from pathlib import Path
 from typing import get_args
@@ -715,43 +716,133 @@ def return_route(root, job, parents):
         dict(kind='formal_review_return', review=seal['formal_review'])
 
 
-def subject_for_receipt(root, receipt):
-    """Host interpretation of a retained exact subject; original bytes stay intact."""
-    import copy
+def _reference_owner(root, step, reference, *, base, owners, context=None):
+    """Select an exact source from facts already owned by this operation."""
     from . import originals
-    proof = q._read(root, receipt)
+    identity = reference.get('origin_identity')
+    if identity is None and context is not None:
+        return originals.at_step(context, step)
+    for owner in owners:
+        if owner.step == step and (owner.origin_identity == identity if identity is not None else not owner.inherited):
+            return owner
+    if identity is None:
+        return originals.node_from_base(root, step, base=base)
+    local = dict(goal_id=base['goal_id'], settings_ref=dict(path=str(Path(root) / 'settings.json')))
+    if identity == local:
+        return originals.NodeSource(identity, step, str(root), Path(root))
+    for owner in owners:
+        if owner.inherited:
+            return originals.at_step(originals.source_for_ref(owner, reference), step)
+    manifest = originals._manifest(root)
+    if manifest is None:
+        raise q.IntegrityError('Formal review receipt lost its original instance')
+    return originals._source(root, manifest, identity, step)
+
+
+def _receipt_subject_origin(root, receipt, proof, *, base, context, owners):
+    if 'origin_identity' not in receipt:
+        return None
+    from . import originals
+    subject = proof['subject']
+    if context.inherited:
+        return originals.dependency(context, subject['producer_step'],
+            seal_ref=subject['producer_seal']).origin_identity
+    return _reference_owner(root, subject['producer_step'], {}, base=base,
+        owners=owners).origin_identity
+
+
+def _receipt_original(root, receipt, *, base, owners):
+    """Read one receipt through its declared origin, without rereading settings."""
+    from . import originals
+    identity = receipt.get('origin_identity')
+    if identity is None:
+        proof = q._read(root, receipt)
+        owner = _reference_owner(root, proof['review_step'], receipt, base=base, owners=owners)
+    else:
+        owner = next((row for row in owners if row.origin_identity == identity), None)
+        if owner is None:
+            owner = _reference_owner(root, 1, receipt, base=base, owners=owners)
+        proof = q._read(root, receipt, source=owner)
+        owner = originals.at_step(owner, proof['review_step'])
+    return owner, proof
+
+
+def subject_from_receipt_facts(receipt, *, proof, producer_origin):
+    """Interpret a produced receipt without resolving or reopening its subject."""
     subject = copy.deepcopy(proof['subject'])
     if 'origin_identity' in receipt:
-        context = originals.for_origin(root, receipt['origin_identity'], step=proof['review_step'])
-        owner = originals.dependency(context, subject['producer_step'],
-            seal_ref=subject['producer_seal'])
-        subject['producer_seal'].setdefault('origin_identity', owner.origin_identity)
+        subject['producer_seal'].setdefault('origin_identity', producer_origin)
     return subject
 
 
-def require_review(root, subject, receipt):
-    """Future P3 gate consumes an explicit exact receipt; never a latest lookup."""
-    root=Path(root).resolve()
-    proof = q._read(root, receipt)
+def receipt_facts(root, receipt, *, proof, owner, base, sources, requests):
+    """Load only this selected review's remaining originals, each once."""
+    root = Path(root).resolve()
     from . import originals
-    context = (originals.for_origin(root, receipt['origin_identity'], step=proof['review_step'])
-        if 'origin_identity' in receipt else originals.node(root, proof['review_step']))
-    job = originals.source_job(context)
-    if context.inherited:
-        # A receipt's exact origin can differ from the visible node at the
-        # same logical label in this fork. Read that saved original directly.
+    owners = [facts['owner'] for facts in sources] + [row['owner'] for row in requests]
+    context = originals.at_step(owner, proof['review_step'])
+    selected = next((facts for facts in sources if facts['owner'] == context), None)
+    if selected is None:
+        selected = dict(owner=context)
+        sources.append(selected)
+    if 'job' not in selected:
+        selected['job'] = originals.source_job(context)
+    if 'seal' not in selected:
         with handoff_state.loading():
-            c.read(originals.source_record(context, 'result.json'))
-        seal = c.read(originals.source_record(context, 'result-identity.json'))
-        request = c.read(originals.resolve_ref(originals.source_for_ref(context, job['formal_review']), job['formal_review']))
+            if not context.inherited:
+                handoff_state._accepted_marker(root, proof['review_step'], context)
+            selected['seal'] = c.read(originals.source_record(context, 'result-identity.json'))
+    job, seal = selected['job'], selected['seal']
+    if 'accepted_result' not in selected:
+        with handoff_state.loading():
+            selected['accepted_result'] = c.read(originals.source_record(context, 'result.json'))
+    reference = job['formal_review']
+    request_owner = _reference_owner(root, context.step, reference,
+        base=base, owners=[*owners, context], context=context)
+    retained = next((row for row in requests
+        if row['owner'].origin_identity == request_owner.origin_identity and row['reference'] == reference), None)
+    if retained is None:
+        retained = dict(owner=request_owner, reference=reference,
+            value=q._read(root, reference, source=request_owner))
+        requests.append(retained)
+    if context.inherited:
         bound_receipt = dict(seal.get('formal_review') or {})
         bound_receipt.setdefault('origin_identity', context.origin_identity)
     else:
-        handoff_state.read_sealed(root, job['step'])
-        seal = c.read(c.host_record(c.workspace(root, job['step'])) / 'result-identity.json')
-        request = q._read(root, job['formal_review'])
         bound_receipt = seal.get('formal_review')
-    if (bound_receipt != receipt or subject_for_receipt(root, receipt) != subject
+    producer_origin = _receipt_subject_origin(root, receipt, proof,
+        base=base, context=context, owners=[*owners, context])
+    return dict(proof=proof, request=retained['value'], bound_receipt=bound_receipt,
+        subject=subject_from_receipt_facts(receipt, proof=proof, producer_origin=producer_origin))
+
+
+def require_review_from_facts(subject, receipt, *, facts):
+    """Accept a produced exact sealed pass without reading any originals."""
+    proof, request = facts['proof'], facts['request']
+    if (facts['bound_receipt'] != receipt or facts['subject'] != subject
             or proof['contract'] != request['contract'] or proof['status'] != 'passed'):
         raise ValueError('Exact subject has no compatible independent sealed pass')
     return receipt
+
+
+def subject_for_receipt(root, receipt):
+    """Independent query for a retained exact subject; original bytes stay intact."""
+    root = Path(root).resolve()
+    if 'origin_identity' not in receipt:
+        return subject_from_receipt_facts(receipt, proof=q._read(root, receipt), producer_origin=None)
+    base = c.settings(root)
+    context, proof = _receipt_original(root, receipt, base=base, owners=[])
+    producer_origin = None
+    if 'origin_identity' in receipt:
+        producer_origin = _receipt_subject_origin(root, receipt, proof, base=base,
+            context=context, owners=[context])
+    return subject_from_receipt_facts(receipt, proof=proof, producer_origin=producer_origin)
+
+
+def require_review(root, subject, receipt):
+    """Independent admission entrypoint for an explicit exact sealed receipt."""
+    root = Path(root).resolve()
+    base = c.settings(root)
+    context, proof = _receipt_original(root, receipt, base=base, owners=[])
+    facts = receipt_facts(root, receipt, proof=proof, owner=context, base=base, sources=[], requests=[])
+    return require_review_from_facts(subject, receipt, facts=facts)

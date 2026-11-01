@@ -399,6 +399,13 @@ def _writer(root):
         yield
 
 
+@contextmanager
+def _writer_from_base(root, *, base):
+    from .instance_owner import lease
+    with lease(root), _local_writer_from_base(root, base=base):
+        yield
+
+
 _controller_writers = ContextVar('controller_writers', default=frozenset())
 
 
@@ -409,8 +416,15 @@ def require_writer(root):
 
 @contextmanager
 def _local_writer(root, *, descriptor=None):
-    from .protocol import require_current
-    require_current(root)
+    """Independent controller entry produces its original settings once."""
+    with _local_writer_from_base(root, base=contracts.settings(root), descriptor=descriptor):
+        yield
+
+
+@contextmanager
+def _local_writer_from_base(root, *, base, descriptor=None):
+    from .protocol import require_current_base
+    require_current_base(root, base=base)
     owned = descriptor is None
     if owned:
         descriptor = os.open(root / "host-run.lock",
@@ -2105,7 +2119,7 @@ def closeout(root, *, export_only=False):
                 if fork is None or not fork_runtime.source_job(root, step).get('final_only'):
                     cutoff = step
             elif not export_only and (record / 'native-intent.json').exists() and _terminal_success(root, execution.record(root, step)):
-                continuation.seal_or_repair(root, step);cutoff = step
+                continuation.seal_or_repair(root, step,inventory=contracts.accept_current_inventory(root,step));cutoff = step
             else:
                 break
         if not (root / 'host-started.json').exists():

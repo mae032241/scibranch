@@ -95,40 +95,81 @@ def revoke(root, guidance_id, *, expected_revision):
 
 @contextmanager
 def binding(root, step, role, retained):
-    """Hold the existing short ledger lock through task publication and application."""
-    with budget._ledger_writer(root):
-        values = []
-        if retained is not None:
-            values = retained.get('user_guidance', [])
-        else:
-            for path in sorted((Path(root) / 'host-control' / 'guidance').glob('*.json')):
-                value = contracts.read(contracts.regular(path))
-                revoked = Path(root) / 'host-control' / 'guidance-revocations' / f'{value["guidance_id"]}.json'
-                if revoked.exists() and contracts.read(contracts.regular(revoked))['effective_step'] <= step:
-                    continue
-                if (value['status'] == 'applied' and value.get('scope') == 'research'
-                        and value['target'] in {'global', role} and (value['effective_step'] or 1) <= step):
-                    values.append(value)
-                elif (value['status'] == 'pending'
-                        and value['target'] in {'global', role} and (value['effective_step'] or 1) <= step):
-                    values.append(dict(value, status='applied', applied_step=step, applied_role=role))
-        values.sort(key=lambda row: row.get('sequence', 0))
+    """Independent binding entry, with one original-settings observation."""
+    with binding_from_base(root, step, role, retained,
+            base=contracts.settings(root)) as (values, _):
         yield values
 
 
-def apply_job(root, job):
+def load_binding_facts(root, *, retained):
+    """Produce current originals once while the binding owner holds its lock."""
+    root = Path(root)
+    paths = (sorted((root / 'host-control' / 'guidance').glob('*.json'))
+        if retained is None else [_path(root, identity) for identity in
+            dict.fromkeys(row['guidance_id'] for row in retained.get('user_guidance', []))])
+    current, revocations = {}, {}
+    for path in paths:
+        value = contracts.read(contracts.regular(path))
+        identity = value['guidance_id']
+        current[identity] = value
+        revoked = root / 'host-control' / 'guidance-revocations' / f'{identity}.json'
+        if revoked.exists():
+            revocations[identity] = contracts.read(contracts.regular(revoked))
+    return current, revocations
+
+
+def select_binding(step, role, retained, *, current, revocations):
+    """Select frozen statements from already produced guidance originals."""
+    values = []
+    if retained is not None:
+        values = list(retained.get('user_guidance', []))
+    else:
+        for identity, value in current.items():
+            revoked = revocations.get(identity)
+            if revoked is not None and revoked['effective_step'] <= step:
+                continue
+            if (value['status'] == 'applied' and value.get('scope') == 'research'
+                    and value['target'] in {'global', role} and (value['effective_step'] or 1) <= step):
+                values.append(value)
+            elif (value['status'] == 'pending'
+                    and value['target'] in {'global', role} and (value['effective_step'] or 1) <= step):
+                values.append(dict(value, status='applied', applied_step=step, applied_role=role))
+    return sorted(values, key=lambda row: row.get('sequence', 0))
+
+
+@contextmanager
+def binding_from_base(root, step, role, retained, *, base):
+    """Keep current facts under the original lock through publication and accept."""
+    with budget._ledger_writer_from_base(root, base=base):
+        current, revocations = load_binding_facts(root, retained=retained)
+        yield select_binding(step, role, retained,
+            current=current, revocations=revocations), current
+
+
+def _application_updates(job, *, current):
+    updates = {}
+    for value in job.get('user_guidance', []):
+        identity = value['guidance_id']
+        if identity not in current:
+            raise ValueError('Current guidance original is required')
+        original = current[identity]
+        if original['revision'] != value['revision']:
+            raise ValueError('Frozen guidance revision changed')
+        if original['status'] == 'pending':
+            updates[identity] = value
+    return updates
+
+
+def apply_job(root, job, *, current):
     """Apply the advice bound to this published task under its accept lock.
 
     A retained task repeats this exact write after an interrupted publication;
     no other job needs to be opened to establish its binding.
     """
-    for value in job.get('user_guidance', []):
-        path = _path(root, value['guidance_id'])
-        current = contracts.read(contracts.regular(path))
-        if current['revision'] != value['revision']:
-            raise ValueError('Frozen guidance revision changed')
-        if current['status'] == 'pending':
-            contracts.write(path, value)
+    updates = _application_updates(job, current=current)
+    for identity, value in updates.items():
+        contracts.write(_path(root, identity), value)
+    return dict(current, **updates)
 
 
 def public(job):

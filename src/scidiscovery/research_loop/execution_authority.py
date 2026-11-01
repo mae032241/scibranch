@@ -7,6 +7,7 @@ reserves resources and revalidates originals before a backend side effect.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import copy
 import fcntl
 import uuid
 import hmac
@@ -42,14 +43,20 @@ def freeze_configuration(root, directory=None):
              stage='decision_originals_resource_gate_separate')))
 
 
-def _policy_contract(root, policy):
+def contract_from_facts(policy, *, document):
+    """Accept one already loaded operator contract, without selecting policy."""
     if policy is None:
         raise ValueError('Execution authority is unavailable for this instance')
-    value = q._read(root, policy['contract'])
-    if {key:item for key,item in value.items() if key!='implementation'} != dict(version=1, options=list(OPTIONS), scope=SCOPE,
+    if {key:item for key,item in document.items() if key!='implementation'} != dict(version=1, options=list(OPTIONS), scope=SCOPE,
                      stage='decision_originals_resource_gate_separate'):
         raise q.IntegrityError('Execution authority contract changed')
     return policy['contract']
+
+
+def _policy_contract(root, policy):
+    if policy is None:
+        raise ValueError('Execution authority is unavailable for this instance')
+    return contract_from_facts(policy, document=q._read(root, policy['contract']))
 
 
 def contract(root, job=None):
@@ -142,47 +149,109 @@ def _secret(root, secret):
     security.receipt_hmac(secret, b'')
 
 
-def _qualifications(root, job):
-    from . import originals
+def _qualification_candidates(job, *, sources):
+    """Select only direct frozen references from the owner's produced parents."""
     candidates = []
     back = job.get('evidence_return') or {}
     if back.get('kind') == 'formal_review_return':
         candidates.append(back['review'])
     for row in job['direct_refs']:
         parent = int(row['path'].split('/')[2])
-        source = originals.node(root, parent)
-        previous = originals.source_job(source)
+        facts = sources[parent]
+        source, previous = facts['owner'], facts['job']
         def original_ref(ref):
             return dict(ref, origin_identity=ref.get('origin_identity', source.origin_identity)) if source.inherited else ref
         candidates.extend(original_ref(ref) for ref in previous.get('execution_qualifications', []))
         returned = previous.get('evidence_return') or {}
         if returned.get('kind') == 'formal_review_return':
             candidates.append(original_ref(returned['review']))
+    return [ref for index, ref in enumerate(candidates) if ref not in candidates[:index]]
+
+
+def _qualifications(job, *, candidates):
+    """Accept exact sealed review facts; this consumer never loads originals."""
     result = []
     bound = [*job['direct_materials'], *[row['material'] for row in job.get('selected_inputs', [])]]
-    for ref in candidates:
-        proof = q._read(root, ref)
+    for item in candidates:
+        ref, proof = item['receipt'], item['proof']
         if proof['subject']['material'] in bound and ref not in result:
             # Unqualified findings remain scientific evidence, never a grant.
             if proof['status'] == 'passed':
-                review.require_review(root, review.subject_for_receipt(root, ref), ref)
+                facts = item['review']
+                review.require_review_from_facts(facts['subject'], ref, facts=facts)
                 result.append(ref)
     return result
 
 
-def bind_job(root, job):
-    if configuration_updates.for_job(root, job).get('execution_authority_policy') is not None:
-        job['execution_authority'] = contract(root, job)
-        job['execution_qualifications'] = _qualifications(root, job)
+def _job_inputs(job):
+    return dict(step=job['step'], direct_refs=job['direct_refs'],
+        direct_materials=job['direct_materials'],
+        selected_materials=[row['material'] for row in job.get('selected_inputs', [])],
+        evidence_return=job.get('evidence_return'))
 
 
-def validate_job(root, job):
-    if configuration_updates.for_job(root, job).get('execution_authority_policy') is None:
+def job_facts(root, job, *, base, policy, sources):
+    """Load this operation's selected authority originals once, then accept them."""
+    root = Path(root).resolve()
+    selected = policy.get('execution_authority_policy')
+    facts = dict(inputs=copy.deepcopy(_job_inputs(job)), contract=None, qualifications=[], qualified_materials=[])
+    if selected is None:
+        return facts
+    from . import originals
+    for reference in job['direct_refs']:
+        parent = int(Path(reference['path']).parts[2])
+        if parent not in sources:
+            sources[parent] = dict(owner=originals.node_from_base(root, parent, base=base))
+        if 'job' not in sources[parent]:
+            sources[parent]['job'] = originals.source_job(sources[parent]['owner'])
+    candidates = []
+    review_sources = list(sources.values())
+    requests = []
+    owners = [source['owner'] for source in review_sources]
+    contract_owner = (review._reference_owner(root, job['step'], selected['contract'],
+        base=base, owners=owners) if 'origin_identity' in selected['contract'] else None)
+    receipt_owners = [*owners, *([contract_owner] if contract_owner is not None else [])]
+    facts['contract'] = contract_from_facts(selected,
+        document=q._read(root, selected['contract'], source=contract_owner))
+    bound = [*job['direct_materials'], *[row['material'] for row in job.get('selected_inputs', [])]]
+    for receipt in _qualification_candidates(job, sources=sources):
+        owners = [*receipt_owners, *[row['owner'] for row in requests]]
+        owner, proof = review._receipt_original(root, receipt, base=base, owners=owners)
+        if owner not in receipt_owners:
+            receipt_owners.append(owner)
+        item = dict(receipt=receipt, proof=proof, review=None)
+        if proof['subject']['material'] in bound and proof['status'] == 'passed':
+            item['review'] = review.receipt_facts(root, receipt, proof=proof, owner=owner,
+                base=base, sources=review_sources, requests=requests)
+        candidates.append(item)
+    facts['qualifications'] = _qualifications(job, candidates=candidates)
+    facts['qualified_materials'] = [item['proof']['subject']['material']['path'] for item in candidates
+        if item['receipt'] in facts['qualifications']]
+    return facts
+
+
+def _require_job_facts(job, facts):
+    if facts['inputs'] != _job_inputs(job):
+        raise q.IntegrityError('Execution authority facts belong to another frozen task')
+
+
+def bind_job(root, job, *, facts):
+    """Bind only the operation owner's accepted execution-authority facts."""
+    _require_job_facts(job, facts)
+    if facts['contract'] is not None:
+        job['execution_authority'] = copy.deepcopy(facts['contract'])
+        job['execution_qualifications'] = copy.deepcopy(facts['qualifications'])
+
+
+def validate_job(root, job, *, facts):
+    """Compare saved bindings without reopening policy, parents or receipts."""
+    _require_job_facts(job, facts)
+    if facts['contract'] is None:
         if 'execution_authority' in job or 'execution_qualifications' in job:
             raise q.IntegrityError('Task invented execution authority')
         return
-    if (job.get('execution_authority') != contract(root, job)
-            or job.get('execution_qualifications') != _qualifications(root, job)):
+    if (job.get('execution_authority') != facts['contract']
+            or job.get('execution_qualifications') != facts['qualifications']):
         raise q.IntegrityError('Task execution qualifications differ from direct frozen originals')
 
 

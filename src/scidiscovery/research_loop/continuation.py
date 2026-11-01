@@ -639,7 +639,7 @@ def _work_exit(root,job,record,reason,*,inventory):
         budgeted=budget.node_limits(root,job) is not None)
     proof=worker_delivery.authorize_exit(root,job,record,reason)
     checkpoint.end_stage(root,job,record,reason,inventory=inventory,work_exit=proof)
-    return c.seal_result(root,job['step'],inventory=inventory)
+    return c.seal_result_from_inventory(root,job['step'],inventory=inventory)
 
 
 def finish_automatic_work(root, step, decision, reason, *, inventory):
@@ -660,29 +660,38 @@ def finish_automatic_work(root, step, decision, reason, *, inventory):
 
 def seal_or_repair(root, step, *, inventory):
     """Try the original seal first; only a frozen opt-in can accept a repair turn."""
-    from .protocol import require_current
-    require_current(root)
-    from . import contracts as _contracts
-    require_current(root,_contracts.read(_contracts.regular(Path(root)/'jobs'/f'{step:03d}.json')))
+    if inventory is None:return c.seal_result(root,step)
+    from .protocol import require_current_job
+    c._inventory_identity(root,step,inventory)
+    if inventory.base is None or inventory.policy is None:
+        raise ValueError('Current inventory requires its produced base and policy')
+    require_current_job(root,base=inventory.base,job=inventory.job,
+        retained=inventory.job,policy=inventory.policy)
+    if (execution.origin(root,step)/'result-identity.json').exists():
+        return c.seal_result(root,step)
     try:
-        job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
-        if inventory is None or not inventory.science_available:return c.seal_result(root,step,inventory=inventory)
+        job=inventory.job
+        record=inventory.record
+        if not inventory.science_available:return c.seal_result_from_inventory(root,step,inventory=inventory)
         if not (execution.origin(root,step)/'result-identity.json').exists():
             from . import managed_wait
-            managed_wait.before_seal(root,job,execution.record(root,step),inventory=inventory)
-        if checkpoint.enabled(root, job) and not (execution.origin(root, step) / 'result-identity.json').exists():
-            record = execution.record(root, step)
+            managed_wait.before_seal(root,job,record,inventory=inventory)
+        if checkpoint.enabled_for_policy(job,settings=inventory.policy) and not (execution.origin(root, step) / 'result-identity.json').exists():
             if (record / 'stage-end.json').exists():
                 checkpoint.stage_end(root, job, record)
-                return c.seal_result(root, step,inventory=inventory)
+                return c.seal_result_from_inventory(root, step,inventory=inventory)
             saved = checkpoint.validate(root, job, record,inventory=inventory)
-            outcome = c.native_outcome(record)
+            outcome=inventory.native_outcome
             if (outcome.get('returncode') == 0 and not outcome.get('stop_reason')
-                    and (not outcome['usage']['unknown_steps'] or budget.native_completion_known(outcome, configuration_updates.for_step(root, step)))):
+                    and (not outcome['usage']['unknown_steps'] or budget.native_completion_known(outcome, inventory.policy))):
                 if saved['science']['status'] != 'present':
-                    # c.seal_result provides the bound output diagnosis/repair.
-                    return c.seal_result(root, step,inventory=inventory)
-                science = c.science_payload(record / 'science-output.json', 'W', job.get('handoff_protocol', 1))
+                    # The seal consumer provides the bound output diagnosis/repair.
+                    return c.seal_result_from_inventory(root, step,inventory=inventory)
+                science=inventory.payload
+                if science is None:
+                    if inventory.science_error is not None:raise inventory.science_error
+                    if inventory.output_error is not None:raise inventory.output_error
+                    raise ValueError('Current inventory requires its produced scientific payload')
                 review = fragment_review(root, job)
                 review_required = review['requested'] and review['enforced']
                 from . import worker_delivery
@@ -690,7 +699,7 @@ def seal_or_repair(root, step, *, inventory):
                 if science['stage_intent']!='continue':worker_delivery.require_output_clarification(science,delivery)
                 if delivery['status']=='partial':
                     checkpoint.end_stage(root,job,record,delivery['reason'],inventory=inventory)
-                    return c.seal_result(root,step,inventory=inventory)
+                    return c.seal_result_from_inventory(root,step,inventory=inventory)
                 if delivery['status']=='incomplete' and review_required:
                     return _work_exit(root,job,record,review['reason'],inventory=inventory)
                 if science['stage_intent']!='continue':worker_delivery.require_delivery(root,job,science,record,inventory=inventory)
@@ -702,19 +711,19 @@ def seal_or_repair(root, step, *, inventory):
                         # original budget boundary, without another native turn.
                         if delivery['status']=='incomplete':return _work_exit(root,job,record,error.reason,inventory=inventory)
                         checkpoint.end_stage(root, job, record, error.reason,inventory=inventory)
-                        return c.seal_result(root, step,inventory=inventory)
+                        return c.seal_result_from_inventory(root, step,inventory=inventory)
                     except ResumeUnavailable as error:
                         if str(error) != 'worker_fragment_review_requested':
                             raise
                         if delivery['status']=='incomplete':return _work_exit(root,job,record,error.review_reason,inventory=inventory)
                         checkpoint.end_stage(root, job, record, error.review_reason,inventory=inventory)
-                        return c.seal_result(root, step,inventory=inventory)
+                        return c.seal_result_from_inventory(root, step,inventory=inventory)
                     return dict(fragment_continuation=True)
                 checkpoint.end_stage(root, job, record, review['reason'] if review_required else 'worker_requested',inventory=inventory)
-        return c.seal_result(root, step,inventory=inventory)
+        return c.seal_result_from_inventory(root, step,inventory=inventory)
     except WorkRepairRequired as error:
         inventory=error.inventory
-        job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'));record=execution.record(root,step)
+        job=inventory.job;record=inventory.record
         decision=automatic_decision(root,step,inventory=inventory)
         if decision['action'] in {'continue','retry'}:raise AutomaticRecoveryRequired(decision,inventory=inventory)
         if decision['reason']=='automatic_recovery_continue_limit' and decision.get('work_repair') is not None:
@@ -724,7 +733,7 @@ def seal_or_repair(root, step, *, inventory):
         except ResumeUnavailable as error:
             return _work_exit(root,job,record,str(error),inventory=inventory)
     except OutputRepairRequired:
-        if not (configuration_updates.for_step(root, step).get('resume_policy') or {}).get('output_repair', False):
+        if not (inventory.policy.get('resume_policy') or {}).get('output_repair', False):
             raise
         try:return start(root, step,inventory=inventory)
         except ResumeUnavailable as error:
@@ -1003,9 +1012,9 @@ def start(root, step, *, inventory=None):
                 if science['stage_intent']!='continue' or (last/'stage-end.json').exists():
                     worker_delivery.require_delivery(root,job,science,last,inventory=inventory)
                     candidate_nominations.require(root,job,science,inventory=inventory)
-                if (last/'stage-end.json').exists():return c.seal_result(root, step,inventory=inventory)
+                if (last/'stage-end.json').exists():return c.seal_result_from_inventory(root, step,inventory=inventory)
                 return native.wait_native(root,step,inventory=inventory)
-            return c.seal_result(root, step,inventory=inventory)
+            return c.seal_result_from_inventory(root, step,inventory=inventory)
         except WorkRepairRequired as error:
             inventory=error.inventory
             repair=output_request(root,step,last,inventory=inventory)

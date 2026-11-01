@@ -193,7 +193,7 @@ def test_output_repair_admission_receives_the_same_current_inventory(scene,monke
     monkeypatch.setattr(execution,'origin',lambda *args:record)
     monkeypatch.setattr(native.runtime,'node_state',lambda *args:'terminal')
     monkeypatch.setattr(c,'native_outcome',lambda *args:dict(returncode=0,stop_reason=None))
-    monkeypatch.setattr(c,'seal_result',malformed)
+    monkeypatch.setattr(c,'seal_result_from_inventory',malformed)
     monkeypatch.setattr(checkpoint,'enabled',lambda *args:False)
     monkeypatch.setattr(continuation,'validate_launcher',lambda *args:dict(output_repair=True))
     monkeypatch.setattr(continuation,'output_request',request)
@@ -274,7 +274,8 @@ def test_owner_output_diagnosis_returns_to_same_repair_without_accepting_again(s
         pytest.fail('Output repair repeated the owner acceptance or layout diagnosis')
     monkeypatch.setattr(c,'accept_current_inventory',forbidden)
     monkeypatch.setattr(c,'_material_inventory',forbidden)
-    monkeypatch.setattr(configuration_updates,'for_step',lambda *args:dict(resume_policy=dict(output_repair=True)))
+    resume_policy=dict(inventory.policy.get('resume_policy') or {},output_repair=True)
+    monkeypatch.setattr(inventory,'policy',dict(inventory.policy,resume_policy=resume_policy))
     def repair(root,step,*,inventory):
         assert inventory is accepted
         return continuation.output_request(root,step,record,inventory=inventory,verify_task=False)

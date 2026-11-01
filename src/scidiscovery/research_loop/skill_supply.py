@@ -364,14 +364,18 @@ def inherit(root, settings):
 
 
 def native_mounts(root, job):
+    """Independent native Skill projection with one frozen-policy loader."""
+    from . import configuration_updates
+    return native_mounts_from_policy(root, job, policy=configuration_updates.for_job(root, job))
+
+
+def native_mounts_from_policy(root, job, *, policy):
     """Exact readonly inputs for a registered native namespace only.
 
     The caller must not pass this list to scientific executor subprocesses.
     Neither settings/manifest nor the whole installation library is supplied.
     """
-    from . import configuration_updates
-    settings = configuration_updates.for_job(root, job)
-    targets = project(root, settings, job, rebuild=False)
+    targets = project(root, policy, job, rebuild=False)
     if targets is None:
         return []
     projection = c.workspace(Path(root), job['step']) / '.agents/skills'

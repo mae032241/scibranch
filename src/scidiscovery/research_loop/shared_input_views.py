@@ -18,6 +18,7 @@ DYNAMIC_ROOTS = ('retained-experiments', 'execution-results', 'retained-implemen
 ALIAS_MAX_ENTRIES = 100_000
 ALIAS_SECONDS = 15
 _CAPABILITIES = set()
+_UNLOADED_AUTHOR = object()
 
 
 class _BwrapCommand(list):
@@ -87,11 +88,9 @@ def _binding(root, work):
     return root / 'host-runtime/shared-input-views' / work.relative_to(root) / 'binding.json'
 
 
-def dynamic_root(root, work, name):
-    """Create the fixed roots once; later publication must use the same inodes."""
+def _load_dynamic_binding(root, work):
+    """Own one declaration read at a preparation or publication boundary."""
     from . import atomic_files
-    if name not in DYNAMIC_ROOTS:
-        raise ValueError('Unknown shared input publication root')
     root, work = _exact(root), _exact(work)
     path = _binding(root, work)
     paths = [work, work / 'work', *[work / 'work' / item for item in DYNAMIC_ROOTS]]
@@ -102,6 +101,13 @@ def dynamic_root(root, work, name):
         atomic_files.publish_bytes(path, (json.dumps(value, sort_keys=True) + '\n').encode(), existing_ok=True)
     from . import contracts as c
     value = c.read(c.regular(_exact(path)))
+    _observe_dynamic_binding(root, work, value)
+    return value
+
+
+def _observe_dynamic_binding(root, work, value):
+    """Observe current directory identities against the already read declaration."""
+    paths = [work, work / 'work', *[work / 'work' / item for item in DYNAMIC_ROOTS]]
     expected = dict(workspace=str(work), directories=[dict(path=str(p), identity=_identity(p)) for p in paths])
     if (value.get('workspace')!=expected['workspace'] or value.get('directories')!=expected['directories']
             or set(value)-{'workspace','directories','holders'}):
@@ -109,6 +115,14 @@ def dynamic_root(root, work, name):
     for holder,identity in value.get('holders',{}).items():
         if _identity(Path(holder))!=identity:
             raise _unsupported('a bound private original holder was replaced; publication refused')
+
+
+def dynamic_root(root, work, name):
+    """Create the fixed roots once; later publication must use the same inodes."""
+    if name not in DYNAMIC_ROOTS:
+        raise ValueError('Unknown shared input publication root')
+    work = Path(work)
+    _load_dynamic_binding(root, work)
     return work / 'work' / name
 
 
@@ -255,41 +269,44 @@ class _Inventory:
 
 def _pin_holders(root, work, holders):
     """Extend the one ephemeral launch binding; existing roots never rebind."""
-    from . import atomic_files, contracts as c
-    dynamic_root(root,work,DYNAMIC_ROOTS[0])
-    path=_binding(root,work);value=c.read(c.regular(path))
+    from . import atomic_files
+    value=_load_dynamic_binding(root,work)
+    path=_binding(root,work)
     identities=dict(value.get('holders',{}))
     for holder in holders:identities[str(holder)]=_identity(holder)
     if identities!=value.get('holders',{}):
         value['holders']=identities
         atomic_files.replace_bytes(path,(json.dumps(value,sort_keys=True)+'\n').encode(),mode=0o400)
+    return value
 
 
-def _host_aliases(root, work, inventory, job):
+def _host_aliases(root, work, inventory, job, record, binding):
     """Protect the current job's framework aliases and publication holders.
 
     Historical nodes retain their sealed bindings. Only sources actually selected
     for this launch enter the mount plan; old jobs and attempts are not reopened.
     """
-    from . import contracts as c, execution, experiment_client
+    from . import contracts as c
     aliases=[];holders=[]
     def existing(path):
         inventory.check()
         if path.exists() or path.is_symlink():
             aliases.append(_exact(path))
+    if 'step' not in job:return aliases,binding
     step=job['step']
     node=c.workspace(root,step)
     for relative in ('inputs','conclusion.json',*[f'work/{name}' for name in DYNAMIC_ROOTS]):
         existing(node/relative)
     origin=c.host_record(node)
-    record=execution.record(root,step)
-    for current in dict.fromkeys((origin,record)):
+    for current in dict.fromkeys((origin,record or origin)):
         for name in ('science-result.schema.json','science-output.json','author-science-context'):
             existing(current/name)
     for number in ('001','002'):
         existing(root/'host-recovery/author-context'/f'{step:03d}'/number/'author-science-context')
     if job.get('role')=='W':
-        record_directory=experiment_client.record_directory(root,step)
+        record_directory=(root/'host-runtime/experiment-control'/f'{step:03d}'/'records'
+            if type(job.get('worker_view_version')) is int and job['worker_view_version']==1
+            else node/'work/lineage')
         private=root/'host-runtime/experiment-control'/f'{step:03d}'
         for holder in (record_directory,private/'scientific-output-views',
                 private/'implementations',origin/'compiled-implementations'):
@@ -306,40 +323,83 @@ def _host_aliases(root, work, inventory, job):
                 if not output.is_relative_to(root):
                     raise _unsupported('a retained compiler alias escaped its instance')
                 existing(output)
-    _pin_holders(root,work,holders)
-    return aliases
+    binding=_pin_holders(root,work,holders)
+    return aliases,binding
 
 
-def _native_intent(root, job):
-    from . import contracts as c, execution
-    record = execution.record(root, job['step'])
-    intent = record / 'native-intent.json'
-    return c.read(c.regular(intent)) if intent.exists() else {}
+def _load_native_facts(root, job, *, native=None, input_policy=None):
+    """Load an unknown accepted chain once, or consume the caller's exact chain.
+
+    A prepared node without an initial intent or continuation candidate has no
+    wake or author context and needs no historical accepted-chain traversal.
+    """
+    from . import accepted_budget, contracts as c, execution
+    if 'step' not in job:return dict(record=None, intent={}, records=(), input_policy=input_policy)
+    origin = execution.origin(root, job['step'])
+    if native is not None:
+        record, intent = Path(native['record']), native['intent']
+        attempt = intent.get('attempt', 0)
+        expected = origin if attempt == 0 else origin / 'continuations' / f'{attempt:03d}'
+        if (record != expected or intent.get('task_ref') != dict(path=str(Path(root)/'jobs'/f'{job["step"]:03d}.json'))
+                or intent.get('step', job['step']) != job['step']):
+            raise _unsupported('native facts belong to another task or attempt')
+        records = tuple(origin if number == 0 else origin/'continuations'/f'{number:03d}'
+            for number in range(attempt + 1))
+        return dict(record=record, intent=intent, records=records, input_policy=input_policy)
+    initial = (origin/'native-intent.json').exists()
+    candidates = False
+    if not initial:
+        directory = origin/'continuations'
+        if directory.exists():
+            if directory.resolve() != directory:
+                raise ValueError('Native continuation directory changed')
+            candidates = any(directory.iterdir())
+    if not initial and not candidates:
+        if input_policy is not None and accepted_budget.native_attempt(root, job['step'], origin,
+                head=input_policy['head']) is not None:
+            raise _unsupported('an accepted native intent is missing')
+        return dict(record=origin, intent={}, records=(origin,), input_policy=input_policy)
+    if input_policy is None:
+        base = c.settings(root)
+        head = accepted_budget.load(root, base=base)
+        policy = c.settings_for_job(root, job, base=base, head=head)
+        input_policy = dict(base=base, policy=policy, head=head)
+    rows = tuple(execution.accepted_intents_from_facts(root, job['step'], job=job,
+        task_ref=c.record_ref(Path(root)/'jobs'/f'{job["step"]:03d}.json'), **input_policy))
+    if not rows:
+        if initial:raise _unsupported('an existing native intent has no accepted owner')
+        return dict(record=origin, intent={}, records=(origin,), input_policy=input_policy)
+    records = tuple(path for path, _ in rows)
+    seal = origin/'result-identity.json'
+    if seal.exists() and c.read(c.regular(seal)).get('execution_ref') != execution._reference(records):
+        raise ValueError('Sealed native execution reference changed')
+    return dict(record=records[-1], intent=rows[-1][1], records=records, input_policy=input_policy)
 
 
-def _author_context(root, job):
-    from . import author_closeout, contracts as c
-    value = _native_intent(root, job)
-    if value.get('author_context_version') != 1:return None
-    proof = value['author_closeout_science_context']
-    directory = author_closeout.validate_science_context(root, job, proof)
-    return directory, c.read(author_closeout._check(root, proof))
-
-
-def _wake_mappings(root, job, target):
+def _load_wake_facts(root, job, native):
     from . import contracts as c, execution, experiments as e, originals
-    mappings = []
+    mappings, documents, resolved = [], {}, []
+    def resolve(reference):
+        for declaration, path in resolved:
+            if declaration == reference:return path
+        path = originals.resolve_root_ref(root, reference)
+        resolved.append((reference, path))
+        return path
+    def document(path):
+        if path not in documents:documents[path] = c.read(path)
+        return documents[path]
     def original(reference):
-        return originals.resolve_root_ref(root, {key: reference[key]
+        return resolve({key: reference[key]
             for key in ('path', 'size_bytes', 'file_stat') if key in reference})
-    for number, reference in enumerate((_native_intent(root, job).get('execution_wake') or {}).get('observations', []), 1):
-        observed = c.read(originals.resolve_root_ref(root, reference))
-        accepted = c.read(originals.resolve_root_ref(root, observed['accepted']))
+    for number, reference in enumerate((native['intent'].get('execution_wake') or {}).get('observations', []), 1):
+        observed = document(resolve(reference))
+        accepted = document(resolve(observed['accepted']))
         attempt = accepted.get('native_attempt', {}).get('number', 0)
-        config = c.read(c.regular(execution.record(root, job['step'], attempt) / 'experiment-config.json'))
+        record = execution.record_from_chain(native['records'], attempt)
+        config = document(c.regular(record / 'experiment-config.json'))
         if accepted['scope'] != config['scope'] or accepted['interface'] != config['execution_interface']:
             raise _unsupported('a selected wake original changed its accepted owner')
-        prefix = target / 'work/execution-results' / f'{number:03d}'
+        prefix = Path('work/execution-results') / f'{number:03d}'
         if job.get('worker_view_version') == 1:
             for output in e.scientific_outputs(config, observed):
                 mappings.append((Path(output.local_path), prefix / 'outputs' / output.name))
@@ -348,35 +408,76 @@ def _wake_mappings(root, job, target):
                 mappings.append((original(output), prefix / 'outputs' / output['name']))
             for index, proof in enumerate(observed['proofs'], 1):
                 mappings.append((original(proof), prefix / 'originals' / f'{index:03d}'))
-            mappings.append((originals.resolve_root_ref(root, observed['completed']), prefix / 'result.json'))
+            mappings.append((resolve(observed['completed']), prefix / 'result.json'))
     return mappings
 
 
-def selected_code_mounts(root, job, work, *, target_work=None, context=None, exports=None):
-    """Materialize only exact selected review/context pins for this launch."""
-    from . import code_versions, contracts as c
+def load_source_facts(root, job, work, *, target_work=None, native=None, input_policy=None,
+                      policy=None, include_review=True, include_wake=True,
+                      author_facts=_UNLOADED_AUTHOR):
+    """One producer owns this operation's native, wake and author originals."""
     root, work = Path(root), Path(work)
     target = Path(target_work) if target_work is not None else work
-    selected = []
-    if job.get('formal_review'):
+    native = _load_native_facts(root, job, native=native, input_policy=input_policy)
+    author = None
+    if native['intent'].get('author_context_version') == 1:
+        from . import accepted_budget, author_closeout, contracts as c
+        proof = native['intent']['author_closeout_science_context']
+        if author_facts is _UNLOADED_AUTHOR:
+            if native['input_policy'] is None:
+                base = c.settings(root)
+                head = accepted_budget.load(root, base=base)
+                native['input_policy'] = dict(base=base, head=head,
+                    policy=c.settings_for_job(root, job, base=base, head=head) if policy is None else policy)
+            author = author_closeout.load_science_context_facts(root, job, proof,
+                input_policy=native['input_policy'])
+        else:
+            author = author_facts
+            if (author is None or author['root'] != root or author['job'] != job
+                    or author['proof'] != proof
+                    or author['manifest_path'] != author_closeout._declared_ref(root, proof)):
+                raise _unsupported('author facts belong to another exact context')
+    elif author_facts is not _UNLOADED_AUTHOR and author_facts is not None:
+        raise _unsupported('author facts have no selected context')
+    facts = dict(root=root, job=job, work=work, target=target, native=native,
+        author=author, wake=_load_wake_facts(root, job, native) if include_wake else [], review_code=[],
+        policy=policy if policy is not None else
+            (native['input_policy']['policy'] if native['input_policy'] is not None else None))
+    if include_review and job.get('formal_review'):
         from . import formal_review, execution_inputs, qualification as q
         bound = formal_review.selected_compiler(root, job['formal_review'])
         if bound is not None and 'code_version' in bound[1]:
             ref, compiler = bound
             owner = q._read(root, compiler['job'])
             call_id = execution_inputs._compiler_call_id(root, owner['step'], ref)
-            selected.append((owner['step'], call_id, compiler['code_version'],
+            facts['review_code'].append((owner['step'], call_id, compiler['code_version'],
                 target / 'inputs/review/scientific-implementation.json', True))
-    author = _author_context(root, job)
+    return facts
+
+
+def wake_mappings_from_facts(facts):
+    return [(source, facts['target'] / destination) for source, destination in facts['wake']]
+
+
+def selected_code_from_facts(facts):
+    """Select accepted code identities without reading or materializing them."""
+    root, target, author = facts['root'], facts['target'], facts['author']
+    selected = list(facts['review_code'])
     if author is not None:
-        from . import author_closeout
-        directory, manifest = author
-        for item in manifest['entries']:
+        for row in author['entries']:
+            item = row['item']
             if 'code_version' not in item:continue
-            step, call_id = author_closeout._context_code(root, job, item, controls_only=False)
+            step, call_id = row['code_identity']
             destination = root / item['display']['path']
-            selected.append((step, call_id, item['code_version'], target / destination.relative_to(directory),
+            selected.append((step, call_id, item['code_version'],
+                target / destination.relative_to(author['directory']),
                 item['kind'] == 'compiler_author' or item['code_version']['selection'] == 'file'))
+    return selected
+
+
+def materialize_selected_code(root, selected, *, context=None, exports=None):
+    """The existing export writer owns physical code acceptance and writes."""
+    from . import code_versions
     mappings = []
     for step, call_id, version, destination, file_entry in selected:
         if exports is not None:exports.append((step, call_id))
@@ -384,6 +485,12 @@ def selected_code_mounts(root, job, work, *, target_work=None, context=None, exp
             code_version=version, context=context)
         mappings.append((export / version['entry'] if file_entry else export, destination, step, call_id))
     return mappings
+
+
+def selected_code_mounts(root, job, work, *, target_work=None, context=None, exports=None):
+    """Independent code-selection operation; real launches pass source facts."""
+    facts = load_source_facts(root, job, work, target_work=target_work, include_wake=False)
+    return materialize_selected_code(root, selected_code_from_facts(facts), context=context, exports=exports)
 
 
 def _dynamic_mountpoints(work, target, selected, *, context=None):
@@ -418,47 +525,68 @@ def _dynamic_mountpoints(work, target, selected, *, context=None):
                 os.close(descriptor)
 
 
-def logical_original(root, job, path):
-    """Host reads of an existing selected view use its source, not a mountpoint."""
-    from . import author_closeout, code_versions, contracts as c
-    work = c.workspace(root, job['step']); path = Path(path)
-    for source, destination in _wake_mappings(root, job, work):
+def logical_original_from_facts(facts, path, *, code_mounts=()):
+    """Resolve one logical name using only this lookup's accepted facts."""
+    path = Path(path)
+    for source, destination in wake_mappings_from_facts(facts):
         if path == destination:return source
-    author = _author_context(root, job)
+    author = facts['author']
     if author is None:return None
-    directory, manifest = author
-    for item in manifest['entries']:
-        destination = work / (Path(root) / item['display']['path']).relative_to(directory)
+    for row in author['entries']:
+        item = row['item']
+        destination = facts['target'] / (facts['root'] / item['display']['path']).relative_to(author['directory'])
         if 'code_version' in item:
             file_entry = item['kind'] == 'compiler_author' or item['code_version']['selection'] == 'file'
             if (path != destination if file_entry else not path.is_relative_to(destination)):
                 continue
-            step, call_id = author_closeout._context_code(root, job, item, controls_only=False)
-            export = code_versions.materialize(root, step=step, call_id=call_id, code_version=item['code_version'])
-            return export / (item['code_version']['entry'] if file_entry else path.relative_to(destination))
+            step, call_id = row['code_identity']
+            for source, target, owner, call in code_mounts:
+                if (target, owner, call) == (destination, step, call_id):
+                    return source if file_entry else source / path.relative_to(destination)
+            continue
         if path == destination:
-            return (author_closeout._check(root, item['display']) if item['kind'] in {'task', 'framework'}
-                else author_closeout._context_source(root, item['source']))
+            return row['display'] if item['kind'] in {'task', 'framework'} else row['source']
     return None
 
 
-def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=False, include_skills=True, context=None, selected_code=None):
-    """Final ro overlays after ALL writable/context mappings.
+def logical_original(root, job, path):
+    """Independent lookup: collect once, then resolve without reopening views."""
+    from . import contracts as c
+    facts = load_source_facts(root, job, c.workspace(root, job['step']), include_review=False)
+    selected = [item for item in selected_code_from_facts(facts)
+        if item[4] and Path(path) == item[3]]
+    # Directory selections may resolve any descendant; no unrelated export is
+    # created merely because a host asks about another logical original.
+    selected.extend(item for item in selected_code_from_facts(facts)
+        if not item[4] and Path(path).is_relative_to(item[3]))
+    code_mounts = materialize_selected_code(root, selected)
+    return logical_original_from_facts(facts, path, code_mounts=code_mounts)
+
+
+def load_mount_facts(root, job, work, *, target_work=None, mounts=(), private=False,
+                     include_skills=True, context=None, selected_code=None, source_facts=None):
+    """Produce exact source and live metadata facts for one final mount seam.
 
     Explicit readonly (source,target) mappings override the default same target.
     Private canonical roots are only appropriate to the full-host generic outer;
-    mapped scientific namespaces must leave private=False.
+    mapped scientific namespaces must leave private=False. Dedicated writers
+    prepare roots, exports and empty mountpoints before the final inventory.
     """
     work, root = _exact(work), _exact(root)
     target = Path(target_work) if target_work is not None else work
-    dynamic_root(root, work, DYNAMIC_ROOTS[0])
+    sources = (load_source_facts(root, job, work, target_work=target)
+        if source_facts is None else source_facts)
+    if (sources['root'], sources['job'], sources['work'], sources['target']) != (root, job, work, target):
+        raise _unsupported('source facts belong to another task or namespace')
+    binding=_load_dynamic_binding(root, work)
     mappings = {}
     for name in DYNAMIC_ROOTS:
         mappings[str(target / 'work' / name)] = work / 'work' / name
     skill_mounts = []
     if include_skills:
         from . import skill_supply
-        skill_mounts = skill_supply.native_mounts(root, job)
+        skill_mounts = (skill_supply.native_mounts(root, job) if sources['policy'] is None else
+            skill_supply.native_mounts_from_policy(root, job, policy=sources['policy']))
         for source, destination in skill_mounts:
             destination = Path(destination)
             if destination.is_relative_to(work):
@@ -501,22 +629,24 @@ def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=Fal
         catalogue = c.regular(work / 'inputs/delivery-candidates.json')
         declared[str(target / 'inputs/delivery-candidates.json')] = catalogue
         current_sources.add(catalogue)
-    for source, destination in _wake_mappings(root, job, target):
+    for source, destination in wake_mappings_from_facts(sources):
         declared[str(destination)] = source
         current_sources.add(source)
-    author = _author_context(root, job)
+    author = sources['author']
     if author is not None:
-        from . import author_closeout
-        directory, manifest = author
-        for item in manifest['entries']:
+        for row in author['entries']:
+            item = row['item']
             if 'code_version' in item:continue
             display = root / item['display']['path']
-            source = (author_closeout._check(root, item['display']) if item['kind'] in {'task', 'framework'}
-                else author_closeout._context_source(root, item['source']))
-            declared[str(target / display.relative_to(directory))] = source
+            source = row['display'] if item['kind'] in {'task', 'framework'} else row['source']
+            declared[str(target / display.relative_to(author['directory']))] = source
             current_sources.add(source)
-    code_mounts = (selected_code_mounts(root, job, work, target_work=target, context=context)
+    code_selection = selected_code_from_facts(sources)
+    code_mounts = (materialize_selected_code(root, code_selection, context=context)
         if selected_code is None else selected_code)
+    if [(destination, step, call_id) for _, destination, step, call_id in code_mounts] != [
+            (destination, step, call_id) for step, call_id, _, destination, _ in code_selection]:
+        raise _unsupported('selected code mounts belong to another task or namespace')
     for source, destination, _, _ in code_mounts:
         declared[str(destination)] = source
         current_sources.add(source)
@@ -538,7 +668,9 @@ def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=Fal
     project_overlap(job.get('project'), [(source, Path(destination)) for destination, source in mappings.items()])
     _dynamic_mountpoints(work, target, declared, context=context)
     inventory = _Inventory(context)
-    host_aliases=_host_aliases(root,work,inventory,job) if private else []
+    host_aliases=[]
+    if private:
+        host_aliases,binding=_host_aliases(root,work,inventory,job,sources['native']['record'],binding)
     protected = set()
     for path in host_aliases:
         inventory.check();info=path.lstat()
@@ -567,18 +699,31 @@ def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=Fal
             path = root / name
             if path.exists():
                 mappings[str(path)] = _exact(path)
-    dynamic_root(root, work, DYNAMIC_ROOTS[0])
+    c.regular(_exact(_binding(root,work)))
+    _observe_dynamic_binding(root,work,binding)
+    input_mappings = [(Path(destination), source) for destination, source in mappings.items()
+        if Path(destination).is_relative_to(target / 'inputs')]
+    if input_mappings:_exact(work / 'inputs').mkdir(exist_ok=True)
+    project_aliases = (_project_readonly_aliases(job.get('project'), work, target, mappings, context=context)
+        if job.get('role') == 'W' else [])
+    if context is not None:context.remaining_seconds()
+    return dict(root=root, job=job, work=work, target=target, sources=sources,
+        mappings=mappings, input_mappings=input_mappings, project_aliases=project_aliases,
+        code_mounts=code_mounts)
+
+
+def mount_arguments_from_facts(facts):
+    """Pure final readonly argv projection; no original or metadata is read."""
+    mappings, target = facts['mappings'], facts['target']
     arguments = []
     inputs = target / 'inputs'
-    input_mappings = [(Path(destination), source) for destination, source in mappings.items()
-        if Path(destination).is_relative_to(inputs)]
+    input_mappings = facts['input_mappings']
     for destination, source in mappings.items():
         if Path(destination).is_relative_to(inputs):continue
         arguments.extend(['--ro-bind', str(source), destination])
     # Build missing logical mountpoints only in this namespace. Freezing this
     # inputs tree leaves the already-bound dynamic publication roots intact.
     if input_mappings:
-        _exact(work / 'inputs').mkdir(exist_ok=True)
         arguments.extend(['--tmpfs', str(inputs)])
         directories = {parent for destination, _ in input_mappings for parent in destination.parents
             if parent != inputs and parent.is_relative_to(inputs)}
@@ -587,11 +732,17 @@ def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=Fal
         for destination, source in sorted(input_mappings, key=lambda item: len(item[0].parts)):
             arguments.extend(['--ro-bind', str(source), str(destination)])
         arguments.extend(['--remount-ro', str(inputs)])
-    if job.get('role') == 'W':
-        for source, destination in _project_readonly_aliases(job.get('project'), work, target, mappings, context=context):
-            arguments.extend(['--ro-bind', str(source), str(destination)])
-    if context is not None:context.remaining_seconds()
+    for source, destination in facts['project_aliases']:
+        arguments.extend(['--ro-bind', str(source), str(destination)])
     return arguments
+
+
+def mount_arguments(root, job, work, *, target_work=None, mounts=(), private=False,
+                    include_skills=True, context=None, selected_code=None):
+    """Independent mount operation, with one producer and a pure argv consumer."""
+    facts = load_mount_facts(root, job, work, target_work=target_work, mounts=mounts,
+        private=private, include_skills=include_skills, context=context, selected_code=selected_code)
+    return mount_arguments_from_facts(facts)
 
 
 def _probe(program, generation, timeout):
@@ -634,34 +785,60 @@ def ensure_capability(*, context=None):
     return program
 
 
-def wrap(root, job, work, argv, *, context=None, selected_code=None):
-    """All local native argv, including opaque protocol/custom launchers."""
+def load_wrap_facts(root, job, work, *, context=None, selected_code=None,
+                    source_facts=None, policy=None):
+    """Produce one full-host namespace using dedicated preparation writers."""
+    root, work = Path(root), Path(work)
     program = ensure_capability(context=context)
     holder, ancestors = _private_git_arguments(root)
+    sources = (load_source_facts(root, job, work, policy=policy)
+        if source_facts is None else source_facts)
     project = job.get('project')
-    project_mounts = []
+    project_mounts, worker_policy = [], None
     if project is not None:
         from . import contracts as c, native_execution
-        settings = c.settings(root, job)
+        settings = (sources['native']['input_policy']['policy']
+            if policy is None and sources['native']['input_policy'] is not None else policy)
+        if settings is None:settings = c.settings(root, job)
         if settings.get('project') != project:
             raise _unsupported('project namespace differs from its frozen job')
-        policy = native_execution.project_policy(settings)
+        if sources['policy'] is None:sources = dict(sources, policy=settings)
+        projected = native_execution.project_policy(settings)
         worker = job.get('role') == 'W'
         if worker:
-            policy = dict(policy, writable_roots=[str(path) for path in project_targets(project, writable=True)])
-            declaration = 'sandbox_workspace_write='+native_execution._toml(policy)
-            if not any(argument == declaration and argv[index-1] == '-c'
-                    for index, argument in enumerate(argv) if index):
-                argv = list(argv)
-                position = argv.index('resume') if 'resume' in argv else len(argv)-1
-                argv[position:position] = ['-c', declaration]
+            worker_policy = dict(projected,
+                writable_roots=[str(path) for path in project_targets(project, writable=True)])
         project_mounts = project_arguments(project, work, artifacts=work/'artifacts', writable=worker, context=context)
+    workspace = workspace_arguments(root, work)
+    mounts = load_mount_facts(root, job, work, private=True, context=context,
+        selected_code=selected_code, source_facts=sources)
+    return dict(program=program, holder=holder, ancestors=ancestors, workspace=workspace,
+        project_mounts=project_mounts, worker_policy=worker_policy, mounts=mounts)
+
+
+def wrap_from_facts(facts, argv):
+    """Pure native argv assembly from this launch's freshly produced plan."""
+    if facts['worker_policy'] is not None:
+        from . import native_execution
+        declaration = 'sandbox_workspace_write='+native_execution._toml(facts['worker_policy'])
+        if not any(argument == declaration and argv[index-1] == '-c'
+                for index, argument in enumerate(argv) if index):
+            argv = list(argv)
+            position = argv.index('resume') if 'resume' in argv else len(argv)-1
+            argv[position:position] = ['-c', declaration]
+    program, holder = facts['program'], facts['holder']
     controls = [program, '--unshare-user', '--unshare-pid', '--die-with-parent', '--bind', '/', '/', '--proc', '/proc',
         '--dev', '/dev',
-        *ancestors, *workspace_arguments(root, work), *project_mounts,
-        *mount_arguments(root, job, work, private=True, context=context, selected_code=selected_code),
+        *facts['ancestors'], *facts['workspace'], *facts['project_mounts'],
+        *mount_arguments_from_facts(facts['mounts']),
         '--ro-bind', str(holder), str(holder)]
     return _BwrapCommand([*controls, '--', *argv], command_index=len(controls))
+
+
+def wrap(root, job, work, argv, *, context=None, selected_code=None):
+    """Independent full-host launch-plan operation, including opaque argv."""
+    return wrap_from_facts(load_wrap_facts(root, job, work, context=context,
+        selected_code=selected_code), argv)
 
 
 def _private_git_arguments(root):

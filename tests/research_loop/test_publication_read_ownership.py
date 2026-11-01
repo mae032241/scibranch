@@ -36,9 +36,9 @@ def _prepare(root, facts):
     return pending
 
 
-def _commit(root, pending, inventory):
+def _commit(root, pending, inventory, seal):
     return accepted_prefix.commit_node_from_facts(root, pending,
-        base=inventory.base, head=inventory.head)
+        base=inventory.base, head=inventory.head, seal=seal)
 
 
 def test_publication_reads_no_settings_and_only_writer_refreshes_head(scene, monkeypatch):
@@ -63,10 +63,18 @@ def test_publication_reads_no_settings_and_only_writer_refreshes_head(scene, mon
     monkeypatch.setattr(originals, 'node', forbidden)
     pending = _prepare(scene, facts)
     assert reads.count(scene/accepted.HEAD) == 0
+    row = accepted.AcceptedState.row
 
-    assert _commit(scene, pending, inventory) == pending['prefix']
+    def no_job_reopen(state, key):
+        if key == 'job/001':
+            pytest.fail('Publication reopened its writer-owned current job')
+        return row(state, key)
+
+    monkeypatch.setattr(accepted.AcceptedState, 'row', no_job_reopen)
+    assert _commit(scene, pending, inventory, facts['seal']) == pending['prefix']
 
     assert reads.count(scene/accepted.HEAD) == 1
+    assert reads.count(scene/'native-evidence/001/result-identity.json') == 0
     assert scene/'settings.json' not in reads
     assert inventory.head.prefix['count'] == 0
     overview = read(scene/'host-history/overview.json')
@@ -78,7 +86,7 @@ def test_publication_reads_no_settings_and_only_writer_refreshes_head(scene, mon
     assert (raw.read_bytes(), result.read_bytes()) == retained
 
     frozen = (scene/accepted.HEAD).read_bytes()
-    assert _commit(scene, pending, inventory) == pending['prefix']
+    assert _commit(scene, pending, inventory, facts['seal']) == pending['prefix']
     assert (scene/accepted.HEAD).read_bytes() == frozen
     assert reads.count(scene/accepted.HEAD) == 2
 
@@ -118,7 +126,7 @@ def test_stale_inventory_cannot_bypass_fresh_publication_owner(scene, monkeypatc
     frozen = (scene/accepted.HEAD).read_bytes()
 
     with pytest.raises(ValueError, match='lost its active view owner'):
-        _commit(scene, pending, inventory)
+        _commit(scene, pending, inventory, facts['seal'])
 
     assert (scene/accepted.HEAD).read_bytes() == frozen
     assert not (scene/'control-ledger'/f'{inventory.head["seq"]+1:06d}.json').exists()
@@ -139,11 +147,11 @@ def test_old_publication_cannot_overwrite_shared_files_after_a_new_node(scene, m
     old_pending = _prepare(scene, first)
     navigation_rows(old_pending, 1)
     old_inventory = first['inventory']
-    _commit(scene, old_pending, old_inventory)
+    _commit(scene, old_pending, old_inventory, first['seal'])
     second = _publication(scene, monkeypatch, step=2, role='E', parents=(1,))
     new_pending = _prepare(scene, second)
     navigation_rows(new_pending, 2)
-    _commit(scene, new_pending, second['inventory'])
+    _commit(scene, new_pending, second['inventory'], second['seal'])
     current = accepted.read(scene)
     assert current.current_job['step'] == 2 and current.prefix['count'] == 2
     assert current['seq'] > old_inventory.head['seq']
@@ -168,7 +176,7 @@ def test_old_publication_cannot_overwrite_shared_files_after_a_new_node(scene, m
 
     monkeypatch.setattr(c, 'write', observed)
     with pytest.raises(ValueError, match='lost its active view owner'):
-        _commit(scene, old_pending, old_inventory)
+        _commit(scene, old_pending, old_inventory, first['seal'])
 
     assert {path: path.read_bytes() for path in shared} == retained
     assert overwritten == []
@@ -193,14 +201,14 @@ def test_publication_recovers_its_single_writer_tail_and_refreshes_new_state(sce
     with monkeypatch.context() as patch:
         patch.setattr(atomic_files, 'replace_bytes', interrupted)
         with pytest.raises(OSError, match='publication interrupted'):
-            _commit(scene, pending, inventory)
+            _commit(scene, pending, inventory, facts['seal'])
     assert (scene/accepted.HEAD).read_bytes() == frozen_head
     event_path = scene/'control-ledger'/f'{before["seq"]+1:06d}.json'
     frozen_event = event_path.read_bytes()
     event = c.read(event_path)
     assert event['index_updates']['job/001']['previous'] == previous_job
 
-    assert _commit(scene, pending, inventory) == pending['prefix']
+    assert _commit(scene, pending, inventory, facts['seal']) == pending['prefix']
 
     after = accepted.read(scene)
     assert after['seq'] == before['seq']+1

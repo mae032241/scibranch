@@ -160,15 +160,13 @@ def ensure_phase(root, boot):
         final_only=job.get('final_only', False), stopped_original=original.get('stopped_original'))
 
 
-def _selected_base(root, selected, *, bind_inputs=False):
-    from . import accepted_budget, contracts as c, configuration_updates, execution_authority, qualification
+def _load_selected_base_facts(root, selected, *, base, policy, head, bind_inputs=False):
+    """Own selected-input reads and acceptance using the entrypoint's policy."""
+    from . import contracts as c, configuration_updates, execution_authority, qualification, originals
     job = copy.deepcopy(selected['job'])
-    revision = configuration_updates.for_new_job(root, job['step'])
+    revision = policy
     _validate_selected_settings(selected, revision)
-    binding_head = accepted_budget.read(root)
-    binding = configuration_updates._reservation(root, job['step'], head=binding_head)
-    if binding is not None:
-        configuration_updates.policy_for_job(root, binding, base=binding_head.base, head=binding_head)
+    binding = configuration_updates._reservation(root, job['step'], head=head)
     job.pop('configuration_revision', None)
     if binding is not None and binding['configuration_revision'] is not None:
         job['configuration_revision'] = binding['configuration_revision']
@@ -180,7 +178,6 @@ def _selected_base(root, selected, *, bind_inputs=False):
     if job['goal_text'] != revision['objective']:
         raise ValueError('Fork cannot replace the selected original scientific objective')
     job['fork_source'] = _selected_identity(selected)
-    head=accepted_budget.read(root)
     admitted=head.row(f'job/{job["step"]:03d}')
     job['history']['prefix']=copy.deepcopy(head['prefix'] if admitted is None else admitted['prefix'])
     job['history']['breadth_snapshot']=copy.deepcopy(head['search_ref'] if admitted is None else admitted['input_search_ref'])
@@ -208,12 +205,30 @@ def _selected_base(root, selected, *, bind_inputs=False):
             **c.record_ref(Path(root) / 'control-ledger' / f'{begin["seq"]:06d}.json'))
     job.pop('execution_authority', None)
     job.pop('execution_qualifications', None)
-    job['source_provenance'] = (qualification.bind_inputs(root, job) if bind_inputs else
-        qualification._ref(root, c.host_record(c.workspace(root, job['step'])) / 'input-provenance.json'))
-    qualification.validate_inputs(root, job)
-    job['source_restrictions'] = qualification.status(root, job)
-    execution_authority.bind_job(root, job)
-    return job
+    source, original = selected['source'], selected['job']
+    document = (qualification._source_read(source, original['source_provenance'])
+        if original.get('source_provenance') is not None else
+        dict(version=1, step=original['step'], edges=[], scope=qualification.SCOPE))
+    producers = {edge['step']: originals.dependency(source, edge['step'], seal_ref=edge['seal'])
+        for edge in document['edges'] if edge['kind']=='producer'}
+    inputs = qualification.fork_input_facts(source,original,document=document,
+        producer_origins={step:owner.origin_identity for step,owner in producers.items()})
+    if bind_inputs:
+        job['source_provenance'], document = qualification.bind_inputs_from_facts(root,job,facts=inputs)
+    else:
+        job['source_provenance'] = qualification._ref(root,
+            c.host_record(c.workspace(root, job['step'])) / 'input-provenance.json')
+        document = qualification.validate_inputs_from_facts(root,job,facts=inputs)
+    job['source_restrictions'] = qualification.status_from_facts(job,document,facts=inputs)
+    sources = {}
+    if policy.get('execution_authority_policy') is not None:
+        for reference in job['direct_refs']:
+            step = int(Path(reference['path']).parts[2])
+            owner = producers[step] if step in producers else originals.dependency(source, step)
+            sources[step] = dict(owner=owner)
+    authority = execution_authority.job_facts(root,job,base=base,policy=policy,sources=sources)
+    execution_authority.bind_job(root,job,facts=authority)
+    return job, dict(inputs=inputs, authority=authority, sources=sources)
 
 
 def selected_science_view(root, job):
@@ -221,6 +236,14 @@ def selected_science_view(root, job):
     selected = fork_sources.selected_task(root)
     if job.get('fork_source') != _selected_identity(selected):
         raise ValueError('Fork task lost its exact scientific original')
+    policy = c.settings(Path(root), job) if job.get('execution_authority') is not None else {}
+    qualified = [qualification._read(root, ref)['subject']['material']['path']
+        for ref in job.get('execution_qualifications', [])[:3]]
+    return _selected_science_view(job,selected=selected,policy=policy,qualified=qualified)
+
+
+def _selected_science_view(job, *, selected, policy, qualified):
+    from . import user_guidance
     view = copy.deepcopy(selected['science_task'])
     view['public_root'] = job['public_root']
     view.pop('user_guidance', None)
@@ -228,9 +251,8 @@ def selected_science_view(root, job):
     view.pop('execution_authority', None)
     if job.get('execution_authority') is not None:
         view['execution_authority'] = dict(
-            status='trusted_gate_required' if c.settings(Path(root), job).get('execution_resource_policy') else 'authority_only_production_gate_unavailable',
-            qualified_materials=[qualification._read(root, ref)['subject']['material']['path']
-                for ref in job.get('execution_qualifications', [])[:3]],
+            status='trusted_gate_required' if policy.get('execution_resource_policy') else 'authority_only_production_gate_unavailable',
+            qualified_materials=qualified[:3],
             qualified_materials_omitted_count=max(0, len(job.get('execution_qualifications', [])) - 3),
             instruction='Choose scientific materials through the existing selection. Control binds exact review and execution identities; ordinary pass text grants nothing. Decisions alone do not dispatch or add budget.')
     if 'source_restrictions' in job:
@@ -256,20 +278,24 @@ def _selected_files(root, selected):
 
 def build_selected_job(root, step):
     """Prepare the frozen task and restore its inert, writable current drafts."""
-    from . import contracts as c, configuration_updates, fork_sources, user_guidance
+    from . import accepted_budget, contracts as c, configuration_updates, fork_sources, user_guidance
     root = Path(root)
     selected = fork_sources.selected_task(root)
     if step != selected['job']['step']:
         raise ValueError('Fork bootstrap cannot select another logical task')
-    configuration_updates.bind_new_job(root, step)
+    base=c.settings(root)
+    _, frozen, head=configuration_updates.bind_new_job_facts(root,step,base=base)
     path = root / 'jobs' / f'{step:03d}.json'
     if path.exists():
         job = c.read(c.regular(path))
-        validate_selected_job(root, c.workspace(root, step), job)
-        from . import accepted_budget
-        accepted_budget.accept_job(root,step,job)
+        _load_selected_job_facts(root,c.workspace(root,step),job,
+            base=base,policy=frozen,head=head,selected=selected)
+        with user_guidance.binding_from_base(root,step,job['role'],job,base=base) as (_,guidance_current):
+            acceptance=accepted_budget.job_acceptance_facts(root,step,base=base)
+            accepted_budget.accept_job_from_facts(root,step,job,facts=acceptance,
+                guidance_current=guidance_current)
         from . import skill_supply
-        skill_supply.project(root, configuration_updates.for_job(root, job), job)
+        skill_supply.project(root,frozen,job)
         return job
     # First admission verifies copied controls/drafts. Scientific inputs are
     # checked through their original bindings by their actual consumers.
@@ -284,38 +310,39 @@ def build_selected_job(root, step):
             row['source'].mkdir(parents=True,exist_ok=True)
     from . import storage_policy as storage
     from scidiscovery import archive_io as files
-    frozen=configuration_updates.for_new_job(root,step)
     context=storage.Deadline(frozen['max_seconds'])
     inventory=storage.Inventory(frozen.get('storage_policy'),context=context)
     for relative, source, entry in _selected_files(root, selected):
         inventory.entry();inventory.file(entry['size_bytes'])
         files.copy_original(source,root/relative,dict(entry,kind='file'),context=context)
-    job = _selected_base(root, selected, bind_inputs=True)
+    job, facts = _load_selected_base_facts(root,selected,base=base,policy=frozen,head=head,bind_inputs=True)
     # Review inputs remain neutral; general advice waits for the next legal task.
     if job.get('formal_review'):
         statements = selected['job'].get('user_guidance', [])
         if statements:
             job['user_guidance'] = copy.deepcopy(statements)
-        _publish_selected(root, work, job)
-    else:
-        with user_guidance.binding(root, step, job['role'], None) as statements:
+    with user_guidance.binding_from_base(root,step,job['role'],job if job.get('formal_review') else None,
+            base=base) as (statements,guidance_current):
+        if not job.get('formal_review'):
             previous = copy.deepcopy(selected['job'].get('user_guidance', []))
             combined = previous + [row for row in statements
                 if row['guidance_id'] not in {item['guidance_id'] for item in previous}]
             if combined:
                 job['user_guidance'] = combined
-            _publish_selected(root, work, job)
-    from . import accepted_budget
-    accepted_budget.accept_job(root,step,job)
+        _publish_selected(root,work,job,selected=selected,policy=frozen,facts=facts)
+        acceptance=accepted_budget.job_acceptance_facts(root,step,base=base)
+        accepted_budget.accept_job_from_facts(root,step,job,facts=acceptance,
+            guidance_current=guidance_current)
     from . import skill_supply
     skill_supply.project(root, frozen, job)
     return job
 
 
-def _publish_selected(root, work, job):
+def _publish_selected(root, work, job, *, selected, policy, facts):
     from . import contracts as c
     for path, value in ((Path(root) / 'jobs' / f'{job["step"]:03d}.json', job),
-            (work / 'science-task.json', selected_science_view(root, job)),
+            (work / 'science-task.json', _selected_science_view(job,selected=selected,policy=policy,
+                qualified=facts['authority']['qualified_materials'])),
             (c.host_record(work) / 'science-result.schema.json', c.result_schema(job['role'],
                 job['handoff_protocol'], 'selection' in job, **c.response_options(job)))):
         if path.exists():
@@ -327,9 +354,18 @@ def _publish_selected(root, work, job):
 
 def validate_selected_job(root, work, job):
     """Validate exact inherited inputs rather than reconstructing a later context."""
-    from . import contracts as c, fork_sources, execution_authority, originals
-    selected = fork_sources.selected_task(root)
-    expected = _selected_base(root, selected)
+    from . import accepted_budget, contracts as c, fork_sources
+    base=c.settings(root)
+    head=accepted_budget.load(root,base=base)
+    policy=c.settings_for_job(root,job,base=base,head=head)
+    selected=fork_sources.selected_task(root)
+    _load_selected_job_facts(root,work,job,base=base,policy=policy,head=head,selected=selected)
+
+
+def _load_selected_job_facts(root, work, job, *, base, policy, head, selected):
+    """Own selected-job reads and validation, then return accepted facts."""
+    from . import contracts as c, execution_authority, originals
+    expected, facts = _load_selected_base_facts(root,selected,base=base,policy=policy,head=head)
     original_statements = expected.pop('user_guidance', [])
     actual = copy.deepcopy(job)
     statements = actual.pop('user_guidance', [])
@@ -342,16 +378,24 @@ def validate_selected_job(root, work, job):
         if (statement.get('applied_step') != job['step'] or statement.get('applied_role') != job['role']
                 or c.read(c.regular(user_guidance._path(root, statement['guidance_id']))) != statement):
             raise ValueError('Fork advice differs from its exact applied user original')
-    if c.read(c.regular(Path(work) / 'science-task.json')) != selected_science_view(root, job):
+    if c.read(c.regular(Path(work) / 'science-task.json')) != _selected_science_view(job,
+            selected=selected,policy=policy,qualified=facts['authority']['qualified_materials']):
         raise ValueError('Fork scientific task projection changed')
     source=selected['source']
     for ref in [*job.get('global_materials',[]),*job.get('direct_refs',[]),
             *job.get('direct_materials',[]),*job.get('history',{}).get('execution_recovery_materials',[])]:
         originals.resolve_ref(source,dict(ref,path=f'project/nodes/{source.step:03d}/'+ref['path']))
     for ref in job.get('direct_originals',job.get('direct_refs',[])):
-        producer=originals.dependency(source,int(Path(ref['path']).parts[2]))
-        seal=c.read(originals.source_record(producer,'result-identity.json'))
+        step=int(Path(ref['path']).parts[2])
+        parent=facts['sources'].get(step)
+        producer=parent['owner'] if parent is not None else originals.dependency(source,step)
+        if parent is not None and 'seal' in parent:
+            seal=parent['seal']
+        else:
+            seal=c.read(originals.source_record(producer,'result-identity.json'))
+            if parent is not None:parent['seal']=seal
         if ref['size_bytes']!=seal['raw_ref']['size_bytes']:
             raise ValueError('Fork direct original changed its exact producer')
         originals.resolve_ref(producer,seal['raw_ref'])
-    execution_authority.validate_job(root, job)
+    execution_authority.validate_job(root,job,facts=facts['authority'])
+    return facts

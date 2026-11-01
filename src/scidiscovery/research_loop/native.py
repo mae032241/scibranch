@@ -417,9 +417,10 @@ def run_native(root: Path, step: int, attempt=0):
             raise ValueError('Native fragment checkpoint changed before launch')
         write(work/'work/science-resume.json',checkpoint.brief(root,job,prior))
     author_limits=None;author=None
+    author_context_facts=None
     if intent.get('continuation_kind')=='author_closeout':
         from . import author_closeout
-        permit=author_closeout.require_intent_eligibility(root,job,intent)
+        permit,author_context_facts=author_closeout.load_intent_eligibility(root,job,intent)
         author_limits=dict(max_observed_tokens=permit['max_tokens'],max_seconds=permit['max_seconds'])
         author=dict(facts='work/author-closeout-science.json' if intent.get('worker_view_version')==1 else ('author-closeout-facts.json' if attempt==2 else 'work/author-closeout-facts.json'),limits=author_limits)
     mode=control_budget.node_mode(root)
@@ -497,7 +498,8 @@ def run_native(root: Path, step: int, attempt=0):
                 actual_home=Path(env.get('CODEX_HOME',str(Path.home()/'.codex')))
                 if not actual_home.is_absolute():actual_home=work/actual_home
                 args,launch=native_execution.prepare(root,step,record,work,actual_home.resolve(),args,
-                    standard=standard_native,resume_position=resume_position,native_options=settings.get('native_options'))
+                    standard=standard_native,resume_position=resume_position,native_options=settings.get('native_options'),
+                    job=job,intent=intent,settings=settings)
                 scientific_lifetime.enter_context(worker_execution_bridge.serve(
                     work/worker_execution_bridge.SUBMISSION_DIRECTORY,work/'work/experiment-config.json',work,
                     launch=launch))
@@ -505,9 +507,16 @@ def run_native(root: Path, step: int, attempt=0):
             limits=control_budget.snapshot(root,settings)
             view_context=_shared_view_context(root,job,intent,limits,final_return=final_return,
                 author_permit=permit if intent.get('continuation_kind')=='author_closeout' else None)
-            selected_code=shared_input_views.selected_code_mounts(root,job,work,context=view_context,exports=code_exports)
+            view_sources=shared_input_views.load_source_facts(root,job,work,
+                native=dict(record=record,intent=intent),policy=settings,
+                include_wake=namespace_launcher is None,author_facts=author_context_facts,
+                input_policy=author_context_facts['input_policy'] if author_context_facts is not None else None)
+            selected_code=shared_input_views.materialize_selected_code(root,
+                shared_input_views.selected_code_from_facts(view_sources),context=view_context,exports=code_exports)
             if namespace_launcher is None:
-                args=shared_input_views.wrap(root,job,work,args,context=view_context,selected_code=selected_code)
+                view_facts=shared_input_views.load_wrap_facts(root,job,work,context=view_context,
+                    selected_code=selected_code,source_facts=view_sources,policy=settings)
+                args=shared_input_views.wrap_from_facts(view_facts,args)
             else:
                 # Registered host preparation/bridge stays in its host view.
                 # Its frozen module owns the final scientific namespace seam.

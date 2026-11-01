@@ -185,6 +185,16 @@ def _producer(root, step, *, facts):
                 missing_reason=None if seal.get('source_provenance') else 'legacy_producer_without_source_proof')
 
 
+def fork_input_facts(source, original, *, document, producer_origins):
+    """Reduce the selected task's loaded proof and explicit dependency origins."""
+    document = copy.deepcopy(document)
+    for edge in document['edges']:
+        if edge['kind'] == 'producer':
+            edge['seal'] = dict(edge['seal'], origin_identity=producer_origins[edge['step']])
+    return dict(document=document, declarations=None, producers={}, fork_source=source,
+        restrictions={}, material_paths={}, fork_restriction=_saved_input_restriction(original))
+
+
 def input_facts(root, job, *, base, head, sources, material_paths=None, review_binding=None):
     """Own this operation's declared source collection and file acceptance."""
     from . import originals, handoff_state
@@ -194,15 +204,12 @@ def input_facts(root, job, *, base, head, sources, material_paths=None, review_b
         original = originals.source_job(source)
         # Selection can name a frozen task that has never been submitted. Its
         # saved input edges do not require a result or replay old input checks.
-        document = (copy.deepcopy(_source_read(source, original['source_provenance']))
+        document = (_source_read(source, original['source_provenance'])
             if original.get('source_provenance') is not None else
             dict(version=1, step=original['step'], edges=[], scope=SCOPE))
-        for edge in document['edges']:
-            if edge['kind'] == 'producer':
-                producer = originals.dependency(source, edge['step'], seal_ref=edge['seal'])
-                edge['seal'] = dict(edge['seal'], origin_identity=producer.origin_identity)
-        return dict(document=document, declarations=None, producers={},
-            restrictions={}, material_paths={}, fork_restriction=_saved_input_restriction(original))
+        producer_origins = {edge['step']: originals.dependency(source, edge['step'],
+            seal_ref=edge['seal']).origin_identity for edge in document['edges'] if edge['kind']=='producer'}
+        return fork_input_facts(source, original, document=document, producer_origins=producer_origins)
     declarations = _sources_from_base(root, base=base)
     steps = {int(Path(ref['path']).parts[2]) for ref in job['direct_refs']}
     steps.update(row['origin_step'] for row in job.get('selected_inputs', []))

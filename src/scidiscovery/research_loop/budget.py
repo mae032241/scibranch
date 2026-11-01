@@ -333,6 +333,21 @@ def _operator_writer(root):
         yield
 
 
+@contextmanager
+def _operator_writer_from_base(root, *, base):
+    """Reuse the live controller boundary with an already produced base fact."""
+    from .controller import _writer_from_base, require_writer
+    try:
+        require_writer(root)
+    except RuntimeError:
+        with _writer_from_base(Path(root).resolve(), base=base):
+            yield
+    else:
+        from .protocol import require_current_base
+        require_current_base(root, base=base)
+        yield
+
+
 def amend_execution_grant(root, *, allowance, authorization_note, operation_id=None):
     with _operator_writer(root):
         return _amend_execution_grant_locked(root, allowance=allowance,
@@ -1617,9 +1632,10 @@ def _normal_source_refs(root, before_step, events):
     return refs
 
 
-def scientific_steps(root, before_step, *, resume=None):
+def scientific_steps(root, before_step, *, resume=None, events=None):
     """Only a journal-bound resume may omit preserved non-scientific originals."""
-    events,_ = _events(root)
+    if events is None:
+        events,_ = _events(root)
     resumed = normal_resume(root,before_step,events=events)
     if resume is not None and resume != resumed:
         raise ValueError('Scientific history requires its exact original resume event')
