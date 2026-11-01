@@ -30,16 +30,26 @@ def automatic_source(root, step, record):
     that stream or receipt; terminal, activity and session facts must still
     agree with the original process outcome.
     """
-    from . import backends, native_recovery
-    backend = backends.selected(configuration_updates.for_step(root, step))
+    from . import backends
+    policy = configuration_updates.for_step(root, step)
+    backend = backends.selected(policy)
     if backend.name != 'codex' or not backend.standard:
         raise ResumeUnavailable('automatic_recovery_unsupported_backend')
     outcome = c.native_outcome(record)
+    intent = c.read(c.regular(record / 'native-intent.json'))
+    return _automatic_source_from_facts(record, policy=policy, intent=intent, outcome=outcome)
+
+
+def _automatic_source_from_facts(record, *, policy, intent, outcome):
+    """Verify the original native stream using its owner's retained receipts."""
+    from . import backends, native_recovery
+    backend = backends.selected(policy)
+    if backend.name != 'codex' or not backend.standard:
+        raise ResumeUnavailable('automatic_recovery_unsupported_backend')
     failures = []
     terminal = activity = False
     completed_before = None
-    original = c.read(c.regular(record / 'native-intent.json'))
-    thread = (original.get('session') or {}).get('thread_id')
+    thread = (intent.get('session') or {}).get('thread_id')
     with c.regular(record / 'native.jsonl', limit=None).open('rb') as stream:
         for line in stream:
             try:event = json.loads(line)
@@ -68,17 +78,30 @@ def format_source(root, step, record):
     never authority for negotiation; the complete raw native stream supplies
     the positive request rejection, with every other retained fact checked.
     """
-    from . import backends, native_recovery
-    backend = backends.selected(configuration_updates.for_step(root, step))
+    from . import backends
+    policy = configuration_updates.for_step(root, step)
+    backend = backends.selected(policy)
     if backend.name != 'codex' or not backend.standard:return None
     outcome = c.read(c.regular(record / 'native-outcome.json'))
-    if (outcome.get('terminal_observed') is not False or type(outcome.get('returncode')) is not int
+    if not _format_source_outcome(outcome):return None
+    intent = c.read(c.regular(record / 'native-intent.json'))
+    return _format_source_from_facts(record, policy=policy, intent=intent, outcome=outcome)
+
+
+def _format_source_outcome(outcome):
+    return not (outcome.get('terminal_observed') is not False or type(outcome.get('returncode')) is not int
             or outcome['returncode'] == 0 or outcome.get('stop_reason') not in {None,'native_failure_event'}
             or outcome.get('cleanup') != 'observed_group_cleaned'
-            or outcome.get('native_schema_transport', 'native_flag') != 'native_flag'):
-        return None
-    original = c.read(c.regular(record / 'native-intent.json'))
-    thread = (original.get('session') or {}).get('thread_id')
+            or outcome.get('native_schema_transport', 'native_flag') != 'native_flag')
+
+
+def _format_source_from_facts(record, *, policy, intent, outcome):
+    """Retain positive stream evidence without reopening known control facts."""
+    from . import backends, native_recovery
+    backend = backends.selected(policy)
+    if backend.name != 'codex' or not backend.standard:return None
+    if not _format_source_outcome(outcome):return None
+    thread = (intent.get('session') or {}).get('thread_id')
     activity = rejected = False
     raw=c.regular(record / 'native.jsonl', limit=None)
     if raw.stat().st_size > 256 * 1024:return None

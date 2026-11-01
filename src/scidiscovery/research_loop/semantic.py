@@ -42,7 +42,8 @@ def outcome(root,job,payload,*,inventory):
     candidate_nominations.require_final_coverage(root,job,payload)
     diagnostics=interpretation['diagnostics']
     from . import decision
-    requests=decision.assess(root,job,payload,focus=interpretation['focus'])
+    requests=decision._assess_from_facts(root,job,payload,
+        policy=inventory.policy,interpretation=interpretation,head=inventory.head)
     delivery=None
     if job['role']=='W':
         from . import worker_delivery

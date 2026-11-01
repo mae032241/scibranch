@@ -1383,13 +1383,21 @@ def validate_final_report_inputs(root, job, *, events=None):
     value = job.get('final_report')
     if value is None:
         return None
-    settings = contracts.settings(root, job)
-    delivery = settings.get('delivery_policy')
+    policy = contracts.settings(root, job)
     if events is None:
         events, _ = _events(root)
+    return _validate_final_report_inputs_from_facts(root, job, policy=policy, events=events)
+
+
+def _validate_final_report_inputs_from_facts(root, job, *, policy, events):
+    """Check this owner's FINAL inputs against its selected policy and head."""
+    value = job.get('final_report')
+    if value is None:
+        return None
+    delivery = policy.get('delivery_policy')
     begin = _final_boundary(events, job)
     final = begin is not None
-    if (not (protected_final_report(settings) or final)
+    if (not (protected_final_report(policy) or final)
             or job['role'] != 'A' or job.get('purpose') is not None or job.get('formal_review') is not None
             or not final and delivery is not None and delivery['adapter'] is not None
             or not isinstance(value, dict) or set(value) != {'source_cutoff', 'stopped_original'}
@@ -1458,6 +1466,13 @@ def _final_boundary(events, job):
 def normal_resume(root, before_step=None, *, events=None):
     if events is None:
         events, _ = _events(root)
+    return _normal_resume_from_facts(root,before_step,events=events)
+
+
+def _normal_resume_from_facts(root, before_step=None, *, events):
+    """Project the owner's accepted resume without loading another head."""
+    if events is None:
+        raise ValueError('Normal resume requires its produced accepted events')
     if isinstance(events, accepted_budget.AcceptedEvents):
         row = events.state['resume']
         return events.event(row['ref']) if row is not None and (before_step is None or row['first_step'] <= before_step) else None
@@ -1673,10 +1688,16 @@ def _validate_final_a_event(root, settings, event, previous):
 
 def final_a_return(root, job, intent, *, events=None):
     """Validate one final A identity, including its bounded output-only repairs."""
-    settings = contracts.settings(root, job)
-    _final_a_policy(settings)
+    policy = contracts.settings(root, job)
+    _final_a_policy(policy)
     if events is None:
         events, _ = _events(root)
+    return _final_a_return_from_facts(root, job, intent, policy=policy, events=events)
+
+
+def _final_a_return_from_facts(root, job, intent, *, policy, events):
+    """Consume the selected current policy without another admission sample."""
+    _final_a_policy(policy)
     marker = (intent.get('budget_slice') or {}).get('final_return')
     if isinstance(events, accepted_budget.AcceptedEvents):
         accepted = events.state['final_return']
@@ -1717,7 +1738,7 @@ def final_a_return(root, job, intent, *, events=None):
             ('boot_id','advance_seconds','previous_tokens','previous_seconds')})
     if repair and accepted is not None:
         number=intent.get('attempt')
-        limits=settings.get('resume_policy') or {}
+        limits=policy.get('resume_policy') or {}
         if (type(number) is not int or number < 1
                 or not limits.get('output_repair',False)):
             raise ValueError('Final A return has no bounded output repair authorization')
@@ -1836,19 +1857,31 @@ def native_completion_known(outcome, settings=None):
 
 
 def validate_final_a_receipt(root, job, intent, outcome, meter=None):
-    accepted = final_a_return(root, job, intent)
+    base = contracts.settings(root)
+    head = accepted_budget.load(root,base=base)
+    policy = contracts.settings_for_job(root,job,base=base,head=head)
+    accepted = _final_a_return_from_facts(root,job,intent,policy=policy,
+        events=_events_from_state(head)[0])
     if accepted is not None and meter is None:
         record = contracts.host_record(contracts.workspace(root, job['step']))
         if intent.get('attempt') is not None:record = record/'continuations'/f'{intent["attempt"]:03d}'
         if (record / 'usage.json').exists():
             meter = contracts.read(contracts.regular(record / 'usage.json'))
+    return _validate_final_a_receipt_from_facts(intent,outcome,
+        policy=policy,meter=meter,accepted=accepted)
+
+
+def _validate_final_a_receipt_from_facts(intent, outcome, *, policy, meter, accepted):
+    """Check FINAL receipt gates using the owner's exact terminal facts."""
+    if policy is None:
+        raise ValueError('Final A completion requires its produced policy')
     expected = final_a_receipt(accepted, intent, meter, outcome['usage']) if accepted is not None else None
     if outcome.get('final_a_completion') != expected:
         raise ValueError('Final A completion or overrun receipt changed')
     if accepted is not None and outcome.get('returncode') == 0 and not outcome.get('stop_reason'):
         from .native_usage import tokens
         observation = outcome.get('metering') or {}
-        if (not native_completion_known(outcome, contracts.settings(root, job))
+        if (not native_completion_known(outcome, policy)
                 or meter is not None and (tokens(meter) != meter or observation.get('tokens') != meter)
                 or observation.get('coverage') == 'terminal' and meter is None):
             raise ValueError('Final A completion lacks a known terminal execution or cleanup')
@@ -1951,8 +1984,9 @@ def _attempt_consumption_from_facts(root,job,receipts,*,policy,limits,task_ref,
             from . import native_recovery
             negotiation = ((automatic_recovery or {}).get('format_fallback') is True and number == len(receipts)-1
                 or (successor.get('automatic_recovery') or {}).get('format_fallback') is True)
-            eligible = (continuation.format_source(root,job['step'],path) is not None if negotiation else
-                automatic and native_recovery.recoverable_source(continuation.automatic_source(root, job['step'], path)))
+            eligible = (continuation._format_source_from_facts(path,policy=policy,intent=intent,outcome=original) is not None if negotiation else
+                automatic and native_recovery.recoverable_source(
+                    continuation._automatic_source_from_facts(path,policy=policy,intent=intent,outcome=original)))
             if not automatic or not eligible:
                 raise ValueError('Missing billing has no known original completion')
         # An absent meter contributes no reported tokens to the lower bound;

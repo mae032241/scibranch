@@ -82,11 +82,24 @@ def _direct_assessment_sources(root,job,prepared=None):
 def assessment_context(root,job,*,state=None,source_rows=None):
     """Shared B1/FINAL identity facts; this does not define a B2 cycle."""
     empty=dict(applicable=False,mechanisms={},completed_w=[],discriminating_work=[],sources={})
-    if job['role']!='A' or job.get('formal_review') or job.get('purpose')=='formal_review' or c.settings(root,job).get('search_policy') is None:
+    if job['role']!='A' or job.get('formal_review') or job.get('purpose')=='formal_review':
         return empty
-    sources=_frozen_sources(root,job,source_rows=source_rows)
+    policy=c.settings(root,job)
+    if policy.get('search_policy') is None:
+        return empty
     if state is None:
         state=current_state(root,job)
+    return _assessment_context_for_policy(root,job,policy=policy,state=state,source_rows=source_rows)
+
+
+def _assessment_context_for_policy(root,job,*,policy,state,source_rows=None):
+    """Use an already selected policy and state while resolving exact sources."""
+    empty=dict(applicable=False,mechanisms={},completed_w=[],discriminating_work=[],sources={})
+    if policy is None or state is None:
+        raise ValueError('Assessment context requires its produced policy and state')
+    if job['role']!='A' or job.get('formal_review') or job.get('purpose')=='formal_review' or policy.get('search_policy') is None:
+        return empty
+    sources=_frozen_sources(root,job,source_rows=source_rows)
     prepared=None if source_rows is None else {row[0]['step']:row for row in source_rows}
     direct={source['step'] for source,_,_ in _direct_assessment_sources(root,job,prepared)}
     final=bool(job.get('final_report') or job.get('purpose')=='closeout' or job.get('final_only'))
@@ -344,10 +357,10 @@ def _repair_choice(root,job,ref,*,payload=None):
         return dict(status='missing_original',root=None,source=None)
 
 
-def _repair_diagnostic(root,state,choice,job):
+def _repair_diagnostic(state,choice,*,policy):
     if choice['status']!='available':return 'search_repair_source_'+choice['status']
     count=state['_repair_get'](choice['root']) if state.get('summary') is not None else state['repairs'].get(choice['root'],0)
-    if count>=c.settings(root,job)['search_policy']['max_requested_repairs']:
+    if count>=policy['search_policy']['max_requested_repairs']:
         return 'search_repair_limit'
     return None
 
@@ -412,7 +425,7 @@ def _choice(job,payload):
     return result
 
 
-def _apply_science(root,job,payload,state,diagnostics):
+def _apply_science(root,job,payload,state,diagnostics,*,policy):
     mechanisms=state['mechanisms']
     if job['role']=='H':
         state['current_h']=job['step']
@@ -463,13 +476,13 @@ def _apply_science(root,job,payload,state,diagnostics):
     intent=dict(payload)
     for field in ('search_plan','search_review'):intent[field]=None
     if job['role'] in {'H','A'}:intent['search_plan' if job['role']=='H' else 'search_review']=_choice(job,payload)
-    if job['role']=='A' and not assessment_context(root,job,state=state)['applicable']:intent['portfolio_review']=None
+    if job['role']=='A' and not _assessment_context_for_policy(root,job,policy=policy,state=state)['applicable']:intent['portfolio_review']=None
     interpretation=resolve_intent(state,job,intent,assessed=_assessed(root,job,state))
     diagnostics.extend(interpretation['diagnostics'])
     focus=interpretation['focus']
     if job['role'] in {'H','A'} and payload.get('next_action') in {'experiment','continue_w'} and focus and focus['action']=='repair' and not diagnostics:
         choice=_repair_choice(root,job,focus['mechanism_ref'],payload=payload)
-        code=_repair_diagnostic(root,state,choice,job)
+        code=_repair_diagnostic(state,choice,policy=policy)
         if code:diagnostics.append(dict(code=code,subject=focus['mechanism_ref']))
     state['focus']=focus
     if job['role']=='A' and interpretation['focus'] and ((_choice(job,payload) or {}).get('next_focus') or {}).get('mechanism_ref') is not None and not diagnostics:
@@ -480,19 +493,31 @@ def _apply_science(root,job,payload,state,diagnostics):
 
 def interpret(root,job,payload,*,state=None):
     """One prospective interpretation; callers do not publish its mutations."""
-    state=copy.deepcopy(current_state(root,job,payload) if state is None else state)
+    state=current_state(root,job,payload) if state is None else state
+    if job.get('purpose')=='formal_review' or job.get('formal_review') or job.get('engineering_repair'):
+        return dict(state=copy.deepcopy(state),focus=None,allocation=None,diagnostics=[])
+    if (job.get('purpose')=='closeout' or job.get('final_report')) and job['role']!='A':
+        return dict(state=copy.deepcopy(state),focus=None,allocation=None,diagnostics=[])
+    return _interpret_from_facts(root,job,payload,policy=c.settings(root,job),state=state)
+
+
+def _interpret_from_facts(root,job,payload,*,policy,state):
+    """Interpret the owner's current state without reselecting its policy."""
+    if policy is None or state is None:
+        raise ValueError('Scientific interpretation requires its produced policy and state')
+    state=copy.deepcopy(state)
     if job.get('purpose')=='formal_review' or job.get('formal_review') or job.get('engineering_repair'):
         return dict(state=state,focus=None,allocation=None,diagnostics=[])
     if job.get('purpose')=='closeout' or job.get('final_report'):
         from .scientific_intent import resolve_discriminating_work
-        if assessment_context(root,job,state=state)['applicable']:
+        if _assessment_context_for_policy(root,job,policy=policy,state=state)['applicable']:
             state['order']['discriminating_work']=resolve_discriminating_work(state,job,payload)
         return dict(state=state,focus=None,allocation=None,diagnostics=[])
     diagnostics=[]
     field='search_plan' if job['role']=='H' else 'search_review' if job['role']=='A' else None
     if field is not None and payload.get(field) is not None and c.scientific_field(job,payload,field) is None:
         diagnostics.extend(row for row in c.scientific_diagnostics(job,payload) if row['subject']==field)
-    try:_apply_science(root,job,payload,state,diagnostics)
+    try:_apply_science(root,job,payload,state,diagnostics,policy=policy)
     except UnresolvedSearch as error:diagnostics.append(dict(code=error.code,subject=error.subject))
     return dict(state=state,focus=state['focus'],allocation=state['order']['allocation'],diagnostics=diagnostics)
 

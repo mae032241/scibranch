@@ -1091,35 +1091,77 @@ def accept_configuration_binding_from_base(root, step, binding, *, base):
 
 
 def publish_scientific_seal(root, step, *, prefix, role, result_ref, search_ref, search_delta=None):
+    """Independent publication entry, including its original settings producer."""
     from . import budget
     root = Path(root)
     with budget._ledger_writer(root) as base:
         state = recover(root, load(root, base=base))
-        job_key = f'job/{step:03d}'
-        job = state.row(job_key)
-        if job is None or job['role'] != role:
-            raise ValueError('Scientific seal has no exact accepted job')
-        if job['status'] == 'sealed':
-            if job['result_ref'] != result_ref or job['output_search_ref'] != search_ref:
-                raise ValueError('Scientific seal changed its accepted result')
-            return state
-        if (state.current_job is None or state.current_job['step'] != step
-                or state['current_native'] is not None or job['status'] != 'terminal'):
-            raise ValueError('Scientific seal no longer owns the accepted current slot')
-        event_ref = dict(path=str(Path(state['logical_root'])/'control-ledger'/f'{state["seq"]+1:06d}.json'))
-        previous_job = job
-        job = dict(previous_job, status='sealed', result_ref=result_ref, role_usage=state['role_usage'],
-            output_event_ref=event_ref,
-            output_search_ref=copy.deepcopy(search_ref), search_ref=copy.deepcopy(search_ref))
-        rows = {job_key: job}
-        updates = dict(current_job=job, prefix=prefix, search_ref=copy.deepcopy(search_ref))
-        if search_delta is not None:
-            updates['search'] = copy.deepcopy(search_delta['summary'])
-            rows.update(search_delta['rows'])
-        stamp = budget.clock_stamp()
-        index_updates = {key: dict(previous_seq=state['seq'],
-            previous=previous_job if key == job_key else state.row(key), current=value)
-            for key, value in rows.items()}
-        _, state = _append_prepared(root, state, kind='scientific_seal', stamp=stamp,
-            fields=dict(step=step, result_ref=result_ref), updates=updates, index_updates=index_updates)
+        job = _scientific_publication_job(state,step,job_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),
+            role=role,result_ref=result_ref,search_ref=search_ref)
+        return _publish_scientific_seal(root,step,state,job=job,prefix=prefix,
+            result_ref=result_ref,search_ref=search_ref,search_delta=search_delta)
+
+
+def publish_scientific_seal_from_facts(root, step, *, base, previous_prefix, job_ref,
+        prefix, role, result_ref, search_ref, search_delta):
+    """Reobserve mutable admission under the writer, retaining the produced base."""
+    from . import budget
+    if base is None:
+        raise ValueError('Scientific publication requires its produced base')
+    root = Path(root)
+    with budget._ledger_writer_from_base(root,base=base):
+        state = recover(root, load(root, base=base))
+        _validate_scientific_publication_owner(state,step,previous_prefix=previous_prefix,
+            prefix=prefix,job_ref=job_ref)
+        job = _scientific_publication_job(state,step,job_ref=job_ref,role=role,
+            result_ref=result_ref,search_ref=search_ref)
+        return _publish_scientific_seal(root,step,state,job=job,prefix=prefix,
+            result_ref=result_ref,search_ref=search_ref,search_delta=search_delta)
+
+
+def _validate_scientific_publication_owner(state, step, *, previous_prefix, prefix, job_ref):
+    current = state.current_job
+    if (state.prefix not in (previous_prefix,prefix)
+            or current is None or current.get('step')!=step or current.get('job_ref')!=job_ref):
+        raise ValueError('Accepted public publication lost its active view owner')
+
+
+def _scientific_publication_job(state, step, *, job_ref, role, result_ref, search_ref):
+    """Produce and admit the previous row before any public navigation writes."""
+    job = state.row(f'job/{step:03d}')
+    if job is None or job['role'] != role or job['job_ref'] != job_ref:
+        raise ValueError('Scientific seal has no exact accepted job')
+    if job['status'] == 'sealed':
+        if job['result_ref'] != result_ref or job['output_search_ref'] != search_ref:
+            raise ValueError('Scientific seal changed its accepted result')
+        return job
+    if (state.current_job is None or state.current_job['step'] != step
+            or state['current_native'] is not None or job['status'] != 'terminal'):
+        raise ValueError('Scientific seal no longer owns the accepted current slot')
+    return job
+
+
+def _publish_scientific_seal(root, step, state, *, job, prefix,
+        result_ref, search_ref, search_delta):
+    """Consume one admitted writer-owned head and its already produced job row."""
+    from . import budget
+    if job['status'] == 'sealed':
         return state
+    job_key = f'job/{step:03d}'
+    event_ref = dict(path=str(Path(state['logical_root'])/'control-ledger'/f'{state["seq"]+1:06d}.json'))
+    previous_job = job
+    job = dict(previous_job, status='sealed', result_ref=result_ref, role_usage=state['role_usage'],
+        output_event_ref=event_ref,
+        output_search_ref=copy.deepcopy(search_ref), search_ref=copy.deepcopy(search_ref))
+    rows = {job_key: job}
+    updates = dict(current_job=job, prefix=prefix, search_ref=copy.deepcopy(search_ref))
+    if search_delta is not None:
+        updates['search'] = copy.deepcopy(search_delta['summary'])
+        rows.update(search_delta['rows'])
+    stamp = budget.clock_stamp()
+    index_updates = {key: dict(previous_seq=state['seq'],
+        previous=previous_job if key == job_key else state.row(key), current=value)
+        for key, value in rows.items()}
+    _, state = _append_prepared(root, state, kind='scientific_seal', stamp=stamp,
+        fields=dict(step=step, result_ref=result_ref), updates=updates, index_updates=index_updates)
+    return state

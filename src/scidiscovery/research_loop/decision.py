@@ -37,11 +37,10 @@ def _basis(root,job,*,sealed=False):
     return correction._proofs(root,job,{'verdict':'progress'},sealed=sealed)
 
 
-def _requests(root,job,action):
+def _requests(root,job,action,*,head):
     """Compare only relevant A originals in this declared accepted cut."""
     prefix=accepted_prefix.for_job(job)
     directory=Path(root)/accepted_prefix.MEMBERS/accepted_prefix._view_key(prefix)/'ordinals'
-    head=accepted_budget.read(root)
     for ordinal in range(1,prefix['count']+1):
         link=c.read(c.regular(directory/f'{ordinal:09d}.json'))
         metadata=accepted_budget.search_row(root,accepted_search.key('node',link['step']),head=head)
@@ -78,12 +77,24 @@ def _completed(job, payload, sources):
 
 
 def assess(root, job, payload, *, focus=None):
-    if c.settings(root,job).get('decision_contract_version')!=1 or job['role']!='A' or job.get('purpose') in {'closeout','formal_review'}:
+    policy=c.settings(root,job)
+    if policy.get('decision_contract_version')!=1 or job['role']!='A' or job.get('purpose') in {'closeout','formal_review'}:
         return []
     if payload['next_action'] not in ACTIONS:return []
-    key,basis=_key(job,payload,focus),_basis(root,job)
+    return _assess_from_facts(root,job,payload,policy=policy,
+        interpretation=dict(focus=focus),head=accepted_budget.read(root))
+
+
+def _assess_from_facts(root, job, payload, *, policy, interpretation, head):
+    """Consume this attempt's interpretation and accepted comparison head."""
+    if policy is None or interpretation is None or head is None:
+        raise ValueError('Decision assessment requires its produced policy, interpretation and accepted head')
+    if policy.get('decision_contract_version')!=1 or job['role']!='A' or job.get('purpose') in {'closeout','formal_review'}:
+        return []
+    if payload['next_action'] not in ACTIONS:return []
+    key,basis=_key(job,payload,interpretation['focus']),_basis(root,job)
     prefix=accepted_prefix.for_job(job)
-    for original,prior,seal,_ in _requests(root,job,payload['next_action']):
+    for original,prior,seal,_ in _requests(root,job,payload['next_action'],head=head):
         control=seal.get('control_outcome',{})
         if (original['role']!='A' or original.get('purpose') in {'closeout','formal_review'}
                 or prior.get('next_action') not in ACTIONS or control.get('decision_status')!='applied'

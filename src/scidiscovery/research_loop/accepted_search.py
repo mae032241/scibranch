@@ -160,6 +160,15 @@ def _record_terminal(delta,fact):
 
 
 def prepare_node(root, job, payload, seal, *, summary, lookup, observation, usage_lookup=None):
+    """Independent entry: produce this node's policy and exact original owner."""
+    from . import contracts as c
+    return prepare_node_from_facts(root,job,payload,seal,summary=summary,lookup=lookup,
+        observation=observation,usage_lookup=usage_lookup,policy=c.settings(root,job),
+        origin=_origin(root,job['step']))
+
+
+def prepare_node_from_facts(root, job, payload, seal, *, summary, lookup, observation,
+        policy, origin, usage_lookup=None):
     """Copy the small breadth table and apply this accepted original's facts.
 
     ``lookup`` must read at the same canonical accepted head as ``summary``. The
@@ -167,14 +176,16 @@ def prepare_node(root, job, payload, seal, *, summary, lookup, observation, usag
     owns duplicate-event and interrupted-publication reconciliation.
     """
     from . import contracts as c, history
+    if policy is None or origin is None:
+        raise ValueError('Scientific publication requires its produced policy and origin')
+    origin=copy.deepcopy(origin)
     delta = _Delta(summary, lookup)
     current = delta.summary
     step, role = job['step'], job['role']
     if delta.get('node', step) is not None:
         raise ValueError('Scientific original is already accepted at this head')
-    settings=c.settings(root, job)
-    limits = settings.get('search_policy') or {}
-    threshold=(settings.get('portfolio_policy') or {}).get('review_after_cycles')
+    limits = policy.get('search_policy') or {}
+    threshold=(policy.get('portfolio_policy') or {}).get('review_after_cycles')
     prior_threshold=current['portfolio'].get('review_after_cycles')
     if current['node_count'] and prior_threshold!=threshold:
         raise ValueError('Accepted portfolio policy cannot change without an explicit rebuild')
@@ -194,7 +205,7 @@ def prepare_node(root, job, payload, seal, *, summary, lookup, observation, usag
         direct_steps=[int(row['path'].split('/')[2]) for row in job.get('direct_refs',[])],
         pending_executions=copy.deepcopy(seal.get('pending_executions')),
         pending_calls=[], pending_namespace_unavailable=False,
-        origin_identity=_origin(root,step))
+        origin_identity=copy.deepcopy(origin))
     delta.put('node', step, node)
     request=current['pending_work_response']
     if request and step==request['source_a']+1:
@@ -222,7 +233,6 @@ def prepare_node(root, job, payload, seal, *, summary, lookup, observation, usag
         if role == 'H':
             current['current_h'] = step
             plan = payload.get('search_plan') or {}
-            origin=_origin(root,step)
             for index, authored in enumerate(plan.get('commitments', []), 1):
                 ref = authored.get('existing_ref') or f'h{step:03d}.m{index}'
                 item = delta.get('mechanism', ref)
@@ -305,7 +315,7 @@ def prepare_node(root, job, payload, seal, *, summary, lookup, observation, usag
         if observation.get('actual_submission') is not None:
             current['actual_submission'] = dict(copy.deepcopy(observation['actual_submission']), observed_at=step)
         managed=observation.get('managed_calls',[])
-        call_origin=_origin(root,step) if managed else None
+        call_origin=origin if managed else None
         for call_index,call in enumerate(managed):
             identity = f'{step}:{call["call_id"]}'
             if delta.get('call', identity) is not None:
@@ -341,7 +351,7 @@ def prepare_node(root, job, payload, seal, *, summary, lookup, observation, usag
         from . import candidate_nominations
         declaration=candidate_nominations._preview(c.scientific_field(job,payload,'candidate_nominations'))
         if declaration is not None:
-            nominations=current['table']['nominations'];origin=_origin(root,step)
+            nominations=current['table']['nominations']
             nominations.update(source_step=step,origin_identity=origin,
                 latest_extras=copy.deepcopy([row for row in declaration['extras'] if isinstance(row.get('candidate'),str)]))
             rows=[(kind,row) for kind in ('representatives','gaps') for row in declaration[kind]

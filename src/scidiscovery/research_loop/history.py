@@ -290,7 +290,9 @@ def _snapshot(proof):
 def _inventory_policy(root,job,inventory):
     if inventory.root!=Path(root) or inventory.job!=job:
         raise ValueError('Current inventory belongs to another task or attempt')
-    return inventory.policy if inventory.policy is not None else c.settings(root,job)
+    if inventory.policy is None:
+        raise ValueError('Current inventory requires its produced policy')
+    return inventory.policy
 
 
 def _job_storage(function):
@@ -1675,9 +1677,15 @@ def refresh(root, before_step):
 
 
 def _refresh(root, before_step):
-    """Update disposable projections after every seal, including a terminal A."""
+    """Independent entry: produce the current accepted projection source."""
     from . import accepted_budget
-    state=accepted_budget.read(root)
+    return refresh_from_state(root,before_step,state=accepted_budget.read(root))
+
+
+def refresh_from_state(root, before_step, *, state):
+    """Publish disposable summaries from the writer's returned accepted state."""
+    if state is None:
+        raise ValueError('History publication requires its produced accepted state')
     summary=state['search']
     overview=dict(coverage=dict(status=summary['coverage'],note='Accepted facts; read public node navigation for complete original science.'),
         candidate_count=summary['candidate_count'],current_candidate=summary['current_candidate'],

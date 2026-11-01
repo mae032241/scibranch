@@ -1005,6 +1005,7 @@ class CurrentInventory:
     caller_correction: dict | None = None
     observation_document: dict | None = None
     observation_inputs: dict | None = None
+    native_meter: dict | None = None
 
 
 def accept_current_inventory(root: Path, step: int):
@@ -1044,7 +1045,7 @@ def accept_current_inventory(root: Path, step: int):
             and outcome.get('raw_ref')==dict(path=str(raw),size_bytes=regular(pending).stat().st_size)):
         os.link(regular(pending),raw,follow_symlinks=False)
     inventory=CurrentInventory(root,job,record,len(chain)-1,[],{},policy=policy,
-        native_intent=intent,native_outcome=outcome,base=base,head=head,task_ref=task_ref,
+        native_intent=intent,native_outcome=outcome,native_meter=meter,base=base,head=head,task_ref=task_ref,
         configuration_revision=job.get('configuration_revision'),chain=chain,intents=intents,
         process_receipts=receipts)
     calls=(history._observe_managed_calls_for_inventory(root,job,inventory=inventory)
@@ -1076,7 +1077,8 @@ def accept_current_inventory(root: Path, step: int):
         if authored is None:inventory.science_error=error
     if inventory.payload is not None:
         from . import search
-        inventory.interpretation=(search.interpret(root,job,inventory.payload)
+        inventory.interpretation=(search._interpret_from_facts(root,job,inventory.payload,
+            policy=policy,state=search.current_state(root,job,inventory.payload))
             if policy.get('search_policy') is not None and not job.get('formal_review') and not job.get('final_report')
             else dict(focus=None,allocation=None,diagnostics=[]))
     if len(chain)>1 and outcome.get('returncode')==0 and not outcome.get('stop_reason'):
@@ -2071,7 +2073,9 @@ def _validate_inputs_from_facts(root,work,job,*,base,policy,head):
         engineering.validate_job(root, job)
         return document
     from . import budget,accepted_budget,accepted_prefix
-    report = budget.validate_final_report_inputs(root, job)
+    events=budget._events_from_state(head)[0]
+    report = budget._validate_final_report_inputs_from_facts(root,job,policy=policy,
+        events=events)
     accepted=(head.current_job if head.current_job is not None and head.current_job['step']==job['step']
         else head.row(f'job/{job["step"]:03d}'))
     if accepted is None or accepted['prefix']!=accepted_prefix.for_job(job):
@@ -2080,7 +2084,7 @@ def _validate_inputs_from_facts(root,work,job,*,base,policy,head):
         raise ValueError('Scientific breadth input differs from its accepted snapshot')
     if report is not None and 'search' in job:
         raise ValueError('Final report input history changed its exact sealed prefix')
-    resumed = budget.normal_resume(root,job['step'])
+    resumed = budget._normal_resume_from_facts(root,job['step'],events=events)
     expected_resume = (budget._event_ref(root,resumed) if resumed is not None and job.get('purpose') in (None,'formal_review') and not job.get('final_report') else None)
     if job.get('normal_resume') != expected_resume:
         raise ValueError('Scientific task changed its exact normal resume boundary')
@@ -2240,9 +2244,12 @@ def _seal_result(root,step,*,inventory):
         raise ValueError('Current inventory requires its produced policy')
     policy=inventory.policy
     from . import worker_delivery
-    native_raw_ref=_native_output_identity(root,step,intent,outcome,job=job)
     from . import budget
-    final = budget.final_a_return(root, job, intent)
+    final = budget._final_a_return_from_facts(root,job,intent,policy=policy,
+        events=budget._events_from_state(inventory.head)[0])
+    budget._validate_final_a_receipt_from_facts(intent,outcome,
+        policy=policy,meter=inventory.native_meter,accepted=final)
+    native_raw_ref=outcome.get('raw_ref')
     if (type(outcome.get('returncode')) is not int or outcome['returncode'] != 0
             or outcome.get('stop_reason')
             or budget.final_a_usage_unknown(final, outcome['usage']) and not budget.native_completion_known(outcome, policy)):
@@ -2367,7 +2374,7 @@ def _seal_result(root,step,*,inventory):
     from . import accepted_prefix
     pending_public=accepted_prefix.prepare_node(root,job,value,seal,inventory=inventory)
     write(record / 'result-identity.json', seal)
-    accepted_prefix.commit_node(root,pending_public)
+    accepted_prefix.commit_node_from_facts(root,pending_public,base=inventory.base,head=inventory.head)
     return projected
 
 

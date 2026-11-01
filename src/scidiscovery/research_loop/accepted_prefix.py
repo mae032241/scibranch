@@ -277,7 +277,9 @@ def prepare_node(root, job, payload, seal, *, inventory):
     """Prepare this node's mechanical publication before its acceptance marker."""
     from . import accepted_budget, accepted_search, contracts as c, originals,history,candidate_refs
     root=Path(root)
-    state=accepted_budget.read(root)
+    if inventory.base is None or inventory.policy is None or inventory.head is None:
+        raise ValueError('Scientific publication requires its produced base, policy and head')
+    state=inventory.head
     prefix=state['prefix']
     slot=state.get('current_job')
     if (not isinstance(slot,dict) or slot.get('step')!=job['step']
@@ -286,7 +288,9 @@ def prepare_node(root, job, payload, seal, *, inventory):
         raise ValueError('Public publication requires its exact admitted scientific owner')
     if for_job(job)!=prefix:
         raise ValueError('Scientific output lost its admitted accepted prefix')
-    origin=prefix['branch']
+    origin=dict(goal_id=inventory.base['goal_id'],settings_ref=dict(state['settings_ref']))
+    if prefix['branch']!=origin:
+        raise ValueError('Scientific publication lost its local original identity')
     key=originals.identity_key(origin)
     base=f'nodes/{key}/{job["step"]:03d}'
     prior=navigation(root,prefix)
@@ -295,10 +299,10 @@ def prepare_node(root, job, payload, seal, *, inventory):
         limitations=payload.get('limitations',[])[:4],original=f'inputs/history/{base}/science.json')
     recent.append(item)
     observation=inventory.observation_document if seal.get('observations') else None
-    search_delta=accepted_search.prepare_node(root,job,payload,seal,summary=state['search'],
+    search_delta=accepted_search.prepare_node_from_facts(root,job,payload,seal,summary=state['search'],
         lookup=lambda name:accepted_budget.search_row(root,name,head=state),
         usage_lookup=lambda number:accepted_budget.native_usage_row(root,number,head=state),
-        observation=observation)
+        observation=observation,policy=inventory.policy,origin=origin)
     snapshot=root/'native-evidence'/f'{job["step"]:03d}'/'breadth-snapshot.json'
     _write_once(snapshot,search_delta['summary'])
     snapshot_ref=dict(origin_identity=origin,path=snapshot.relative_to(root).as_posix(),size_bytes=snapshot.stat().st_size)
@@ -357,58 +361,74 @@ def prepare_node(root, job, payload, seal, *, inventory):
 
 
 def commit_node(root, pending):
-    """Commit only the prepared current delta after the durable science marker."""
-    from . import contracts as c, accepted_budget
-    root=Path(root);step=pending['step']
+    """Independent entry: observe the current owner before committing recovery."""
+    from . import accepted_budget
     state=accepted_budget.read(root)
+    return commit_node_from_facts(root,pending,base=state.base,head=state)
+
+
+def commit_node_from_facts(root, pending, *, base, head):
+    """Admit and publish the prepared delta under the same fresh ledger writer."""
+    from . import contracts as c, accepted_budget, budget
+    if base is None or head is None:
+        raise ValueError('Scientific publication requires its produced base and head')
+    root=Path(root);step=pending['step'];state=head
+    slot=state.get('current_job')
     if (state['prefix'] not in (pending['previous'],pending['prefix'])
-            or state.get('current_job',{}).get('step')!=step):
+            or not isinstance(slot,dict) or slot.get('step')!=step
+            or slot.get('job_ref')!=pending['job_ref']):
         raise ValueError('Accepted public publication lost its active view owner')
-    marker=c.regular(root/'native-evidence'/f'{step:03d}'/'result-identity.json')
-    seal=c.read(marker)
-    if seal['result_ref']!=pending['result_ref']:
-        raise ValueError('Pending public node differs from its accepted scientific marker')
-    prefix=pending['prefix'];member_value=pending['member']
-    directory=visibility(root,prefix)/Path(prefix['tip']['navigation']['path']).parent
-    directory.mkdir(parents=True,exist_ok=True)
-    result=c.regular(Path(seal['result_ref']['path']))
-    result.chmod(0o400)
-    science=directory/'science.json'
-    if science.exists():
-        if not science.samefile(result):raise ValueError('Accepted public science alias changed')
-    else:os.link(result,science,follow_symlinks=False)
-    original=c.regular(Path(seal['raw_ref']['path']))
-    raw_alias=directory/'scientific-original.json'
-    if raw_alias.exists():
-        if not raw_alias.samefile(original):raise ValueError('Accepted public scientific original changed')
-    else:os.link(original,raw_alias,follow_symlinks=False)
-    _write_once(directory/'index.json',pending['node'])
-    for public,canonical in pending['candidate_aliases'].items():
-        _write_once(_key_file(root/MEMBERS/_view_key(prefix)/'candidate-aliases',public),dict(candidate_id=canonical))
-    for identity,value in pending['implementation_candidates'].items():
-        c.write(_key_file(root/MEMBERS/_view_key(prefix)/'implementation-candidates',identity),value)
-    for key,row in pending['search_delta']['rows'].items():
-        parts=key.split('/',2)
-        if len(parts)!=3 or parts[1] not in {'candidate','work'}:continue
-        public=(row.get('public_reference') if parts[1]=='candidate' else None) or parts[2]
-        value=_public_entity(parts[1],row)
-        c.write(_key_file(visibility(root,prefix)/'entities'/parts[1],public),value)
-    references={row['observation']['id']:row['public_reference']
-        for name,row in pending['search_delta']['rows'].items()
-        if name.startswith('search/candidate/') and row.get('public_reference') is not None}
-    _publish_breadth(visibility(root,prefix),pending['search_delta']['summary'],candidate_references=references)
-    committed=accepted_budget.publish_scientific_seal(root,step,prefix=prefix,role=pending['node']['role'],
-        result_ref=seal['result_ref'],search_delta=pending['search_delta'],search_ref=pending['search_ref'])
-    accepted=committed.row(f'job/{step:03d}')
-    member_value=dict(member_value,scientific_event=accepted['output_event_ref'])
-    _write_once(_member_path(root,prefix,member_value['origin_identity'],step),member_value)
-    _write_once(root/MEMBERS/_view_key(prefix)/'logical'/f'{step:03d}.json',dict(origin_identity=member_value['origin_identity']))
-    _write_once(root/MEMBERS/_view_key(prefix)/'ordinals'/f'{member_value["ordinal"]:09d}.json',
-        dict(origin_identity=member_value['origin_identity'],step=step))
-    from . import history
-    history.refresh(root,step+1)
-    (root/PENDING).unlink(missing_ok=True)
-    return prefix
+    with budget._ledger_writer_from_base(root,base=base):
+        state=accepted_budget.recover(root,accepted_budget.load(root,base=base))
+        prefix=pending['prefix'];member_value=pending['member']
+        accepted_budget._validate_scientific_publication_owner(state,step,
+            previous_prefix=pending['previous'],prefix=prefix,job_ref=pending['job_ref'])
+        job=accepted_budget._scientific_publication_job(state,step,job_ref=pending['job_ref'],
+            role=pending['node']['role'],result_ref=pending['result_ref'],search_ref=pending['search_ref'])
+        marker=c.regular(root/'native-evidence'/f'{step:03d}'/'result-identity.json')
+        seal=c.read(marker)
+        if seal['result_ref']!=pending['result_ref']:
+            raise ValueError('Pending public node differs from its accepted scientific marker')
+        directory=visibility(root,prefix)/Path(prefix['tip']['navigation']['path']).parent
+        directory.mkdir(parents=True,exist_ok=True)
+        result=c.regular(Path(seal['result_ref']['path']))
+        result.chmod(0o400)
+        science=directory/'science.json'
+        if science.exists():
+            if not science.samefile(result):raise ValueError('Accepted public science alias changed')
+        else:os.link(result,science,follow_symlinks=False)
+        original=c.regular(Path(seal['raw_ref']['path']))
+        raw_alias=directory/'scientific-original.json'
+        if raw_alias.exists():
+            if not raw_alias.samefile(original):raise ValueError('Accepted public scientific original changed')
+        else:os.link(original,raw_alias,follow_symlinks=False)
+        _write_once(directory/'index.json',pending['node'])
+        for public,canonical in pending['candidate_aliases'].items():
+            _write_once(_key_file(root/MEMBERS/_view_key(prefix)/'candidate-aliases',public),dict(candidate_id=canonical))
+        for identity,value in pending['implementation_candidates'].items():
+            c.write(_key_file(root/MEMBERS/_view_key(prefix)/'implementation-candidates',identity),value)
+        for key,row in pending['search_delta']['rows'].items():
+            parts=key.split('/',2)
+            if len(parts)!=3 or parts[1] not in {'candidate','work'}:continue
+            public=(row.get('public_reference') if parts[1]=='candidate' else None) or parts[2]
+            value=_public_entity(parts[1],row)
+            c.write(_key_file(visibility(root,prefix)/'entities'/parts[1],public),value)
+        references={row['observation']['id']:row['public_reference']
+            for name,row in pending['search_delta']['rows'].items()
+            if name.startswith('search/candidate/') and row.get('public_reference') is not None}
+        _publish_breadth(visibility(root,prefix),pending['search_delta']['summary'],candidate_references=references)
+        committed=accepted_budget._publish_scientific_seal(root,step,state,job=job,prefix=prefix,
+            result_ref=seal['result_ref'],search_delta=pending['search_delta'],search_ref=pending['search_ref'])
+        accepted=committed.row(f'job/{step:03d}')
+        member_value=dict(member_value,scientific_event=accepted['output_event_ref'])
+        _write_once(_member_path(root,prefix,member_value['origin_identity'],step),member_value)
+        _write_once(root/MEMBERS/_view_key(prefix)/'logical'/f'{step:03d}.json',dict(origin_identity=member_value['origin_identity']))
+        _write_once(root/MEMBERS/_view_key(prefix)/'ordinals'/f'{member_value["ordinal"]:09d}.json',
+            dict(origin_identity=member_value['origin_identity'],step=step))
+        from . import history
+        history.refresh_from_state(root,step+1,state=committed)
+        (root/PENDING).unlink(missing_ok=True)
+        return prefix
 
 
 def reconcile(root):

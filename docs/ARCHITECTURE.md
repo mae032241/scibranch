@@ -348,7 +348,11 @@ necessary acceptance once, then passes existing values or original references
 explicitly to internal consumers. Consumers reuse those facts without reopening
 the same records or repeating acceptance. Mutable control state is observed at
 the actual writer or admission boundary; mutations return the new state for
-subsequent consumers. Each migration retains an explicit implementation scope;
+subsequent consumers. Every new node freshly selects and binds its effective
+configuration; retained nodes and continuations keep their exact bound revision.
+Direct parent jobs, seals and authored responses are produced once for the
+operation, with authored bytes kept separate from control and public projections.
+Each migration retains an explicit implementation scope;
 other discovered violations are recorded for separate changes.
 Source restrictions propagate saved input and output facts; passive provenance
 reads do not reopen producer execution or ancestry gates. Missing restriction
