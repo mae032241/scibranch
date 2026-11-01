@@ -76,7 +76,7 @@ def validate(root,refs,*,originals=True):
                 or row.get('mechanism_binding')!=matches[0].get('mechanism_binding')
                 or row['status'] not in {'known_success','known_failed','not_submitted'}):
             raise history.ObserverIntegrityError('Execution recovery changed original reservation')
-        history.validate_managed(root,job,[row],verify_files=False);values.append(value)
+        history._validate_managed(root,job,[row],verify_files=False);values.append(value)
     return values
 
 
@@ -180,7 +180,7 @@ def _validate_event(root,ref,value,chains,*,originals=True,sources=None,pending=
         if allocation['call_id']!=call or allocation['binding']['scope']!=value['scope']:
             raise history.ObserverIntegrityError('Execution recovery allocation changed')
         if row is not None:
-            if source is None:history.validate_managed(root,job,[row],context=context,verify_files=False)
+            if source is None:history._validate_managed(root,job,[row],context=context,verify_files=False)
             else:history.validate_managed_original(source,job,[row],controls_only=True)
             if row.get('mechanism_binding')!=allocation['binding'].get('mechanism_binding'):
                 raise history.ObserverIntegrityError('Recovered execution changed original scientific opportunity')
@@ -250,11 +250,11 @@ def _validate_event(root,ref,value,chains,*,originals=True,sources=None,pending=
 
 def append(root,base,phase,*,row=None,query=None,native_state=None,submission=None,context=None):
     """Only actual fact changes append; caller owns the controller writer."""
-    from . import accepted_budget,accepted_search,originals
+    from . import accepted_budget
     root=Path(root);state=accepted_budget.read(root)
     indexed=state.row(f'execution-recovery/{base["source_step"]:03d}/{base["call_id"]}')
     previous=None if indexed is None else indexed['ref']
-    prior=None if previous is None else c.read(c.regular(root/previous['path']))
+    prior=None if previous is None else state.control_file(previous['path'])
     if prior is not None and all(prior.get(key)==item for key,item in dict(phase=phase,row=row,native_state=native_state,submission=submission).items()):
         return previous
     directory=root/DIRECTORY/f'{base["source_step"]:03d}'/base['call_id']
@@ -268,28 +268,57 @@ def append(root,base,phase,*,row=None,query=None,native_state=None,submission=No
         chains[(base['source_step'],base['call_id'])]=dict(ref=previous,number=number-1,phase=prior['phase'],value=prior)
     _validate_event(root,ref,value,chains,originals=False,context=context)
     if context is not None:context.remaining_seconds()
-    c.write(path,value);path.chmod(0o400)
-    delta=None
-    if row is not None and accepted_budget.search_row(root,accepted_search.key('call',f'{base["source_step"]}:{base["call_id"]}'),head=state) is not None:
-        delta=accepted_search.prepare_recovery(summary=state['search'],lookup=lambda key:accepted_budget.search_row(root,key,head=state),
-            step=base['source_step'],call_id=base['call_id'],resolved=row,
-            recovery_ref=dict(ref,origin_identity=originals.local_identity(root)))
-    search_ref=None
-    if delta is not None:
-        snapshot=directory/'snapshots'/f'{number:06d}.json'
-        from . import accepted_prefix
-        accepted_prefix._write_once(snapshot,delta['summary'])
-        search_ref=dict(origin_identity=originals.local_identity(root),
-            path=snapshot.relative_to(root).as_posix(),size_bytes=snapshot.stat().st_size)
-    accepted_budget.publish_recovery(root,step=base['source_step'],call_id=base['call_id'],
-        recovery_ref=ref,search_delta=delta,search_ref=search_ref)
+    _publish_fact(root,state,base['source_step'],base['call_id'],ref,value)
     return ref
 
 
-def latest(root,step,call_id):
+def _publish_fact(root,state,step,call_id,ref,value):
+    """Accept the same-call original, exact point row and unfinished facts together."""
+    from . import accepted_budget,accepted_search,accepted_prefix,originals
+    path=Path(root)/ref['path']
+    snapshot=path.parent/'snapshots'/path.name
+    if snapshot.exists():
+        state=accepted_budget.read(root)
+        indexed=state.row(f'execution-recovery/{step:03d}/{call_id}')
+        if indexed is not None and indexed['ref']==ref:
+            if state.control_file(ref['path'])!=value:
+                raise ValueError('Accepted execution recovery original changed')
+            return
+        prior=None if indexed is None else Path(root)/indexed['ref']['path']
+        # Only an unaccepted next slot is a discardable derived draft. The
+        # current point includes the one ledger tail; older slots stay frozen.
+        if prior is None or (prior.parent==path.parent and prior.stem.isdecimal()
+                and path.stem.isdecimal() and int(path.stem)==int(prior.stem)+1):
+            snapshot.unlink()
+        else:
+            raise ValueError('Recovery snapshot is outside the next unaccepted same-call slot')
+    delta=accepted_search.prepare_recovery(summary=state['search'],
+        lookup=lambda key:accepted_budget.search_row(root,key,head=state),
+        step=step,call_id=call_id,resolved=value.get('row'),
+        recovery_ref=dict(ref,origin_identity=originals.local_identity(root)))
+    accepted_prefix._write_once(snapshot,delta['summary'])
+    search_ref=dict(origin_identity=originals.local_identity(root),
+        path=snapshot.relative_to(root).as_posix(),size_bytes=snapshot.stat().st_size)
+    accepted_budget.publish_recovery(root,step=step,call_id=call_id,
+        recovery_ref=ref,search_delta=delta,search_ref=search_ref,
+        control_files={ref['path']:value})
+
+
+def latest(root,step,call_id,*,head=None):
     from . import accepted_budget
-    value=accepted_budget.read(root).row(f'execution-recovery/{step:03d}/{call_id}')
-    return None if value is None else c.read(c.regular(Path(root)/value['ref']['path']))
+    state=accepted_budget.read(root) if head is None else head
+    value=state.row(f'execution-recovery/{step:03d}/{call_id}')
+    if value is None:return None
+    result=state.control_file(value['ref']['path'])
+    if result is None:raise history.ObserverIntegrityError('Accepted execution recovery original is missing')
+    if (result.get('source_step')!=step
+            or result.get('call_id',(result.get('row') or {}).get('call_id'))!=call_id):
+        raise history.ObserverIntegrityError('Accepted execution recovery identity changed')
+    if result.get('version')==2:return result
+    # create() retains its validated terminal original without V2 dispatch
+    # fields. Give its consumers the same phase view without rewriting it.
+    return dict(result,phase='not_submitted' if result['row']['status']=='not_submitted' else 'terminal',
+        native_state=None)
 
 
 def call_view(root,sources,refs,*,originals=True,validated=None,original_rows=None):
@@ -384,21 +413,42 @@ def sealed_pending_rows(root,sources):
     return result
 
 
-def _current_pending_sources(root):
-    # Clock/new-call admission explicitly use current seals; frozen science never does.
-    result=[]
-    for path in sorted((Path(root)/'native-evidence').glob('*/result-identity.json')):
-        seal=c.read(c.regular(path,limit=None))
-        if seal.get('pending_executions') is not None:
-            result.append((dict(step=int(path.parent.name)),None,
-                {key:seal[key] for key in ('job_ref','pending_executions','observations') if key in seal},None))
-    return result
+def _unfinished(root,head):
+    """Consume only unfinished accepted facts and their exact recovery originals."""
+    from . import originals
+    pending={}
+    for name,fact in head['search']['current_facts'].items():
+        if name.startswith('search/node/'):
+            if fact['pending_namespace_unavailable']:
+                raise history.ObserverIntegrityError('Original pending namespace was unavailable; no clean execution state can be proved')
+            for item in fact['pending_calls']:
+                pending[(fact['step'],item['call_id'])]=dict(origin=fact['origin_identity'],
+                    recovery_ref=item['recovery_ref'],row=None)
+    for name,fact in head['search']['current_facts'].items():
+        if name.startswith('search/call/') and fact['status']=='unknown':
+            key=(fact['source_step'],fact['call_id'])
+            existing=pending.get(key)
+            if existing is not None and existing['origin']!=fact['origin_identity']:
+                raise history.ObserverIntegrityError('Unfinished execution changed its original issuer')
+            pending[key]=dict(origin=fact['origin_identity'],recovery_ref=fact['recovery_ref'],row=fact)
+    for (step,call),fact in pending.items():
+        value=None
+        if fact['origin']==head.prefix['branch']:
+            value=latest(root,step,call,head=head)
+        if value is None and fact['recovery_ref'] is not None:
+            ref=fact['recovery_ref']
+            owner=originals.for_origin(root,ref.get('origin_identity',fact['origin']))
+            value=c.read(originals.resolve_ref(owner,ref))
+            if (value.get('source_step')!=step
+                    or value.get('call_id',(value.get('row') or {}).get('call_id'))!=call):
+                raise history.ObserverIntegrityError('Unfinished recovery escaped its original call')
+        yield (step,call), (dict(row=fact['row'],native_state=None) if value is None else value)
 
 
 def pending(root,*,unknown_only=False,ignore=None):
     from scidiscovery.operations.execution import PENDING_EXECUTION_STATES
-    refs=prefix(root,budget.historical_step_limit(root)+1)
-    for key,value in call_view(root,_current_pending_sources(root),refs,originals=False).items():
+    from . import accepted_budget
+    for key,value in _unfinished(root,accepted_budget.read(root)):
         if key==ignore:continue
         row=value.get('row')
         if row is None or row['status']=='unknown':
@@ -424,6 +474,11 @@ def create(root,step):
         directory=e.Records(config).directory(row['call_id'])
         if path.exists():
             ref=dict(path=path.relative_to(root).as_posix());validate(root,[ref]);created.append(ref)
+            from . import accepted_budget
+            state=accepted_budget.read(root)
+            indexed=state.row(f'execution-recovery/{step:03d}/{row["call_id"]}')
+            if indexed is None or indexed['ref']!=ref:
+                _publish_fact(root,state,step,row['call_id'],ref,c.read(path))
             observed=directory/'execution-observation.json'
             if observed.exists():e._cleanup_terminal_code_export(config,row['call_id'],c.read(observed))
             continue
@@ -436,8 +491,13 @@ def create(root,step):
         current=[item for item in history.managed_calls(root,job) if item['call_id']==row['call_id']]
         if len(current)!=1 or current[0]['status']=='unknown':raise ValueError('Original recovery terminal is unverified')
         value=dict(source_step=step,seal_ref=sha,old_row=row,row=current[0])
-        c.write(path,value);path.chmod(0o400)
-        ref=dict(path=path.relative_to(root).as_posix());validate(root,[ref]);created.append(ref)
+        ref=dict(path=path.relative_to(root).as_posix())
+        c.write(path,value)
+        path.chmod(0o400)
+        validate(root,[ref])
+        from . import accepted_budget
+        _publish_fact(root,accepted_budget.read(root),step,row['call_id'],ref,value)
+        created.append(ref)
         observed=directory/'execution-observation.json'
         if observed.exists():e._cleanup_terminal_code_export(config,row['call_id'],c.read(observed))
     return dict(status='execution_recovered' if created and not unresolved else 'execution_recovery_pending',

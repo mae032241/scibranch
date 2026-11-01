@@ -1,7 +1,7 @@
 """Scientific A requests and exact completed-request replay; no value classifier."""
 from pathlib import Path
 
-from . import accepted_prefix,contracts as c,correction,history
+from . import accepted_budget,accepted_prefix,accepted_search,contracts as c,correction,history
 
 ACTIONS = {'continue_w': 'W', 'revise_h': 'H', 'extract': 'E'}
 
@@ -37,23 +37,32 @@ def _basis(root,job,*,sealed=False):
     return correction._proofs(root,job,{'verdict':'progress'},sealed=sealed)
 
 
-def _sources(root,job):
-    """Read the declared accepted cut for this existing historical gate only.
-
-    This remains an explicit linear historical comparison, not a qualification
-    replay. This A decision gate remains linear; E history construction and the
-    accepted summary do not call it.
-    """
+def _requests(root,job,action):
+    """Compare only relevant A originals in this declared accepted cut."""
     prefix=accepted_prefix.for_job(job)
     directory=Path(root)/accepted_prefix.MEMBERS/accepted_prefix._view_key(prefix)/'ordinals'
-    result={}
+    head=accepted_budget.read(root)
     for ordinal in range(1,prefix['count']+1):
         link=c.read(c.regular(directory/f'{ordinal:09d}.json'))
+        metadata=accepted_budget.search_row(root,accepted_search.key('node',link['step']),head=head)
+        if metadata is None or metadata['origin_identity']!=link['origin_identity']:
+            raise ValueError('Decision request scientific prefix identity changed')
+        if metadata['role']!='A' or metadata.get('next_action')!=action:continue
         member=accepted_prefix.member(root,prefix,link['step'],origin=link['origin_identity'])
         row=history._source(root,link['step'])
         if row[3]!=member['seal_ref']:raise ValueError('Decision request scientific prefix identity changed')
-        result[link['step']]=row
-    return result
+        yield row
+
+
+def _response(root,prefix,job,payload):
+    step=job['step']+1
+    if step>prefix['cutoff']:return False
+    try:member=accepted_prefix.member(root,prefix,step)
+    except FileNotFoundError:return False
+    response=history._source(root,step)
+    if response[3]!=member['seal_ref']:
+        raise ValueError('Decision response scientific prefix identity changed')
+    return _completed(job,payload,{step:response})
 
 
 def _completed(job, payload, sources):
@@ -73,29 +82,31 @@ def assess(root, job, payload, *, focus=None):
         return []
     if payload['next_action'] not in ACTIONS:return []
     key,basis=_key(job,payload,focus),_basis(root,job)
-    sources=_sources(root,job)
-    for original,prior,seal,_ in sources.values():
+    prefix=accepted_prefix.for_job(job)
+    for original,prior,seal,_ in _requests(root,job,payload['next_action']):
         control=seal.get('control_outcome',{})
         if (original['role']!='A' or original.get('purpose') in {'closeout','formal_review'}
                 or prior.get('next_action') not in ACTIONS or control.get('decision_status')!='applied'
                 or control.get('search_status')=='unresolved' or control.get('selection_status')=='unresolved'):
             continue
-        if (_completed(original,prior,sources) and _key(original,prior,control.get('resolved_focus'))==key
+        if (_key(original,prior,control.get('resolved_focus'))==key and _response(root,prefix,original,prior)
                 and basis<=_basis(root,original,sealed=True)):
             return [dict(code='a_decision_request_repeated',subject=payload['next_action'])]
     return []
 
 
 def reason(root, job, payload):
-    from . import search
+    from . import originals,search
+    seal=originals.source_record(originals.node(root,job['step']),'result-identity.json')
+    if seal.exists():
+        # Routing consumes the accepted answer, including after newer history
+        # or a caller-supplied payload has changed the prospective comparison.
+        control=c.read(c.regular(seal))['control_outcome']
+        if control['decision_status']!='unresolved':return None
+        return next((row['code'] for row in control['diagnostics']
+            if row['code']=='a_decision_request_repeated'),'a_decision_request_repeated')
     focus=None
     if c.settings(root,job).get('search_policy'):
-        from . import originals
-        seal=originals.source_record(originals.node(root,job['step']),'result-identity.json')
-        if seal.exists():
-            # Its accepted binding remains authoritative after the live head
-            # advances. Do not reinterpret an old original under newer facts.
-            focus=c.read(c.regular(seal))['control_outcome']['resolved_focus']
-        else:focus=search.interpret(root,job,payload)['focus']
+        focus=search.interpret(root,job,payload)['focus']
     diagnostics=assess(root,job,payload,focus=focus)
     return diagnostics[0]['code'] if diagnostics else None

@@ -141,6 +141,8 @@ def declared_request(tmp_path):
     review_ref=dict(path='qualification/reviews/declared.json',size_bytes=31)
     job=dict(step=2,role='W',direct_materials=[material],selected_inputs=[],execution_qualifications=[review_ref])
     job_ref=q._save(root,root/'jobs/002.json',job)
+    from scidiscovery.research_loop import accepted_budget
+    accepted_budget.accept_job(root,2,job)
     native_ref=q._save(root,root/'native-evidence/002/native-intent.json',dict(step=2,task_ref=q.control_reference(root,job_ref)))
     subject=dict(producer_step=1,producer_seal=dict(path='native-evidence/001/result-identity.json',size_bytes=19),material=material)
     grant=q._save(root,root/'host-runtime/permission-fixture-grant.json',dict(scope='Declared permission owner only'))

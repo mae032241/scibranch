@@ -150,6 +150,7 @@ def prepare_fixture(tmp_path, mode='ok', *, real_harness=None, python=sys.execut
 
 
 def closeout_decision(root, refs, recommendation='run-1'):
+    from scidiscovery.research_loop import accepted_budget
     budget.begin_closeout(root, 2, 3, 'fixture closeout', delivery_sources=refs)
     job = c.build_job(root, 3, 'A', [1, 2], purpose='closeout', source_cutoff=2, delivery_sources=refs)
     record = c.host_record(c.workspace(root, 3))
@@ -158,11 +159,13 @@ def closeout_decision(root, refs, recommendation='run-1'):
                    candidate_recommendation=recommendation, progress_assessment=None,
                    search_review=None, decision_request=None, portfolio_review=None,
                    next_action='deliver', route_reason='An explicit bounded delivery decision')
-    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/003.json')))
+    intent = dict(task_ref=c.record_ref(root / 'jobs/003.json'))
+    c.write(record / 'native-intent.json', intent)
+    accepted_budget.accept_native(root, 3, record, intent)
     if isinstance(payload.get('candidate_recommendation'),str):payload['selection_explanation']=selection_explanation()
     c.write(record / 'science-output.json', payload)
     c.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
-    c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, usage=native.usage(root),
+    c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, native_started=False, usage=native.usage(root),
                                               raw_ref=c.file_ref(record / 'science-output.json')))
     result = c.seal_result(root, 3)
     return job, result, delivery.binding(root, job, result)

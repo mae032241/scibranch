@@ -201,19 +201,19 @@ def before_seal(root,job,record,*,inventory):
 
 def pending(root):
     """Read-only clock classification; no backend query and no new authority."""
-    from . import execution_recovery
+    from . import execution_recovery,accepted_budget
     if execution_recovery.pending(root):return True
-    for path in (Path(root)/'native-evidence').glob('*/**/'+NAME):
-        record=path.parent
-        step=int(record.relative_to(Path(root)/"native-evidence").parts[0])
-        job=c.read(Path(root)/'jobs'/f'{step:03d}.json')
-        if execution.record(root,job['step'])!=record:continue
-        value=validate(root,job,record)
-        for item in value['calls']:
-            path=Path(item['accepted']['path']).parent/'execution-observation.json'
-            if not path.exists():return True
-            accepted=c.read(Path(item['accepted']['path']));_,config=_config(root,job,accepted)
-            e.verify_observation(c.read(path),lambda proof:Path(proof['path']),interface=config['execution_interface'])
+    current=accepted_budget.read(root).current_job
+    if current is None or current['status']=='sealed' or current['native_record'] is None:return False
+    job=c.read(Path(root)/'jobs'/f'{current["step"]:03d}.json')
+    record=Path(root)/current['native_record']
+    if not (record/NAME).exists():return False
+    value=validate(root,job,record)
+    for item in value['calls']:
+        path=Path(item['accepted']['path']).parent/'execution-observation.json'
+        if not path.exists():return True
+        accepted=c.read(Path(item['accepted']['path']));_,config=_config(root,job,accepted)
+        e.verify_observation(c.read(path),lambda proof:Path(proof['path']),interface=config['execution_interface'])
     return False
 
 

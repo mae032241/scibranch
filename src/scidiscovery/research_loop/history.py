@@ -61,11 +61,13 @@ def observer_config(value):
     return result
 
 
-def observer_input_sources(root,job,observation,*,source=None,controls_only=False):
+def observer_input_sources(root,job,observation,*,source=None,controls_only=False,_policy=None):
     """Only the retained trusted contract/view; display coverage grants nothing."""
     from . import execution_inputs, qualification as q
     from . import originals
-    config = (originals.source_settings(source) if source is not None else c.settings(root, job)).get('history_observer')
+    policy=(originals.source_settings(source) if source is not None else
+        c.settings(root,job) if _policy is None else _policy)
+    config = policy.get('history_observer')
     original = observation.get('input_sources')
     if config is None or config.get('source_contract') is None:
         if original is not None:
@@ -252,11 +254,19 @@ def _snapshot(proof):
     return path.as_posix()
 
 
+def _inventory_policy(root,job,inventory):
+    if inventory.root!=Path(root) or inventory.job!=job:
+        raise ValueError('Current inventory belongs to another task or attempt')
+    return inventory.policy if inventory.policy is not None else c.settings(root,job)
+
+
 def _job_storage(function):
     @wraps(function)
     def bound(root,job,*args,**kwargs):
         from . import storage_policy as storage, shared_originals
-        with storage.bind(root,c.settings(root,job).get('storage_policy')):
+        inventory=kwargs.get('inventory')
+        policy=c.settings(root,job) if inventory is None else _inventory_policy(root,job,inventory)
+        with storage.bind(root,policy.get('storage_policy')):
             return function(root,job,*args,**kwargs)
     return bound
 
@@ -899,7 +909,8 @@ def validate_input_coverage(root,job,rows,published,*,source=None,controls_only=
 @_job_storage
 def _capture(root, job, payload, materials, *, inventory):
     """Snapshot mechanical adapter facts once, before the scientific seal."""
-    config = c.settings(root, job).get('history_observer')
+    policy=_inventory_policy(root,job,inventory)
+    config = policy.get('history_observer')
     if config is None:
         config=_managed_config(job,root)
         if config is None:return None
@@ -1071,7 +1082,7 @@ def _capture(root, job, payload, materials, *, inventory):
         from . import qualification as q
         snapshot['input_sources'] = dict(contract=config['source_contract'],
             job=q._ref(root, root / 'jobs' / f'{job["step"]:03d}.json'), raw=q._ref(root, raw), view=value['input_sources'])
-        observer_input_sources(root, job, snapshot)
+        observer_input_sources(root, job, snapshot,_policy=policy)
     if _managed_config(job,root):
         from . import generic_results
         snapshot['managed_calls']=current_calls
@@ -1091,7 +1102,7 @@ def capture(root, job, payload, materials, *, inventory):
     if job.get('formal_review'):return None
     from .protocol import require_current
     require_current(root,job)
-    config = c.settings(root, job).get('history_observer')
+    config = _inventory_policy(root,job,inventory).get('history_observer')
     if config is None:
         return _capture(root,job,payload,materials,inventory=inventory) if _managed_config(job,root) else None
     adapter = c.regular(Path(config['adapter']))
@@ -1427,8 +1438,9 @@ def validate_observation(root, job, seal, *, inventory):
     value = read_observation(root, job, seal)
     if value is None:
         return
-    input_sources=observer_input_sources(root, job, value)
-    config = c.settings(root, job).get('history_observer') or _managed_config(job,root)
+    policy=_inventory_policy(root,job,inventory)
+    input_sources=observer_input_sources(root, job, value,_policy=policy)
+    config = policy.get('history_observer') or _managed_config(job,root)
     if value.get('binding') != _observer_binding({key:seal['raw_ref'][key] for key in ('path','size_bytes')},config):
         raise ObserverIntegrityError('Observer snapshot source binding changed')
     if _managed_config(job,root):

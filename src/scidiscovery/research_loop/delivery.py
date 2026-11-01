@@ -279,24 +279,34 @@ def selected_sources(root, refs, candidate_id, *, prepare=False, job=None):
 
 
 def preparation_failure(root, reason, source_nodes, *, candidate_id=None, decision_step=None):
-    directory = root / 'host-delivery/preparation'
-    number = len(list(directory.glob('*.json'))) + 1
-    c.write(directory / f'{number:03d}.json', dict(reason=reason, source_nodes=source_nodes,
-        candidate_id=candidate_id, cleanup_confirmed=reason != 'delivery_cleanup_unknown',**(dict(decision_step=decision_step) if decision_step is not None else {})))
+    from . import accepted_budget
+    accepted_budget.accept_preparation_failure(root, dict(reason=reason, source_nodes=source_nodes,
+        candidate_id=candidate_id, cleanup_confirmed=reason != 'delivery_cleanup_unknown',
+        **(dict(decision_step=decision_step) if decision_step is not None else {})))
 
 
 def preparation_status(root):
-    paths = sorted((root / 'host-delivery/preparation').glob('*.json'))
-    if not paths:
+    from . import accepted_budget
+    head = accepted_budget.read(root)
+    summary = head['delivery_preparation']
+    if summary['last_ref'] is None:
         return None
-    value = c.read(c.regular(paths[-1]))
-    return dict(attempts=len(paths), last_failure=value['reason'], candidate_id=value['candidate_id'],
+    value = head.control_file(summary['last_ref']['path'])
+    if value is None:raise ValueError('Accepted preparation original is missing')
+    return dict(attempts=summary['count'], last_failure=value['reason'], candidate_id=value['candidate_id'],
         cleanup_confirmed=value['cleanup_confirmed'])
 
 
 def preparation_blocked(root):
-    return any(not c.read(c.regular(path))['cleanup_confirmed']
-        for path in (root / 'host-delivery/preparation').glob('*.json'))
+    from . import accepted_budget
+    head = accepted_budget.read(root)
+    ref = head['delivery_preparation']['unresolved_ref']
+    if ref is None:return False
+    value = head.control_file(ref['path'])
+    if value is None:raise ValueError('Accepted preparation original is missing')
+    if value['cleanup_confirmed'] is not False:
+        raise ValueError('Accepted preparation cleanup original changed')
+    return True
 
 
 @owner_effect

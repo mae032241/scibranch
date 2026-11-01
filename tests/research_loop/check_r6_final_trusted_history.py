@@ -5,11 +5,13 @@ requalified because a FINAL cursor retains a longer accepted prefix.
 """
 from contextlib import contextmanager
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
 from scidiscovery.research_loop import budget, contracts as c, controller, handoff_state
 from scidiscovery.research_loop import experiments, fork_runtime, fork_service, history, native, originals
+from scidiscovery.research_loop import accepted_budget, configuration_updates, control_operations, correction, delivery
 from test_history_handoff import finish
 
 
@@ -125,6 +127,8 @@ def test_fork_final_cursor_trusts_inherited_and_local_seals(tmp_path, monkeypatc
     # Author terminal fixture receipts directly instead of rebuilding that job.
     record = c.host_record(c.workspace(child, selected['step']))
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(child / 'jobs/002.json')))
+    accepted_budget.accept_native(child, selected['step'], record,
+        c.read(c.regular(record / 'native-intent.json')))
     c.write(record / 'science-output.json', dict(summary='A synthetic fork contribution',
         scientific_result='The fork retains an unanswered synthetic question.',
         limitations=['Synthetic fixture; no scientific evidence or qualification.'],
@@ -177,3 +181,107 @@ def test_usage_accounting_does_not_read_unused_ledger(tmp_path, monkeypatch):
         assert budget.usage_accounting(tmp_path, dict(observed_tokens=observed)) == dict(
             reserved_tokens=0, accounted_tokens=observed, reserved_unknown_steps=[],
             blocking_unknown_steps=[], accounting_basis='observed_lower_bound')
+
+
+def _final_without_launch(root, monkeypatch):
+    monkeypatch.setattr(budget, 'final_a_barrier', lambda root: None)
+    monkeypatch.setattr(budget, 'execution_blocked', lambda root: False)
+    monkeypatch.setattr(budget, 'transition', lambda *args, **kwargs: None)
+    monkeypatch.setattr(correction, 'gate', lambda *args: None)
+    monkeypatch.setattr(configuration_updates, 'current', lambda root: {})
+    monkeypatch.setattr(fork_runtime, 'bootstrap', lambda root: None)
+    monkeypatch.setattr(controller, '_native_call', lambda *args, **kwargs: None)
+    monkeypatch.setattr(handoff_state, 'read_sealed', lambda *args: {})
+    monkeypatch.setattr(controller, '_final_a_result', lambda root, job, payload: job)
+    original_glob = Path.glob
+    def bounded_glob(path, pattern, *args, **kwargs):
+        assert path != root/'jobs', 'FINAL enumerated the jobs directory'
+        return original_glob(path, pattern, *args, **kwargs)
+    monkeypatch.setattr(Path, 'glob', bounded_glob)
+
+
+def test_existing_final_job_reuses_assignment_without_source_discovery(tmp_path, monkeypatch):
+    root = tmp_path/'instance'
+    job = dict(step=3, role='A', final_only=True, history=dict(retained='exact original'))
+    c.write(root/'jobs/003.json', job)
+    _final_without_launch(root, monkeypatch)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Existing FINAL rebuilt its accepted sources')
+    monkeypatch.setattr(history, 'source_sequence', forbidden)
+    monkeypatch.setattr(originals, 'source_sequence', forbidden)
+    monkeypatch.setattr(fork_runtime, 'source_job', forbidden)
+    monkeypatch.setattr(configuration_updates, 'bind_new_job', forbidden)
+    assert controller._run_final(root, dict(first_step=3, source_cutoff=2)) == job
+
+
+@pytest.mark.parametrize('saved_cursor,stopped_original', [(True, False), (False, False), (False, True)])
+def test_final_construction_collects_sources_once_or_consumes_cursor(tmp_path, monkeypatch, saved_cursor, stopped_original):
+    root, cursor = _prefix(tmp_path, 2)
+    first_step = 4 if stopped_original else 3
+    if stopped_original:
+        c.write(root/'jobs/003.json', dict(step=3, role='W', retained_stopped_original=True))
+    begin = dict(first_step=first_step, source_cutoff=2, resume_cursor=cursor if saved_cursor else None)
+    sequence = history.source_sequence
+    sequences, metadata_reads, sources_read = [], [], []
+    source = history._source
+    def source_once(root, step, **kwargs):
+        sources_read.append(step)
+        return source(root, step, **kwargs)
+    def sequence_once(*args, **kwargs):
+        sequences.append(True)
+        return sequence(*args, **kwargs)
+    lookup = accepted_budget.search_row
+    def node_once(root, key, **kwargs):
+        metadata_reads.append(key)
+        return lookup(root, key, **kwargs)
+    monkeypatch.setattr(history, '_source', source_once)
+    monkeypatch.setattr(history, 'source_sequence', sequence_once)
+    monkeypatch.setattr(accepted_budget, 'search_row', node_once)
+    _final_without_launch(root, monkeypatch)
+    monkeypatch.setattr(control_operations, 'apply_pending_budget', lambda root: None)
+    monkeypatch.setattr(configuration_updates, 'bind_new_job', lambda root, step: 0)
+    monkeypatch.setattr(configuration_updates, 'for_new_job', lambda root, step: {})
+    built = []
+    def build(root, step, role, parents, **kwargs):
+        built.append((parents, kwargs))
+        return dict(step=step, role=role, final_only=True)
+    monkeypatch.setattr(c, 'build_job', build)
+    result = controller._run_final(root, begin)
+    assert result['step'] == first_step
+    assert sequences == ([] if saved_cursor else [True])
+    assert built[0][0] == [2]
+    assert 'No accepted W evidence exists' in built[0][1]['instruction']
+    assert all(sources_read.count(step)<=1 for step in (1,2))
+    assert all(metadata_reads.count(f'search/node/{step}')<=1 for step in (1,2))
+
+
+def test_final_cursor_keeps_inherited_delivery_original_refs(tmp_path, monkeypatch):
+    root = tmp_path/'child'
+    cursor = dict(source_refs=[
+        dict(step=1, seal_ref=dict(path=str(tmp_path/'parent/native-evidence/001/result-identity.json'))),
+        dict(step=2, seal_ref=dict(path=str(root/'native-evidence/002/result-identity.json')))])
+    _final_without_launch(root, monkeypatch)
+    monkeypatch.setattr(control_operations, 'apply_pending_budget', lambda root: None)
+    monkeypatch.setattr(configuration_updates, 'bind_new_job', lambda root, step: 0)
+    monkeypatch.setattr(configuration_updates, 'for_new_job', lambda root, step:
+        dict(delivery_policy=dict(adapter='original-fixture-adapter')))
+    monkeypatch.setattr(accepted_budget, 'read', lambda root: {})
+    monkeypatch.setattr(accepted_budget, 'search_row', lambda root, key, **kwargs:
+        dict(role='H' if key.endswith('/1') else 'W'))
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Known fork originals were rediscovered')
+    monkeypatch.setattr(history, 'source_sequence', forbidden)
+    monkeypatch.setattr(originals, 'source_sequence', forbidden)
+    monkeypatch.setattr(fork_runtime, 'source_job', forbidden)
+    observed = []
+    def catalogue(root, nodes, **kwargs):
+        observed.append(nodes)
+        return dict(retained='exact source catalogue')
+    monkeypatch.setattr(delivery, 'catalogue_sources', catalogue)
+    def build(root, step, role, parents, **kwargs):
+        assert parents == [1, 2]
+        assert kwargs['delivery_sources'] == dict(retained='exact source catalogue')
+        return dict(step=step, role=role, final_only=True)
+    monkeypatch.setattr(c, 'build_job', build)
+    assert controller._run_final(root, dict(first_step=3, source_cutoff=2, resume_cursor=cursor))['step'] == 3
+    assert observed == [cursor['source_refs']]

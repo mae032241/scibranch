@@ -131,7 +131,7 @@ def instance(tmp_path,options,*,fragment=False,resume=True,seconds=120,node_seco
         worker_fragment_policy=dict(context='same_session') if fragment else None)
     c.write(root/'fixture-options.json',options)
     finish(root,1,'H',[],action='experiment',search_choice=dict(scope='Two mechanisms',commitments=[
-        dict(label=label,minimal_test='Read original backend fact',existing_ref=None) for label in ('P','Q')],focus=dict(label=None,action='screen')))
+        dict(label=label,minimal_test='Read original backend fact',existing_ref=None) for label in ('P','Q')],focus=dict(index=1,action='screen')))
     return root
 
 

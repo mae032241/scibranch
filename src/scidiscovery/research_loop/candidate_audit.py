@@ -155,7 +155,8 @@ def _outcome(root, step):
         if value.get('recovery_ref') is not None:
             from . import audit_recovery
             recovery_path=root/'host-delivery/audit-recovery'/intent['operation_id']/'outcome.json'
-            recovered=next((fact for row,fact in audit_recovery.facts(root) if row['operation_id']==intent['operation_id']),None)
+            fact=audit_recovery._fact(root,intent['operation_id'])
+            recovered=fact[1] if fact is not None else None
             if (recovered is None or not recovered['cleanup_confirmed'] or recovered['status']!='engineering_error'
                     or c.record_ref(c.regular(recovery_path))!=value['recovery_ref']):
                 raise ValueError('Candidate audit recovery original changed')
@@ -204,7 +205,18 @@ def facts(root):
 
 
 def blocked(root):
-    return any(outcome is None or not outcome['result']['cleanup_confirmed'] for _, outcome in facts(root))
+    from . import accepted_budget
+    head = accepted_budget.read(root)
+    active = head['active_audit']
+    if active is None:return False
+    path = _directory(root, active['step'])/'intent.json'
+    intent = head.control_file(path)
+    if intent is None:
+        return head.control_file(root/'host-delivery/audit-recovery'/active['operation_id']/'intent.json') is None
+    if intent['operation_id'] != active['operation_id']:return False
+    _validate_request(root, intent)
+    outcome = _outcome(root, active['step'])
+    return outcome is None or not outcome['result']['cleanup_confirmed']
 
 
 def receipt_ref(root, step):
@@ -281,19 +293,28 @@ def _settle_preflight(root,intent):
             process_ref=c.record_ref(directory/'process.json') if (directory/'process.json').exists() else None,
             leaf_output=delivery.leaf_refs(root,intent['operation_id']),
             **(dict(recovery_ref=c.record_ref(root/'host-delivery/audit-recovery'/intent['operation_id']/'outcome.json')) if recovered is not None else {})))
+        from . import accepted_budget
+        accepted_budget.finish_audit(root, intent['operation_id'])
         return True
 
 
 def settle_preflights(root):
     """Owner recovery precedes admission; unknown dispatches remain blockers."""
-    from . import controller,audit_recovery
+    from . import controller,audit_recovery,accepted_budget
     controller.require_writer(root)
-    for intent,outcome in facts(root):
-        if outcome is None:_settle_preflight(root,intent)
+    active = accepted_budget.read(root)['active_audit']
+    if active is None:return
+    path = _directory(root, active['step'])/'intent.json'
+    if path.exists():
+        intent = c.read(c.regular(path))
+        if intent['operation_id'] == active['operation_id'] and _outcome(root, active['step']) is None:
+            _settle_preflight(root,intent)
     # Selection and delivery consumers can have retries without a candidate
     # audit intent. Their pre-dispatch recovery uses the same exclusive owner.
-    for intent,outcome in audit_recovery.facts(root):
-        if outcome is None:audit_recovery.recover_preflight(root,intent['operation_id'])
+    retry = audit_recovery._fact(root, active['operation_id'])
+    if retry is not None and retry[1] is None:
+        audit_recovery.recover_preflight(root,active['operation_id'])
+    accepted_budget.finish_audit(root,active['operation_id'])
 
 
 def _unavailable_input(root,job,chosen,rows):
@@ -321,6 +342,9 @@ def execute(root, job, payload):
     directory = _directory(root, step)
     previous = _outcome(root, step)
     if previous is not None:
+        if previous['accepted']:
+            from . import accepted_budget
+            accepted_budget.finish_audit(root, c.read(directory/'intent.json')['operation_id'])
         if previous['result']['note']=='candidate_audit_unchanged_originals_unavailable':return 'candidate_audit_originals_unavailable'
         return None if previous['result']['cleanup_confirmed'] else 'candidate_audit_unknown'
     if (directory / 'intent.json').exists():
@@ -352,6 +376,9 @@ def execute(root, job, payload):
                          process_ref=c.record_ref(directory / 'process.json') if (directory / 'process.json').exists() else None,
                          leaf_output=(delivery.leaf_refs(root, resolved) if resolved else []) + delivery.leaf_refs(root, intent['operation_id']))
         _save(directory / 'outcome.json', value)
+        if intent is not None:
+            from . import accepted_budget
+            accepted_budget.finish_audit(root, intent['operation_id'])
         if note=='candidate_audit_unchanged_originals_unavailable':return 'candidate_audit_originals_unavailable'
         return None if cleanup else 'candidate_audit_unknown'
     if not enabled(configuration_updates.for_job(root, job)):
@@ -390,7 +417,9 @@ def execute(root, job, payload):
     require_eligibility(root,intent)
     budget.transition(root, 'advance', 'candidate_audit')
     intent['advance_seconds']=budget.snapshot(root)['advance_seconds']
-    _save(directory / 'intent.json', intent)
+    from . import accepted_budget
+    accepted_budget.accept_audit(root, step=step, operation_id=operation,
+        path=directory/'intent.json', intent=intent)
     try:
         source_nodes=delivery.candidate_source_nodes(root,job,chosen)
         if not job.get('delivery_sources'):resolved = json.dumps(source_nodes, sort_keys=True)

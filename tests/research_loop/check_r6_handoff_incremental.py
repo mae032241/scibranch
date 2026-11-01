@@ -129,12 +129,12 @@ def _verification_counts(monkeypatch,root,length):
             counts['old_input_validation' if job['step']<=length else 'current_input_validation']+=1
             return validate_inputs(root,work,job,*args,**kwargs)
         patch.setattr(c,'_validate_inputs',counted_inputs)
-        for name in ('validate_managed','validate_observation'):
-            original=getattr(history,name)
+        for name,entry in (('validate_managed','_validate_managed'),('validate_observation','validate_observation')):
+            original=getattr(history,entry)
             def counted_history(root,job,*args,_original=original,_name=name,**kwargs):
                 counts[f'old_{_name}' if job['step']<=length else f'current_{_name}']+=1
                 return _original(root,job,*args,**kwargs)
-            patch.setattr(history,name,counted_history)
+            patch.setattr(history,entry,counted_history)
         managed_status=history.managed_status
         def counted_status(root,row,*args,**kwargs):
             counts['managed_status']+=1

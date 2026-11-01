@@ -19,7 +19,8 @@ HEAD = DIRECTORY + '/head.json'
 EVENT_KINDS = frozenset(('clock','budget_amend','closeout_begin','closeout_resume','action_intent',
     'action_outcome','final_a_return','resource_grant','resource_reserve','resource_rebind',
     'resource_bind','resource_settle','resource_release','job_accept','native_accept','native_terminal',
-    'scientific_seal','configuration_accept','configuration_bind','execution_recovery'))
+    'scientific_seal','configuration_accept','configuration_bind','execution_recovery',
+    'audit_accept','audit_complete','delivery_preparation','authority_accept'))
 
 
 def _bytes(value):
@@ -178,6 +179,22 @@ class AcceptedState(dict):
         relative = path.relative_to(self['logical_root']) if path.is_absolute() else path
         return c.read(self.root / relative)
 
+    def control_file(self, path):
+        """Read one accepted redo original, including a not-yet-installed tail."""
+        path = Path(path)
+        relative = path.relative_to(self.root) if path.is_absolute() else path
+        if '..' in relative.parts:
+            raise ValueError('Accepted control original escaped its instance')
+        expected = (None if self.pending is None else
+            self.pending.get('control_files', {}).get(relative.as_posix()))
+        actual = self.root/relative
+        if not actual.exists():
+            return copy.deepcopy(expected)
+        value = c.read(c.regular(actual))
+        if expected is not None and value != expected:
+            raise ValueError('Accepted original control file changed')
+        return value
+
 
 class AcceptedEvents:
     """Bounded current facts for existing budget predicates, not a log list."""
@@ -227,13 +244,14 @@ def initialize(root, settings, *, search_seed, search_ref, identity_root=None,
     from . import accepted_prefix
     root = Path(root)
     identity_root = Path(identity_root or root)
-    value = dict(version=1, logical_root=str(identity_root),
+    value = dict(version=2, logical_root=str(identity_root),
         instance_id=settings['goal_id'], settings_ref=dict(path=str(identity_root/'settings.json')),
         seq=0, head_ref=None, last_stamp=None, latest={},
         ceilings={key: settings[key] for key in ('max_tokens', 'max_seconds', 'max_steps')},
         historical_max_steps=settings['max_steps'], max_local_step=0,
         prepared_count=0, continuation_count=0, action_count=0, audit_count=0,
-        current_job=None, current_native=None,
+        current_job=None, current_native=None, active_audit=None,
+        delivery_preparation=dict(count=0, last_ref=None, unresolved_ref=None),
         usage=dict(input_tokens=0, cached_input_tokens=0, output_tokens=0,
             unknown_count=0, first_unknown_step=None),
         role_usage=dict(H=0, W=0, A=0, E=0, closeout=0),
@@ -302,7 +320,8 @@ def read(root):
     if not path.exists():
         raise ValueError('Accepted budget head is required; old instances are not rebuilt implicitly')
     value = c.read(path)
-    if value.get('version') != 1:
+    if (value.get('version') != 2 or 'active_audit' not in value
+            or 'delivery_preparation' not in value):
         raise ValueError('Unsupported accepted budget state')
     settings = c.settings(root)
     if (value['instance_id'] != settings['goal_id']
@@ -331,7 +350,12 @@ def _install_indexes(root, event):
                 raise ValueError('Accepted original control file changed')
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_files.publish_bytes(path, _bytes(value))
+            if event['kind'] == 'authority_accept':
+                # Authority originals retain qualification._save's wire bytes.
+                from . import qualification as q
+                q._save(root, path, value)
+            else:
+                atomic_files.publish_bytes(path, _bytes(value))
 
 
 def recover(root, state):
@@ -599,6 +623,7 @@ def accept_job(root, step, job):
         if prior is not None:
             if prior['job_ref'] != reference:
                 raise ValueError('Prepared job changed its accepted identity')
+            authority_calls(state, step)
             return state
         current = state.current_job
         if current is not None and current['status'] != 'sealed':
@@ -607,6 +632,7 @@ def accept_job(root, step, job):
                     or begin['first_step'] != step):
                 raise ValueError('Another accepted scientific job remains open')
         row = dict(step=step, role=job['role'], job_ref=reference, status='prepared',
+            native_record=None, authority_calls={},
             prefix=copy.deepcopy(state.prefix), purpose=job.get('purpose'), unknown_count=0,
             reported_tokens=0, complete=True, input_search_ref=copy.deepcopy(state['search_ref']))
         from . import user_guidance
@@ -616,6 +642,117 @@ def accept_job(root, step, job):
                 max_local_step=max(state['max_local_step'], step),
                 is_fork=(root/'host-runtime/fork/manifest.json').exists()), rows={f'job/{step:03d}': row})
         return state
+
+
+def authority_calls(state, step):
+    """Exact originals accepted for this job, including pre-prepare allocations."""
+    job = state.row(f'job/{step:03d}')
+    if job is None or not isinstance(job.get('authority_calls'), dict):
+        raise ValueError('Accepted job authority references are required')
+    if (state.current_job is not None and state.current_job['step'] == step
+            and state.current_job != job):
+        raise ValueError('Accepted authority job row lost its current pointer')
+    for call, row in job['authority_calls'].items():
+        if (not isinstance(call, str) or not isinstance(row, dict)
+                or set(row) != {'allocation', 'requests'} or not isinstance(row['requests'], list)):
+            raise ValueError('Accepted job authority references changed')
+        allocation = row['allocation']
+        for ref in ([allocation] if allocation is not None else []) + row['requests']:
+            if (not isinstance(ref, dict) or set(ref) != {'path', 'size_bytes'}
+                    or type(ref['size_bytes']) is not int or ref['size_bytes'] <= 0):
+                raise ValueError('Exact accepted authority original reference required')
+        if allocation is not None and allocation['path'] != f'execution-authority/calls/{call}/allocation.json':
+            raise ValueError('Accepted allocation changed its exact call')
+        request_paths = [ref['path'] for ref in row['requests']]
+        if len(set(request_paths)) != len(request_paths):
+            raise ValueError('Accepted authority request was repeated')
+        for relative in request_paths:
+            parts = Path(relative).parts
+            if (len(parts) != 4 or parts[:2] != ('execution-authority', 'requests')
+                    or parts[-1] != 'request.json' or len(parts[2]) != 64
+                    or any(char not in '0123456789abcdef' for char in parts[2])):
+                raise ValueError('Accepted authority request path changed')
+    return job['authority_calls']
+
+
+def authority_original(state, reference):
+    """Point-read an accepted authority original, even before tail installation."""
+    from . import qualification as q
+    value = state.control_file(reference['path'])
+    if value is None:
+        raise ValueError('Accepted authority original is unavailable')
+    path = state.root/reference['path']
+    if path.exists():
+        actual = q._ref(state.root, path)
+    else:
+        actual = dict(path=reference['path'], size_bytes=len(
+            (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)+'\n').encode('utf-8')))
+    if actual != reference:
+        raise ValueError('Accepted authority original identity changed')
+    return value
+
+
+def accept_authority(root, *, step, call_id, path, value, supersedes=None, operation_context=None):
+    """Accept one authority original and this job's reference in the same event.
+
+    The authority writer is already held. The existing ledger writer and redo
+    publish originals before returning; a renewal's successor belongs to this
+    same acceptance rather than a second publication boundary.
+    """
+    from . import budget, qualification as q
+    root, path = Path(root), Path(path)
+    relative = path.relative_to(root).as_posix()
+    allocation = relative == f'execution-authority/calls/{call_id}/allocation.json'
+    parts = Path(relative).parts
+    if (not allocation and (len(parts) != 4 or parts[:2] != ('execution-authority', 'requests')
+            or parts[-1] != 'request.json' or len(parts[2]) != 64
+            or any(char not in '0123456789abcdef' for char in parts[2]))):
+        raise ValueError('Exact authority allocation or request original required')
+    reference = dict(path=relative, size_bytes=len(
+        (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)+'\n').encode('utf-8')))
+    with budget._ledger_writer(root, context=operation_context):
+        state = recover(root, read(root))
+        calls = copy.deepcopy(authority_calls(state, step))
+        job = state.row(f'job/{step:03d}')
+        if (job['role'] != 'W' or value.get('call_id') != call_id
+                or job['job_ref'] != c.record_ref(root/'jobs'/f'{step:03d}.json')):
+            raise ValueError('Authority original lost its accepted W job')
+        if allocation:
+            if value['binding']['scope']['job_ref'] != job['job_ref'] or supersedes is not None:
+                raise ValueError('Allocation changed its accepted job')
+        elif value['job'] != q._ref(root, root/'jobs'/f'{step:03d}.json') or value.get('supersedes') != supersedes:
+            raise ValueError('Authority request changed its accepted job or predecessor')
+        row = calls.setdefault(call_id, dict(allocation=None, requests=[]))
+        existing = row['allocation'] if allocation else next(
+            (ref for ref in row['requests'] if ref['path'] == relative), None)
+        controls = {relative: value}
+        if supersedes is not None:
+            if supersedes not in row['requests']:
+                raise ValueError('Authority renewal predecessor was not accepted for this call')
+            previous = authority_original(state, supersedes)
+            if previous['call_id'] != call_id:
+                raise ValueError('Authority renewal changed its original call')
+            successor = (Path(supersedes['path']).parent/'successor.json').as_posix()
+            controls[successor] = dict(previous=supersedes, successor=reference)
+        if existing is not None:
+            if existing != reference or authority_original(state, existing) != value:
+                raise ValueError('Accepted authority original changed')
+            for original, expected in controls.items():
+                if state.control_file(original) != expected:
+                    raise ValueError('Accepted authority successor changed')
+            return reference
+        if any((root/original).exists() for original in controls):
+            raise ValueError('Authority original was published without its accepted job reference')
+        if allocation:
+            row['allocation'] = reference
+        else:
+            row['requests'].append(reference)
+        job['authority_calls'] = calls
+        updates = (dict(current_job=job) if state.current_job is not None
+            and state.current_job['step'] == step else {})
+        append(root, state, kind='authority_accept', fields=dict(step=step, call_id=call_id,
+            original=reference), updates=updates, rows={f'job/{step:03d}': job}, control_files=controls)
+        return reference
 
 
 def accept_native(root, step, record, intent):
@@ -644,9 +781,11 @@ def accept_native(root, step, record, intent):
         fields = dict(step=step, record=relative)
         if intent.get('budget_slice') is not None:
             fields['native_floor'] = {key: intent['budget_slice'][key] for key in ('boot_id', 'advance_seconds')}
+        job = dict(state.current_job, native_record=relative)
         _, state = append(root, state, kind='native_accept', fields=fields,
-            updates=dict(current_native=row, dispatch_count=state['dispatch_count']+1,
-                continuation_count=state['continuation_count']+continuation), rows={key: row},
+            updates=dict(current_native=row, current_job=job, dispatch_count=state['dispatch_count']+1,
+                continuation_count=state['continuation_count']+continuation),
+            rows={key: row, f'job/{step:03d}':job},
             control_files={relative+'/native-intent.json': intent})
         return state
 
@@ -799,7 +938,7 @@ def role_usage(root, through_step):
         unknown_step_count=observed['unknown_step_count'])
 
 
-def publish_recovery(root, *, step, call_id, recovery_ref, search_delta, search_ref):
+def publish_recovery(root, *, step, call_id, recovery_ref, search_delta, search_ref, control_files=None):
     """Publish already reconciled same-call facts, with no replay or refund."""
     from . import budget
     if (search_delta is None) != (search_ref is None):
@@ -814,7 +953,75 @@ def publish_recovery(root, *, step, call_id, recovery_ref, search_delta, search_
         rows[key] = dict(ref=recovery_ref)
         _, state = append(root, state, kind='execution_recovery',
             fields=dict(step=step, call_id=call_id, recovery_ref=recovery_ref),
-            updates={} if search_delta is None else dict(search=search_delta['summary'],search_ref=search_ref), rows=rows)
+            updates={} if search_delta is None else dict(search=search_delta['summary'],search_ref=search_ref), rows=rows,
+            control_files=control_files)
+        return state
+
+
+def accept_audit(root, *, step, operation_id, path, intent):
+    """Accept this audit/retry intent and its sole active pointer before effects."""
+    from . import budget
+    root, path = Path(root), Path(path)
+    relative = path.relative_to(root).as_posix()
+    expected = (f'native-evidence/{step:03d}/candidate-audit/intent.json',
+        f'host-delivery/audit-recovery/{operation_id}/intent.json')
+    if relative not in expected or intent.get('operation_id') != operation_id:
+        raise ValueError('Audit acceptance lost its exact original declaration')
+    pointer = dict(step=step, operation_id=operation_id)
+    with budget._ledger_writer(root):
+        state = recover(root, read(root))
+        if state['active_audit'] is not None and state['active_audit'] != pointer:
+            raise ValueError('Another accepted audit remains active')
+        if path.exists():
+            if state['active_audit'] != pointer or c.read(c.regular(path)) != intent:
+                raise ValueError('Audit intent was not accepted with its active pointer')
+            return state
+        _, state = append(root, state, kind='audit_accept',
+            fields=dict(step=step, operation_id=operation_id, intent_path=relative),
+            updates=dict(active_audit=pointer, audit_count=state['audit_count']+1),
+            control_files={relative: intent})
+        return state
+
+
+def finish_audit(root, operation_id):
+    """Release only an exact original whose audit and retry cleanup are known."""
+    from . import budget, candidate_audit, audit_recovery
+    root = Path(root)
+    with budget._ledger_writer(root):
+        state = recover(root, read(root))
+        pointer = state['active_audit']
+        if pointer is None or pointer['operation_id'] != operation_id:
+            return state
+        path = candidate_audit._directory(root, pointer['step'])/'intent.json'
+        if path.exists():
+            intent = c.read(c.regular(path))
+            if intent['operation_id'] == operation_id:
+                value = candidate_audit._outcome(root, pointer['step'])
+                if value is None or not value['result']['cleanup_confirmed']:
+                    return state
+        retry = audit_recovery._fact(root, operation_id)
+        if retry is not None and (retry[1] is None or not retry[1]['cleanup_confirmed']):
+            return state
+        _, state = append(root, state, kind='audit_complete',
+            fields=dict(operation_id=operation_id), updates=dict(active_audit=None))
+        return state
+
+
+def accept_preparation_failure(root, value):
+    """Keep the existing preparation count, last original and first unknown cleanup."""
+    from . import budget
+    root = Path(root)
+    with budget._ledger_writer(root):
+        state = recover(root, read(root))
+        prior = state['delivery_preparation']
+        count = prior['count']+1
+        relative = f'host-delivery/preparation/{count:03d}.json'
+        ref = dict(path=relative)
+        summary = dict(count=count, last_ref=ref,
+            unresolved_ref=prior['unresolved_ref'] or (None if value['cleanup_confirmed'] else ref))
+        _, state = append(root, state, kind='delivery_preparation',
+            fields=dict(preparation_ref=ref), updates=dict(delivery_preparation=summary),
+            control_files={relative: value})
         return state
 
 

@@ -16,48 +16,80 @@ CONTROL_CODES = {'audit_source_missing', 'audit_harness_unavailable', 'audit_pro
                  'audit_transport_timeout', 'audit_output_capacity', 'audit_process_unavailable'}
 
 
+def _read_intent(root, path):
+    intent = c.read(c.regular(path))
+    return _validate_intent(root, path, intent)
+
+
+def _validate_intent(root, path, intent):
+    settings = configuration_updates.for_job(root, intent)
+    if (intent.get('settings_ref') != c.record_ref(root / 'settings.json')
+            or intent.get('operation_id') != path.parent.name
+            or type(intent.get('attempt')) is not int or intent['attempt'] != 1
+            or intent.get('reason') not in CONTROL_CODES
+            or not re.fullmatch('[0-9a-f]{64}',path.parent.name)
+            or type(intent.get('max_seconds')) not in (int,float) or not math.isfinite(intent['max_seconds'])
+            or not 0 < intent['max_seconds'] <= settings['delivery_policy']['submit_seconds']
+            or type(intent.get('advance_seconds')) not in (int,float) or not math.isfinite(intent['advance_seconds'])
+            or intent['advance_seconds']<0):
+        raise ValueError('Audit engineering recovery identity changed')
+    return intent
+
+
+def _outcome(root, intent):
+    path = root/'host-delivery/audit-recovery'/intent['operation_id']/'intent.json'
+    outcome = path.with_name('outcome.json')
+    value = c.read(c.regular(outcome)) if outcome.exists() else None
+    if value is not None:
+        if (value['intent_ref'] != c.record_ref(path) or value.get('recovery','none') not in {'none','author_repair','control_retry'}
+            or value.get('status') not in AUDIT_STATUSES
+                or type(value.get('cleanup_confirmed')) is not bool
+                or not value['cleanup_confirmed'] and value['status']!='unknown'):
+            raise ValueError('Audit engineering recovery outcome changed')
+        process=path.with_name('process.json')
+        if value.get('process_ref') is not None:
+            if c.record_ref(c.regular(process))!=value['process_ref']:
+                raise ValueError('Audit engineering recovery process changed')
+            record=c.read(process)
+            if record.get('phase')!='audit' or record.get('identity',{}).get('task_ref')!=intent['operation_id']:
+                raise ValueError('Audit engineering recovery process identity changed')
+        elif value['status']=='audited':raise ValueError('A completed engineering retry needs its process original')
+    return value
+
+
+def _fact(root, operation, *, head=None):
+    """Read the accepted declaration and result of this exact original operation."""
+    if not isinstance(operation, str) or not re.fullmatch('[0-9a-f]{64}', operation):
+        raise ValueError('Audit engineering recovery identity changed')
+    path = root/'host-delivery/audit-recovery'/operation/'intent.json'
+    if head is None:
+        if not path.exists():return None
+        intent = _read_intent(root, path)
+    else:
+        intent = head.control_file(path)
+        if intent is None:return None
+        intent = _validate_intent(root,path,intent)
+    return intent, _outcome(root, intent)
+
+
 def intents(root):
     """Accepted retry declarations; outcome integrity is a separate result check."""
     for path in sorted((root / 'host-delivery/audit-recovery').glob('*/intent.json')):
-        intent = c.read(c.regular(path))
-        settings = configuration_updates.for_job(root, intent)
-        if (intent.get('settings_ref') != c.record_ref(root / 'settings.json')
-                or intent.get('operation_id') != path.parent.name
-                or type(intent.get('attempt')) is not int or intent['attempt'] != 1
-                or intent.get('reason') not in CONTROL_CODES
-                or not re.fullmatch('[0-9a-f]{64}',path.parent.name)
-                or type(intent.get('max_seconds')) not in (int,float) or not math.isfinite(intent['max_seconds'])
-                or not 0 < intent['max_seconds'] <= settings['delivery_policy']['submit_seconds']
-                or type(intent.get('advance_seconds')) not in (int,float) or not math.isfinite(intent['advance_seconds'])
-                or intent['advance_seconds']<0):
-            raise ValueError('Audit engineering recovery identity changed')
-        yield intent
+        yield _read_intent(root, path)
 
 
 def facts(root):
     for intent in intents(root):
-        path = root/'host-delivery/audit-recovery'/intent['operation_id']/'intent.json'
-        outcome = path.with_name('outcome.json')
-        value = c.read(c.regular(outcome)) if outcome.exists() else None
-        if value is not None:
-            if (value['intent_ref'] != c.record_ref(path) or value.get('recovery','none') not in {'none','author_repair','control_retry'}
-                or value.get('status') not in AUDIT_STATUSES
-                    or type(value.get('cleanup_confirmed')) is not bool
-                    or not value['cleanup_confirmed'] and value['status']!='unknown'):
-                raise ValueError('Audit engineering recovery outcome changed')
-            process=path.with_name('process.json')
-            if value.get('process_ref') is not None:
-                if c.record_ref(c.regular(process))!=value['process_ref']:
-                    raise ValueError('Audit engineering recovery process changed')
-                record=c.read(process)
-                if record.get('phase')!='audit' or record.get('identity',{}).get('task_ref')!=intent['operation_id']:
-                    raise ValueError('Audit engineering recovery process identity changed')
-            elif value['status']=='audited':raise ValueError('A completed engineering retry needs its process original')
-        yield intent, value
+        yield intent, _outcome(root, intent)
 
 
 def blocked(root):
-    return any(value is None or not value['cleanup_confirmed'] for _, value in facts(root))
+    from . import accepted_budget
+    head = accepted_budget.read(root)
+    active = head['active_audit']
+    if active is None:return False
+    fact = _fact(root, active['operation_id'], head=head)
+    return fact is not None and (fact[1] is None or not fact[1]['cleanup_confirmed'])
 
 
 def recover_preflight(root, operation):
@@ -65,17 +97,19 @@ def recover_preflight(root, operation):
     from . import controller,delivery,runtime
     from .candidate_audit import _save
     controller.require_writer(root)
+    if not isinstance(operation, str) or not re.fullmatch('[0-9a-f]{64}', operation):
+        raise ValueError('Audit engineering recovery identity changed')
     directory=root/'host-delivery/audit-recovery'/operation
     path=directory/'intent.json'
     if not path.exists():return None
     with c.record_writer(directory,blocking=False,exclusive=True):
-        intent=next((row for row in intents(root) if row['operation_id']==operation),None)
-        if (intent is None or intent.get('fence_protocol')!=1
+        intent=_read_intent(root,path)
+        if (intent.get('fence_protocol')!=1
                 or runtime.process_matches(intent.get('owner',{}),operation)):
             return None
         outcome=directory/'outcome.json'
         if outcome.exists():
-            return next(value for row,value in facts(root) if row['operation_id']==operation)
+            return _outcome(root,intent)
         if (any((directory/name).exists() or (directory/name).is_symlink() for name in ('dispatch.json','process.json'))
                 or delivery.leaf_refs(root,operation)!=intent.get('leaf_output')
                 or intent.get('initial_result',{}).get('status')!='engineering_error'
@@ -83,6 +117,8 @@ def recover_preflight(root, operation):
             return None
         result=dict(status='engineering_error',note='audit_recovery_preflight_not_dispatched',cleanup_confirmed=True)
         _save(outcome,dict(intent_ref=c.record_ref(path),process_ref=None,**result))
+        from . import accepted_budget
+        accepted_budget.finish_audit(root,operation)
         return result
 
 
@@ -154,7 +190,11 @@ def run(root, spec, source, request, seconds, *, on_process=None, author_require
         advance_seconds=limits['advance_seconds'])
     if job is not None and job.get('configuration_revision') is not None:
         intent['configuration_revision'] = job['configuration_revision']
-    _save(intent_path, intent)
+    from . import accepted_budget
+    head = accepted_budget.read(root)
+    step = job['step'] if job is not None else head.current_job['step']
+    accepted_budget.accept_audit(root, step=step, operation_id=request['operation_id'],
+        path=intent_path, intent=intent)
     deadline=time.clock_gettime(time.CLOCK_BOOTTIME)+intent['max_seconds']
     fresh=request
     try:
@@ -169,4 +209,5 @@ def run(root, spec, source, request, seconds, *, on_process=None, author_require
         result=dict(status='engineering_error' if preflight else 'unknown',
             note='audit_recovery_preflight_failed' if preflight else 'audit_recovery_dispatch_unknown',cleanup_confirmed=preflight)
     _save(outcome_path, dict(intent_ref=c.record_ref(intent_path),process_ref=c.record_ref(directory/'process.json') if (directory/'process.json').exists() else None, **result))
+    accepted_budget.finish_audit(root,request['operation_id'])
     return result, fresh, deadline

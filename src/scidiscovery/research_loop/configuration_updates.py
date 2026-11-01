@@ -67,14 +67,15 @@ def _reference(root, row):
     return dict(revision=row['revision'], path=path.relative_to(Path(root)).as_posix())
 
 
-def _read_reference(root, ref):
+def _read_reference(root, ref, *, _head=None):
     if not isinstance(ref, dict) or set(ref) != {'revision', 'path'} or type(ref.get('revision')) is not int or ref['revision'] < 1:
         raise ValueError('Exact configuration revision reference required')
     expected = f'host-control/configuration/revisions/{ref["revision"]:06d}.json'
     if ref['path'] != expected:
         raise ValueError('Configuration revision location changed')
     from . import accepted_budget
-    accepted = accepted_budget.read(root).row(f'configuration/{ref["revision"]:06d}')
+    head=accepted_budget.read(root) if _head is None else _head
+    accepted = head.row(f'configuration/{ref["revision"]:06d}')
     if accepted is None or accepted['ref'] != dict(path=expected):
         raise ValueError('Configuration revision has not been accepted')
     value = c.read(c.regular(Path(root) / expected))
@@ -89,11 +90,11 @@ def settings_path(root, job):
     return Path(root) / ((job.get('configuration_revision') or {}).get('path', 'settings.json'))
 
 
-def for_job(root, job):
+def for_job(root, job, *, _head=None):
     """A retained node without a revision always uses its original base settings."""
     root = Path(root).resolve()
     ref = job.get('configuration_revision')
-    return c.settings(root) if ref is None else _read_reference(root, ref)
+    return c.settings(root) if ref is None else _read_reference(root, ref,_head=_head)
 
 
 def for_step(root, step):
@@ -101,10 +102,11 @@ def for_step(root, step):
     return for_job(root, c.read(c.regular(root / 'jobs' / f'{step:03d}.json')))
 
 
-def _reservation(root, step):
+def _reservation(root, step, *, _head=None):
     path = _directory(root) / 'bindings' / f'{step:06d}.json'
     from . import accepted_budget
-    row = accepted_budget.read(root).row(f'configuration-binding/{step:06d}')
+    head=accepted_budget.read(root) if _head is None else _head
+    row = head.row(f'configuration-binding/{step:06d}')
     if row is None:
         if path.exists():
             raise ValueError('Unaccepted configuration binding requires original-call reconciliation')
@@ -114,7 +116,7 @@ def _reservation(root, step):
     if set(row) != {'step', 'configuration_revision'} or row['step'] != step:
         raise ValueError('Configuration node binding changed')
     if row['configuration_revision'] is not None:
-        _read_reference(root, row['configuration_revision'])
+        _read_reference(root, row['configuration_revision'],_head=head)
     return row
 
 
@@ -123,22 +125,26 @@ def for_new_job(root, step):
     path = root / 'jobs' / f'{step:03d}.json'
     if path.exists():
         return for_job(root, c.read(c.regular(path)))
-    reserved = _reservation(root, step)
-    return for_job(root, reserved) if reserved is not None else current(root)
+    from . import accepted_budget
+    head=accepted_budget.read(root)
+    reserved = _reservation(root, step,_head=head)
+    return for_job(root, reserved,_head=head) if reserved is not None else current(root,_head=head)
 
 
-def current(root):
+def current(root, *, _head=None):
     """Pure policy read: latest saved snapshot, without budget admission reads."""
     from . import accepted_budget
-    selected = accepted_budget.read(root)['configuration']
+    head=accepted_budget.read(root) if _head is None else _head
+    selected = head['configuration']
     if selected is None:
         return c.settings(Path(root))
-    return _read_reference(root, dict(revision=selected['revision'], **selected['ref']))
+    return _read_reference(root, dict(revision=selected['revision'], **selected['ref']),_head=head)
 
 
-def _current_revision(root):
+def _current_revision(root, *, _head=None):
     from . import accepted_budget
-    selected = accepted_budget.read(root)['configuration']
+    head=accepted_budget.read(root) if _head is None else _head
+    selected = head['configuration']
     return None if selected is None else c.read(Path(root)/selected['ref']['path'])
 
 
@@ -296,15 +302,16 @@ def bind_new_job(root, step):
         if path.exists():
             job = c.read(c.regular(path))
             return job.get('configuration_revision')
-        reserved = _reservation(root, step)
+        from . import accepted_budget
+        head = accepted_budget.read(root)
+        reserved = _reservation(root, step,_head=head)
         if reserved is not None:
             return reserved['configuration_revision']
-        current = _current_revision(root)
+        current = _current_revision(root,_head=head)
         values = [] if current is None else [current]
         fork_runtime.preflight_selected_settings(root,
             values[-1]['settings'] if values else c.settings(root), step=step)
         ref = _reference(root, values[-1]) if values else None
-        from . import accepted_budget
         head = accepted_budget.read(root)
         if values and values[-1]['revision'] > head['applied_configuration']:
             row = values[-1]

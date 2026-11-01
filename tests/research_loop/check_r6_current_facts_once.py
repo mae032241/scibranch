@@ -1,9 +1,10 @@
 """Current inventory ownership and publication boundaries; no model execution."""
 from pathlib import Path
+import sys
 import pytest
 
 from scidiscovery.research_loop import contracts as c, history, checkpoint, worker_delivery
-from scidiscovery.research_loop import handoff_state
+from scidiscovery.research_loop import handoff_state, accepted_budget
 from scidiscovery.research_loop import semantic, budget, continuation, execution, native, configuration_updates
 from scidiscovery.research_loop import execution_inputs, experiments
 from scidiscovery.research_loop import execution_resume, execution_recovery, experiment_client
@@ -370,3 +371,135 @@ def test_input_validation_rejects_a_caller_changed_search_before_consuming_accep
     changed=dict(job,search=dict(focus=dict(mechanism_ref='invented',action='screen')))
     with pytest.raises(ValueError,match='accepted canonical job'):
         c._validate_inputs(scene,c.workspace(scene,1),changed)
+
+
+def test_current_input_validation_reads_its_frozen_policy_once(scene,monkeypatch):
+    job=c.build_job(scene,1,'H',[])
+    settings=c.settings
+    reads=[]
+    def observed(root,current=None):
+        if current is job and sys._getframe(1).f_code is c._validate_inputs.__code__:
+            reads.append(current)
+        return settings(root,current)
+    monkeypatch.setattr(c,'settings',observed)
+    c._validate_inputs(scene,c.workspace(scene,1),job)
+    assert reads==[job]
+
+
+def _forbid_consumer_policy_reads(monkeypatch):
+    settings=c.settings
+    consumers={function.__code__ for function in (
+        c.material_inventory,history._inventory_policy,history.capture,
+        history._capture,history._capture.__wrapped__,history.observer_input_sources,
+        history.validate_observation)}
+    def observed(root,job=None):
+        # Observe direct frozen-policy reads only. Real protocol, live-head and
+        # native-receipt checks keep reading their own current settings.
+        if sys._getframe(1).f_code in consumers:
+            pytest.fail('An inventory consumer reread the frozen settings')
+        return settings(root,job)
+    monkeypatch.setattr(c,'settings',observed)
+
+
+def test_inventory_material_and_observer_consumers_reuse_the_frozen_policy(scene,monkeypatch):
+    monkeypatch.setattr(c,'seal_result',lambda *args,**kwargs:None)
+    job,work,record=finish(scene,1,'H',[],action='wait')
+    inventory=c.accept_current_inventory(scene,1)
+    _forbid_consumer_policy_reads(monkeypatch)
+    assert c.material_inventory(scene,1,inventory=inventory)[0]==inventory.materials
+    assert history.capture(scene,job,{},inventory.materials,inventory=inventory) is None
+    assert history._capture(scene,job,{},inventory.materials,inventory=inventory) is None
+    raw_ref=c.file_ref(record/'science-output.json')
+    config=dict(adapter_ref='registered-originals-v1')
+    snapshot=dict(binding=history._observer_binding(raw_ref,config),candidates=[],managed_calls=[])
+    monkeypatch.setattr(history,'read_observation',lambda *args:snapshot)
+    monkeypatch.setattr(history,'_managed_config',lambda *args:config)
+    assert history.validate_observation(scene,job,dict(raw_ref=raw_ref),inventory=inventory) is None
+
+
+@pytest.mark.parametrize('changed',['root','job','revision','attempt'])
+def test_inventory_policy_cannot_cross_another_job_revision_or_attempt(scene,monkeypatch,changed):
+    job=c.build_job(scene,1,'H',[])
+    record=scene/'native-evidence/001'
+    inventory=c.CurrentInventory(scene,job,record,0,[],{},policy=c.settings(scene,job))
+    if changed=='root':inventory.root=scene/'another-instance'
+    elif changed=='job':inventory.job=dict(job,step=2)
+    elif changed=='revision':inventory.job=dict(job,configuration_revision=dict(
+        revision=1,path='host-control/configuration/revisions/000001.json'))
+    else:inventory.record=record/'continuations/001'
+    _forbid_consumer_policy_reads(monkeypatch)
+    with pytest.raises(ValueError,match='another task or attempt'):
+        c.material_inventory(scene,1,inventory=inventory)
+    if changed!='attempt':
+        with pytest.raises(ValueError,match='another task or attempt'):
+            history.capture(scene,job,{},[],inventory=inventory)
+
+
+@pytest.mark.parametrize('change',['budget','native','recovery'])
+def test_next_configuration_operation_reads_after_accepted_state_changes(scene,monkeypatch,change):
+    job=c.build_job(scene,1,'E',[])
+    read=accepted_budget.read
+    observed=[]
+    def fresh(root):
+        state=read(root)
+        observed.append(state)
+        return state
+    monkeypatch.setattr(accepted_budget,'read',fresh)
+    policy=configuration_updates.current(scene)
+    assert len(observed)==1
+    before=observed[0]
+    if change=='budget':
+        budget.amend(scene,max_tokens=before['ceilings']['max_tokens']+1000,
+            authorization_note='Explicit adjacent-operation fixture amendment.')
+    elif change=='native':
+        record=c.host_record(c.workspace(scene,1))
+        accepted_budget.accept_native(scene,1,record,dict(task_ref=c.record_ref(scene/'jobs/001.json')))
+    else:
+        recovery=scene/'execution-authority/calls/fixture/recovery-operations/000001.json'
+        recovery.parent.mkdir(parents=True)
+        c.write(recovery,dict(step=1,call_id='fixture',status='unknown'))
+        snapshot=recovery.parent/'snapshots/000001.json'
+        snapshot.parent.mkdir()
+        c.write(snapshot,before['search'])
+        snapshot.chmod(0o400)
+        reference=dict(origin_identity=before.prefix['branch'],
+            path=snapshot.relative_to(scene).as_posix(),size_bytes=snapshot.stat().st_size)
+        accepted_budget.publish_recovery(scene,step=1,call_id='fixture',recovery_ref=c.record_ref(recovery),
+            search_delta=dict(summary=before['search'],rows={}),search_ref=reference)
+    observed.clear()
+    assert configuration_updates.current(scene)==policy
+    assert len(observed)==1 and observed[0]['seq']>before['seq']
+    after=observed[0]
+    if change=='budget':assert after['ceilings']['max_tokens']==before['ceilings']['max_tokens']+1000
+    elif change=='native':assert after['current_native']['step']==job['step']
+    else:assert after.row('execution-recovery/001/fixture')['ref']==c.record_ref(recovery)
+
+
+def test_configuration_head_is_shared_locally_and_job_revision_stays_exact(scene,monkeypatch):
+    from test_configuration_updates import edit
+    edit(scene,model='fixture-first')
+    read=accepted_budget.read
+    observed=[]
+    def fresh(root):
+        state=read(root)
+        observed.append(state)
+        return state
+    monkeypatch.setattr(accepted_budget,'read',fresh)
+    assert configuration_updates.current(scene)['model']=='fixture-first'
+    assert len(observed)==1
+    observed.clear()
+    assert configuration_updates.for_new_job(scene,1)['model']=='fixture-first'
+    assert len(observed)==1
+    first=configuration_updates.bind_new_job(scene,1)
+    observed.clear()
+    assert configuration_updates.for_new_job(scene,1)['model']=='fixture-first'
+    assert len(observed)==1
+    job=c.build_job(scene,1,'H',[])
+    assert job['configuration_revision']==first
+    edit(scene,model='fixture-second')
+    observed.clear()
+    assert configuration_updates.current(scene)['model']=='fixture-second'
+    assert len(observed)==1
+    observed.clear()
+    assert configuration_updates.for_job(scene,job)['model']=='fixture-first'
+    assert len(observed)==1

@@ -33,7 +33,7 @@ def capture_pending(root, job):
 
 
 def _capture_pending(root, job):
-    from . import execution_authority as authority
+    from . import accepted_budget, execution_authority as authority
     root = Path(root).resolve()
     if job['role'] != 'W':
         return None
@@ -63,23 +63,26 @@ def _capture_pending(root, job):
         records=experiment_client.record_directory(root,job['step'])/'calls'
         namespace=sorted(item.name for item in records.iterdir()) if records.exists() else []
         if records.resolve()!=records:complete=False
-        calls=[]
-        for directory in sorted((root/'execution-authority/calls').glob('*')):
-            original=directory/'allocation.json'
-            if not original.exists():complete=False;continue
-            allocation=c.read(c.regular(original))
-            if allocation['binding']['scope']['job_ref']==dict(path=str(root/job_ref['path'])):
-                calls.append((directory,allocation))
+        head=accepted_budget.read(root)
+        current=accepted_budget.authority_calls(head,job['step'])
+        calls=[];requests={}
+        for call,refs in sorted(current.items()):
+            allocation_ref=refs['allocation']
+            if allocation_ref is not None:
+                allocation=accepted_budget.authority_original(head,allocation_ref)
+                if not (root/allocation_ref['path']).exists():complete=False
+                if (allocation['call_id']!=call
+                        or allocation['binding']['scope']['job_ref']!=dict(path=str(root/job_ref['path']))):
+                    raise q.IntegrityError('Accepted allocation changed its exact current job')
+                calls.append((root/Path(allocation_ref['path']).parent,allocation,allocation_ref))
+            for ref in refs['requests']:
+                value=accepted_budget.authority_original(head,ref)
+                if not (root/ref['path']).exists():complete=False
+                if value['job']!=job_ref or value['call_id']!=call:
+                    raise q.IntegrityError('Accepted request changed its exact current job or call')
+                requests.setdefault(call,[]).append(ref)
         # No pending authority allocation means no new attempt/request history IO.
-        if not calls and not namespace and not pending:return None
-        requests = {}
-        for directory in sorted((root / 'execution-authority/requests').glob('*')):
-            item=directory/'request.json'
-            if directory.resolve()!=directory or not directory.is_dir() or not item.exists():
-                complete=False;continue
-            value = c.read(c.regular(item))
-            if value['job'] == job_ref:
-                requests.setdefault(value['call_id'], []).append(q._ref(root, item))
+        if not calls and not requests and not namespace and not pending:return None
         attempts = []
         for record in execution.records(root, job['step']):
             from . import worker_execution_bridge
@@ -102,7 +105,7 @@ def _capture_pending(root, job):
                             or any(type(process.get(key)) is not int or process[key]<=0 for key in ('pid','start_ticks','pgid','sid'))):
                         complete=False
             attempts.append(proofs)
-        for directory,allocation in calls:
+        for directory,allocation,allocation_ref in calls:
             original = directory / 'allocation.json'
             call = allocation['call_id']
             if directory.name != call or directory.resolve() != directory:
@@ -127,7 +130,7 @@ def _capture_pending(root, job):
                     for name in sorted(files):
                         originals.append(q._ref(root,c.regular(directory_path/name)))
             refs['records']=originals
-            allocations.append(dict(call_id=call, allocation=q._ref(root, original),
+            allocations.append(dict(call_id=call, allocation=allocation_ref,
                 requests=requests.pop(call, []), **refs,
                 disposition='unprepared' if not prepare.exists() and call not in namespace and call not in unknown_calls else 'possibly_prepared'))
         if requests or any(name not in {row['call_id'] for row in allocations} for name in namespace):

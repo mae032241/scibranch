@@ -1048,12 +1048,12 @@ def _run(root, *, continue_wait=None):
                 return _terminal_route(root,settings,completed,last,job['role'])
     def start_final(cutoff, step, blocked_role, reason, *, pending=None):
         route = pending if pending is not None else (role,parents,instruction,evidence_return,correction_request,author_correction)
-        cursor = None
+        cursor = sources = None
         if route[0] is not None:
             sources = history.source_sequence(root,cutoff+1)
             cursor = dict(zip(('role','parents','instruction','evidence_return','correction_request','author_correction'),route))
             cursor['source_refs'] = [dict(step=job['step'],seal_ref=seal_sha) for job,_,_,seal_sha in sources]
-        return _start_budget_closeout(root,cutoff,step,blocked_role,reason,resume_cursor=cursor)
+        return _start_budget_closeout(root,cutoff,step,blocked_role,reason,resume_cursor=cursor,sources=sources)
     for step in _step_numbers(root, first_step):
         # Reserve pending edits once at a new-node boundary, before admission.
         settings = configuration_updates.for_new_job(root, step)
@@ -1292,6 +1292,28 @@ def _run(root, *, continue_wait=None):
     return start_final(completed, completed + 1, role, 'bounded_steps_exhausted')
 
 
+def _closeout_accepted_slots(root, step):
+    """Read the two saved candidate slots at one exact accepted cut."""
+    if not step:
+        return dict(actual_submission=None, a_recommended=None, latest_a_step=None)
+    from . import candidate_refs, originals
+    source = originals.node(root, step)
+    seal = contracts.read(contracts.regular(originals.source_record(source, 'result-identity.json')))
+    reference = seal['breadth_snapshot']
+    owner = originals.source_for_ref(source, reference)
+    summary = contracts.read(contracts.regular(originals.resolve_ref(owner, reference)))
+    def candidate(identity):
+        return candidate_refs.origin_candidate(owner.origin_identity, identity) if owner.inherited else identity
+    actual = summary['actual_submission']
+    if actual is not None:
+        actual = dict(candidate_id=candidate(actual['candidate_id']), observed_at=actual['observed_at'],
+            retention=(actual.get('artifact') or {}).get('retention', 'unknown'))
+    recommendation = summary['a_recommended']
+    if recommendation is not None:
+        recommendation = dict(recommendation, candidate_id=candidate(recommendation['candidate_id']))
+    return dict(actual_submission=actual, a_recommended=recommendation, latest_a_step=summary['latest_a_step'])
+
+
 def _closeout_result(root, status, *, reason=None, step=None, read_only=False):
     state = budget.closeout_state(root)
     query_limits = budget.status_snapshot(root) if read_only else None
@@ -1299,17 +1321,32 @@ def _closeout_result(root, status, *, reason=None, step=None, read_only=False):
     all_actions = state['actions']
     if begin is not None and begin['mode'] == 'final':
         state = dict(state,actions=[row for row in all_actions if row['intent']['seq'] > begin['seq']])
-    closed = []
+    closed, pending = [], []
+    last_science = None
     if begin is not None:
-        for path in sorted((root / 'jobs').glob('*.json')):
-            job = contracts.read(path)
-            if (job.get('purpose') == 'closeout' or job.get('final_only')) and (begin['first_step'] <= job['step'] if begin['mode'] == 'final' else True) and (_record(root, job['step']) / 'result-identity.json').exists():
-                handoff_state.read_sealed(root, job['step'])
-                closed.append(job['step'])
+        from . import accepted_budget
+        head = accepted_budget.read(root)
+        # The phase owns this known closeout range. Earlier nodes already
+        # belong to its cutoff; status never discovers the research history.
+        for number in range(begin['first_step'], head['max_local_step'] + 1):
+            path = root / 'jobs' / f'{number:03d}.json'
+            if not path.exists():continue
+            job = contracts.read(contracts.regular(path))
+            if job.get('purpose') != 'closeout' and not job.get('final_only'):continue
+            if (_record(root, number) / 'result-identity.json').exists():
+                last_science = handoff_state.read_sealed(root, number)
+                closed.append(number)
+            elif job.get('purpose') == 'closeout':
+                pending.append(number)
     cutoff = begin['source_cutoff'] if begin else 0
-    previous = history.candidate_overview(history.rebuild(root, cutoff + 1, write_cache=False))
-    latest = history.candidate_overview(history.rebuild(root, max(closed, default=cutoff) + 1,
-        source_cutoff=cutoff, extra_steps=closed, write_cache=False))
+    previous = _closeout_accepted_slots(root, cutoff)
+    latest_recommendation = previous['a_recommended']
+    for number in closed:
+        accepted = _closeout_accepted_slots(root, number)
+        # A FINAL resume may exclude earlier FINAL nodes after this cutoff.
+        # Consume only a slot actually updated by this selected closed node.
+        if accepted['latest_a_step'] == number:
+            latest_recommendation = accepted['a_recommended']
     screened = shortlist.summary(root) if configuration_updates.current(root).get('selection_policy') else None
     last = max(closed, default=cutoff) or None
     confirmed = [row['outcome']['result'] for row in all_actions if row['outcome'] is not None
@@ -1320,7 +1357,8 @@ def _closeout_result(root, status, *, reason=None, step=None, read_only=False):
         or last_action['intent']['action_kind']=='submit' and last_outcome['status']=='confirmed'))
     if not read_only:
         budget.inactive(root, status)
-    last_science = handoff_state.read_sealed(root, last) if last is not None else None
+    if last_science is None and last is not None:
+        last_science = handoff_state.read_sealed(root, last)
     if status == 'closeout_status':
         final = budget.final_a_barrier(root)
         if final is not None and last == final['step'] and (_record(root, last) / 'result-identity.json').exists():
@@ -1333,8 +1371,6 @@ def _closeout_result(root, status, *, reason=None, step=None, read_only=False):
                 status = 'closeout_unresolved' if last_science.get('next_action') == 'deliver' else 'final_a_completed'
     if status == 'closeout_status':
         from . import candidate_audit, delivery
-        pending = [contracts.read(path)['step'] for path in sorted((root / 'jobs').glob('*.json'))
-            if contracts.read(path).get('purpose') == 'closeout' and contracts.read(path)['step'] not in closed]
         if begin['mode'] == 'export_only':
             status = 'exported_unsubmitted'
         elif state['unresolved_operations']:
@@ -1397,7 +1433,7 @@ def _closeout_result(root, status, *, reason=None, step=None, read_only=False):
         source_cutoff=cutoff, last_step=last, completed_scientific_nodes=cutoff + len(closed),
         used_steps=budget.used_steps(root), usage=native.usage(root),
         budget=query_limits if read_only else budget.snapshot(root),
-        previous_submission_observation=previous['actual_submission'], existing_A_recommendation=latest['a_recommended'],
+        previous_submission_observation=previous['actual_submission'], existing_A_recommendation=latest_recommendation,
         last_confirmed=confirmed[-1] if confirmed else None,
         current_actual='unknown' if state['unresolved_operations'] or pending_confirmation else (confirmed[-1] if confirmed else None))
     if last is not None and (root / 'jobs' / f'{last:03d}.json').exists():
@@ -1489,11 +1525,15 @@ def _resume_final(root, begin):
     if state['unresolved_operations'] or actions and (actions[-1]['outcome'] is None or
             actions[-1]['intent']['action_kind'] == 'submit' and actions[-1]['outcome']['result']['status'] == 'confirmed'):
         return False
-    first = max(begin['first_step'],max((int(path.stem) for path in (root/'jobs').glob('*.json')),default=0))+1
+    from . import accepted_budget
+    first = max(begin['first_step'],accepted_budget.read(root)['max_local_step'])+1
     cursor = begin['resume_cursor']
     if cursor['source_refs'] and cursor['author_correction'] is None:
-        source_step = cursor['source_refs'][-1]['step']
-        source_job, source_result, _, _ = history.source_sequence(root, begin['source_cutoff'] + 1)[-1]
+        reference = cursor['source_refs'][-1]
+        source_step = reference['step']
+        source_job, source_result, _, seal_ref = history._source(root, source_step)
+        if seal_ref != reference['seal_ref']:
+            raise ValueError('Final resume source seal identity changed')
         if role_share.reason(root, source_step, source_job, source_result, cursor['role'],
                 cursor['correction_request'], allow_repeat=source_result.get('next_action') == 'wait') is not None:
             return False
@@ -1510,7 +1550,7 @@ def _budget_denied(reason):
             or reason.startswith(('node_budget_unavailable_', 'closeout_reserve_', 'closeout_protected_')))
 
 
-def _start_budget_closeout(root, cutoff, step, blocked_role, reason, *, resume_cursor=None):
+def _start_budget_closeout(root, cutoff, step, blocked_role, reason, *, resume_cursor=None, sources=None):
     """One durable FINAL phase, followed only by its exact A and host delivery."""
     from .protocol import require_settings_format
     require_settings_format(configuration_updates.current(root))
@@ -1530,14 +1570,14 @@ def _start_budget_closeout(root, cutoff, step, blocked_role, reason, *, resume_c
             return _closeout_result(root, 'exported_unsubmitted', reason='original_execution_unresolved', step=step)
         step += 1
     begin = budget.begin_closeout(root, cutoff, step, reason, final_only=True, stopped_original=stopped,resume_cursor=resume_cursor)
-    return _run_final(root, begin)
+    return _run_final(root, begin, sources=sources)
 
 
 def _start_final_report(root, cutoff, step, blocked_role, reason, *, stopped_step=None):
     return _start_budget_closeout(root, cutoff, stopped_step if stopped_step is not None else step, blocked_role, reason)
 
 
-def _run_final(root, begin):
+def _run_final(root, begin, *, sources=None):
     """FINAL cannot dispatch W/E, scientific audit, correction or another A."""
     from . import delivery
     settings = configuration_updates.current(root)
@@ -1549,22 +1589,7 @@ def _run_final(root, begin):
     if (root / 'pause.request').exists() or correction.gate(root, begin['source_cutoff']) is not None:
         return _closeout_result(root, 'exported_unsubmitted', reason='original_pause_requires_release')
     step = begin['first_step']
-    revision = configuration_updates.bind_new_job(root, step)
-    prospective_job = dict(step=step, configuration_revision=revision)
-    settings = configuration_updates.for_new_job(root, step)
-    accepted = []
     from . import fork_runtime
-    if fork_runtime.is_fork(root):
-        from . import originals
-        accepted = [source.step for source in originals.source_sequence(root, step)]
-    else:
-        for path in sorted((root / 'jobs').glob('*.json')):
-            number = int(path.stem)
-            if number >= step or not (_record(root, number) / 'result-identity.json').exists():
-                continue
-            handoff_state.read_sealed(root, number)
-            accepted.append(number)
-    has_worker = any(fork_runtime.source_job(root, number)['role'] == 'W' for number in accepted)
     path = root / 'jobs' / f'{step:03d}.json'
     fork = fork_runtime.bootstrap(root)
     if fork is not None and step == fork['next_step']:
@@ -1576,13 +1601,43 @@ def _run_final(root, begin):
     else:
         from . import control_operations
         control_operations.apply_pending_budget(root)
-        parents = []
-        for role in ('H', 'W', 'A', 'E'):
-            matching = [number for number in accepted if fork_runtime.source_job(root, number)['role'] == role]
-            if matching:
-                parents.append(matching[-1])
+        revision = configuration_updates.bind_new_job(root, step)
+        prospective_job = dict(step=step, configuration_revision=revision)
+        settings = configuration_updates.for_new_job(root, step)
+        cursor = begin.get('resume_cursor')
+        last_roles = {}
+        after_cutoff = set()
+        nodes = []
+        if sources is None and cursor is None:
+            # First construction without an accepted list owns this traversal.
+            # A crash before publishing its job may repeat this attempt.
+            sources = history.source_sequence(root, begin['source_cutoff'] + 1)
+            # A retained stopped original may lie before first_step without
+            # a seal. Only accepted closeout members extend the frozen cut.
+            for number in range(begin['source_cutoff'] + 1, step):
+                if (_record(root, number) / 'result-identity.json').exists():
+                    sources.append(history._source(root, number))
+        if sources is not None:
+            members = ((job['step'],job['role'],seal_ref) for job,_,_,seal_ref in sources)
+        else:
+            from . import accepted_budget, accepted_search
+            head = accepted_budget.read(root)
+            def known_members():
+                for reference in cursor['source_refs']:
+                    number = reference['step']
+                    metadata = accepted_budget.search_row(root, accepted_search.key('node',number), head=head)
+                    if metadata is None:
+                        raise ValueError('Final source has no accepted role metadata')
+                    yield number, metadata['role'], reference['seal_ref']
+            members = known_members()
+        for number, source_role, seal_ref in members:
+            last_roles[source_role] = number
+            if number > begin['source_cutoff']:
+                after_cutoff.add(number)
+            nodes.append(dict(step=number, seal_ref=seal_ref))
+        has_worker = 'W' in last_roles
         # Keep all accepted closeout science in the exact final history.
-        parents = sorted(set(parents) | {number for number in accepted if number > begin['source_cutoff']})
+        parents = sorted(set(last_roles.values()) | after_cutoff)
         instruction = ('This is FINAL. Give the final scientific conclusion from accepted existing W evidence, '
             'make your explicit selection, and explain all unmet objectives and missing work in scientific_result and limitations. '
             'No new scientific role, experiment, audit, wait or correction is authorized. '
@@ -1596,7 +1651,6 @@ def _run_final(root, begin):
         # Execution safety was checked above. Billing uncertainty cannot remove
         # accepted W originals or the final author's submission choice.
         if has_worker and policy is not None and policy['adapter'] is not None:
-            nodes = [dict(step=number, seal_ref=contracts.record_ref(fork_runtime.source_record(root, number, 'result-identity.json'))) for number in accepted]
             try:
                 sources = delivery.catalogue_sources(root, nodes, job=prospective_job)
             except delivery.DeliveryUnresolved as error:

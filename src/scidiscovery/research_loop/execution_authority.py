@@ -301,10 +301,10 @@ def create_request(root, *, step, native_intent, call_id, subject, review_ref,
     request_id = security.request_digest(value)
     value['nonce_hash'] = security.secret_hash(security.token(secret, 'request-nonce', request_id))
     with writer(root,context=operation_context):
-        ref=q._save(root, _directory(root, request_id) / 'request.json', value)
-        if supersedes is not None:
-            q._save(root,(Path(root)/supersedes['path']).parent/'successor.json',dict(previous=supersedes,successor=ref))
-        return ref
+        from . import accepted_budget
+        return accepted_budget.accept_authority(root, step=step, call_id=call_id,
+            path=_directory(root, request_id)/'request.json', value=value, supersedes=supersedes,
+            operation_context=operation_context)
 
 
 def request(root, request_id):
@@ -549,7 +549,7 @@ def _remaining(root, config, allocation=None):
 
 
 def _allocate_call(config, payload, ordinal, mechanism=None):
-    from . import budget, native, breadth, experiments as e
+    from . import accepted_budget, budget, native, breadth, experiments as e
     root, job, intent = _host_context(config)
     subject, ref, alias = _selected_subject(root, job, payload)
     body = dict(scope=config['scope'], native_attempt=config['native_attempt'], interface=config['execution_interface'],
@@ -560,8 +560,10 @@ def _allocate_call(config, payload, ordinal, mechanism=None):
     call = f'{ordinal:04d}-' + security.request_digest(body)[:32]
     path = root / 'execution-authority/calls' / call / 'allocation.json'
     with writer(root):
-        if path.exists():
-            original = c.read(c.regular(path))
+        head = accepted_budget.read(root)
+        row = accepted_budget.authority_calls(head, job['step']).get(call)
+        if row is not None and row['allocation'] is not None:
+            original = accepted_budget.authority_original(head, row['allocation'])
             if original['binding'] != body:
                 raise q.IntegrityError('Pending execution call allocation changed')
             if (path.parent / 'prepare-intent.json').exists():
@@ -571,12 +573,13 @@ def _allocate_call(config, payload, ordinal, mechanism=None):
             stamp, seconds = _remaining(root, config)
             if seconds <= 0:
                 raise ValueError('Original native deadline has expired')
-            q._save(root, path, dict(version=1, call_id=call, binding=body, native_intent=intent,
+            original = dict(version=1, call_id=call, binding=body, native_intent=intent,
                 boot_id=stamp['boot_id'], dispatch_deadline_boottime=stamp['at_boottime'] + seconds,
                 job_deadline_boottime=stamp['at_boottime'] + budget.execution_available(root, job,
                     budget.snapshot(root, sample_stamp=stamp), native.usage(root))['seconds'],
                 scientific_authorization=budget.authorization_revision(root),
-                expires_at=stamp['at_unix'] + seconds))
+                expires_at=stamp['at_unix'] + seconds)
+        accepted_budget.accept_authority(root, step=job['step'], call_id=call, path=path, value=original)
     return call
 
 

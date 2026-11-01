@@ -547,12 +547,12 @@ def _public_materials(root, materials, *, source=None):
     return rows
 
 
-def _accept_selected_inputs(work, payload, job, diagnostics=None):
+def _accept_selected_inputs(work, payload, job, diagnostics=None, *, _policy=None):
     """Resolve explicit reuse intent against this role's already frozen inputs."""
     from .protocol import require_job_format
     require_job_format(job)
     root = work.parents[2]
-    policy = settings(root, job)
+    policy = settings(root, job) if _policy is None else _policy
     bound = {row['path']: row for row in job['direct_materials']}
     selected, seen, total = [], set(), 0
     choices = []
@@ -902,6 +902,7 @@ def science_view(job, root=None):
 
 @dataclass
 class CurrentInventory:
+    """Accepted facts for this stopped attempt within one control operation."""
     root: Path
     job: dict
     record: Path
@@ -919,6 +920,9 @@ class CurrentInventory:
     selected_inputs: list = field(default_factory=list)
     selection_diagnostics: list = field(default_factory=list)
     output_error: Exception | None = None
+    policy: dict | None = None
+    native_intent: dict | None = None
+    native_outcome: dict | None = None
 
 
 def accept_current_inventory(root: Path, step: int):
@@ -931,6 +935,7 @@ def accept_current_inventory(root: Path, step: int):
         raise ValueError('Sealed scientific facts must be read from their accepted result')
     record=execution.record(root,step)
     worker_delivery.writers_stopped(root,job,record)
+    intent=read(regular(record/'native-intent.json'))
     outcome=native_outcome(record)
     from . import accepted_budget
     meter=read(regular(record/'usage.json')) if (record/'usage.json').exists() else None
@@ -948,19 +953,21 @@ def accept_current_inventory(root: Path, step: int):
     outputs={row['call_id']:history._observe_scientific_outputs(root,job,row)
         for row in calls if row['status'] in {'known_success','known_failed'}}
     inventory=CurrentInventory(root,job,record,
-        int(record.name) if record.parent.name=='continuations' else 0,calls,outputs)
+        int(record.name) if record.parent.name=='continuations' else 0,calls,outputs,
+        policy=settings(root,job),native_intent=intent,native_outcome=outcome)
     needs_checkpoint=(job['role']=='W' and (checkpoint.enabled(root,job)
         or worker_delivery.applicable(job) or job.get('managed_execution_wait')))
     if not raw.exists():
         if needs_checkpoint:inventory.checkpoint=checkpoint._capture(root,job,record,inventory=inventory)
         return inventory
     inventory.science_available=True
-    _validate_inputs(root,workspace(root,step),job)
+    _validate_inputs(root,workspace(root,step),job,_policy=inventory.policy)
     try:
         from . import candidate_refs
         payload=candidate_refs.control_payload(job,science_payload(raw,job['role'],job['handoff_protocol'],
             'selection' in job,**response_options(job)),root=root,inventory=inventory)
-        inventory.selected_inputs=_accept_selected_inputs(workspace(root,step),payload,job,inventory.selection_diagnostics)
+        inventory.selected_inputs=_accept_selected_inputs(workspace(root,step),payload,job,inventory.selection_diagnostics,
+            _policy=inventory.policy)
     except OutputRepairRequired as error:
         # The existing bounded output-repair owner diagnoses malformed science;
         # no selection or scientific qualification is inferred from it here.
@@ -993,17 +1000,21 @@ def accept_recovery_call(root, job, call_id, *, context=None):
 def material_inventory(root: Path, step: int, *, inventory):
     """Validate stopped-node originals and layout without changing permissions."""
     job=read(regular(root/'jobs'/f'{step:03d}.json'))
-    policy = settings(root, job)
+    if inventory.root!=root or inventory.job!=job:
+        raise ValueError('Current inventory belongs to another task or attempt')
+    policy = inventory.policy if inventory.policy is not None else settings(root, job)
     work = workspace(root, step)
     rows, mutable, destinations = [], [], {}
     from . import execution
     record=execution.record(root,step)
+    if record!=inventory.record:
+        raise ValueError('Current inventory belongs to another task or attempt')
     from . import worker_delivery
     if (record/'native-intent.json').exists():
-        intent=read(regular(record/'native-intent.json'))
+        intent=(inventory.native_intent if inventory.native_intent is not None
+            else read(regular(record/'native-intent.json')))
         if intent.get('author_context_version')==1:
             from . import author_closeout
-            job=read(regular(root/'jobs'/f'{step:03d}.json'))
             proof=intent['author_closeout_science_context']
             author_closeout.validate_science_context(root,job,proof)
 
@@ -1063,7 +1074,6 @@ def material_inventory(root: Path, step: int, *, inventory):
 
     artifacts(work / 'artifacts')
     experiments(work / 'experiments')
-    job=read(root/'jobs'/f'{step:03d}.json')
     if job['role']=='W':
         from . import history
         for call in history.managed_calls(inventory):
@@ -1649,10 +1659,10 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     return job
 
 
-def _native_output_identity(root, step, intent, outcome, *, source=None):
+def _native_output_identity(root, step, intent, outcome, *, source=None, job=None):
     from . import budget
     if source is None:
-        job = read(regular(Path(root) / 'jobs' / f'{step:03d}.json'))
+        if job is None:job = read(regular(Path(root) / 'jobs' / f'{step:03d}.json'))
         budget.validate_final_a_receipt(root, job, intent, outcome)
     return outcome.get('raw_ref')
 
@@ -1776,7 +1786,7 @@ def validate(work: Path):
     calls=observed.get('managed_calls',[])
     history._validate_managed(root,job,calls)
     inventory=CurrentInventory(root,job,execution.record(root,job['step']),
-        len(execution.records(root,job['step']))-1,calls,{})
+        len(execution.records(root,job['step']))-1,calls,{},policy=settings(root,job))
     if (seal.get('control_outcome') or {}).get('worker_delivery',{}).get('facts_ref'):
         from . import worker_delivery
         inventory.delivery=worker_delivery._validate(root,job,inventory.record,inventory=inventory)
@@ -1788,7 +1798,7 @@ def validate(work: Path):
     raw = regular(native_record / 'science-output.json')
     result = regular(record / 'result.json')
     conclusion = work / 'conclusion.json'
-    native_raw_ref=_native_output_identity(root,job['step'],intent,outcome)
+    native_raw_ref=_native_output_identity(root,job['step'],intent,outcome,job=job)
     if seal.get('final_a_completion') != _final_a_seal(native_record, outcome):
         raise ValueError('Final A completion receipt identity changed')
     if (seal['job_ref'] != record_ref(job_path) or intent['task_ref'] != record_ref(job_path)
@@ -1818,9 +1828,9 @@ def validate(work: Path):
         raise ValueError('Scientific deliverable entry points changed')
     if seal.get('unresolved_links') != unresolved:
         raise ValueError('Scientific unresolved link receipt changed')
-    if seal.get('selected_inputs', []) != _accept_selected_inputs(work, payload, job):
+    if seal.get('selected_inputs', []) != _accept_selected_inputs(work, payload, job,_policy=inventory.policy):
         raise ValueError('Selected implementation receipts changed')
-    _validate_inputs(root, work, job)
+    _validate_inputs(root, work, job,_policy=inventory.policy)
     from . import execution_inputs
     execution_inputs.validate_seal(root, job, seal)
     if 'pending_executions' in seal:
@@ -1861,7 +1871,7 @@ def _validate_task_view(root, work, job):
         raise ValueError('Frozen scientific task changed its assessment sources')
 
 
-def _validate_inputs(root, work, job):
+def _validate_inputs(root, work, job, *, _policy=None):
     if read(regular(Path(root)/'jobs'/f'{job["step"]:03d}.json'))!=job:
         raise ValueError('Scientific inputs differ from their accepted canonical job')
     if job.get('fork_source') is not None:
@@ -1872,6 +1882,7 @@ def _validate_inputs(root, work, job):
         formal_review.validate_job(root, job)
         engineering.validate_job(root, job)
         return
+    policy=settings(root,job) if _policy is None else _policy
     from . import budget,accepted_budget,accepted_prefix
     report = budget.validate_final_report_inputs(root, job)
     accepted=accepted_budget.read(root).row(f'job/{job["step"]:03d}')
@@ -1893,14 +1904,14 @@ def _validate_inputs(root, work, job):
     qualification.validate_inputs(root, job)
     if 'source_provenance' in job and job.get('source_restrictions') != qualification.status(root, job):
         raise ValueError('Frozen source restriction view changed')
-    if job.get('experiment_mode')!=settings(root, job).get('experiment_mode'):
+    if job.get('experiment_mode')!=policy.get('experiment_mode'):
         raise ValueError('Frozen experiment mode differs from its original settings')
-    selected=settings(root, job).get('execution_config')
+    selected=policy.get('execution_config')
     if job.get('execution_config_record')!=selected:
         raise ValueError('Frozen execution selection differs from its original settings')
-    if job['role']=='W' and job.get('worker_fragment_policy')!=settings(root, job).get('worker_fragment_policy'):
+    if job['role']=='W' and job.get('worker_fragment_policy')!=policy.get('worker_fragment_policy'):
         raise ValueError('Frozen W continuation configuration differs from its original settings')
-    if job.get('candidate_nomination_policy') is not None and job['candidate_nomination_policy']!=settings(root, job).get('candidate_nomination_policy'):
+    if job.get('candidate_nomination_policy') is not None and job['candidate_nomination_policy']!=policy.get('candidate_nomination_policy'):
         raise ValueError('Frozen candidate nomination configuration changed')
     if job.get('audit_projection_version') == 1:
         if (job['history'].get('audit_projection_version') != 1
@@ -1912,7 +1923,6 @@ def _validate_inputs(root, work, job):
     _validate_task_view(root,work,job)
     if job['global_materials'] != global_materials(root):
         raise ValueError('Bound global context changed')
-    policy = settings(root, job)
     if job.get('purpose') == 'closeout':
         from . import budget, delivery
         boundary = job.get('closeout_begin') or {}
@@ -2017,11 +2027,11 @@ def _validate_inputs(root, work, job):
 @owner_effect
 def seal_result(root: Path, step: int, *, inventory=None):
     from .protocol import require_current
-    require_current(root,read(regular(Path(root)/'jobs'/f'{step:03d}.json')))
     work = workspace(root, step)
     record = host_record(work)
     job_path = root / 'jobs' / f'{step:03d}.json'
-    job = read(job_path)
+    job = read(regular(job_path))
+    require_current(root,job)
     if (record / 'result-identity.json').exists():
         from . import handoff_state,accepted_prefix
         accepted_prefix.reconcile(root)
@@ -2030,10 +2040,12 @@ def seal_result(root: Path, step: int, *, inventory=None):
     if inventory is None:inventory=accept_current_inventory(root,step)
     if inventory.root!=root or inventory.job!=job or execution.record(root,step)!=inventory.record:raise ValueError('Current inventory belongs to another task or attempt')
     native_record = inventory.record
-    intent = read(regular(native_record / 'native-intent.json'))
+    intent=(inventory.native_intent if inventory.native_intent is not None
+        else read(regular(native_record / 'native-intent.json')))
     if intent['task_ref'] != record_ref(regular(job_path)):
         raise ValueError('Native launch task changed')
-    outcome = native_outcome(native_record)
+    outcome=inventory.native_outcome if inventory.native_outcome is not None else native_outcome(native_record)
+    policy=inventory.policy if inventory.policy is not None else settings(root,job)
     from . import worker_delivery
     # Collect the same completed call. Keep its pending output and receipt as
     # retained originals; publishing the scientific bytes never starts a turn.
@@ -2045,12 +2057,12 @@ def seal_result(root: Path, step: int, *, inventory=None):
             and outcome.get('cleanup') == 'observed_group_cleaned'
             and outcome.get('raw_ref') == dict(path=str(raw_path), size_bytes=regular(pending).stat().st_size)):
         os.link(regular(pending), raw_path, follow_symlinks=False)
-    native_raw_ref=_native_output_identity(root,step,intent,outcome)
+    native_raw_ref=_native_output_identity(root,step,intent,outcome,job=job)
     from . import budget
     final = budget.final_a_return(root, job, intent)
     if (type(outcome.get('returncode')) is not int or outcome['returncode'] != 0
             or outcome.get('stop_reason')
-            or budget.final_a_usage_unknown(final, outcome['usage']) and not budget.native_completion_known(outcome, settings(root, read(regular(root / 'jobs' / f'{step:03d}.json'))))):
+            or budget.final_a_usage_unknown(final, outcome['usage']) and not budget.native_completion_known(outcome, policy)):
         raise ValueError('Terminal scientific output is unverified or changed')
     if native_record!=execution.origin(root,step):
         from . import author_closeout
@@ -2075,7 +2087,8 @@ def seal_result(root: Path, step: int, *, inventory=None):
     if inventory.output_error is not None:
         raise inventory.output_error
     from . import candidate_refs
-    value = envelope(job, candidate_refs.control_payload(job,science_payload(raw, job['role'], job['handoff_protocol'], 'selection' in job,**response_options(job)),root=root,inventory=inventory))
+    value = envelope(job, candidate_refs.control_payload(job,science_payload(raw, job['role'], job['handoff_protocol'],
+        'selection' in job,**response_options(job)),root=root,inventory=inventory))
     if job['role']=='W':
         from . import managed_wait
         managed_wait.before_seal(root,job,native_record,inventory=inventory)
@@ -2129,7 +2142,7 @@ def seal_result(root: Path, step: int, *, inventory=None):
     observed_inputs=history.validate_observation(root,job,seal,inventory=inventory)
     inventory.observation=observations
     if observations is not None:
-        observer_unknown=(settings(root,job).get('history_observer') is not None and
+        observer_unknown=(policy.get('history_observer') is not None and
             (observed_inputs is None or not observed_inputs['complete']))
         inventory.additional_inputs=((bool(inventory.managed_calls) if inventory.input_coverage is None else
             not all(row['complete'] for row in inventory.input_coverage)) or observer_unknown)

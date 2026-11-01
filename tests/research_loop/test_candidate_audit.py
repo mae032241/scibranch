@@ -113,14 +113,17 @@ def test_incomplete_and_rejected_audits_never_promote_or_claim_global_qualificat
 
 @pytest.mark.process_e2e
 def test_unknown_accepted_audit_is_not_replayed_and_blocks_amendment(tmp_path):
+    from scidiscovery.research_loop import accepted_budget
     root = audit_fixture(tmp_path)
     job,payload = request(root)
     directory = candidate_audit._directory(root,3)
     operation = candidate_audit._operation(root,candidate_audit._decision(root,3),'run-1')
-    candidate_audit._save(directory/'intent.json',dict(action_id=operation,action_kind='audit',operation_id=operation,
-        decision=candidate_audit._decision(root,3),candidate_id='run-1',max_seconds=20,advance_seconds=budget.snapshot(root)['advance_seconds']))
+    intent=dict(action_id=operation,action_kind='audit',operation_id=operation,
+        decision=candidate_audit._decision(root,3),candidate_id='run-1',max_seconds=20,advance_seconds=budget.snapshot(root)['advance_seconds'])
+    accepted_budget.accept_audit(root,step=3,operation_id=operation,path=directory/'intent.json',intent=intent)
     saved=(directory/'intent.json').read_bytes()
-    assert candidate_audit.execute(root,job,payload)=='candidate_audit_unknown'
+    with controller._writer(root):
+        assert candidate_audit.execute(root,job,payload)=='candidate_audit_unknown'
     assert controller.run(root)['status']=='candidate_audit_unknown'
     assert budget.execution_blocked(root) and budget.used_steps(root)==4
     with pytest.raises(RuntimeError, match='no running or unknown'):

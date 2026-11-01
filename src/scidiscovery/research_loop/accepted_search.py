@@ -191,7 +191,10 @@ def prepare_node(root, job, payload, seal, *, summary, lookup, usage_lookup=None
         stage_intent=payload.get('stage_intent'), focus=copy.deepcopy((job.get('search') or {}).get('focus')),
         allocation=copy.deepcopy((job.get('search') or {}).get('allocation')),
         breadth=bool((job.get('search') or {}).get('breadth')), assessed=False,portfolio_assessed=False,
-        direct_steps=[int(row['path'].split('/')[2]) for row in job.get('direct_refs',[])])
+        direct_steps=[int(row['path'].split('/')[2]) for row in job.get('direct_refs',[])],
+        pending_executions=copy.deepcopy(seal.get('pending_executions')),
+        pending_calls=[], pending_namespace_unavailable=False,
+        origin_identity=_origin(root,step))
     delta.put('node', step, node)
     request=current['pending_work_response']
     if request and step==request['source_a']+1:
@@ -265,6 +268,22 @@ def prepare_node(root, job, payload, seal, *, summary, lookup, usage_lookup=None
         current['allocation'] = None
         current['diagnostics'] = copy.deepcopy(control.get('diagnostics', []))
     observation = history.read_observation(root, job, seal) if seal.get('observations') else None
+    if node['pending_executions'] is not None:
+        from . import originals
+        source = originals.node(root,step)
+        pending = c.read(originals.resolve_ref(source,node['pending_executions']))
+        known = {row['call_id'] for row in (observation or {}).get('managed_calls', [])
+            if row['status'] != 'unknown'}
+        calls = [row['call_id'] for row in pending['allocations']
+            if row['disposition'] == 'possibly_prepared']
+        for ref in pending.get('host_preparations', []):
+            owner = originals.source_for_ref(source,ref)
+            calls.append(c.read(originals.resolve_ref(owner,ref))['call_id'])
+        node['pending_calls'] = [dict(call_id=call,recovery_ref=None)
+            for call in dict.fromkeys(call for call in calls if call not in known)]
+        node['pending_namespace_unavailable'] = (pending.get('complete') is False
+            and bool(pending.get('unavailable_reason')) and not pending['allocations']
+            and not pending.get('host_preparations'))
     if observation is None:
         if current['coverage'] != 'partial':current['coverage'] = 'partial'
     else:
@@ -352,11 +371,14 @@ def _retain_current(delta,step=None):
         return value
     for name,value in available.items():
         if (name.startswith('search/work/') and value['status']!='withdrawn'
-                or name.startswith('search/call/') and value['status']=='unknown'):
+                or name.startswith('search/call/') and value['status']=='unknown'
+                or name.startswith('search/node/')
+                and (value['pending_calls'] or value['pending_namespace_unavailable'])):
             selected[name]=copy.deepcopy(value)
     if step is None:
-        for name,value in summary['current_facts'].items():
-            if name.startswith('search/node/'):selected[name]=copy.deepcopy(value)
+        latest = max((value['step'] for name,value in available.items()
+            if name.startswith('search/node/')), default=None)
+        retain('node',latest)
     else:retain('node',step)
     if summary['last_science']:retain('node',summary['last_science']['step'])
     portfolio=summary['portfolio'];pending=portfolio['pending_w']
@@ -529,11 +551,29 @@ def prepare_recovery(*, summary, lookup, step, call_id, resolved,recovery_ref):
     delta = _Delta(summary, lookup)
     identity = f'{step}:{call_id}'
     original = delta.get('call', identity)
+    node = delta.get('node',step)
+    if node is None:
+        raise ValueError('Recovery requires its accepted original scientific node')
+    pending = node['pending_calls']
+    pointer = next((item for item in pending if item['call_id'] == call_id),None)
+    if resolved is None or resolved['status'] == 'unknown':
+        if pointer is None:
+            pointer = dict(call_id=call_id,recovery_ref=None)
+            pending.append(pointer)
+        pointer['recovery_ref'] = copy.deepcopy(recovery_ref)
+    elif pointer is not None:
+        pending.remove(pointer)
     if original is None:
-        raise ValueError('Recovery requires its accepted original scientific call')
+        # A sealed unprepared allocation has not consumed a scientific call.
+        # Its resume intent still owns an unfinished original, even with no row.
+        _retain_current(delta)
+        return dict(summary=delta.summary, rows=delta.rows)
+    if resolved is None:
+        _retain_current(delta)
+        return dict(summary=delta.summary, rows=delta.rows)
     if (resolved.get('call_id') != call_id
             or resolved.get('mechanism_binding') != original['mechanism_binding']
-            or resolved.get('status') not in {'known_success', 'known_failed', 'unknown'}):
+            or resolved.get('status') not in {'known_success', 'known_failed', 'unknown', 'not_submitted'}):
         raise ValueError('Recovery changed the original scientific call binding')
     if original['status'] != 'unknown' and resolved['status'] != original['status']:
         raise ValueError('Recovery cannot replace known original scientific facts')

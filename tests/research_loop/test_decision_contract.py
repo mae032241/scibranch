@@ -71,7 +71,9 @@ def test_minimal_route_still_rejects_completed_repetition_without_new_evidence(t
     job, payload = author(root, 5, [1, 2, 3], None, omit_request=True)
     assert decision.reason(root, job, payload) == 'a_decision_request_repeated'
     changed = dict(payload, route_reason='A different scientific question for the same evidence.')
-    assert decision.reason(root, job, changed) is None
+    # A sealed result keeps its saved gate, even if a caller supplies new prose.
+    assert decision.reason(root, job, changed) == 'a_decision_request_repeated'
+    assert decision.assess(root, job, changed) == []
 
 
 @pytest.mark.parametrize('action', ['continue_w', 'revise_h', 'extract'])

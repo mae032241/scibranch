@@ -335,6 +335,13 @@ route and search cursors carry accepted decisions forward; a missing derived
 cursor can be rebuilt from saved facts without granting new qualification.
 New verification covers the current node and its actual declared inputs,
 including recovered materials, independently of the historical node count.
+Current inventory checks reuse the frozen policy and accepted receipts. Pending
+execution capture follows the current job's exact authority references; allocation
+and request originals are accepted with those references in the existing control
+ledger, including allocations made before preparation starts. Sealed A decisions
+and an existing FINAL source selection are reused. A new A still performs its
+required comparisons, and the first FINAL selection may read its eligible sources
+once.
 Source restrictions propagate saved input and output facts; passive provenance
 reads do not reopen producer execution or ancestry gates. Missing restriction
 facts remain unknown, and restricted sources cannot become clear by inheritance.
