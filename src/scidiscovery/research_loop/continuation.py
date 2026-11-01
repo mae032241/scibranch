@@ -155,7 +155,9 @@ def _automatic_session(root, step, record, outcome):
 def _completed_work_request(root, step, record, source_attempt, prior_intents, *, inventory):
     """Only the existing exact W delivery contract can reopen completed work."""
     if inventory is None:return None
-    job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
+    job = inventory.job
+    if job['step'] != step:
+        raise ValueError('Current inventory belongs to another task')
     if (job['role'] != 'W' or job.get('formal_review') or job.get('final_only')
             or job.get('purpose') == 'closeout'
             or any(item.get('continuation_kind') in {'author_closeout','execution_wake'}
@@ -352,6 +354,9 @@ def _automatic_start_locked(root, step, decision, *, inventory=None, recovery_wa
         raise ResumeUnavailable('automatic_recovery_decision_stale')
     validate_launcher(root, step)
     job = validate_task(root, step,inventory=inventory)
+    if inventory is None:
+        from . import handoff_state
+        job = handoff_state.material_inputs(root,job,sources={})
     paths = execution.records(root, step);last = paths[-1]
     from . import fork_runtime
     if any((execution.origin(root, later) / 'native-intent.json').exists()
@@ -455,9 +460,12 @@ def validate_wake_policy(root, step):
 
 
 def validate_task(root, step, *, inventory=None):
-    job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
-    if inventory is not None and (inventory.job!=job or inventory.job['step']!=step):
-        raise ValueError('Current inventory belongs to another task')
+    retained = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
+    job = retained
+    if inventory is not None:
+        if c.job_record(inventory.job)!=retained or inventory.job['step']!=step:
+            raise ValueError('Current inventory belongs to another task')
+        job = inventory.job
     # This is the original call's frozen transport input. Rebuilding it with a
     # later scientific contract would change a retained task during recovery.
     c.regular(execution.origin(root, step) / 'science-result.schema.json', limit=None)
@@ -743,7 +751,13 @@ def seal_or_repair(root, step, *, inventory):
 
 def output_request(root, step, record, *, inventory, source_attempt=None, verify_task=True):
     """Recompute a repair binding from verified original final-response bytes."""
-    job = validate_task(root, step,inventory=inventory) if verify_task else c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
+    if verify_task:
+        job = validate_task(root, step,inventory=inventory)
+        if inventory is None:
+            from . import handoff_state
+            job = handoff_state.material_inputs(root,job,sources={})
+    else:
+        job = inventory.job if inventory is not None else c.read_job(root / 'jobs' / f'{step:03d}.json')
     if source_attempt is None:source_attempt = len(execution.records(root, step)) - 1
     outcome = c.native_outcome(record)
     if (type(outcome.get('returncode')) is not int or outcome['returncode'] != 0
@@ -998,14 +1012,14 @@ def start(root, step, *, inventory=None):
     last = paths[-1]
     outcome = c.native_outcome(last)
     if inventory is None:inventory=c.accept_current_inventory(root,step)
+    job = inventory.job
     repair = None
     work_repair=False
     if outcome.get('returncode') == 0 and not outcome.get('stop_reason'):
         try:
-            if checkpoint.enabled(root, c.read(root / 'jobs' / f'{step:03d}.json')):
+            if checkpoint.enabled(root, job):
                 if outcome.get('output_status') == 'missing':
                     raise OutputRepairRequired('missing_output', 'Return the missing scientific summary without rerunning completed work.')
-                job=c.read(root/'jobs'/f'{step:03d}.json')
                 science=c.science_payload(last/'science-output.json','W',job.get('handoff_protocol',1),**c.response_options(job))
                 from . import candidate_refs, worker_delivery, candidate_nominations
                 science=candidate_refs.control_payload(job,science,root=root,inventory=inventory)
@@ -1026,7 +1040,7 @@ def start(root, step, *, inventory=None):
             repair = output_request(root, step, last,inventory=inventory)
     limits = validate_launcher(root, step)
     closeout = budget.closeout_state(root)['begin']
-    job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
+    job = inventory.job
     if limits.get('output_only') and (repair is None or work_repair):
         raise ResumeUnavailable('worker_resume_output_only')
     final_repair = repair is not None and not work_repair and budget.final_a_barrier(root) is not None and budget.final_a_barrier(root)['step']==step
@@ -1045,7 +1059,7 @@ def start(root, step, *, inventory=None):
     original_intent = c.read(c.regular(paths[0] / 'native-intent.json'))
     if original_intent.get('task_ref') != c.record_ref(root / 'jobs' / f'{step:03d}.json'):
         raise ValueError('Original native task identity changed')
-    validate_task(root, step)
+    validate_task(root, step,inventory=inventory)
     _eligible_original(root, step, paths, successful=repair is not None, wait_runner=repair is not None)
     session_ref = session(root, step, last)
     from . import profiles
@@ -1095,6 +1109,9 @@ def wake_start(root,step,observations,*,inventory=None):
     """Resume one successful suspended native turn, sharing original finite authorization."""
     from . import managed_wait, experiments
     limits=validate_wake_policy(root, step);job=validate_task(root,step,inventory=inventory);paths=execution.records(root,step);last=paths[-1]
+    if inventory is None:
+        from . import handoff_state
+        job = handoff_state.material_inputs(root,job,sources={})
     if (execution.origin(root,step)/'result-identity.json').exists():raise ResumeUnavailable('execution_wake_stage_already_sealed')
     if (root/'pause.request').exists() or budget.closeout_state(root)['begin'] is not None:
         raise ResumeUnavailable('worker_resume_paused_or_closeout')

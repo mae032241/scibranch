@@ -137,8 +137,9 @@ def build(root, before_step, *, sources=None, search_state=None):
             else execution_recovery.prefix(root,before_step))
         search_state=search.fold(root,sources,recovery_refs=recovery_refs)
     source_facts={}
-    for job,_,seal,_ in sources:
+    for job,_,seal,seal_ref in sources:
         source_facts[job['step']]=dict(owner=originals.node(root,job['step']),
+            job=job,seal=seal,seal_ref=seal_ref,
             observation_view=history.read_observation(root,job,seal) if seal.get('observations') else None)
     return build_from_source_facts(root,before_step,sources=sources,source_facts=source_facts,
         search_state=search_state)
@@ -146,13 +147,14 @@ def build(root, before_step, *, sources=None, search_state=None):
 
 def build_from_source_facts(root, before_step, *, sources, source_facts, search_state):
     """Build the same relations from this operation's accepted source views."""
+    from . import material_references
     state=search_state
     nodes=[];candidates={};edges=[];calls=set();coverage='complete';available={}
     for job,payload,seal,_ in sources:
         step=job['step'];owner=source_facts[step]['owner']
         nodes.append(dict(step=step,role=job['role'],parents=[int(Path(r['path']).parts[2]) for r in job['direct_refs']],
                           source_ref=seal['raw_ref'],summary=payload['summary'],limitations=payload['limitations']))
-        for selected in seal.get('selected_inputs',[]):
+        for selected in material_references.selected_materials(seal.get('selected_inputs',[]), sources=source_facts):
             edges.append(dict(kind='reuse',subject=dict(node=step),target=dict(node=selected['origin_step'],material=selected['material']),scope='declared_handoff_not_proven_read'))
         receipt=seal.get('observations')
         if not receipt:coverage='partial';continue

@@ -438,7 +438,6 @@ def _source_projection_from_provider(config, accepted, scientific_source):
     if accepted.get('execution_authority') is not None:
         from . import experiment_client,contracts as c,execution_authority,execution_inputs,originals
         root=experiment_client.root_for_configuration(config)
-        job=c.read(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
         metadata=_source_control_metadata(config,accepted,verify_signatures=True)
         if metadata is not None and metadata['compiler'] is not None:
             subject=metadata['subject'];compiled=metadata['compiled'];compiler=metadata['compiler']
@@ -450,6 +449,7 @@ def _source_projection_from_provider(config, accepted, scientific_source):
             elif scientific_source is not None:
                 # Legacy author-file projections keep their original scientific
                 # validation. New Git metadata never takes this consumption path.
+                job=c.read_job(root/'jobs'/f'{config["scope"]["step"]:03d}.json')
                 binding=execution_authority.accepted_input_subject(root,job,accepted)
                 if binding is not None:
                     owner=(originals.for_origin(root,subject['producer_seal']['origin_identity'])
@@ -819,14 +819,16 @@ def configure(root,step,executor,config,output):
     from . import contracts as _contracts
     require_current(root,_contracts.read(_contracts.regular(Path(root)/'jobs'/f'{step:03d}.json')))
     from . import contracts as c, execution, budget
-    root=Path(root).resolve();job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
+    root=Path(root).resolve()
+    material_sources = {}
+    job=c.read_job(root/'jobs'/f'{step:03d}.json', sources=material_sources)
     versions=(configuration_updates.for_job(root, job).get('experiment_interface_version'),job.get('experiment_interface_version'))
     if any(type(value) is not int or value!=VERSION for value in versions):
         raise UnsupportedExecution('Preserved scientific instance is read-only; prepare a new registered instance')
     versions=(configuration_updates.for_job(root, job).get('managed_admission_version'),job.get('managed_admission_version'))
     if any(type(value) is not int or value!=ADMISSION_VERSION for value in versions):
         raise UnsupportedExecution('Preserved scientific admission is read-only; prepare a new instance')
-    c._validate_inputs(root,c.workspace(root,step),job)
+    c._validate_inputs(root,c.workspace(root,step),job,_sources=material_sources)
     record=execution.record(root,step)
     if c.read(c.regular(record/'native-intent.json')).get('task_ref')!=c.record_ref(root/'jobs'/f'{step:03d}.json'):
         raise IntegrityError('Host configuration has no exact accepted scientific task')
@@ -967,7 +969,7 @@ def original_adapter(config,call_id,capability):
     return original,adapter
 
 
-def _direct_execution_input(config, metadata, prepared, original):
+def _direct_execution_input(config, metadata, prepared, original, *, client_facts):
     """Use the accepted code or exact original-package binding, without copying it."""
     if 'code_version' in metadata:return True
     if config.get('worker_view_version')!=1:return False
@@ -989,7 +991,7 @@ def _direct_execution_input(config, metadata, prepared, original):
     if (isinstance(metadata.get('source_script'),str)
             and Path(metadata['source_script']).absolute()!=Path(prepared['local_path'])):
         from . import experiment_client
-        selected=experiment_client.payload_path(config,metadata['source_script'])
+        selected=experiment_client._observe_payload_path(config,metadata['source_script'],facts=client_facts)
         return (selected==Path(prepared['local_path'])
             and selected!=Path(metadata['source_script']).absolute())
     return False
@@ -1093,8 +1095,14 @@ class Records:
         with self.admission_lease(context=storage.Deadline(self.config['max_seconds'])):
             return self.admission_binding(mechanism,expected_calls=expected_calls)
 
-    @_configuration_effect
     def accept(self, descriptor, metadata, interface, *, expected_calls=None, mechanism=None, recovery_admission=None, operation_context=None, _local_preparation=False):
+        from . import experiment_client
+        return self._accept(descriptor,metadata,interface,expected_calls=expected_calls,mechanism=mechanism,
+            recovery_admission=recovery_admission,operation_context=operation_context,
+            _local_preparation=_local_preparation,client_facts=experiment_client.load_client_facts(self.config))
+
+    @_configuration_effect
+    def _accept(self, descriptor, metadata, interface, *, client_facts, expected_calls=None, mechanism=None, recovery_admission=None, operation_context=None, _local_preparation=False):
         """Snapshot inputs before the short accept.lock publication section."""
         _require_new_execution(self.config)
         from .protocol import require_scope
@@ -1102,7 +1110,7 @@ class Records:
         from . import contracts as c, storage_policy as storage
         from . import preparation_recovery, experiment_client
         operation_context = storage.Deadline(self.config['max_seconds'],operation_context)
-        instance=experiment_client.root_for_configuration(self.config,allow_standalone=True)
+        instance=client_facts['root']
         if instance is not None:
             unresolved=[row for row in preparation_recovery.retained_preparations(instance,self.root,context=operation_context)
                 if not row['resolved']]
@@ -1112,7 +1120,7 @@ class Records:
         if original['size_bytes']!=descriptor.size_bytes:
             raise IntegrityError('Prepared execution input changed')
         destination=self.root/'calls'/descriptor.name
-        direct_input=_direct_execution_input(self.config,metadata,descriptor.model_dump(mode='json'),original)
+        direct_input=_direct_execution_input(self.config,metadata,descriptor.model_dump(mode='json'),original,client_facts=client_facts)
         source_proof=original if direct_input else dict(path=str(destination/'source.py'),size_bytes=descriptor.size_bytes)
         accepted = dict(metadata, call_id=descriptor.name, scope=self.config['scope'],
             source_script=metadata.get('source_script',descriptor.local_path) if direct_input else descriptor.local_path, script=source_proof,native_attempt=self.config.get('native_attempt'),
@@ -1156,7 +1164,7 @@ class Records:
                     raise IntegrityError('Managed input changed before acceptance')
                 target=directory/'inputs'/relative
                 if direct_input:
-                    saved=experiment_client.input_reference(self.config,item['path'])
+                    saved=experiment_client._observe_input_reference(self.config,item['path'],facts=client_facts)
                     if any(saved.get(key)!=item.get(key) for key in ('path','size_bytes','file_stat')):
                         raise IntegrityError('Code data inventory differs from its frozen scientific input')
                 else:
@@ -1281,14 +1289,16 @@ def dispatch(config, script, *, parent=None, new=False, change=None, mechanism=N
     from . import experiment_client
     with instance_owner.lease_for_configuration(config):
         if '\0' in os.fspath(script):raise CallerError('Script or payload path cannot contain NUL bytes.')
-        logical=experiment_client.code_path(config,script)
-        reference=experiment_client.input_reference(config,logical)
-        source=experiment_client.payload_path(config,logical);item=proof(source)
+        client_facts=experiment_client.load_client_facts(config)
+        logical=(experiment_client._observe_code_path(script,facts=client_facts)
+            if client_facts['root'] is not None and config.get('scope',{}).get('role')=='W' else Path(script).absolute())
+        reference=experiment_client._observe_input_reference(config,logical,facts=client_facts)
+        source=experiment_client._observe_payload_path(config,logical,facts=client_facts);item=proof(source)
         if str(source)==reference['path'] and item!=reference:
             raise IntegrityError('Scientific payload changed after its saved input binding was checked')
         payload=LocalFileDescriptor(name='input',local_path=str(source),size_bytes=item['size_bytes'],media_type='application/octet-stream')
-        return dispatch_descriptor(config,payload,parent=parent,new=new,change=change,mechanism=mechanism,
-            command_options=command_options,_source_script=str(logical))
+        return _dispatch_descriptor_operation(config,payload,parent=parent,new=new,change=change,mechanism=mechanism,
+            command_options=command_options,_source_script=str(logical),client_facts=client_facts)
 
 
 def local_terminal_status(accepted, completed, terminal):
@@ -1703,13 +1713,19 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
 
 
 def dispatch_descriptor(config, payload, *, parent=None, new=False, change=None, mechanism=None, command_options=None,_source_script=None):
+    from . import experiment_client
+    return _dispatch_descriptor_operation(config,payload,parent=parent,new=new,change=change,mechanism=mechanism,
+        command_options=command_options,_source_script=_source_script,client_facts=experiment_client.load_client_facts(config))
+
+
+def _dispatch_descriptor_operation(config,payload,*,client_facts,parent=None,new=False,change=None,mechanism=None,command_options=None,_source_script=None):
     from .protocol import require_scope
     require_scope(config.get('scope'))
     from . import execution_authority, experiment_client, storage_policy as storage
-    root=experiment_client.root_for_configuration(config,allow_standalone=True)
+    root=client_facts['root']
     with instance_owner.lease_for_configuration(config), storage.bind(root,config.get('storage_policy')):
         try:return _dispatch_descriptor(config,payload,parent=parent,new=new,change=change,mechanism=mechanism,
-            command_options=command_options,_source_script=_source_script)
+            command_options=command_options,_source_script=_source_script,client_facts=client_facts)
         except execution_authority.AuthorityRequired as error:return error.feedback
         except LocalPreparationCleanupError:
             return dict(status='known_not_started',accepted=False,error='local_cleanup_failed',
@@ -1734,7 +1750,7 @@ def _admission_conflict(config, expected_calls):
         note='Execution admission did not accept this dispatch; no new call was submitted.')
 
 
-def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None, mechanism=None, command_options=None,_source_script=None):
+def _dispatch_descriptor(config, payload, *, client_facts, parent=None, new=False, change=None, mechanism=None, command_options=None,_source_script=None):
     from . import contracts as c, experiment_client
     records=Records(config)
     with ExitStack() as originals:
@@ -1742,7 +1758,7 @@ def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None
         except BlockingIOError:
             return dict(status='known_not_started',accepted=False,
                 note='Managed execution records are busy; this dispatch did not prepare or accept a call.')
-        instance=experiment_client.root_for_configuration(config,allow_standalone=True)
+        instance=client_facts['root']
         if instance is not None:
             from . import shared_input_views
             shared_input_views.dynamic_root(instance,c.workspace(instance,config['scope']['step']),'retained-experiments')
@@ -1758,7 +1774,7 @@ def _dispatch_descriptor(config, payload, *, parent=None, new=False, change=None
                 note='Managed execution records are busy; this dispatch did not prepare or accept a call.')
         prepared=_prepare_descriptor(config,payload,adapter,records,expected_calls,
             parent=parent,new=new,change=change,mechanism=mechanism,command_options=command_options,
-            _source_script=_source_script)
+            _source_script=_source_script,client_facts=client_facts)
     if isinstance(prepared,dict):return prepared
     with c.record_writer(records.root):
         if prepared is None:return _admission_conflict(config,expected_calls)
@@ -1835,15 +1851,16 @@ def _local_metadata(adapter,descriptor,**options):
         raise CallerError(str(error)) from error
 
 
-def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, parent=None, new=False, change=None, mechanism=None, command_options=None,_source_script=None):
+def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, client_facts, parent=None, new=False, change=None, mechanism=None, command_options=None,_source_script=None):
     from . import code_versions, experiment_client, preparation_recovery, experiments as common, storage_policy as storage
-    instance=experiment_client.root_for_configuration(config,allow_standalone=True)
+    instance=client_facts['root']
     pending=_pending_dispatch(config,instance)
     if pending is not None:return pending
     if [path.name for path in records.calls()]!=expected_calls:return None
     logical=Path(_source_script or payload.local_path).absolute()
-    selection=experiment_client.code_selection(config,logical,resolved=payload.local_path,
-        experiment_directory=(command_options or {}).get('experiment_directory'))
+    selection=(experiment_client._observe_code_selection(config,logical,resolved=payload.local_path,
+        experiment_directory=(command_options or {}).get('experiment_directory'),facts=client_facts)
+        if instance is not None and config.get('scope',{}).get('role')=='W' else None)
     if (selection is not None and selection['logical_root']=='project'
             and config['execution_interface']['executor']!='local_execution:command'):
         raise UnsupportedExecution('Project directory execution requires the managed Local runtime; compile a self-contained implementation JSON for this executor.')
@@ -1946,7 +1963,7 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, pa
                 or code_version is None and 'code_version' in metadata):
             raise IntegrityError('Adapters cannot change host-owned code versions')
         try:
-            accepted = records.accept(prepared, metadata, config['execution_interface'],
+            accepted = records._accept(prepared, metadata, config['execution_interface'],client_facts=client_facts,
                 expected_calls=expected_calls,mechanism=mechanism,operation_context=operation_context,
                 _local_preparation=local_preparation)
         except (ReviewRequired,breadth.OpportunityRequired,ConcurrentExecution) as error:
@@ -2103,9 +2120,15 @@ def preserved_progress(config):
     return dict(calls=rows[-16:],counts=counts,omitted_count=max(0,len(rows)-16),coverage='preserved_originals_only')
 
 
-@_configuration_effect
 def compile_implementation(config, adapter, source, aliases, output):
     """Optional registered authoring; this does not dispatch or grant execution."""
+    from . import experiment_client
+    return _compile_implementation(config,adapter,source,aliases,output,
+        client_facts=experiment_client.load_client_facts(config))
+
+
+@_configuration_effect
+def _compile_implementation(config,adapter,source,aliases,output,*,client_facts):
     _require_new_execution(config)
     capabilities = [item for item in _public_capabilities(adapter) if item['key'] == 'implementation_authoring']
     if (len(capabilities) != 1 or capabilities[0] not in config['execution_interface'].get('public_capabilities', [])
@@ -2116,11 +2139,12 @@ def compile_implementation(config, adapter, source, aliases, output):
     from . import contracts as c,experiment_client
     if '\0' in os.fspath(source) or '\0' in os.fspath(output):
         raise CallerError('Compile implementation and output paths cannot contain NUL bytes.')
-    source=experiment_client.code_path(config,source)
-    experiment_client.input_reference(config,source)
+    source=(experiment_client._observe_code_path(source,facts=client_facts)
+        if client_facts['root'] is not None and config.get('scope',{}).get('role')=='W' else Path(source).absolute())
+    experiment_client._observe_input_reference(config,source,facts=client_facts)
     if config.get('worker_view_version')!=1:return adapter.compile_implementation(source, aliases, output)
-    root=experiment_client.root_for_configuration(config);work=c.workspace(root,config['scope']['step'])
-    source=experiment_client.code_path(config,source)
+    root,work=client_facts['root'],client_facts['work']
+    if root is None:experiment_client.root_for_configuration(config)
     output=Path(output).absolute()
     if output.resolve()!=output or not output.is_relative_to(work/'artifacts') or output.exists():
         raise CallerError('Choose a new scientific implementation output under this task artifacts; the selected output already exists or is outside artifacts/.')
@@ -2267,11 +2291,12 @@ def main(argv=None):
         elif args.command=='compile':
             from . import experiment_client
             if '\0' in os.fspath(args.scientific_files):raise CallerError('Scientific-files path cannot contain NUL bytes.')
-            aliases=experiment_client.input_reference(config,args.scientific_files)
+            client_facts=experiment_client.load_client_facts(config)
+            aliases=experiment_client._observe_input_reference(config,args.scientific_files,facts=client_facts)
             try:alias_map=json.loads(read(aliases['path']))
             except json.JSONDecodeError as error:
                 raise CallerError(f'Scientific-files JSON is invalid at line {error.lineno}, column {error.colno}: {error.msg}.') from error
-            result=compile_implementation(config,adapter,args.implementation,alias_map,args.output)
+            result=_compile_implementation(config,adapter,args.implementation,alias_map,args.output,client_facts=client_facts)
             result={key:result[key] for key in ('status','path','qualification') if key in result}
             code=0
         elif args.command=='run':
@@ -2509,7 +2534,7 @@ def _compiler_source_version(compiler, reference, subject, *, project=None):
 
 def _source_control_metadata(config, accepted, *, verify_signatures=False, source=None):
     """Read the accepted source's existing controls without consuming its science."""
-    from . import experiment_client,contracts as c,execution_authority as authority,qualification as q,originals
+    from . import experiment_client,contracts as c,execution_authority as authority,qualification as q,originals,handoff_state
     if accepted.get('execution_authority') is None:return None
     if source is not None and not source.inherited:source=None
     if source is None:
@@ -2574,6 +2599,13 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False, sourc
             raise IntegrityError('Scientific control original changed')
         # q owns path/size controls; the execution fingerprint is checked above.
         return q._read(root,dict(path=actual.relative_to(root).as_posix(),size_bytes=reference['size_bytes']))
+    material_sources = {}
+    def material_job(value, reference):
+        owner = None
+        if source is not None:
+            owner,_,_ = entry_owner(reference['path'],reference)
+            owner = originals.at_step(owner,value['step'])
+        return handoff_state.material_inputs(root,value,sources=material_sources,source=owner)
     try:
         job=read_control(control_ref(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
         _validate_base_identity(job.get('project'),accepted)
@@ -2628,6 +2660,15 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False, sourc
                         authority.security.receipt_hmac(secret,authority.security.canonical(signed_body))):
                     raise IntegrityError('Scientific source host signature changed')
         seal=read_control(subject['producer_seal']);material=subject['material'];step=subject['producer_step']
+        if type(step) is not int or not 0<step<job['step']:
+            raise IntegrityError('Scientific source lost its exact accepted producer material')
+        if source is None:
+            producer = originals.node(root,step)
+        else:
+            producer,_,_ = entry_owner(subject['producer_seal']['path'],subject['producer_seal'])
+            producer = originals.at_step(producer,step)
+        material_sources[step] = handoff_state.sealed_facts(root,step,owner=producer,known=dict(seal=seal))
+        job = material_job(job,request['job'])
         if (type(step) is not int or not 0<step<job['step']
                 or subject['producer_seal']!=control_ref(c.host_record(c.workspace(root,step))/'result-identity.json')
                 or not any({key:value for key,value in row.items() if key!='file_stat'}==material
@@ -2651,7 +2692,8 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False, sourc
         control_paths.add(control_address(reference))
         version=None
         if 'code_version' in compiler:
-            compiler_job=read_control(compiler['job']);compiler_config=read_control(compiler['configuration'])
+            compiler_job=material_job(material_sources[step]['job'],compiler['job'])
+            compiler_config=read_control(compiler['configuration'])
             version=_compiler_source_version(compiler,reference,subject,project=compiler_job.get('project'))
             compiler_attempt=compiler_config['native_attempt']['number']
             if type(compiler_attempt) is not int or not 0<=compiler_attempt<10000:
@@ -2700,7 +2742,10 @@ def _source_control_metadata(config, accepted, *, verify_signatures=False, sourc
                     q._ref(root,c.host_record(c.workspace(root,input_step))/'result-identity.json'))
                 expected=dict(instance_id=producer.origin_identity['goal_id'],producer_step=input_step,
                     producer_seal=producer_seal,material_path=input_material['path'],size_bytes=input_material['size_bytes'])
-                seal=read_control(producer_seal)
+                producer_facts=material_sources[input_step]
+                if producer_facts['owner']!=producer:
+                    raise IntegrityError('Scientific compiler input changed its exact producer origin')
+                seal=producer_facts['seal']
                 if (json.dumps(original,sort_keys=True)!=json.dumps(expected,sort_keys=True)
                         or [{key:value for key,value in row.items() if key!='file_stat'}
                             for row in seal.get('materials',[]) if row['path']==input_material['path']]!=[input_material]

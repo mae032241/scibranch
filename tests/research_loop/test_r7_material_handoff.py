@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, experiment_client, history, originals
+from scidiscovery.research_loop import contracts as c, experiment_client, handoff_state, history, originals
 from test_direct_input_bindings import direct_instance, stopped_seals
 from test_history_handoff import finish
 
@@ -22,6 +22,10 @@ def paths(job):
     return {row['path'] for row in job['direct_materials']}
 
 
+def relay_materials(root, seal):
+    return handoff_state.relayed_materials(root, seal, sources={})
+
+
 def relay(root, *, selection=None, report=True):
     finish(root, 3, 'A', [1, 2], action='revise_h',
         files={'assessment.json': '{"gap":"declared"}'} if report else None)
@@ -32,7 +36,7 @@ def test_r7_null_direction_relay_keeps_originals_and_exact_implementation_ids(ma
     root = material_scene
     hjob, _, record = relay(root)
     seal = c.read(record / 'result-identity.json')
-    assert seal['relayed_materials'] == hjob['direct_materials']
+    assert relay_materials(root, seal) == hjob['direct_materials']
     assert not seal.get('selected_inputs')
     authored = (record / 'science-output.json').read_bytes()
     worker = c.build_job(root, 5, 'W', [4])
@@ -85,7 +89,7 @@ def test_r7_assessment_clear_or_replace_survives_null_h_with_older_parents(mater
     _, _, record = finish(root, 3, 'A', [1, 2], action='revise_h', selection=selection,
         files={'assessment.json': '{"gap":"declared"}'})
     assessed = c.read(record / 'result-identity.json')
-    assert {row['path'] for row in assessed['relayed_materials']} == expected
+    assert {row['path'] for row in relay_materials(root, assessed)} == expected
     hjob, _, _ = finish(root, 4, 'H', [1, 2, 3], action='experiment')
     expected = expected | {'inputs/parents/003/artifacts/assessment.json'}
     assert paths(hjob) == expected
@@ -127,7 +131,7 @@ def test_r7_assessment_extraction_return_preserves_current_selection(material_sc
         files={'evidence.txt': 'An exact requested source excerpt'})
     expected = expected | {'inputs/parents/003/artifacts/assessment.json'}
     assert paths(extraction) == expected
-    assert c.read(record / 'result-identity.json')['relayed_materials'] == extraction['direct_materials']
+    assert relay_materials(root, c.read(record / 'result-identity.json')) == extraction['direct_materials']
     c.build_job(root, 5, 'A', [1, 2, 3, 4], instruction='Exact scientific question')
     assessment, _, _ = finish(root, 5, 'A', [1, 2, 3, 4], action='continue_w')
     expected = expected | {'inputs/parents/004/artifacts/evidence.txt'}
@@ -156,7 +160,7 @@ def test_r7_h_extraction_return_retains_carried_assessment_reports(material_scen
 def test_r7_e_without_an_exact_bound_requester_does_not_publish_a_relay(material_scene):
     root = material_scene
     _, _, record = finish(root, 3, 'E', [1, 2])
-    assert 'relayed_materials' not in c.read(record / 'result-identity.json')
+    assert 'relayed_material_refs' not in c.read(record / 'result-identity.json')
 
 
 def test_r7_new_worker_outputs_replace_the_automatic_working_set(material_scene):
@@ -166,13 +170,13 @@ def test_r7_new_worker_outputs_replace_the_automatic_working_set(material_scene)
     assessment, _, record = finish(root, 6, 'A', [4, 5], action='revise_h',
         files={'current-report.json': '{"new":"observation"}'})
     assert paths(assessment) == {'inputs/parents/005/artifacts/current-model.bin'}
-    assert not c.read(c.host_record(c.workspace(root, 5)) / 'result-identity.json').get('relayed_materials')
+    assert not c.read(c.host_record(c.workspace(root, 5)) / 'result-identity.json').get('relayed_material_refs')
     finish(root, 7, 'H', [4, 5, 6], action='experiment')
     successor = c.build_job(root, 8, 'W', [7])
     assert paths(successor) == {'inputs/parents/005/artifacts/current-model.bin',
         'inputs/parents/006/artifacts/current-report.json'}
     assert {row['id'] for row in successor['implementation_options']} == {'W005-I001', 'A006-I001'}
-    assert c.read(record / 'result-identity.json')['relayed_materials'] == assessment['direct_materials']
+    assert relay_materials(root, c.read(record / 'result-identity.json')) == assessment['direct_materials']
 
 
 def test_r7_report_only_worker_can_explicitly_keep_an_original_model(material_scene):
@@ -229,7 +233,7 @@ def test_r7_selected_fork_preserves_relay_originals_and_ids_through_next_worker(
     c._validate_inputs(child, c.workspace(child, 4), selected)
     finish(child, 4, 'H', [1, 2, 3], action='experiment')
     completed = c.read(c.host_record(c.workspace(child, 4)) / 'result-identity.json')
-    assert completed['relayed_materials'] == selected['direct_materials']
+    assert relay_materials(child, completed) == selected['direct_materials']
     worker = c.build_job(child, 5, 'W', [4])
     assert worker['direct_materials'] == source['direct_materials']
     assert worker['implementation_options'] == source['implementation_options']

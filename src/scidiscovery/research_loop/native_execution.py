@@ -297,7 +297,8 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
     from . import worker_execution_bridge, experiment_client
     context=storage_policy.Deadline(config['max_seconds'],upstream=worker_execution_bridge.operation_context())
     shared_input_views.ensure_capability(context=context)
-    job=c.read(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
+    producer_sources={}
+    job=c.read_job(root/'jobs'/f'{config["scope"]["step"]:03d}.json',sources=producer_sources)
     project=job.get('project')
     if value.get('project')!=project:
         raise e.IntegrityError('Scientific project differs from its frozen native attempt')
@@ -305,6 +306,11 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
         raise e.UnsupportedExecution('Selected executor has no default scientific subprocess namespace')
     directory=e.Records(config).directory(accepted['call_id'])
     work=Path(value['workspace']);source=Path(accepted['source_script'])
+    input_sources=shared_input_views.load_source_facts(root,job,work,material_sources=producer_sources)
+    if input_sources['native']['intent'].get('attempt',0)!=value['native_attempt']['number']:
+        raise e.IntegrityError('Scientific input facts belong to another native attempt')
+    client_facts=experiment_client.client_bindings_from_facts(root,work,job,
+        material_paths=input_sources['material_paths'],material_sources=producer_sources)
     command=list(command);bindings=[];code_root=None;final_mounts=[]
     if 'code_version' in accepted:
         from . import code_versions
@@ -322,7 +328,7 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
                 raise e.UnsupportedExecution('Scientific experiment is outside its accepted working directory')
             for item in accepted['snapshot_files']:
                 logical=target/item['name']
-                reference=experiment_client.input_reference(config,logical)
+                reference=experiment_client._observe_input_reference(config,logical,facts=client_facts)
                 if any(reference[key]!=item.get(key) for key in ('path','size_bytes','file_stat')):
                     raise e.IntegrityError('Scientific input differs from its accepted original')
                 bindings.append(('--ro-bind',Path(item['path']),logical))
@@ -339,7 +345,7 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
             raise e.UnsupportedExecution('Scientific source is outside its assigned workspace')
         bound_script=('entry' not in accepted and accepted['script']['path']!=str(directory/'source.py'))
         if bound_script:
-            resolved=experiment_client.payload_path(config,source)
+            resolved=experiment_client._observe_payload_path(config,source,facts=client_facts)
             if (resolved==source or accepted['script']['path']!=str(resolved)
                     or any(e.proof(resolved).get(key)!=item for key,item in accepted['script'].items())):
                 raise e.IntegrityError('Scientific bound package differs from its accepted original')
@@ -362,9 +368,6 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
     project_writes=shared_input_views.project_targets(project,writable=False)
     if _profile(value['policy'],policy_cwd,'/task-tmp',virtual=True,project_writes=project_writes)!=value['backend_permission_profile']['configuration']:
         raise e.IntegrityError('Accepted scientific cwd differs from its native permission projection')
-    input_sources=shared_input_views.load_source_facts(root,job,work)
-    if input_sources['native']['intent'].get('attempt',0)!=value['native_attempt']['number']:
-        raise e.IntegrityError('Scientific input facts belong to another native attempt')
     input_mounts=None
     if code_root is not None:
         input_facts=shared_input_views.load_mount_facts(root,job,work,include_skills=False,

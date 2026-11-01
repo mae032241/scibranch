@@ -220,12 +220,13 @@ def _load_selected_base_facts(root, selected, *, base, policy, head, bind_inputs
             c.host_record(c.workspace(root, job['step'])) / 'input-provenance.json')
         document = qualification.validate_inputs_from_facts(root,job,facts=inputs)
     job['source_restrictions'] = qualification.status_from_facts(job,document,facts=inputs)
-    sources = {}
+    sources = dict(selected['material_sources'])
     if policy.get('execution_authority_policy') is not None:
         for reference in job['direct_refs']:
             step = int(Path(reference['path']).parts[2])
             owner = producers[step] if step in producers else originals.dependency(source, step)
-            sources[step] = dict(owner=owner)
+            if step not in sources:
+                sources[step] = dict(owner=owner)
     authority = execution_authority.job_facts(root,job,base=base,policy=policy,sources=sources)
     execution_authority.bind_job(root,job,facts=authority)
     return job, dict(inputs=inputs, authority=authority, sources=sources)
@@ -287,7 +288,7 @@ def build_selected_job(root, step):
     _, frozen, head=configuration_updates.bind_new_job_facts(root,step,base=base)
     path = root / 'jobs' / f'{step:03d}.json'
     if path.exists():
-        job = c.read(c.regular(path))
+        job = c.read_job(path, sources=selected['material_sources'], base=base)
         _load_selected_job_facts(root,c.workspace(root,step),job,
             base=base,policy=frozen,head=head,selected=selected)
         with user_guidance.binding_from_base(root,step,job['role'],job,base=base) as (_,guidance_current):
@@ -299,7 +300,7 @@ def build_selected_job(root, step):
         return job
     # First admission verifies copied controls/drafts. Scientific inputs are
     # checked through their original bindings by their actual consumers.
-    selected = fork_sources.selected_task(root, full=True)
+    selected = fork_sources.selected_task(root, full=True, material_sources=selected['material_sources'])
     work = c.workspace(root, step)
     work.mkdir(parents=True, exist_ok=True)
     (work / 'work').mkdir(exist_ok=True)
@@ -340,7 +341,7 @@ def build_selected_job(root, step):
 
 def _publish_selected(root, work, job, *, selected, policy, facts):
     from . import contracts as c
-    for path, value in ((Path(root) / 'jobs' / f'{job["step"]:03d}.json', job),
+    for path, value in ((Path(root) / 'jobs' / f'{job["step"]:03d}.json', c.job_record(job)),
             (work / 'science-task.json', _selected_science_view(job,selected=selected,policy=policy,
                 qualified=facts['authority']['qualified_materials'])),
             (c.host_record(work) / 'science-result.schema.json', c.result_schema(job['role'],
@@ -364,7 +365,7 @@ def validate_selected_job(root, work, job):
 
 def _load_selected_job_facts(root, work, job, *, base, policy, head, selected):
     """Own selected-job reads and validation, then return accepted facts."""
-    from . import contracts as c, execution_authority, originals
+    from . import contracts as c, execution_authority, handoff_state, originals
     expected, facts = _load_selected_base_facts(root,selected,base=base,policy=policy,head=head)
     original_statements = expected.pop('user_guidance', [])
     actual = copy.deepcopy(job)
@@ -383,8 +384,9 @@ def _load_selected_job_facts(root, work, job, *, base, policy, head, selected):
         raise ValueError('Fork scientific task projection changed')
     source=selected['source']
     for ref in [*job.get('global_materials',[]),*job.get('direct_refs',[]),
-            *job.get('direct_materials',[]),*job.get('history',{}).get('execution_recovery_materials',[])]:
+            *job.get('history',{}).get('execution_recovery_materials',[])]:
         originals.resolve_ref(source,dict(ref,path=f'project/nodes/{source.step:03d}/'+ref['path']))
+    handoff_state.material_paths(root, job, sources=facts['sources'])
     for ref in job.get('direct_originals',job.get('direct_refs',[])):
         step=int(Path(ref['path']).parts[2])
         parent=facts['sources'].get(step)

@@ -2,7 +2,7 @@
 import copy
 import math
 
-from . import budget, contracts as c, instance_display as display, native_usage, runtime
+from . import accepted_search, budget, contracts as c, instance_display as display, native_usage, runtime
 from .ui_view import memo_lock, native_completed
 
 
@@ -383,7 +383,8 @@ def portfolio_metrics_from_head(head, usage_value, budget_value):
         actual, mechanisms = summary['portfolio'], summary['table']['mechanisms']
         completed, source_step = actual['completed_cycle_count'], head['prefix']['cutoff']
         work_count, accepted_count = summary['work_count'], head['dispatch_count']
-        if (summary.get('version') != 1 or not isinstance(mechanisms, dict)
+        if (type(summary.get('version')) is not int or summary['version'] != accepted_search.VERSION
+                or not isinstance(mechanisms, dict)
                 or any(type(value) is not int or value < 0
                     for value in (completed, source_step, work_count, accepted_count))):
             return unavailable

@@ -436,6 +436,9 @@ class _Closure:
                 follow(proof)
         for proof in value.get('control_cut', {}).get('correction_events', []):
             follow(proof)
+        for group in [*value.get('material_refs', []), *value.get('relayed_material_refs', []),
+                *[dict(list_ref=row['material_ref']['list_ref']) for row in value.get('selected_inputs', [])]]:
+            follow(group['list_ref'])
         recoveries=value.get('history',{}).get('execution_recoveries',[])
         if (type(value.get('step')) is int and path==f'jobs/{value["step"]:03d}.json'
                 and value.get('role') in {'H','W','A','E'}):
@@ -615,6 +618,9 @@ class _Closure:
         from . import contracts as c
         step = source.step
         job = o.source_job(source)
+        if selected:
+            from . import handoff_state
+            job = handoff_state.material_inputs(o.context_root(source), job, sources={}, source=source)
         key = (o.identity_key(source.origin_identity), step)
         if key in self.tasks:
             return self.tasks[key]
@@ -1041,17 +1047,23 @@ def validate_manifest(child_root, *, full=False):
     return manifest
 
 
-def selected_task(child_root, *, full=False):
+def selected_task(child_root, *, full=False, material_sources=None):
     manifest = validate_manifest(child_root, full=True) if full else o._manifest(child_root)
     source = o.selected_source(child_root)
-    job = o.source_job(source)
+    from . import handoff_state, contracts as c
+    material_sources = {} if material_sources is None else material_sources
+    job = handoff_state.material_inputs(child_root, o.source_job(source),
+        sources=material_sources, source=source)
     from .protocol import require_job_format
     require_job_format(job)
     task = _json(o.resolve_ref(source, manifest['source']['science_task_ref']))
-    fields = ('global_materials', 'direct_refs', 'direct_originals', 'direct_materials', 'selected_inputs', 'history')
-    return dict(source=source, job=job, science_task=task, settings=o.source_settings(source),
+    fields = ('global_materials', 'direct_refs', 'direct_originals', 'material_refs', 'selected_inputs', 'history')
+    canonical = c.job_record(job)
+    return dict(source=source, job=job, material_sources=material_sources,
+        science_task=task, settings=o.source_settings(source),
         phase_original_ref=manifest['cut'].get('phase_original_ref'),
-        input_binding={field: copy.deepcopy(job.get(field, {} if field == 'history' else [])) for field in fields},
+        input_binding={field: copy.deepcopy(canonical.get(field, {} if field == 'history' else []))
+            for field in fields},
         source_job_ref=manifest['source']['job_ref'], source_task_ref=manifest['source']['science_task_ref'])
 
 

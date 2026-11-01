@@ -404,7 +404,7 @@ def _source_read(source, ref):
 
 def _original_inputs(source, job, *, _active=None):
     """Check frozen provenance edges against their portable input originals."""
-    from . import originals
+    from . import originals, material_references
     active = set() if _active is None else _active
     identity = (originals.identity_key(source.origin_identity), source.step)
     if identity in active:
@@ -447,6 +447,7 @@ def _original_inputs(source, job, *, _active=None):
     if [row for row in document['edges'] if row['kind'] == 'declaration'] != expected_declarations:
         raise IntegrityError('Original public declarations changed')
     required = {int(Path(ref['path']).parts[2]) for ref in job['direct_refs']}
+    required.update(row['list_ref']['step'] for row in job['material_refs'])
     required.update(row['origin_step'] for row in job.get('selected_inputs', []))
     required.update(row['step'] for row in job.get('delivery_sources', {}).get('source_nodes', []))
     if job.get('engineering_repair') is not None:
@@ -454,7 +455,7 @@ def _original_inputs(source, job, *, _active=None):
     producers = [row for row in document['edges'] if row['kind'] == 'producer']
     if not required.issubset({row['step'] for row in producers}) or len({row['step'] for row in producers}) != len(producers):
         raise IntegrityError('Original source proof omits or duplicates its producers')
-    bound_seals = []
+    bound_seals, material_sources = [], {}
     for edge in producers:
         if not 0 < edge['step'] < job['step']:
             raise IntegrityError('Original producer is outside its task input boundary')
@@ -467,8 +468,10 @@ def _original_inputs(source, job, *, _active=None):
         if edge.get('missing_reason') != missing:
             raise IntegrityError('Original producer provenance availability changed')
         bound_seals.append(seal)
+        material_sources[edge['step']] = dict(owner=parent, seal=seal,
+            job=originals.source_job(parent))
     unknown = [row for row in document['edges'] if row['kind'] == 'unknown']
-    for material in job['direct_materials']:
+    for material in material_references.materials(job['material_refs'], sources=material_sources):
         matches = [seal for seal in bound_seals if any(
             {key:value for key,value in row.items() if key!='file_stat'}==material
             for row in seal['materials'])]

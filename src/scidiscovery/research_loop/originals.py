@@ -310,12 +310,18 @@ def _logical_input(root, path, *, source=None, context=None):
         source=at_step(source,step)
         job=source_job(source)
     logical='/'.join(parts[3:])
-    materials=[row for row in [*job.get('direct_materials',[]),
-        *[item['material'] for item in job.get('selected_inputs',[])]] if row['path']==logical]
+    material_parts = PurePosixPath(logical).parts
+    materials = []
+    if len(material_parts) >= 5 and material_parts[:2] == ('inputs', 'parents') and material_parts[3] == 'artifacts':
+        from . import handoff_state, material_references
+        producers = {}
+        handoff_state.load_material_sources(root,job['material_refs'],sources=producers,source=source)
+        materials=[row for row in material_references.materials(job['material_refs'],sources=producers)
+            if row['path']==logical]
     if materials:
         if any(row!=materials[0] for row in materials):raise ValueError('Logical input has conflicting originals')
-        host=source.storage_root.parents[1] if source is not None and source.inherited else root
-        return material_path(host,materials[0])
+        producer = producers[int(PurePosixPath(materials[0]['path']).parts[2])]
+        return bound_material_path(root,materials[0],source=producer['owner'],seal=producer['seal'])
     rows=[row for row in [*job.get('global_materials',[]),*job.get('history',{}).get('inputs',[]),
         *job.get('history',{}).get('execution_recovery_materials',[])] if row['path']==logical]
     if rows:
@@ -352,9 +358,12 @@ def _declared_science(source, actual, ref, *, context=None):
     actual=Path(actual)
     if source.inherited and not source._index.get((identity_key(source.origin_identity),f'jobs/{source.step:03d}.json')):
         raise ValueError('Scientific path has no exact declared original membership')
+    from . import handoff_state, material_references
     job=source_job(source)
-    rows=[*job.get('global_materials',[]),*job.get('direct_materials',[]),
-        *[item['material'] for item in job.get('selected_inputs',[])],
+    producers = {}
+    handoff_state.load_material_sources(Path(source.original_root),job['material_refs'],sources=producers,source=source)
+    materials = material_references.materials(job['material_refs'], sources=producers)
+    rows=[*job.get('global_materials',[]),*materials,
         *job.get('history',{}).get('inputs',[]),
         *job.get('history',{}).get('execution_recovery_materials',[])]
     proofs=[]

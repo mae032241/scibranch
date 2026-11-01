@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import stat
 
-from . import backends, contracts, execution, native_usage, public_output, runtime
+from . import accepted_budget, backends, contracts, execution, native_usage, public_output, runtime
 
 MAX_BYTES = 262144
 
@@ -56,11 +56,16 @@ def read(root, step, *, attempt=0, cursor=None, limit_bytes=65536, tail=False):
         raise ValueError('Progress requires an exact positive node, nonnegative attempt and 1024–262144 byte page')
     root = Path(root).expanduser().resolve()
     settings = contracts.settings(root)
-    job_path = contracts.regular(root / 'jobs' / f'{step:03d}.json', limit=MAX_BYTES)
-    job_bytes = job_path.read_bytes()
-    job = json.loads(job_bytes)
-    if job.get('step') != step:
-        raise ValueError('Exact progress node identity changed')
+    head = accepted_budget.load(root, base=settings)
+    current = head.current_job
+    job = (current if isinstance(current, dict) and current.get('step') == step
+        else head.row(f'job/{step:03d}'))
+    if not isinstance(job, dict):
+        raise ValueError('Exact progress node has no accepted job record')
+    if (type(job.get('step')) is not int or job['step'] != step
+            or job.get('role') not in ('H', 'W', 'A', 'E')
+            or job.get('job_ref') != dict(path=str(root / 'jobs' / f'{step:03d}.json'))):
+        raise ValueError('Exact progress node accepted identity changed')
     binding = [settings['goal_id'], step, attempt]
     previous = _decode(cursor, binding) if cursor is not None else None
     record = execution.origin(root, step)
@@ -80,7 +85,7 @@ def read(root, step, *, attempt=0, cursor=None, limit_bytes=65536, tail=False):
             runner_path = record / 'runner-process.json'
             if runner_path.exists():
                 runner = contracts.read(contracts.regular(runner_path, limit=4096))
-                runtime_binding = contracts.record_ref(intent_path if attempt else job_path)
+                runtime_binding = contracts.record_ref(intent_path) if attempt else job['job_ref']
                 result['state'] = 'running' if runtime.process_matches(runner, runtime_binding) else 'unknown'
             if type(intent.get('prepared_at')) in (int, float):
                 result['prepared_at'] = intent['prepared_at']

@@ -259,7 +259,8 @@ def authors(root, step, active=None, memo=None, *, source=None):
     if key in memo:
         return memo[key]
     context = owner if owner.inherited else None
-    job = originals.source_job(owner)
+    job = handoff_state.material_inputs(originals.context_root(owner), originals.source_job(owner),
+        sources={}, source=owner)
     seal = c.read(originals.source_record(owner, 'result-identity.json'))
     own = participants(root, job, seal, source=owner)
     people = {tuple(row) for row in own['participants']}
@@ -360,13 +361,17 @@ def _request_original(root, reference):
     return source, c.read(originals.resolve_ref(source, reference))
 
 
-def _seal_original(root, step, reference, context=None):
+def _seal_original(root, step, reference, context=None, *, facts=None):
     from . import originals
-    source = originals.node(root, step)
-    if reference.get('origin_identity') is not None:
+    source = facts['owner'] if facts is not None else originals.node(root, step)
+    if facts is not None:
+        if source.step != step:
+            raise q.IntegrityError('Formal review producer belongs to another logical node')
+    elif reference.get('origin_identity') is not None:
         manifest = originals._manifest(root)
         source = originals._source(root, manifest, reference['origin_identity'], step)
-    elif context is not None and source.origin_identity != context.origin_identity:
+    if (reference.get('origin_identity') is None and context is not None
+            and source.origin_identity != context.origin_identity):
         # A nested request may refer to another origin only through an explicit
         # binding. Equal logical labels do not establish that relationship.
         raise q.IntegrityError('Formal review subject lacks its exact origin binding')
@@ -375,7 +380,7 @@ def _seal_original(root, step, reference, context=None):
         plain.pop('origin_identity')
     if reference != plain:
         raise q.IntegrityError('Formal review seal differs from its exact original')
-    return source, c.read(originals.resolve_ref(source, reference))
+    return source, facts['seal'] if facts is not None else c.read(originals.resolve_ref(source, reference))
 
 
 def _request_value(root, selected, job):
@@ -420,7 +425,9 @@ def request_route(root, job, payload, parents):
     root = Path(root).resolve()
     seal_path = c.host_record(c.workspace(root, job['step'])) / 'result-identity.json'
     seal = c.read(c.regular(seal_path))
-    value = dict(_request_value(root,seal.get('selected_inputs', []), job), requester_rationale=payload['route_reason'])
+    from . import handoff_state
+    selected = handoff_state.selected_materials(root, seal, sources={})
+    value = dict(_request_value(root,selected, job), requester_rationale=payload['route_reason'])
     reason=value['reason']
     requester = dict(step=job['step'], seal=q._ref(root, seal_path))
     record = c.host_record(c.workspace(root, job['step']))
@@ -455,13 +462,17 @@ def selected_compiler(root, reference, *, controls_only=False):
     return row['compiler'], compiler
 
 
-def input_binding(root, reference):
+def input_binding(root, reference, *, sources=None):
     """Exact material and producer metadata, without mounting authored conclusions."""
-    from . import originals, history
+    from . import originals, history, material_references
+    sources = {} if sources is None else sources
     context, request = _request_original(root, reference)
     requester = originals.source_job(context)
     subject = request['subject']
-    producer, seal = _seal_original(root, subject['producer_step'], subject['producer_seal'], context)
+    producer, seal = _seal_original(root, subject['producer_step'], subject['producer_seal'], context,
+        facts=sources.get(subject['producer_step']))
+    if producer.step not in sources:
+        sources[producer.step] = dict(owner=producer, seal=seal, job=originals.source_job(producer))
     expected_contract = originals.source_settings(context).get('formal_review_policy', {}).get('contract')
     if request['contract'] != expected_contract or request['question'] != QUESTION:
         raise q.IntegrityError('Formal review inputs differ from the exact requested subject')
@@ -481,12 +492,14 @@ def input_binding(root, reference):
             originals.resolve_ref(originals.source_for_ref(producer,author),author)
             scientific=[dict(source=str(Path(producer.original_root)/author['path']),path='inputs/review/scientific-implementation.json',size_bytes=author['size_bytes'])]
             materials.extend(scientific)
-        owner=q._read(root,compiler['job'],source=source)
+        owner=c.read_job(q._source_path(source,compiler['job']) if source is not None else
+            originals.resolve_root_ref(root,compiler['job']), sources=sources, source=source)
         for item in compiler['inputs']:
             material=execution_inputs.resolve_native_original(root,item['original'],compiler_job=owner,source=source)
             if material not in materials:materials.append(material)
             steps.append(item['original']['producer_step'])
-    return dict(materials=materials, selected=[selected],
+    selected = material_references.bind_selected([selected], sources=sources)
+    return dict(materials=materials, selected=selected, material_sources=sources,
         **(dict(compiler_scientific_materials=scientific,scientific_source_steps=sorted(set(steps))) if compiled else {}),
         history=dict(prefix=request['prefix'],breadth_snapshot=request['breadth_snapshot'],inputs=[],view={}))
 
@@ -590,7 +603,7 @@ def public_choices(root, job):
         enforcement='Control rejects unchanged unavailable requests before sealing, using same-session output repair. A different exact singleton may be selected in the same response; ordinary scientific actions retain their own checks.')
 
 
-def bind_job(root, job):
+def bind_job(root, job, *, sources=None):
     back = job.get('evidence_return') or {}
     if back.get('kind') != 'formal_review':
         return
@@ -602,19 +615,22 @@ def bind_job(root, job):
     expected_contract = originals.source_settings(context).get('formal_review_policy', {}).get('contract')
     if request['contract'] != expected_contract or request['requester']['step'] >= job['step']:
         raise q.IntegrityError('Formal review request contract or requester changed')
-    _seal_original(root, request['requester']['step'], request['requester']['seal'], context)
-    _seal_original(root, request['subject']['producer_step'], request['subject']['producer_seal'], context)
+    known = {} if sources is None else sources
+    _seal_original(root, request['requester']['step'], request['requester']['seal'], context,
+        facts=known.get(request['requester']['step']))
+    _seal_original(root, request['subject']['producer_step'], request['subject']['producer_seal'], context,
+        facts=known.get(request['subject']['producer_step']))
     job.update(purpose='formal_review', formal_review=back['request'])
 
 
-def validate_job(root, job):
+def validate_job(root, job, *, sources=None):
     back = job.get('evidence_return') or {}
     if job.get('formal_review') or back.get('kind')=='formal_review':
         expected=dict(job)
-        bind_job(root,expected)
+        bind_job(root,expected,sources=sources)
         if (expected.get('formal_review')!=job.get('formal_review') or job.get('purpose')!='formal_review'):
             raise q.IntegrityError('Formal review task differs from its frozen request')
-        binding=input_binding(root,job['formal_review'])
+        binding=input_binding(root,job['formal_review'],sources=sources)
         if (job['instruction']!=QUESTION or job['goal_text']!=configuration_updates.for_job(root, job)['objective']
                 or job['global_materials']!=c.global_materials(root) or job['direct_refs']
                 or job['direct_materials']!=binding['materials'] or job.get('selected_inputs')!=binding['selected']

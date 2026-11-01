@@ -48,7 +48,7 @@ def _binding(root, job, record):
     if root.resolve() != root or record.resolve() != record:
         raise ValueError('Fragment originals require exact instance paths')
     path = c.regular(root / 'jobs' / f'{job["step"]:03d}.json')
-    if job.get('role') != 'W' or c.read(path) != job:
+    if job.get('role') != 'W' or c.read(path) != c.job_record(job):
         raise ValueError('Fragment must bind the exact original W scientific job')
     chain = execution.records(root, job['step'])
     if record not in chain:

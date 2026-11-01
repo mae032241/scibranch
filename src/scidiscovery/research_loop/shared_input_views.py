@@ -414,10 +414,16 @@ def _load_wake_facts(root, job, native):
 
 def load_source_facts(root, job, work, *, target_work=None, native=None, input_policy=None,
                       policy=None, include_review=True, include_wake=True,
-                      author_facts=_UNLOADED_AUTHOR):
+                      author_facts=_UNLOADED_AUTHOR, material_sources=None):
     """One producer owns this operation's native, wake and author originals."""
     root, work = Path(root), Path(work)
     target = Path(target_work) if target_work is not None else work
+    from . import handoff_state
+    if job.get('material_refs') and 'direct_materials' not in job:
+        raise _unsupported('the input owner must supply its resolved current material facts')
+    producers = {} if material_sources is None else material_sources
+    handoff_state.load_material_sources(root, job.get('material_refs', []), sources=producers)
+    material_paths = handoff_state.material_paths(root, job, sources=producers)
     native = _load_native_facts(root, job, native=native, input_policy=input_policy)
     author = None
     if native['intent'].get('author_context_version') == 1:
@@ -441,6 +447,7 @@ def load_source_facts(root, job, work, *, target_work=None, native=None, input_p
         raise _unsupported('author facts have no selected context')
     facts = dict(root=root, job=job, work=work, target=target, native=native,
         author=author, wake=_load_wake_facts(root, job, native) if include_wake else [], review_code=[],
+        material_paths=material_paths,
         policy=policy if policy is not None else
             (native['input_policy']['policy'] if native['input_policy'] is not None else None))
     if include_review and job.get('formal_review'):
@@ -620,7 +627,10 @@ def load_mount_facts(root, job, work, *, target_work=None, mounts=(), private=Fa
         # These are published navigation/control pages, already bound by the
         # job. Actual direct/global/recovery inputs still use the exact resolver.
         historical = item['path'] not in actual_paths and history_files.get(item['path']) == item
-        source = (Path(bound['source']) if historical else originals.material_path(root, bound))
+        if item['path'] in sources['material_paths']:
+            source = sources['material_paths'][item['path']]
+        else:
+            source = (Path(bound['source']) if historical else originals.material_path(root, bound))
         (historical_sources if historical else current_sources).add(source)
         if destination in declared and declared[destination] != source:
             raise _unsupported('a declared logical input has ambiguous sources')

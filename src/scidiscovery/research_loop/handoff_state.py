@@ -125,6 +125,84 @@ def sealed_facts(root, step, *, base=None, owner=None, known=None):
     return facts
 
 
+def load_material_sources(root, refs, *, sources, base=None, source=None):
+    """Load each explicitly selected producer list once for the operation owner."""
+    from . import originals, material_references
+    for group in refs:
+        ref = group['list_ref']
+        step = ref['step']
+        if type(step) is not int or step < 1:
+            raise ValueError('Current material list lost its exact original producer')
+        if step not in sources or 'seal' not in sources[step]:
+            known = sources.get(step)
+            if known is not None:
+                owner = known['owner']
+            elif source is not None:
+                owner = originals.at_step(originals.source_for_ref(source, ref), step)
+            else:
+                owner = originals.for_origin(root, ref['origin_identity'], step=step)
+            sources[step] = sealed_facts(root, step, base=base, owner=owner, known=known)
+        if material_references.list_ref(sources[step]) != ref:
+            raise ValueError('Current material list differs from its exact producer')
+    return sources
+
+
+def material_inputs(root, job, *, sources, base=None, source=None):
+    """Produce this current job's rows; historical job reads stay metadata only."""
+    from . import material_references
+    refs = job['material_refs']
+    load_material_sources(root, refs, sources=sources, base=base, source=source)
+    loaded = dict(job, direct_materials=material_references.materials(refs, sources=sources))
+    if 'selected_inputs' in job:
+        loaded['selected_inputs'] = material_references.selected_materials(job['selected_inputs'], sources=sources)
+    if job.get('formal_review'):
+        from . import formal_review
+        reference = job['formal_review']
+        if source is not None:
+            reference = dict(reference, origin_identity=reference.get('origin_identity', source.origin_identity))
+        binding = formal_review.input_binding(root, reference, sources=sources)
+        scientific = binding.get('compiler_scientific_materials', [])
+        expected = material_references.references(
+            [row for row in binding['materials'] if row not in scientific], sources=sources)
+        if refs != expected:
+            raise ValueError('Formal review material references changed their exact subject')
+        loaded['direct_materials'] = binding['materials']
+    return loaded
+
+
+def material_paths(root, job, *, sources):
+    """Accept the owner's selected original paths using its loaded producer lists."""
+    from . import originals
+    result = {}
+    for material in job.get('direct_materials', []):
+        if job.get('formal_review') and material['path'] == 'inputs/review/scientific-implementation.json':
+            result[material['path']] = originals.resolve_root_ref(root,
+                dict(material, path=material['source']))
+            continue
+        step = int(Path(material['path']).parts[2])
+        producer = sources[step]
+        result[material['path']] = originals.bound_material_path(root, material,
+            source=producer['owner'], seal=producer['seal'])
+    return result
+
+
+def selected_materials(root, seal, *, sources, base=None, source=None):
+    """Resolve a saved selection from its explicit producer lists only."""
+    from . import material_references
+    rows = seal.get('selected_inputs', [])
+    refs = material_references.selected_refs(rows)
+    load_material_sources(root, refs, sources=sources, base=base, source=source)
+    return material_references.selected_materials(rows, sources=sources)
+
+
+def relayed_materials(root, seal, *, sources, base=None, source=None):
+    """Resolve the exact current relay without following ancestor relays."""
+    from . import material_references
+    refs = seal['relayed_material_refs']
+    load_material_sources(root, refs, sources=sources, base=base, source=source)
+    return material_references.materials(refs, sources=sources)
+
+
 def _observation_facts(facts):
     if 'observation' not in facts:
         from . import contracts as c, originals

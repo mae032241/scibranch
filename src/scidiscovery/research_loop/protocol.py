@@ -99,13 +99,14 @@ def require_current_job(root, *, base, job, retained, policy):
 
 
 def _require_retained_job(job, *, retained):
+    from . import contracts as c
     if not isinstance(job, dict):
         raise UnsupportedProtocol('Scientific job')
     _current(job.get('handoff_protocol'), 'Scientific job')
     if type(job.get('step')) is not int or job['step'] <= 0:
         raise ValueError('An exact frozen scientific job is required')
     _current(retained.get('handoff_protocol'), 'Retained scientific job')
-    if retained != job:
+    if c.job_record(retained) != c.job_record(job):
         raise ValueError('Scientific job differs from its frozen original')
     return require_job_format(job)
 
@@ -126,7 +127,7 @@ def stage_scope(root,job):
     root=Path(root).absolute();path=root/'jobs'/f'{job["step"]:03d}.json'
     if root.resolve()!=root or path.resolve()!=path:
         raise ValueError('Scientific job requires its canonical original path')
-    if c.read(c.regular(path))!=job:
+    if c.read(c.regular(path))!=c.job_record(job):
         raise ValueError('Scientific job differs from its frozen original')
     reference=c.record_ref(path)
     return stage_scope_for_job(root,job,task_ref=reference)

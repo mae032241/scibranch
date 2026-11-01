@@ -82,7 +82,7 @@ def writers_stopped(root,job,record):
     root,record=Path(root),Path(record)
     base=c.settings(root);head=accepted_budget.load(root,base=base)
     retained=c.read(c.regular(root/'jobs'/f'{job["step"]:03d}.json'))
-    if retained!=job:raise ValueError('Original native writer lost its exact scientific task')
+    if retained!=c.job_record(job):raise ValueError('Original native writer lost its exact scientific task')
     policy=c.settings_for_job(root,job,base=base,head=head)
     accepted=list(execution.accepted_intents_from_facts(root,job['step'],job=job,
         base=base,policy=policy,head=head,task_ref=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json')))

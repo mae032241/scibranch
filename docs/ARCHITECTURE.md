@@ -88,6 +88,22 @@ not managed-original copies or entire ancestor workspaces. Implementation option
 show selection IDs and usable paths; compile arguments name paths, not IDs.
 Existing current-input bounds still apply.
 
+Private jobs and relay records store references to existing producer material
+lists and selected IDs, rather than repeating each file descriptor. The operation
+owner resolves only those selected lists once and passes the resulting facts to
+consumers; ordinary control-record reads do not implicitly load material lists or
+walk history. Each produced material records one original source path.
+The publication namespace `experiments/<accepted-call-id>/` belongs to control.
+W cites retained managed outputs and publishes new reports outside that namespace.
+An authored package occupying it is returned for delivery correction, preserving
+original calls and outputs without rerunning experiments.
+
+Public progress uses accepted node identities independently of job-body size.
+The exploration-investment UI consumes the accepted search producer's version.
+Candidate downloads keep the exact sealed member and saved call-output binding,
+including originals retained in place. FINAL submission and confirmation remain
+distinct actions; only confirmation of the active FINAL marks delivery complete.
+
 Local result metrics retain distinct nonempty names and explicit finite numeric
 values. `unit`, `evaluation_key`, `direction` and labels are optional scientific
 descriptions: control imposes no optimization enum or scientific text-length limit.

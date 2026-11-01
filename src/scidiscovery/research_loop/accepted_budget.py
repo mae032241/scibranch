@@ -431,7 +431,8 @@ def append_budget_event(root, events, **fields):
         updates['final_return'] = dict(fields, seq=state['seq']+1, kind=kind, ref=ref)
     elif kind == 'action_intent':
         rows['action/'+fields['action_id']] = dict(intent_ref=ref, outcome_ref=None,
-            operation_id=fields['operation_id'], status='pending')
+            operation_id=fields['operation_id'], action_kind=fields['action_kind'],
+            final_return=fields.get('final_return'), status='pending')
         operation_key = 'delivery-operation/'+fields['operation_id']
         operation = state.row(operation_key) or dict(pending=0)
         increase = int(operation['pending'] == 0)
@@ -461,7 +462,9 @@ def append_budget_event(root, events, **fields):
             updates['unresolved_actions'] = state['unresolved_actions']-1
             if not updates['unresolved_actions']:
                 updates['first_unresolved_operation'] = None
-        if fields['result']['status'] == 'confirmed':
+        final=state['final_return']
+        if (fields['result']['status'] == 'confirmed' and row['action_kind'] == 'confirm'
+                and final is not None and row['final_return'] == dict(seq=final['seq'],record=final['ref'])):
             updates['final_confirmed'] = True
     elif kind.startswith('resource_'):
         updates, rows = resource_delta(state, ref, kind, fields)

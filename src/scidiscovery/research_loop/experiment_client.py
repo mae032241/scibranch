@@ -16,6 +16,11 @@ def record_directory(root, step):
     root = Path(root).absolute()
     job_path = root / 'jobs' / f'{step:03d}.json'
     job = c.read(c.regular(job_path))
+    return _record_directory_from_facts(root,step,job)
+
+
+def _record_directory_from_facts(root,step,job):
+    from . import contracts as c
     if type(job.get('worker_view_version')) is int and job['worker_view_version'] == VERSION:
         return root / 'host-runtime/experiment-control' / f'{step:03d}' / 'records'
     return c.workspace(root, step) / 'work/lineage'
@@ -23,6 +28,16 @@ def record_directory(root, step):
 
 def root_for_configuration(config, *, allow_standalone=False):
     """Resolve only the old or current canonical execution record namespace."""
+    from .experiments import IntegrityError
+    root=_configuration_root(config,allow_standalone=allow_standalone)
+    if root is None:return None
+    if Path(config['record_dir']) != record_directory(root, config['scope']['step']):
+        raise IntegrityError('Execution record namespace differs from its frozen scientific task')
+    return root
+
+
+def _configuration_root(config, *, allow_standalone):
+    """Observe the configured namespace without loading its task record."""
     from .experiments import IntegrityError
     if not isinstance(config,dict) or not isinstance(config.get('record_dir'),str):
         raise IntegrityError('Execution record namespace is malformed')
@@ -40,8 +55,6 @@ def root_for_configuration(config, *, allow_standalone=False):
     if (not directory.is_absolute() or directory.resolve()!=directory or not isinstance(scope,dict)
             or type(scope.get('step')) is not int or scope['step']<=0):
         raise IntegrityError('Execution record namespace or scientific scope changed')
-    if directory != record_directory(root, config['scope']['step']):
-        raise IntegrityError('Execution record namespace differs from its frozen scientific task')
     return root
 
 
@@ -104,29 +117,35 @@ def resolve(path, value):
 
 def payload_path(config, path):
     """Resolve only an exact host-bound compiled implementation client."""
+    return _observe_payload_path(config,path,facts=load_client_facts(config))
+
+
+def _observe_payload_path(config, path, *, facts):
+    """Acquire a payload using this operation's already loaded task bindings."""
     from . import contracts as c
     from .experiments import IntegrityError, proof, read, MAX_ASSET
-    requested=Path(path).absolute();reference=input_reference(config,requested);path=Path(reference['path'])
+    requested=Path(path).absolute();reference=_observe_input_reference(config,requested,facts=facts);path=Path(reference['path'])
     if config.get('worker_view_version')!=VERSION:return path
     try:value=json.loads(read(path,MAX_ASSET))
     except (UnicodeError,ValueError):return path
     if not isinstance(value,dict) or 'worker_implementation_version' not in value:return path
-    root=root_for_configuration(config);work=c.workspace(root,config['scope']['step'])
+    root,work,job=facts['root'],facts['work'],facts['job']
+    if root is None:root_for_configuration(config)
     if (set(value)!={'worker_implementation_version','implementation_ref'}
             or type(value['worker_implementation_version']) is not int or value['worker_implementation_version']!=VERSION
             or not isinstance(value['implementation_ref'],str) or re.fullmatch(r'I[0-9]{3,}',value['implementation_ref']) is None):
         raise IntegrityError('Scientific implementation reference is malformed')
     from . import execution_inputs
-    job=c.read(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
     materials={json.dumps(item,sort_keys=True):item for item in execution_inputs._bound(job)
         if requested in (work/item['path'],root/Path(item['source']))}
     if materials:
         if len(materials)!=1:raise IntegrityError('Scientific implementation input is ambiguous')
-        material=next(iter(materials.values()));actual=proof(path)
+        material=next(iter(materials.values()));actual=reference
         if any(actual[key]!=material[key] for key in ('size_bytes',)):
             raise IntegrityError('Scientific implementation input differs from its bound original')
         package=execution_inputs.compiled_payload(root,material)
-        if any(proof(package['path'])[key]!=package[key] for key in package if key in {'path','size_bytes','file_stat'}):
+        package_proof=proof(package['path'])
+        if any(package_proof[key]!=package[key] for key in package if key in {'path','size_bytes','file_stat'}):
             raise IntegrityError('Scientific implementation package differs from its compiled original')
         return Path(package['path'])
     if not path.is_relative_to(work/'artifacts'):
@@ -134,9 +153,10 @@ def payload_path(config, path):
     directory=Path(config['record_dir']).parent/'implementations'/value['implementation_ref']
     binding=c.read(c.regular(directory/'client.json'))
     package=directory/'package.json'
+    package_proof=proof(package)
     if (not isinstance(binding,dict) or set(binding)!={'client','public_path','package'} or binding['client']!=value
             or binding['public_path']!=str(path)
-            or any(proof(package).get(key)!=item for key,item in binding['package'].items())):
+            or any(package_proof.get(key)!=item for key,item in binding['package'].items())):
         raise IntegrityError('Scientific implementation differs from its exact compiled original')
     return package
 
@@ -148,48 +168,86 @@ def _input_rows(job):
         *[row['material'] for row in job.get('selected_inputs',[])]]
 
 
+def load_client_facts(config):
+    """Own one operation's task expansion and exact material locations."""
+    from . import contracts as c, handoff_state
+    root=_configuration_root(config,allow_standalone=True)
+    if root is None:return client_bindings_from_facts(None,None,None,material_paths={},material_sources={})
+    work=c.workspace(root,config['scope']['step'])
+    sources={}
+    job=c.read_job(root/'jobs'/f'{config["scope"]["step"]:03d}.json',sources=sources)
+    from .experiments import IntegrityError
+    if Path(config['record_dir'])!=_record_directory_from_facts(root,config['scope']['step'],job):
+        raise IntegrityError('Execution record namespace differs from its frozen scientific task')
+    paths=handoff_state.material_paths(root,job,sources=sources)
+    return client_bindings_from_facts(root,work,job,material_paths=paths,material_sources=sources)
+
+
+def client_bindings_from_facts(root,work,job,*,material_paths,material_sources):
+    """Share one owner's loaded bindings without acquiring another record."""
+    return dict(root=root,work=work,job=job,material_paths=material_paths,material_sources=material_sources)
+
+
+def _input_matches_from_facts(facts,path):
+    """Select declared aliases without loading or probing their originals."""
+    root,work,job=facts['root'],facts['work'],facts['job']
+    return {json.dumps(item,sort_keys=True):item for item in _input_rows(job)
+        if path in (work/item['path'],root/Path(item.get('source',work/item['path'])))}
+
+
+def _code_path_from_facts(facts,path):
+    """Map one code alias using only the operation's loaded task bindings."""
+    from . import project_layout
+    from .experiments import CallerError
+    root,work,job=facts['root'],facts['work'],facts['job']
+    if _input_matches_from_facts(facts,path):return path,False
+    project=job.get('project')
+    if project is None:return path,False
+    layout=project_layout.code_roots(project,work)
+    for alias in (Path(project['base_root']),layout['root']):
+        if not path.is_relative_to(alias):continue
+        relative=path.relative_to(alias)
+        if '..' in relative.parts or not any(
+                relative.is_relative_to(row['relative']) and relative!=Path(row['relative'])
+                for row in layout['editable']):
+            raise CallerError('Choose a code entry inside a declared project editable directory.')
+        return layout['root']/relative,True
+    return path,False
+
+
+def _observe_code_path(path, *, facts):
+    from .experiments import IntegrityError
+    path=Path(path).absolute()
+    selected,ordinary=_code_path_from_facts(facts,path)
+    if ordinary and selected.resolve()!=selected:
+        raise IntegrityError('Code selection requires an exact ordinary project draft path')
+    return selected
+
+
 
 def code_path(config, path):
     """Map declared original-path aliases to the exact current project draft."""
-    from . import contracts as c, project_layout
-    from .experiments import CallerError, IntegrityError
     path = Path(path).absolute()
     if config.get('scope', {}).get('role') != 'W':return path
-    root = root_for_configuration(config, allow_standalone=True)
-    if root is None:return path
-    work = c.workspace(root, config['scope']['step'])
-    job = c.read(c.regular(root / 'jobs' / f'{config["scope"]["step"]:03d}.json'))
-    if any(path in (work / item['path'], root / Path(item.get('source', work / item['path'])))
-           for item in _input_rows(job)):
-        return path
-    project = job.get('project')
-    if project is None:return path
-    layout = project_layout.code_roots(project, work)
-    for alias in (Path(project['base_root']), layout['root']):
-        if not path.is_relative_to(alias):continue
-        relative = path.relative_to(alias)
-        if '..' in relative.parts or not any(
-                relative.is_relative_to(row['relative']) and relative != Path(row['relative'])
-                for row in layout['editable']):
-            raise CallerError('Choose a code entry inside a declared project editable directory.')
-        selected = layout['root'] / relative
-        if selected.resolve() != selected:
-            raise IntegrityError('Code selection requires an exact ordinary project draft path')
-        return selected
-    return path
+    facts=load_client_facts(config)
+    if facts['root'] is None:return path
+    return _observe_code_path(path,facts=facts)
 
 
 def code_selection(config, path, *, resolved=None, experiment_directory=None):
     """Select dedicated current-W code; saved scientific inputs stay direct."""
-    from . import contracts as c, project_layout, shared_input_views
-    from .experiments import CallerError, IntegrityError
     if config.get('scope',{}).get('role')!='W':return None
-    root=root_for_configuration(config,allow_standalone=True)
-    if root is None:return None
-    path=code_path(config,path)
-    if resolved is not None:resolved=code_path(config,resolved)
-    work=c.workspace(root,config['scope']['step'])
-    job=c.read(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
+    facts=load_client_facts(config)
+    if facts['root'] is None:return None
+    return _observe_code_selection(config,path,resolved=resolved,experiment_directory=experiment_directory,facts=facts)
+
+
+def _observe_code_selection(config,path,*,resolved,experiment_directory,facts):
+    from . import project_layout, shared_input_views
+    from .experiments import CallerError, IntegrityError
+    root,work,job=facts['root'],facts['work'],facts['job']
+    path=_observe_code_path(path,facts=facts)
+    if resolved is not None:resolved=_observe_code_path(resolved,facts=facts)
     rows=_input_rows(job)
     bound=any(path in (work/item['path'],root/Path(item.get('source',work/item['path'])))
         for item in rows)
@@ -200,7 +258,7 @@ def code_selection(config, path, *, resolved=None, experiment_directory=None):
     if path.resolve()!=path:
         raise IntegrityError('Code selection requires an exact ordinary path')
     if any(path.is_relative_to(work/'work'/name) for name in shared_input_views.DYNAMIC_ROOTS):
-        input_reference(config,path)
+        _observe_input_reference(config,path,facts=facts)
         return None
     project=job.get('project')
     layout=project_layout.code_roots(project,work)
@@ -255,21 +313,26 @@ def _selected_reference(path, logical='script or payload'):
 
 def input_reference(config, path):
     """Resolve the exact task binding before fingerprinting its actual source."""
-    from . import contracts as c, originals
+    return _observe_input_reference(config,path,facts=load_client_facts(config))
+
+
+def _observe_input_reference(config,path,*,facts):
+    """Acquire selected-file facts without reloading this operation's task."""
+    from . import originals
     from .experiments import IntegrityError, proof
     path=Path(path).absolute()
-    root=root_for_configuration(config,allow_standalone=True)
+    root,work,job=facts['root'],facts['work'],facts['job']
     if root is None:return _selected_reference(path)
-    work=c.workspace(root,config['scope']['step'])
-    job=c.read(c.regular(root/'jobs'/f'{config["scope"]["step"]:03d}.json'))
-    matches={json.dumps(item,sort_keys=True):item for item in _input_rows(job)
-        if path in (work/item['path'],root/Path(item.get('source',work/item['path'])))}
+    matches=_input_matches_from_facts(facts,path)
     if matches:
         if len(matches)!=1:raise IntegrityError('Scientific input binding is ambiguous')
         material=next(iter(matches.values()))
         try:
             if path.resolve()!=path:raise IntegrityError('Scientific input requires an exact ordinary path')
-            original=originals.material_path(root,dict(material,source=material.get('source',str(work/material['path']))))
+            if material in job['direct_materials']:
+                original=facts['material_paths'][material['path']]
+            else:
+                original=originals.material_path(root,dict(material,source=material.get('source',str(work/material['path']))))
             reference=proof(original)
         except (OSError,ValueError) as error:
             raise IntegrityError('Scientific input original is unavailable or changed') from error

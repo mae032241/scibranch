@@ -665,7 +665,7 @@ def science_facts(root, step, *, context_entries=None, context_directory=None):
 
 def start(root, step, *, max_tokens, max_seconds, authorization_note):
     from . import budget, execution, native, profiles, runtime
-    root=Path(root);settings=configuration_updates.for_step(root, step);job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
+    root=Path(root);settings=configuration_updates.for_step(root, step);job=c.read_job(root/'jobs'/f'{step:03d}.json')
     origin=execution.origin(root,step)
     if (type(max_tokens) is not int or max_tokens<=0 or type(max_seconds) not in (int,float)
             or not 0<max_seconds<float('inf') or not authorization_note.strip()):
@@ -844,7 +844,7 @@ def start_successor(root, step, *, max_tokens, max_seconds, authorization_note,
     paths=execution.records(root,step)
     if len(paths)==3:return native.wait_native(root,step)  # Collect exact accepted 2, never create 3.
     if len(paths)!=2:raise ValueError('Author successor requires exactly the original and first author attempts')
-    job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'));settings=configuration_updates.for_step(root, step)
+    job=c.read_job(root/'jobs'/f'{step:03d}.json');settings=configuration_updates.for_step(root, step)
     if ((origin/'result-identity.json').exists() or (root/'pause.request').exists()
             or budget.closeout_state(root)['begin'] is not None
             or any(p.name>f'{step:03d}.json' for p in (root/'jobs').glob('*.json'))):

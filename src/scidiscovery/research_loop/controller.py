@@ -740,7 +740,7 @@ def _finish(root, settings, status, completed, last, *, reason=None, next_role=N
 
 def _check_job(root, settings, step, role, parents, instruction, evidence_return, correction_request=None, author_correction=None):
     """A retained node must be the exact job selected by its sealed predecessor."""
-    job = contracts.read(root / "jobs" / f"{step:03d}.json")
+    job = contracts.read_job(root / "jobs" / f"{step:03d}.json", base=settings)
     if job.get('fork_source'):
         from . import fork_runtime
         fork_runtime.validate_selected_job(root, contracts.workspace(root, step), job)
@@ -1246,7 +1246,7 @@ def _run(root, *, continue_wait=None):
         try:
             # seal_result already closed terminal, task and current-input
             # verification. Loading the saved seal never renews those checks.
-            job = contracts.read(root / 'jobs' / f'{step:03d}.json')
+            job = contracts.read_job(root / 'jobs' / f'{step:03d}.json')
             result = handoff_state.read_sealed(root, step)
             if result["role"] != role:
                 raise ValueError("Sealed result role differs from its job")
@@ -1837,7 +1837,7 @@ def _run_direct_delivery(root, begin):
     """Consume only the ordinary A's exact choice; failure grants no new science."""
     from . import delivery
     step=begin['authorization_step']
-    job=contracts.read(root/'jobs'/f'{step:03d}.json')
+    job=contracts.read_job(root/'jobs'/f'{step:03d}.json')
     result=handoff_state.read_sealed(root, step)
     if job['role']!='A' or job.get('purpose') is not None or result['next_action']!='deliver' or step!=begin['source_cutoff']:
         raise ValueError('Original direct delivery authorization changed')

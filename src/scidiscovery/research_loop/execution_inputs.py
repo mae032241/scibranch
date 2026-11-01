@@ -106,7 +106,7 @@ def validate_exact_input_sources(root, job, accepted, *, source=None, controls_o
         f'continuations/{attempt["number"]:03d}' if attempt['number'] else root / f'native-evidence/{job["step"]:03d}')
     if not controls_only:native_record = _native_record(root, job['step'], attempt['number'], source=source)
     if (view['job'] != q._ref(root, root / 'jobs' / f'{job["step"]:03d}.json', source=source)
-            or q._read(root, view['job'], source=source) != job or job['role'] != 'W'
+            or q._read(root, view['job'], source=source) != c.job_record(job) or job['role'] != 'W'
             or view['configuration'] != q._ref(root, projection, source=source)
             or config['scope'] != accepted['scope'] or config['native_attempt'] != attempt
             or config['execution_interface'] != accepted['interface']
@@ -295,7 +295,8 @@ def verify_compilation(root, ref, *, material=None, client_binding=None, source=
     root = Path(root).resolve(); value = q._read(root, ref)
     if value.get('version') != 1 or type(value.get('version')) is not int:
         raise q.IntegrityError('Compiler original version changed')
-    job = q._read(root, value['job']); step = job['step']
+    from . import originals
+    job = c.read_job(originals.resolve_root_ref(root, value['job'])); step = job['step']
     from .protocol import require_job_format
     require_job_format(job)
     from . import experiments as e
@@ -356,7 +357,7 @@ def verify_compilation(root, ref, *, material=None, client_binding=None, source=
             if (set(binding) != {'client', 'public_path', 'package'}
                     or binding['client'] != dict(worker_implementation_version=1, implementation_ref=path.parent.name)
                     or binding['package'] != value['output']
-                    or binding['public_path'] != material.get('original_source', material['source'])
+                    or binding['public_path'] != material['source']
                     or not _private_compile_output(root, job, config, Path(value['output']['path']))):
                 raise q.IntegrityError('Compiler client changed its exact material/package binding')
         return value
@@ -398,7 +399,7 @@ def verify_compilation(root, ref, *, material=None, client_binding=None, source=
             raise q.IntegrityError('Compiler client binding is not its sealed original')
         binding = q._read(root, client_binding)
         expected = dict(worker_implementation_version=1, implementation_ref=path.parent.name)
-        source = Path(material.get('original_source',material['source']))
+        source = Path(material['source'])
         if (not isinstance(binding, dict) or set(binding) != {'client', 'public_path', 'package'}
                 or not isinstance(binding['client'], dict)
                 or type(binding['client'].get('worker_implementation_version')) is not int
@@ -439,7 +440,8 @@ def verify_original_compilation(source, ref, *, material=None, client_binding=No
         owner = originals.source_for_ref(source, value)
         return c.read(originals.resolve_ref(owner, value))
     value = read_ref(ref)
-    job = read_ref(value['job'])
+    job_owner = originals.source_for_ref(source, value['job'])
+    job = c.read_job(originals.resolve_ref(job_owner, value['job']), source=job_owner)
     from .protocol import require_job_format
     require_job_format(job)
     from . import experiments as e
@@ -499,7 +501,7 @@ def verify_original_compilation(source, ref, *, material=None, client_binding=No
             if (set(binding) != {'client', 'public_path', 'package'}
                     or binding['client'] != dict(worker_implementation_version=1, implementation_ref=expected.parent.name)
                     or binding['package'] != value['output']
-                    or binding['public_path'] != material.get('original_source', material['source'])
+                    or binding['public_path'] != material['source']
                     or not _private_compile_output(root, job, config, Path(value['output']['path']), source=source)):
                 raise q.IntegrityError('Original compiler client changed its reviewed material/package binding')
         return value
@@ -543,8 +545,8 @@ def verify_original_compilation(source, ref, *, material=None, client_binding=No
         binding = read_ref(client_binding)
         expected = dict(worker_implementation_version=1, implementation_ref=expected_path.parent.name)
         if (set(binding) != {'client', 'public_path', 'package'} or binding['client'] != expected
-                or binding['package'] != output or binding['public_path'] != material.get('original_source',material['source'])
-                or not Path(material.get('original_source',material['source'])).is_relative_to(source.logical_workspace / 'artifacts')
+                or binding['package'] != output or binding['public_path'] != material['source']
+                or not Path(material['source']).is_relative_to(source.logical_workspace / 'artifacts')
                 or _implementation_client(material, source=source) != expected):
             raise q.IntegrityError('Original compiler client changed its reviewed material/package')
     return value
@@ -573,7 +575,7 @@ def capture(root, job, materials):
         client_binding = q._ref(root, client_path)
         client = q._read(root, client_binding)
         source = client.get('public_path')
-        matches = [row for row in materials if row.get('original_source',row['source']) == source]
+        matches = [row for row in materials if row['source'] == source]
         if not matches:
             continue
         if len(matches) != 1 or matches[0]['source'] in seen:
@@ -742,7 +744,7 @@ def local_input_sources(config, interface, payload, metadata):
     if root is None:
         return None  # Standalone commands have no current scientific-task owner.
     step = config['scope']['step']; work = c.workspace(root, step)
-    job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
+    job = c.read_job(root / 'jobs' / f'{step:03d}.json')
     attempt = config.get('native_attempt') or {}
     if type(attempt.get('number')) is not int:
         return None
@@ -869,7 +871,7 @@ def validate_local_input_sources(root, job, accepted, *, source=None, controls_o
     if not controls_only:native_record = _native_record(root, job['step'], attempt['number'], source=source)
     if (set(view) != {'job','native_intent','configuration','prepared','files'}
             or view['job'] != q._ref(root, root / 'jobs' / f'{job["step"]:03d}.json', source=source)
-            or q._read(root, view['job'], source=source) != job or job['role'] != 'W'
+            or q._read(root, view['job'], source=source) != c.job_record(job) or job['role'] != 'W'
             or view['configuration'] != q._ref(root, projection, source=source)
             or config['scope'] != accepted['scope'] or config['native_attempt'] != attempt
             or config['execution_interface'] != accepted['interface']

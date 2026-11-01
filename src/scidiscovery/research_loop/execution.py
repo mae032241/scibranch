@@ -124,7 +124,7 @@ def validate_records(root, step):
         from . import native_recovery
         automatic = native_recovery.policy(automatic)
     automatic_limit = automatic['max_continues'] + automatic['max_retries'] if automatic and automatic['enabled'] else 0
-    job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
+    job = c.read_job(root / 'jobs' / f'{step:03d}.json')
     from . import checkpoint
     fragments = checkpoint.enabled(root, job)
     from . import budget

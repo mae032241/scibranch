@@ -216,13 +216,20 @@ def artifact(root, step, index):
         return Original(_path(root, relative)), name
     if source.parent == root / 'host-history/objects':
         return Original(_object(root, relative)), name
-    # Older saved members retain the former managed-output source location.
-    # Its saved observation maps that exact member to an existing archive object.
+    # The saved observation binds a managed member to its exact call output.
+    # Current retained outputs stay inside that node's original call directory.
     saved_observation = observation(root, step, node=dict(seal=seal))
     for call in (saved_observation or {}).get('managed_calls', []):
         for output in call.get('outputs', []):
             if (name == f'experiments/{call["call_id"]}/artifacts/{output["name"]}'
                     and call['scope']['step'] == step and output.get('retention') == 'archived'
                     and output.get('path',) == relative):
+                call_id = call['call_id']
+                if (isinstance(call_id, str) and call_id not in {'', '.', '..'}
+                        and PurePosixPath(call_id).name == call_id and '\\' not in call_id
+                        and isinstance(output['name'], str)
+                        and source == work / 'work/retained-experiments' / call_id / 'outputs' / output['name']
+                        and output.get('snapshot') == relative):
+                    return Original(_path(root, relative)), name
                 return Original(_object(root, output['snapshot'])), name
     raise ValueError('Saved deliverable escaped its output owner')

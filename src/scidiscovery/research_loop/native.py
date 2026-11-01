@@ -191,7 +191,8 @@ def execute_native(root: Path, step: int, *, final_report=None):
     record = execution.record(root, step)
     record.mkdir(parents=True, exist_ok=True)
     job_path = root / "jobs" / f"{step:03d}.json"
-    job = read(job_path)
+    producer_sources={}
+    job = _contracts.read_job(job_path,sources=producer_sources)
     profile_binding = profiles.binding(settings, job)
     from . import skill_supply
     skill_supply.project(root, settings, job)
@@ -255,7 +256,7 @@ def wait_native(root: Path, step: int, *, _reentry_started=False, inventory=None
                     raise control_budget.NodeBudgetUnavailable(refused)
                 from . import contracts as c
                 if inventory is None:inventory=c.accept_current_inventory(root,step)
-                elif inventory.root!=root or inventory.job!=job or inventory.record!=record:
+                elif inventory.root!=root or c.job_record(inventory.job)!=job or inventory.record!=record:
                     raise ValueError('Current inventory belongs to another task or attempt')
                 decision = continuation.automatic_decision(root, step,inventory=inventory)
                 if decision['action'] in {'continue','retry'}:
@@ -324,7 +325,8 @@ def run_native(root: Path, step: int, attempt=0):
     settings = configuration_updates.for_step(root, step)
     work = workspace(root, step)
     job_path = root / 'jobs' / f'{step:03d}.json'
-    job = read(job_path)
+    producer_sources={}
+    job = _contracts.read_job(job_path,sources=producer_sources)
     record = execution.record(root, step, attempt)
     record.mkdir(parents=True, exist_ok=True)
     intent = read(record / 'native-intent.json')
@@ -510,6 +512,7 @@ def run_native(root: Path, step: int, attempt=0):
             view_sources=shared_input_views.load_source_facts(root,job,work,
                 native=dict(record=record,intent=intent),policy=settings,
                 include_wake=namespace_launcher is None,author_facts=author_context_facts,
+                material_sources=producer_sources,
                 input_policy=author_context_facts['input_policy'] if author_context_facts is not None else None)
             selected_code=shared_input_views.materialize_selected_code(root,
                 shared_input_views.selected_code_from_facts(view_sources),context=view_context,exports=code_exports)

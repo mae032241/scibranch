@@ -337,7 +337,7 @@ def execute(root, job, payload):
     from . import runtime
     require_current(root,job)
     step, chosen = job['step'], payload.get('candidate_recommendation')
-    if job!=c.read(c.regular(root/'jobs'/f'{step:03d}.json')):
+    if c.job_record(job)!=c.read(c.regular(root/'jobs'/f'{step:03d}.json')):
         raise ValueError('Candidate audit scientific task changed')
     directory = _directory(root, step)
     previous = _outcome(root, step)

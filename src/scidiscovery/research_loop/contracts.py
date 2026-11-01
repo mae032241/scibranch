@@ -62,6 +62,21 @@ def read(path: Path):
     return json.loads(path.read_text(encoding='utf-8'))
 
 
+def job_record(job):
+    """Canonical private job form; expanded material facts stay operation local."""
+    from . import material_references
+    return material_references.job_record(job)
+
+
+def read_job(path, *, sources=None, base=None, source=None):
+    """Own one current job read and explicitly resolve its selected material lists."""
+    from . import handoff_state, originals
+    path = Path(path)
+    root = originals.context_root(source) if source is not None else path.parent.parent
+    return handoff_state.material_inputs(root, read(regular(path)),
+        sources={} if sources is None else sources, base=base, source=source)
+
+
 def native_outcome(record, *, original_record=None, output_path=None):
     """Read terminal facts from the retained original call, without rewriting it.
 
@@ -355,7 +370,8 @@ def response_instructions(job):
         if job.get('purpose')=='closeout':
             fields['closeout_response']=('FINAL: follow action options; no new work/audit.' if job.get('final_only') else 'Closeout: deliver/audit/finish/wait; no exploration.')
     elif job['role']=='W':
-        fields['delivery_requirements']='Cite managed originals; retain other outputs/receipts and gaps.'
+        fields['implementation_reuse']='implementation_selection: IDs=forward old inputs; null=keep prior selection; []=clear.'
+        fields['delivery_requirements']='Cite managed originals; no copies. Retain other outputs/receipts and gaps.'
         fields['stage_response']=('stage_intent: review=A-ready; decision=partial obstacle; continue=work. '
             'Optional blocker: mechanism_findings:[{mechanism:"<ref>",basis:"blocked",finding:"<obstacle>"}].')
         fields['stage_continuation']=dict(status='configured' if job.get('worker_fragment_policy') else 'unavailable',
@@ -581,7 +597,7 @@ def _public_materials(materials):
     return [{key:value for key,value in material.items() if key!='file_stat'} for material in materials]
 
 
-def _accept_selected_inputs(work, payload, job, diagnostics=None, *, _policy=None):
+def _accept_selected_inputs(work, payload, job, diagnostics=None, *, _policy=None, _sources=None):
     """Resolve explicit reuse intent against this role's already frozen inputs."""
     from .protocol import require_job_format
     require_job_format(job)
@@ -589,6 +605,7 @@ def _accept_selected_inputs(work, payload, job, diagnostics=None, *, _policy=Non
     policy = settings(root, job) if _policy is None else _policy
     bound = {row['path']: row for row in job['direct_materials']}
     selected, seen, total = [], set(), 0
+    sources = {} if _sources is None else _sources
     choices = []
     choice = payload.get('implementation_selection')
     if choice is not None and (not isinstance(choice,list) or any(not isinstance(item,str) for item in choice)
@@ -642,19 +659,22 @@ def _accept_selected_inputs(work, payload, job, diagnostics=None, *, _policy=Non
         if origin != f'{origin_step:03d}' or not 0 < origin_step < job['step']:
             raise ValueError('Implementation reuse requires an exact preceding node')
         from . import originals
-        owner = originals.node(root, origin_step)
-        identity = read(originals.source_record(owner, 'result-identity.json'))
-        actual = originals.material_path(root, row)
-        if (not any({key: value for key, value in item.items() if key != 'file_stat'} == row
-                for item in identity['materials']) or source.resolve() != source.absolute()
-                or actual.stat().st_size != row['size_bytes']):
+        from . import handoff_state
+        if origin_step not in sources:
+            owner = originals.node(root, origin_step)
+            sources[origin_step] = handoff_state.sealed_facts(root, origin_step, owner=owner)
+        facts = sources[origin_step]
+        identity = facts['seal']
+        originals.bound_material_path(root, row, source=facts['owner'], seal=identity)
+        if source.resolve() != source.absolute():
             raise ValueError('Selected original implementation changed or is not sealed')
         total += row['size_bytes']
         if output_quota_exceeded(policy,(entry['material']['size_bytes'] for entry in [*selected,dict(material=row)])):
             raise ValueError('Selected implementations exceed the frozen handoff bound')
         selected.append(dict(label=label[:160], origin_step=origin_step,
-                             origin_result_ref=identity['result_ref'], material=row))
-    return selected
+            origin_result_ref=identity['result_ref'], material=row))
+    from . import material_references
+    return material_references.bind_selected(selected, sources=sources)
 
 
 def selected_inputs(inventory):
@@ -675,8 +695,17 @@ def _relayed_materials(job, payload, selected):
                 'author_correction', 'correction_request'))):
         return None
     if payload.get('implementation_selection') is None:
-        return [] if job.get('input_selection_status') == 'unresolved' else job['direct_materials']
-    return [row['material'] for row in selected]
+        return [] if job.get('input_selection_status') == 'unresolved' else job['material_refs']
+    groups = []
+    for row in selected:
+        ref = row['material_ref']
+        group = next((item for item in groups if item['list_ref'] == ref['list_ref']), None)
+        if group is None:
+            group = dict(list_ref=ref['list_ref'], ids=[])
+            groups.append(group)
+        if ref['id'] not in group['ids']:
+            group['ids'].append(ref['id'])
+    return groups
 
 
 def _material_options(materials, *, sources):
@@ -1055,6 +1084,7 @@ class CurrentInventory:
     observation_document: dict | None = None
     observation_inputs: dict | None = None
     native_meter: dict | None = None
+    material_sources: dict = field(default_factory=dict)
 
 
 def accept_current_inventory(root: Path, step: int):
@@ -1062,7 +1092,8 @@ def accept_current_inventory(root: Path, step: int):
     from . import execution, worker_delivery, history, checkpoint
     from .output_repair import OutputRepairRequired
     root=Path(root)
-    job=read(regular(root/'jobs'/f'{step:03d}.json'))
+    material_sources = {}
+    job=read_job(root/'jobs'/f'{step:03d}.json', sources=material_sources)
     if (root/'native-evidence'/f'{step:03d}'/'result-identity.json').exists():
         raise ValueError('Sealed scientific facts must be read from their accepted result')
     from . import accepted_budget
@@ -1096,7 +1127,7 @@ def accept_current_inventory(root: Path, step: int):
     inventory=CurrentInventory(root,job,record,len(chain)-1,[],{},policy=policy,
         native_intent=intent,native_outcome=outcome,native_meter=meter,base=base,head=head,task_ref=task_ref,
         configuration_revision=job.get('configuration_revision'),chain=chain,intents=intents,
-        process_receipts=receipts)
+        process_receipts=receipts,material_sources=material_sources)
     calls=(history._observe_managed_calls_for_inventory(root,job,inventory=inventory)
         if history._managed_config_for_inventory(job,inventory) else [])
     history._validate_managed_for_inventory(root,job,calls,inventory=inventory)
@@ -1109,7 +1140,8 @@ def accept_current_inventory(root: Path, step: int):
         if needs_checkpoint:inventory.checkpoint=checkpoint._capture(root,job,record,inventory=inventory)
         return inventory
     inventory.science_available=True
-    _validate_inputs_from_facts(root,workspace(root,step),job,base=base,policy=policy,head=head)
+    load_validated_input_facts(root,workspace(root,step),job,base=base,policy=policy,head=head,
+        sources=material_sources)
     authored=None
     try:
         from . import candidate_refs
@@ -1118,7 +1150,7 @@ def accept_current_inventory(root: Path, step: int):
         payload=candidate_refs.control_payload(job,authored,root=root,inventory=inventory)
         inventory.payload=payload
         inventory.selected_inputs=_accept_selected_inputs(workspace(root,step),payload,job,inventory.selection_diagnostics,
-            _policy=inventory.policy)
+            _policy=inventory.policy,_sources=material_sources)
     except OutputRepairRequired as error:
         # The existing bounded output-repair owner diagnoses malformed science;
         # no selection or scientific qualification is inferred from it here.
@@ -1159,7 +1191,7 @@ def accept_recovery_call(root, job, call_id, *, context=None):
 def material_inventory(root: Path, step: int, *, inventory):
     """Validate stopped-node originals and layout without changing permissions."""
     job=read(regular(root/'jobs'/f'{step:03d}.json'))
-    if inventory.root!=root or inventory.job!=job:
+    if inventory.root!=root or job_record(inventory.job)!=job:
         raise ValueError('Current inventory belongs to another task or attempt')
     _inventory_identity(root,step,inventory)
     if inventory.policy is None:
@@ -1221,6 +1253,16 @@ def _material_inventory(root: Path, step: int, *, inventory):
         raise ValueError('Current inventory requires its produced policy')
     policy = inventory.policy
     from . import worker_delivery
+    calls=[]
+    if job['role']=='W':
+        from . import history
+        calls=history.managed_calls(inventory)
+    managed_namespaces={call['call_id'] for call in calls}
+
+    def managed_namespace(relative):
+        parts=PurePosixPath(relative).parts
+        return len(parts)>=2 and parts[0]=='experiments' and parts[1] in managed_namespaces
+
     if (record/'native-intent.json').exists():
         intent=inventory.native_intent
         if intent.get('author_context_version')==1:
@@ -1231,7 +1273,8 @@ def _material_inventory(root: Path, step: int, *, inventory):
     def add(path, relative, *, source_kind='mutable'):
         path = regular(path)
         size = path.stat().st_size
-        if policy.get('max_output_item_bytes') is not None and size > policy['max_output_item_bytes']:
+        if (not (source_kind=='mutable' and managed_namespace(relative))
+                and policy.get('max_output_item_bytes') is not None and size > policy['max_output_item_bytes']):
             raise ValueError(f'Deliverable {relative!r} exceeds item byte budget '
                              f'({size} > {policy["max_output_item_bytes"]})')
         if source_kind=='mutable':
@@ -1250,7 +1293,7 @@ def _material_inventory(root: Path, step: int, *, inventory):
             return
         sources.append((path, source_kind))
         if source_kind=='mutable':mutable.append(path)
-        rows.append(dict(source=str(path), original_source=str(path),
+        rows.append(dict(source=str(path),
                          path=f'inputs/parents/{step:03d}/artifacts/{relative}', size_bytes=size))
 
     def artifacts(base, prefix=''):
@@ -1285,8 +1328,7 @@ def _material_inventory(root: Path, step: int, *, inventory):
     artifacts(work / 'artifacts')
     experiments(work / 'experiments')
     if job['role']=='W':
-        from . import history
-        for call in history.managed_calls(inventory):
+        for call in calls:
             if call['status'] not in {'known_success','known_failed'}:continue
             outputs=history.scientific_outputs(inventory,call)
             for item in outputs:
@@ -1297,6 +1339,15 @@ def _material_inventory(root: Path, step: int, *, inventory):
     # hidden behind an author's first entry. The author cannot resolve these.
     if any(sum(kind == 'managed_frozen' for _, kind in sources) > 1 for sources in collisions):
         raise ValueError('Different managed originals share a deliverable path')
+    reserved = next((path for relative, sources in destinations.items() if managed_namespace(relative)
+        for path, kind in sources if kind=='mutable'),None)
+    if reserved is not None:
+        from .output_repair import OutputRepairRequired
+        diagnostic = (
+            'Remove redundant copies; cite retained managed originals directly. '
+            'Managed call publication directories belong to their original producers; move distinct authored reports outside them. '
+            f'Preserve managed originals/call IDs; no rerun/resubmit. Owned path: {reserved.relative_to(work).as_posix()}')
+        raise OutputRepairRequired('deliverable_path_collision', diagnostic)
     if collisions:
         from .output_repair import OutputRepairRequired
         managed = next((sources for sources in collisions if any(kind == 'managed_frozen' for _, kind in sources)), None)
@@ -1511,7 +1562,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     accepted_prefix.reconcile(root)
     retained_path=Path(root)/'jobs'/f'{step:03d}.json'
     if retained_path.exists():
-        retained=read(regular(retained_path))
+        retained=read_job(retained_path, base=base)
         requested=dict(role=role,instruction=instruction,evidence_return=evidence_return,
             correction_request=correction_request,author_correction=author_correction)
         expected_purpose='formal_review' if (evidence_return or {}).get('kind')=='formal_review' else purpose
@@ -1556,7 +1607,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         if role!='W':raise ValueError('Engineering repair requires a new exact Worker task')
         engineering.admit(root,engineering_repair,step)
     job_path=root/'jobs'/f'{step:03d}.json'
-    retained=read(regular(job_path)) if job_path.exists() else None
+    retained=read_job(job_path, base=base) if job_path.exists() else None
     from . import configuration_updates
     revision, policy, head = configuration_updates.bind_new_job_facts(root, step, base=base)
     events, _ = budget._events_from_state(head)
@@ -1586,12 +1637,13 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     parent_sources=[]
     parent_facts,parent_members,parent_views,material_paths={},{},{},{}
     if review_binding is not None:
+        parent_facts.update(review_binding['material_sources'])
         materials=review_binding['materials'];selected=review_binding['selected']
     relay_predecessor = None
     if review_binding is None and step - 1 in parents:
         predecessor = _load_parent_source(root, step - 1, base=base,
             sources=parent_facts, members=parent_members, prefix=head['prefix'])
-        if 'relayed_materials' in predecessor['seal']:
+        if 'relayed_material_refs' in predecessor['seal']:
             relay_predecessor = step - 1
     for parent in ([] if review_binding is not None else parents):
         facts=_load_parent_source(root,parent,base=base,sources=parent_facts,members=parent_members,
@@ -1615,8 +1667,11 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         # Reuse is an instruction to the immediate next node, not persistent
         # baggage on a retained H ancestor in every later scientific cycle.
         if parent == step - 1:
-            selected.extend(parent_seal.get('selected_inputs', []))
-            materials.extend(parent_seal.get('relayed_materials', []))
+            selected.extend(handoff_state.selected_materials(root,parent_seal,sources=parent_facts,
+                base=base,source=facts['owner']))
+            if 'relayed_material_refs' in parent_seal:
+                materials.extend(handoff_state.relayed_materials(root,parent_seal,sources=parent_facts,
+                    base=base,source=facts['owner']))
     unique = {}
     for item in [*materials, *[row['material'] for row in selected]]:
         if item['path'] in unique and unique[item['path']] != item:
@@ -1684,7 +1739,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     if policy.get('formal_review_policy') is not None:
         from . import formal_review
         job['formal_review_version']=1
-        formal_review.bind_job(root,job)
+        formal_review.bind_job(root,job,sources=parent_facts)
     from . import profiles, skill_supply
     skill_binding = skill_supply.binding(policy, job)
     if skill_binding is not None:
@@ -1868,6 +1923,14 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         from . import formal_review
         job['formal_review_choices']=formal_review.choice_constraints(root,job,
             retained['formal_review_choices']['unavailable'] if retained is not None else None)
+    from . import material_references
+    scientific = review_binding.get('compiler_scientific_materials', []) if review_binding is not None else []
+    job['material_refs'] = material_references.references(
+        [row for row in job['direct_materials'] if row not in scientific], sources=parent_facts)
+    if review_binding is None:
+        job['direct_materials'] = material_references.materials(job['material_refs'], sources=parent_facts)
+    if 'selected_inputs' in job:
+        job['selected_inputs'] = material_references.bind_selected(job['selected_inputs'], sources=parent_facts)
     # Retained legacy jobs keep their exact identity and remain unqualified.
     if retained is None or 'source_provenance' in retained:
         from . import qualification
@@ -1892,7 +1955,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     with user_guidance.binding_from_base(root,step,role,retained,base=base) as (statements,guidance_current):
         if statements:
             job['user_guidance'] = statements
-        for path, value in ((root / 'jobs' / f'{step:03d}.json', job),
+        for path, value in ((root / 'jobs' / f'{step:03d}.json', job_record(job)),
                             (work / 'science-task.json', read(regular(work / 'science-task.json')) if retained is not None else _science_view(job,root,parent_sources=parent_views,policy=policy,qualified_materials=authority_facts['qualified_materials'])),
                             (host_record(work) / 'science-result.schema.json', read(regular(host_record(work) / 'science-result.schema.json')) if retained is not None else result_schema(role, protocol, 'selection' in job,**response_options(job)))):
             if path.exists():
@@ -1957,7 +2020,10 @@ def validate_original(source, *, _active=None, _memo=None, controls_only=False):
     if key in memo:
         return memo[key]
     active = {*active, key}
-    job = originals.source_job(source)
+    from . import handoff_state
+    material_sources = {}
+    job = handoff_state.material_inputs(originals.context_root(source), originals.source_job(source),
+        sources=material_sources, source=source)
     policy = originals.source_settings(source)
     if policy.get('handoff_protocol') != CURRENT or job.get('handoff_protocol') != CURRENT:
         raise ValueError('Fork original requires the current frozen protocol')
@@ -1992,7 +2058,7 @@ def validate_original(source, *, _active=None, _memo=None, controls_only=False):
             or raw_ref != {key:seal['raw_ref'][key] for key in ('path','size_bytes')}):
         raise ValueError('Source terminal lost its exact original task/output')
     payload = read(result) if controls_only else _sealed_science(job,seal,raw,result,source=source)
-    if ('relayed_materials' in seal and seal['relayed_materials'] !=
+    if ('relayed_material_refs' in seal and seal['relayed_material_refs'] !=
             _relayed_materials(job, payload, seal.get('selected_inputs', []))):
         raise ValueError('Relayed material receipts changed')
     if not controls_only:
@@ -2033,7 +2099,8 @@ def validate(work: Path):
     if originals.inherited(root, int(work.name)):
         return validate_original(originals.node(root, int(work.name)))
     job_path = root / 'jobs' / f'{int(work.name):03d}.json'
-    job = read(regular(job_path))
+    material_sources = {}
+    job = read_job(job_path, sources=material_sources)
     from .protocol import require_current
     require_current(root, job)
     record = host_record(work)
@@ -2044,7 +2111,8 @@ def validate(work: Path):
     history._validate_managed(root,job,calls)
     inventory=CurrentInventory(root,job,execution.record(root,job['step']),
         len(execution.records(root,job['step']))-1,calls,{},policy=settings(root,job),
-        task_ref=record_ref(job_path),configuration_revision=job.get('configuration_revision'))
+        task_ref=record_ref(job_path),configuration_revision=job.get('configuration_revision'),
+        material_sources=material_sources)
     if (seal.get('control_outcome') or {}).get('worker_delivery',{}).get('facts_ref'):
         from . import worker_delivery
         inventory.delivery=worker_delivery._validate(root,job,inventory.record,inventory=inventory)
@@ -2086,12 +2154,14 @@ def validate(work: Path):
         raise ValueError('Scientific deliverable entry points changed')
     if seal.get('unresolved_links') != unresolved:
         raise ValueError('Scientific unresolved link receipt changed')
-    if seal.get('selected_inputs', []) != _accept_selected_inputs(work, payload, job,_policy=inventory.policy):
+    from . import material_references
+    if seal.get('selected_inputs', []) != material_references.selected_record(
+            _accept_selected_inputs(work, payload, job,_policy=inventory.policy,_sources=material_sources)):
         raise ValueError('Selected implementation receipts changed')
-    if ('relayed_materials' in seal and seal['relayed_materials'] !=
+    if ('relayed_material_refs' in seal and seal['relayed_material_refs'] !=
             _relayed_materials(job, payload, seal.get('selected_inputs', []))):
         raise ValueError('Relayed material receipts changed')
-    _validate_inputs(root, work, job,_policy=inventory.policy)
+    _validate_inputs(root, work, job,_policy=inventory.policy,_sources=material_sources)
     from . import execution_inputs
     execution_inputs.validate_seal(root, job, seal)
     if 'pending_executions' in seal:
@@ -2133,24 +2203,26 @@ def _validate_task_view(root, work, job):
     return view
 
 
-def _validate_inputs(root, work, job, *, _policy=None):
-    if read(regular(Path(root)/'jobs'/f'{job["step"]:03d}.json'))!=job:
+def _validate_inputs(root, work, job, *, _policy=None, _sources=None):
+    if read(regular(Path(root)/'jobs'/f'{job["step"]:03d}.json'))!=job_record(job):
         raise ValueError('Scientific inputs differ from their accepted canonical job')
     from . import accepted_budget
     base=settings(root)
     head=accepted_budget.load(root,base=base)
     policy=settings_for_job(root,job,base=base,head=head) if _policy is None else _policy
-    return _validate_inputs_from_facts(root,work,job,base=base,policy=policy,head=head)
+    return load_validated_input_facts(root,work,job,base=base,policy=policy,head=head,
+        sources=_sources)['document']
 
 
-def load_validated_input_facts(root,work,job,*,base,policy,head):
+def load_validated_input_facts(root,work,job,*,base,policy,head,sources=None):
+    sources = {} if sources is None else sources
     if job.get('fork_source') is not None:
         from . import fork_runtime, fork_sources, formal_review, engineering
-        selected=fork_sources.selected_task(root)
+        selected=fork_sources.selected_task(root, material_sources=sources)
         facts=fork_runtime._load_selected_job_facts(root,work,job,base=base,policy=policy,head=head,
             selected=selected)
         document=facts['inputs']['document']
-        formal_review.validate_job(root, job)
+        formal_review.validate_job(root, job, sources=facts['sources'])
         engineering.validate_job(root, job)
         task_view=fork_runtime._selected_science_view(job,selected=selected,policy=policy,
             qualified=facts['authority']['qualified_materials'])
@@ -2172,9 +2244,9 @@ def load_validated_input_facts(root,work,job,*,base,policy,head):
     if job.get('normal_resume') != expected_resume:
         raise ValueError('Scientific task changed its exact normal resume boundary')
     from . import formal_review
-    formal_review.validate_job(root,job)
+    formal_review.validate_job(root,job,sources=sources)
     from . import qualification
-    sources,members={},{}
+    members={}
     for ref in job['direct_refs']:
         step=int(Path(ref['path']).parts[2])
         _load_parent_source(root,step,base=base,sources=sources,members=members,
@@ -2259,9 +2331,12 @@ def load_validated_input_facts(root,work,job,*,base,policy,head):
     expected = []
     previous = f'inputs/parents/{job["step"] - 1:03d}/conclusion.json'
     if job.get('formal_review'):
-        expected=formal_review.input_binding(root,job['formal_review'])['selected']
+        expected=formal_review.input_binding(root,job['formal_review'],sources=sources)['selected']
     elif any(ref['path'] == previous for ref in job['direct_refs']):
-        expected = sources[job['step']-1]['seal'].get('selected_inputs', [])
+        from . import handoff_state
+        predecessor = sources[job['step']-1]
+        expected = handoff_state.selected_materials(root,predecessor['seal'],sources=sources,
+            base=base,source=predecessor['owner'])
     if job.get('selected_inputs', []) != expected:
         raise ValueError('Bound implementation selection differs from its predecessor')
     from . import originals
@@ -2408,6 +2483,7 @@ def _seal_result(root,step,*,inventory):
     entry_points = artifact_entry_points(work, value, materials, job['handoff_protocol'], unresolved)
     selected = selected_inputs(inventory)
     relayed = _relayed_materials(job, inventory.payload, selected)
+    from . import material_references
     observations = None
     from . import history
     history.validate_recommendation(job, value, root=root)
@@ -2430,8 +2506,8 @@ def _seal_result(root,step,*,inventory):
           **(dict(execution_ref=execution_ref) if execution_ref is not None else {}),
           **(dict(control_outcome=control) if control is not None else {}),
           unresolved_links=unresolved,
-          **(dict(selected_inputs=selected) if selected else {}),
-          **(dict(relayed_materials=relayed) if relayed is not None else {}),
+          **(dict(selected_inputs=material_references.selected_record(selected)) if selected else {}),
+          **(dict(relayed_material_refs=relayed) if relayed is not None else {}),
           **(dict(observations=observations) if observations else {}))
     observed_inputs=history.validate_current_observation(root,job,seal,inventory=inventory)
     inventory.observation=observations

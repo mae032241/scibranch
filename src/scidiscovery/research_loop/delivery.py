@@ -767,7 +767,7 @@ def binding(root, job, result):
     if job['role'] != 'A' or not (job.get('purpose') == 'closeout' or ordinary):
         raise ValueError('Delivery requires its exact frozen A authorization')
     path = root / 'jobs' / f'{job["step"]:03d}.json'
-    if c.read(path) != job:
+    if c.read(path) != c.job_record(job):
         raise ValueError('Delivery decision job changed')
     raw = handoff_state.read_sealed(root, job['step'])
     chosen = result.get('candidate_recommendation')

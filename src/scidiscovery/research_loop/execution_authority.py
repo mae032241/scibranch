@@ -266,12 +266,17 @@ def _directory(root, request_id):
 
 def _validate_binding(root, value):
     """Replay the declared permission identity, without result or admission checks."""
-    job = q._read(root, value['job'])
+    from . import originals
+    job=c.read_job(originals.resolve_root_ref(root,value['job']))
+    return _check_binding(root,value,job=job)
+
+
+def _check_binding(root,value,*,job):
+    """Check the request using its owner's already expanded task original."""
     if (value['contract'] != contract(root, job) or value['instance'] != c.settings(root)['goal_id']
             or value.get('version') != 1 or value.get('kind') != 'execution_authorization'
             or value.get('options') != list(OPTIONS) or value.get('scope') != SCOPE):
         raise q.IntegrityError('Execution request contract or instance changed')
-    job = q._read(root, value['job'])
     if value['job'] != q._ref(root, Path(root) / 'jobs' / f'{job["step"]:03d}.json'):
         raise q.IntegrityError('Execution requester is not an exact task original')
     if job['role'] != 'W':
@@ -304,8 +309,10 @@ def _validate_binding(root, value):
 
 def require_request_eligibility(root, value):
     """Check real inputs, native lineage and scientific qualification before dispatch."""
-    job = q._read(root,value['job'])
-    c._validate_inputs(root,c.workspace(Path(root),job['step']),job)
+    from . import originals
+    sources={}
+    job=c.read_job(originals.resolve_root_ref(root,value['job']),sources=sources)
+    c._validate_inputs(root,c.workspace(Path(root),job['step']),job,_sources=sources)
     intents = [q._ref(root,row/'native-intent.json') for row in execution.records(root,job['step'])
         if (row/'native-intent.json').exists()]
     if (value['native_intent'] not in intents
@@ -349,12 +356,13 @@ def create_request(root, *, step, native_intent, call_id, subject, review_ref,
     if not isinstance(policy, dict) or policy.get('outcome') not in {'policy', 'require_human_approval', 'deny'}:
         raise ValueError('Trusted policy admission required')
     job_path = root / 'jobs' / f'{step:03d}.json'
+    job=c.read_job(job_path)
     previous = q._read(root,supersedes) if supersedes is not None else None
     if payload_binding is None:
         payload_binding = (previous['payload'] if previous is not None else
             {key:subject['material']['source' if key == 'path' else key] for key in ('path','size_bytes')})
     value = dict(version=1, kind='execution_authorization', instance=c.settings(root)['goal_id'],
-        contract=contract(root, c.read(c.regular(job_path))), job=q._ref(root, job_path), native_intent=native_intent,
+        contract=contract(root, job), job=q._ref(root, job_path), native_intent=native_intent,
         call_id=call_id, subject=subject, review=review_ref,
         payload=payload_binding, target=target, policy=policy,
         resources=resources, grant_revision=grant_revision, expires_at=expires_at,
@@ -366,7 +374,7 @@ def create_request(root, *, step, native_intent, call_id, subject, review_ref,
         for key in ('job','native_intent','call_id','subject','review','payload','payload_alias','target','resources'):
             if old.get(key)!=value.get(key):raise q.IntegrityError('Renewal changed the original execution subject')
         value['supersedes']=supersedes
-    _validate_binding(root, value)
+    _check_binding(root,value,job=job)
     request_id = security.request_digest(value)
     value['nonce_hash'] = security.secret_hash(security.token(secret, 'request-nonce', request_id))
     with writer(root,context=operation_context):
@@ -527,8 +535,10 @@ class AuthorityRequired(ValueError):
 
 def _host_context(config):
     """Resolve only the existing canonical host projection and accepted task."""
-    root = experiment_client.root_for_configuration(config)
-    step = config['scope']['step']; job = c.read(c.regular(root / 'jobs' / f'{step:03d}.json'))
+    facts=experiment_client.load_client_facts(config)
+    root,job=facts['root'],facts['job']
+    if root is None:experiment_client.root_for_configuration(config)
+    step = config['scope']['step']
     from .protocol import stage_scope
     if (job['role'] != 'W' or config['scope'] != stage_scope(root, job)
             or config.get('host_execution_authority') != contract(root, job)
