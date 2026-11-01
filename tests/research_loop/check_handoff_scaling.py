@@ -126,11 +126,20 @@ def _counts(monkeypatch, root, current):
             filesystem('scandir_calls', path)
             return Scan(original_scandir(path))
         patch.setattr(os, 'scandir', scandir)
+        original_read_bytes = Path.read_bytes
+        def read_bytes(path, *args, **kwargs):
+            if relative_parts(path) == ('settings.json',):
+                counts['path::Path.read_bytes::settings.json'] += 1
+            return original_read_bytes(path, *args, **kwargs)
+        patch.setattr(Path, 'read_bytes', read_bytes)
         for name in ('read', 'read_scientific_output'):
             original = getattr(c, name)
             def read(path, *args, _original=original, _name=name, **kwargs):
                 owner = file_category(path)
                 counts[f'{_name}_{owner}'] += 1
+                parts = relative_parts(path)
+                if parts is not None:
+                    counts[f'path::c.{_name}::{"/".join(parts)}'] += 1
                 # The spy's byte measurement must not inflate production stat counts.
                 counts[f'{_name}_bytes_{owner}'] += original_stat(path).st_size
                 if owner == 'ancient':
@@ -243,10 +252,12 @@ def test_synthetic_handoff_scaling(tmp_path, monkeypatch):
     output = Path(os.environ.get('SCID_TEST_LOG_DIR', str(tmp_path))) / 'handoff-scaling.json'
     output.parent.mkdir(parents=True, exist_ok=True)
     report = dict(scope='Synthetic E handoffs at bounded prefix lengths 2/8/16/32; no scientific performance claim.',
-        instrumentation='c.read/read_scientific_output, explicit deep gates, current inventory owner, ledger reader, os.scandir calls/yielded entries and os.stat/lstat; counting overhead included in wall times.',
+        instrumentation='c.read/read_scientific_output with exact instance-relative paths, settings.json Path.read_bytes, explicit deep gates, current inventory owner, ledger reader, os.scandir calls/yielded entries and os.stat/lstat; counting overhead included in wall times.',
         limitations=['Prefix setup excluded from per-handoff timing but remains inside the supervised process budget.',
             'Cold samples complete the next prepared job after dropping the warm scope, so their prefix has one extra sealed node.',
             'All current findings/artifacts and direct-parent counts/bytes are fixed; generated history/context growth is reported without exemption.',
+            'Exact-path Counter keys use path::<entrypoint>::<instance-relative path>; c.read and c.read_scientific_output path counts duplicate their owner-category counts and must not be added to those totals.',
+            'c.read_scientific_output and settings.json Path.read_bytes counts are additional to c.read counts; the observed entrypoints do not cover every underlying IO operation.',
             'Filesystem counts cover paths inside this instance; stat/lstat count Python calls, and DirEntry metadata requests are separate because they may use cached metadata.',
             'Directory calls and entries are grouped by jobs, native-evidence, candidate audit, audit recovery, execution recovery and other paths; entries retain ancient/direct/current/next attribution when their path carries a step.',
             'This handoff sample does not enter controller._run; startup and pending discovery require their own observation.',

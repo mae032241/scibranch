@@ -342,6 +342,14 @@ ledger, including allocations made before preparation starts. Sealed A decisions
 and an existing FINAL source selection are reused. A new A still performs its
 required comparisons, and the first FINAL selection may read its eligible sources
 once.
+Changes across the framework must preserve one producer for each immutable
+control fact or accepted scientific view. The operation owner loads and performs
+necessary acceptance once, then passes existing values or original references
+explicitly to internal consumers. Consumers reuse those facts without reopening
+the same records or repeating acceptance. Mutable control state is observed at
+the actual writer or admission boundary; mutations return the new state for
+subsequent consumers. Each migration retains an explicit implementation scope;
+other discovered violations are recorded for separate changes.
 Source restrictions propagate saved input and output facts; passive provenance
 reads do not reopen producer execution or ancestry gates. Missing restriction
 facts remain unknown, and restricted sources cannot become clear by inheritance.
