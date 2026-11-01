@@ -296,17 +296,17 @@ def _mechanism_sources(root,job,ref,state,*,screen=False):
 
 
 
-def _repair_subject(root,job,ref,*,payload=None):
+def _repair_subject(root,job,ref,*,selected_inputs):
     """Bind one old known observation; current H authority is a separate identity.
 
     Direct W inputs are eligible. An existing exact implementation selection may
     name an older W and disambiguate its accepted input bytes, never its outputs.
+    The owner supplies accepted selection rows; repair does not select them again.
     No labels, chronology or current-H qualification select an observation.
     """
     direct={source['step']:(source,seal) for source,_,seal in history.direct_sources(root,job) if source['role']=='W'}
-    selected=c.selected_inputs(c.workspace(root,job['step']),payload or {},job)
     sources=dict(direct);inputs={}
-    for item in selected:
+    for item in selected_inputs:
         step=item['origin_step']
         source,_,seal,_=history._source(root,step)
         if source['role']!='W':continue
@@ -348,8 +348,8 @@ def _repair_subject(root,job,ref,*,payload=None):
     return dict(status='available',root=source['search'].get('repair_root') or source['step'],source=subject)
 
 
-def _repair_choice(root,job,ref,*,payload=None):
-    try:return _repair_subject(root,job,ref,payload=payload)
+def _repair_choice(root,job,ref,*,selected_inputs):
+    try:return _repair_subject(root,job,ref,selected_inputs=selected_inputs)
     except FileNotFoundError:
         return dict(status='missing_original',root=None,source=None)
     except ValueError as error:
@@ -439,7 +439,7 @@ def _choice(job,payload):
     return result
 
 
-def _apply_science(root,job,payload,state,diagnostics,*,policy):
+def _apply_science(root,job,payload,state,diagnostics,*,policy,selected_inputs):
     mechanisms=state['mechanisms']
     if job['role']=='H':
         state['current_h']=job['step']
@@ -498,7 +498,7 @@ def _apply_science(root,job,payload,state,diagnostics,*,policy):
     diagnostics.extend(interpretation['diagnostics'])
     focus=interpretation['focus']
     if job['role'] in {'H','A'} and payload.get('next_action') in {'experiment','continue_w'} and focus and focus['action']=='repair' and not diagnostics:
-        choice=_repair_choice(root,job,focus['mechanism_ref'],payload=payload)
+        choice=_repair_choice(root,job,focus['mechanism_ref'],selected_inputs=selected_inputs)
         code=_repair_diagnostic(state,choice,policy=policy)
         if code:diagnostics.append(dict(code=code,subject=focus['mechanism_ref']))
     state['focus']=focus
@@ -515,11 +515,18 @@ def interpret(root,job,payload,*,state=None):
         return dict(state=copy.deepcopy(state),focus=None,allocation=None,diagnostics=[])
     if (job.get('purpose')=='closeout' or job.get('final_report')) and job['role']!='A':
         return dict(state=copy.deepcopy(state),focus=None,allocation=None,diagnostics=[])
-    return _interpret_from_facts(root,job,payload,policy=c.settings(root,job),state=state)
+    policy=c.settings(root,job)
+    selected=[]
+    if job['role'] in {'H','A'} and payload.get('next_action') in {'experiment','continue_w'}:
+        choice=c.scientific_field(job,payload,'search_plan' if job['role']=='H' else 'search_review')
+        focus=choice.get('focus' if job['role']=='H' else 'next_focus') if isinstance(choice,dict) else None
+        if isinstance(focus,dict) and focus.get('action')=='repair':
+            selected=c._accept_selected_inputs(c.workspace(root,job['step']),payload,job,_policy=policy)
+    return _interpret_from_facts(root,job,payload,policy=policy,state=state,selected_inputs=selected)
 
 
-def _interpret_from_facts(root,job,payload,*,policy,state):
-    """Interpret the owner's current state without reselecting its policy."""
+def _interpret_from_facts(root,job,payload,*,policy,state,selected_inputs):
+    """Consume the owner's policy, state and already accepted selection."""
     if policy is None or state is None:
         raise ValueError('Scientific interpretation requires its produced policy and state')
     state=copy.deepcopy(state)
@@ -534,7 +541,7 @@ def _interpret_from_facts(root,job,payload,*,policy,state):
     field='search_plan' if job['role']=='H' else 'search_review' if job['role']=='A' else None
     if field is not None and payload.get(field) is not None and c.scientific_field(job,payload,field) is None:
         diagnostics.extend(row for row in c.scientific_diagnostics(job,payload) if row['subject']==field)
-    try:_apply_science(root,job,payload,state,diagnostics,policy=policy)
+    try:_apply_science(root,job,payload,state,diagnostics,policy=policy,selected_inputs=selected_inputs)
     except UnresolvedSearch as error:
         diagnostic=dict(code=error.code,subject=error.subject)
         if error.expected is not None:diagnostic.update(expected=error.expected,message=str(error))
@@ -848,9 +855,11 @@ def bind(root,step,role,protocol=None,*,write_pages=True,state=None,unified=True
     focus=state['focus'] if role=='W' else None
     repair_root=repair_binding=repair_source=repair_authorization=None
     if focus is not None and focus['action']=='repair':
-        chooser,payload,_,_=history._source(root,state['summary']['last_science']['step'])
+        chooser,_,chooser_seal,_=history._source(root,state['summary']['last_science']['step'])
         chooser_step=chooser['step'];chooser_source=originals.node(root,chooser_step)
-        choice=_repair_choice(root,chooser,focus['mechanism_ref'],payload=payload)
+        from . import handoff_state
+        selected=handoff_state.selected_materials(root,chooser_seal,sources={},source=chooser_source)
+        choice=_repair_choice(root,chooser,focus['mechanism_ref'],selected_inputs=selected)
         repair_binding,repair_root,repair_source=choice['status'],choice['root'],choice['source']
         seal=originals.source_record(chooser_source,'result-identity.json')
         repair_authorization=dict(step=chooser_step,job_ref=history.source_control_ref(chooser_source,f'jobs/{chooser_step:03d}.json'),seal_ref=c.record_ref(seal))

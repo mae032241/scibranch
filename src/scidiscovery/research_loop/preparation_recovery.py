@@ -212,7 +212,7 @@ def _direct_input(value, config):
     try:
         tcad=accepted.get('tcad');script=accepted.get('script')
         if 'code_version' in accepted or isinstance(tcad,dict) and 'prepared' in tcad:
-            return e._direct_execution_input(config,accepted,prepared,script)
+            return e._direct_execution_input(config,accepted,prepared,script,client_facts=None)
         # The original host snapshot records the producer's direct/copy choice.
         # Replaying live alias resolution would reopen historical science.
         return (config.get('worker_view_version')==1

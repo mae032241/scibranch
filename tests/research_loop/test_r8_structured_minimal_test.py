@@ -133,7 +133,7 @@ def test_structured_description_preserves_focus_type_and_action_gates(tmp_path, 
     declaration['focus'] = focus
     result = search._interpret_from_facts(tmp_path, dict(role='H', step=1),
         dict(search_plan=declaration, next_action='experiment', route_reason='Fixture question'),
-        policy=dict(search_policy=dict(search.DEFAULT_POLICY)), state=_empty_state())
+        policy=dict(search_policy=dict(search.DEFAULT_POLICY)), state=_empty_state(), selected_inputs=[])
     assert result['diagnostics']
     assert result['focus'] is None
 
@@ -141,7 +141,7 @@ def test_structured_description_preserves_focus_type_and_action_gates(tmp_path, 
 def test_empty_screen_still_has_no_mechanism_to_dispatch(tmp_path):
     result = search._interpret_from_facts(tmp_path, dict(role='H', step=1),
         dict(search_plan=dict(commitments=[], focus=dict(index=None, action='screen')), next_action='experiment'),
-        policy=dict(search_policy=dict(search.DEFAULT_POLICY)), state=_empty_state())
+        policy=dict(search_policy=dict(search.DEFAULT_POLICY)), state=_empty_state(), selected_inputs=[])
     assert result['diagnostics'] == [dict(code='science_plan_empty', subject='unfinished scientific plan')]
     assert result['focus'] is None
 

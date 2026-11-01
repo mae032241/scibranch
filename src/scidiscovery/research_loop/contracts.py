@@ -1163,7 +1163,8 @@ def accept_current_inventory(root: Path, step: int):
     if inventory.payload is not None:
         from . import search
         inventory.interpretation=(search._interpret_from_facts(root,job,inventory.payload,
-            policy=policy,state=search.current_state(root,job,inventory.payload))
+            policy=policy,state=search.current_state(root,job,inventory.payload),
+            selected_inputs=inventory.selected_inputs)
             if policy.get('search_policy') is not None and not job.get('formal_review') and not job.get('final_report')
             else dict(focus=None,allocation=None,diagnostics=[]))
     if len(chain)>1 and outcome.get('returncode')==0 and not outcome.get('stop_reason'):

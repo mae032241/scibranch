@@ -557,6 +557,9 @@ provider 已报告实际用量、cached input、时间及步数全部保留；�
 冻结能力声明输入来源；自包含 TCAD V2 package 必须匹配准备归档和原 reviewed
 producer，编译 V3 输入保持原 compiler 链。明确不完整的声明不能回退为更广的来源主张。
 可选 observer 须另行启用冻结来源合同，并提供绑定精确 observation 的来源视图；
+请求描述当前观察，不传完整的历史 candidate/context 列表。返回的候选和 parent 引用
+通过冻结 prefix 定点选择旧事实；一次操作复用同一 producer 的事实及相邻留存元数据，
+不遍历此前节点。独立历史投影同样按冻结 prefix 核对实际推荐的候选。
 可变观察元数据按现有存储策略保留采集时版本；模型仅复用准确的受管输出原件，缺少留存归属的 live 路径明确不可用，不复制模型或伪称归档。后续提交替换标记不改变前次已采集事实。
 展示 coverage 本身不授予资格。真实 producer 贡献即使未被选为 implementation 也进入
 作者集合；普通 parent 链不自动生成作者关系。

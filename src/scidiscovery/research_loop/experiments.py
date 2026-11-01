@@ -1911,7 +1911,7 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, cl
                     adapter.prepare_runtime_directory(command_options['experiment_directory'],logical)
                 local_metadata=_local_metadata(adapter,descriptor,parent=parent,new=new,change=change,
                     command_options=dict(command_options or {},source_script=str(logical)),
-                    _code_version=dict(code_version))
+                    _code_version=dict(code_version),client_facts=client_facts)
         preparation_started=True
         prepared = adapter.prepare(descriptor, preparation_profile='research_loop.v1', exchange_directory=records.root)
         try:

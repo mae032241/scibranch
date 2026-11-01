@@ -498,8 +498,9 @@ def configure(root, step, run_argv, runs_root, output, *, receipt_channel='publi
     from scidiscovery.research_loop import contracts as _contracts
     require_current(root,_contracts.read(_contracts.regular(Path(root)/'jobs'/f'{step:03d}.json')))
     from scidiscovery.research_loop import contracts as c, execution, lineage, experiment_client
-    root=Path(root).resolve();job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
-    c._validate_inputs(root,c.workspace(root,step),job)
+    root=Path(root).resolve();sources={}
+    job=c.read_job(root/'jobs'/f'{step:03d}.json',sources=sources)
+    c._validate_inputs(root,c.workspace(root,step),job,_sources=sources)
     record=execution.record(root,step)
     if c.read(c.regular(record/'native-intent.json')).get('task_ref')!=c.record_ref(root/'jobs'/f'{step:03d}.json'):
         raise IntegrityError('Launcher preparation has no accepted scientific task')

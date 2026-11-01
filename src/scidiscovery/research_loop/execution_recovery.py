@@ -488,9 +488,9 @@ def create(root,step):
                 unresolved.append(row['call_id']);continue
             if e.record_observation(config,e.load(config),row['call_id']) is None:
                 unresolved.append(row['call_id']);continue
-        current=[item for item in history.managed_calls(root,job) if item['call_id']==row['call_id']]
-        if len(current)!=1 or current[0]['status']=='unknown':raise ValueError('Original recovery terminal is unverified')
-        value=dict(source_step=step,seal_ref=sha,old_row=row,row=current[0])
+        current=c.accept_recovery_call(root,job,row['call_id'])
+        if current['status']=='unknown':raise ValueError('Original recovery terminal is unverified')
+        value=dict(source_step=step,seal_ref=sha,old_row=row,row=current)
         ref=dict(path=path.relative_to(root).as_posix())
         c.write(path,value)
         path.chmod(0o400)

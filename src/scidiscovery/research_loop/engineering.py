@@ -62,22 +62,20 @@ def _request(root,decision_step,failure):
     result, path, binding = failure
     if (result['status'] != 'engineering_error' or not result['cleanup_confirmed']
             or result.get('recovery')!='author_repair' or binding is None):return None
-    from . import originals
+    from . import accepted_prefix, originals
     job = originals.source_job(originals.node(root, decision_step))
     cid = binding['candidate_id']
-    sources = []
-    nodes=list(job['history']['nodes'])
-    own=c.host_record(c.workspace(root,decision_step))/'result-identity.json'
-    if own.exists():nodes.append(dict(step=decision_step,seal_ref=c.record_ref(own)))
-    for node in nodes:
-        producer = originals.node(root, node['step'])
-        seal = c.read(originals.source_record(producer, 'result-identity.json'))
-        observed = seal.get('observations')
-        if observed is None:continue
-        fact = c.read(originals.resolve_ref(producer, observed))
-        if any(row['id']==cid for row in fact['candidates']):sources.append(node)
-    if len(sources)!=1:return None
-    source = sources[0]
+    prefix = accepted_prefix.for_job(job)
+    try:
+        candidate = accepted_prefix.candidate(root, prefix, cid)
+    except FileNotFoundError:
+        return None
+    except ValueError as error:
+        if str(error) == 'Candidate reference is outside this frozen scientific task':return None
+        raise
+    member = accepted_prefix.member(root, prefix, candidate['first_step'],
+        origin=candidate['origin_identity'])
+    source = dict(step=member['step'], seal_ref=member['seal_ref'])
     owner = originals.source_job(originals.node(root, source['step']))
     if owner['role']!='W':return None
     original = (owner.get('engineering_repair') or {}).get('original_candidate',cid)
@@ -207,12 +205,13 @@ def steps(root, before_step=None):
 
 
 def sources(root, before_step):
-    from . import budget,delivery,fork_runtime
-    begin=budget.closeout_state(root)['begin']
+    from . import accepted_budget,budget,delivery
+    head=accepted_budget.read(root)
+    begin=budget.closeout_state(root,events=budget._events_from_state(head)[0])['begin']
     repaired=[step for step in steps(root,before_step) if step>begin['source_cutoff']]
     if not repaired:return begin['delivery_sources']
     nodes=[*begin['delivery_sources']['source_nodes'],*[dict(step=step,
         seal_ref=history.source_seal_ref(originals.node(root,step))) for step in repaired]]
     path=root/'jobs'/f'{before_step:03d}.json'
-    job=c.read(c.regular(path)) if path.exists() else configuration_updates._reservation(root,before_step)
+    job=c.read(c.regular(path)) if path.exists() else configuration_updates._reservation(root,before_step,head=head)
     return delivery.catalogue_sources(root,nodes,job=job)

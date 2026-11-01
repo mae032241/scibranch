@@ -663,6 +663,17 @@ def validate_seal(root, job, seal, *, source=None):
             client_binding=row.get('client_binding'), controls_only=True)
 
 
+def _compiler_job_inputs(root, reference, compiler):
+    """Expand a compiler's task in its declared original instance context."""
+    from . import originals
+    origin = reference.get('origin_identity', compiler['job'].get('origin_identity'))
+    if origin is None:
+        return c.read_job(originals.resolve_root_ref(root, compiler['job'])), None
+    source = originals.source_for_ref(originals.for_origin(root, origin), compiler['job'])
+    job = c.read_job(originals.resolve_ref(source, compiler['job']), source=source)
+    return job, originals.at_step(source, job['step'])
+
+
 def execution_input_coverage(root, job, subject):
     """Prove coverage by existing selected/compiler edges, without adding edges."""
     root = Path(root).resolve()
@@ -677,13 +688,14 @@ def execution_input_coverage(root, job, subject):
         return None
     compiler = verify_compilation(root, found[0]['compiler'], material=subject['material'],
                                   client_binding=found[0].get('client_binding'))
-    compiler_job = q._read(root, compiler['job'])
+    compiler_job, compiler_source = _compiler_job_inputs(root, found[0]['compiler'], compiler)
 
-    def covers(owner, originals):
+    def covers(owner, originals, *, source=None):
         if owner.get('source_provenance') is None:
             return False
-        q.validate_inputs(root, owner)
-        edges = q._read(root, owner['source_provenance'])['edges']
+        if source is None:q.validate_inputs(root, owner)
+        else:q._original_inputs(source, owner)
+        edges = q._read(root, owner['source_provenance'], source=source)['edges']
         return all(any(edge['kind'] == 'producer' and edge['step'] == original['producer_step']
             and edge['seal'] == original['producer_seal'] for edge in edges) for original in originals)
 
@@ -694,7 +706,7 @@ def execution_input_coverage(root, job, subject):
         originals.append(compiler['author_input'])
     # These same originals are already traversed by authors(compiler producer).
     # verify_compilation proves their exact membership in compiler_job.
-    if not covers(compiler_job, originals):
+    if not covers(compiler_job, originals, source=compiler_source):
         return None
     return found[0]['compiler']
 
@@ -1146,7 +1158,7 @@ class NativeInputHost:
             raise ValueError('Native package needs its exact sealed compiler provenance')
         value = verify_compilation(self.root, found[0]['compiler'], material=subject['material'],
                                    client_binding=found[0].get('client_binding'))
-        compiler_job = q._read(self.root, value['job'])
+        compiler_job, compiler_source = _compiler_job_inputs(self.root, found[0]['compiler'], value)
         expected = [{key: row[key] for key in row if key != 'alias'} for row in value['inputs']]
         if json.dumps([item.model_dump(mode='json') for item in resolved_inputs], sort_keys=True) != json.dumps(expected, sort_keys=True):
             raise q.IntegrityError('Native package slots differ from their sealed compiler provenance')
@@ -1156,7 +1168,7 @@ class NativeInputHost:
             matches = [row for row in value['inputs'] if {key: row[key] for key in row if key != 'alias'} == declared]
             if len(matches) != 1:
                 raise q.IntegrityError('Native slot differs from its exact reviewed compiler binding')
-            return resolve_native_original(self.root, declared['original'], compiler_job=compiler_job)
+            return resolve_native_original(self.root, declared['original'], compiler_job=compiler_job, source=compiler_source)
 
         def metadata(item):
             material = resolve(item)

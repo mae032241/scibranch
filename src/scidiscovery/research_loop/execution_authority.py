@@ -759,10 +759,7 @@ def _accepted_input_subject(root, job, accepted, secret, *, source=None):
         {key:value for key,value in row.items() if key != 'file_stat'} == material]
     if len(selected) != 1:
         raise q.IntegrityError('Managed source lost its exact selected producer material')
-    from . import originals
-    producer = (originals.dependency(source, subject['producer_step'], seal_ref=subject['producer_seal'])
-        if source is not None else originals.node(root, subject['producer_step']))
-    if c._public_materials(root, selected, source=producer)[0] != material:
+    if c._public_materials(selected)[0] != material:
         raise q.IntegrityError('Managed source selected producer material changed')
     original = execution_inputs.compiled_payload(root, material, source=source)
     alias_path = Path(alias['path'])

@@ -93,7 +93,7 @@ def observer_input_sources(root,job,observation,*,source=None,controls_only=Fals
         else q._ref(root,raw,source=source))
     job_ref=q._ref(root,logical_root/'jobs'/f'{job["step"]:03d}.json',source=source)
     if (not isinstance(original,dict) or set(original)!={'contract','job','raw','view'}
-            or original['job']!=job_ref or q._read(root,original['job'],source=source)!=job):
+            or original['job']!=job_ref or q._read(root,original['job'],source=source)!=c.job_record(job)):
         raise q.IntegrityError('Observer source view differs from its original task')
     return _observer_input_sources_from_facts(root,job,observation,policy=policy,
         job_ref=job_ref,raw=raw,raw_ref=raw_ref,source=source,controls_only=controls_only)
@@ -1041,7 +1041,11 @@ def _capture(root, job, payload, materials, *, inventory):
         inputs=_observer_input_sources_for_inventory(root,job,stored,inventory)
         inventory.observation_document,inventory.observation_inputs=stored,inputs
         return dict(path=path.relative_to(root).as_posix())
-    known = set();known_contexts = set();prior_contexts = [];managed_outputs = {};previous_proofs = {}
+    from . import accepted_budget, accepted_prefix, accepted_search, handoff_state, originals
+    prefix = accepted_prefix.for_job(job)
+    if inventory.head is None or inventory.head['prefix']!=prefix:
+        raise ObserverIntegrityError('Observer inventory differs from its frozen prefix')
+    known = set();memberships = {};prior_contexts = [];managed_outputs = {};previous_proofs = {};prior_sources = {}
     def remember_proofs(observation, owner):
         # Read only already-loaded control metadata here. Validate the chosen
         # retained object later, without statting every historical evidence file.
@@ -1063,23 +1067,48 @@ def _capture(root, job, payload, materials, *, inventory):
                 if proof.get('retention')=='archived':
                     managed_outputs[str(Path(owner.original_root)/proof['path'])]=(owner,proof)
                     managed_outputs[str(Path(owner.original_root)/proof['snapshot'])]=(owner,proof)
-    from . import originals
-    for receipt in job.get('history', {}).get('nodes', []):
-        prior_source = originals.node(root, receipt['step'])
-        prior_job,_,old_seal,_ = _source(root,receipt['step'])
-        if old_seal.get('observations'):
-            prior = read_observation(root, prior_job, old_seal)
-            known.update(row['id'] for row in prior['candidates'])
-            known_contexts.update(row['call_id'] for row in prior.get('contexts', []))
-            prior_contexts.extend(prior.get('contexts', []))
-            remember_outputs(prior.get('managed_calls',[]),prior_source)
-            remember_proofs(prior,prior_source)
+    def prior_observation(step, origin):
+        key=(originals.identity_key(origin),step)
+        if key not in prior_sources:
+            member=accepted_prefix.member(root,prefix,step,origin=origin)
+            owner=originals.for_origin(root,origin,step=step)
+            supplied=inventory.material_sources.get(step)
+            if supplied is not None and supplied.get('owner')!=owner:supplied=None
+            facts=handoff_state.sealed_facts(root,step,owner=owner,known=supplied)
+            if facts['seal_ref']!=member['seal_ref']:
+                raise ObserverIntegrityError('Observer source differs from its frozen prefix')
+            observed=handoff_state.observation_from_facts(root,facts)
+            prior_sources[key]=(facts,observed)
+            if observed is not None:
+                remember_outputs(observed.get('managed_calls',[]),owner)
+                remember_proofs(observed,owner)
+        return prior_sources[key][1]
+    def prior_candidate(identity, *, observe=False):
+        if identity not in memberships:
+            candidate=accepted_budget.search_row(root,accepted_search.key('candidate',identity),head=inventory.head)
+            memberships[identity]=(candidate if candidate is not None and candidate['first_step']<=prefix['cutoff'] else None)
+        candidate=memberships[identity]
+        if candidate is not None:
+            known.add(identity)
+            if observe:
+                prior_observation(candidate['first_step'],candidate['origin_identity'])
+                if candidate.get('source_step') is not None:
+                    member=accepted_prefix.member(root,prefix,candidate['source_step'])
+                    prior_observation(member['step'],member['origin_identity'])
+        return candidate
+    adjacent_loaded=False
+    def adjacent_proofs():
+        nonlocal adjacent_loaded
+        if adjacent_loaded:return
+        adjacent_loaded=True
+        tip=prefix['tip']
+        if tip is not None:prior_observation(tip['step'],tip['origin_identity'])
     current_calls=managed_calls(inventory) if _managed_config_for_inventory(job,inventory) else None
     if current_calls is not None:
         remember_outputs(current_calls,originals.node(root,job['step']))
-    request = dict(root=str(root), step=job['step'], config=config['config'], materials=materials,
-                   known_candidates=sorted(known),
-                   **(dict(known_contexts=sorted(known_contexts)) if config.get('contract_version') == 2 else {}))
+    # The adapter describes this observation. Exact returned IDs, not complete
+    # prehistory lists, select the prior facts that its host consumer needs.
+    request = dict(root=str(root), step=job['step'], config=config['config'], materials=materials)
     inputs=None
     if config.get('source_contract') is not None:
         from . import execution_inputs
@@ -1096,6 +1125,25 @@ def _capture(root, job, payload, materials, *, inventory):
     coverage = value['coverage']
     if not isinstance(coverage, dict) or set(coverage) != {'status', 'note'} or coverage['status'] not in ('complete', 'partial', 'unavailable') or not isinstance(coverage['note'], str):
         raise ValueError('Observer coverage requires an explicit status')
+    for field in ('current_candidate','actual_submission'):
+        item=value[field]
+        if isinstance(item,dict) and isinstance(item.get('candidate_id'),str):
+            prior_candidate(item['candidate_id'],observe=True)
+    if config.get('contract_version') == 2:
+        for item in value['contexts']:
+            parent=item.get('parent') if isinstance(item,dict) else None
+            identity=parent.get('candidate_id') if isinstance(parent,dict) else None
+            if not isinstance(identity,str):continue
+            candidate=prior_candidate(identity,observe=True)
+            if candidate is None:continue
+            pointer=re.fullmatch(r'/contexts/([0-9]+)',candidate.get('context_pointer',''))
+            if pointer is None:continue
+            member=accepted_prefix.member(root,prefix,candidate['source_step'])
+            prior=prior_observation(member['step'],member['origin_identity'])
+            contexts=(prior or {}).get('contexts',[]);number=int(pointer[1])
+            if number>=len(contexts) or contexts[number].get('candidate_id')!=candidate['observation']['id']:
+                raise ObserverIntegrityError('Observer parent differs from its accepted context')
+            if contexts[number] not in prior_contexts:prior_contexts.append(contexts[number])
     proof_cache = {};artifact_cache = {}
     def artifact(name):
         if not isinstance(name,str):raise ValueError('Observer artifact path is not a string')
@@ -1125,16 +1173,22 @@ def _capture(root, job, payload, materials, *, inventory):
             raise ValueError('Observer original path is not a string')
         if name in artifact_names:return artifact(name)
         if name not in proof_cache:
+            adjacent_proofs()
             proof_cache[name] = _proof(root,name,previous=previous_proofs.get(str(root/name)))
         return proof_cache[name]
     candidates, seen, diagnostics = [], set(), []
-    receipts = job.get('history', {}).get('nodes', [])
     repeated={item['id'] for item in value['candidates'] if isinstance(item,dict) and isinstance(item.get('id'),str)
         and sum(isinstance(other,dict) and other.get('id')==item['id'] for other in value['candidates'])>1}
     for index,item in enumerate(value['candidates']):
         if (not isinstance(item,dict) or not isinstance(item.get('id'),str) or not ID.fullmatch(item['id'])
-                or item['id'] in repeated or item['id'] in known):
+                or item['id'] in repeated):
             diagnostics.append(dict(index=index,code='candidate_identity_unresolved'));continue
+        previous=prior_candidate(item['id'])
+        if previous is not None:
+            prior=previous['observation']
+            if any(item.get(key)!=entry for key,entry in prior.items()):
+                diagnostics.append(dict(index=index,code='candidate_identity_unresolved'))
+            continue
         if (not isinstance(item.get('status'),str) or item['status'] not in ('ok','failed','unknown')
                 or not isinstance(item.get('evidence'),list) or not item['evidence']
                 or any(not isinstance(name,str) for name in item['evidence'])):
@@ -1142,8 +1196,17 @@ def _capture(root, job, payload, materials, *, inventory):
         seen.add(item['id'])
         implementation = item.get('implementation')
         if implementation is not None:
-            try:resolve(root, implementation, receipts, current=dict(step=job['step'], materials=materials))
-            except (ValueError,TypeError) as error:
+            try:
+                selected=dict(step=job['step'],materials=materials)
+                match=HANDLE.fullmatch(implementation) if isinstance(implementation,str) else None
+                if match is not None and int(match[1])!=job['step']:
+                    member=accepted_prefix.member(root,prefix,int(match[1]))
+                    origin=member['origin_identity']
+                    prior_observation(member['step'],origin)
+                    facts=prior_sources[(originals.identity_key(origin),member['step'])][0]
+                    selected=dict(step=member['step'],materials=facts['seal']['materials'])
+                resolve(root, implementation, prefix, current=selected)
+            except (ValueError,TypeError,FileNotFoundError) as error:
                 if str(error)=='Historical node seal changed':
                     raise ObserverIntegrityError(str(error)) from error
                 seen.remove(item['id']);diagnostics.append(dict(index=index,code='candidate_implementation_unresolved'));continue
@@ -1410,10 +1473,11 @@ def records_from_sources(root, sources, *, write_cache=True, include_details=Tru
     sources = list(sources)
     loaded = {}
     for job, _, seal, _ in sources:
-        facts = loaded[job['step']] = {}
+        owner=originals.node(root,job['step'])
+        facts = loaded[job['step']] = dict(owner=owner)
         if include_details:
             with handoff_state.loading():
-                raw = originals.resolve_ref(originals.node(root,job['step']),seal['raw_ref'])
+                raw = originals.resolve_ref(owner,seal['raw_ref'])
                 facts.update(raw_path=raw, raw_text=raw.read_text(encoding='utf-8'))
         facts['observation_view'] = read_observation(root,job,seal) if seal.get('observations') else None
     return load_records_from_source_facts(root, sources, source_facts=loaded,
@@ -1422,10 +1486,31 @@ def records_from_sources(root, sources, *, write_cache=True, include_details=Tru
 
 def load_records_from_source_facts(root, sources, *, source_facts, write_cache=True, include_details=True):
     """Project records from the operation's exact originals and saved receipts."""
+    from . import candidate_refs, originals
     if write_cache:
         from .protocol import require_current
         require_current(root)
     records, current_h = [], None
+    preceding={};by_id={};by_raw={};by_reference={}
+    def owner_origin(step):
+        owner=source_facts.get(step,{}).get('owner')
+        if owner is None:raise ValueError('Record candidate projection requires its produced original owner')
+        return owner.origin_identity
+    def recommendation_for(job,payload):
+        value=payload.get('candidate_recommendation')
+        if job['role']!='A' or payload.get('next_action')=='audit' or not isinstance(value,str):return None
+        prefix=job['history']['prefix']
+        def eligible(keys):
+            return {key for key in keys if prefix['count']>0
+                and preceding[key]['step']<=prefix['cutoff'] and preceding[key]['step']<job['step']}
+        choices=eligible(by_reference.get(value,())) or eligible(by_id.get(value,()))
+        if not choices:
+            raw=eligible(by_raw.get(value,()))
+            if raw:
+                origin=originals.identity_key(owner_origin(job['step']))
+                choices={key for key in raw if key[0]==origin} or raw
+        identities={preceding[key]['id'] for key in choices}
+        return next(iter(identities)) if len(identities)==1 else None
     for job, payload, seal, seal_sha in sources:
         step = job["step"]
         if job['role'] == 'H':
@@ -1468,9 +1553,19 @@ def load_records_from_source_facts(root, sources, *, source_facts, write_cache=T
             if observation['binding']['source_ref'] != raw_ref:
                 raise ValueError('Observer snapshot differs from scientific source')
         row = dict(step=step, role=job['role'], seal_ref=seal_sha, view=view, detail=detail,
-                   recommendation=payload.get('candidate_recommendation') if job['role'] == 'A' and payload.get('next_action') != 'audit'
-                       and payload.get('candidate_recommendation') in job.get('history',{}).get('candidate_ids',[]) else None,
+                   recommendation=recommendation_for(job,payload),
                    observation=observation)
+        if observation is not None and observation.get('candidates'):
+            origin=owner_origin(step);origin_key=originals.identity_key(origin)
+            references=candidate_refs.references([row])
+            for candidate in observation['candidates']:
+                identity=candidate['id'];key=(origin_key,identity)
+                if key in preceding:continue
+                preceding[key]=dict(id=identity,step=step)
+                by_id.setdefault(identity,set()).add(key)
+                raw=candidate_refs.original_id(origin,identity)
+                by_raw.setdefault(raw,set()).add(key)
+                if identity in references:by_reference.setdefault(references[identity],set()).add(key)
         if job['role']=='W' and job.get('candidate_nomination_mechanisms'):
             declared=c.scientific_field(job,payload,'candidate_nominations')
             if declared is not None:row['candidate_nominations']=declared

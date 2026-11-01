@@ -99,7 +99,7 @@ class LocalExecution:
             raise ValueError('Finite original execution time limit required')
         return payload
 
-    def acceptance_metadata(self,payload,*,parent=None,new=False,change=None,command_options=None,_code_version=None):
+    def acceptance_metadata(self,payload,*,parent=None,new=False,change=None,command_options=None,_code_version=None,client_facts=None):
         options=command_options or {}; arguments=options.get('arguments',[])
         if (set(options)-{'arguments','experiment_directory','source_script'} or not isinstance(arguments,list)
                 or any(not isinstance(item,str) or '\0' in item for item in arguments)):
@@ -117,9 +117,13 @@ class LocalExecution:
             metadata['command'][metadata['script_index']]=str(source)
             if e.proof(payload.local_path)['size_bytes']!=payload.size_bytes:
                 raise e.IntegrityError('Local code export differs from its prepared descriptor')
-            instance=experiment_client.root_for_configuration(self.config)
-            work=c.workspace(instance,self.config['scope']['step'])
-            job=c.read(c.regular(instance/'jobs'/f'{self.config["scope"]["step"]:03d}.json'))
+            if client_facts is None:
+                raise e.IntegrityError('Local code metadata requires its owner-loaded scientific input facts')
+            instance,work,job=client_facts['root'],client_facts['work'],client_facts['job']
+            if (instance is None or job.get('step')!=self.config['scope']['step']
+                    or work!=c.workspace(instance,job['step'])
+                    or Path(self.config['record_dir'])!=experiment_client._record_directory_from_facts(instance,job['step'],job)):
+                raise e.IntegrityError('Local code metadata belongs to another scientific task')
             runtime=Path(options.get('experiment_directory') or self.config.get('cwd') or work).absolute()
             # The final readonly overlays follow the backend's artifacts
             # exception, so an overlapping runtime target cannot be writable.
@@ -140,7 +144,7 @@ class LocalExecution:
                     logical=work/material['path']
                     if logical.is_relative_to(directory) and not logical.is_relative_to(directory/'artifacts'):
                         name=logical.relative_to(directory).as_posix()
-                        files[name]=dict(experiment_client.input_reference(self.config,logical),name=name)
+                        files[name]=dict(experiment_client._observe_input_reference(self.config,logical,facts=client_facts),name=name)
                 metadata.update(experiment_directory=str(directory),cwd=str(directory),
                     snapshot_files=[files[name] for name in sorted(files)])
             return metadata

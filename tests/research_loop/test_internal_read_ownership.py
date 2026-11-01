@@ -42,9 +42,9 @@ def test_interpret_repair_uses_selected_policy_through_real_consumers(tmp_path, 
     forbid_control_loaders(monkeypatch)
 
     limited = search._interpret_from_facts(tmp_path, job, payload, state=state,
-        policy=dict(search_policy=dict(max_requested_repairs=1)))
+        policy=dict(search_policy=dict(max_requested_repairs=1)), selected_inputs=[])
     allowed = search._interpret_from_facts(tmp_path, job, payload, state=state,
-        policy=dict(search_policy=dict(max_requested_repairs=2)))
+        policy=dict(search_policy=dict(max_requested_repairs=2)), selected_inputs=[])
 
     assert limited['diagnostics'] == [dict(code='search_repair_limit', subject='h001.m1')]
     assert allowed['diagnostics'] == []
@@ -59,7 +59,7 @@ def test_interpret_a_uses_policy_in_real_assessment_context(tmp_path, monkeypatc
     forbid_control_loaders(monkeypatch)
 
     result = search._interpret_from_facts(tmp_path, job, dict(next_action='finish'),
-        policy=dict(search_policy={}), state=state)
+        policy=dict(search_policy={}), state=state, selected_inputs=[])
 
     assert result['diagnostics'] == []
     assert result['focus'] is None
@@ -68,7 +68,7 @@ def test_interpret_a_uses_policy_in_real_assessment_context(tmp_path, monkeypatc
 
 @pytest.mark.parametrize('missing', ['policy', 'state'])
 def test_interpret_does_not_load_missing_owner_facts(tmp_path, monkeypatch, missing):
-    facts = dict(policy=dict(search_policy={}), state=search_state())
+    facts = dict(policy=dict(search_policy={}), state=search_state(), selected_inputs=[])
     facts[missing] = None
     forbid_control_loaders(monkeypatch)
     with pytest.raises(ValueError, match='produced policy and state'):
