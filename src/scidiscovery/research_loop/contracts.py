@@ -373,8 +373,8 @@ def response_instructions(job):
         fields.pop('implementation_reuse')
         context=(job.get('worker_fragment_policy') or {}).get('context')
         fields['stage_response']=('stage_intent: review=A|decision=partial|continue=work. '
-            'implementation_selection: null=keep selection; []=clear; IDs=forward old inputs. '
-            'Cite originals; no copies; keep outputs/receipts/gaps. '
+            'implementation_selection: null=keep; []=clear; IDs=forward old inputs. '
+            'Host publishes originals; no artifacts/experiments copies; keep receipts/gaps. '
             'Optional mechanism_findings:[{mechanism:ref,basis:"observed",finding:text,call_id:exact_retained_id}]; '
             'Reuse comparative call for supported mechanisms; gaps: basis:"blocked". '
             'Optional candidate_nominations:{representatives:[{mechanism_ref:"ref",candidate:"ref"}]}; full pool selectable. '
@@ -554,9 +554,11 @@ def artifact_entry_points(work, payload, materials, protocol=CURRENT, unresolved
     targets={}
     for row in materials:
         local=material_name(work,row)
-        if local in targets and targets[local]!=row['path']:
-            raise ValueError('Scientific entry point is ambiguous')
-        targets[local]=row['path']
+        names=(local,'artifacts/'+local) if local.startswith('experiments/') else (local,)
+        for name in names:
+            if name in targets and targets[name]!=row['path']:
+                raise ValueError('Scientific entry point is ambiguous')
+            targets[name]=row['path']
     entries, seen = [], set()
     def unavailable(label, target, reason):
         if unresolved is not None:
@@ -590,9 +592,9 @@ def artifact_entry_points(work, payload, materials, protocol=CURRENT, unresolved
         if path not in targets:
             unavailable(label, target, 'Scientific artifact link does not name a selected deliverable')
             continue
-        if path not in seen:
+        if targets[path] not in seen:
             entries.append(dict(label=label[:160], path=targets[path]))
-            seen.add(path)
+            seen.add(targets[path])
     return entries
 
 
@@ -1089,6 +1091,7 @@ class CurrentInventory:
     observation_inputs: dict | None = None
     native_meter: dict | None = None
     material_sources: dict = field(default_factory=dict)
+    redundant_materials: list = field(default_factory=list)
 
 
 def accept_current_inventory(root: Path, step: int):
@@ -1344,6 +1347,27 @@ def _material_inventory(root: Path, step: int, *, inventory):
     # hidden behind an author's first entry. The author cannot resolve these.
     if any(sum(kind == 'managed_frozen' for _, kind in sources) > 1 for sources in collisions):
         raise ValueError('Different managed originals share a deliverable path')
+    # Only a copy at the original's exact publication path can be redundant.
+    # Compare at those collisions after validating every retained original.
+    redundant = set()
+    sizes = {row['source']: row['size_bytes'] for row in rows}
+    for relative, sources in destinations.items():
+        managed = [path for path, kind in sources if kind == 'managed_frozen']
+        if not managed:continue
+        original = managed[0]
+        for path, kind in sources:
+            if kind != 'mutable' or sizes[str(path)] != sizes[str(original)]:continue
+            with path.open('rb') as authored, original.open('rb') as retained:
+                while True:
+                    block = authored.read(65536)
+                    if block != retained.read(65536):break
+                    if not block:
+                        redundant.add(path)
+                        break
+        destinations[relative] = [(path, kind) for path, kind in sources if path not in redundant]
+    rows = [row for row in rows if Path(row['source']) not in redundant]
+    mutable = [path for path in mutable if path not in redundant]
+    collisions = [sources for sources in destinations.values() if len(sources) > 1]
     reserved = next((path for relative, sources in destinations.items() if managed_namespace(relative)
         for path, kind in sources if kind=='mutable'),None)
     if reserved is not None:
@@ -1369,6 +1393,7 @@ def _material_inventory(root: Path, step: int, *, inventory):
     total = sum(row['size_bytes'] for row in rows)
     if policy.get('max_output_total_bytes') is not None and total > policy['max_output_total_bytes']:
         raise ValueError(f'Deliverables exhaust total byte budget ({total} > {policy["max_output_total_bytes"]})')
+    inventory.redundant_materials = sorted(redundant)
     return sorted(rows, key=lambda row: row['path']), mutable
 
 
@@ -1380,6 +1405,9 @@ def collect_materials(root: Path, step: int, *, inventory):
     # partially changed modes; this is not a filesystem transaction.
     for path in mutable:
         if path.stat().st_mode & 0o777 != 0o400:path.chmod(0o400)
+    for path in inventory.redundant_materials:
+        try:path.unlink(missing_ok=True)
+        except OSError:pass  # The retained original already owns publication.
     return rows
 
 

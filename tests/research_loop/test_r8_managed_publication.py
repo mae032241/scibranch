@@ -27,23 +27,27 @@ def inventory_rows(scene):
     return c._material_inventory(root,2,inventory=inventory)
 
 
-@pytest.mark.parametrize('owned_path',[
-    'artifacts/experiments/call-1/model.bin',
-    'artifacts/experiments/call-1/artifacts/model.bin',
-    'experiments/call-1/artifacts/model.bin',
+@pytest.mark.parametrize('owned_path,exact_publication',[
+    ('artifacts/experiments/call-1/model.bin',False),
+    ('artifacts/experiments/call-1/artifacts/model.bin',True),
+    ('experiments/call-1/artifacts/model.bin',True),
 ])
-def test_r8_repackaged_managed_call_requires_output_only_layout_correction(managed_scene,owned_path):
+def test_r8_repackaged_managed_call_requires_exact_original_publication_path(managed_scene,owned_path,exact_publication):
     root,work,original,inventory=managed_scene
     copied=work/owned_path
     copied.parent.mkdir(parents=True);copied.write_bytes(original.read_bytes())
     assert not copied.samefile(original)
     before={path:(path.stat().st_mode,path.read_bytes()) for path in (original,copied)}
     calls=deepcopy(inventory.managed_calls);outputs=deepcopy(inventory.scientific_outputs)
-    with pytest.raises(OutputRepairRequired) as caught:inventory_rows(managed_scene)
-    request=caught.value.request()
-    assert request['code']=='deliverable_path_collision'
-    assert owned_path in request['diagnostic'] and str(root) not in request['diagnostic']
-    assert 'no rerun/resubmit' in request['diagnostic']
+    if exact_publication:
+        rows,mutable=inventory_rows(managed_scene)
+        assert mutable==[] and [row['source'] for row in rows]==[str(original)]
+    else:
+        with pytest.raises(OutputRepairRequired) as caught:inventory_rows(managed_scene)
+        request=caught.value.request()
+        assert request['code']=='deliverable_path_collision'
+        assert owned_path in request['diagnostic'] and str(root) not in request['diagnostic']
+        assert 'no rerun/resubmit' in request['diagnostic']
     assert {path:(path.stat().st_mode,path.read_bytes()) for path in before}==before
     assert inventory.managed_calls==calls and inventory.scientific_outputs==outputs
 

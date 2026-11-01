@@ -231,7 +231,7 @@ def test_protected_final_delivery_repairs_missing_explicit_candidate(tmp_path,ch
 
 @pytest.mark.parametrize('gate',['portfolio','coverage'])
 def test_same_task_output_repair_runs_conditional_breadth_gates(tmp_path,monkeypatch,gate):
-    from scidiscovery.research_loop import continuation,candidate_refs,formal_review,candidate_nominations,search
+    from scidiscovery.research_loop import continuation,candidate_refs,formal_review,candidate_nominations,search,semantic
     root=tmp_path/'instance';record=c.host_record(c.workspace(root,1))
     job=dict(role='A',step=1,handoff_protocol=c.HANDOFF_PROTOCOL,worker_view_version=1,lineage_projection_version=1,
         direct_materials=[],history=dict(nodes=[]))
@@ -239,15 +239,19 @@ def test_same_task_output_repair_runs_conditional_breadth_gates(tmp_path,monkeyp
     c.write(root/'settings-identity.json',dict(path='settings.json'))
     c.write(root/'jobs/001.json',job)
     raw=record/'science-output.json'
-    c.write(raw,dict(summary='Finding',scientific_result='Retained evidence',limitations=[],next_action='finish',route_reason='Stop'))
+    science=dict(summary='Finding',scientific_result='Retained evidence',limitations=[],next_action='finish',route_reason='Stop')
+    c.write(raw,science)
     c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=dict(unknown_steps=[]),raw_ref=c.file_ref(raw)))
-    monkeypatch.setattr(continuation,'validate_task',lambda *args:job)
+    inventory=c.CurrentInventory(root,job,record,0,[],{},policy=dict(search_policy=None),
+        science_available=True,payload=science,interpretation=dict(focus=None,allocation=None,diagnostics=[]))
+    monkeypatch.setattr(continuation,'validate_task',lambda *args,**kwargs:job)
     monkeypatch.setattr(candidate_refs,'control_payload',lambda job,science,**kwargs:science)
-    monkeypatch.setattr(formal_review,'validate_choice',lambda *args:None)
+    monkeypatch.setattr(formal_review,'validate_choice',lambda *args,**kwargs:None)
+    monkeypatch.setattr(semantic,'author_choices',lambda *args,**kwargs:(inventory.interpretation,[]))
     def required(*args,**kwargs):raise OutputRepairRequired(gate+'_incomplete','Fill the conditional scientific declaration in this same task.')
     monkeypatch.setattr(search,'require_portfolio_review',required if gate=='portfolio' else lambda *args,**kwargs:None)
     monkeypatch.setattr(candidate_nominations,'require_final_coverage',required if gate=='coverage' else lambda *args,**kwargs:None)
-    request=continuation.output_request(root,1,record,source_attempt=0)
+    request=continuation.output_request(root,1,record,inventory=inventory,source_attempt=0)
     assert request['code']==gate+'_incomplete'
     assert request['raw_ref']==c.file_ref(raw) and request['source_attempt']==0
 
@@ -352,7 +356,7 @@ def test_legacy_a_packet_cannot_seal_or_rebuild_without_changing_originals(tmp_p
     root = tmp_path / 'archive'
     c.write(root / 'settings.json', dict(handoff_protocol=retired))
     c.write(root / 'settings-identity.json', dict(path='settings.json'))
-    c.write(root / 'jobs/003.json', dict(step=3, role='A', handoff_protocol=retired))
+    c.write(root / 'jobs/003.json', dict(step=3, role='A', handoff_protocol=retired, material_refs=[]))
     work = c.workspace(root, 3);record = c.host_record(work)
     c.write(work / 'science-task.json', dict(preserved_task='Original scientific limitations'))
     c.write(record / 'science-result.schema.json', dict(preserved_schema='Original archived schema'))
@@ -365,9 +369,11 @@ def test_legacy_a_packet_cannot_seal_or_rebuild_without_changing_originals(tmp_p
                  root / 'jobs', root / 'jobs/003.json', work, work / 'science-task.json',
                  record, record / 'science-result.schema.json', record / 'science-output.json')
     before = snapshot(originals)
-    for write in (lambda: c.seal_result(root, 3), lambda: c.build_job(root, 3, 'A', [2]),
-                  lambda: c.build_job(root, 4, 'H', [3])):
-        with pytest.raises(protocol.UnsupportedProtocol, match='Instance'):
+    for write,error,diagnostic in (
+        (lambda: c.seal_result(root, 3),ValueError,'Accepted budget head is required'),
+        (lambda: c.build_job(root, 3, 'A', [2]),protocol.UnsupportedProtocol,'Instance'),
+        (lambda: c.build_job(root, 4, 'H', [3]),protocol.UnsupportedProtocol,'Instance')):
+        with pytest.raises(error, match=diagnostic):
             write()
         assert snapshot(originals) == before
         assert not (record / 'result-identity.json').exists()
