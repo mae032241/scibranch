@@ -79,6 +79,9 @@ Workers write ordinary scientific files; control records their exact paths, prod
 and declared sizes privately on the host under the reference contract above.
 
 Reports and reusable diagnostic scripts belong in `artifacts/`; `work/` is scratch.
+H's `minimal_test` accepts nonempty text, objects or lists. Derived mechanism
+views render structured descriptions as JSON text while preserving original
+scientific bytes. Invalid commitment diagnostics identify the precise field.
 Ordinary A/H relay their current material references through existing input bindings,
 including exact E request/return and selected forks. Null preserves that working
 set, `[]` clears it, and explicit IDs replace it. An accepted empty set is not
@@ -127,7 +130,12 @@ use candidate and reason; gaps use mechanism_ref and reason. Current-call candid
 may use `{call_id, artifact}`; historical candidates use existing scientific references.
 The preview resolves recognizable entries and candidate identities. Omitted or
 unreadable nominations do not trigger output repair or restrict the full candidate
-pool. Mechanism membership, suitability and gaps remain scientific judgments;
+pool. Unreadable nonempty advice retains nonblocking diagnostics and its original
+response pointer in previews and the UI; compact views retain a count and index.
+No candidate identity is inferred from a label or a declared file path.
+Cross-mechanism observed findings cite an exact retained `call_id`; a comparative
+call may support multiple author-declared findings without another experiment.
+Mechanism membership, suitability and gaps remain scientific judgments;
 A's separate final_coverage accounts for final mechanism coverage.
 
 The latest sealed W declaration for each mechanism supplies the comparison

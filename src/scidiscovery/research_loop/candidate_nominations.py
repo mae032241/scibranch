@@ -23,24 +23,38 @@ def schema():
     return dict(type=['object','null'],description='Optional scientific candidate preview; the complete retained candidate pool remains selectable.')
 
 
-def _preview(declaration):
+def _preview(declaration, *, available=None):
     """Read recognizable preview entries without imposing a scientific contract."""
-    if not isinstance(declaration,dict):return None
     result={key:[] for key in ('representatives','extras','gaps')}
+    diagnostics=[]
+    def unreadable(pointer):
+        diagnostics.append(dict(code='candidate_nomination_unresolved',severity='warning',pointer=pointer,
+            reason='Optional nomination preview could not resolve this declaration; inspect the scientific original.'))
+    if not isinstance(declaration,dict):
+        if not declaration:return None
+        unreadable('/candidate_nominations')
+        return dict(result,diagnostics=diagnostics)
     for kind in result:
         rows=declaration.get(kind,[])
-        if not isinstance(rows,list):continue
+        if not isinstance(rows,list):
+            if rows is not None:unreadable('/candidate_nominations/'+kind)
+            continue
+        skipped=False
         for row in rows:
-            if not isinstance(row,dict):continue
-            if kind!='extras' and not isinstance(row.get('mechanism_ref'),str):continue
+            if not isinstance(row,dict):skipped=True;continue
+            if kind!='extras' and not isinstance(row.get('mechanism_ref'),str):skipped=True;continue
             candidate=row.get('candidate')
-            if kind!='gaps' and not (isinstance(candidate,str) or isinstance(candidate,dict)
-                    and all(isinstance(candidate.get(key),str) for key in ('call_id','artifact'))):continue
+            if kind!='gaps' and not isinstance(candidate,str):skipped=True;continue
+            if kind!='gaps' and available is not None and candidate not in available:
+                skipped=True;continue
             item=dict(reason=row.get('reason') if isinstance(row.get('reason'),str) else '')
             if kind!='extras':item['mechanism_ref']=row['mechanism_ref']
             if kind!='gaps':item['candidate']=copy.deepcopy(candidate)
             result[kind].append(item)
-    return result
+        if skipped:unreadable('/candidate_nominations/'+kind)
+    if any(key not in result for key in declaration) and not any(result.values()):
+        unreadable('/candidate_nominations')
+    return dict(result,diagnostics=diagnostics)
 
 
 def applicable(job):
@@ -49,17 +63,18 @@ def applicable(job):
 
 def resolve(root, job, declaration, *, source=None, inventory=None, source_facts=None):
     """Resolve only the declared candidate slots, preserving unresolvable advice."""
-    value=_preview(declaration)
-    if value is None:return None
+    if not isinstance(declaration,dict):return copy.deepcopy(declaration)
     from . import candidate_refs, generic_results, handoff_state, originals
-    value=copy.deepcopy(value);current=None;retained=None
-    for row in [*value.get('representatives',[]),*value.get('extras',[])]:
+    value=copy.deepcopy(declaration);current=None;retained=None
+    for row in [row for kind in ('representatives','extras')
+            for row in (value.get(kind,[]) if isinstance(value.get(kind),list) else [])]:
         if not isinstance(row,dict):continue
         candidate=row.get('candidate')
         if isinstance(candidate,str):
             try:row['candidate']=candidate_refs.resolve_reference(root,job,candidate,source=source)
             except ValueError:row['candidate']=None
-        elif isinstance(candidate,dict) and (root is not None or source is not None and source.inherited):
+        elif (isinstance(candidate,dict) and all(isinstance(candidate.get(key),str) for key in ('call_id','artifact'))
+                and (root is not None or source is not None and source.inherited)):
             if current is None:
                 if source_facts is not None:
                     if source_facts['job'] != job or (source is not None and source_facts['owner'] != source):
@@ -91,7 +106,7 @@ def resolve(root, job, declaration, *, source=None, inventory=None, source_facts
             matches=[generic_results.identity(call,item) for call in current
                 if call['call_id']==candidate.get('call_id') for item in generic_results.declarations(call)
                 if isinstance(item,dict) and item.get('artifact')==candidate.get('artifact')]
-            if len(matches)==1 and (retained is None or matches[0] in retained):row['candidate']=matches[0]
+            row['candidate']=(matches[0] if len(matches)==1 and (retained is None or matches[0] in retained) else None)
     return value
 
 
@@ -119,8 +134,10 @@ def project(records, state):
     pending=[ref for ref,item in mechanisms.items() if item['status']!='waived' and ref not in declared]
     waived=[dict(mechanism_ref=ref,reason=item['disposition']['reason'],source_a=item['disposition']['source_a'])
         for ref,item in mechanisms.items() if item['status']=='waived' and item.get('disposition')]
+    diagnostics=[dict(row,source_step=latest['step'],original=f'inputs/history/nodes/{latest["step"]:03d}/0001.json')
+        for row in latest['candidate_nominations']['diagnostics']] if latest else []
     return dict(source_step=latest['step'] if latest else None,**value,pending_mechanisms=pending,waived=waived,
-        mechanism_sources=sources)
+        mechanism_sources=sources,diagnostics=diagnostics)
 
 
 def table_project(summary):
@@ -132,7 +149,10 @@ def table_project(summary):
     for ref,item in sorted(declared.items(),key=lambda pair:pair[1]['order']):
         value[item['kind']].append(copy.deepcopy(item['declaration']))
         sources[ref]=item['source_step']
-    return dict(source_step=nominations['source_step'],**value,
+    diagnostics=[dict(row,source_step=nominations['source_step'],
+        original=f'inputs/history/nodes/{nominations["origin_identity"]["goal_id"]}/{nominations["source_step"]:03d}/science.json')
+        for row in nominations.get('diagnostics',[])]
+    return dict(source_step=nominations['source_step'],**value,diagnostics=diagnostics,
         pending_mechanisms=[ref for ref,item in mechanisms.items() if item['status']!='waived' and ref not in declared],
         waived=[dict(mechanism_ref=ref,reason=item['disposition']['reason'],source_a=item['disposition']['source_a'])
             for ref,item in mechanisms.items() if item['status']=='waived' and item.get('disposition')],
@@ -143,7 +163,7 @@ def source_table_projection(summary,resolve_public):
     """Public nomination detail; candidate mapping is an explicit caller read."""
     value=table_project(summary);stored=summary['table']['nominations']
     result=dict(source_step=value['source_step'],representatives=[],extras=[],gaps=[],
-        pending_mechanisms=value['pending_mechanisms'],waived=value['waived'])
+        pending_mechanisms=value['pending_mechanisms'],waived=value['waived'],diagnostics=value['diagnostics'])
     for kind in ('representatives','gaps','extras'):
         for declaration in value[kind]:
             record=stored if kind=='extras' else stored['by_mechanism_ref'][declaration['mechanism_ref']]
@@ -168,6 +188,7 @@ def page_rows(value):
             row['reason_truncated']=row['reason']!=reason
             rows.append(row)
     rows.extend(dict(kind='pending',mechanism_ref=ref) for ref in value['pending_mechanisms'])
+    rows.extend(dict(row,kind='diagnostic') for row in value.get('diagnostics',[]))
     for item in value['waived']:
         reason=item['reason'];excerpt=reason.encode()[:512].decode('utf-8',errors='ignore')
         rows.append(dict(item,kind='waived',reason=excerpt,reason_truncated=excerpt!=reason,
@@ -181,6 +202,7 @@ def preview(value, index):
         extras=[dict(candidate_id=row['candidate']) for row in value['extras']],
         gaps=[row['mechanism_ref'] for row in value['gaps']],pending_mechanisms=value['pending_mechanisms'],
         distinct_candidate_count=len({row['candidate'] for row in [*value['representatives'],*value['extras']]}),
+        diagnostics=copy.deepcopy(value.get('diagnostics',[])),
         scope='Latest W scientific declaration per mechanism, with each original source retained. Other mechanisms keep their prior declarations or explicit pending gaps; no new global judgment is inferred. Read nomination pages for reasons; the complete candidate index remains selectable by A.')
 
 

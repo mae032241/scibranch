@@ -357,8 +357,14 @@ def candidate_table(value, *, open_=True, ident='candidates'):
     body = ('<section class="candidates" id="' + esc(ident) + '"><h2>候选比较（' + esc(total) + '）</h2>'
             '<p class="note">' + description +
             '★ 为 A 的作者推荐，✓ 为控制记录的已确认交付，✕ 为执行失败；界面不提供科学排序或默认选择。</p>')
+    diagnostics=value.get('nomination_diagnostics',[])
+    if diagnostics:
+        body+='<p class="note" role="status">部分可选提名无法生成预览；完整候选池仍可查看。请核对科学原文：</p><ul>'
+        for item in diagnostics:
+            body+='<li>'+link('第 '+str(item['source_step'])+' 阶段原文','/nodes/'+str(item['source_step'])+'/science')+' <code>'+esc(item['pointer'])+'</code></li>'
+        body+='</ul>'
     if not total:
-        return Safe(body + empty('未记录提名或 A 选中候选。') + '</section>')
+        return Safe(body + empty('尚无可显示的提名或 A 选中候选；请核对上述原文。' if diagnostics else '未记录提名或 A 选中候选。') + '</section>')
     extra = sum(1 for group in value['groups'] for row in group['rows'] if row['extra'])
     toggle = ''
     if extra:

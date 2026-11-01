@@ -25,8 +25,11 @@ def author_choices(root,job,payload,*,inventory):
     if repair:
         from .output_repair import OutputRepairRequired
         row=repair[0]
-        raise OutputRepairRequired(row['code'], 'Correct '+str(row.get('subject','scientific action'))[:128]+': '+row['code']+
-            '. Change only the diagnosed choice using the required declared choice/action fields. Return full JSON preserving all other original science/plans/facts/limits. No prior experiment is implied.')
+        detail=(row['message']+'. Correct only the diagnosed field.' if row.get('expected') is not None else
+            'Correct '+str(row.get('subject','scientific action'))[:128]+': '+row['code']+
+            '. Change only the diagnosed choice using the required declared choice/action fields.')
+        raise OutputRepairRequired(row['code'], detail+
+            ' Return full JSON preserving all other original science/plans/facts/limits. No prior experiment is implied.')
     return interpretation,selection
 
 

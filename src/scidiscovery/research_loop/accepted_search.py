@@ -178,7 +178,7 @@ def prepare_node_from_facts(root, job, payload, seal, *, summary, lookup, observ
     returned rows and summary are committed together by accepted_budget, which
     owns duplicate-event and interrupted-publication reconciliation.
     """
-    from . import contracts as c, history
+    from . import contracts as c, history, search
     if policy is None or origin is None:
         raise ValueError('Scientific publication requires its produced policy and origin')
     origin=copy.deepcopy(origin)
@@ -255,7 +255,7 @@ def prepare_node_from_facts(root, job, payload, seal, *, summary, lookup, observ
                     _status(delta, ref, item, 'pending', initial_calls)
                     if was_waived:_due(delta,item,reset=True)
                     item.pop('disposition', None)
-                item.update(label=authored['label'], minimal_test=authored['minimal_test'], source_h=step,
+                item.update(label=authored['label'], minimal_test=search.minimal_test_text(authored['minimal_test']), source_h=step,
                     source_origin_identity=origin,source_h_ref=_seal_ref(root,step))
                 delta.queue(ref, item, step)
                 if current['extra_grant'] and current['extra_grant']['mechanism_ref'] == ref:
@@ -352,10 +352,19 @@ def prepare_node_from_facts(root, job, payload, seal, *, summary, lookup, observ
     _work(delta, job, payload, valid and ordinary)
     if role=='W' and job.get('candidate_nomination_mechanisms'):
         from . import candidate_nominations
-        declaration=candidate_nominations._preview(c.scientific_field(job,payload,'candidate_nominations'))
+        authored=c.scientific_field(job,payload,'candidate_nominations')
+        available=set()
+        if isinstance(authored,dict):
+            for kind in ('representatives','extras'):
+                for row in authored.get(kind,[]) if isinstance(authored.get(kind),list) else []:
+                    identity=row.get('candidate') if isinstance(row,dict) else None
+                    if isinstance(identity,str) and len(identity.encode())<=160 and delta.get('candidate',identity) is not None:
+                        available.add(identity)
+        declaration=candidate_nominations._preview(authored,available=available)
         if declaration is not None:
             nominations=current['table']['nominations']
             nominations.update(source_step=step,origin_identity=origin,
+                diagnostics=copy.deepcopy(declaration['diagnostics']),
                 latest_extras=copy.deepcopy([row for row in declaration['extras'] if isinstance(row.get('candidate'),str)]))
             rows=[(kind,row) for kind in ('representatives','gaps') for row in declaration[kind]
                 if kind=='gaps' or isinstance(row.get('candidate'),str)]

@@ -1,0 +1,41 @@
+{
+  "scope": "Mechanical parser regression from r8 H001; no scientific qualification.",
+  "search_plan": {
+    "commitments": [
+      {
+        "label": "Fixed regularized inverse",
+        "minimal_test": {
+          "question": "Can regularization of a fixed supervised Y-to-X map provide competitive recovery despite underdetermination and operator shift?",
+          "differing_predictions": "If inverse coefficient sparsity or shared inverse feature relevance is sufficient, per-output Lasso/ElasticNet or joint MultiTaskLasso should approach generative recovery. If sparsity must instead be imposed on each reconstructed signal, these direct models should retain appreciable reconstruction bias.",
+          "discriminating_signal": "Paired recovery differences against both generative mechanisms on common held-out rows, including degradation under common operator perturbations. Distinguish MultiTaskLasso's shared measurement-feature assumption from shared signal support across samples.",
+          "priority": "Initial comparator; include the required per-output and joint-sparsity methodological families.",
+          "reopening_condition": "Revisit after screening if direct models win on low-energy or dense-support rows, show better perturbation stability, or A identifies instability in forward-operator estimation."
+        }
+      },
+      {
+        "label": "Estimated forward operator with hard adaptive support recovery",
+        "minimal_test": {
+          "question": "Does estimating the forward operator and selecting discrete sparse supports explain most recoverable signal structure?",
+          "differing_predictions": "If supports are sufficiently identifiable and the learned operator remains informative under shift, adaptive OMP-style recovery should outperform fixed inverse regression. If correlated atoms or operator mismatch cause irreversible early selection errors, performance should deteriorate relative to soft sparse recovery.",
+          "discriminating_signal": "Common-row recovery, support errors and catastrophic reconstruction failures, stratified by true support size and signal energy for evaluation only. Compare unperturbed and perturbed observations while holding the evaluation signals fixed.",
+          "priority": "Primary generative explanation; explicitly cover the required forward-estimation-plus-OMP family.",
+          "reopening_condition": "Revisit whenever soft recovery wins primarily through shrinkage bias reduction, an operator-estimation gap emerges, or A finds that stopping decisions depend on unavailable true support sizes."
+        }
+      },
+      {
+        "label": "Estimated forward operator with soft sparse recovery",
+        "minimal_test": {
+          "question": "Does retaining support uncertainty through regularized sparse inversion improve recovery when the operator is imperfect?",
+          "differing_predictions": "If mismatch makes hard support decisions unstable, soft recovery should lose less score under perturbation and reduce severe errors. If supports are cleanly identifiable, shrinkage bias may make it inferior to hard support recovery on unshifted data.",
+          "discriminating_signal": "Paired recovery and perturbation degradation against hard recovery using the same forward estimate, separating support mistakes from amplitude bias. Include structurally different perturbation assumptions so an isotropic-noise result is not mistaken for general shift robustness.",
+          "priority": "Live robustness alternative in the initial screen.",
+          "reopening_condition": "Revisit if hard recovery wins only on unshifted validation, perturbation families reverse rankings, or A finds unresolved sensitivity to signal amplitude or support density."
+        }
+      }
+    ],
+    "focus": {
+      "index": null,
+      "action": "screen"
+    }
+  }
+}

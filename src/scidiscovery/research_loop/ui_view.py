@@ -1070,7 +1070,7 @@ def candidate_projection(root, before_step, *, job=None, reader=None, history_on
             recommendation=payload.get('candidate_recommendation') if source['role'] == 'A' and payload.get('next_action') != 'audit' else None,
             view=dict(h_scope=current_h, summary=payload.get('summary', ''),
                 conclusion_pages=[f'inputs/history/nodes/{step:03d}/0001.json']))
-        if isinstance(payload.get('candidate_nominations'), dict):
+        if 'candidate_nominations' in payload:
             record['candidate_nominations'] = payload['candidate_nominations']
         if payload.get('next_action') == 'audit':
             record['audit_request'] = True
@@ -1083,31 +1083,30 @@ def candidate_projection(root, before_step, *, job=None, reader=None, history_on
                     mechanism_ref=(item.get('mechanism_binding') or {}).get('mechanism_ref') or item.get('scope', {}).get('mechanism_ref'),
                     execution_status=item.get('status'))
     unresolved = []
-    if history_only:
-        # An incomplete read-only history must not turn a dangling author
-        # reference into a usable candidate or hide unrelated observations.
-        # Ordinary subject projections keep the strict lineage contract below.
-        known = set()
-        projected = []
-        for record in records:
-            record = dict(record)
-            known.update(item['id'] for item in (record.get('observation') or {}).get('candidates', []))
-            if record['recommendation'] is not None and (not isinstance(record['recommendation'], str) or record['recommendation'] not in known):
-                unresolved.append(dict(step=record['step'], field='recommendation', count=1))
-                record['recommendation'] = None
-            declaration = record.get('candidate_nominations')
-            if declaration is not None:
-                declaration = copy.deepcopy(declaration)
-                omitted = 0
-                for kind in ('representatives', 'extras'):
-                    rows = declaration[kind]
-                    declaration[kind] = [row for row in rows if isinstance(row['candidate'], str) and row['candidate'] in known]
-                    omitted += len(rows) - len(declaration[kind])
-                if omitted:
-                    unresolved.append(dict(step=record['step'], field='nominations', count=omitted))
-                record['candidate_nominations'] = declaration
-            projected.append(record)
-        records = projected
+    # Keep malformed optional advice for its original-pointer warning. Unknown
+    # identities cannot become nominees, including in incomplete display reads.
+    known = set()
+    projected = []
+    for record in records:
+        record = dict(record)
+        known.update(item['id'] for item in (record.get('observation') or {}).get('candidates', []))
+        if history_only and record['recommendation'] is not None and (not isinstance(record['recommendation'], str) or record['recommendation'] not in known):
+            unresolved.append(dict(step=record['step'], field='recommendation', count=1))
+            record['recommendation'] = None
+        declaration = record.get('candidate_nominations')
+        if isinstance(declaration,dict):
+            declaration = copy.deepcopy(declaration)
+            omitted = 0
+            for kind in ('representatives', 'extras'):
+                for row in declaration.get(kind,[]) if isinstance(declaration.get(kind),list) else []:
+                    if isinstance(row,dict) and row.get('candidate') is not None and (not isinstance(row['candidate'],str) or row['candidate'] not in known):
+                        row['candidate'] = None
+                        omitted += 1
+            if omitted:
+                unresolved.append(dict(step=record['step'], field='nominations', count=omitted))
+            record['candidate_nominations'] = declaration
+        projected.append(record)
+    records = projected
     indexed = lineage.candidate_view(records)
     graph = dict(mechanisms=mechanisms, candidates=candidates)
     latest_w = next((record for record in reversed(records) if record['role'] == 'W'), None)
@@ -1119,6 +1118,7 @@ def candidate_projection(root, before_step, *, job=None, reader=None, history_on
         references = {}
     return dict(index=indexed['candidate_index'], graph=graph, references=references,
                 nominated_ids=nominated_ids,
+                nomination_diagnostics=nominated['diagnostics'],
                 records=records, sources=sources, subject=job,
                 recommended=(indexed.get('a_recommended') or {}).get('candidate_id'),
                 unresolved=unresolved)
@@ -1180,6 +1180,7 @@ def candidate_rows(projection, *, recommended=None, delivered=None, audits=None,
         group['ambiguous_label'] = sum(other['key'] == group['key'] for other in display_groups) > 1
     return dict(total=len(rows), groups=display_groups,
                 limit=CANDIDATE_LIMIT,
+                nomination_diagnostics=copy.deepcopy(projection.get('nomination_diagnostics',[])),
                 recommended=recommended, delivered=delivered)
 
 

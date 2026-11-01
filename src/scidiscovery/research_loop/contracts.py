@@ -370,13 +370,16 @@ def response_instructions(job):
         if job.get('purpose')=='closeout':
             fields['closeout_response']=('FINAL: follow action options; no new work/audit.' if job.get('final_only') else 'Closeout: deliver/audit/finish/wait; no exploration.')
     elif job['role']=='W':
-        fields['implementation_reuse']='implementation_selection: IDs=forward old inputs; null=keep prior selection; []=clear.'
-        fields['delivery_requirements']='Cite managed originals; no copies. Retain other outputs/receipts and gaps.'
-        fields['stage_response']=('stage_intent: review=A-ready; decision=partial obstacle; continue=work. '
-            'Optional blocker: mechanism_findings:[{mechanism:"<ref>",basis:"blocked",finding:"<obstacle>"}].')
-        fields['stage_continuation']=dict(status='configured' if job.get('worker_fragment_policy') else 'unavailable',
-            context=(job.get('worker_fragment_policy') or {}).get('context'),
-            permission='Needs terminal/session, known usage and authorization.')
+        fields.pop('implementation_reuse')
+        context=(job.get('worker_fragment_policy') or {}).get('context')
+        fields['stage_response']=('stage_intent: review=A|decision=partial|continue=work. '
+            'implementation_selection: null=keep selection; []=clear; IDs=forward old inputs. '
+            'Cite originals; no copies; keep outputs/receipts/gaps. '
+            'Optional mechanism_findings:[{mechanism:ref,basis:"observed",finding:text,call_id:exact_retained_id}]; '
+            'Reuse comparative call for supported mechanisms; gaps: basis:"blocked". '
+            'Optional candidate_nominations:{representatives:[{mechanism_ref:"ref",candidate:"ref"}]}; full pool selectable. '
+            'Continuation '+('configured: '+(context if isinstance(context,str) else json.dumps(context,ensure_ascii=False,separators=(',',':')))
+                if job.get('worker_fragment_policy') else 'unavailable')+'; needs terminal/session+known usage+authorization.')
     return fields
 
 
@@ -393,7 +396,8 @@ def scientific_field(job, payload, field):
         return value if (isinstance(value,dict) and isinstance(value.get('decision'),str)
             and value['decision'] in {'candidate','mechanism','compliance'}
             and all(isinstance(value.get(key),str) for key in ('question','change_criterion'))) else None
-    if field in {'search_plan','search_review','candidate_nominations','candidate_comparison','portfolio_review','selection_explanation'}:
+    if field=='candidate_nominations':return value
+    if field in {'search_plan','search_review','candidate_comparison','portfolio_review','selection_explanation'}:
         return value if isinstance(value,dict) else None
     if field in {'mechanism_findings','final_coverage'}:
         return value if isinstance(value,list) else None

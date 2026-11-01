@@ -19,9 +19,10 @@ MODES = ('screen', 'improve', 'repair', 'validate')
 
 
 class UnresolvedSearch(ValueError):
-    def __init__(self, code, subject, message):
+    def __init__(self, code, subject, message, *, expected=None):
         super().__init__(message)
         self.code, self.subject = code, subject
+        self.expected = expected
 
 
 class UnresolvedScientificReference(ValueError):
@@ -379,6 +380,11 @@ def _assessed(root,job,state):
         breadth=bool(source['search'].get('breadth')),mechanism_refs=sorted(_managed_refs(root,source,source_seal,state)))
 
 
+def minimal_test_text(value):
+    """Display an accepted scientific description without changing its original."""
+    return value if isinstance(value,str) else json.dumps(value,ensure_ascii=False,allow_nan=False)
+
+
 def _choice(job,payload):
     """Read only the mechanism and route keys consumed by this controller."""
     role=job['role']
@@ -386,8 +392,9 @@ def _choice(job,payload):
     field='search_plan' if role=='H' else 'search_review'
     value=c.scientific_field(job,payload,field)
     if value is None:return None
-    def unresolved(subject):
-        raise UnresolvedSearch('science_choice_unresolved',subject,'Supply the mechanism or route keys needed by this choice')
+    def unresolved(subject,expected=None):
+        message=f'Correct {subject}: expected {expected}' if expected else 'Supply the mechanism or route keys needed by this choice'
+        raise UnresolvedSearch('science_choice_unresolved',subject,message,expected=expected)
     if not isinstance(value,dict):unresolved(field)
     result={}
     if role=='H':
@@ -395,13 +402,21 @@ def _choice(job,payload):
         if scope is not None and not isinstance(scope,str):unresolved('scope')
         result['scope']=scope
         rows=value.get('commitments',[])
-        if not isinstance(rows,list):unresolved('commitments')
+        if not isinstance(rows,list):unresolved('search_plan.commitments','an array of commitment objects')
         result['commitments']=[]
-        for row in rows:
-            if not isinstance(row,dict) or any(not isinstance(row.get(key),str) for key in ('label','minimal_test')):unresolved('commitments')
+        for index,row in enumerate(rows):
+            path=f'search_plan.commitments[{index}]'
+            if not isinstance(row,dict):unresolved(path,'an object')
+            if not isinstance(row.get('label'),str):unresolved(path+'.label','a string')
+            minimal=row.get('minimal_test')
+            expected='a nonblank string or nonempty JSON object/array'
+            if not isinstance(minimal,(str,dict,list)):unresolved(path+'.minimal_test',expected)
+            if not minimal or isinstance(minimal,str) and not minimal.strip():
+                raise UnresolvedSearch('h_mechanism_unresolved',path+'.minimal_test',
+                    f'Correct {path}.minimal_test: expected {expected}',expected=expected)
             existing=row.get('existing_ref')
-            if existing is not None and not isinstance(existing,str):unresolved('existing_ref')
-            result['commitments'].append(dict(label=row['label'],minimal_test=row['minimal_test'],existing_ref=existing))
+            if existing is not None and not isinstance(existing,str):unresolved(path+'.existing_ref','a string or null')
+            result['commitments'].append(dict(label=row['label'],minimal_test=minimal_test_text(minimal),existing_ref=existing))
     else:
         rows=value.get('dispositions',[])
         if not isinstance(rows,list):unresolved('dispositions')
@@ -432,8 +447,11 @@ def _apply_science(root,job,payload,state,diagnostics,*,policy):
         if plan is not None:
             labels=set();refs=set()
             for index,item in enumerate(plan['commitments'],1):
-                if not item['label'].strip() or not item['minimal_test'].strip() or item['label'] in labels:
-                    raise UnresolvedSearch('h_mechanism_unresolved',item['label'],'H commitments need distinct labels and minimal tests')
+                if not item['label'].strip() or item['label'] in labels:
+                    path=f'search_plan.commitments[{index-1}].label'
+                    expected='a nonblank string distinct within commitments'
+                    raise UnresolvedSearch('h_mechanism_unresolved',path,
+                        f'Correct {path}: expected {expected}',expected=expected)
                 labels.add(item['label']);ref=item['existing_ref']
                 if ref is not None and ref not in mechanisms:raise UnresolvedSearch('h_mechanism_unresolved',ref,'Revision requires an exact registered mechanism')
                 ref=ref or f'h{job["step"]:03d}.m{index}'
@@ -517,7 +535,10 @@ def _interpret_from_facts(root,job,payload,*,policy,state):
     if field is not None and payload.get(field) is not None and c.scientific_field(job,payload,field) is None:
         diagnostics.extend(row for row in c.scientific_diagnostics(job,payload) if row['subject']==field)
     try:_apply_science(root,job,payload,state,diagnostics,policy=policy)
-    except UnresolvedSearch as error:diagnostics.append(dict(code=error.code,subject=error.subject))
+    except UnresolvedSearch as error:
+        diagnostic=dict(code=error.code,subject=error.subject)
+        if error.expected is not None:diagnostic.update(expected=error.expected,message=str(error))
+        diagnostics.append(diagnostic)
     return dict(state=state,focus=state['focus'],allocation=state['order']['allocation'],diagnostics=diagnostics)
 
 
@@ -588,7 +609,7 @@ def apply_source(root,job,payload,seal,state):
                     prior['status']='pending';prior.pop('disposition',None)
                     if state.get('extra_grant') and state['extra_grant']['mechanism_ref']==ref:
                         state['extra_grant']=None
-                mechanisms[ref].update(label=item['label'],minimal_test=item['minimal_test'],source_h=job['step'])
+                mechanisms[ref].update(label=item['label'],minimal_test=minimal_test_text(item['minimal_test']),source_h=job['step'])
                 pending=next((row for row in remaining if row['mechanism_ref']==ref),None)
                 if pending is None:remaining.append(dict(mechanism_ref=ref,planned_step=job['step']))
                 else:pending['planned_step']=job['step']
@@ -596,7 +617,7 @@ def apply_source(root,job,payload,seal,state):
             if plan.get('scope') is not None:state['scope']=plan['scope']
             focus=plan.get('focus')
             state['plan']=dict(scope=plan.get('scope'),
-                commitments=[dict(label=item['label'],minimal_test=item['minimal_test'],existing_ref=item.get('existing_ref')) for item in plan.get('commitments',[])],
+                commitments=[dict(label=item['label'],minimal_test=minimal_test_text(item['minimal_test']),existing_ref=item.get('existing_ref')) for item in plan.get('commitments',[])],
                 focus={key:focus[key] for key in ('index','action')} if focus is not None else None)
         elif job['role']=='A':
             review=payload.get('search_review') or {}
@@ -867,7 +888,9 @@ def launch_reason(root,job):
 def validate_payload(root,job,payload):
     if c.settings(root, job).get('search_policy') is None:return
     diagnostics=assess_payload(root,job,payload)
-    if diagnostics:raise UnresolvedSearch(diagnostics[0]['code'],diagnostics[0]['subject'],'Scientific intent needs clarification')
+    if diagnostics:
+        row=diagnostics[0]
+        raise UnresolvedSearch(row['code'],row['subject'],row.get('message','Scientific intent needs clarification'),expected=row.get('expected'))
 
 
 def accept(root, job):

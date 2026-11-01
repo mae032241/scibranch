@@ -130,19 +130,21 @@ skill_set = "analysis"
 
 ## 机制编号与精确引用
 
-当前协议 28 中，首次 H 和每次 H 修订都以同次 `commitments` 的 1 起始编号选择机制：
+当前协议 29 中，首次 H 和每次 H 修订都以同次 `commitments` 的 1 起始编号选择机制：
 
 ```json
 {"commitments":[{"label":"机制 P","minimal_test":"有界区分测量","existing_ref":null}],"focus":{"index":1,"action":"screen"}}
 ```
 
 这是 `search_plan` 的简短字段示例，完整返回仍保留 `scope` 等科学内容。
+`minimal_test` 接受非空文本、对象或列表。结构化说明只在控制投影中显示为 JSON 文本，科学原件不改写；真正的字段错误会指出准确条目及字段，不要求作者改动合法的路线选择。
 `index:null` 只允许 `screen`，保持多机制浅筛；空 commitments 只能使用 null screen。
 修订中要选择已有机制，须在同次 commitments 中显式填写其 canonical `existing_ref`，再用该项编号；
 省略的机制仍保留广度。控制分配 `h001.m1` 等稳定引用，不随 UI 排序改变。后续 A 的
 `next_focus.mechanism_ref` 和 `mechanism_findings[].mechanism` 使用任务给出的精确引用。
 W 的 `--mechanism 1` 使用冻结目录中的正整数编号，控制绑定准确机制及其 H 来源；显示 label
 不参与匹配。准入拒绝回执列出公开原因与当时可选编号，不因显示为 pending 就保证可执行。
+跨机制引用已有比较实验时，可在 `mechanism_findings` 的 observed 条目中写明准确 `call_id`；同一比较调用可以支持多个机制。科学关联由作者声明，控制层不猜测；不要求重跑实验。
 
 窄输出补正只修改诊断指出的 JSON/布局字段，返回完整原 JSON，其余科学计划保持原义。
 提示中的 `remaining_observed_tokens`、`remaining_active_seconds` 与
@@ -650,11 +652,12 @@ Codex/命名空间、replay/model、solver 及 SSH 验收留到 G3 后由用户�
 指标名不赋予目标含义，同口径比较不代替 A 的科学判断；A 的推荐可为 null，null 不授权交付。
 
 启用 H search 时，prepare --candidate-extra-slots N 冻结可选 W 提名预览的额外数量建议，默认 2。
-candidate_nominations 可选；代表项只需 mechanism_ref、candidate、reason，额外项
-candidate、reason，缺口项 mechanism_ref、reason。候选沿现有科学引用或准确当前调用
+candidate_nominations 可选；representatives、extras、gaps 均为条目列表。代表项使用 mechanism_ref、candidate，额外项
+candidate，缺口项 mechanism_ref；reason 为可选科学说明。候选沿现有科学引用或准确当前调用
 的 call_id/artifact 定位。省略提名不触发补填，全部已登记候选仍在候选池可选。
 默认预览及 lineage.indexes.nominations 保留有效声明及原结论入口；A 可直接选择预览外
 已有模型，在普通科学正文解释准则和限制，不必重跑或覆写 W 原结论。
+无法解析的非空提名在任务预览、索引和网页保留非阻断诊断及原结论位置；紧凑预览省略细节时保留诊断计数和完整索引入口，不显示成作者没有提名。不会据标签推断候选或自动读取声明中的文件路径。
 
 执行状态与结果状态分别显示：退出码0只表示命令成功；结果文件缺失为 `missing`，JSON或协议基础形状无法解析为 `invalid`，采集失败为 `unavailable`。个别条目或说明不可用时，其余声明仍为 `available` 并带局部 `diagnostics`。
 原件、cleanup或外部结果未知时保留 `unknown`，不得重发以代替查明原调用。

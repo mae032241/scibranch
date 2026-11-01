@@ -372,6 +372,8 @@ def bounded_brief(value):
         value['candidates']['nominations']={key:nominations[key] for key in
             ('source_step','index','distinct_candidate_count','scope')}
         value['candidates']['nominations']['preview_in_index']=True
+        if nominations.get('diagnostics'):
+            value['candidates']['nominations'].update(diagnostic_count=len(nominations['diagnostics']),diagnostics_in_index=True)
     while size()>history.MAX_BRIEF_BYTES and value.get('implementation_options'):
         value['implementation_options'].pop();value['implementation_options_omitted_count']+=1
     if size()>history.MAX_BRIEF_BYTES:
@@ -390,6 +392,8 @@ def bounded_brief(value):
         if nominations:
             value['candidates']['nominations']=dict(source_step=nominations['source_step'],index=nominations['index'],
                 distinct_candidate_count=nominations['distinct_candidate_count'],preview_in_index=True)
+            if nominations.get('diagnostics'):
+                value['candidates']['nominations'].update(diagnostic_count=len(nominations['diagnostics']),diagnostics_in_index=True)
     return value
 
 
