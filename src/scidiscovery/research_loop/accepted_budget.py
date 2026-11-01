@@ -373,19 +373,25 @@ def recover(root, state):
 
 
 def append(root, state, *, kind, fields=None, updates=None, rows=None, control_files=None):
-    """Caller holds _ledger_writer; event -> exact indexes -> head -> return."""
+    """Independent row producer; caller holds the existing _ledger_writer."""
     from . import budget
     state = recover(root, state)
     stamp = budget.clock_stamp()
+    index_updates = {key: dict(previous_seq=state['seq'], previous=state.row(key), current=value)
+        for key, value in (rows or {}).items()}
+    return _append_prepared(root, state, kind=kind, stamp=stamp, fields=fields,
+        updates=updates, index_updates=index_updates, control_files=control_files)
+
+
+def _append_prepared(root, state, *, kind, stamp, index_updates,
+        fields=None, updates=None, control_files=None):
+    """Publish explicit row generations under the writer, after recovery."""
     event = dict(seq=state['seq']+1, parent_ref=state['head_ref'], settings_ref=state['settings_ref'],
-        **stamp, kind=kind, **(fields or {}), head_updates=updates or {}, index_updates={},
+        **stamp, kind=kind, **(fields or {}), head_updates=updates or {}, index_updates=index_updates,
         control_files=control_files or {})
     if state['clock']['basis'] == 'active':
         durations, _, _ = clock_sample(state['clock'], stamp)
         event.update(uptime_accounting=True, observed_advance_seconds=durations['advance'])
-    for key, value in (rows or {}).items():
-        previous = state.row(key)
-        event['index_updates'][key] = dict(previous_seq=state['seq'], previous=previous, current=value)
     next_state = _apply(state, event)
     path = Path(root)/'control-ledger'/f'{event["seq"]:06d}.json'
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -826,7 +832,10 @@ def accept_terminal_from_base(root, step, record, *, base, meter, unknown, meter
             from .native import _usage_event
             if _usage_event(dict(type='turn.completed', usage=meter)) != meter:
                 raise ValueError('Invalid current terminal usage')
-        job = state.row(f'job/{step:03d}')
+        previous_row = row
+        job_key = f'job/{step:03d}'
+        previous_job = state.row(job_key)
+        job = dict(previous_job)
         totals = dict(state['usage'])
         for name in ('input_tokens', 'cached_input_tokens', 'output_tokens'):
             totals[name] += 0 if meter is None else meter[name]
@@ -842,12 +851,15 @@ def accept_terminal_from_base(root, step, record, *, base, meter, unknown, meter
             and metering.get('coverage') == 'terminal' and metering.get('reporting_delay_unmeasured') is False
             and metering.get('inflight_usage_unknown') is False)
         job['complete'] = job['complete'] and complete
-        row.update(status='closed', meter=meter, unknown=bool(unknown))
+        row = dict(previous_row, status='closed', meter=meter, unknown=bool(unknown))
         job['status'] = 'terminal'
         job['role_usage'] = roles
-        _, state = append(root, state, kind='native_terminal', fields=dict(step=step, record=relative),
+        _, state = _append_prepared(root, state, kind='native_terminal', stamp=budget.clock_stamp(),
+            fields=dict(step=step, record=relative),
             updates=dict(usage=totals, role_usage=roles, current_native=None, current_job=job),
-            rows={key: row, f'job/{step:03d}': job})
+            index_updates={
+                key: dict(previous_seq=state['seq'], previous=previous_row, current=row),
+                job_key: dict(previous_seq=state['seq'], previous=previous_job, current=job)})
         return state
 
 
@@ -1083,7 +1095,8 @@ def publish_scientific_seal(root, step, *, prefix, role, result_ref, search_ref,
     root = Path(root)
     with budget._ledger_writer(root) as base:
         state = recover(root, load(root, base=base))
-        job = state.row(f'job/{step:03d}')
+        job_key = f'job/{step:03d}'
+        job = state.row(job_key)
         if job is None or job['role'] != role:
             raise ValueError('Scientific seal has no exact accepted job')
         if job['status'] == 'sealed':
@@ -1094,14 +1107,19 @@ def publish_scientific_seal(root, step, *, prefix, role, result_ref, search_ref,
                 or state['current_native'] is not None or job['status'] != 'terminal'):
             raise ValueError('Scientific seal no longer owns the accepted current slot')
         event_ref = dict(path=str(Path(state['logical_root'])/'control-ledger'/f'{state["seq"]+1:06d}.json'))
-        job.update(status='sealed', result_ref=result_ref, role_usage=state['role_usage'],
+        previous_job = job
+        job = dict(previous_job, status='sealed', result_ref=result_ref, role_usage=state['role_usage'],
             output_event_ref=event_ref,
             output_search_ref=copy.deepcopy(search_ref), search_ref=copy.deepcopy(search_ref))
-        rows = {f'job/{step:03d}': job}
+        rows = {job_key: job}
         updates = dict(current_job=job, prefix=prefix, search_ref=copy.deepcopy(search_ref))
         if search_delta is not None:
             updates['search'] = copy.deepcopy(search_delta['summary'])
             rows.update(search_delta['rows'])
-        _, state = append(root, state, kind='scientific_seal', fields=dict(step=step, result_ref=result_ref),
-            updates=updates, rows=rows)
+        stamp = budget.clock_stamp()
+        index_updates = {key: dict(previous_seq=state['seq'],
+            previous=previous_job if key == job_key else state.row(key), current=value)
+            for key, value in rows.items()}
+        _, state = _append_prepared(root, state, kind='scientific_seal', stamp=stamp,
+            fields=dict(step=step, result_ref=result_ref), updates=updates, index_updates=index_updates)
         return state
