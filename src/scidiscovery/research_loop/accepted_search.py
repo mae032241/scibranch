@@ -159,7 +159,7 @@ def _record_terminal(delta,fact):
         item['last_terminal']=pointer
 
 
-def prepare_node(root, job, payload, seal, *, summary, lookup, usage_lookup=None):
+def prepare_node(root, job, payload, seal, *, summary, lookup, observation, usage_lookup=None):
     """Copy the small breadth table and apply this accepted original's facts.
 
     ``lookup`` must read at the same canonical accepted head as ``summary``. The
@@ -267,7 +267,6 @@ def prepare_node(root, job, payload, seal, *, summary, lookup, usage_lookup=None
         current['focus'] = None
         current['allocation'] = None
         current['diagnostics'] = copy.deepcopy(control.get('diagnostics', []))
-    observation = history.read_observation(root, job, seal) if seal.get('observations') else None
     if node['pending_executions'] is not None:
         from . import originals
         source = originals.node(root,step)

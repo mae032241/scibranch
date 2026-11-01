@@ -165,33 +165,35 @@ def freeze_sources(root, configured, originals, globals_, *, policy, context, so
 
 
 def _sources(root):
-    ref = c.settings(root).get('source_provenance')
+    """Independent declaration entrypoint; internal owners pass their base."""
+    return _sources_from_base(root,base=c.settings(root))
+
+
+def _sources_from_base(root, *, base):
+    ref = base.get('source_provenance')
     return _read(root, ref) if ref is not None else dict(declarations=[], globals=[])
 
 
-def _producer(root, step):
+def _producer(root, step, *, facts):
     from . import originals
-    if originals.inherited(root, step):
-        source = originals.node(root, step)
-        path = originals.source_record(source, 'result-identity.json')
-        seal = c.read(path)
+    source, seal = facts['owner'], facts['seal']
+    if source.inherited:
         return dict(kind='producer', step=step,
             seal=originals.original_ref(source, f'native-evidence/{step:03d}/result-identity.json'),
             missing_reason=None if seal.get('source_provenance') else 'legacy_producer_without_source_proof')
-    path = c.host_record(c.workspace(root, step)) / 'result-identity.json'
-    seal = c.read(c.regular(path))
-    return dict(kind='producer', step=step, seal=_ref(root, path),
+    return dict(kind='producer', step=step, seal=_ref(root, facts['seal_path']),
                 missing_reason=None if seal.get('source_provenance') else 'legacy_producer_without_source_proof')
 
 
-def _inputs(root, job):
-    from . import originals
+def input_facts(root, job, *, base, head, sources, material_paths=None, review_binding=None):
+    """Own this operation's declared source collection and file acceptance."""
+    from . import originals, handoff_state
+    root = Path(root).resolve()
     if job.get('fork_source') is not None:
         source = originals.selected_source(root)
         original = originals.source_job(source)
-        # The selected task's provenance was closed by its original seal. A
-        # new binding preserves those saved edges; it does not replay that
-        # producer's own input checks through the inherited prefix.
+        # Selection can name a frozen task that has never been submitted. Its
+        # saved input edges do not require a result or replay old input checks.
         document = (copy.deepcopy(_source_read(source, original['source_provenance']))
             if original.get('source_provenance') is not None else
             dict(version=1, step=original['step'], edges=[], scope=SCOPE))
@@ -199,8 +201,73 @@ def _inputs(root, job):
             if edge['kind'] == 'producer':
                 producer = originals.dependency(source, edge['step'], seal_ref=edge['seal'])
                 edge['seal'] = dict(edge['seal'], origin_identity=producer.origin_identity)
-        return document
-    sources = _sources(root)
+        return dict(document=document, declarations=None, producers={},
+            restrictions={}, material_paths={}, fork_restriction=_saved_input_restriction(original))
+    declarations = _sources_from_base(root, base=base)
+    steps = {int(Path(ref['path']).parts[2]) for ref in job['direct_refs']}
+    steps.update(row['origin_step'] for row in job.get('selected_inputs', []))
+    steps.update(row['step'] for row in job.get('delivery_sources', {}).get('source_nodes', []))
+    if job.get('formal_review'):
+        if review_binding is None:
+            from . import formal_review
+            review_binding = formal_review.input_binding(root, job['formal_review'])
+        steps.update(review_binding.get('scientific_source_steps', []))
+    if job.get('engineering_repair') is not None:
+        steps.add(job['engineering_repair']['source']['step'])
+    producers, restrictions, producer_edges = {}, {}, []
+    for step in sorted(steps):
+        if not 0 < step < job['step']:
+            raise IntegrityError('Source producer is not an exact preceding node')
+        if step not in sources:
+            sources[step] = handoff_state.sealed_facts(root, step, base=base)
+        facts = producers[step] = sources[step]
+        producer_edges.append(_producer(root,step,facts=facts))
+        ref = facts['seal'].get('source_provenance')
+        if 'provenance' not in facts:
+            facts['provenance'] = (_source_read(facts['owner'], ref) if ref is not None else None)
+        restrictions[step] = _saved_output_restriction(facts['job'], facts['provenance'])
+    points = {}
+    for ref in job.get('direct_originals', job['direct_refs']):
+        step = int(Path(ref['path']).parts[2])
+        if step not in producers:
+            raise IntegrityError('Direct source does not name its exact producer original')
+        facts = producers[step]
+        if ref['size_bytes'] != facts['seal']['raw_ref']['size_bytes']:
+            raise IntegrityError('Direct source does not name its exact producer original')
+        if not facts['owner'].inherited:
+            if step not in points:
+                points[step] = (head.current_job if head.current_job is not None and head.current_job['step'] == step
+                    else head.row(f'job/{step:03d}'))
+            point = points[step]
+            if (point is None or point['job_ref'] != facts['seal']['job_ref']
+                    or facts['seal']['raw_ref']['path'] != str(root / point['native_record'] / 'science-output.json')):
+                raise IntegrityError('Direct source does not name its exact producer original')
+        originals.resolve_ref(facts['owner'], facts['seal']['raw_ref'])
+    paths = {} if material_paths is None else dict(material_paths)
+    facts = dict(declarations=declarations, producers=producers, restrictions=restrictions,
+        producer_edges=producer_edges, material_paths=paths, review_binding=review_binding, fork_restriction=None)
+    facts['document'] = _inputs(root, job, facts=facts)
+    for material in job['direct_materials']:
+        if material['path'] in paths:
+            continue
+        parts = Path(material['path']).parts
+        step = int(parts[2]) if len(parts) >= 5 and parts[:2] == ('inputs', 'parents') else None
+        if step is not None and not (review_binding is not None and material in review_binding.get('compiler_scientific_materials', [])):
+            if step not in sources:
+                sources[step] = handoff_state.sealed_facts(root, step, base=base)
+            owner = sources[step]
+            paths[material['path']] = originals.bound_material_path(root, material,
+                source=owner['owner'], seal=owner['seal'])
+        else:
+            paths[material['path']] = originals.material_path(root, material)
+    return facts
+
+
+def _inputs(root, job, *, facts):
+    """Build direct provenance from the owner's explicitly selected producers."""
+    if job.get('fork_source') is not None:
+        return facts['document']
+    sources = facts['declarations']
     edges = []
     for material in job['global_materials']:
         mappings = [row for row in sources['globals'] if row['material'] == material]
@@ -212,34 +279,11 @@ def _inputs(root, job):
     global_origins = [row['origin'] for row in sources['globals']]
     edges.extend(dict(kind='declaration', declaration=index) for index, row in enumerate(sources['declarations'])
                  if row['origin'] not in global_origins)
-    steps = {int(Path(ref['path']).parts[2]) for ref in job['direct_refs']}
-    for ref in job.get('direct_originals',job['direct_refs']):
-        step = int(Path(ref['path']).parts[2])
-        source = originals.node(root, step)
-        seal = c.read(originals.source_record(source, 'result-identity.json'))
-        # Local native_record=None means the canonical current attempt, not
-        # necessarily the first attempt. Inherited refs retain logical paths.
-        raw = (str(Path(source.original_root) / (source.native_record or f'native-evidence/{source.step:03d}') / 'science-output.json')
-            if source.inherited else str(c._execution_raw(source.storage_root, source.step)))
-        if seal['raw_ref'].get('path') != raw:
-            raise IntegrityError('Direct source does not name its exact producer original')
-    steps.update(row['origin_step'] for row in job.get('selected_inputs', []))
-    steps.update(row['step'] for row in job.get('delivery_sources', {}).get('source_nodes', []))
-    review_binding=None
-    if job.get('formal_review'):
-        from . import formal_review
-        review_binding=formal_review.input_binding(root,job['formal_review'])
-        steps.update(review_binding.get('scientific_source_steps',[]))
-    repair = job.get('engineering_repair')
-    if repair is not None:
-        steps.add(repair['source']['step'])
-    for step in sorted(steps):
-        if not 0 < step < job['step']:
-            raise IntegrityError('Source producer is not an exact preceding node')
-        edges.append(_producer(root, step))
+    edges.extend(facts['producer_edges'])
     # A copied material needs membership in an exact bound producer seal. Equal
     # bytes from another path do not establish that membership or its origin.
-    seals = [(edge['step'], _read(root, edge['seal'])) for edge in edges if edge['kind'] == 'producer']
+    seals = [(step, producer['seal']) for step, producer in facts['producers'].items()]
+    review_binding = facts['review_binding']
     for material in job['direct_materials']:
         matches = [(step, seal) for step, seal in seals if any(
             {key:value for key,value in row.items() if key!='file_stat'}==material
@@ -294,52 +338,55 @@ def _saved_output_restriction(job, proof):
     return inherited_restriction([_saved_input_restriction(job), additional])
 
 
-def _restriction(root, document, active, memo, sources, *, verify_inputs=True):
-    key = document['step']
-    if key in active:
-        return 'unknown'
-    if key in memo:
-        return memo[key]
-    active = {*active, key}
+def _restriction(document, *, sources, producer_restrictions):
+    """Reduce saved source facts without loading or renewing any producer."""
     states = []
     for edge in dependency_sources(None, document['edges']):
-        if edge['kind'] == 'global':
-            material = edge['material']
-            if verify_inputs and c.regular(root / material['source']).stat().st_size != material['size_bytes']:
-                raise IntegrityError('Bound global original changed')
-            states.append(_declaration(root, sources, edge['declaration'], memo,verify_inputs=verify_inputs))
-        elif edge['kind'] == 'declaration':
-            states.append(_declaration(root, sources, edge['declaration'], memo,public=True,verify_inputs=verify_inputs))
+        if edge['kind'] in {'global', 'declaration'}:
+            index = edge['declaration']
+            states.append('unknown' if index is None else sources['declarations'][index]['restriction'])
         elif edge['kind'] == 'producer':
-            from . import originals
-            if 'origin_identity' in edge['seal'] or originals.inherited(root, edge['step']):
-                source = originals.for_origin(root, edge['seal']['origin_identity'], step=edge['step']) if 'origin_identity' in edge['seal'] else originals.node(root, edge['step'])
-                states.append(original_status(source,controls_only=True)['restriction'])
-                continue
-            seal = _read(root, edge['seal'])
-            step = edge['step']
-            job_path = root / 'jobs' / f'{step:03d}.json'
-            parent = c.read(c.regular(job_path))
-            ref = seal.get('source_provenance')
-            proof = _read(root, ref) if ref is not None else None
-            states.append(_saved_output_restriction(parent, proof))
+            states.append(producer_restrictions[edge['step']])
         else:
             states.append('unknown')
-    result = inherited_restriction(states)
-    memo[key] = result
-    return result
+    return inherited_restriction(states)
+
+
+def bind_inputs_from_facts(root, job, *, facts):
+    root = Path(root).resolve()
+    document = facts['document']
+    return _save(root, c.host_record(c.workspace(root, job['step'])) / 'input-provenance.json', document), document
 
 
 def bind_inputs(root, job):
+    facts = _load_input_facts(root, job)
+    ref, _ = bind_inputs_from_facts(root, job, facts=facts)
+    return ref
+
+
+def validate_inputs_from_facts(root, job, *, facts):
     root = Path(root).resolve()
-    return _save(root, c.host_record(c.workspace(root, job['step'])) / 'input-provenance.json', _inputs(root, job))
+    ref = job.get('source_provenance')
+    if ref is None:
+        return None
+    document = _read(root, ref)
+    if document != facts['document']:
+        raise IntegrityError('Frozen direct source binding changed')
+    return document
 
 
 def validate_inputs(root, job):
-    root = Path(root).resolve()
-    ref = job.get('source_provenance')
-    if ref is not None and _read(root, ref) != _inputs(root, job):
-        raise IntegrityError('Frozen direct source binding changed')
+    if job.get('source_provenance') is None:
+        return None
+    facts = _load_input_facts(root, job)
+    return validate_inputs_from_facts(root, job, facts=facts)
+
+
+def _load_input_facts(root, job):
+    from . import accepted_budget
+    base = c.settings(root)
+    head = (None if job.get('fork_source') is not None else accepted_budget.load(root, base=base))
+    return input_facts(root, job, base=base, head=head, sources={})
 
 
 def _source_read(source, ref):
@@ -556,20 +603,24 @@ def validate_outputs(root,job,seal,*,source=None,controls_only=False):
         raise IntegrityError('Output source proof is missing')
 
 
-def status(root, job):
-    """On-demand compact view; never duplicate ancestor edges in task/context."""
-    root = Path(root).resolve()
+def status_from_facts(job, document, *, facts):
+    """Project this owner's compared document; this consumer never reads files."""
     if job.get('fork_source') is not None:
-        from . import originals
-        validate_inputs(root, job)
-        result = _original_input_status(originals.selected_source(root),controls_only=True)
-        return dict(result, direct_input_count=len(_inputs(root, job)['edges']))
-    ref = job.get('source_provenance')
-    if ref is None:
+        return dict(restriction=facts['fork_restriction'],
+            direct_input_count=len(facts['document']['edges']),scope=SCOPE)
+    if document is None:
         return dict(restriction='unknown', scope=SCOPE)
-    validate_inputs(root, job)
-    document = _read(root, ref)
-    return dict(restriction=_restriction(root,document,set(),{},_sources(root),verify_inputs=False), direct_input_count=len(document['edges']), scope=SCOPE)
+    restriction = _restriction(document,sources=facts['declarations'],producer_restrictions=facts['restrictions'])
+    return dict(restriction=restriction, direct_input_count=len(document['edges']), scope=SCOPE)
+
+
+def status(root, job):
+    """Independent query entrypoint; internal consumers pass produced facts."""
+    if job.get('source_provenance') is None and job.get('fork_source') is None:
+        return dict(restriction='unknown', scope=SCOPE)
+    facts = _load_input_facts(root, job)
+    document = validate_inputs_from_facts(root, job, facts=facts)
+    return status_from_facts(job, document, facts=facts)
 
 
 def output_status(root, step, material=None):
@@ -590,7 +641,9 @@ def output_status(root, step, material=None):
             if {key:value for key,value in row.items() if key!='file_stat'}==material]
         if len(matches)!=1:
             raise IntegrityError('Material is not an exact original of the named producer')
-        c._public_materials(root,matches,source=source)
+        owner=source if source is not None else originals.node(root,step)
+        originals.bound_material_path(root,matches[0],source=owner,seal=seal)
+        c._public_materials(matches)
     if source is not None:
         return dict(original_status(source,controls_only=True),missing_reason=None)
     ref = seal.get('source_provenance')

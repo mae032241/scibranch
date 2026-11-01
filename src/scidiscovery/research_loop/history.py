@@ -157,7 +157,9 @@ def resolve(root, target, receipts, *, current=None):
     row = next((row for row in rows if handle(row) == target), None)
     if row is None:
         raise ValueError('Historical implementation is not an exact sealed deliverable')
-    return c._public_materials(root,[row])[0]
+    from . import originals
+    originals._material_path(Path(root).absolute(),row)
+    return c._public_materials([row])[0]
 
 
 def _observer_source_stat(info):
@@ -1284,14 +1286,19 @@ def resolve_implementation(root, object_id, receipts):
     from . import accepted_prefix
     try:receipt=accepted_prefix.member(root,receipts,step)
     except FileNotFoundError:receipt=None
-    job, _, seal, seal_sha = _source(root, step) if receipt else (None, None, None, None)
+    from . import handoff_state, originals
+    facts=handoff_state.source_facts(root,step) if receipt else None
+    job, _, seal, seal_sha = (handoff_state.source_from_facts(facts)
+        if receipt else (None, None, None, None))
     if receipt is not None and seal_sha != receipt['seal_ref']:
         raise ValueError('Historical node seal changed')
     if (receipt is None or job['role'] != match[1]
             or object_id != f'{job["role"]}{step:03d}-I{index:03d}' or index < 1
             or index > len(seal['materials'])):
         raise UnresolvedImplementation('Implementation selection is outside its exact frozen source')
-    return c._public_materials(root,[sorted(seal['materials'], key=lambda row: row['path'])[index - 1]])[0]
+    material=sorted(seal['materials'],key=lambda row:row['path'])[index-1]
+    originals.bound_material_path(root,material,source=facts['owner'],seal=seal)
+    return c._public_materials([material])[0]
 
 
 def candidate_materials(root, job, *, candidate_id):

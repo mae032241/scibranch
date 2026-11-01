@@ -151,8 +151,15 @@ def _sealed_material(root, seal, material, *, source=None, controls_only=False):
         if {key: value for key, value in row.items() if key != 'file_stat'} == material]
     if len(matches) != 1:
         raise q.IntegrityError('Scientific input is not its exact producer material')
-    if not controls_only and c._public_materials(root, matches, source=source) != [material]:
-        raise q.IntegrityError('Scientific input is not its exact producer material')
+    if not controls_only:
+        from . import originals
+        if source is None:
+            originals._material_path(Path(root).absolute(),matches[0])
+        else:
+            owner,relative=originals.material_owner(source,matches[0])
+            originals.resolve_ref(owner,dict(matches[0],path=relative))
+        if c._public_materials(matches) != [material]:
+            raise q.IntegrityError('Scientific input is not its exact producer material')
     return material
 
 
@@ -571,7 +578,7 @@ def capture(root, job, materials):
             continue
         if len(matches) != 1 or matches[0]['source'] in seen:
             raise q.IntegrityError('Compiled material has ambiguous provenance')
-        material = c._public_materials(root, matches)[0]
+        material = c._public_materials(matches)[0]
         verify_compilation(root, ref, material=material, client_binding=client_binding); seen.add(material['source'])
         result.append(dict(material=material, compiler=ref,
             **(dict(client_binding=client_binding) if client_binding is not None else {})))

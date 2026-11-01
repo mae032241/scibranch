@@ -77,9 +77,9 @@ def source_input_mapping(source, job, *, _active=None):
     return result
 
 
-def source_observation(source, job, value):
+def source_observation(source, job, value, *, input_mapping=None):
     """Typed host projection of inherited observations, separate from originals."""
-    inputs = source_input_mapping(source, job)
+    inputs = source_input_mapping(source, job) if input_mapping is None else input_mapping
     own = {row['id']: origin_candidate(source.origin_identity, row['id']) for row in value['candidates']}
     result = copy.deepcopy(value)
     def bind(proof):
@@ -119,9 +119,9 @@ def source_observation(source, job, value):
     return result
 
 
-def source_job_view(source, job):
+def source_job_view(source, job, *, input_mapping=None):
     result = copy.deepcopy(job)
-    mapping = source_input_mapping(source, job)
+    mapping = source_input_mapping(source, job) if input_mapping is None else input_mapping
     history = result.get('history', {})
     history['candidate_ids'] = [mapping.get(item, item) for item in history.get('candidate_ids', [])]
     if 'candidate_references' in history:
@@ -269,7 +269,7 @@ def resolve_reference(root, job, identity, *, source=None):
     return identity
 
 
-def control_payload(job, payload, *, root=None, source=None, inventory=None):
+def control_payload(job, payload, *, root=None, source=None, inventory=None, source_facts=None):
     """Resolve only structured author choices; preserve the original return bytes."""
     if job.get('worker_view_version')!=1:return payload
     def resolve(identity):
@@ -278,7 +278,7 @@ def control_payload(job, payload, *, root=None, source=None, inventory=None):
     value=copy.deepcopy(payload)
     if job['role']=='W' and 'candidate_nominations' in value:
         from . import candidate_nominations
-        value['candidate_nominations']=candidate_nominations.resolve(root,job,value['candidate_nominations'],source=source,inventory=inventory)
+        value['candidate_nominations']=candidate_nominations.resolve(root,job,value['candidate_nominations'],source=source,inventory=inventory,source_facts=source_facts)
     if 'candidate_recommendation' in value:value['candidate_recommendation']=resolve(value['candidate_recommendation'])
     if root is not None and isinstance(value.get('candidate_recommendation'),str) and re.fullmatch(r'[HWAE]\d{3,}-I\d{3,}',value['candidate_recommendation']):
         from . import history

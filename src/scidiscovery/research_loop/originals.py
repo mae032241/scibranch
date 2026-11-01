@@ -175,6 +175,25 @@ def node(root, step):
     return source
 
 
+def node_from_base(root, step, *, base):
+    """Select a source using the operation owner's already accepted local identity."""
+    from . import handoff_state
+    root = files.check_path(Path(root).absolute())
+    state = handoff_state.current(root)
+    if state is not None and step in state.handles:
+        return state.handles[step]
+    if type(step) is not int or step < 1:
+        raise ValueError('Exact positive logical step required')
+    if (root / 'jobs' / f'{step:03d}.json').exists():
+        source = NodeSource(dict(goal_id=base['goal_id'],
+            settings_ref=dict(path=str(root / 'settings.json'))), step, str(root), root)
+    else:
+        source = _node(root, step)
+    if state is not None:
+        state.handles[step] = source
+    return source
+
+
 def _node(root, step):
     if type(step) is not int or step < 1:
         raise ValueError('Exact positive logical step required')
@@ -445,7 +464,24 @@ def material_path(root, material):
                     and item['size_bytes']==material['size_bytes']]
                 if len(matches)!=1:raise ValueError('Unsealed managed material differs from its saved original')
                 saved=dict(material,**{key:matches[0][key] for key in ('file_stat',) if key in matches[0]})
+    return _material_path(root, saved)
+
+
+def bound_material_path(root, material, *, source, seal):
+    """Consume an owner's exact producer seal without reopening that seal."""
+    public = {key: value for key, value in material.items() if key != 'file_stat'}
+    matches = [row for row in seal.get('materials', [])
+        if {key: value for key, value in row.items() if key != 'file_stat'} == public]
+    if len(matches) != 1:
+        raise ValueError('Scientific material differs from its exact producer seal')
+    if source.step != int(PurePosixPath(public['path']).parts[2]):
+        raise ValueError('Scientific material belongs to another producer')
+    return _material_path(Path(root).absolute(), matches[0])
+
+
+def _material_path(root, saved):
     source = Path(saved['source'])
+    parts = PurePosixPath(saved.get('path', '')).parts
     ref = dict(path=str(source), **{field: saved[field]
         for field in ('size_bytes', 'file_stat') if field in saved})
     if not source.is_absolute() or source.is_relative_to(root):

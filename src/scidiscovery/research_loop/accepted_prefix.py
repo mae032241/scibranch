@@ -294,14 +294,15 @@ def prepare_node(root, job, payload, seal, *, inventory):
     item=dict(step=job['step'],role=job['role'],summary=payload['summary'][:512],
         limitations=payload.get('limitations',[])[:4],original=f'inputs/history/{base}/science.json')
     recent.append(item)
+    observation=inventory.observation_document if seal.get('observations') else None
     search_delta=accepted_search.prepare_node(root,job,payload,seal,summary=state['search'],
         lookup=lambda name:accepted_budget.search_row(root,name,head=state),
-        usage_lookup=lambda number:accepted_budget.native_usage_row(root,number,head=state))
+        usage_lookup=lambda number:accepted_budget.native_usage_row(root,number,head=state),
+        observation=observation)
     snapshot=root/'native-evidence'/f'{job["step"]:03d}'/'breadth-snapshot.json'
     _write_once(snapshot,search_delta['summary'])
     snapshot_ref=dict(origin_identity=origin,path=snapshot.relative_to(root).as_posix(),size_bytes=snapshot.stat().st_size)
     seal['breadth_snapshot']=snapshot_ref
-    observation=history.read_observation(root,job,seal)
     aliases={};implementation_candidates={}
     if observation is not None:
         references=candidate_refs.references([dict(step=job['step'],role=job['role'],observation=observation)])

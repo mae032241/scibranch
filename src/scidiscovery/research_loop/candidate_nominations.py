@@ -47,7 +47,7 @@ def applicable(job):
     return job['role']=='W' and bool(job.get('candidate_nomination_mechanisms'))
 
 
-def resolve(root, job, declaration, *, source=None, inventory=None):
+def resolve(root, job, declaration, *, source=None, inventory=None, source_facts=None):
     """Resolve only the declared candidate slots, preserving unresolvable advice."""
     value=_preview(declaration)
     if value is None:return None
@@ -61,7 +61,15 @@ def resolve(root, job, declaration, *, source=None, inventory=None):
             except ValueError:row['candidate']=None
         elif isinstance(candidate,dict) and (root is not None or source is not None and source.inherited):
             if current is None:
-                if source is not None and source.inherited:
+                if source_facts is not None:
+                    if source_facts['job'] != job or (source is not None and source_facts['owner'] != source):
+                        raise ValueError('Candidate nominations differ from their exact source task')
+                    observed = source_facts['observation']
+                    current = (observed or {}).get('managed_calls', [])
+                    if source is not None and source.inherited:
+                        retained = ({row['id'] for row in (observed or {}).get('candidates', [])}
+                            & {row['id'] for row in generic_results.candidates(current)})
+                elif source is not None and source.inherited:
                     with handoff_state.loading():
                         if originals.source_job(source)!=job:
                             raise ValueError('Candidate nominations differ from their exact source task')

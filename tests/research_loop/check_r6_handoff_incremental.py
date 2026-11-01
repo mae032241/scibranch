@@ -129,6 +129,11 @@ def _verification_counts(monkeypatch,root,length):
             counts['old_input_validation' if job['step']<=length else 'current_input_validation']+=1
             return validate_inputs(root,work,job,*args,**kwargs)
         patch.setattr(c,'_validate_inputs',counted_inputs)
+        validate_inputs_from_facts=c._validate_inputs_from_facts
+        def counted_inputs_from_facts(root,work,job,*args,**kwargs):
+            counts['old_input_validation' if job['step']<=length else 'current_input_validation']+=1
+            return validate_inputs_from_facts(root,work,job,*args,**kwargs)
+        patch.setattr(c,'_validate_inputs_from_facts',counted_inputs_from_facts)
         for name,entry in (('validate_managed','_validate_managed'),('validate_observation','validate_observation')):
             original=getattr(history,entry)
             def counted_history(root,job,*args,_original=original,_name=name,**kwargs):
@@ -167,9 +172,9 @@ def _verification_counts(monkeypatch,root,length):
             return native_outcome(record,*args,**kwargs)
         patch.setattr(c,'native_outcome',counted_outcome)
         restriction=qualification._restriction
-        def counted_restriction(root,document,*args,**kwargs):
+        def counted_restriction(document,*args,**kwargs):
             counts['old_restriction_replay' if document['step']<=length else 'current_restriction']+=1
-            return restriction(root,document,*args,**kwargs)
+            return restriction(document,*args,**kwargs)
         patch.setattr(qualification,'_restriction',counted_restriction)
         provenance_output=qualification._output
         def counted_provenance(root,job,*args,**kwargs):

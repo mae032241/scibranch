@@ -77,7 +77,7 @@ def loading_sealed():
 def _accepted_marker(root, step, owner):
     """Require the published acceptance marker, without replaying its checks."""
     state=current(root)
-    if state is not None and (step in state.results or any(key[0]==step for key in state.sources)):
+    if state is not None and step in state.results and state.handles.get(step) == owner:
         return
     from . import originals
     path=originals.source_record(owner,'result-identity.json')
@@ -85,50 +85,126 @@ def _accepted_marker(root, step, owner):
         raise ValueError('Scientific result has no regular acceptance marker')
 
 
-def source(root, step, *, resolve_choices=True):
-    from . import contracts as c, originals, candidate_refs
+def sealed_facts(root, step, *, base=None, owner=None):
+    """Load one exact sealed producer; its authored body is loaded only on demand."""
+    from . import contracts as c, originals
+    if owner is None:
+        owner = (originals.node(root, step) if base is None
+            else originals.node_from_base(root, step, base=base))
+    if owner.step != step:
+        raise ValueError('Sealed source belongs to another logical node')
+    seal_ref = dict(path=str(Path(owner.original_root) / f'native-evidence/{step:03d}/result-identity.json'))
+    key = (owner.origin_identity['goal_id'], owner.origin_identity['settings_ref']['path'],
+        owner.original_root, str(owner.storage_root), step, seal_ref['path'], owner.native_record)
     state = current(root)
-    key = (step, resolve_choices)
     if state is not None and key in state.sources:
         return state.sources[key]
     with loading():
-        owner = originals.node(root, step)
         _accepted_marker(root,step,owner)
         job = originals.source_job(owner)
         seal_path = originals.source_record(owner, 'result-identity.json')
         seal = c.read(seal_path)
-        payload = c.read_scientific_output(originals.resolve_ref(owner, seal['raw_ref']))
-        if resolve_choices:
-            payload = candidate_refs.control_payload(job, payload, root=root, source=owner if owner.inherited else None)
-            if owner.inherited:
-                mapping = candidate_refs.source_input_mapping(owner, job)
-                if job['role'] == 'W' and seal.get('observations'):
-                    observed = c.read(originals.resolve_ref(owner, seal['observations']))
-                    mapping.update({row['id']: candidate_refs.origin_candidate(owner.origin_identity, row['id']) for row in observed['candidates']})
-                payload = candidate_refs.public_science_fields(payload, mapping)
-        if owner.inherited:
-            job = candidate_refs.source_job_view(owner, job)
-        seal_ref = dict(path=str(Path(owner.original_root) / f'native-evidence/{step:03d}/result-identity.json'))
-        row = (job, payload, seal, seal_ref)
+        if seal['job_ref'] != dict(path=str(Path(owner.original_root) / f'jobs/{step:03d}.json')):
+            raise ValueError('Source seal changed its exact original job')
+        raw = Path(seal['raw_ref']['path'])
+        origin = Path(owner.original_root) / f'native-evidence/{step:03d}'
+        if not raw.is_relative_to(origin) or raw.name != 'science-output.json':
+            raise ValueError('Source seal lost its exact native attempt')
+        relative = raw.parent.relative_to(origin)
+        if relative.parts and (len(relative.parts) != 2 or relative.parts[0] != 'continuations'
+                or not relative.parts[1].isdecimal() or relative.parts[1] != f'{int(relative.parts[1]):03d}'):
+            raise ValueError('Source seal lost its exact native attempt')
+        if owner.native_record is not None and raw.parent != Path(owner.original_root) / owner.native_record:
+            raise ValueError('Source seal differs from its retained native attempt')
+        raw_path = originals.resolve_ref(owner, seal['raw_ref'])
+        facts = dict(owner=owner, job=job, seal=seal, seal_ref=seal_ref,
+            seal_path=seal_path, raw_path=raw_path)
     if state is not None:
-        state.sources[key] = row
-    return row
+        state.sources[key] = facts
+    return facts
+
+
+def _observation_facts(facts):
+    if 'observation' not in facts:
+        from . import contracts as c, originals
+        receipt = facts['seal'].get('observations')
+        with loading():
+            facts['observation'] = (c.read(originals.resolve_ref(facts['owner'], receipt))
+                if receipt is not None else None)
+    return facts['observation']
+
+
+def source_facts(root, step, *, base=None, owner=None, resolve_choices=True):
+    """Produce original and control views from one parsed author response."""
+    return source_facts_from_sealed(root,sealed_facts(root,step,base=base,owner=owner),
+        resolve_choices=resolve_choices)
+
+
+def source_facts_from_sealed(root, facts, *, resolve_choices=True):
+    """Complete the owner's existing sealed facts without reopening metadata."""
+    from . import contracts as c, candidate_refs
+    if 'payload' not in facts:
+        facts['payload'] = c.read_scientific_output(facts['raw_path'])
+    if resolve_choices and 'control' not in facts:
+        job, payload, owner = facts['job'], facts['payload'], facts['owner']
+        nominations = payload.get('candidate_nominations')
+        dict_choices = isinstance(nominations, dict) and any(
+            isinstance(row, dict) and isinstance(row.get('candidate'), dict)
+            for field in ('representatives', 'extras')
+            for row in (nominations.get(field, []) if isinstance(nominations.get(field, []), list) else []))
+        if dict_choices or owner.inherited and job['role'] == 'W':
+            _observation_facts(facts)
+        with loading():
+            control = candidate_refs.control_payload(job, payload, root=root,
+                source=owner if owner.inherited else None, source_facts=facts)
+            projected_job = job
+            if owner.inherited:
+                if 'input_mapping' not in facts:
+                    facts['input_mapping'] = candidate_refs.source_input_mapping(owner, job)
+                mapping = facts['input_mapping']
+                projected_job = candidate_refs.source_job_view(owner, job, input_mapping=mapping)
+                science_mapping = dict(mapping)
+                if job['role'] == 'W':
+                    science_mapping.update({row['id']: candidate_refs.origin_candidate(owner.origin_identity, row['id'])
+                        for row in (facts.get('observation') or {}).get('candidates', [])})
+                control = candidate_refs.public_science_fields(control, science_mapping)
+            facts['control'] = (projected_job, control, facts['seal'], facts['seal_ref'])
+    return facts
+
+
+def source_from_facts(facts, *, resolve_choices=True):
+    """Select a produced view without loading or requalifying its source."""
+    if resolve_choices:
+        return facts['control']
+    return facts['job'], facts['payload'], facts['seal'], facts['seal_ref']
+
+
+def source(root, step, *, resolve_choices=True):
+    return source_from_facts(source_facts(root, step, resolve_choices=resolve_choices),
+        resolve_choices=resolve_choices)
 
 
 def observation(root, job, seal):
     receipt = seal.get('observations')
     if receipt is None:
         return None
-    from . import contracts as c, originals, candidate_refs
+    from . import candidate_refs
     state = current(root)
     step = job['step']
-    if state is not None and step in state.observations:
-        return state.observations[step]
+    facts = sealed_facts(root, step)
+    if facts['seal'] != seal:
+        raise ValueError('Observation belongs to another sealed source')
+    if 'observation_view' in facts:
+        return facts['observation_view']
     with loading():
-        owner = originals.node(root, step)
-        value = c.read(originals.resolve_ref(owner, receipt))
+        owner = facts['owner']
+        value = _observation_facts(facts)
         if owner.inherited:
-            value = candidate_refs.source_observation(owner, originals.source_job(owner), value)
+            if 'input_mapping' not in facts:
+                facts['input_mapping'] = candidate_refs.source_input_mapping(owner, facts['job'])
+            value = candidate_refs.source_observation(owner, facts['job'], value,
+                input_mapping=facts['input_mapping'])
+    facts['observation_view'] = value
     if state is not None:
         state.observations[step] = value
     return value
