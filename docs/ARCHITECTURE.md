@@ -698,10 +698,15 @@ all candidates or report missing comparisons with a finite conclusion.
 
 H uses A's evidence, limitations and exact references to decide mechanism changes
 and the next minimal discriminator, checking concrete conflicts as needed rather
-than routinely repeating A's full-pool review. A independently checks gaps that
-can change a route or selection and may expand the review or perform bounded
-original refits; new-candidate development, tuning studies and bulk retests belong
-to W. Authors publish reusable diagnostics and their executed source and necessary
+than routinely repeating A's full-pool review. A prioritizes reusing existing A/W
+reports, result arrays, executed scripts/code and the full candidate pool while
+retaining independent judgment; this does not default to rechecking, rerunning or
+retraining. Targeted checks or refits address concrete conflicts, missing evidence
+or questions likely to change a decision, with expansion as needed; new-candidate
+development, tuning studies and bulk retests belong to W. Reused artifacts and
+helper dependencies use the current task's declared input paths; old author
+workspace absolute aliases are not current locators. Authors publish reusable
+diagnostics and their executed source and necessary
 helpers through the existing declared outputs, following task code and project
 write rules. Managed originals are cited directly. Unpublished diagnostics remain
 a stated gap, without a new nonempty-material or repair gate.

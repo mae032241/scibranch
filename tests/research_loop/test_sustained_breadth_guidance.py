@@ -95,13 +95,14 @@ def test_normal_prepared_scientific_request_delivers_sustained_breadth_and_froze
         assert 'uncertainty' not in task['portfolio_response'].lower()
         assert transmitted.count(c.AUTHOR_EVIDENCE_GUIDANCE) == 1
         assert c.AUTHOR_EVIDENCE_GUIDANCE not in json.dumps(task)
-        for concept in ('Reuse A deltas/scripts/full pool', 'Target decision gaps',
-                'expand checks/bounded original refits as needed',
+        for concept in ('Reuse A/W reports/arrays/code/full pool',
+                'no routine rechecks/refits',
+                'Check decision-changing conflicts/gaps; expand as needed',
                 'New candidates/tuning/bulk retests: W',
                 'Changed bases limit comparisons',
-                '2-3 full procedures if useful/affordable, no quota/score default',
+                '2-3 full procedures if useful/affordable; no quota/score default',
                 'revise_h(minimal executable test); else continue_w', 'May reject all',
-                'Publish own reports/executed code+needed helpers to outputs',
+                'Publish own reports/executed code+helpers to outputs',
                 'cite managed originals'):
             assert concept in transmitted
     else:
