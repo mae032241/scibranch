@@ -347,7 +347,8 @@ def test_living_original_and_unknown_managed_call_never_start_replacement(tmp_pa
     assert continuation.automatic_decision(root, 1)['action'] == 'none'
     monkeypatch.setattr(runtime, 'process_matches', lambda *_:False)
     monkeypatch.setattr(history, 'managed_calls', lambda *_:[dict(status='unknown')])
-    assert continuation.automatic_decision(root, 1)['reason'] == 'automatic_recovery_managed_execution_pending'
+    inventory=SimpleNamespace(job=c.read(root/'jobs/001.json'))
+    assert continuation.automatic_decision(root, 1,inventory=inventory)['reason'] == 'automatic_recovery_managed_execution_pending'
 
 
 @pytest.mark.parametrize('boundary', ['pause','final_only','closeout','final_barrier'])

@@ -1,10 +1,11 @@
 """A narrow final-response repair cannot start new managed scientific work."""
+import sys
 from types import SimpleNamespace
 
 import pytest
 
-from scidiscovery.research_loop import (configuration_updates, contracts as c,
-    execution, experiment_client, experiments)
+from scidiscovery.research_loop import (accepted_budget, budget, configuration_updates,
+    contracts as c, controller, execution, experiment_client, experiments)
 from execution_fixtures import execution_registry
 from test_default_cli_output_repair import cli, nomination_diagnostic, prepare_cli
 
@@ -43,16 +44,37 @@ def test_output_repair_never_borrows_independent_work_permission(tmp_path,monkey
 
 
 @pytest.mark.parametrize('entry',['accept','compile'])
-def test_new_accept_and_compile_reject_before_adapter_or_output_effect(tmp_path,monkeypatch,entry):
-    _,config,_=accepted_attempts(tmp_path,monkeypatch,[dict(continuation_kind='repair',
-        output_repair=dict(code='missing_output'))])
+def test_new_accept_and_compile_reject_before_adapter_or_output_effect(tmp_path,monkeypatch,execution_registry,entry):
+    public=tmp_path/'public';public.mkdir()
+    objective=public/'goal';objective.write_text('Only the original response may be corrected.')
+    root=tmp_path/'instance'
+    controller.prepare(root,objective,public,['never-launched'],max_tokens=1000,
+        max_seconds=60,max_steps=4,model='fixture',reasoning_effort='high',
+        search_policy=None,node_budget_mode='soft')
+    job=c.build_job(root,1,'H',[]);record=execution.record(root,1)
+    intent=dict(task_ref=c.record_ref(root/'jobs/001.json'))
+    anchor=budget.accept_node(root,job)
+    if anchor is not None:intent['budget_slice']=anchor
+    c.write(record/'native-intent.json',intent)
+    accepted_budget.accept_native(root,1,record,intent)
+    experiments.configure(root,1,'local_execution:command',dict(run_argv=[sys.executable]),tmp_path/'config.json')
+    config=c.read(record/'experiment-config.json')
+    # Keep the real original client and its loaded facts. An independently
+    # retained latest response-repair intent also forbids borrowing that client.
+    latest=dict(attempt=1,task_ref=intent['task_ref'],continuation_kind='repair',
+        output_repair=dict(code='missing_output'))
+    monkeypatch.setattr(execution,'accepted_intents',lambda *_:iter([
+        (record,intent),(record/'continuations/001',latest)]))
+    def forbidden(*args,**kwargs):pytest.fail('Output repair cannot enter the compiler')
+    adapter=SimpleNamespace(compile_implementation=forbidden)
     output=tmp_path/'new-implementation.json'
     with pytest.raises(experiments.UnsupportedExecution,match='Output repair permits original results only'):
         if entry=='accept':
-            experiments.Records.accept.__wrapped__(SimpleNamespace(config=config),object(),{}, {})
+            experiments.Records(config).accept(object(),{}, {})
         else:
-            experiments.compile_implementation.__wrapped__(config,object(),tmp_path/'source.py',{},output)
+            experiments.compile_implementation(config,adapter,tmp_path/'source.py',{},output)
     assert not output.exists()
+    assert experiments.Records(config).calls()==[]
 
 
 def test_latest_output_repair_cannot_borrow_original_client(tmp_path,monkeypatch):

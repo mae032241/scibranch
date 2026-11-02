@@ -111,6 +111,15 @@ def handoff(config,result,command,call_id=None):
         action=handoff_action(state,original_bound=external is not None,query=query,
             wake_authorized=wake,terminal_verified=verified)
         if action=='consume_terminal':
+            failure=observed.get('public_result',{}).get('author_file_error')
+            if failure is not None:
+                log=f'work/retained-experiments/{call_id}/outputs/'+failure['log_name']
+                return hint(action,'author_file_error',
+                    failure['diagnostic']+'. Read '+log+'. Decide whether author-file closeout needs correction. '
+                    'Reuse retained results; do not retrain, rerun completed experiments or copy retained originals again. '
+                    'Only original permissions and budget apply. Preserve the failed call and scientific limitations. '
+                    'You own candidate suitability: rejecting every candidate is valid. If no further correction is warranted or available, set stage_intent=decision and state any blocker.',
+                    author_file_error={key:failure[key] for key in ('error','errno','diagnostic')}|dict(log=log))
             return hint(action,'original_terminal_verified',
                 'Read this verified original terminal result and retained outputs; interpret their scientific meaning and limitations. Do not resubmit.')
         if action=='return_control':

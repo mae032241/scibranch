@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, controller, execution, experiments, feedback, history
+from scidiscovery.research_loop import (accepted_budget, budget, contracts as c,
+    controller, execution, experiments, feedback, history)
 from cov_execution import lineage as cov_lineage
 from execution_fixtures import execution_registry
 
@@ -40,7 +41,11 @@ def consumer(tmp_path, monkeypatch, execution_registry):
             config=dict(runs='runs', calls='project/nodes', evaluation_key='fixture-public')))
     job = c.build_job(root, 1, 'H', [])
     record = execution.record(root, 1)
-    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json')))
+    intent=dict(task_ref=c.record_ref(root/'jobs/001.json'))
+    anchor=budget.accept_node(root,job)
+    if anchor is not None:intent['budget_slice']=anchor
+    c.write(record/'native-intent.json',intent)
+    accepted_budget.accept_native(root,1,record,intent)
     experiments.configure(root, 1, 'local_execution:command', dict(run_argv=[sys.executable]), tmp_path / 'config.json')
 
     def observe(value, *, registered=True):

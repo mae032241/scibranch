@@ -481,6 +481,52 @@ def scientific_result(config, accepted, completed, observation):
     return result
 
 
+def author_file_failure(status, stderr):
+    """Classify one confirmed Python file error, without interpreting science."""
+    if status!='known_failed' or not isinstance(stderr,str):return None
+    marker='Traceback (most recent call last):'
+    if marker not in stderr:return None
+    tail=stderr.rsplit(marker,1)[1].strip()
+    if (not tail or not re.search(r'^ *File ".+", line [0-9]+, in .+$',tail,re.M)
+            or not re.search(r'^PermissionError: \[Errno 13\] Permission denied: .+$',tail.splitlines()[-1])):
+        return None
+    return dict(error='PermissionError',errno='EACCES',
+        diagnostic='Python PermissionError (EACCES: Permission denied) while accessing an author file')
+
+
+def read_author_file_failure(status, outputs):
+    """The observation owner reads only its verified public stderr tail once."""
+    if status!='known_failed':return None
+    logs=[item for item in outputs
+        if re.fullmatch(r'execution-logs(?:-[0-9]+)?/stderr\.txt',item.get('name',''))]
+    if not logs:return None
+    # The built-in Local producer appends its actual logs after author outputs,
+    # choosing a distinct suffix when an author used the normal log name.
+    log=logs[-1];size=log['size_bytes']
+    with Path(log['path']).open('rb') as stream:
+        stream.seek(max(0,size-64*1024))
+        text=stream.read(64*1024).decode('utf-8',errors='replace')
+    failure=author_file_failure(status,text)
+    return dict(failure,log_name=log['name']) if failure is not None else None
+
+
+def _validate_author_file_failure(observation,accepted):
+    """Consume a producer's typed diagnosis without reopening its stderr."""
+    if 'author_file_error' not in observation.get('public_result',{}):return
+    failure=observation['public_result']['author_file_error']
+    if (not isinstance(failure,dict)
+            or failure!={
+                'error':'PermissionError','errno':'EACCES',
+                'diagnostic':'Python PermissionError (EACCES: Permission denied) while accessing an author file',
+                'log_name':failure.get('log_name'),'source_attempt':(accepted.get('native_attempt') or {}).get('number')}
+            or observation['interface'].get('executor')!='local_execution:command'
+            or observation.get('status')!='known_failed'
+            or not isinstance(failure.get('log_name'),str)
+            or re.fullmatch(r'execution-logs(?:-[0-9]+)?/stderr\.txt',failure['log_name']) is None
+            or sum(item['name']==failure['log_name'] for item in observation.get('scientific_outputs',[]))!=1):
+        raise IntegrityError('Author file diagnosis differs from its verified Local failure')
+
+
 def _diagnostic(error, fallback, *, config=None, detail=False):
     # Keep the full exception in host diagnostics. Explicit detailed feedback
     # uses the existing public cleaner for known private paths and credentials.
@@ -1412,6 +1458,7 @@ def verify_observation(value, original, *, interface=None, context=None, verify_
         public=_run_view(value['public_result'])
         if public.get('status')!=value['status'] or 'call_id' in public and public['call_id']!=value['call_id']:
             raise IntegrityError('Frozen public result differs from the original call')
+    _validate_author_file_failure(value,accepted)
     names=set()
     for item in value.get('scientific_outputs',[]):
         reference(item);reference(item['source'])
@@ -1702,6 +1749,11 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
     value['scientific_outputs']=[dict(retain(proof(item.local_path,context=operation_context)),
         name=item.name,descriptor=item.model_dump(mode='json')) for item in selected]
     verify_observation(value,lambda item:Path(item['path']),context=operation_context)
+    if config['execution_interface'].get('executor')=='local_execution:command':
+        failure=read_author_file_failure(status,value['scientific_outputs'])
+        if failure is not None:
+            value['public_result']['author_file_error']=dict(failure,source_attempt=(accepted.get('native_attempt') or {}).get('number'))
+            _validate_author_file_failure(value,accepted)
     with records.lease('observation-'+call_id+'.lock'):
         if path.exists():
             if json.loads(read(path))!=value:raise IntegrityError('Frozen execution observation changed')

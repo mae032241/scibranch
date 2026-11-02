@@ -1064,6 +1064,9 @@ scid-research closeout --root /绝对路径/实例 --export-only
 修正请求不再触发补正；未知命令的原参数交回作者自行修正，不猜测命令意图。准确的未接受
 机械拒绝在原有限额度内优先修正；没有这种拒绝的科学 decision/blocked 仍交 A。已接受未知
 调用只核对原调用。
+新 Local 调用若以 Python `PermissionError`（EACCES）终止，回执会给出错误类别和已保留 stderr 的相对路径。
+W 在当前回合的末次调用遇到这类错误后仍请求 review 时，已有自动续接许可可将问题有界交回同一 W；复用已产生的结果，不自动重跑原实验。
+候选为空不是错误，作者可判断所有模型均不适用，或明确作出 decision/blocked；后续回合没有新文件错误时，不会因旧失败反复续接。原权限、预算和次数限制保持不变。
 FINAL 与 closeout 沿同一 native collector 接续 interrupted 或已接受未启动的 attempt；
 宿主明确的提交前预算拒绝转入 FINAL 时保留完整原 attempt 链与累计消费。
 launcher 的绝对调用路径及其指向的原文件被冻结，保留符号链接调用语义。

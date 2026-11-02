@@ -58,6 +58,21 @@ def _caller_correction(root,job,record):
     return dict(diagnostic=refusal['diagnostic'],mechanism_ref=ref)
 
 
+def _file_correction(root,job,*,inventory):
+    """Consume the current attempt's last accepted Local file-error value."""
+    if not repair_applicable(job):return None
+    calls=history.managed_calls(inventory)
+    if not calls or calls[-1]['status']!='known_failed':return None
+    call=calls[-1]
+    failure=((call.get('execution') or {}).get('public_result') or {}).get('author_file_error')
+    if failure is None or type(failure.get('source_attempt')) is not int or failure['source_attempt']!=inventory.attempt:return None
+    binding=call.get('mechanism_binding') or {}
+    return dict({key:failure[key] for key in ('error','errno','diagnostic')},call_id=call['call_id'],
+        mechanism_ref=binding.get('mechanism_ref','accepted '+call['call_id']),
+        log='work/retained-experiments/'+call['call_id']+'/outputs/'+failure['log_name'],
+        accepted=call['accepted'],completed=call['completed'],observation=call.get('observation'))
+
+
 def _bytes(value):
     return (json.dumps(value,ensure_ascii=False,indent=2,allow_nan=False)+'\n').encode()
 
@@ -195,7 +210,7 @@ def _capture(root,job,record,*,inventory):
     if not repair_applicable(job):return None
     correction=inventory.caller_correction
     if not applicable(job):
-        if correction is None:return None
+        if correction is None and inventory.file_correction is None:return None
     root,record=Path(root),Path(record);path=record/FACT_NAME
     number=inventory.attempt
     binding=dict(job_ref=inventory.task_ref,
@@ -234,7 +249,8 @@ def _capture(root,job,record,*,inventory):
         if all(mechanism.get(key)==expected[key] for key in ('mechanism_ref','source_h','source_h_ref')):selected[_evidence_key(row)]=row
     value=dict(version=1,binding=binding,evidence=list(selected.values()),unknown=unknown,
         prior_unknown=((job.get('search') or {}).get('breadth') or {}).get('prior_unknown',False),
-        capacity=capacity,omitted_evidence=0,omitted_unknown=0)
+        capacity=capacity,omitted_evidence=0,omitted_unknown=0,
+        **(dict(file_correction=inventory.file_correction) if inventory.file_correction is not None else {}))
     c.write(path,value);path.chmod(0o400)
     return value
 
@@ -261,6 +277,8 @@ def _validate(root,job,record,*,inventory,source_attempt=None):
         raw_ref=c.file_ref(c.regular(record/'science-output.json',limit=None)),
         source_attempt=source_attempt)
     if value.get('version')!=1 or value.get('binding')!=expected:raise history.ObserverIntegrityError('Worker fact snapshot binding changed')
+    if 'file_correction' in value and value['file_correction']!=inventory.file_correction:
+        raise history.ObserverIntegrityError('Worker file correction differs from its accepted terminal error')
     # A frozen prefix row already passed its original producer's checks. Match
     # its complete saved descriptor, then check this task's current H binding.
     prefix={}
@@ -352,16 +370,23 @@ def assessment(root,job,science,record,*,inventory,source_attempt=None):
     """Coverage of this task's own authored findings; no scientific screened verdict."""
     if not repair_applicable(job):return dict(status='not_applicable',missing=[],blocked=[],reason=None)
     correction=inventory.caller_correction
-    if not applicable(job) and correction is None:
+    if not applicable(job) and correction is None and inventory.file_correction is None:
         return dict(status='not_applicable',missing=[],blocked=[],reason=None)
     if not applicable(job) and not (record/FACT_NAME).exists():
         None  # The owner supplies accepted delivery facts in inventory.
     facts=validate(root,job,record,inventory=inventory,source_attempt=source_attempt)
-    if facts['capacity'] or facts['unknown'] or facts['prior_unknown']:correction=None
+    file_correction=facts.get('file_correction')
+    if facts['capacity'] or facts['unknown'] or facts['prior_unknown']:correction=file_correction=None
+    file_blocked=(finding_coverage(science,[],[file_correction['mechanism_ref']])['blocked'] if file_correction else set())
+    file_reason=('worker_decision' if science.get('stage_intent')=='decision'
+        else 'scientific_blocked' if file_blocked else None)
     if not applicable(job):
-        return dict(status='incomplete' if correction else 'not_applicable',
-            missing=[correction['mechanism_ref']] if correction else [],blocked=[],reason=None,
-            **(dict(facts_ref=c.record_ref(c.regular(record/FACT_NAME)),caller_correction=correction) if correction else {}))
+        active=correction or file_correction
+        return dict(status='partial' if file_correction and file_reason else 'incomplete' if active else 'not_applicable',
+            missing=[active['mechanism_ref']] if active else [],blocked=sorted(file_blocked),reason=file_reason if file_correction else None,
+            **(dict(facts_ref=c.record_ref(c.regular(record/FACT_NAME))) if active else {}),
+            **(dict(caller_correction=correction) if correction else {}),
+            **(dict(file_correction=file_correction) if file_correction else {}))
     expected={row['mechanism_ref'] for row in _obligations(job)}
     coverage=finding_coverage(science,facts['evidence'],expected)
     known=coverage['observed'];blocked=coverage['blocked']
@@ -375,10 +400,14 @@ def assessment(root,job,science,record,*,inventory,source_attempt=None):
         # the refusal at the bridge producer before this consumer sees it.
         missing=sorted(set(missing)|{correction['mechanism_ref']})
         reason=None
+    if file_correction is not None:
+        missing=sorted(set(missing)|{file_correction['mechanism_ref']})
+        reason=file_reason or reason
     return dict(status='partial' if reason else 'incomplete' if missing else 'complete',missing=missing,blocked=sorted(blocked),reason=reason,
         facts_ref=c.record_ref(c.regular(record/FACT_NAME)),
         **(dict(reference_clarification=sorted(coverage['unresolved'])) if facts['evidence'] and coverage['unresolved'] else {}),
-        **(dict(caller_correction=correction) if correction is not None else {}))
+        **(dict(caller_correction=correction) if correction is not None else {}),
+        **(dict(file_correction=file_correction) if file_correction is not None else {}))
 
 
 def require_delivery(root,job,science,record,*,inventory,source_attempt=None):
@@ -394,6 +423,15 @@ def require_delivery(root,job,science,record,*,inventory,source_attempt=None):
                 reason=validate_exit(root,job,record,value['work_exit'])
                 if value['reason']!=reason:raise history.ObserverIntegrityError('Stage ending changed its verified Worker exception')
                 return dict(result,status='partial',reason=reason)
+        failure=result.get('file_correction')
+        if failure is not None:
+            error=WorkRepairRequired('PermissionError (EACCES). Read '+failure['log']+
+                '. Reuse retained results. '
+                'Do not retrain, rerun completed experiments or copy retained originals again. '
+                'You may reject all candidates. Keep failed call, permissions and budget. '
+                'Correct author-file closeout if needed; otherwise set stage_intent=decision and state any blocker.')
+            error.inventory=inventory
+            raise error
         diagnosis=('Correct the unaccepted request for '+result['caller_correction']['mechanism_ref']+': '+
             result['caller_correction']['diagnostic']+'. ' if result.get('caller_correction') else '')
         error=WorkRepairRequired(diagnosis+'Complete the missing assigned observations: '+', '.join(result['missing'])+
@@ -409,7 +447,7 @@ def require_output_clarification(science,result):
     Alternative keys identify an output question only. They supply neither a
     blocker nor an observation, and canonical reused claims still need originals.
     """
-    if result['status']!='incomplete' or result.get('caller_correction'):return
+    if result['status']!='incomplete' or result.get('caller_correction') or result.get('file_correction'):return
     if result.get('reference_clarification'):
         from .output_repair import OutputRepairRequired
         raise OutputRepairRequired('worker_delivery_reference',

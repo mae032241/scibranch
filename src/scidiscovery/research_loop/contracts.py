@@ -1087,6 +1087,7 @@ class CurrentInventory:
     science_error: Exception | None = None
     interpretation: dict | None = None
     caller_correction: dict | None = None
+    file_correction: dict | None = None
     observation_document: dict | None = None
     observation_inputs: dict | None = None
     native_meter: dict | None = None
@@ -1176,6 +1177,7 @@ def accept_current_inventory(root: Path, step: int):
     inventory.input_coverage=history._accept_managed_input_coverage(root,job,calls) if calls else None
     if worker_delivery.repair_applicable(job) and (record/'science-output.json').exists():
         inventory.caller_correction=worker_delivery._caller_correction(root,job,record)
+        inventory.file_correction=worker_delivery._file_correction(root,job,inventory=inventory)
         inventory.delivery=worker_delivery._capture(root,job,record,inventory=inventory)
     if needs_checkpoint:
         inventory.checkpoint=checkpoint._capture(root,job,record,inventory=inventory)
