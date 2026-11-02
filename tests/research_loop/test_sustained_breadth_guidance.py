@@ -97,14 +97,16 @@ def test_normal_prepared_scientific_request_delivers_sustained_breadth_and_froze
         assert c.AUTHOR_EVIDENCE_GUIDANCE not in json.dumps(task)
         for concept in ('Reuse A/W reports/arrays/code/full pool',
                 'no routine rechecks/refits',
-                'Check decision-changing conflicts/gaps; expand as needed',
-                'New candidates/tuning/bulk retests: W',
+                'Minor gaps: light checks',
+                'bundle substantive unmet-goal tests/diagnostics/methods: continue_w(improve)',
+                'Only evidenced need to revise/add mechanisms: revise_h(minimal executable test)',
+                'even if methods improve',
                 'Changed bases limit comparisons',
-                '2-3 full procedures if useful/affordable; no quota/score default',
-                'revise_h(minimal executable test); else continue_w', 'May reject all',
+                'useful affordable full-procedure comparisons; no quota', 'May reject all',
                 'Publish own reports/executed code+helpers to outputs',
                 'cite managed originals'):
             assert concept in transmitted
+        assert '2-3 full procedures' not in transmitted
     else:
         assert 'Reuse exact driver/report refs/conditions' in transmitted
         assert 'full tuning/output procedures; deliver from that procedure' in transmitted
@@ -263,7 +265,13 @@ def test_a_gap_or_bottleneck_revision_adds_distinct_route_with_stable_refs_and_f
         change_criterion='A matched public discriminator changes the mechanism choice.')
     assert payload['search_review']['next_focus'] is None
     assert payload['portfolio_review']['main_line'] == 'h001.m1'
-    h_job = c.build_job(root, 4, 'H', [1, 2, 3], instruction=payload['route_reason'])
+    a_job = c.read(root / 'jobs/003.json')
+    role, parents, instruction, evidence_return, current_h, current_w = controller._route(
+        root, 3, 'A', payload, a_job, 1, 2)
+    assert (role, parents, instruction, evidence_return, current_h, current_w) == (
+        'H', [1, 2, 3], revision_reason, None, 1, 2)
+    h_job = c.build_job(root, 4, role, parents, instruction=instruction,
+        evidence_return=evidence_return)
     h_job_bytes = (root / 'jobs/004.json').read_bytes()
     h_task = c.read(c.workspace(root, 4) / 'science-task.json')
     assert h_task['decision_context']['source_action'] == 'revise_h'

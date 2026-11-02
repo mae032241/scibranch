@@ -105,9 +105,11 @@ def test_a_breadth_judgment_reaches_actual_native_prompt_with_custom_guidance(tm
     work = c.workspace(root, 1)
     task = c.read(work / 'science-task.json')
     judgment = guidance.STAGE_PLANNING['A']
-    for concept in ('Reuse A deltas/scripts/full pool', 'Target decision gaps',
-            'Gaps/bottlenecks/assumption/criteria changes',
-            'revise_h(minimal executable test); else continue_w'):
+    for concept in ('Reuse A/W reports/arrays/code/full pool', 'no routine rechecks/refits',
+            'Minor gaps: light checks',
+            'bundle substantive unmet-goal tests/diagnostics/methods: continue_w(improve)',
+            'Only evidenced need to revise/add mechanisms: revise_h(minimal executable test)',
+            'even if methods improve'):
         assert concept.lower() in judgment.lower()
     record = execution.origin(root, 1)
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json'),

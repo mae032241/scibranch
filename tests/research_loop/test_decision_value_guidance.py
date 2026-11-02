@@ -113,11 +113,12 @@ def test_prepared_literal_and_current_fallback_are_not_rewritten(tmp_path, monke
     assert all(path.read_bytes() == raw for path, raw in originals.items())
 
 
-def assessment_with_comparison_recipe(root, action, next_action='continue_w'):
+def assessment_with_comparison_recipe(root, action, next_action='continue_w', *,
+        instruction=None, worker_request=None):
     """Seal authored A science with its optional request, without a native call."""
     job = c.build_job(root, 3, 'A', [1, 2])
     record = c.host_record(c.workspace(root, 3))
-    instruction = 'Resolve the target-condition gap: compare the proposed 2x2 grid, then return to A.'
+    instruction = instruction or 'Resolve the target-condition gap: compare the proposed 2x2 grid, then return to A.'
     payload = dict(summary='The broad H goal remains unmet',
         scientific_result='The initial observation has not resolved the target-condition gap; no global completion or candidate selection is justified.',
         limitations=['Synthetic scientific claims only; no model or experiment executed.'],
@@ -125,7 +126,8 @@ def assessment_with_comparison_recipe(root, action, next_action='continue_w'):
         search_review=dict(dispositions=[], next_focus=dict(mechanism_ref='h001.m1', action=action)),
         decision_request=dict(decision='mechanism', question='Which related change resolves the target-condition gap?',
             change_criterion='Retained fair controls show that the target-condition gap is resolved.'),
-        worker_request=dict(proposed_grid='2x2: two candidate methods by two target conditions',
+        worker_request=worker_request if worker_request is not None else dict(
+            proposed_grid='2x2: two candidate methods by two target conditions',
             return_point='Return to A after the four comparisons.'))
     fixture_portfolio_review(root, job, payload)
     c.write(record/'native-intent.json', dict(task_ref=c.record_ref(root/'jobs/003.json')))
@@ -138,18 +140,20 @@ def assessment_with_comparison_recipe(root, action, next_action='continue_w'):
     return instruction, record
 
 
-def comparison_recipe_stage(tmp_path, action, *, next_action='continue_w'):
+def comparison_recipe_stage(tmp_path, action, *, next_action='continue_w',
+        instruction=None, worker_request=None, h_choice=None):
     root = prepare(tmp_path, guidance.DEFAULT, search_policy=search.DEFAULT_POLICY, launcher=[sys.executable],
         node_budget_mode='soft', node_budget_policy=node_policy(),
         worker_fragment_policy=dict(context='same_session'),
         resume_policy=dict(max_attempts=2, protocol='codex_exec_resume', usage_scope='turn', output_repair=True))
     finish(root, 1, 'H', [], action='experiment',
         text='Investigate related scientific improvements until the target-condition gap is resolved; preserve all required controls.',
-        search_choice=dict(scope='Resolve the target-condition gap within this mechanism',
+        search_choice=h_choice if h_choice is not None else dict(scope='Resolve the target-condition gap within this mechanism',
             commitments=[dict(label='Related candidate changes', minimal_test='Fair target-condition comparison', existing_ref=None)],
             focus=dict(index=1, action='improve')))
     finish(root, 2, 'W', [1], text='The initial comparison leaves the target-condition gap unresolved.')
-    instruction, record = assessment_with_comparison_recipe(root, action, next_action)
+    instruction, record = assessment_with_comparison_recipe(root, action, next_action,
+        instruction=instruction, worker_request=worker_request)
     return root, instruction, record
 
 
@@ -174,9 +178,9 @@ def test_improve_a_comparison_recipe_preserves_local_scientific_iterations_and_o
     assert search.launch_reason(root, job) is None
     assert job['scientific_work_unit'] == guidance.WORK_UNITS['improve']
     assert job['scientific_work_unit'] in task['question']
-    assert 'In H, follow findings/unmet goals beyond recipes' in task['question']
-    assert 'return to A for independent strategy/judgment' in task['question']
-    assert 'direction-changing evidence, stalls, scope changes, blockers or limits' in task['question']
+    assert 'In H, batch coherent work toward unmet goals beyond recipes' in task['question']
+    assert 'finish implementation/experiment/check followups before independent A strategy/judgment' in task['question']
+    assert 'Return for direction changes, stalls, scope changes, blockers or limits' in task['question']
     assert 'Retain spent budgets' in task['question']
     assert job['worker_fragment_policy'] == dict(context='same_session')
     assert 'Continuation configured: same_session;' in task['stage_response']
@@ -201,6 +205,73 @@ def test_improve_a_comparison_recipe_preserves_local_scientific_iterations_and_o
     monkeypatch.setitem(guidance.WORK_UNITS, 'improve', 'Future guidance must not replace this accepted work unit.')
     assert c.build_job(root, 4, 'W', [1, 2, 3], instruction=instruction) == job
     assert all(path.read_bytes() == raw for path, raw in {**originals, **frozen}.items())
+
+
+@pytest.mark.parametrize('instruction,proposal', [
+    pytest.param(
+        'Pressure-test the retained OMP and robust diagnostic estimators under changed perturbation '
+        'conditions. State the comparison limits, then develop and test useful improvements within '
+        'the existing mechanisms toward the unmet original goal before independent A assessment.',
+        dict(proposed_grid='2x2: retained estimators by changed perturbation conditions',
+            followups='Use observed failures to choose useful implementation and experiment followups.',
+            return_point='Return for independent A judgment after coherent in-scope work or an actual limit.'),
+        id='r12-retained-estimator-pressure-test'),
+    pytest.param(
+        'Decompose the retained OMP residual error into support recovery and coefficient estimation '
+        'effects. Use that diagnostic to choose and test useful solver improvements within the '
+        'existing mechanism toward the unmet original goal before independent A assessment.',
+        dict(proposed_diagnostic='Separate support recovery and coefficient estimation error.',
+            followups='Develop and compare useful solver changes informed by the residual diagnostic.',
+            return_point='Return for independent A judgment after coherent in-scope work or an actual limit.'),
+        id='r12-residual-error-diagnostic'),
+])
+def test_existing_mechanism_pressure_tests_and_diagnostics_route_directly_to_batched_w(
+        tmp_path, instruction, proposal):
+    # Minimized authored r12 counterexamples exercise delivery and routing, not
+    # whether an LLM will choose this advice or whether fixture science succeeds.
+    h_choice = dict(scope='Improve reconstruction within the retained sparse and robust estimation mechanisms.',
+        commitments=[
+            dict(label='Sparse reconstruction with OMP', existing_ref=None,
+                minimal_test='Compare support recovery and coefficient estimation under public perturbations.'),
+            dict(label='Robust diagnostic estimation', existing_ref=None,
+                minimal_test='Compare robustness under the same public perturbations.')],
+        focus=dict(index=1, action='improve'))
+    root, instruction, record = comparison_recipe_stage(tmp_path, 'improve',
+        instruction=instruction, worker_request=proposal, h_choice=h_choice)
+    original_paths = [root / 'jobs/001.json', c.host_record(c.workspace(root, 1)) / 'science-output.json',
+        root / 'jobs/003.json', record / 'science-output.json', record / 'result-identity.json']
+    originals = {path: path.read_bytes() for path in original_paths}
+    a_job = c.read(root / 'jobs/003.json')
+    payload = c.validate(c.workspace(root, 3))
+    assert payload['next_action'] == 'continue_w'
+    assert c.read(record / 'result-identity.json')['control_outcome']['decision_status'] == 'applied'
+    role, parents, routed_instruction, evidence_return, current_h, current_w = controller._route(
+        root, 3, 'A', payload, a_job, 1, 2)
+    assert (role, parents, routed_instruction, evidence_return, current_h, current_w) == (
+        'W', [1, 2, 3], instruction, None, 1, 2)
+    job = c.build_job(root, 4, role, parents, instruction=routed_instruction,
+        evidence_return=evidence_return)
+    task = c.read(c.workspace(root, 4) / 'science-task.json')
+    assert job['role'] == 'W' and job['search']['focus'] == dict(mechanism_ref='h001.m1', action='improve')
+    assert search.launch_reason(root, job) is None
+    state = search.project(root, 4)
+    assert set(state['mechanisms']) == {'h001.m1', 'h001.m2'}
+    assert all(row['original_h'] == row['source_h'] == 1 for row in state['mechanisms'].values())
+    assert c.read(c.host_record(c.workspace(root, 1)) / 'science-output.json')['search_plan'] == h_choice
+    context = task['decision_context']
+    assert context['source_action'] == 'continue_w'
+    assert context['source_original'] == 'inputs/parents/003/conclusion.json'
+    assert context['original_instruction'] == instruction == job['instruction']
+    assert 'Concrete execution methods are proposals' in context['authority']
+    assert payload['worker_request'] == proposal
+    assert all(value not in task['question'] for value in proposal.values())
+    assert '2x2' not in task['question']  # No proposal-derived execution quota.
+    assert job['scientific_work_unit'] == guidance.WORK_UNITS['improve']
+    for concept in ('batch coherent work toward unmet goals beyond recipes',
+            'finish implementation/experiment/check followups before independent A strategy/judgment',
+            'Return for direction changes, stalls, scope changes, blockers or limits'):
+        assert concept in task['question']
+    assert all(path.read_bytes() == raw for path, raw in originals.items())
 
 
 @pytest.mark.parametrize('action', ['screen', 'validate', 'repair'])

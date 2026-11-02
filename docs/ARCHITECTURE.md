@@ -188,15 +188,19 @@ records this rule; earlier summaries are rejected without replay or migration.
 
 Normal A planning checks whether proxy, validation and audit evidence addresses
 the original goal, including conditional ranking reversals and same-family tuning.
-A goal-relevant hypothesis missing from the current mechanisms or a scientific
-bottleneck calls for `revise_h`, even while current methods still improve. A gives
-H the gap, retained evidence and decision question. H revises, reopens or adds
-mechanisms with distinct assumptions or failure modes and discriminating tests,
-revisiting live alternatives beyond screening. Within adequate H scope, bounded
-methods, improvement and implementation repair remain W work via `continue_w`.
-Missing inputs remain missing; evidence can also support concentration, deferral
-or finite closure. This is scientific advice, with no new response fields, quotas
-or admission gates.
+Tests, pressure tests, diagnostics and method improvements within existing
+mechanisms go to W through `continue_w`; ordinary iterative research uses
+`improve`. A missing observation or need for another test alone does not call for
+H revision. `revise_h` is for evidence that the current mechanism is bottlenecked
+or insufficient for the original goal and needs revised or new scientific
+mechanisms. That can include a missing causal explanation outside current scope
+even while some current-method metrics improve; A need not wait for zero progress
+or exhaust every possible method. A gives H the mechanism limitation, retained
+evidence and decision question. H revises, reopens or adds mechanisms with distinct
+assumptions or failure modes and minimal executable discriminators, revisiting
+live alternatives beyond screening. Missing inputs remain missing; evidence can
+also support concentration, deferral or finite closure. This is scientific advice,
+with no new response fields, quotas or admission gates.
 Custom and prepared role literals remain frozen; current launcher planning advice
 does not authorize new work during protected FINAL, closeout or output repair.
 Role advice, shared A evidence judgment, normal-stage planning and response field
@@ -701,9 +705,18 @@ and the next minimal discriminator, checking concrete conflicts as needed rather
 than routinely repeating A's full-pool review. A prioritizes reusing existing A/W
 reports, result arrays, executed scripts/code and the full candidate pool while
 retaining independent judgment; this does not default to rechecking, rerunning or
-retraining. Targeted checks or refits address concrete conflicts, missing evidence
-or questions likely to change a decision, with expansion as needed; new-candidate
-development, tuning studies and bulk retests belong to W. Reused artifacts and
+retraining. A handles minor issues through reuse or light checks, without a default
+extra W round. Targeted checks or refits address concrete conflicts, missing
+evidence or questions likely to change a decision, with expansion as needed.
+A bundles substantive tests, diagnostics, new-candidate development, tuning and
+retests toward unmet original goals for W. Within `improve`, W completes a useful,
+coherent batch of implementation, experiment and check followups before returning
+for independent A strategy and judgment; each small finding need not cause a new
+A/W cycle. W still returns for direction changes, stalls, scope changes, blockers
+or actual limits. Neither role must invent filler work, exhaust budgets or meet an
+experiment quota. `validate` remains bounded to its assigned decision-changing
+gap and `repair` to the exact failed observation; iterative research does not
+expand either unit's permissions. Reused artifacts and
 helper dependencies use the current task's declared input paths; old author
 workspace absolute aliases are not current locators. Authors publish reusable
 diagnostics and their executed source and necessary

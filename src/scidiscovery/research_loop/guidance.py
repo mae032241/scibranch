@@ -2,7 +2,7 @@
 MAX_BYTES = 2560
 WORK_UNITS = {
     'screen': 'Compare assigned mechanisms cheaply; report observations or obstacles. Calls alone do not establish screening.',
-    'improve': 'In H, follow findings/unmet goals beyond recipes; return to A for independent strategy/judgment, direction-changing evidence, stalls, scope changes, blockers or limits. Retain spent budgets.',
+    'improve': 'In H, batch coherent work toward unmet goals beyond recipes; finish implementation/experiment/check followups before independent A strategy/judgment. Return for direction changes, stalls, scope changes, blockers or limits. Retain spent budgets.',
     'validate': 'Resolve the assigned decision-changing gap with fair controls; stop when resolved or blocked, without a new search or unlimited proof.',
     'repair': 'Repair the exact failed observation within H and the original allowance. Preserve checks/accepted evidence; reconcile unknown calls, never replay.',
 }
@@ -28,7 +28,7 @@ OPPORTUNITY = {
 # This plans work only; it never changes H scope or execution admission.
 STAGE_PLANNING = {
     'H': 'H owns questions/mechanisms/criteria; W owns methods/grids. Use A evidence/limits/exact refs for mechanism decisions; no default A/full-pool redo. Check concrete conflicts/gaps as needed. Compare plausible explanations; justify a single line. Mechanisms differ in assumptions/failure modes, not parameters. Revise/reopen/add mechanisms beyond screening with a minimal executable discriminator. minimal_test: public metric/conditions, reference procedure/evaluation driver; repeats only if useful. Publish reusable owned reports/results/executed scripts+needed helpers via declared outputs (usually artifacts/); managed originals: refs only, no copies/links. No downstream budget/call/audit caps.',
-    'A': 'Reuse A/W reports/arrays/code/full pool; no routine rechecks/refits. Check decision-changing conflicts/gaps; expand as needed. New candidates/tuning/bulk retests: W. Changed bases limit comparisons. End: 2-3 full procedures if useful/affordable; no quota/score default. Gaps/bottlenecks/assumption/criteria changes: revise_h(minimal executable test); else continue_w. May reject all. Publish own reports/executed code+helpers to outputs; cite managed originals.',
+    'A': 'Reuse A/W reports/arrays/code/full pool; no routine rechecks/refits. Minor gaps: light checks; bundle substantive unmet-goal tests/diagnostics/methods: continue_w(improve). Only evidenced need to revise/add mechanisms: revise_h(minimal executable test), even if methods improve. Changed bases limit comparisons; useful affordable full-procedure comparisons; no quota. May reject all. Publish own reports/executed code+helpers to outputs; cite managed originals.',
     'W': 'Reuse exact driver/report refs/conditions; compare full tuning/output procedures; deliver from that procedure. Batch if useful; artifacts/ reports, work/ scratch.',
 }
 
