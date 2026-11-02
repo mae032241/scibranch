@@ -32,9 +32,9 @@ ACTIONS = {
 }
 MAX_FIXED_RESPONSE_BYTES = 3072
 AUTHOR_EVIDENCE_GUIDANCE = (
-    'Cite conditions, measured, inferred or proxy evidence, depth, open questions, input/resource gaps, uncertainty, unmet goals, criteria changes and tradeoffs. '
+    'Cite conditions, measured/inferred/proxy evidence, depth, gaps, uncertainty, unmet goals, criteria changes/tradeoffs. '
     'Compare strongest feasible rivals on cheapest decision-changing evidence; no incumbent or unknown-optimality veto. '
-    'Uncertainty allows backed focus, deferral/revisit or finite closure; waive only backed negatives/infeasibility. Calls and audits are not proof.')
+    'Backed focus/defer/revisit/finite closure under uncertainty; waive only backed negatives/infeasibility. Calls and audits are not proof.')
 NATIVE_TASK_INSTRUCTION = (
     'Read science-task.json/exact inputs. Honor goal/checks, scope/permissions and budget. '
     'Follow task rules; return JSON, no hashes/manifests/validators.')

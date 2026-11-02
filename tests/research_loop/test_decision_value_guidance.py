@@ -54,7 +54,7 @@ def test_current_role_advice_reaches_frozen_science_view_with_original_constrain
     assert 'Calls and audits are not proof' in c.AUTHOR_EVIDENCE_GUIDANCE
     assert 'Honor checks' in guidance.DEFAULT['W']
     assert 'Initial/grant opportunities are not trial caps' in guidance.DEFAULT['W']
-    assert 'W owns methods and grids' in guidance.STAGE_PLANNING['H']
+    assert 'W owns methods/grids' in guidance.STAGE_PLANNING['H']
     assert 'differing predictions, signal, priority and reopening condition' in guidance.DEFAULT['H']
     assert 'Preserve user/task constraints, required counts and commitments' in guidance.DEFAULT['H']
 

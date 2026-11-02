@@ -696,6 +696,16 @@ shared conditions and useful repetitions. This advice adds no quota, score-based
 default or acceptance gate. FINAL uses existing evidence, and authors may reject
 all candidates or report missing comparisons with a finite conclusion.
 
+H uses A's evidence, limitations and exact references to decide mechanism changes
+and the next minimal discriminator, checking concrete conflicts as needed rather
+than routinely repeating A's full-pool review. A independently checks gaps that
+can change a route or selection and may expand the review or perform bounded
+original refits; new-candidate development, tuning studies and bulk retests belong
+to W. Authors publish reusable diagnostics and their executed source and necessary
+helpers through the existing declared outputs, following task code and project
+write rules. Managed originals are cited directly. Unpublished diagnostics remain
+a stated gap, without a new nonempty-material or repair gate.
+
 A explains candidate criteria, any revisions, supporting evidence and tradeoffs in
 ordinary scientific prose. selection_explanation is optional and has no nested
 completeness gate. Exact candidate identity, frozen inputs, audit qualification and

@@ -64,8 +64,8 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
         # The same developer layer follows the complete frozen scientific literal.
         instruction+='\n'+format_rule
         prompt=('Read science-task.json/inputs; JSON only. '
-            'Edit code/ or work/ copies; no control wrappers/hashes. '
-            'work/budget-status.json: stale/partial billing, no grant; unknown tokens!=0; input includes cache.')
+            'Use declared writable paths; no control wrappers/hashes. '
+            'work/budget-status.json: stale/partial, no grant; unknown tokens!=0; input has cache.')
         if final_return:
             prompt+=(' Protected FINAL: conclude now; no new role/audit/experiment. '
                 'Reference token/time/step ceilings do not revoke this accepted return; original call limits, '

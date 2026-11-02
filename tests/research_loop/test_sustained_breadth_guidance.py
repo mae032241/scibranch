@@ -81,9 +81,11 @@ def test_normal_prepared_scientific_request_delivers_sustained_breadth_and_froze
         assert concept in reading
         assert concept not in transmitted
     if role == 'H':
-        for concept in ('revise, reopen or add mechanisms beyond screening',
-                'minimal_test set public metric/conditions, reference procedure and evaluation driver',
-                'Seed/split/perturbation repeats only if useful'):
+        for concept in ('Use A evidence/limits/exact refs for mechanism decisions',
+                'no default A/full-pool redo', 'Check concrete conflicts/gaps as needed',
+                'Revise/reopen/add mechanisms beyond screening',
+                'minimal_test: public metric/conditions, reference procedure/evaluation driver',
+                'repeats only if useful'):
             assert concept in transmitted
     elif role == 'A':
         assert 'portfolio_assessment' in task
@@ -93,14 +95,25 @@ def test_normal_prepared_scientific_request_delivers_sustained_breadth_and_froze
         assert 'uncertainty' not in task['portfolio_response'].lower()
         assert transmitted.count(c.AUTHOR_EVIDENCE_GUIDANCE) == 1
         assert c.AUTHOR_EVIDENCE_GUIDANCE not in json.dumps(task)
-        for concept in ('previews do not prune rivals/procedures',
-                'changed bases limit comparisons',
+        for concept in ('Reuse A deltas/scripts/full pool', 'Target decision gaps',
+                'expand checks/bounded original refits as needed',
+                'New candidates/tuning/bulk retests: W',
+                'Changed bases limit comparisons',
                 '2-3 full procedures if useful/affordable, no quota/score default',
-                'revise_h: minimal executable test; else continue_w', 'May reject all'):
+                'revise_h(minimal executable test); else continue_w', 'May reject all',
+                'Publish own reports/executed code+needed helpers to outputs',
+                'cite managed originals'):
             assert concept in transmitted
     else:
         assert 'Reuse exact driver/report refs/conditions' in transmitted
         assert 'full tuning/output procedures; deliver from that procedure' in transmitted
+    assert 'Use declared writable paths; no control wrappers/hashes' in transmitted
+    if role == 'H':
+        for concept in ('H owns questions/mechanisms/criteria',
+                'Publish reusable owned reports/results/executed scripts+needed helpers',
+                'via declared outputs (usually artifacts/)',
+                'managed originals: refs only, no copies/links'):
+            assert concept in transmitted
     assert schema['additionalProperties'] is True  # Science extras remain allowed without a repeated banner.
 
 

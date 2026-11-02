@@ -49,7 +49,7 @@ def test_actual_prepared_worker_and_a_views_deliver_symmetric_choice_and_adaptiv
     expected=guidance.OPPORTUNITY if opportunity and supplied is guidance.DEFAULT else supplied
     assert c.settings(root)['role_guidance']==expected
     assert sum(len(text.encode()) for text in expected.values())<=guidance.MAX_BYTES==2560
-    assert 'Compare plausible explanations before concentrating' in guidance.STAGE_PLANNING['H']
+    assert 'Compare plausible explanations' in guidance.STAGE_PLANNING['H']
     assert 'justify a single line' in guidance.STAGE_PLANNING['H']
     text=worker_job['native_role_instruction']
     assert text==expected['W']
@@ -105,9 +105,9 @@ def test_a_breadth_judgment_reaches_actual_native_prompt_with_custom_guidance(tm
     work = c.workspace(root, 1)
     task = c.read(work / 'science-task.json')
     judgment = guidance.STAGE_PLANNING['A']
-    for concept in ('Reuse A deltas/scripts/full pool',
-            'Hypothesis gaps/bottlenecks/changed assumptions/criteria',
-            'revise_h: minimal executable test; else continue_w'):
+    for concept in ('Reuse A deltas/scripts/full pool', 'Target decision gaps',
+            'Gaps/bottlenecks/assumption/criteria changes',
+            'revise_h(minimal executable test); else continue_w'):
         assert concept.lower() in judgment.lower()
     record = execution.origin(root, 1)
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json'),
