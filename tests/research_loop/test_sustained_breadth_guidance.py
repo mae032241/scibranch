@@ -4,13 +4,16 @@ Authored findings and inert execution prove delivery and identity contracts only
 not the scientific effectiveness of the advice or the fixture mechanisms.
 """
 import json
+import os
+from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import backends, contracts as c, controller, guidance, native, search
+from scidiscovery.research_loop import accepted_budget, backends, contracts as c, controller, guidance, native, search
 from execution_fixtures import execution_registry
 from test_breadth_science import findings, prepare as managed_prepare, run, worker
 from test_history_handoff import finish, fixture_final_coverage, fixture_portfolio_review
+from test_result_schema import rendered_contract
 
 
 def prepare(tmp_path, advice):
@@ -25,17 +28,18 @@ def prepare(tmp_path, advice):
     return root
 
 
-@pytest.mark.parametrize('role', ['H', 'A'])
+@pytest.mark.parametrize('role', ['H', 'W', 'A'])
 @pytest.mark.parametrize('custom', [False, True])
 @pytest.mark.parametrize('backend_name', ['codex', 'protocol'])
 def test_normal_prepared_scientific_request_delivers_sustained_breadth_and_frozen_literal(
         tmp_path, monkeypatch, role, custom, backend_name):
     advice = {key: 'Preserved custom scientific instruction for ' + key for key in 'HWAE'} if custom else guidance.DEFAULT
     root = prepare(tmp_path, advice)
-    if role == 'A':
+    if role in {'W', 'A'}:
         finish(root, 1, 'H', [], action='experiment', search_choice=plan())
+    if role == 'A':
         finish(root, 2, 'W', [1], mechanism_findings=findings(blocked=('h001.m1',)))
-    step, parents = (3, [1, 2]) if role == 'A' else (1, [])
+    step, parents = {'H': (1, []), 'W': (2, [1]), 'A': (3, [1, 2])}[role]
     job = c.build_job(root, step, role, parents)
     work = c.workspace(root, step)
     task = c.read(work / 'science-task.json')
@@ -77,11 +81,11 @@ def test_normal_prepared_scientific_request_delivers_sustained_breadth_and_froze
         assert concept in reading
         assert concept not in transmitted
     if role == 'H':
-        for concept in ('key assumptions or failure modes',
-                'Use retained evidence and A gaps to revise, reopen or add mechanisms',
-                'discriminating tests', 'revisiting live alternatives beyond screening'):
+        for concept in ('revise, reopen or add mechanisms beyond screening',
+                'minimal_test set public metric/conditions, reference procedure and evaluation driver',
+                'Seed/split/perturbation repeats only if useful'):
             assert concept in transmitted
-    else:
+    elif role == 'A':
         assert 'portfolio_assessment' in task
         assert task['portfolio_response'] == c.PORTFOLIO_RESPONSE
         assert c.PORTFOLIO_RESPONSE not in transmitted
@@ -89,20 +93,28 @@ def test_normal_prepared_scientific_request_delivers_sustained_breadth_and_froze
         assert 'uncertainty' not in task['portfolio_response'].lower()
         assert transmitted.count(c.AUTHOR_EVIDENCE_GUIDANCE) == 1
         assert c.AUTHOR_EVIDENCE_GUIDANCE not in json.dumps(task)
-        for concept in ('Read A deltas', 'conditional rank', 'same-family tuning',
-                'hypothesis gap, scientific bottleneck or changed assumptions/criteria',
-                'revise_h with gap, evidence and question despite method gains',
-                'otherwise continue_w for bounded public method work'):
+        for concept in ('previews do not prune rivals/procedures',
+                'changed bases limit comparisons',
+                '2-3 full procedures if useful/affordable, no quota/score default',
+                'revise_h: minimal executable test; else continue_w', 'May reject all'):
             assert concept in transmitted
+    else:
+        assert 'Reuse exact driver/report refs/conditions' in transmitted
+        assert 'full tuning/output procedures; deliver from that procedure' in transmitted
+    assert schema['additionalProperties'] is True  # Science extras remain allowed without a repeated banner.
 
 
-@pytest.mark.parametrize('role', ['H', 'A'])
+@pytest.mark.parametrize('role', ['H', 'W', 'A'])
+@pytest.mark.parametrize('backend_name', ['codex', 'protocol'])
 @pytest.mark.parametrize('gate', ['final_return', 'closeout', 'final_report', 'final_only',
     'output_repair', 'work_repair'])
-def test_existing_final_closeout_and_repair_gates_suppress_new_work_planning(tmp_path, role, gate):
+def test_existing_final_closeout_and_repair_gates_suppress_new_work_planning(tmp_path, role, backend_name, gate):
     root = prepare(tmp_path, guidance.DEFAULT)
-    job = c.build_job(root, 1, role, [])
-    task = c.read(c.workspace(root, 1) / 'science-task.json')
+    if role == 'W':
+        finish(root, 1, 'H', [], action='experiment', search_choice=plan())
+    step, parents = (2, [1]) if role == 'W' else (1, [])
+    job = c.build_job(root, step, role, parents)
+    task = c.read(c.workspace(root, step) / 'science-task.json')
     options = {}
     intent = {}
     if gate == 'final_return':
@@ -113,13 +125,44 @@ def test_existing_final_closeout_and_repair_gates_suppress_new_work_planning(tmp
         intent[gate] = dict(code='fixture_diagnostic', diagnostic='Preserve the original scientific scope.')
     else:
         job = dict(job, **{gate: True})
-    prompt, _, _ = native.render_scientific_request(job, task, intent, backend_name='codex',
+    prompt, _, _ = native.render_scientific_request(job, task, intent, backend_name=backend_name,
         instruction_transport='prompt', **options)
     assert guidance.STAGE_PLANNING[role] not in prompt
     if gate == 'final_return':
         assert 'Protected FINAL: conclude now; no new role/audit/experiment.' in prompt
     elif gate == 'output_repair':
         assert 'No work/rerun/resubmit this turn' in prompt
+
+
+@pytest.mark.parametrize('backend_name', ['codex', 'protocol'])
+def test_frozen_long_worker_literal_and_work_unit_keep_the_actual_fragment_contract_bounded(tmp_path, backend_name):
+    # Retained literals are intentionally independent of future shorter defaults.
+    literal = ('Own methods/candidates within H; A suggests methods. Honor checks; use --mechanism. '
+        'Initial/grant calls protect screening opportunities, not trial totals. '
+        'Route scope changes via A to H; reconcile unknown calls, never replay. '
+        'Return to independent A, not global completion. No auxiliary agents.')
+    unit = ('In H, follow findings/global unmet goals beyond a recipe/contrast. '
+        'Return to A for required independent judgment, strategic choices/tradeoffs, '
+        'direction-changing counterevidence, stall/scope change/blocker or actual limits. Retain spent budgets.')
+    job = dict(role='W', handoff_protocol=c.HANDOFF_PROTOCOL, search={},
+        native_role_instruction=literal, scientific_work_unit=unit)
+    task = c.response_instructions(job)
+    backend = backends.selected(dict(native_backend=backend_name,
+        native_launcher_argv=['codex'] if backend_name == 'codex' else ['independent']),
+        schema_transport='prompt' if backend_name == 'codex' else None)
+    size, _, instruction, _ = rendered_contract(tmp_path, job, task,
+        dict(continuation_kind='fragment'), backend, remaining={},
+        execution_interface=dict(capabilities={}, result_protocol='local-result-v1', executor='local_execution:command'),
+        managed_command=['experiment'],
+        budget_status=dict(shared_seconds_remaining=0, shared_observed_tokens_remaining=0))
+    assert instruction.startswith(literal + '\n') and job['scientific_work_unit'] == unit
+    if os.environ.get('SCID_TEST_LOG_DIR'):
+        report = Path(os.environ['SCID_TEST_LOG_DIR']) / 'retained-worker-contract-sizes.jsonl'
+        report.parent.mkdir(parents=True, exist_ok=True)
+        with report.open('a') as stream:
+            stream.write(json.dumps(dict(backend=backend_name, fixed_bytes=size,
+                with_diagnostic_allowance=size + 512)) + '\n')
+    assert size + 512 <= c.MAX_FIXED_RESPONSE_BYTES == 3072
 
 
 def plan(*, revised=False):
@@ -154,6 +197,7 @@ def assess(root, action, *, main_line='h001.m1', revision_reason=None):
         discriminating_work=None, reason=reason))
     fixture_final_coverage(root, job, payload)
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/003.json')))
+    accepted_budget.accept_native(root, 3, record, c.read(record / 'native-intent.json'))
     c.write(record / 'science-output.json', payload)
     c.write(record / 'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
     c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, native_started=False,
@@ -206,6 +250,7 @@ def test_a_gap_or_bottleneck_revision_adds_distinct_route_with_stable_refs_and_f
     assert payload['search_review']['next_focus'] is None
     assert payload['portfolio_review']['main_line'] == 'h001.m1'
     h_job = c.build_job(root, 4, 'H', [1, 2, 3], instruction=payload['route_reason'])
+    h_job_bytes = (root / 'jobs/004.json').read_bytes()
     h_task = c.read(c.workspace(root, 4) / 'science-task.json')
     assert h_task['decision_context']['source_action'] == 'revise_h'
     assert h_task['decision_context']['original_instruction'] == revision_reason
@@ -229,7 +274,7 @@ def test_a_gap_or_bottleneck_revision_adds_distinct_route_with_stable_refs_and_f
     finish(root, 5, 'W', [4], mechanism_findings=findings('h004.m2', blocked=('h001.m1',)),
         preserve_native_intent=True)
     assert all(path.read_bytes() == original for path, original in originals.items())
-    assert c.read(root / 'jobs/004.json') == h_job
+    assert (root / 'jobs/004.json').read_bytes() == h_job_bytes
 
 
 @pytest.mark.process_e2e

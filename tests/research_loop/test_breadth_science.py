@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import breadth, contracts as c, controller, execution, experiment_client, experiments, history, lineage, native, search
+from scidiscovery.research_loop import accepted_budget, breadth, contracts as c, controller, execution, experiment_client, experiments, history, lineage, native, search
 from cov_execution import lineage as cov_lineage
 from execution_fixtures import execution_registry
 from test_cov_lineage import BACKEND
@@ -98,6 +98,7 @@ def a(root,step,parents,*,focus=None,dispositions=(),action='continue_w',mode='s
     fixture_portfolio_review(root,job,payload,portfolio_review)
     fixture_final_coverage(root,job,payload,final_coverage)
     c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json')))
+    accepted_budget.accept_native(root,step,record,c.read(record/'native-intent.json'))
     c.write(record/'science-output.json',payload)
     c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
     c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,native_started=False,usage=native.usage(root),raw_ref=c.file_ref(record/'science-output.json')))

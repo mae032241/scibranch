@@ -2,14 +2,14 @@
 MAX_BYTES = 2560
 WORK_UNITS = {
     'screen': 'Compare assigned mechanisms cheaply; report observations or obstacles. Calls alone do not establish screening.',
-    'improve': 'In H, follow findings/global unmet goals beyond a recipe/contrast. Return to A for required independent judgment, strategic choices/tradeoffs, direction-changing counterevidence, stall/scope change/blocker or actual limits. Retain spent budgets.',
+    'improve': 'In H, follow findings/unmet goals beyond recipes; return to A for independent strategy/judgment, direction-changing evidence, stalls, scope changes, blockers or limits. Retain spent budgets.',
     'validate': 'Resolve the assigned decision-changing gap with fair controls; stop when resolved or blocked, without a new search or unlimited proof.',
     'repair': 'Repair the exact failed observation within H and the original allowance. Preserve checks/accepted evidence; reconcile unknown calls, never replay.',
 }
 
 DEFAULT = {
-    'H': 'Choose screen for a cheap mechanism comparison; improve/repair/validate name one mechanism. Compare plausible explanations before concentrating; justify a single line. Each minimal_test states differing predictions, the discriminating signal, priority and reopening condition. Where useful, compare 2-3 mechanisms with the same data/evaluation in one W; this is no quota. Preserve user/task constraints, required counts and commitments; request E as needed.',
-    'W': 'Own methods/candidates within H; A proposes methods. Work incrementally; use the task catalog number for --mechanism. Initial/grant opportunities are not trial caps. Route scope changes via A to H; reconcile unknown calls, never replay. Return to independent A. No auxiliary agents.',
+    'H': 'Choose screen for mechanism comparison; improve/repair/validate name one mechanism. Each minimal_test states differing predictions, signal, priority and reopening condition. Preserve user/task constraints, required counts and commitments; request E as needed.',
+    'W': 'Own methods/candidates within H; A proposes methods. Honor checks; use --mechanism=task catalog number. Initial/grant opportunities are not trial caps. Route scope changes via A to H; reconcile unknown calls, never replay. Return to independent A, not global completion. No auxiliary agents.',
     'A': 'Assess progress independently.',
     'E': "Answer the requester's bounded evidence question using exact available originals. Return the scientific finding and its limitations to the requester. Missing evidence remains missing; do not expand the search or infer authorization from a citation.",
 }
@@ -27,9 +27,9 @@ OPPORTUNITY = {
 # Current launcher advice is separate from the immutable scientific literal.
 # This plans work only; it never changes H scope or execution admission.
 STAGE_PLANNING = {
-    'H': 'Choose mechanisms that differ in key assumptions or failure modes, not labels or parameter variants. Use retained evidence and A gaps to revise, reopen or add mechanisms and discriminating tests, revisiting live alternatives beyond screening. H owns questions, mechanisms and criteria; W owns methods and grids. Do not allocate downstream token/time budgets or execution/call/audit caps; control allowances govern.',
-    'A': 'Read A deltas; reuse retained assessments/scripts. Check proxy, validation and audit fit to goal, conditional rank reversals and same-family tuning. For a hypothesis gap, scientific bottleneck or changed assumptions/criteria, revise_h with gap, evidence and question despite method gains; otherwise continue_w for bounded public method work.',
-    'W': 'Publish new reports/scripts in artifacts/; work/ is scratch.',
+    'H': 'H owns questions, mechanisms and criteria; W owns methods and grids. Compare plausible explanations before concentrating; justify a single line. Mechanisms differ in assumptions/failure modes, not parameter variants. Use retained evidence/A gaps to revise, reopen or add mechanisms beyond screening with a minimal executable discriminator. In minimal_test set public metric/conditions, reference procedure and evaluation driver; cite exact originals for reuse. Seed/split/perturbation repeats only if useful. No downstream budget/call/audit caps.',
+    'A': 'Reuse A deltas/scripts/full pool; previews do not prune rivals/procedures. Check goal/proxy/audit fit, rank flips/tuning; changed bases limit comparisons. portfolio_review: exact rival/test refs. Near end compare 2-3 full procedures if useful/affordable, no quota/score default. Hypothesis gaps/bottlenecks/changed assumptions/criteria: revise_h: minimal executable test; else continue_w. May reject all.',
+    'W': 'Reuse exact driver/report refs/conditions; compare full tuning/output procedures; deliver from that procedure. Batch if useful; artifacts/ reports, work/ scratch.',
 }
 
 

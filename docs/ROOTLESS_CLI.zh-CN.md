@@ -774,6 +774,10 @@ W 的 null 仅保留其原先明确选择的旧输入，不表示转交所有收
 
 ## 路由与暂停
 
+普通阶段建议沿现有输入选择保留公开比较方案、评价脚本和完整流程的准确引用，比较条件变化须说明限制。
+有价值且可负担时，A 可在普通阶段请求少量竞争流程的共同条件比较；这不是配额，也不强制候选入池。
+FINAL 仅使用已有证据收口；缺少比较或全部候选被拒绝不会新增科学完整性门槛。
+
 H 选择 `experiment / analyze / extract / wait`；W 固定交 A；
 A 选择 `continue_w / revise_h / extract / deliver / wait / finish`，冻结启用候选审计能力时还可选 `audit`；E 返回请求它的 H 或 A。禁用时 `audit_capability.available=false`，audit 请求返回明确不可用回执且不执行外部调用；已接受原件仍按原身份计步并检查未知状态。
 `next_action` 是枚举，理由单独写 `route_reason`。`deliver` 明确授权适配器交付所选候选；`finish` 结束科学探索，收口时表示不授权交付。两者都不宣称全局目标已完成。`extract` 仅向 E 请求科学证据提取；精确原件定位、复制、封装、提交由控制层和交付适配器完成。

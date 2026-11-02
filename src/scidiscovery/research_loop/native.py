@@ -51,9 +51,9 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
         if job['role']=='A':instruction+='\n'+c.AUTHOR_EVIDENCE_GUIDANCE
         rules=c.response_instructions(job)
         if all(task.get(key)==value for key,value in rules.items()):
-            format_rule='Current format; extra science allowed.'
+            format_rule=''
         else:
-            format_rule=('Response rules supersede old formats; scientific scope binds: '
+            format_rule=('Current response rules; scope binds: '
                 +json.dumps(rules,ensure_ascii=False,separators=(',',':')))
         if backend_name=='codex':
             properties=schema['properties']
@@ -64,30 +64,30 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
         # The same developer layer follows the complete frozen scientific literal.
         instruction+='\n'+format_rule
         prompt=('Read science-task.json/inputs; JSON only. '
-            'Edit code/ or work/ copies only; no control wrappers/hashes. '
-            'work/budget-status.json: partial/stale billing, no grant; unknown tokens!=0; input includes cache.')
+            'Edit code/ or work/ copies; no control wrappers/hashes. '
+            'work/budget-status.json: stale/partial billing, no grant; unknown tokens!=0; input includes cache.')
         if final_return:
             prompt+=(' Protected FINAL: conclude now; no new role/audit/experiment. '
                 'Reference token/time/step ceilings do not revoke this accepted return; original call limits, '
                 'permissions and delivery qualification still apply.')
         else:
-            prompt+=' Soft targets; call limits/permissions apply.'
+            prompt+=' Soft targets; call limits/permissions bind.'
             if (job['role'] in {'A','H','W'} and not author
                     and not output_only_wake and not intent.get('output_repair') and not intent.get('work_repair')
                     and job.get('purpose')!='closeout' and not job.get('final_report') and not job.get('final_only')):
-                prompt+=' Reuse evidence/code; close with unmet goals if short. '+STAGE_PLANNING[job['role']]
-                if job['role']=='W':prompt+=' Prefer 10-30s waits on pending original sessions within deadlines.'
+                prompt+=' Close with unmet goals if short. '+STAGE_PLANNING[job['role']]
+                if job['role']=='W':prompt+=' Prefer 10-30s waits on pending originals within deadlines.'
     if budget_status:prompt+='\n'+json.dumps(budget_status,ensure_ascii=False,separators=(',',':'))
     if execution_interface is not None and not author and not output_only_wake:
         prompt+='\nManaged execution: '+json.dumps(dict(command=managed_command,
             lifecycle=execution_interface['capabilities'],result_protocol=execution_interface['result_protocol']),
             ensure_ascii=False,separators=(',',':'))
-        prompt+=(' Read capabilities/describe first; use original IDs; never replay accepted unknown calls. '
-            'Freeze code/ during capture; logs/outputs outside code/.')
+        prompt+=(' Read capabilities/describe; original IDs; never replay accepted unknown calls. '
+            'Freeze code/ on capture; outputs/logs elsewhere.')
     if job['role']=='W' and ('managed_execution_wait' in job or execution_interface is not None or intent.get('execution_wake')):
-        prompt+=' Follow handoff.action; finalize_response=JSON; return_control=wait.'
+        prompt+=' handoff.action: finalize_response=JSON; return_control=wait.'
     if job['role']=='W' and not output_only_wake and not author:
-        prompt+=' engineering_check: sample only, not training/audit.'
+        prompt+=' engineering_check: sample, no training/audit.'
     if remaining is not None:
         prompt+='\n'+json.dumps(remaining,separators=(',',':'))
         if not intent.get('output_repair') and not intent.get('work_repair'):

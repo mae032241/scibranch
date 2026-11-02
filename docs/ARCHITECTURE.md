@@ -687,6 +687,15 @@ criteria, and explains conflict, uncertainty and missing inputs. Workflow comple
 audit qualification, exhausted budgets, `finish` and delivery do not establish an
 unmeasured goal; A reports unmet objectives when stopping.
 
+Ordinary-stage planning asks authors to retain a public comparison design and
+exact evaluator, report and procedure references through the existing input
+selection. Changed conditions limit comparisons; procedure-level evidence must
+not silently become evidence for a different saved artifact. Before ordinary work
+closes, A may request a small affordable comparison of complete procedures using
+shared conditions and useful repetitions. This advice adds no quota, score-based
+default or acceptance gate. FINAL uses existing evidence, and authors may reject
+all candidates or report missing comparisons with a finite conclusion.
+
 A explains candidate criteria, any revisions, supporting evidence and tradeoffs in
 ordinary scientific prose. selection_explanation is optional and has no nested
 completeness gate. Exact candidate identity, frozen inputs, audit qualification and

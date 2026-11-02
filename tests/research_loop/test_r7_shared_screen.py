@@ -56,7 +56,7 @@ def comparison(tmp_path,monkeypatch):
     science=authored('0001-comparison')
     c.write(record/'science-output.json',science)
     task_ref=dict(path=str(root/'jobs/005.json'))
-    inventory=SimpleNamespace(attempt=0,task_ref=task_ref,caller_correction=None,record=record,job=job)
+    inventory=SimpleNamespace(attempt=0,task_ref=task_ref,caller_correction=None,file_correction=None,record=record,job=job)
     calls=[]
     def terminal(call_id,*,invalid=False):
         base=root/'host-runtime/experiment-control/005/records/calls'/call_id

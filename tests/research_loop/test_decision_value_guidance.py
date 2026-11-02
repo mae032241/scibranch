@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, controller, decision, guidance, native, search
+from scidiscovery.research_loop import accepted_budget, contracts as c, controller, decision, guidance, native, search
 from test_history_handoff import finish, fixture_portfolio_review
 from test_node_budget import policy as node_policy
 
@@ -53,10 +53,9 @@ def test_current_role_advice_reaches_frozen_science_view_with_original_constrain
     assert 'no incumbent or unknown-optimality veto' in c.AUTHOR_EVIDENCE_GUIDANCE
     assert 'Calls and audits are not proof' in c.AUTHOR_EVIDENCE_GUIDANCE
     assert 'Honor checks' in guidance.DEFAULT['W']
-    assert 'Initial/grant calls protect screening opportunities, not trial totals' in guidance.DEFAULT['W']
+    assert 'Initial/grant opportunities are not trial caps' in guidance.DEFAULT['W']
     assert 'W owns methods and grids' in guidance.STAGE_PLANNING['H']
-    assert 'differing predictions, the discriminating signal, priority and reopening condition' in guidance.DEFAULT['H']
-    assert 'compare 2-3 mechanisms' in guidance.DEFAULT['H'] and 'this is no quota' in guidance.DEFAULT['H']
+    assert 'differing predictions, signal, priority and reopening condition' in guidance.DEFAULT['H']
     assert 'Preserve user/task constraints, required counts and commitments' in guidance.DEFAULT['H']
 
 
@@ -130,6 +129,7 @@ def assessment_with_comparison_recipe(root, action, next_action='continue_w'):
             return_point='Return to A after the four comparisons.'))
     fixture_portfolio_review(root, job, payload)
     c.write(record/'native-intent.json', dict(task_ref=c.record_ref(root/'jobs/003.json')))
+    accepted_budget.accept_native(root, 3, record, c.read(record/'native-intent.json'))
     c.write(record/'science-output.json', payload)
     c.write(record/'usage.json', dict(input_tokens=7, cached_input_tokens=2, output_tokens=3))
     c.write(record/'native-outcome.json', dict(returncode=0, stop_reason=None, native_started=False,
@@ -174,12 +174,14 @@ def test_improve_a_comparison_recipe_preserves_local_scientific_iterations_and_o
     assert search.launch_reason(root, job) is None
     assert job['scientific_work_unit'] == guidance.WORK_UNITS['improve']
     assert job['scientific_work_unit'] in task['question']
-    assert 'In H, follow findings/global unmet goals beyond a recipe/contrast' in task['question']
-    assert 'Return to A for required independent judgment, strategic choices/tradeoffs' in task['question']
-    assert 'direction-changing counterevidence, stall/scope change/blocker or actual limits' in task['question']
+    assert 'In H, follow findings/unmet goals beyond recipes' in task['question']
+    assert 'return to A for independent strategy/judgment' in task['question']
+    assert 'direction-changing evidence, stalls, scope changes, blockers or limits' in task['question']
     assert 'Retain spent budgets' in task['question']
-    assert task['stage_continuation']['status'] == 'configured'
-    assert task['stage_response'].endswith('continue=authorized same-stage work.')
+    assert job['worker_fragment_policy'] == dict(context='same_session')
+    assert 'Continuation configured: same_session;' in task['stage_response']
+    assert task['stage_response'].startswith('stage_intent: review=A|decision=partial|continue=work.')
+    assert task['stage_response'].endswith('needs terminal/session+known usage+authorization.')
     assert 'Return to independent A, not global completion' in job['native_role_instruction']
     # A's complete optional proposal is the same bound original, not a rewritten
     # four-comparison quota or a substituted scientific question.
@@ -220,7 +222,7 @@ def test_a_bounded_work_units_do_not_gain_improve_followup_authority(tmp_path, a
         assert guidance.WORK_UNITS[action] in task['question']
     assert 'return-after-comparison' not in task['decision_context']['authority']
     assert 'related observation-driven follow-ups' not in task['decision_context']['authority']
-    assert 'beyond a recipe/contrast' not in task['question']
+    assert 'beyond recipes' not in task['question']
 
 
 def test_a_mechanism_revision_keeps_h_ownership_without_w_followup_authority(tmp_path):
@@ -232,7 +234,7 @@ def test_a_mechanism_revision_keeps_h_ownership_without_w_followup_authority(tmp
     assert 'H owns mechanism revision' in task['decision_context']['authority']
     assert 'related observation-driven follow-ups' not in task['decision_context']['authority']
     assert 'Revise the qualitative mechanism matrix' in task['question']
-    assert 'beyond a recipe/contrast' not in task['question']
+    assert 'beyond recipes' not in task['question']
 
 
 def test_initial_screen_keeps_its_independent_assessment_boundary(tmp_path):
@@ -246,4 +248,4 @@ def test_initial_screen_keeps_its_independent_assessment_boundary(tmp_path):
     assert job['scientific_work_unit'] == guidance.WORK_UNITS['screen']
     assert 'decision_context' not in task
     assert 'Return to independent A, not global completion' in job['native_role_instruction']
-    assert task['stage_response'].startswith('stage_intent: review=A-ready;')
+    assert task['stage_response'].startswith('stage_intent: review=A|decision=partial|continue=work.')

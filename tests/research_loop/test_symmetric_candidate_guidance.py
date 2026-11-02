@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts as c, controller, execution, guidance, native, runtime, selection, shared_input_views
+from scidiscovery.research_loop import accepted_budget, budget, contracts as c, controller, execution, guidance, native, runtime, selection, shared_input_views
 from test_history_handoff import finish
 from execution_fixtures import execution_registry
 from test_breadth_science import prepare as managed_prepare, h, worker, run, a, findings
@@ -49,15 +49,16 @@ def test_actual_prepared_worker_and_a_views_deliver_symmetric_choice_and_adaptiv
     expected=guidance.OPPORTUNITY if opportunity and supplied is guidance.DEFAULT else supplied
     assert c.settings(root)['role_guidance']==expected
     assert sum(len(text.encode()) for text in expected.values())<=guidance.MAX_BYTES==2560
-    assert 'Compare plausible explanations before concentrating' in expected['H']
-    assert 'justify a single line' in expected['H']
+    assert 'Compare plausible explanations before concentrating' in guidance.STAGE_PLANNING['H']
+    assert 'justify a single line' in guidance.STAGE_PLANNING['H']
     text=worker_job['native_role_instruction']
     assert text==expected['W']
     assert 'role_guidance' not in worker_view and 'role_instruction' not in worker_view
     worker_prompt,worker_instruction,_=native.render_scientific_request(worker_job,worker_view,{},
         backend_name='codex',instruction_transport='prompt')
     assert worker_prompt.startswith(text+'\n') and worker_instruction.startswith(text+'\n')
-    assert 'Initial/grant calls protect screening opportunities, not trial totals' in text
+    assert 'Initial/grant opportunities are not trial caps' in text
+    assert '--mechanism=task catalog number' in text
     assert 'reconcile unknown calls, never replay' in text
     assert 'Honor checks' in text and 'No auxiliary agents' in text
     judge_text=judge_job['native_role_instruction']
@@ -104,16 +105,16 @@ def test_a_breadth_judgment_reaches_actual_native_prompt_with_custom_guidance(tm
     work = c.workspace(root, 1)
     task = c.read(work / 'science-task.json')
     judgment = guidance.STAGE_PLANNING['A']
-    for concept in ('Read A deltas', 'conditional rank reversals', 'same-family tuning',
-            'hypothesis gap, scientific bottleneck or changed assumptions/criteria',
-            'revise_h with gap, evidence and question despite method gains',
-            'otherwise continue_w for bounded public method work'):
+    for concept in ('Reuse A deltas/scripts/full pool',
+            'Hypothesis gaps/bottlenecks/changed assumptions/criteria',
+            'revise_h: minimal executable test; else continue_w'):
         assert concept.lower() in judgment.lower()
     record = execution.origin(root, 1)
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json'),
         budget_slice=dict(task_ref=c.record_ref(root / 'jobs/001.json'), role='A',
             boot_id=budget.clock_stamp()['boot_id'], advance_seconds=0., limits=nodes['A'],
             shared_limits=dict(max_tokens=100000, max_seconds=600), previous_tokens=0, previous_seconds=0.)))
+    accepted_budget.accept_native(root, 1, record, c.read(record / 'native-intent.json'))
     c.write(record / 'runner-process.json', dict(fixture='prompt capture only'))
     prompts = []
     commands = []
@@ -155,7 +156,12 @@ def test_a_breadth_judgment_reaches_actual_native_prompt_with_custom_guidance(tm
     monkeypatch.setattr(native.subprocess, 'Popen', CaptureProcess)
     # Capture the request at the native launch boundary; namespace capability
     # probes and mount validation belong to the readonly-view tests.
-    monkeypatch.setattr(shared_input_views, 'wrap', lambda root, job, work, argv, **kwargs: argv)
+    namespace_facts = object()
+    monkeypatch.setattr(shared_input_views, 'load_wrap_facts', lambda root, job, work, **kwargs: namespace_facts)
+    def unwrapped(facts, argv):
+        assert facts is namespace_facts
+        return argv
+    monkeypatch.setattr(shared_input_views, 'wrap_from_facts', unwrapped)
     monkeypatch.setattr(runtime, 'process_identity', lambda pid, binding: dict(task_ref=binding))
     monkeypatch.setattr(runtime, 'process_matches', lambda *args: False)
     monkeypatch.setattr(runtime, 'cleanup_owned_group', lambda *args: 'observed_group_cleaned')
@@ -191,6 +197,7 @@ def test_local_improve_multiple_calls_already_share_original_scope_without_a_sin
         mechanism_findings=findings('h001.m1',blocked=('h001.m2',)))
     a(root,3,[1,2],focus='h001.m1',mode='improve')
     job,local=worker(root,tmp_path,4,[1,2,3])
+    job_bytes=(root/'jobs/004.json').read_bytes()
     assert job['search']['focus']['action']=='improve'
     assert local['scope']['step']==job['step']==4
     assert [row['mechanism_ref'] for row in local['breadth']['mechanisms']]==['h001.m1']
@@ -199,10 +206,10 @@ def test_local_improve_multiple_calls_already_share_original_scope_without_a_sin
     assert all(result['mechanism_binding']['mechanism_ref']=='h001.m1' for result in results)
     assert all(result['mechanism_binding']['grant'] is None for result in results)
     assert len({result['call_id'] for result in results})==3
-    assert c.read(root/'jobs/004.json')==job
+    assert (root/'jobs/004.json').read_bytes()==job_bytes
     view=c.read(c.workspace(root,4)/'science-task.json')
     assert guidance.WORK_UNITS['improve'] in view['question']
-    assert 'Initial/grant calls protect screening opportunities, not trial totals' in job['native_role_instruction']
+    assert 'Initial/grant opportunities are not trial caps' in job['native_role_instruction']
 
 
 @pytest.mark.parametrize('recommended',['old','new'])
