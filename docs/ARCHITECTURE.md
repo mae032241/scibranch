@@ -702,12 +702,20 @@ all candidates or report missing comparisons with a finite conclusion.
 
 H uses A's evidence, limitations and exact references to decide mechanism changes
 and the next minimal discriminator, checking concrete conflicts as needed rather
-than routinely repeating A's full-pool review. A prioritizes reusing existing A/W
-reports, result arrays, executed scripts/code and the full candidate pool while
-retaining independent judgment; this does not default to rechecking, rerunning or
-retraining. A handles minor issues through reuse or light checks, without a default
-extra W round. Targeted checks or refits address concrete conflicts, missing
+than routinely repeating A's full-pool review. A first matches prior A unresolved
+questions against the latest W changes, reusing reports, result arrays, executed
+scripts/code and the full-pool index. Read conclusions, then keys/shapes and exact
+source locators, then needed fields; complete originals remain available for gaps,
+truncation, conflicts or facts that can change the decision. Independent judgment
+does not require repeating old observations, recomputing retained comparisons or
+repackaging old evidence. New or conflicting execution facts are checked at the
+original calls; parent claims do not establish qualification. A handles minor
+issues through reuse or light checks, without a default extra W round. Targeted
+checks or refits may address concrete conflicts, numerical warnings, missing
 evidence or questions likely to change a decision, with expansion as needed.
+The shared A evidence guidance governs strongest-rival comparisons and finite
+closure: sufficient evidence permits a finite choice with stated limits, including
+rejecting all candidates, without routine extra sensitivity analyses.
 A bundles substantive tests, diagnostics, new-candidate development, tuning and
 retests toward unmet original goals for W. Within `improve`, W completes a useful,
 coherent batch of implementation, experiment and check followups before returning
@@ -893,6 +901,14 @@ node token target: positive reported token balance permits ordinary token admiss
 subject to the original finite time, step, integrity and execution gates. All H/W/A/E
 node token targets and W stage targets are advisory: reaching a target requests a
 bounded conclusion without rejecting new managed experiments or forcing A review.
+For an eligible standard Codex launch, a local
+[PostToolUse hook](https://learn.chatgpt.com/docs/hooks) reads the current
+`work/budget-status.json` and injects a short developer reminder at the next local
+tool boundary. It does not interrupt an ongoing reasoning request or turn a soft
+target into a hard kill. Unsupported hooks or failed eligibility checks retain
+file-only advice with an explicit limitation; control changes neither user
+configuration nor native permissions. The reminder grants no execution authority
+and never resubmits an unknown call.
 Missing or stale budget advice does not grant allowance or deny execution;
 exact identity checks and independent execution authorization still apply.
 Shared budget checks for new nodes remain unchanged. Author
@@ -909,7 +925,11 @@ scientific conclusion or execution grant.
 An ordinary A's explicit `finish` ends the run without delivery. Without a frozen
 delivery policy, `deliver` has the same stop behavior as `finish`, while its sealed
 scientific choice remains unchanged. With that policy, `deliver` consumes only
-that sealed author's exact candidate authorization, with no additional FINAL author. When selection policy is enabled, the ordinary A
+that sealed author's exact candidate authorization, with no additional FINAL author.
+A budget cutoff does not reopen an already validly sealed ordinary A `deliver` or
+`finish` as a new scientific FINAL. External delivery remains limited to the
+original identity's finite `submit` and same-operation `confirm`; unknown effects
+require reconciliation of that original call. When selection policy is enabled, the ordinary A
 receives its frozen complete comparison catalogue before authoring its result;
 delivery verifies that same catalogue and all original qualification gates.
 Delivery failure or missing qualification retains the unresolved result without
@@ -935,7 +955,7 @@ The ordinary control boundaries remain distinct:
 | Known completed output needs repair | Use only its frozen finite repair permission; exhaustion reports `output_repair_unavailable`. |
 | Scientific clarification allowance exhausted | Report `semantic_correction_required`; preserve the first root and consumed attempts. |
 | Optional H/A admission refused | Bounded H reconsideration under the same correction allowance and current admission gates. |
-| Shared new-action budget denied | Existing FINAL entry, preserving the pending route where applicable. |
+| Shared new-action budget denied | Consume a valid sealed ordinary A `deliver/finish`; otherwise enter existing FINAL, preserving the pending route where applicable. |
 | External terminal verified, wake wall budget exhausted | Preserve terminal evidence and report `managed_execution_terminal_wake_deadline`; do not wake without admission. Still-pending deadline remains `managed_execution_wait_deadline`. |
 | Actual execution or cleanup unknown | Preserve the original unresolved boundary; no replay, replacement or invented cleanup. |
 

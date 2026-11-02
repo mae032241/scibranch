@@ -73,6 +73,19 @@ def test_breadth_consumers_are_enabled_without_expanding_base_schema():
     assert c.response_fields(dict(role='A'),dict(search_policy=None))==[]
 
 
+def notice_context_bytes(job,intent,backend,**context):
+    """Real Codex capture shows plain developer text, with no text wrapper.
+
+    One attempt can emit the stable node cause and later the shared cause;
+    both remain model-visible even when a repair uses the same text twice.
+    """
+    if not (backend.name=='codex' and backend.standard and backend.options is not None):return 0
+    from scidiscovery.research_loop import budget_notice
+    return sum(len(budget_notice.closeout_notice(job,intent,target_reached=True,shared_reached=shared,
+        author=bool(context.get('author')),final_return=bool(context.get('final_return')))['text'].encode())
+        for shared in (False,True))
+
+
 def rendered_contract(tmp_path,job,task,intent,backend,**context):
     """Include actual renderer escaping and the selected backend's request wire."""
     import json
@@ -86,6 +99,7 @@ def rendered_contract(tmp_path,job,task,intent,backend,**context):
     size=len(wire)+len(json.dumps(task,ensure_ascii=False,indent=2).encode())
     if backend.instruction_transport=='developer':size+=len(instruction.encode())
     if job['role']=='W':size+=len(job['scientific_work_unit'].encode())
+    size+=notice_context_bytes(job,intent,backend,**context)
     return size,prompt,instruction,packet
 
 
@@ -116,7 +130,8 @@ def test_complete_fixed_model_response_contract_fits_three_kib(tmp_path,role,sco
     elif branch=='fragment':
         if role!='W':pytest.skip('Scientific fragments belong only to W')
         intent['continuation_kind']='fragment';remaining={}
-    backend=backends.selected(dict(native_backend=backend_name,native_launcher_argv=['codex'] if backend_name=='codex' else ['independent']),
+    backend=backends.selected(dict(native_backend=backend_name,native_launcher_argv=['codex'] if backend_name=='codex' else ['independent'],
+        native_options={} if backend_name=='codex' else None),
         schema_transport='prompt' if backend_name=='codex' else None)
     interface=dict(capabilities={},result_protocol='local-result-v1',executor='local_execution:command') if role=='W' else None
     context=dict(remaining=remaining,final_return=scope=='final',
@@ -137,6 +152,7 @@ def test_complete_fixed_model_response_contract_fits_three_kib(tmp_path,role,sco
         report.parent.mkdir(parents=True,exist_ok=True)
         with report.open('a') as stream:stream.write(json.dumps(dict(role=role,scope=scope,backend=backend_name,branch=branch,
             fixed_bytes=fixed_size,with_diagnostic_allowance=fixed_size+512,rendered_bytes=size,
+            cumulative_notice_bytes=notice_context_bytes(job,intent,backend,**context),
             final_prompt_bytes=len(prompt.encode()),instruction_bytes=len(instruction.encode()),transport_packet_bytes=len(packet)))+'\n')
     assert fixed_size<=2560,(role,scope,backend_name,branch,fixed_size)
     assert fixed_size+512<=c.MAX_FIXED_RESPONSE_BYTES==3072,(role,scope,backend_name,branch,fixed_size)
@@ -162,7 +178,8 @@ def test_diagnostic_allowance_counts_actual_escaped_renderer_and_backend_wire(tm
         native_role_instruction=guidance.OPPORTUNITY['A'])
     task=c.response_instructions(job)
     backend=backends.selected(dict(native_backend=backend_name,
-        native_launcher_argv=['codex'] if backend_name=='codex' else ['independent']),
+        native_launcher_argv=['codex'] if backend_name=='codex' else ['independent'],
+        native_options={} if backend_name=='codex' else None),
         schema_transport='prompt' if backend_name=='codex' else None)
     diagnosis=OutputRepairRequired('candidate_recommendation_missing',text).request()
     size,_,_,_=rendered_contract(tmp_path,job,task,dict(output_repair=diagnosis),backend,remaining={})
@@ -203,7 +220,8 @@ def test_full_renderer_special_suffixes_fit_same_contract(tmp_path,backend_name,
     if 'wake' in scope:intent['execution_wake']=dict(original='retained')
     if scope=='author_closeout':intent['continuation_kind']='author_closeout'
     task=c.response_instructions(job)
-    backend=backends.selected(dict(native_backend=backend_name,native_launcher_argv=['codex'] if backend_name=='codex' else ['independent']),schema_transport='prompt' if backend_name=='codex' else None)
+    backend=backends.selected(dict(native_backend=backend_name,native_launcher_argv=['codex'] if backend_name=='codex' else ['independent'],
+        native_options={} if backend_name=='codex' else None),schema_transport='prompt' if backend_name=='codex' else None)
     prompt,instruction,projection=native.render_scientific_request(job,task,intent,backend_name=backend_name,
         instruction_transport=backend.instruction_transport,remaining={},output_only_wake=scope=='output_only_wake',
         author=dict(facts='work/author-closeout-science.json',limits={}) if scope=='author_closeout' else None,
@@ -216,6 +234,9 @@ def test_full_renderer_special_suffixes_fit_same_contract(tmp_path,backend_name,
     size=len(wire)+len(json.dumps(task,ensure_ascii=False,indent=2).encode())
     if backend.instruction_transport=='developer':size+=len(instruction.encode())
     if role=='W':size+=len(job['scientific_work_unit'].encode())
+    size+=notice_context_bytes(job,intent,backend,
+        author=dict(facts='work/author-closeout-science.json',limits={}) if scope=='author_closeout' else None,
+        final_return=scope=='protected_final')
     assert size+512<=3072,(backend_name,scope,size)
 
 

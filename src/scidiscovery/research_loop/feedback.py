@@ -67,6 +67,8 @@ def budget_hint(work):
     if final:
         result.update(current_work_boundary=value['current_work_boundary'],
                       final_response_allowance=value['final_response_allowance'], target_kind=value['target_kind'])
+    from . import budget_notice
+    result['notification_channel']=budget_notice.public_channel(value.get('notification_channel'))
     return result
 
 
@@ -76,7 +78,7 @@ def live(root, job):
     advisory = budget_hint(c.workspace(root, job['step']))
     result = dict(version=VERSION, status='unavailable', calls=[], counts=None, omitted_count=None,
         coverage='unavailable', observed_at=None, budget=advisory,
-        limitation='No mid-turn notification channel; visible at a tool return or explicit query. Unmanaged work is not covered.')
+        limitation='Budget notification capability is reported separately; advice is also available on explicit query. Unmanaged work is not covered.')
     config = c.settings(root).get('history_observer')
     registered=job.get('experiment_interface_version')==1
     if job.get('live_feedback_version') != VERSION or (not registered and (config is None or config.get('contract_version') != 2)):

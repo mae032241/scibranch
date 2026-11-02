@@ -329,7 +329,10 @@ def freeze_sources(root, source_nodes, *, candidate_id=None, job=None):
         source_nodes=candidate_source_nodes(root,job,candidate_id)
     remaining = budget.snapshot(root)['seconds_remaining']
     allowance = min(SOURCE_SECONDS, _settings(root, job)['delivery_policy']['cleanup_seconds'])
-    if budget.final_a_barrier(root) is None and (budget.closeout_state(root)['begin'] or {}).get('mode') != 'final':
+    begin = budget.closeout_state(root)['begin'] or {}
+    direct = (job is not None and job['role'] == 'A' and job.get('purpose') is None
+        and begin.get('mode') == 'model' and begin.get('authorization_step') == begin.get('source_cutoff') == job['step'])
+    if budget.final_a_barrier(root) is None and begin.get('mode') != 'final' and not direct:
         allowance = min(allowance, remaining)
     if allowance <= 0:
         raise DeliveryUnresolved('delivery_source_preparation_unavailable')
@@ -1059,7 +1062,8 @@ def invoke(root, intent, max_seconds, *, on_process=None, audit_only=False):
         candidate_audit.validate_intent(root, intent)
         actions = [dict(intent=intent, outcome=None)]
     else:
-        actions = budget.closeout_state(root)['actions']
+        state = budget.closeout_state(root)
+        actions = state['actions']
     stored = next((action for action in actions if action['intent']['action_id'] == intent.get('action_id')), None)
     if stored is None or stored['intent'] != intent:
         raise ValueError('Delivery action was not durably accepted in the control ledger')
@@ -1069,7 +1073,9 @@ def invoke(root, intent, max_seconds, *, on_process=None, audit_only=False):
     used = budget.snapshot(root)['advance_seconds'] - anchor
     if used < 0:raise ValueError('Delivery action time moved backwards')
     max_seconds = min(max_seconds, intent['max_seconds'] - used)
-    if intent.get('final_return') is None:
+    protected = (intent.get('final_return') is not None or not audit_only
+        and budget.direct_delivery_scope(state['begin'], intent['decision'], intent['binding']))
+    if not protected:
         max_seconds = min(max_seconds, budget.snapshot(root)['seconds_remaining'])
     if max_seconds <= 0:return _result(intent['binding'], 'unknown', 'action_time_limit')
     deadline = time.clock_gettime(time.CLOCK_BOOTTIME) + max_seconds

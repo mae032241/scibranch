@@ -977,7 +977,7 @@ def _science_view(job, root, *, parent_sources, policy, qualified_materials):
     reading={
         'H':'Constraints, A judgments/counterevidence, then unresolved H questions.',
         'W':'Constraints and authorized H questions, then A direction and prior observations.',
-        'A':'W observations, H questions and unresolved alternatives, then further investment.',
+        'A':'Prior A unresolved questions and latest W changes, then H questions and unresolved alternatives.',
         'E':'Exact requester question and constraints, then requested original evidence.'}
     parents=[_parent_view(job,ref,source=parent_sources[int(Path(ref['path']).parts[2])] if root is not None else None,
         limitation_bytes=1024//max(1,len(job['direct_refs']))) for ref in job['direct_refs']]
@@ -1026,7 +1026,10 @@ def _science_view(job, root, *, parent_sources, policy, qualified_materials):
            if job.get('project') is not None else {}),
         **(dict(configured_delivery=job['configured_delivery']) if 'configured_delivery' in job else {}),
         'parents': parents,
-        'reading_order':reading[job['role']]+' Read each parent conclusion first; its history_alias and matching history-index pages expose the same scientific source, not independent evidence. Use native file/shell tools: inspect JSON keys/shapes, then needed fields or line ranges; size combined batch returns for every inner/outer tool limit. Analyze large numeric arrays with your own local code and report needed results with exact source locators; originals remain available. Reuse unchanged originals fully read this session; fill gaps/conflicts/truncation, including later pages and limitations. A verifies independently. Check live execution facts at original calls. Parents are claims. Omissions: conclusion/index/next_page.',
+        'reading_order':reading[job['role']]+' Read each parent conclusion first; its history_alias and matching history-index pages expose the same scientific source, not independent evidence. Use native file/shell tools: inspect JSON keys/shapes, then needed fields or line ranges; size combined batch returns for every inner/outer tool limit. Analyze large numeric arrays with your own local code and report needed results with exact source locators; originals remain available. Reuse unchanged originals fully read this session; fill gaps/conflicts/truncation, including later pages and limitations.'
+            +(' A judges independently; no routine redo of old observations. Check new/conflicting execution facts at original calls. Parent claims are not qualification.'
+              if job['role']=='A' else ' A verifies independently. Check live execution facts at original calls. Parents are claims.')
+            +' Omissions: conclusion/index/next_page.',
         'reused_implementations':[dict(label=row['label'],path=row['material']['path']) for row in job.get('selected_inputs',[])],
         'lineage': _role_lineage(job,parents),
         'input_selection_status': job['input_selection_status'], 'control_diagnostics': job['control_diagnostics'],

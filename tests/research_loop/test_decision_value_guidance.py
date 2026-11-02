@@ -38,6 +38,11 @@ def test_current_role_advice_reaches_frozen_science_view_with_original_constrain
             instruction_transport='prompt')
         assert instruction.startswith(expected+'\n') and prompt.startswith(expected+'\n')
         assert 'role_guidance' not in view and 'role_instruction' not in view
+        if role == 'A':
+            assert view['reading_order'].startswith('Prior A unresolved questions and latest W changes')
+            assert 'Parent claims are not qualification' in view['reading_order']
+        else:
+            assert view['reading_order'].endswith(' A verifies independently. Check live execution facts at original calls. Parents are claims. Omissions: conclusion/index/next_page.')
         # Source construction retains a logical namespace, mounted at launch.
         # Read its declared source rather than requiring a copied input tree.
         objective = next(item for item in job['global_materials'] if item['path']==view['global']['objective'])

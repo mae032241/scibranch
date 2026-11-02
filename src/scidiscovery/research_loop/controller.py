@@ -1785,6 +1785,7 @@ def _run_delivery_actions(root, job, result):
         except delivery.DeliveryUnresolved as error:
             return _closeout_result(root, 'closeout_unresolved', reason=error.code)
         kind = 'submit'
+    direct = budget.direct_delivery_scope(state['begin'], binding['decision'], binding)
     successor = root / 'jobs' / f'{job["step"]+1:03d}.json'
     if (not actions and budget.final_a_barrier(root) is None
             and successor.exists() and contracts.read(successor).get('role') == 'A'
@@ -1798,15 +1799,16 @@ def _run_delivery_actions(root, job, result):
             meter = native.usage(root)
             accepted_actions = [row for row in budget.closeout_state(root)['actions']
                                 if row['intent']['decision'] == binding['decision']]
-            if (not accepted_actions and budget.final_a_barrier(root) is None
+            if (not direct and not accepted_actions and budget.final_a_barrier(root) is None
                     and not meter.get('blocking_unknown_steps', meter['unknown_steps'])
                     and not budget.execution_blocked(root)):
                 return _closeout_result(root, 'closeout_budget_unavailable', reason='final_author_required')
-            if budget.final_a_barrier(root) is not None and accepted_actions:
-                return _closeout_result(root, 'delivery_unknown', reason='Original operation is unverified; final reconciliation allowance exhausted')
+            if (direct or budget.final_a_barrier(root) is not None) and accepted_actions:
+                return _closeout_result(root, 'delivery_unknown', reason='Original operation is unverified; '
+                    + ('original delivery' if direct else 'final') + ' reconciliation allowance exhausted')
             return _closeout_result(root, 'closeout_budget_unavailable')
         budget.transition(root, 'advance', 'delivery_' + kind)
-        remaining = (intent['max_seconds'] if intent.get('final_return') is not None else
+        remaining = (intent['max_seconds'] if direct or intent.get('final_return') is not None else
                      min(intent['max_seconds'], budget.snapshot(root)['seconds_remaining']))
         reply = delivery.invoke(root, intent, remaining,
             on_process=lambda phase, identity: budget.action_process(root, intent, phase, identity))
@@ -1850,9 +1852,6 @@ def _run_direct_delivery(root, begin):
     delivered=_run_delivery_actions(root,job,result)
     if delivered['status']=='delivery_reselect':
         return _closeout_result(root,'delivery_rejected',reason=delivered.get('reason'),step=step)
-    if delivered.get('reason')=='final_author_required':
-        return _start_budget_closeout(root,begin['source_cutoff'],begin['first_step'],'A',
-                                      'original_delivery_budget_unavailable')
     return delivered
 
 

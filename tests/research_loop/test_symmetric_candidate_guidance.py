@@ -105,10 +105,10 @@ def test_a_breadth_judgment_reaches_actual_native_prompt_with_custom_guidance(tm
     work = c.workspace(root, 1)
     task = c.read(work / 'science-task.json')
     judgment = guidance.STAGE_PLANNING['A']
-    for concept in ('Reuse A/W reports/arrays/code/full pool', 'no routine rechecks/refits',
-            'Minor gaps: light checks',
-            'bundle substantive unmet-goal tests/diagnostics/methods: continue_w(improve)',
-            'Only evidenced need to revise/add mechanisms: revise_h(minimal executable test)',
+    for concept in ('Prior A gaps/W delta first', 'reuse reports/arrays/code/full-pool index',
+            'no routine rereads/refits/repackaging', 'finite choice with limits if sufficient',
+            'Batch unmet-goal work: continue_w(improve)',
+            'Only evidenced mechanism gaps: revise_h(minimal executable test)',
             'even if methods improve'):
         assert concept.lower() in judgment.lower()
     record = execution.origin(root, 1)
@@ -169,7 +169,7 @@ def test_a_breadth_judgment_reaches_actual_native_prompt_with_custom_guidance(tm
     monkeypatch.setattr(runtime, 'cleanup_owned_group', lambda *args: 'observed_group_cleaned')
     outcome = native.run_native(root, 1)
     assert outcome['returncode'] == 0 and outcome['stop_reason'] is None
-    assert len(prompts) == 1 and judgment in prompts[0]
+    assert len(prompts) == 1 and prompts[0].count(judgment) == 1
     assert (prompts[0].startswith(job['native_role_instruction'])
         or any(job['native_role_instruction'] in argument for argument in commands[0]))
     assert job['native_role_instruction'] == advice['A']

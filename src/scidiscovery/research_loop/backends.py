@@ -113,6 +113,8 @@ def selected(settings, *, schema_transport=None):
 def _toml(value):
     if isinstance(value,dict):
         return '{'+','.join(json.dumps(k)+'='+_toml(v) for k,v in value.items())+'}'
+    if isinstance(value,(list,tuple)):
+        return '['+','.join(_toml(item) for item in value)+']'
     return json.dumps(value, ensure_ascii=False)
 
 
@@ -179,6 +181,28 @@ class Codex:
         schema_args = ['--output-schema',str(schema)] if self.active_schema_transport=='native_flag' else []
         return ([*self.launcher,'exec',*global_args,'resume','--json','--model',profile['model'],
                  *schema_args,'--output-last-message',str(pending),session['thread_id'],'-'],position)
+
+    def budget_hook_args(self, args, definition, *, trusted=False):
+        if not self.standard or self.options is None:
+            raise ValueError('Budget hook requires standard Codex with declared native permissions')
+        extra=['-c','hooks.PostToolUse='+_toml(definition['PostToolUse'])]
+        if trusted:extra.append('--dangerously-bypass-hook-trust')
+        position=len(self.launcher)+1
+        if args[len(self.launcher)]!='exec':raise ValueError('Budget hook requires this backend native exec invocation')
+        return [*args[:position],*extra,*args[position:]]
+
+    def hook_inventory_args(self, args, work):
+        """Same native config/cwd; metadata-only app-server, never a model turn."""
+        if not self.standard or self.options is None:
+            raise ValueError('Native hook inventory requires declared standard Codex')
+        configs=[]
+        for index,item in enumerate(args[:-1]):
+            if item=='-c':configs.extend(['-c',args[index+1]])
+        for flag,key in (('--sandbox','sandbox_mode'),('--model','model')):
+            if flag in args:configs.extend(['-c',key+'='+json.dumps(args[args.index(flag)+1])])
+        # app-server does not accept exec's --ignore-user-config flag. The
+        # metadata-only namespace applies its equivalent exact file overlay.
+        return [*self.launcher,'-C',str(work),*configs,'app-server','--stdio']
 
     def request(self, prompt, **context):
         if self.standard:

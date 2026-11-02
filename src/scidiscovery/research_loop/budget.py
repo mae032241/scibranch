@@ -168,6 +168,12 @@ def _read_events(root, settings, *, resources=False):
                 raise ValueError('Final delivery lost its reserved authorization')
             if 'final_return' in event:
                 _validate_final_a_action(root, event, events)
+            elif (_direct_delivery_begin(events) or {}).get('authorization_step') is not None:
+                from . import configuration_updates
+                begin = _direct_delivery_begin(events)
+                actions, confirmed = _direct_delivery_action_facts(events, begin)
+                _validate_direct_delivery_action(event, begin=begin, actions=actions, confirmed=confirmed,
+                    settings=configuration_updates.for_step(root, event['decision']['step']))
         if event['kind'] == 'action_outcome' and (not isinstance(event.get('action_id'), str)
                 or not isinstance(event.get('result'), dict) or event['result'].get('status') not in {'confirmed', 'failed', 'unknown', 'rejected', 'engineering_error', 'unclassified'}):
             raise ValueError('Invalid delivery action outcome')
@@ -1963,6 +1969,54 @@ def require_final_a_delivery_eligibility(root, decision, binding):
     return marker
 
 
+def _direct_delivery_begin(events):
+    if isinstance(events, accepted_budget.AcceptedEvents):
+        return events.state['closeout']
+    return next((row for row in reversed(events) if row['kind'] == 'closeout_begin'), None)
+
+
+def direct_delivery_scope(begin, decision, binding):
+    """Consume the ordinary A's accepted closeout scope, without new science."""
+    return (begin is not None and begin['mode'] == 'model'
+        and begin.get('authorization_step') == begin['source_cutoff'] == decision.get('step')
+        and type(decision.get('step')) is int and decision['step'] > 0
+        and set(decision) == {'step', 'job_ref', 'raw_ref', 'seal_ref'}
+        and all(isinstance(decision[key], dict) and 'path' in decision[key]
+                for key in ('job_ref', 'raw_ref', 'seal_ref'))
+        and binding.get('decision') == decision
+        and isinstance(binding.get('operation_id'), str) and bool(binding['operation_id']))
+
+
+def _direct_delivery_action_facts(events, begin):
+    """Produce bounded accepted action status, or consume explicit audit values."""
+    actions = [row for row in events if row['kind'] == 'action_intent'
+        and row['decision'].get('step') == (begin or {}).get('authorization_step')]
+    confirms = [row for row in actions if row['action_kind'] == 'confirm']
+    if isinstance(events, accepted_budget.AcceptedEvents):
+        statuses = [events.state.row('action/'+row['action_id']) for row in confirms]
+        confirmed = any(row is not None and row['outcome_ref'] is not None and row['status'] == 'confirmed'
+            for row in statuses)
+    else:
+        confirm_ids = {row['action_id'] for row in confirms}
+        confirmed = any(row['kind'] == 'action_outcome' and row['action_id'] in confirm_ids
+            and row['result']['status'] == 'confirmed' for row in events)
+    return actions, confirmed
+
+
+def _validate_direct_delivery_action(event, *, begin, actions, confirmed, settings):
+    """Replay only supplied accepted choice, status and frozen host windows."""
+    decision, binding = event['decision'], event['binding']
+    policy = settings.get('delivery_policy')
+    if (not direct_delivery_scope(begin, decision, binding) or policy is None or policy['adapter'] is None
+            or event['operation_id'] != binding['operation_id']
+            or event['max_seconds'] != policy['submit_seconds' if event['action_kind'] == 'submit' else 'confirm_seconds']
+            or len(actions) >= 2
+            or confirmed
+            or event['action_kind'] != ('submit' if not actions else 'confirm')
+            or actions and any(event[key] != actions[0][key] for key in ('operation_id', 'decision', 'binding'))):
+        raise ValueError('Direct delivery exceeds its exact bounded operation')
+
+
 def _attempt_consumption(root, job, paths, *, automatic_recovery=None, automatic_successor=None):
     """Derive cumulative consumption from exact completed native facts."""
     policy=contracts.settings(root,job)
@@ -2407,15 +2461,18 @@ def accept_action(root, kind, operation_id, decision, binding, max_seconds):
     meter = native.usage(root)
     limits = snapshot(root)
     final_return = require_final_a_delivery_eligibility(root, decision, binding)
+    direct = direct_delivery_scope(begin, decision, binding)
+    if begin.get('authorization_step') is not None and not direct:
+        raise ValueError('Direct delivery changed its accepted scientific choice')
     barrier = final_a_barrier(root)
     if barrier is not None and final_return is None:
         raise NodeBudgetUnavailable('final_a_return_consumed')
     # The final exception covers shared billing, not unresolved execution:
     # the original-effect gate above and the sealed-choice gate still apply.
-    if final_return is None and (_usage_unknown(meter)
+    if final_return is None and not direct and (_usage_unknown(meter)
             or meter.get('accounted_tokens', meter['observed_tokens']) >= limits['max_tokens']):
         raise NodeBudgetUnavailable('closeout_budget_unavailable')
-    if final_return is None and (limits['seconds_remaining'] < max_seconds or used_steps(root) >= step_limit(root)):
+    if final_return is None and not direct and (limits['seconds_remaining'] < max_seconds or used_steps(root) >= step_limit(root)):
         raise NodeBudgetUnavailable('closeout_budget_unavailable')
     with _ledger_writer(root):
         events, parent = _events(root)
@@ -2434,6 +2491,23 @@ def accept_action(root, kind, operation_id, decision, binding, max_seconds):
                 raise ValueError('Final delivery requires its frozen per-call window')
             _validate_final_a_action(root, dict(final_return=final_return, action_kind=kind,
                 operation_id=operation_id, decision=decision, binding=binding, max_seconds=max_seconds), events)
+        elif direct:
+            row = events.state.current_job
+            tip = events.state['prefix']['tip']
+            if (row is None or row['step'] != decision['step'] or row['role'] != 'A'
+                    or row.get('purpose') is not None or row['status'] != 'sealed'
+                    or row['job_ref'] != decision['job_ref'] or tip is None
+                    or tip['step'] != decision['step'] or tip['seal_ref'] != decision['seal_ref']):
+                raise ValueError('Direct delivery requires its exact sealed ordinary author')
+            direct_begin = _direct_delivery_begin(events)
+            actions, confirmed = _direct_delivery_action_facts(events, direct_begin)
+            if confirmed:
+                raise NodeBudgetUnavailable('direct_delivery_already_confirmed')
+            if len(actions) >= 2 or kind != ('submit' if not actions else 'confirm'):
+                raise NodeBudgetUnavailable('direct_delivery_reserve_exhausted')
+            _validate_direct_delivery_action(dict(action_kind=kind, operation_id=operation_id,
+                decision=decision, binding=binding, max_seconds=max_seconds), begin=direct_begin,
+                actions=actions, confirmed=confirmed, settings=settings)
         return _append(root, settings, events, parent, kind='action_intent', action_id=action_id,
                        action_kind=kind, operation_id=operation_id, decision=decision, binding=binding,
                        max_seconds=max_seconds, advance_seconds=limits['advance_seconds'],
@@ -2482,7 +2556,7 @@ def action_process(root, intent, phase, identity):
     contracts.write(path, dict(action_id=intent['action_id'], operation_id=intent['operation_id'], phase=phase, identity=identity))
 
 
-def write_node_hint(root, job, intent, limits, meter, *, observed, author_limits=None):
+def write_node_hint(root, job, intent, limits, meter, *, observed, author_limits=None, notice_channel=None):
     """Optional replaceable advice; never read as a grant, meter or evidence."""
     from .protocol import require_current
     require_current(root,job)
@@ -2529,6 +2603,7 @@ def write_node_hint(root, job, intent, limits, meter, *, observed, author_limits
     state=('reached' if targets and ((consumed is not None and consumed>=targets['max_observed_tokens']) or duration is not None and duration>=targets['max_seconds'])
            else 'near' if targets and ((consumed is not None and consumed>=.8*targets['max_observed_tokens']) or duration is not None and duration>=.8*targets['max_seconds']) else 'within')
     hint=dict(scope='advice_only_not_authorization_or_scientific_evidence',updated_at_unix=time.time(),mode=mode,
+        notification_channel=notice_channel or dict(status='unavailable',reason='not_preflighted'),
         target_state=state,targets=targets,active_seconds=duration,observed_tokens_lower_bound=consumed,
         metering='observed_lower_bound' if observed else 'inflight_unknown',
         input_accounting='input_includes_cached_input_once; observed_total=input+output',
@@ -2551,6 +2626,11 @@ def write_node_hint(root, job, intent, limits, meter, *, observed, author_limits
             current_work_observed_tokens_remaining_upper_bound=None,
             current_work_active_seconds_available=node_seconds,
             instruction='Complete this same final scientific return and explain completed work, unfinished work and any evidence gap. Token targets and reference ceilings do not terminate this original return; all actual usage is retained. The original finite call duration, resources and transport boundaries remain enforced; shared time and step exhaustion do not revoke this completion. No further scientific turn is authorized.')
+    from . import budget_notice
+    notice=budget_notice.closeout_notice(job,intent,target_reached=state=='reached',
+        shared_reached=remaining<=0 or limits['seconds_remaining']<=0,
+        author=author,final_return=final_return is not None)
+    if notice is not None:hint['closeout_notice']=notice
     data=(json.dumps(hint,ensure_ascii=False,indent=2,allow_nan=False)+'\n').encode()
     if len(data)>4096:raise ValueError('Budget advice exceeds byte bound')
     directory=contracts.workspace(root,job['step'])/'work'

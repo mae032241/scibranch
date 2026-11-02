@@ -142,6 +142,22 @@ def test_one_large_report_reaches_soft_target_without_claiming_pre_request_cap(a
     assert budget.stop_node(root,job,intent,limits,meter) is None
 
 
+def test_current_publisher_adds_stable_notice_only_when_target_or_shared_ceiling_reached(advice):
+    _,_,_,_,shared,_,publish=advice()
+    assert 'closeout_notice' not in publish(observed=False)
+    target=publish(dict(input_tokens=100,cached_input_tokens=90,output_tokens=0))
+    assert target['closeout_notice']['cause']=='node'
+    assert 'Soft target' in target['closeout_notice']['text']
+    repeated=publish(dict(input_tokens=101,cached_input_tokens=90,output_tokens=0))
+    assert repeated['closeout_notice']==target['closeout_notice']
+    shared.update(observed_tokens=1000,accounted_tokens=1000,unknown_steps=[1])
+    exhausted=publish(observed=False)
+    assert exhausted['closeout_notice']['cause']=='shared'
+    assert 'Shared budget reached' in exhausted['closeout_notice']['text']
+    assert exhausted['unknown_usage'] is True
+    assert exhausted['notification_channel']==dict(status='unavailable',reason='not_preflighted')
+
+
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('role','HWAE')
 def test_soft_native_stdin_has_budget_advice_and_prelaunch_hint(tmp_path,role):

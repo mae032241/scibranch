@@ -227,6 +227,22 @@ def test_budget_hint_read_error_is_typed_without_private_oserror(tmp_path, monke
     assert 'private filesystem detail' not in str(error.value)
 
 
+def test_budget_notice_channel_is_projected_honestly_with_its_tool_boundary_limit(tmp_path):
+    work=tmp_path/'node';path=hint(work)
+    value=c.read(path)
+    value['notification_channel']=dict(status='available',mechanism='codex_post_tool_use')
+    c.write(path,value)
+    channel=feedback.budget_hint(work)['notification_channel']
+    assert channel['status']=='available' and channel['mechanism']=='codex_post_tool_use'
+    assert 'running model requests and hosted web cannot be interrupted' in channel['limitation']
+    value['notification_channel']=dict(status='unavailable',reason='hook_trust_unqualified')
+    c.write(path,value)
+    assert feedback.budget_hint(work)['notification_channel']==value['notification_channel']
+    value['notification_channel']=dict(status='available',mechanism='custom_unverified')
+    c.write(path,value)
+    assert feedback.budget_hint(work)['notification_channel']['status']=='unavailable'
+
+
 def test_budget_hint_ancestor_symlink_is_an_integrity_error(tmp_path):
     original = tmp_path / 'original'
     path = hint(original)

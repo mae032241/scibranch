@@ -95,21 +95,31 @@ def test_normal_prepared_scientific_request_delivers_sustained_breadth_and_froze
         assert 'uncertainty' not in task['portfolio_response'].lower()
         assert transmitted.count(c.AUTHOR_EVIDENCE_GUIDANCE) == 1
         assert c.AUTHOR_EVIDENCE_GUIDANCE not in json.dumps(task)
-        for concept in ('Reuse A/W reports/arrays/code/full pool',
-                'no routine rechecks/refits',
-                'Minor gaps: light checks',
-                'bundle substantive unmet-goal tests/diagnostics/methods: continue_w(improve)',
-                'Only evidenced need to revise/add mechanisms: revise_h(minimal executable test)',
+        for concept in ('Prior A gaps/W delta first',
+                'reuse reports/arrays/code/full-pool index',
+                'no routine rereads/refits/repackaging',
+                'Weigh strongest rivals', 'finite choice with limits if sufficient',
+                'Batch unmet-goal work: continue_w(improve)',
+                'Only evidenced mechanism gaps: revise_h(minimal executable test)',
                 'even if methods improve',
-                'Changed bases limit comparisons',
-                'useful affordable full-procedure comparisons; no quota', 'May reject all',
-                'Publish own reports/executed code+helpers to outputs',
-                'cite managed originals'):
+                'Compare full procedures', 'changed conditions limit comparisons', 'may reject all',
+                'Publish own reports/executed code+helpers',
+                'cite exact managed originals'):
             assert concept in transmitted
+        assert len(guidance.STAGE_PLANNING['A'].encode()) <= 461
+        assert reading.startswith('Prior A unresolved questions and latest W changes')
+        for concept in ('no routine redo of old observations',
+                'Check new/conflicting execution facts at original calls',
+                'Parent claims are not qualification', 'originals remain available'):
+            assert concept in reading
+        assert task['lineage']['candidates'] == job['history']['view']['candidates']
+        assert task['lineage']['indexes'] == job['history']['view']['indexes']
         assert '2-3 full procedures' not in transmitted
     else:
         assert 'Reuse exact driver/report refs/conditions' in transmitted
         assert 'full tuning/output procedures; deliver from that procedure' in transmitted
+    if role != 'A':
+        assert reading.endswith(' A verifies independently. Check live execution facts at original calls. Parents are claims. Omissions: conclusion/index/next_page.')
     assert 'Use declared writable paths; no control wrappers/hashes' in transmitted
     if role == 'H':
         for concept in ('H owns questions/mechanisms/criteria',
@@ -164,7 +174,8 @@ def test_frozen_long_worker_literal_and_work_unit_keep_the_actual_fragment_contr
         native_role_instruction=literal, scientific_work_unit=unit)
     task = c.response_instructions(job)
     backend = backends.selected(dict(native_backend=backend_name,
-        native_launcher_argv=['codex'] if backend_name == 'codex' else ['independent']),
+        native_launcher_argv=['codex'] if backend_name == 'codex' else ['independent'],
+        native_options={} if backend_name == 'codex' else None),
         schema_transport='prompt' if backend_name == 'codex' else None)
     size, _, instruction, _ = rendered_contract(tmp_path, job, task,
         dict(continuation_kind='fragment'), backend, remaining={},

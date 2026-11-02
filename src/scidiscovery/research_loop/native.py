@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import selectors
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -317,6 +318,63 @@ def _cleanup_code_exports(root, exports, *, launch_started, process, cleanup, br
             e._diagnostic(error, 'Native context code export cleanup failed', config=None)
 
 
+def _budget_notice_launch(backend, args, work, attempt, env, view_facts, context, *, diagnostic=None):
+    """Qualify only this internal hook in the exact final native namespace."""
+    from . import budget_notice, shared_input_views
+    channel=dict(status='unavailable',reason='hook_preflight_unavailable')
+    def report(error):
+        if diagnostic is not None:
+            message=(type(error).__name__+': '+str(error)).encode('utf-8',errors='replace')[:1024]
+            diagnostic(b'Budget notice preflight: '+message+b'\n')
+    try:
+        helper=Path(work)/'work'/budget_notice.HELPER
+        view_facts['mounts']['mappings'][str(helper)]=helper
+        check=shared_input_views.wrap_from_facts(dict(view_facts,worker_policy=None),[sys.executable,str(helper),
+            '--work',str(work),'--attempt',str(attempt),'--check'])
+        with shared_input_views.popen_arguments(check) as (argv,pass_fds):
+            visible=subprocess.run(argv,cwd=work,env=env,stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,pass_fds=pass_fds,
+                timeout=min(3,context.remaining_seconds()))
+        if visible.returncode or visible.stdout!=budget_notice.VISIBLE.encode()+b'\n':
+            channel['reason']='helper_unavailable'
+            report(ValueError('Helper visibility check failed; returncode='+str(visible.returncode)))
+            return shared_input_views.wrap_from_facts(view_facts,args),channel
+        declared=budget_notice.definition(work,attempt)
+        candidate=backend.budget_hook_args(args,declared)
+        metadata_facts=dict(view_facts,mounts=dict(view_facts['mounts'],
+            mappings=dict(view_facts['mounts']['mappings'])))
+        if '--ignore-user-config' in args:
+            native_home=Path(env.get('CODEX_HOME',str(Path.home()/'.codex')))
+            if not native_home.is_absolute():native_home=Path(work)/native_home
+            native_config=native_home/'config.toml'
+            # A missing config already has the same semantics. Do not create
+            # a mountpoint in the inherited native home for an absent file.
+            try:config_info=native_config.lstat()
+            except FileNotFoundError:config_info=None
+            if config_info is not None and not stat.S_ISREG(config_info.st_mode):
+                report(ValueError('Metadata projection requires a directly ordinary native config file'))
+                return shared_input_views.wrap_from_facts(view_facts,args),channel
+            if config_info is not None:
+                metadata_facts['mounts']['mappings'][str(native_config)]=Path(work)/'work'/budget_notice.EMPTY_CONFIG
+        inventories=[]
+        for invocation in (args,candidate):
+            metadata=shared_input_views.wrap_from_facts(metadata_facts,backend.hook_inventory_args(invocation,work))
+            with shared_input_views.popen_arguments(metadata) as (argv,pass_fds):
+                inventories.append(budget_notice.list_hooks(argv,work,env,pass_fds=pass_fds,
+                    timeout=min(5,context.remaining_seconds())))
+        try:budget_notice.validate_hook_trust(*inventories,declared,work)
+        except ValueError as error:
+            channel['reason']='hook_trust_unqualified'
+            report(error)
+            return shared_input_views.wrap_from_facts(view_facts,args),channel
+        context.remaining_seconds()
+        return shared_input_views.wrap_from_facts(view_facts,backend.budget_hook_args(args,declared,trusted=True)),dict(
+            status='available',mechanism='codex_post_tool_use')
+    except (OSError,ValueError,TypeError,KeyError,RecursionError,subprocess.TimeoutExpired) as error:
+        report(error)
+        return shared_input_views.wrap_from_facts(view_facts,args),channel
+
+
 def run_native(root: Path, step: int, attempt=0):
     from .protocol import require_current
     require_current(root)
@@ -360,6 +418,10 @@ def run_native(root: Path, step: int, attempt=0):
     if backend.standard and not job.get('formal_review'):
         backend = backends.selected(settings, schema_transport='prompt')
     standard_native = backend.standard
+    notice_channel=dict(status='unavailable',reason=('unsupported_backend' if not standard_native else
+        'undeclared_native_permissions' if settings.get('native_options') is None else
+        'unsupported_namespace' if namespace_launcher is not None else 'not_preflighted'))
+    notice_helper=None
     resume_position = None
     resume_session=None
     if settings.get('resume_policy') is not None:
@@ -492,7 +554,8 @@ def run_native(root: Path, step: int, attempt=0):
                 return
             if settings.get('resume_policy') is not None:
                 continuation.validate_task(root, step)
-            control_budget.write_node_hint(root,job,intent,limits,meter,observed=observed,author_limits=author_limits)
+            control_budget.write_node_hint(root,job,intent,limits,meter,observed=observed,
+                author_limits=author_limits,notice_channel=notice_channel)
             next_hint=time.monotonic()+5
             hint_dirty=False
             if experiment_config is not None and job.get('worker_view_version') == 1:
@@ -506,6 +569,10 @@ def run_native(root: Path, step: int, attempt=0):
                     work/worker_execution_bridge.SUBMISSION_DIRECTORY,work/'work/experiment-config.json',work,
                     launch=launch))
             from . import shared_input_views
+            if notice_channel['reason']=='not_preflighted':
+                from . import budget_notice
+                try:notice_helper=budget_notice.stage_helper(work)
+                except (OSError,ValueError):notice_channel['reason']='helper_unavailable'
             limits=control_budget.snapshot(root,settings)
             view_context=_shared_view_context(root,job,intent,limits,final_return=final_return,
                 author_permit=permit if intent.get('continuation_kind')=='author_closeout' else None)
@@ -519,11 +586,21 @@ def run_native(root: Path, step: int, attempt=0):
             if namespace_launcher is None:
                 view_facts=shared_input_views.load_wrap_facts(root,job,work,context=view_context,
                     selected_code=selected_code,source_facts=view_sources,policy=settings)
-                args=shared_input_views.wrap_from_facts(view_facts,args)
+                if notice_helper is not None:
+                    def notice_diagnostic(message):
+                        err.write(message);err.flush()
+                    args,notice_channel=_budget_notice_launch(backend,args,work,attempt,env,view_facts,view_context,
+                        diagnostic=notice_diagnostic)
+                    view_context.remaining_seconds()
+                else:args=shared_input_views.wrap_from_facts(view_facts,args)
             else:
                 # Registered host preparation/bridge stays in its host view.
                 # Its frozen module owns the final scientific namespace seam.
                 shared_input_views.ensure_capability(context=view_context)
+            if notice_helper is not None:
+                limits=control_budget.snapshot(root,settings)
+                control_budget.write_node_hint(root,job,intent,limits,meter,observed=observed,
+                    author_limits=author_limits,notice_channel=notice_channel)
             launch_started = True
             with shared_input_views.popen_arguments(args) as (launch_args, pass_fds):
                 process = subprocess.Popen(launch_args, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -645,7 +722,8 @@ def run_native(root: Path, step: int, attempt=0):
                             stop=stop or 'author_closeout_wall_limit'
                     stop = stop or search.stop_reason(root, job, search_intent, limits, meter)
                     if stop or hint_dirty or time.monotonic()>=next_hint:
-                        control_budget.write_node_hint(root,job,intent,limits,meter,observed=observed,author_limits=author_limits)
+                        control_budget.write_node_hint(root,job,intent,limits,meter,observed=observed,
+                            author_limits=author_limits,notice_channel=notice_channel)
                         next_hint=time.monotonic()+5
                         hint_dirty=False
                     if stop:
@@ -735,6 +813,7 @@ def run_native(root: Path, step: int, attempt=0):
           native_backend=backend.name,
           native_schema_transport=backend.active_schema_transport,
           native_permissions=backends.permission_summary(settings),
+          budget_notification=notice_channel,
           metering=live_meter.snapshot() if process is None else observation,
           limitation='Observed token metadata only; running requests and reporting delay are unmeasured.')
     outcome['shared_inputs']=dict(enforcement=('registered_final_namespace' if namespace_launcher is not None
