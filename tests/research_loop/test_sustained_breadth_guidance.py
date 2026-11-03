@@ -117,7 +117,7 @@ def test_normal_prepared_scientific_request_delivers_sustained_breadth_and_froze
         assert '2-3 full procedures' not in transmitted
     else:
         assert 'Reuse exact driver/report refs/conditions' in transmitted
-        assert 'full tuning/output procedures; deliver from that procedure' in transmitted
+        assert 'compare full tuning/output procedures; deliver from same' in transmitted
     if role != 'A':
         assert reading.endswith(' A verifies independently. Check live execution facts at original calls. Parents are claims. Omissions: conclusion/index/next_page.')
     assert 'Use declared writable paths; no control wrappers/hashes' in transmitted
@@ -187,9 +187,9 @@ def test_frozen_long_worker_literal_and_work_unit_keep_the_actual_fragment_contr
         report = Path(os.environ['SCID_TEST_LOG_DIR']) / 'retained-worker-contract-sizes.jsonl'
         report.parent.mkdir(parents=True, exist_ok=True)
         with report.open('a') as stream:
-            stream.write(json.dumps(dict(backend=backend_name, fixed_bytes=size,
-                with_diagnostic_allowance=size + 512)) + '\n')
-    assert size + 512 <= c.MAX_FIXED_RESPONSE_BYTES == 3072
+            stream.write(json.dumps(dict(backend=backend_name, branch='fragment',
+                rendered_bytes=size, diagnostic_bytes=0)) + '\n')
+    assert size <= c.MAX_FIXED_RESPONSE_BYTES == 3072
 
 
 def plan(*, revised=False):

@@ -1,8 +1,8 @@
 """Short scientific role advice, frozen as literal text when preparing a task."""
 MAX_BYTES = 2560
 WORK_UNITS = {
-    'screen': 'Compare assigned mechanisms cheaply; report observations or obstacles. Calls alone do not establish screening.',
-    'improve': 'In H, batch coherent work toward unmet goals beyond recipes; finish implementation/experiment/check followups before independent A strategy/judgment. Return for direction changes, stalls, scope changes, blockers or limits. Retain spent budgets.',
+    'screen': 'Shallow-screen all assigned mechanisms fairly before deepening any; then only discriminators needed for this comparison. Report observations/obstacles; calls alone do not establish screening.',
+    'improve': 'Improve the focused scientific mechanism toward unmet goals beyond a method recipe.',
     'validate': 'Resolve the assigned decision-changing gap with fair controls; stop when resolved or blocked, without a new search or unlimited proof.',
     'repair': 'Repair the exact failed observation within H and the original allowance. Preserve checks/accepted evidence; reconcile unknown calls, never replay.',
 }
@@ -27,9 +27,9 @@ OPPORTUNITY = {
 # Current launcher advice is separate from the immutable scientific literal.
 # This plans work only; it never changes H scope or execution admission.
 STAGE_PLANNING = {
-    'H': 'H owns questions/mechanisms/criteria; W owns methods/grids. Use A evidence/limits/exact refs for mechanism decisions; no default A/full-pool redo. Check concrete conflicts/gaps as needed. Compare plausible explanations; justify a single line. Mechanisms differ in assumptions/failure modes, not parameters. Revise/reopen/add mechanisms beyond screening with a minimal executable discriminator. minimal_test: public metric/conditions, reference procedure/evaluation driver; repeats only if useful. Publish reusable owned reports/results/executed scripts+needed helpers via declared outputs (usually artifacts/); managed originals: refs only, no copies/links. No downstream budget/call/audit caps.',
+    'H': 'H owns questions/mechanisms/criteria; W owns methods/grids. Assign bounded scientific work packages, not single experiments. Use A evidence/limits/exact refs for mechanism decisions; no default A/full-pool redo. Check concrete conflicts/gaps as needed. Compare plausible explanations; justify a single line by assumptions/failure modes, not method names. Revise/reopen/add mechanisms beyond screening with a minimal executable discriminator. minimal_test: public metric/conditions, reference procedure/evaluation driver; differing predictions, fair controls, sufficient evidence; repeats only if useful. Publish reusable owned reports/results/executed scripts+needed helpers via declared outputs (usually artifacts/); managed originals: refs only, no copies/links. No downstream budget/call/audit caps.',
     'A': 'Prior A gaps/W delta first; reuse reports/arrays/code/full-pool index; no routine rereads/refits/repackaging. Weigh strongest rivals; finite choice with limits if sufficient; may reject all. Batch unmet-goal work: continue_w(improve). Only evidenced mechanism gaps: revise_h(minimal executable test), even if methods improve. Compare full procedures; changed conditions limit comparisons. Publish own reports/executed code+helpers; cite exact managed originals.',
-    'W': 'Reuse exact driver/report refs/conditions; compare full tuning/output procedures; deliver from that procedure. Batch if useful; artifacts/ reports, work/ scratch.',
+    'W': 'Within H: observe, design/run small batches, compare, adapt. Finish useful implementation/tuning/controls/checks before independent A. Next batch: unresolved judgment, discriminator, decision-changing outcomes. Return with limits if answered, low value/cost or insufficient token/time, independent strategy or mechanism/scope/criteria change needed, blocked. Batch scripts/incremental tables; compact deltas. Reuse exact driver/report refs/conditions, arrays/indexes; compare full tuning/output procedures; deliver from same. artifacts/ reports, work/ scratch.',
 }
 
 

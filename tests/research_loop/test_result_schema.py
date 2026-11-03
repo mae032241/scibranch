@@ -74,16 +74,28 @@ def test_breadth_consumers_are_enabled_without_expanding_base_schema():
 
 
 def notice_context_bytes(job,intent,backend,**context):
-    """Real Codex capture shows plain developer text, with no text wrapper.
+    """Count one plain developer notice per token/time dimension at most.
 
-    One attempt can emit the stable node cause and later the shared cause;
-    both remain model-visible even when a repair uses the same text twice.
+    The hook marks each dimension once, regardless of later cause changes.
+    Use its longest reachable node/shared/global-exhaustion text for this branch.
     """
     if not (backend.name=='codex' and backend.standard and backend.options is not None):return 0
     from scidiscovery.research_loop import budget_notice
-    return sum(len(budget_notice.closeout_notice(job,intent,target_reached=True,shared_reached=shared,
-        author=bool(context.get('author')),final_return=bool(context.get('final_return')))['text'].encode())
-        for shared in (False,True))
+    author,final_return=bool(context.get('author')),bool(context.get('final_return'))
+    ordinary=not (author or final_return or job.get('formal_review') or job.get('purpose')=='closeout'
+        or job.get('final_report') or job.get('final_only') or intent.get('output_repair') or intent.get('work_repair'))
+    roles=('W','A') if job['role']=='H' else ('A',) if job['role']=='W' else ()
+    total=0
+    for dimension in ('token','time'):
+        followups=[None]
+        if ordinary and dimension=='token' and roles:followups.append(dict.fromkeys(roles,1))
+        total+=max(len(budget_notice.closeout_notice(job,intent,dimension=dimension,
+            target_reached=True,shared_reached=shared,shared_exhausted=exhausted,
+            shared_expired=dimension=='time' and shared,followup_tokens=followup,
+            author=author,final_return=final_return)['text'].encode())
+            for shared,exhausted in ((False,False),(False,True),(True,True))
+            for followup in followups)
+    return total
 
 
 def rendered_contract(tmp_path,job,task,intent,backend,**context):
@@ -111,7 +123,8 @@ def test_complete_fixed_model_response_contract_fits_three_kib(tmp_path,role,sco
 
     Dynamic goals/original references/budget observations and transport settings
     remain complete and are reported separately. Formal independent review has
-    its existing separate contract. The 512-byte diagnostic is part of the wire.
+    its existing separate contract. Repair includes its actual bounded diagnostic;
+    ordinary planning and fragments do not also reserve a repair diagnostic.
     """
     import json
     from scidiscovery.research_loop import backends,guidance
@@ -151,12 +164,14 @@ def test_complete_fixed_model_response_contract_fits_three_kib(tmp_path,role,sco
         report=Path(os.environ['SCID_TEST_LOG_DIR'])/'response-contract-sizes.jsonl'
         report.parent.mkdir(parents=True,exist_ok=True)
         with report.open('a') as stream:stream.write(json.dumps(dict(role=role,scope=scope,backend=backend_name,branch=branch,
-            fixed_bytes=fixed_size,with_diagnostic_allowance=fixed_size+512,rendered_bytes=size,
+            fixed_bytes=fixed_size,diagnostic_bytes=diagnostic_bytes,rendered_bytes=size,
+            diagnostic_allowance_bytes=512 if branch=='repair' else 0,
             cumulative_notice_bytes=notice_context_bytes(job,intent,backend,**context),
             final_prompt_bytes=len(prompt.encode()),instruction_bytes=len(instruction.encode()),transport_packet_bytes=len(packet)))+'\n')
-    assert fixed_size<=2560,(role,scope,backend_name,branch,fixed_size)
-    assert fixed_size+512<=c.MAX_FIXED_RESPONSE_BYTES==3072,(role,scope,backend_name,branch,fixed_size)
-    assert size<=c.MAX_FIXED_RESPONSE_BYTES,(role,scope,backend_name,branch,size)
+    if branch=='repair':
+        assert diagnostic_bytes<=512,(role,scope,backend_name,diagnostic_bytes)
+        assert fixed_size+512<=c.MAX_FIXED_RESPONSE_BYTES,(role,scope,backend_name,branch,fixed_size)
+    assert size<=c.MAX_FIXED_RESPONSE_BYTES==3072,(role,scope,backend_name,branch,size)
 
 
 @pytest.mark.parametrize('backend_name',['codex','protocol'])
@@ -237,7 +252,7 @@ def test_full_renderer_special_suffixes_fit_same_contract(tmp_path,backend_name,
     size+=notice_context_bytes(job,intent,backend,
         author=dict(facts='work/author-closeout-science.json',limits={}) if scope=='author_closeout' else None,
         final_return=scope=='protected_final')
-    assert size+512<=3072,(backend_name,scope,size)
+    assert size<=c.MAX_FIXED_RESPONSE_BYTES==3072,(backend_name,scope,size)
 
 
 @pytest.mark.parametrize('choice',[None,'', '   ',[],42])

@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, controller, execution, guidance
+from scidiscovery.research_loop import contracts as c, controller, execution, guidance, native
 from cov_execution import lineage as cov
 from test_history_handoff import finish
 from test_cov_lineage import wrapper
@@ -34,6 +34,15 @@ def test_only_current_role_literal_is_delivered_and_retained_bytes_are_stable(tm
         assert job['native_role_instruction']==stored[role] and isinstance(job['native_role_instruction'],str)
         assert 'role_guidance' not in view  # Literal instructions travel through the native prompt.
         assert 'role_guidance' not in c.result_schema(role,CURRENT)['properties']
+        prompt, _, schema = native.render_scientific_request(job, view, {}, backend_name='codex',
+            instruction_transport='prompt')
+        if role in {'H', 'W'}:
+            assert prompt.count(guidance.STAGE_PLANNING[role]) == 1
+        if role == 'H':
+            assert 'Assign bounded scientific work packages, not single experiments' in prompt
+            assert 'differing predictions, fair controls, sufficient evidence' in prompt
+            assert 'No downstream budget/call/audit caps' in prompt
+        assert 'scientific_work_unit' not in schema['properties']
         originals={p:p.read_bytes() for p in (root/'jobs'/f'{step:03d}.json',work/'science-task.json',record/'result-identity.json')}
         monkeypatch.setitem(guidance.DEFAULT,role,'Changed future guidance; not this task')
         c.build_job(root,step,role,[step-1] if step>1 else [])
@@ -47,6 +56,30 @@ def test_old_job_without_guidance_is_not_rewritten(tmp_path):
     assert 'role_guidance' not in job and 'role_guidance' not in c.science_view(job,root)
     c.build_job(root,1,'H',[]);c.validate(work)
     assert all(p.read_bytes()==data for p,data in original.items())
+
+
+@pytest.mark.parametrize('backend_name', ['codex', 'protocol'])
+@pytest.mark.parametrize('gate,role', [('author', 'H'), ('author', 'W'), ('formal_review', 'A')])
+def test_author_and_formal_review_requests_exclude_ordinary_batch_planning(tmp_path, backend_name, gate, role):
+    root = prepare(tmp_path)
+    job = c.build_job(root, 1, role, [])
+    task = c.read(c.workspace(root, 1)/'science-task.json')
+    intent, options = {}, {}
+    if gate == 'author':
+        intent['continuation_kind'] = 'author_closeout'
+        options['author'] = dict(facts='inputs/author-facts.json',
+            limits=dict(max_tokens=1000, max_seconds=60))
+    else:
+        job = dict(job, formal_review=dict(fixture='request rendering only'))
+        task = dict(task, review_instruction='Independently assess the exact retained subject.')
+    prompt, instruction, _ = native.render_scientific_request(job, task, intent,
+        backend_name=backend_name, instruction_transport='prompt', **options)
+    assert all(text not in prompt + instruction for text in guidance.STAGE_PLANNING.values())
+    if gate == 'author':
+        assert 'Completed originals only' in prompt
+        assert 'stage_intent=review/decision, never continue' in prompt
+    else:
+        assert 'Do not edit the subject' in prompt
 
 
 @pytest.mark.parametrize('bad',[{},dict(guidance.DEFAULT,X='unexpected'),{**guidance.DEFAULT,'H':''},{**guidance.DEFAULT,'H':'机'*1000}])

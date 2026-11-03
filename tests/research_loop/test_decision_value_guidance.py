@@ -183,10 +183,7 @@ def test_improve_a_comparison_recipe_preserves_local_scientific_iterations_and_o
     assert search.launch_reason(root, job) is None
     assert job['scientific_work_unit'] == guidance.WORK_UNITS['improve']
     assert job['scientific_work_unit'] in task['question']
-    assert 'In H, batch coherent work toward unmet goals beyond recipes' in task['question']
-    assert 'finish implementation/experiment/check followups before independent A strategy/judgment' in task['question']
-    assert 'Return for direction changes, stalls, scope changes, blockers or limits' in task['question']
-    assert 'Retain spent budgets' in task['question']
+    assert 'focused scientific mechanism' in task['question']
     assert job['worker_fragment_policy'] == dict(context='same_session')
     assert 'Continuation configured: same_session;' in task['stage_response']
     assert task['stage_response'].startswith('stage_intent: review=A|decision=partial|continue=work.')
@@ -203,6 +200,10 @@ def test_improve_a_comparison_recipe_preserves_local_scientific_iterations_and_o
     for intent in ({}, dict(continuation_kind='fragment')):
         prompt, _, schema = native.render_scientific_request(job, task, intent, backend_name='codex',
             instruction_transport='prompt')
+        assert prompt.count(guidance.STAGE_PLANNING['W']) == 1
+        assert 'Within H: observe, design/run small batches, compare, adapt' in prompt
+        assert 'unresolved judgment, discriminator, decision-changing outcomes' in prompt
+        assert 'Return with limits if answered, low value/cost or insufficient token/time' in prompt
         assert 'stage_intent:continue|review|decision' in prompt
         assert schema['properties']['stage_intent']['enum'] == ['continue', 'review', 'decision']
         assert 'next_action' not in schema['properties']
@@ -272,10 +273,10 @@ def test_existing_mechanism_pressure_tests_and_diagnostics_route_directly_to_bat
     assert all(value not in task['question'] for value in proposal.values())
     assert '2x2' not in task['question']  # No proposal-derived execution quota.
     assert job['scientific_work_unit'] == guidance.WORK_UNITS['improve']
-    for concept in ('batch coherent work toward unmet goals beyond recipes',
-            'finish implementation/experiment/check followups before independent A strategy/judgment',
-            'Return for direction changes, stalls, scope changes, blockers or limits'):
-        assert concept in task['question']
+    prompt, _, _ = native.render_scientific_request(job, task, {}, backend_name='codex',
+        instruction_transport='prompt')
+    assert prompt.count(guidance.STAGE_PLANNING['W']) == 1
+    assert 'Finish useful implementation/tuning/controls/checks before independent A' in prompt
     assert all(path.read_bytes() == raw for path, raw in originals.items())
 
 
@@ -298,7 +299,7 @@ def test_a_bounded_work_units_do_not_gain_improve_followup_authority(tmp_path, a
         assert guidance.WORK_UNITS[action] in task['question']
     assert 'return-after-comparison' not in task['decision_context']['authority']
     assert 'related observation-driven follow-ups' not in task['decision_context']['authority']
-    assert 'beyond recipes' not in task['question']
+    assert guidance.WORK_UNITS['improve'] not in task['question']
 
 
 def test_a_mechanism_revision_keeps_h_ownership_without_w_followup_authority(tmp_path):
@@ -310,18 +311,23 @@ def test_a_mechanism_revision_keeps_h_ownership_without_w_followup_authority(tmp
     assert 'H owns mechanism revision' in task['decision_context']['authority']
     assert 'related observation-driven follow-ups' not in task['decision_context']['authority']
     assert 'Revise the qualitative mechanism matrix' in task['question']
-    assert 'beyond recipes' not in task['question']
+    assert guidance.WORK_UNITS['improve'] not in task['question']
 
 
 def test_initial_screen_keeps_its_independent_assessment_boundary(tmp_path):
     root = prepare(tmp_path, guidance.DEFAULT, search_policy=search.DEFAULT_POLICY)
     finish(root, 1, 'H', [], action='experiment', search_choice=dict(
         scope='Compare mechanisms before selecting a main line',
-        commitments=[dict(label='Initial mechanism', minimal_test='Cheap discriminating comparison', existing_ref=None)],
+        commitments=[dict(label='Initial mechanism', minimal_test='Cheap discriminating comparison', existing_ref=None),
+            dict(label='Rival mechanism', minimal_test='Different prediction under the same conditions', existing_ref=None)],
         focus=dict(index=1, action='screen')))
     job = c.build_job(root, 2, 'W', [1])
     task = c.read(c.workspace(root, 2)/'science-task.json')
     assert job['scientific_work_unit'] == guidance.WORK_UNITS['screen']
+    assert set(search.project(root, 2)['mechanisms']) == {'h001.m1', 'h001.m2'}
+    assert 'Shallow-screen all assigned mechanisms fairly before deepening any' in task['question']
+    assert 'only discriminators needed for this comparison' in task['question']
+    assert guidance.WORK_UNITS['improve'] not in task['question']
     assert 'decision_context' not in task
     assert 'Return to independent A, not global completion' in job['native_role_instruction']
     assert task['stage_response'].startswith('stage_intent: review=A|decision=partial|continue=work.')
