@@ -3,22 +3,25 @@ import json
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts as c, controller, execution, native
+from scidiscovery.research_loop import budget, budget_notice, contracts as c, controller, execution, native
 from test_node_budget import instance, policy, target
 from test_soft_node_budget import start_clock
 
 
 @pytest.fixture
 def advice(tmp_path, monkeypatch):
-    def make(*, mode='soft', node=True, delivery=False, node_tokens=100):
+    def make(*, mode='soft', node=True, delivery=False, node_tokens=100, role='H',
+            role_targets=None, thinking_target=None):
         public=tmp_path/'public';public.mkdir();objective=public/'objective.md';objective.write_text('Bounded scientific question.')
         root=tmp_path/'instance'
         reserve=(dict(closeout_a=dict(max_observed_tokens=10,max_seconds=1),inflight_tokens=5,
             cleanup_seconds=2,submit_seconds=0,confirm_seconds=0,adapter=None) if delivery else None)
         controller.prepare(root,objective,public,['never-launch'],max_tokens=1000,max_seconds=120,max_steps=6,
             model='fixture',reasoning_effort='high',search_policy=None,node_budget_mode=mode,
-            node_budget_policy=policy(tokens=node_tokens,seconds=30) if node else None,delivery_policy=reserve)
-        job=c.build_job(root,1,'H',[]);start_clock(root,'advisory fixture')
+            node_budget_policy=(role_targets or policy(tokens=node_tokens,seconds=30)) if node else None,delivery_policy=reserve,
+            role_budget_policy=dict(version=1,min_w_share=.65,max_thinking_share=.35,
+                thinking_node_target_tokens=thinking_target) if thinking_target is not None else None)
+        job=c.build_job(root,1,role,[]);start_clock(root,'advisory fixture')
         anchor=budget.accept_node(root,job)
         intent=dict(task_ref=c.record_ref(root/'jobs/001.json'),**(dict(budget_slice=anchor) if anchor else {}))
         c.write(execution.origin(root,1)/'native-intent.json',intent)
@@ -142,20 +145,105 @@ def test_one_large_report_reaches_soft_target_without_claiming_pre_request_cap(a
     assert budget.stop_node(root,job,intent,limits,meter) is None
 
 
-def test_current_publisher_adds_stable_notice_only_when_target_or_shared_ceiling_reached(advice):
+def test_current_publisher_adds_stable_notice_from_loaded_budget_risk(advice):
     _,_,_,_,shared,_,publish=advice()
-    assert 'closeout_notice' not in publish(observed=False)
+    assert 'closeout_notices' not in publish(observed=False)
     target=publish(dict(input_tokens=100,cached_input_tokens=90,output_tokens=0))
-    assert target['closeout_notice']['cause']=='node'
-    assert 'Soft target' in target['closeout_notice']['text']
+    assert set(target['closeout_notices'])=={'token'}
+    assert target['closeout_notices']['token']['cause']=='node'
+    assert 'suggested W+A token targets' in target['closeout_notices']['token']['text']
+    assert 'No reservation/grant' in target['closeout_notices']['token']['text']
     repeated=publish(dict(input_tokens=101,cached_input_tokens=90,output_tokens=0))
-    assert repeated['closeout_notice']==target['closeout_notice']
+    assert repeated['closeout_notices']==target['closeout_notices']
     shared.update(observed_tokens=1000,accounted_tokens=1000,unknown_steps=[1])
     exhausted=publish(observed=False)
-    assert exhausted['closeout_notice']['cause']=='shared'
-    assert 'Shared budget reached' in exhausted['closeout_notice']['text']
+    assert exhausted['closeout_notices']['token']['cause']=='shared'
+    assert 'Wrap up' in exhausted['closeout_notices']['token']['text']
     assert exhausted['unknown_usage'] is True
     assert exhausted['notification_channel']==dict(status='unavailable',reason='not_preflighted')
+
+
+@pytest.mark.parametrize('tokens,state,alert',[(79,'within',False),(80,'near',True),(99,'near',True),(100,'reached',True)])
+def test_node_risk_starts_at_eighty_percent_without_changing_soft_targets(advice,tokens,state,alert):
+    root,job,intent,limits,_,_,publish=advice(role='E')
+    meter=dict(input_tokens=tokens,output_tokens=0,cached_input_tokens=0)
+    hint=publish(meter)
+    assert hint['target_state']==state and hint['targets']==dict(max_observed_tokens=100,max_seconds=30)
+    assert ('closeout_notices' in hint) is alert
+    if alert:
+        assert set(hint['closeout_notices'])=={'token'}
+        assert hint['closeout_notices']['token']['cause']=='node' and 'Soft target' in hint['closeout_notices']['token']['text']
+        assert budget_notice.published_notices(hint)==hint['closeout_notices']
+    assert budget.stop_node(root,job,intent,limits,meter) is None
+
+
+@pytest.mark.parametrize('elapsed,alert',[(23.99,False),(24.,True)])
+def test_node_time_risk_uses_the_existing_eighty_percent_target(advice,monkeypatch,elapsed,alert):
+    _,_,_,_,_,_,publish=advice(role='E')
+    monkeypatch.setattr(budget,'_node_duration',lambda *args:elapsed)
+    hint=publish()
+    assert ('closeout_notices' in hint) is alert
+    if alert:assert set(hint['closeout_notices'])=={'time'}
+    assert hint['targets']==dict(max_observed_tokens=100,max_seconds=30)
+
+
+@pytest.mark.parametrize('role,threshold,expected',[('H',340,{'W':300,'A':40}),('W',40,{'A':40})])
+def test_followup_risk_uses_existing_role_suggestions_without_reserving_them(advice,role,threshold,expected):
+    targets={key:dict(max_observed_tokens=value,max_seconds=30) for key,value in dict(H=100,W=300,A=200,E=100).items()}
+    root,_,_,_,shared,_,publish=advice(role=role,role_targets=targets,thinking_target=40)
+    frozen=(root/'settings.json').read_bytes()
+    shared.update(observed_tokens=1000-threshold-1,accounted_tokens=1000-threshold-1)
+    before=publish()
+    assert before['target_state']=='within' and 'closeout_notices' not in before
+    shared.update(observed_tokens=1000-threshold,accounted_tokens=1000-threshold)
+    hint=publish()
+    assert hint['target_state']=='within' and hint['closeout_notices']['token']['cause']=='shared'
+    assert set(hint['closeout_notices'])=={'token'}
+    assert hint['shared_observed_tokens_remaining_upper_bound']==threshold
+    assert hint['current_work_observed_tokens_remaining_upper_bound']==threshold
+    assert 'No reservation/grant' in hint['closeout_notices']['token']['text']
+    for next_role,tokens in expected.items():assert f'{next_role}={tokens}' in hint['instruction']
+    assert budget_notice.published_notices(hint)==hint['closeout_notices']
+    assert (root/'settings.json').read_bytes()==frozen
+
+
+@pytest.mark.parametrize('seconds,alert',[(12.,False),(11.999,True),(0.,True),(-1.,True)])
+def test_shared_time_risk_is_strictly_below_ten_percent(advice,seconds,alert):
+    _,_,_,limits,_,_,publish=advice(role='A')
+    limits['seconds_remaining']=seconds
+    hint=publish()
+    assert hint['target_state']=='within' and hint['shared_active_seconds_remaining']==seconds
+    assert ('closeout_notices' in hint) is alert
+    assert 'At shared time expiry' in hint['instruction']
+    if alert:
+        text=hint['closeout_notices']['time']['text']
+        assert set(hint['closeout_notices'])=={'time'}
+        assert hint['closeout_notices']['time']['cause']=='shared'
+        assert 'eligible existing candidate or finish with gaps' in text and 'No H/W/E/extra FINAL' in text
+        assert ('Shared time expired' in text) is (seconds<=0)
+        assert budget_notice.published_notices(hint)==hint['closeout_notices']
+
+
+@pytest.mark.parametrize('first_dimension',['token','time','both'])
+def test_producer_keeps_token_and_time_risks_independent_through_resume(advice,first_dimension):
+    root,_,_,limits,_,_,publish=advice(role='A')
+    if first_dimension in {'time','both'}:limits['seconds_remaining']=11.
+    meter=dict(input_tokens=80 if first_dimension in {'token','both'} else 25,cached_input_tokens=0,output_tokens=0)
+    first=publish(meter)
+    expected={'time','token'} if first_dimension=='both' else {first_dimension}
+    assert set(first['closeout_notices'])==expected
+    selected='time' if first_dimension=='both' else first_dimension
+    work=c.workspace(root,1)
+    assert budget_notice.hook_output(work,0)['hookSpecificOutput']['additionalContext']==first['closeout_notices'][selected]['text']
+    if first_dimension!='both':assert budget_notice.hook_output(work,1) is None
+    limits['seconds_remaining']=0.
+    both=publish(dict(input_tokens=100,cached_input_tokens=0,output_tokens=0))
+    assert set(both['closeout_notices'])=={'time','token'}
+    remaining='token' if selected=='time' else 'time'
+    output=budget_notice.hook_output(work,2)['hookSpecificOutput']['additionalContext']
+    assert output==both['closeout_notices'][remaining]['text']
+    if remaining=='time':assert 'Shared time expired' in output
+    for attempt in (0,1,2,999):assert budget_notice.hook_output(work,attempt) is None
 
 
 @pytest.mark.process_e2e
@@ -190,7 +278,9 @@ def test_soft_native_stdin_has_budget_advice_and_prelaunch_hint(tmp_path,role):
     assert local['inflight_usage_unknown'] and local['reporting_delay_unmeasured']
     assert ordinary['token_usage_unknown']  # This current native task has no outcome or usage before submission.
     assert 'unknown_usage' not in ordinary
-    for text in ('Soft targets','work/budget-status.json','input includes cache',
+    for text in ('Soft targets','work/budget-status.json','input has cache',
             'unknown tokens!=0','no grant','no control wrappers/hashes'):
         assert text in prompt
+    if role in 'HW':assert 'Allow for suggested follow-up token targets' in prompt
+    if role=='A':assert 'At shared time expiry' in prompt and 'No new H/W/E/extra FINAL' in prompt
     assert c.read(execution.record(root,step)/'native-outcome.json')['stop_reason'] is None

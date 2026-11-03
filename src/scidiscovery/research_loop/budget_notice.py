@@ -1,7 +1,7 @@
 """Bounded budget advice at a native tool boundary; never an execution grant.
 
 This file is also the staged hook executable. Its hook path uses only stdlib,
-one fixed current hint and at most two exclusive markers for this attempt.
+one fixed current hint and one exclusive marker per logical node and dimension.
 """
 from __future__ import annotations
 
@@ -35,34 +35,44 @@ def public_channel(value):
     return dict(status='unavailable', reason=reason if reason in UNAVAILABLE_REASONS else 'not_preflighted')
 
 
-def closeout_notice(job, intent, *, target_reached, shared_reached, author=False, final_return=False):
+def closeout_notice(job, intent, *, dimension, target_reached, shared_reached, target_near=False,
+        shared_risk=False, shared_expired=False, followup_tokens=None, author=False, final_return=False):
     """Render only already-loaded observations; unknown usage is never zero."""
-    if not (target_reached or shared_reached):
+    if dimension not in {'token', 'time'}:
+        raise ValueError('Unknown budget advice dimension')
+    if not (target_reached or target_near or shared_reached or shared_risk):
         return None
-    cause = 'shared' if shared_reached else 'node'
+    cause = 'shared' if shared_reached or shared_risk else 'node'
+    risk = dimension.capitalize()+' budget risk.'
     if intent.get('output_repair'):
-        text = ('Budget reached. Finish output repair now; keep science/plans/limits/future action. '
+        text = (risk+' Finish output repair now; keep science/plans/limits/future action. '
             'No work/rerun/replay; permissions hold; unknown usage != 0.')
     elif intent.get('work_repair'):
-        text = ('Budget reached. Finish accepted missing work or report gaps now. '
+        text = (risk+' Finish accepted missing work or report gaps now. '
             'Keep original authorization/action; no expansion/unknown replay; unknown usage != 0.')
     elif job.get('formal_review'):
-        text = ('Budget reached. Finish this exact independent review now from existing evidence; retain gaps and verdict authority. '
+        text = (risk+' Finish this exact independent review now from existing evidence; retain gaps and verdict authority. '
             'No new work; unknown usage != 0.')
     elif author:
-        text = ('Budget reached. Return author-only JSON from existing results now; retain gaps. '
+        text = (risk+' Return author-only JSON from existing results now; retain gaps. '
             'No new work/replay; permissions hold; unknown usage != 0.')
     elif final_return:
-        text = ('Budget reached. Complete accepted final return now from existing results; retain gaps. '
+        text = (risk+' Complete accepted final return now from existing results; retain gaps. '
             'No extra FINAL/new work; permissions hold; unknown usage != 0.')
-    elif job['role'] == 'A' and shared_reached:
-        text = ('Shared budget reached. A: conclude/select completed results and return your final scientific judgment now. '
-            'No new work/extra FINAL; permissions hold; unknown usage != 0.')
+    elif job['role'] == 'A' and not (job.get('purpose') == 'closeout' or job.get('final_report') or job.get('final_only')):
+        timing = ('Shared time expired. A: conclude now;' if shared_expired else
+            f'Shared {dimension} budget reached. A: conclude now;' if shared_reached else risk+' A: wrap up; at expiry')
+        text = (timing+' deliver an eligible existing candidate or finish with gaps. '
+            'No H/W/E/extra FINAL; permissions hold; unknown usage != 0.')
+    elif followup_tokens:
+        roles = '+'.join(followup_tokens)
+        text = (risk+f' Wrap up for suggested {roles} token targets. '
+            'No reservation/grant; return JSON with gaps; permissions hold; unknown usage != 0.')
     elif shared_reached:
-        text = ('Shared budget reached. Return scientific JSON from existing results now; retain gaps. '
+        text = (f'Shared {dimension} budget reached. Return scientific JSON from existing results now; retain gaps. '
             'No new work/replay; permissions hold; unknown usage != 0.')
     else:
-        text = ('Node target reached. Finish bounded actions and return scientific JSON now with limits. '
+        text = (risk+' Finish bounded actions and return scientific JSON now with limits. '
             'Soft target; permissions hold; unknown usage != 0.')
     if len(text.encode('utf-8')) > MAX_NOTICE_BYTES:
         raise ValueError('Budget closeout notice exceeds its fixed response allowance')
@@ -76,24 +86,28 @@ def _finite(value):
         return False
 
 
-def published_notice(value):
+def published_notices(value):
     """Accept the bounded current host projection from its sole producer."""
     if not isinstance(value, dict) or value.get('scope') != SCOPE:
         return None
     if not _finite(value.get('updated_at_unix')) or value.get('inflight_usage_unknown') is not True:
         return None
-    notice = value.get('closeout_notice')
-    if not isinstance(notice, dict) or set(notice) != {'cause', 'text'}:
+    notices = value.get('closeout_notices')
+    if not isinstance(notices, dict) or not notices or not set(notices).issubset({'token', 'time'}):
         return None
-    if notice.get('cause') not in {'node', 'shared'} or not isinstance(notice.get('text'), str):
-        return None
-    if len(notice['text'].encode('utf-8')) > MAX_NOTICE_BYTES:
-        return None
-    shared = any(_finite(value.get(key)) and value[key] == 0 for key in
-        ('shared_observed_tokens_remaining_upper_bound', 'shared_active_seconds_remaining'))
-    if notice['cause'] == 'shared' and not shared or notice['cause'] == 'node' and value.get('target_state') != 'reached':
-        return None
-    return notice
+    # Shared risk also includes the producer's follow-up advice and time ratio.
+    # The hook consumes that bounded projection; it does not reload settings or
+    # reconstruct the producer's plan to decide whether advice is warranted.
+    for notice in notices.values():
+        if not isinstance(notice, dict) or set(notice) != {'cause', 'text'}:
+            return None
+        if notice.get('cause') not in {'node', 'shared'} or not isinstance(notice.get('text'), str):
+            return None
+        if len(notice['text'].encode('utf-8')) > MAX_NOTICE_BYTES:
+            return None
+        if notice['cause'] == 'node' and value.get('target_state') not in {'near', 'reached'}:
+            return None
+    return notices
 
 
 def read_hint(work):
@@ -107,28 +121,34 @@ def read_hint(work):
             data = stream.read(4097)
         if len(data) > 4096:
             return None
-        return published_notice(json.loads(data.decode('utf-8')))
+        return published_notices(json.loads(data.decode('utf-8')))
     except (OSError, ValueError, UnicodeError, RecursionError):
         return None
 
 
 def hook_output(work, attempt):
-    notice = read_hint(work)
-    if notice is None:
+    notices = read_hint(work)
+    if notices is None:
         return None
     directory = Path(work) / 'work'
     try:
         fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
-            marker = f'.budget-notice-{attempt}-{notice["cause"]}'
-            item = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                0o400, dir_fd=fd)
-            os.close(item)
+            for dimension in ('time', 'token'):
+                if dimension not in notices:
+                    continue
+                try:
+                    item = os.open('.budget-notice-'+dimension,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400, dir_fd=fd)
+                except FileExistsError:
+                    continue
+                os.close(item)
+                return dict(hookSpecificOutput=dict(hookEventName='PostToolUse', additionalContext=notices[dimension]['text']))
         finally:
             os.close(fd)
     except OSError:
         return None
-    return dict(hookSpecificOutput=dict(hookEventName='PostToolUse', additionalContext=notice['text']))
+    return None
 
 
 def definition(work, attempt, *, python=None):

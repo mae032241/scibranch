@@ -97,6 +97,34 @@ def test_sealed_overbudget_a_delivers_its_exact_choice_without_final(tmp_path, m
 
 
 @pytest.mark.process_e2e
+@pytest.mark.parametrize('recommendation', [None, 'run-1'])
+def test_expired_sealed_a_can_finish_with_gaps_without_delivery_or_final(tmp_path, monkeypatch, recommendation):
+    from test_closeout_protocol import scene
+    root = scene(tmp_path, [])
+    c.write(root/'host-started.json', budget.clock_stamp())
+    budget.transition(root, 'advance', 'Original ordinary A finish fixture')
+    record = publish(root, c.build_job(root, 3, 'A', [1, 2]),
+        action='finish', recommendation=recommendation)
+    stamp = budget.clock_stamp()
+    later = dict(stamp, at_unix=stamp['at_unix']+1000, at_boottime=stamp['at_boottime']+1000)
+    monkeypatch.setattr(budget, 'clock_stamp', lambda: dict(later))
+    assert budget.snapshot(root)['seconds_remaining'] == 0
+    originals = {path: path.read_bytes() for path in (
+        root/'settings.json', root/'jobs/003.json', record/'native-intent.json',
+        record/'science-output.json', record/'native-outcome.json', record/'result-identity.json')}
+    usage = native.usage(root)
+    monkeypatch.setattr(native, 'execute_native', lambda *args: pytest.fail('The accepted A finish needs no new native call'))
+    monkeypatch.setattr(delivery, 'invoke', lambda *args, **kwargs: pytest.fail('Finish does not authorize delivery'))
+    for _ in range(2):
+        result = controller.run(root)
+        assert result['status'] == 'finish' and result['last_step'] == 3
+        assert budget.closeout_state(root)['begin'] is None and not budget.closeout_state(root)['actions']
+        assert budget.final_a_barrier(root) is None and not (root/'jobs/004.json').exists()
+        assert not (root/'submission/model.pkl').exists() and native.usage(root) == usage
+        assert all(path.read_bytes() == raw for path, raw in originals.items())
+
+
+@pytest.mark.process_e2e
 def test_unknown_overbudget_a_delivery_reconciles_the_same_original(tmp_path, monkeypatch):
     from test_closeout_protocol import scene
     root = scene(tmp_path, [])

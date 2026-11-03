@@ -2560,9 +2560,10 @@ def write_node_hint(root, job, intent, limits, meter, *, observed, author_limits
     """Optional replaceable advice; never read as a grant, meter or evidence."""
     from .protocol import require_current
     require_current(root,job)
-    mode=node_mode(root)
+    settings = contracts.settings(root, job)
+    mode=node_mode(root,settings=settings)
     publish_review(root,job,intent,limits,meter,observed=observed)
-    targets=node_limits(root,job)
+    targets=node_limits(root,job,settings=settings)
     duration=_node_duration(root,job,intent,limits) if targets else None
     if targets is None and job['role']=='W' and job.get('search'):
         from . import search
@@ -2583,7 +2584,6 @@ def write_node_hint(root, job, intent, limits, meter, *, observed, author_limits
         boundary='author_permit' if targets is not None else 'unavailable'
         duration=(duration-intent['budget_slice'].get('previous_seconds',0.)) if duration is not None else None
         consumed=meter['input_tokens']+meter['output_tokens']
-    settings = contracts.settings(root, job)
     closeout = job.get('purpose') == 'closeout'
     reserve = (closeout_floor(settings, preparation_seconds=closeout_state(root)['begin']['preparation_seconds'])
         if closeout else delivery_reserve(settings)) or dict(tokens=0,seconds=0,steps=0)
@@ -2593,6 +2593,14 @@ def write_node_hint(root, job, intent, limits, meter, *, observed, author_limits
     from . import native
     shared=native.usage(root)
     remaining=limits['max_tokens']-shared.get('accounted_tokens', shared['observed_tokens'])
+    shared_seconds=limits['seconds_remaining']
+    ordinary=not (author or final_return is not None or job.get('formal_review') or closeout
+        or job.get('final_report') or job.get('final_only') or intent.get('output_repair') or intent.get('work_repair'))
+    followup_tokens={}
+    if ordinary:
+        for role in ('W','A') if job['role']=='H' else ('A',) if job['role']=='W' else ():
+            suggestion=node_limits(root,dict(role=role),settings=settings)
+            if suggestion is not None:followup_tokens[role]=suggestion['max_observed_tokens']
     available_tokens=max(0,remaining-reserve['tokens'])
     available_seconds=max(0.,limits['seconds_remaining']-reserve['seconds'])
     if author:
@@ -2612,12 +2620,19 @@ def write_node_hint(root, job, intent, limits, meter, *, observed, author_limits
         target_kind='unavailable' if targets is None else 'soft_target',
         unknown_usage=not observed or bool(shared.get('unknown_steps')),
         shared_remaining_basis='configured_ceiling_minus_reported_usage',
-        shared_observed_tokens_remaining_upper_bound=max(0,remaining),shared_active_seconds_remaining=limits['seconds_remaining'],
+        shared_observed_tokens_remaining_upper_bound=max(0,remaining),shared_active_seconds_remaining=shared_seconds,
         reserve_state='reached' if remaining<=reserve['tokens'] or limits['seconds_remaining']<=reserve['seconds'] else 'within',
         reserve_scope='external_closeout_floor' if closeout else 'minimal_closeout_reserve',
         current_work_observed_tokens_remaining_upper_bound=available_tokens,
         current_work_active_seconds_available=available_seconds,
         instruction='Near/reached limits, targets or reserve: finish bounded actions and return your scientific JSON. Unknown coverage is not zero usage; reported consumption is a lower bound, and remaining upper bounds are not grants or request/billing caps. Shared ceilings are checked before the next node, without terminating this accepted node for a soft target. Original finite external-call and resource limits still apply.')
+    if followup_tokens:
+        hint['instruction'] += (' Allow for at least the suggested follow-up token targets '
+            +', '.join(f'{role}={tokens}' for role,tokens in followup_tokens.items())
+            +'; these are advice, not reserved tokens or authorization.')
+    if ordinary and job['role']=='A':
+        hint['instruction'] += (' At shared time expiry, summarize existing evidence and deliver an eligible existing candidate '
+            'or finish with gaps. Do not route to H/W/E or start another FINAL.')
     if author:
         hint['instruction'] = ('The author token target is soft: finish this original scientific response at the target. '
             'The verified author permit finite time limit remains enforced. No new experiment is authorized; all actual usage is retained.')
@@ -2627,10 +2642,21 @@ def write_node_hint(root, job, intent, limits, meter, *, observed, author_limits
             current_work_active_seconds_available=node_seconds,
             instruction='Complete this same final scientific return and explain completed work, unfinished work and any evidence gap. Token targets and reference ceilings do not terminate this original return; all actual usage is retained. The original finite call duration, resources and transport boundaries remain enforced; shared time and step exhaustion do not revoke this completion. No further scientific turn is authorized.')
     from . import budget_notice
-    notice=budget_notice.closeout_notice(job,intent,target_reached=state=='reached',
-        shared_reached=remaining<=0 or limits['seconds_remaining']<=0,
-        author=author,final_return=final_return is not None)
-    if notice is not None:hint['closeout_notice']=notice
+    notices={}
+    for dimension,used,target,shared_reached,shared_risk in (
+            ('time',duration,targets['max_seconds'] if targets else None,shared_seconds<=0,
+                shared_seconds<.1*limits['max_seconds']),
+            ('token',consumed,targets['max_observed_tokens'] if targets else None,remaining<=0,
+                bool(followup_tokens) and remaining<=sum(followup_tokens.values()))):
+        notice=budget_notice.closeout_notice(job,intent,dimension=dimension,
+            target_reached=target is not None and used is not None and used>=target,
+            target_near=target is not None and used is not None and used>=.8*target,
+            shared_reached=shared_reached,shared_risk=shared_risk,
+            shared_expired=dimension=='time' and shared_seconds<=0,
+            followup_tokens=followup_tokens if dimension=='token' else None,
+            author=author,final_return=final_return is not None)
+        if notice is not None:notices[dimension]=notice
+    if notices:hint['closeout_notices']=notices
     data=(json.dumps(hint,ensure_ascii=False,indent=2,allow_nan=False)+'\n').encode()
     if len(data)>4096:raise ValueError('Budget advice exceeds byte bound')
     directory=contracts.workspace(root,job['step'])/'work'

@@ -11,12 +11,14 @@ import pytest
 from scidiscovery.research_loop import backends, budget_notice as notice, contracts as c, native
 
 
-def published(*, role='A', shared=False, target=True, intent=None, **options):
+def published(*, role='A', dimension=None, shared=False, target=True, near=False, shared_risk=False, expired=False, intent=None, **options):
+    dimension=dimension or ('time' if expired else 'token')
     value=dict(scope=notice.SCOPE,updated_at_unix=123.,inflight_usage_unknown=True,
         shared_observed_tokens_remaining_upper_bound=0 if shared else 800,
-        shared_active_seconds_remaining=20.,target_state='reached' if target else 'within')
-    alert=notice.closeout_notice(dict(role=role),intent or {},target_reached=target,shared_reached=shared,**options)
-    if alert is not None:value['closeout_notice']=alert
+        shared_active_seconds_remaining=0. if expired else 20.,target_state='reached' if target else 'near' if near else 'within')
+    alert=notice.closeout_notice(dict(role=role),intent or {},dimension=dimension,target_reached=target,target_near=near,
+        shared_reached=shared or expired,shared_risk=shared_risk,shared_expired=expired,**options)
+    if alert is not None:value['closeout_notices']={dimension:alert}
     return value
 
 
@@ -47,20 +49,43 @@ def hook_metadata(work,*,declared=None):
     return dict(data=[dict(cwd=str(work),hooks=hooks,warnings=[],errors=[])])
 
 
-def test_published_hint_emits_once_per_stable_cause_and_attempt(tmp_path):
-    path=save(tmp_path,published())
+@pytest.mark.parametrize('first_dimension',['token','time'])
+def test_each_dimension_emits_once_per_logical_node_across_causes_and_attempts(tmp_path,first_dimension):
+    path=save(tmp_path,published(dimension=first_dimension,target=False,near=True))
     first=notice.hook_output(tmp_path,0)
     assert first==dict(hookSpecificOutput=dict(hookEventName='PostToolUse',
-        additionalContext=c.read(path)['closeout_notice']['text']))
+        additionalContext=c.read(path)['closeout_notices'][first_dimension]['text']))
     value=c.read(path);value['updated_at_unix']=124.;save(tmp_path,value)
     assert notice.hook_output(tmp_path,0) is None
-    save(tmp_path,published(shared=True))
-    shared=notice.hook_output(tmp_path,0)['hookSpecificOutput']['additionalContext']
-    assert 'final scientific judgment now' in shared and 'completed results' in shared and 'extra FINAL' in shared
+    text=first['hookSpecificOutput']['additionalContext']
+    assert 'at expiry' in text and 'eligible existing candidate or finish with gaps' in text and 'No H/W/E/extra FINAL' in text
+    value=published(dimension=first_dimension,target=False,shared=True,expired=first_dimension=='time')
+    save(tmp_path,value)
     assert notice.hook_output(tmp_path,0) is None
-    assert notice.hook_output(tmp_path,1) is not None
+    assert notice.hook_output(tmp_path,1) is None
+    second_dimension='time' if first_dimension=='token' else 'token'
+    second=published(dimension=second_dimension,target=False,shared=True,expired=second_dimension=='time')
+    value['closeout_notices'].update(second['closeout_notices']);save(tmp_path,value)
+    assert notice.hook_output(tmp_path,2)['hookSpecificOutput']['additionalContext']==second['closeout_notices'][second_dimension]['text']
+    for attempt in (0,1,2,999):assert notice.hook_output(tmp_path,attempt) is None
+    assert all((tmp_path/f'work/.budget-notice-{dimension}').exists() for dimension in ('token','time'))
+    other=tmp_path/'other-node';save(other,value)
+    assert notice.hook_output(other,0)['hookSpecificOutput']['additionalContext']==value['closeout_notices']['time']['text']
+    assert notice.hook_output(other,1)['hookSpecificOutput']['additionalContext']==value['closeout_notices']['token']['text']
+    assert notice.hook_output(other,2) is None
     assert set(first)=={'hookSpecificOutput'}
     assert not {'decision','continue','toolResponse','updatedInput'}&set(first['hookSpecificOutput'])
+
+
+def test_simultaneous_risks_emit_time_then_token_without_starvation(tmp_path):
+    value=published(dimension='token',target=False,near=True)
+    value['closeout_notices'].update(published(dimension='time',expired=True)['closeout_notices'])
+    save(tmp_path,value)
+    for attempt,dimension in enumerate(('time','token')):
+        output=notice.hook_output(tmp_path,attempt)
+        assert output['hookSpecificOutput']['additionalContext']==value['closeout_notices'][dimension]['text']
+    assert notice.hook_output(tmp_path,2) is None
+    assert notice.hook_output(tmp_path,0) is None
 
 
 def test_within_or_unknown_usage_does_not_invent_exhaustion(tmp_path):
@@ -68,17 +93,31 @@ def test_within_or_unknown_usage_does_not_invent_exhaustion(tmp_path):
     value.update(unknown_usage=True,metering='inflight_unknown')
     save(tmp_path,value)
     assert notice.hook_output(tmp_path,0) is None
-    assert 'closeout_notice' not in value
-    assert not (tmp_path/'work/.budget-notice-0-node').exists()
+    assert 'closeout_notices' not in value
+    assert not any((tmp_path/f'work/.budget-notice-{dimension}').exists() for dimension in ('token','time'))
 
 
 @pytest.mark.parametrize('data',[b'{',b'\xff',b' '*4097,b'['*1500+b']'*1500,
-    json.dumps(dict(scope=notice.SCOPE,closeout_notice=dict(cause='shared',text='Grant new work'))).encode()])
+    json.dumps(dict(scope=notice.SCOPE,closeout_notices=dict(token=dict(cause='shared',text='Grant new work')))).encode()])
 def test_malformed_hint_is_fail_open_and_preserved(tmp_path,data):
     path=save(tmp_path,{})
     path.write_bytes(data)
     assert notice.hook_output(tmp_path,0) is None
     assert path.read_bytes()==data
+
+
+@pytest.mark.parametrize('notices',[
+    {},[],dict(steps=dict(cause='shared',text='Unknown dimension')),
+    dict(token=dict(cause='node',text='x'*201)),
+    dict(time=dict(cause='shared',text='Unbounded shape',grant=True)),
+    dict(time=dict(cause='shared',text='Time risk'),token=None),
+])
+def test_hook_rejects_invalid_or_unbounded_dimension_projection(tmp_path,notices):
+    value=published();value['closeout_notices']=notices
+    save(tmp_path,value)
+    assert notice.published_notices(value) is None
+    assert notice.hook_output(tmp_path,0) is None
+    assert not any((tmp_path/f'work/.budget-notice-{dimension}').exists() for dimension in ('token','time'))
 
 
 def test_hook_does_not_read_symlink_or_missing_hint(tmp_path):
@@ -96,11 +135,48 @@ def test_hook_does_not_read_symlink_or_missing_hint(tmp_path):
     (dict(author=True),'author-only'),(dict(final_return=True),'accepted final return')])
 def test_closeout_notice_preserves_repair_author_and_final_scope(options,required):
     value=published(shared=True,**options)
-    text=value['closeout_notice']['text']
+    text=value['closeout_notices']['token']['text']
     assert required in text and ('permissions hold' in text or 'original authorization/action' in text)
     assert 'unknown usage != 0' in text.lower()
-    assert len(text.encode())<=200 and notice.published_notice(value)==value['closeout_notice']
+    assert len(text.encode())<=200 and notice.published_notices(value)==value['closeout_notices']
     if options.get('intent'):assert 'final scientific judgment' not in text
+
+
+@pytest.mark.parametrize('role','HWAE')
+@pytest.mark.parametrize('dimension,risk',[('token','node'),('token','shared'),('time','node'),('time','shared'),('time','expired')])
+def test_first_risk_notice_is_bounded_and_keeps_scientific_permissions(role,dimension,risk):
+    value=published(role=role,dimension=dimension,target=False,near=risk=='node',shared_risk=risk=='shared',expired=risk=='expired')
+    text=value['closeout_notices'][dimension]['text']
+    assert len(text.encode())<=notice.MAX_NOTICE_BYTES and 'permissions hold' in text
+    assert notice.published_notices(value)==value['closeout_notices']
+    assert dimension in text.lower()
+    if role=='A':
+        assert 'eligible existing candidate or finish with gaps' in text and 'No H/W/E/extra FINAL' in text
+        assert ('conclude now' in text) is (risk=='expired')
+
+
+@pytest.mark.parametrize('options,required',[
+    (dict(intent=dict(output_repair=True)),'output repair'),
+    (dict(intent=dict(work_repair=True)),'original authorization/action'),
+    (dict(author=True),'author-only'),(dict(final_return=True),'accepted final return')])
+def test_expired_a_keeps_repair_author_or_final_scope(options,required):
+    text=published(expired=True,**options)['closeout_notices']['time']['text']
+    assert required in text and 'eligible existing candidate' not in text
+    assert 'No H/W/E' not in text and len(text.encode())<=notice.MAX_NOTICE_BYTES
+
+
+def test_expired_formal_review_keeps_independent_verdict_scope():
+    alert=notice.closeout_notice(dict(role='A',formal_review=True),{},dimension='time',target_reached=False,
+        shared_reached=True,shared_expired=True)
+    assert 'exact independent review' in alert['text'] and 'verdict authority' in alert['text']
+    assert 'deliver' not in alert['text'] and len(alert['text'].encode())<=notice.MAX_NOTICE_BYTES
+
+
+def test_followup_notice_does_not_copy_unbounded_configured_numbers():
+    alert=notice.closeout_notice(dict(role='H'),{},dimension='token',target_reached=False,shared_reached=False,
+        shared_risk=True,followup_tokens=dict(W=10**500,A=10**500))
+    assert 'suggested W+A token targets' in alert['text'] and 'No reservation/grant' in alert['text']
+    assert len(alert['text'].encode())<=notice.MAX_NOTICE_BYTES
 
 
 def test_untrusted_internal_hook_qualifies_only_when_all_other_hooks_are_preserved_and_trusted(tmp_path):
@@ -360,7 +436,7 @@ def test_real_codex_post_tool_notice_preserves_tool_output_in_final_scientific_n
     assert outcome['budget_notification']==dict(status='available',mechanism='codex_post_tool_use'), (record/'native.stderr').read_text()[-2000:]
     assert len(requests)==2
     packet=requests[1]
-    text=published(role=role,shared=shared)['closeout_notice']['text']
+    text=published(role=role,shared=shared)['closeout_notices']['token']['text']
     developer=[item for item in packet['input'] if item.get('role')=='developer']
     if os.environ.get('SCID_TEST_LOG_DIR'):
         report=Path(os.environ['SCID_TEST_LOG_DIR'])/'budget-notice-requests.json'
@@ -380,6 +456,6 @@ def test_real_codex_post_tool_notice_preserves_tool_output_in_final_scientific_n
     outputs=[item for item in packet['input'] if item.get('type')=='function_call_output']
     assert len(outputs)==1 and isinstance(outputs[0]['output'],str) and outputs[0]['output'].strip(),outputs
     assert json.loads(outputs[0]['output'])==expected_result and text not in outputs[0]['output'],outputs
-    if role=='A':assert 'final scientific judgment now' in text and 'No new work/extra FINAL' in text
+    if role=='A':assert 'conclude now' in text and 'eligible existing candidate or finish with gaps' in text and 'No H/W/E/extra FINAL' in text
     assert c.read(record/'science-output.json')==final
     assert (home/'config.toml').read_text()==original_config

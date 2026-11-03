@@ -711,14 +711,32 @@ boundary before another new task, retaining all consumption, reservations and un
 usage. `accepted` is a queued request, not an applied ceiling. Execution-resource
 amendments remain separate and grant no exact-call permission. Soft node/W targets
 request a bounded conclusion without forcing A or rejecting a new managed experiment
-solely for reaching the target. Shared admission and finite execution permissions
-remain enforced. The protected final A and its authorized original delivery retain
+solely for reaching the target. Notices start at 80% of the advisory node token or
+time target, at token balance no higher than the existing W+A advice for H or A
+advice for W, or at strictly less than 10% of shared active time remaining. Each
+logical node receives one token-risk and one time-risk notice across resumes, at
+most two notices; token advice does not suppress later time advice. Notices arrive
+at the next supported local tool boundary without interrupting the current request.
+Ordinary A is advised early to `deliver` an existing qualified candidate at expiry,
+or `finish` with gaps retained
+if none is suitable, without another FINAL. These are advisory thresholds, not new
+quotas, reservations, authorization or defaults. Missing billing coverage alone
+does not block advancement; reported lower bounds and unknown gaps remain, without
+refund, zero replacement or replay. Unknown execution still requires original-call
+reconciliation. Shared admission and finite execution permissions remain enforced.
+The protected final A and its authorized original delivery retain
 their completion policy; see [architecture](ARCHITECTURE.md).
 
 科学预算修订先收取持久 operation ID，在下一新任务前的安全边界应用，保留全部消费、
 预留和未知用量。accepted 仅表示排队；执行资源修订另行办理且不授精确调用权限。
-节点/W 软目标只提示收口，不仅因达线拒绝新受管实验或强制转 A。共享准入、单次有限执行
-及 protected FINAL 原策略继续有效。
+节点/W 软目标只提示收口，不仅因达线拒绝新受管实验或强制转 A。节点建议 token 或时间目标
+达到 80%、token 余额不高于 H 后续 W+A 或 W 后续 A 的既有建议量、或共享剩余 active time
+严格低于总时限的 10% 时提醒；每逻辑节点的 token、time 风险各一次，跨 resume 去重，最多
+两次，token 提醒不抑制后续 time 提醒；在下一受支持本地工具边界生效，不打断当前请求。
+普通 A 提前获知到期用已有合格候选 `deliver`，无合适候选则 `finish`
+并保留缺口，不另开 FINAL。阈值均为建议，不新增配额、预留、授权或默认配置。仅计费未知
+不阻断推进，已报下界与未知缺口保留，不补零、不退款、不授重放；真实执行未知仍须按原调用
+核对。共享准入、单次有限执行及 protected FINAL 原策略继续有效。
 
 User direction uses `guidance-submit`, `guidance-list`, `guidance-edit` and
 `guidance-revoke`. Targets are `global`, `H`, `W`, `A`, `E`; `--scope next` binds

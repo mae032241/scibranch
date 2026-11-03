@@ -77,6 +77,11 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
                     and not output_only_wake and not intent.get('output_repair') and not intent.get('work_repair')
                     and job.get('purpose')!='closeout' and not job.get('final_report') and not job.get('final_only')):
                 prompt+=' Close with unmet goals if short. '+STAGE_PLANNING[job['role']]
+                if job['role'] in {'H','W'}:
+                    prompt+=' Allow for suggested follow-up token targets in work/budget-status.json; no reservation/grant.'
+                else:
+                    prompt+=(' At shared time expiry, deliver an eligible existing candidate or finish with gaps. '
+                        'No new H/W/E/extra FINAL.')
                 if job['role']=='W':prompt+=' Prefer 10-30s waits on pending originals within deadlines.'
     if budget_status:prompt+='\n'+json.dumps(budget_status,ensure_ascii=False,separators=(',',':'))
     if execution_interface is not None and not author and not output_only_wake:

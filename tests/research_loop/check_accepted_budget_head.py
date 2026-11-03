@@ -98,7 +98,9 @@ def test_adjacent_amendment_and_current_meter_are_fresh(tmp_path):
     record = c.host_record(c.workspace(root,1))
     intent = dict(task_ref=c.record_ref(root/'jobs/001.json'))
     accepted.accept_native(root,1,record,intent)
-    assert native.usage(root)['blocking_unknown_count'] == 1
+    assert native.usage(root)['unknown_steps'] == [1]
+    assert native.usage(root)['blocking_unknown_count'] == 0
+    assert budget.execution_blocked(root)
     c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
     assert native.usage(root)['observed_tokens'] == 10
     c.write(record/'usage.json',dict(input_tokens=17,cached_input_tokens=2,output_tokens=3))
@@ -107,6 +109,29 @@ def test_adjacent_amendment_and_current_meter_are_fresh(tmp_path):
     assert native.usage(root)['observed_tokens'] == 20
     accepted.accept_terminal(root,1,record,meter=dict(input_tokens=17,cached_input_tokens=2,output_tokens=3),unknown=False)
     assert native.usage(root)['observed_tokens'] == 20
+
+
+def test_closed_unknown_meter_is_retained_and_only_explicit_blocking_is_excluded(tmp_path, monkeypatch):
+    root = prepare(tmp_path)
+    c.build_job(root,1,'E',[])
+    record = c.host_record(c.workspace(root,1))
+    intent = dict(task_ref=c.record_ref(root/'jobs/001.json'))
+    accepted.accept_native(root,1,record,intent)
+    meter = dict(input_tokens=17,cached_input_tokens=2,output_tokens=3)
+    accepted.accept_terminal(root,1,record,meter=meter,unknown=True,
+        metering=dict(coverage='unknown',reason='terminal_usage_unreported'))
+    retained = native.usage(root)
+    assert retained['unknown_steps'] == [1] and retained['unknown_step_count'] == 1
+    assert retained['observed_tokens'] == retained['accounted_tokens'] == 20
+    assert retained['blocking_unknown_steps'] == [] and retained['blocking_unknown_count'] == 0
+    with monkeypatch.context() as no_history:
+        no_history.setattr(accepted,'read',lambda *_:pytest.fail('Blocking projection must not reopen history'))
+        assert not accepted.unknown_except(root,retained,allowed=[1])
+        # An allowed historical metering gap cannot cancel a different step in
+        # an explicit blocking projection supplied by another consumer.
+        observed = dict(retained,blocking_unknown_steps=[2],blocking_unknown_count=1)
+        assert accepted.unknown_except(root,observed,allowed=[1])
+        assert not accepted.unknown_except(root,observed,allowed=[2])
 
 
 def test_recovery_snapshot_advances_current_pointer_and_preserves_admitted_input(tmp_path):

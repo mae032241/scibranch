@@ -906,6 +906,10 @@ node token target: positive reported token balance permits ordinary token admiss
 subject to the original finite time, step, integrity and execution gates. All H/W/A/E
 node token targets and W stage targets are advisory: reaching a target requests a
 bounded conclusion without rejecting new managed experiments or forcing A review.
+Missing billing or unknown metering coverage alone does not block ordinary
+advancement: reported usage remains a lower bound and gaps remain unknown, without
+zero replacement, refund or replay authority. Unresolved original execution,
+submission and cleanup retain their separate reconciliation gates.
 For an eligible standard Codex launch, a local
 [PostToolUse hook](https://learn.chatgpt.com/docs/hooks) reads the current
 `work/budget-status.json` and injects a short developer reminder at the next local
@@ -914,6 +918,16 @@ target into a hard kill. Unsupported hooks or failed eligibility checks retain
 file-only advice with an explicit limitation; control changes neither user
 configuration nor native permissions. The reminder grants no execution authority
 and never resubmits an unknown call.
+Notice starts at 80% of the node's advisory token or time target (`near`). H uses
+the existing W+A role token advice as its follow-up reference, and W uses A's;
+reported shared token balance at or below that reference also prompts a notice.
+Shared active time prompts a notice only when strictly less than 10% of the total
+time limit remains. Token and time risks each receive one notice per logical node
+across resumes, at most two notices; a token notice does not suppress a later time
+notice. An ordinary A is advised early to conclude at expiry with `deliver` using an existing
+qualified candidate, or `finish` with the gaps retained when none is suitable,
+without opening another FINAL. These thresholds remain advice, not hard quotas or
+new reservations.
 Missing or stale budget advice does not grant allowance or deny execution;
 exact identity checks and independent execution authorization still apply.
 Shared budget checks for new nodes remain unchanged. Author

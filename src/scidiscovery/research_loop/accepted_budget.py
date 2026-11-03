@@ -952,25 +952,21 @@ def usage(root, *, head=None):
                 count += 1
             if current['step'] not in unknown:
                 unknown.append(current['step'])
+    # Metering gaps retain their reported lower bound and diagnostics without
+    # asserting execution uncertainty; the original-call gate owns that fact.
     return dict(totals, observed_tokens=totals['input_tokens']+totals['output_tokens'],
         accounted_tokens=totals['input_tokens']+totals['output_tokens'], reserved_tokens=0,
-        unknown_steps=unknown, unknown_step_count=count, blocking_unknown_count=count,
+        unknown_steps=unknown, unknown_step_count=count, blocking_unknown_count=0,
         unknown_steps_omitted_count=max(0, count-len(unknown)),
-        reserved_unknown_steps=[], blocking_unknown_steps=unknown,
+        reserved_unknown_steps=[], blocking_unknown_steps=[],
         accounting_basis='observed_lower_bound')
 
 
 def unknown_except(root, meter, allowed=(), *, head=None):
-    """Count retained unknown steps without enumerating their historical IDs."""
-    count = meter.get('blocking_unknown_count', len(meter.get('blocking_unknown_steps', meter.get('unknown_steps', []))))
-    state = read(root) if head is None else head
-    for step in set(allowed):
-        row = state.row(f'job/{step:03d}')
-        if row is not None and row['unknown_count']:
-            count -= 1
-        elif step in meter.get('blocking_unknown_steps', meter.get('unknown_steps', [])):
-            count -= 1
-    return count > 0
+    """Exclude only allowed steps present in the blocking usage projection."""
+    blocking = meter.get('blocking_unknown_steps', meter.get('unknown_steps', []))
+    count = meter.get('blocking_unknown_count', len(blocking))
+    return count > len(set(allowed).intersection(blocking))
 
 
 def role_usage(root, through_step):
