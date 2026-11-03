@@ -20,6 +20,9 @@ CODEX_HTTP_FAILURE_MESSAGES = {
     'server_overloaded': 'unexpected status 503 Service Unavailable: Deterministic loopback native failure., url: http://127.0.0.1:46345/v1/responses',
 }
 
+# Retained error and turn.failed messages from the 2026-11-03 A005 incident.
+CODEX_CAPACITY_MESSAGE = 'Selected model is at capacity. Please try a different model.'
+
 # Retained native Codex exec errors from the 2026-10-30 routing incident.
 CODEX_ROUTING_MESSAGES = ['workspace routing discovery timed out', 'workspace routing discovery failed',
     *[f'Reconnecting... {number}/5 (workspace routing discovery {reason})'
@@ -79,6 +82,59 @@ def test_confirmed_exec_native_http_translations_have_narrow_message_patterns(co
 def test_confirmed_quota_message_dominates_generic_http_429():
     event = dict(type='turn.failed',error=dict(status=429,message=CODEX_HTTP_FAILURE_MESSAGES['insufficient_quota']))
     assert recovery.classify(event)['category'] == 'permanent'
+
+
+@pytest.mark.parametrize('kind', ['error', 'turn.failed'])
+def test_exact_native_capacity_failure_retries_only_the_original_session(kind):
+    event = dict(type=kind, **({'message':CODEX_CAPACITY_MESSAGE} if kind == 'error'
+        else {'error':dict(message=CODEX_CAPACITY_MESSAGE)}))
+    original = copy.deepcopy(event)
+    projected = recovery.classify(event)
+    assert projected['category'] == 'temporary' and projected['codes'] == ['capacity_exceeded']
+    assert projected['statuses'] == [] and projected['message_patterns'] == ['codex_exec_model_capacity_v1']
+    assert projected['not_accepted'] is False and event == original
+    value = dict(outcome(), native_failure=projected, native_activity_observed=True)
+    used = dict(continues=0, retries=0, wait_seconds=0.)
+    for retries, delay in enumerate((30., 60., 120.)):
+        used['retries'] = retries
+        decided = recovery.decision(value, recovery.policy({}), used,
+            session_available=True, activity_observed=True)
+        assert decided['action'] == 'retry' and decided['startup_retry'] is False
+        assert decided['delay_seconds'] == delay
+        used['wait_seconds'] += delay
+    used['retries'] = 3
+    assert decide(value, used=used)['reason'] == 'automatic_recovery_retry_limit'
+    for thread in ('original', None):
+        stopped = recovery.decision(dict(value, thread_id=thread), recovery.policy({}),
+            dict(continues=0, retries=0, wait_seconds=0.), session_available=False,
+            activity_observed=thread is not None)
+        assert stopped['action'] == 'stop' and stopped['reason'] == 'automatic_recovery_session_unavailable'
+
+
+def test_capacity_message_translation_requires_an_exact_native_failure():
+    backend = backends.Codex(dict(native_launcher_argv=['codex']))
+    for kind in ('message', 'tool', 'item.completed', 'turn.completed'):
+        event = dict(type=kind, message=CODEX_CAPACITY_MESSAGE, error=dict(message=CODEX_CAPACITY_MESSAGE),
+            item=dict(type='agent_message', text=CODEX_CAPACITY_MESSAGE))
+        assert recovery.classify(event) is None and 'failure' not in backend.event(event)
+    for kind in ('turn.incomplete', 'turn.interrupted'):
+        projected = recovery.classify(dict(type=kind, message=CODEX_CAPACITY_MESSAGE))
+        assert projected['category'] == 'incomplete' and projected['message_patterns'] == []
+    for message in ('Reported: ' + CODEX_CAPACITY_MESSAGE, CODEX_CAPACITY_MESSAGE + ' Extra ordinary text',
+            CODEX_CAPACITY_MESSAGE + '\n'):
+        projected = recovery.classify(dict(type='error', message=message))
+        assert projected['category'] == 'unknown' and projected['message_patterns'] == []
+
+
+@pytest.mark.parametrize('fact', [dict(code=code) for code in
+    ('invalid_api_key', 'permission_denied', 'insufficient_quota', 'invalid_configuration')]
+    + [dict(status=status) for status in (400, 401, 403, 404, 422)])
+def test_capacity_message_cannot_override_permanent_native_facts(fact):
+    event = dict(type='turn.failed', error=dict(message=CODEX_CAPACITY_MESSAGE, **fact))
+    projected = recovery.classify(event)
+    assert projected['category'] == 'permanent'
+    combined = recovery.combine([recovery.classify(dict(type='error', message=CODEX_CAPACITY_MESSAGE)), projected])
+    assert decide(dict(outcome(), native_failure=combined))['reason'] == 'automatic_recovery_permanent_failure'
 
 
 @pytest.mark.parametrize('message', CODEX_ROUTING_MESSAGES)
@@ -450,6 +506,51 @@ def test_retained_unknown_routing_diagnostic_is_interpreted_from_native_original
             continuation.automatic_source(tmp_path, 1, record)
 
 
+def test_retained_unknown_capacity_diagnostic_is_interpreted_from_native_originals(tmp_path, monkeypatch):
+    record = tmp_path / 'record';record.mkdir()
+    backend = backends.Codex(dict(native_launcher_argv=['codex']))
+    monkeypatch.setattr(configuration_updates, 'for_step', lambda *_:{})
+    monkeypatch.setattr(backends, 'selected', lambda *_:backend)
+    c.write(record / 'native-intent.json', dict(step=5, budget_slice=dict(role='A',
+        limits=dict(max_observed_tokens=300000, max_seconds=1800),
+        shared_limits=dict(max_tokens=5000000, max_seconds=10800))))
+    events = [dict(type='thread.started', thread_id='original'), dict(type='turn.started'),
+        dict(type='item.completed', item=dict(type='command_execution', exit_code=0, status='completed',
+            aggregated_output='Retained observation.')),
+        dict(type='error', message=CODEX_CAPACITY_MESSAGE),
+        dict(type='turn.failed', error=dict(message=CODEX_CAPACITY_MESSAGE))]
+    (record / 'native.jsonl').write_text(''.join(json.dumps(event) + '\n' for event in events))
+    home = tmp_path / 'native-home';session = home / 'sessions/rollout-original.jsonl'
+    session.parent.mkdir(parents=True)
+    session.write_text(json.dumps(dict(type='session_meta', payload=dict(id='original'))) + '\n')
+    saved = dict(outcome(), native_failure=recovery.classify(dict(type='error')),
+        returncode=1, native_activity_observed=True, native_backend='codex', native_schema_transport='prompt',
+        native_identity=dict(backend='codex', home=str(home), path=str(session)),
+        usage=dict(observed_tokens=3962290, accounted_tokens=3962290, reserved_tokens=0, unknown_steps=[5]),
+        metering=dict(source='native_session_token_count', thread_id='original', coverage='unknown',
+            tokens=dict(input_tokens=275162, cached_input_tokens=231040, output_tokens=1327)),
+        budget_slice=dict(role='A', advance_seconds=89.06067524499667, input_tokens=275162,
+            cached_input_tokens=231040, output_tokens=1327, observed_tokens=276489,
+            dispatches=1, usage_observed=True, limits=dict(max_observed_tokens=300000, max_seconds=1800)))
+    c.write(record / 'native-outcome.json', saved)
+    originals = {path:path.read_bytes() for path in (record / 'native-intent.json',
+        record / 'native-outcome.json', record / 'native.jsonl', session)}
+    current = continuation.automatic_source(tmp_path, 5, record)
+    assert current == dict(saved, native_failure=recovery.combine([recovery.classify(event)
+        for event in events if event['type'] in {'error', 'turn.failed'}]))
+    decided = decide(current)
+    assert decided['action'] == 'retry' and decided['startup_retry'] is False
+    assert decided['delay_seconds'] == 30. and recovery.recoverable_source(current)
+    assert current['native_failure']['not_accepted'] is False
+    assert decide(saved)['reason'] == 'automatic_recovery_unknown_failure'
+    assert not (record / 'usage.json').exists()
+    assert all(path.read_bytes() == raw for path, raw in originals.items())
+    for field, changed in (('terminal_observed', True), ('native_activity_observed', False), ('thread_id', 'other')):
+        c.write(record / 'native-outcome.json', dict(saved, **{field:changed}))
+        with pytest.raises(ValueError, match='failure evidence changed'):
+            continuation.automatic_source(tmp_path, 5, record)
+
+
 @pytest.mark.parametrize('event,category', [
     (dict(type='turn.failed', error=dict(message='Unclassified native failure.')), 'unknown'),
     (dict(type='turn.failed', error=dict(code='insufficient_quota')), 'permanent'),
@@ -534,6 +635,7 @@ assert prompt.strip() and '"additionalProperties"' not in prompt
 work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE']);home=pathlib.Path(os.environ['CODEX_HOME'])
 role=os.environ['THIN_HWA_ROLE'];thread='11111111-2222-4333-8444-'+('%012d'%int(work.name))
 configuration=json.loads(pathlib.Path(__file__).resolve().with_name('launcher-config.json').read_text())
+failed_role='A' if configuration['fault']=='retrycapacity' else 'H'
 with (work/'work/launches').open('a') as stream:stream.write('resume\n' if resume else 'exec\n')
 print(json.dumps(dict(type='thread.started',thread_id=thread)),flush=True)
 if not resume:
@@ -544,11 +646,16 @@ if not configuration['fault'].endswith('_unreported') or resume:
  with session.open('a') as stream:
   stream.write(json.dumps(dict(type='event_msg',payload=dict(type='token_count',info=dict(
    total_token_usage=dict(input_tokens=20 if resume else 10,cached_input_tokens=6 if resume else 3,output_tokens=8 if resume else 4)))))+'\n')
-if role=='H' and not resume:
+if role==failed_role and not resume:
  (work/'work/retained-observation').write_text('one exact observation')
  if configuration['fault'].startswith('retry'):
-  message=('unexpected status 503 Service Unavailable: Deterministic loopback native failure., url: http://127.0.0.1:46345/v1/responses'
-   if configuration['fault']=='retry503' else 'exceeded retry limit, last status: 429 Too Many Requests')
+  if configuration['fault']=='retrycapacity':
+   print(json.dumps(dict(type='turn.started')),flush=True)
+   message='Selected model is at capacity. Please try a different model.'
+   print(json.dumps(dict(type='error',message=message)),flush=True)
+  else:
+   message=('unexpected status 503 Service Unavailable: Deterministic loopback native failure., url: http://127.0.0.1:46345/v1/responses'
+    if configuration['fault']=='retry503' else 'exceeded retry limit, last status: 429 Too Many Requests')
   print(json.dumps(dict(type='turn.failed',error=dict(message=message))),flush=True)
  else:print(json.dumps(dict(type='turn.incomplete')),flush=True)
  raise SystemExit(7)
@@ -567,11 +674,12 @@ print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=10,cached_in
 
 
 def _automatic_failure_diagnostic(root, result, fault):
-    """Retain only the two exact fake H attempts, never environment or auth."""
+    """Retain only the two exact fake attempts, never environment or auth."""
     import os
     from pathlib import Path
-    records = [('original', root / 'native-evidence/001'),
-        ('continuation-001', root / 'native-evidence/001/continuations/001')]
+    failed_step = 2 if fault == 'retrycapacity' else 1
+    original = root / 'native-evidence' / f'{failed_step:03d}'
+    records = [('original', original), ('continuation-001', original / 'continuations/001')]
     observed = {}
     for label, record in records:
         files = {}
@@ -598,7 +706,8 @@ def _automatic_failure_diagnostic(root, result, fault):
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('fault,action', [('retry','retry'),('retry503','retry'),('incomplete','continue'),('retry_unreported','retry')])
+@pytest.mark.parametrize('fault,action', [('retry','retry'),('retry503','retry'),('incomplete','continue'),
+    ('retry_unreported','retry'),('retrycapacity','retry')])
 def test_default_controller_recovers_one_exact_session_and_keeps_attempt_chain(tmp_path, monkeypatch, fault, action):
     import sys
     from test_default_cli_output_repair import prepare_cli
@@ -611,10 +720,18 @@ def test_default_controller_recovers_one_exact_session_and_keeps_attempt_chain(t
     monkeypatch.setattr(controller, '_recovery_remaining', lambda *_:0.)
     for key in ('CODEX_HOME','PATH','PYTHONPATH'):monkeypatch.setenv(key, env[key])
     settings = c.settings(root)
+    failed_step = 2 if fault == 'retrycapacity' else 1
     originals = {path:path.read_bytes() for path in (root / 'settings.json',home / 'config.toml',home / 'auth.json')}
     result = controller.run(root)
     assert result['status'] == 'finish', _automatic_failure_diagnostic(root, result, fault)
-    first, recovered = execution.records(root, 1)
+    first, recovered = execution.records(root, failed_step)
+    if fault == 'retrycapacity':
+        events = [json.loads(line) for line in (first / 'native.jsonl').read_text().splitlines()]
+        assert events[-2:] == [dict(type='error', message=CODEX_CAPACITY_MESSAGE),
+            dict(type='turn.failed', error=dict(message=CODEX_CAPACITY_MESSAGE))]
+        projected = c.read(first / 'native-outcome.json')['native_failure']
+        assert projected['category'] == 'temporary' and projected['codes'] == ['capacity_exceeded']
+        assert projected['message_patterns'] == ['codex_exec_model_capacity_v1']
     request = c.read(recovered / 'native-intent.json')
     assert request['continuation_kind'] == 'automatic_recovery'
     assert request['automatic_recovery']['action'] == action
@@ -623,7 +740,7 @@ def test_default_controller_recovers_one_exact_session_and_keeps_attempt_chain(t
     assert request['session']['home'] == str(home)
     assert request['previous'] == execution.proof(first)
     assert request['task_ref'] == c.read(first / 'native-intent.json')['task_ref']
-    assert (c.workspace(root,1) / 'work/launches').read_text() == 'exec\nresume\n'
+    assert (c.workspace(root,failed_step) / 'work/launches').read_text() == 'exec\nresume\n'
     assert c.read(first / 'automatic-recovery.json')['status'] == 'started'
     assert recovery.counters([request]) == dict(continues=int(action=='continue'),retries=int(action=='retry'),wait_seconds=0.)
     assert budget.used_steps(root) == 3
@@ -632,13 +749,13 @@ def test_default_controller_recovers_one_exact_session_and_keeps_attempt_chain(t
     assert c.read(recovered / 'native-outcome.json')['budget_slice']['observed_tokens'] == (28 if reported else 14)
     assert native.usage(root)['observed_tokens'] == (42 if reported else 28)
     assert (first / 'usage.json').exists() is reported
-    assert native.usage(root)['unknown_steps'] == [1]  # Failed-turn coverage stays unknown.
+    assert native.usage(root)['unknown_steps'] == [failed_step]  # Failed-turn coverage stays unknown.
     assert settings['resume_policy']['output_only'] is True
     assert all(path.read_bytes() == raw for path, raw in originals.items())
     before = native.usage(root)
     assert controller.run(root)['status'] == 'finish'
-    assert native.usage(root) == before and len(execution.records(root,1)) == 2
-    assert (c.workspace(root,1) / 'work/launches').read_text() == 'exec\nresume\n'
+    assert native.usage(root) == before and len(execution.records(root,failed_step)) == 2
+    assert (c.workspace(root,failed_step) / 'work/launches').read_text() == 'exec\nresume\n'
 
 
 @pytest.mark.process_e2e

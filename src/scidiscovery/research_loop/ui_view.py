@@ -38,6 +38,7 @@ STATES = {
     'completed': '已完成', 'error': '状态不可读',
     'external_wait': '等待原实验', 'unsealed': '结论待封存', 'not_submitted': '提交意图待核对',
     'service_wait': '等待服务恢复',
+    'service_error': '服务错误待处理',
 }
 EXPERIMENT_TOOLTIP = '本阶段实验数 = 封存观察中已接受的受管调用数；不等于独立实验设计数或科学覆盖。'
 EXTREME_TOOLTIP = '全部已观察数值，含失败记录；仅在同一口径（evaluation_key）内按作者声明的指标方向取数值极值；不代表科学排序。'
@@ -633,6 +634,72 @@ def native_state_label(node):
     return '原生已完成，待收集封存' if native_completed(node) else STATE_LABELS.get(node.get('state'), '状态待核对')
 
 
+def native_failure_guidance(node):
+    """Static help from the already-produced safe failure fields; no native reads."""
+    failure = (node or {}).get('native_failure') or {}
+    if failure.get('category') != 'permanent':
+        if (not node or node.get('state') != 'automatic_recovery_stopped'
+                or not native_failure_fork_available(node)):
+            return None
+        recovery = node.get('automatic_recovery') or {}
+        if failure.get('category') == 'unknown':
+            return dict(summary='原生错误原因未识别，自动接续已停止',
+                explanations=['原生进程已结束并完成清理；错误类别尚未识别，这不表示外部调用结果已核实。'],
+                advice=['请维护者在宿主机查看本次原生诊断并核对原调用状态；可先暂停研究，或进入分支预览核对是否可以重做当前任务。'],
+                next_step='请先核对宿主诊断与原调用')
+        if recovery.get('reason') in {'automatic_recovery_retry_limit', 'automatic_recovery_continue_limit',
+                'automatic_recovery_wait_limit', 'automatic_recovery_retry_after_limit'}:
+            summary = '自动接续次数或等待额度已用尽'
+        else:
+            summary = '自动接续已停止，原任务的接续条件尚未满足'
+        return dict(summary=summary,
+            explanations=['临时服务故障或原生中断的自动接续已停止；这不是科学结论失败。'],
+            advice=['请维护者核对本次宿主诊断、已用恢复次数和原调用状态；可先暂停研究，或进入分支预览核对是否可以重做当前任务。已用预算保留。'],
+            next_step='请先核对接续限制与原调用')
+    codes = set(failure.get('codes') or [])
+    statuses = set(failure.get('statuses') or [])
+    groups = [
+        ({'authentication_error', 'unauthorized', 'invalid_api_key', 'authentication_failed'},
+         {401}, '认证失败或凭据无效',
+         '在运行工作台的宿主机重新登录原生服务或修复凭据，并确认原账户可访问所选模型；不要在公开材料中填写密钥。'),
+        ({'permission_denied', 'permission_error', 'forbidden'}, {403}, '账户或组织权限不足',
+         '检查原服务账户、组织和模型访问权限，恢复所需权限后再处理原任务。'),
+        ({'insufficient_quota', 'quota_exceeded', 'billing_hard_limit_reached', 'usage_limit_reached',
+          'credit_balance_exhausted', 'organization_usage_limit_exceeded', 'usage_limit_exceeded'},
+         set(), '服务配额、余额或计费上限不足',
+         '检查服务账户的套餐、余额、账单和组织用量上限；增加本研究的 tokens 预算不会恢复服务账户额度。'),
+        ({'model_not_found', 'unsupported_model', 'invalid_model', 'resource_not_found'},
+         {404}, '所选模型或服务资源不可用',
+         '核对原任务的模型名称、服务可用性和账户权限；需要改变冻结模型时，请用明确的新配置创建研究，分支重做不会自动换模型。'),
+        ({'invalid_request_error', 'invalid_json_schema', 'bad_request', 'invalid_configuration',
+          'configuration_error', 'unsupported_parameter', 'invalid_parameter', 'executor_version_incompatible'},
+         {400, 422}, '请求格式、参数或启动器配置不兼容',
+         '检查宿主启动器版本及原请求配置；服务请求被拒绝不能靠补填阶段结论修复。需要改变冻结参数时，请用明确的新配置创建研究。'),
+        ({'context_length_exceeded'}, set(), '原任务上下文超过模型容量',
+         '核对输入规模与模型上下文限制；分支重做保留原始输入，需要缩减输入或改变模型时，请用明确的新配置创建研究。'),
+    ]
+    matched = [(known & codes, label, advice) for known, _, label, advice in groups if known & codes]
+    if not matched:
+        matched = [(set(), label, advice) for _, known_statuses, label, advice in groups if known_statuses & statuses]
+    if not matched:
+        return dict(summary='永久服务错误：具体原因尚未识别',
+            explanations=['已记录永久服务错误，但没有可显示的已知错误码含义。'],
+            advice=['请维护者在宿主机核对本次原生诊断，确认原因和原调用状态后再决定下一步；不要盲目重试。'])
+    return dict(summary='永久服务错误：' + '；'.join(label for _, label, _ in matched),
+        explanations=[('、'.join(sorted(known)) + '：' if known else '') + label for known, label, _ in matched],
+        advice=[advice for _, _, advice in matched])
+
+
+def native_failure_fork_available(node):
+    """A terminal display candidate for preview; the fork service owns admission."""
+    category = ((node or {}).get('native_failure') or {}).get('category')
+    return bool(node and category in {'permanent', 'temporary', 'incomplete', 'unknown'}
+        and node.get('state') in {'native_outcome_unsealed', 'native_not_submitted',
+            'automatic_recovery_stopped', 'automatic_recovery_paused'}
+        and (category == 'permanent' or node.get('state') == 'automatic_recovery_stopped')
+        and type(node.get('returncode')) is int and node.get('cleanup') == 'observed_group_cleaned')
+
+
 def native_facts(node, clean):
     facts = []
     if type(node.get('returncode')) is int:
@@ -647,6 +714,10 @@ def native_facts(node, clean):
             facts.append(dict(label='服务错误码', value=clean('、'.join(failure['codes']), 500)))
         if failure.get('statuses'):
             facts.append(dict(label='HTTP 状态', value='、'.join(str(value) for value in failure['statuses'])))
+        guidance = native_failure_guidance(node)
+        if guidance:
+            facts.append(dict(label='错误含义', value='；'.join(guidance['explanations'])))
+            facts.extend(dict(label='处理建议', value=advice) for advice in guidance['advice'])
     if node.get('stop_reason'):
         facts.append(dict(label='停止代码', value=clean(str(node['stop_reason']), 300)))
     return facts
@@ -670,8 +741,13 @@ def status_summary(presentation, view, *, final_phase=False, exhausted=None, wai
                    current_round=None, completed_line=None, elapsed=None, clean=None):
     current = presentation['current']
     recovery = (current or {}).get('automatic_recovery')
+    failure_help = native_failure_guidance(current)
     if presentation['completed']:
         state = 'completed'
+    elif (failure_help and not presentation['active'] and not presentation['waiting']
+            and presentation['state'] in {'native_outcome_unsealed', 'native_not_submitted',
+                'automatic_recovery_stopped', 'automatic_recovery_paused'}):
+        state = 'service_error'
     elif view.get('paused') and recovery and recovery.get('status') == 'paused':
         state = 'paused'
     elif recovery and recovery.get('status') == 'waiting' and not view.get('paused'):
@@ -699,6 +775,10 @@ def status_summary(presentation, view, *, final_phase=False, exhausted=None, wai
     round_text = ('第 ' + str(current_round) + ' 轮 · ') if current_round else ''
     if state == 'completed':
         headline = completed_line or '研究已完成，可以查看结果'
+    elif state == 'service_error':
+        headline = failure_help['summary'] + '；' + failure_help.get('next_step', '请先处理服务条件')
+        if view.get('paused'):
+            headline = '研究已暂停；' + headline
     elif state == 'service_wait':
         headline = '等待服务恢复：' + str(recovery.get('reason') or '有界退避后重新核对原任务')
         if recovery.get('next_attempt_at') is not None:
@@ -733,7 +813,9 @@ def status_summary(presentation, view, *, final_phase=False, exhausted=None, wai
     if current:
         stage = '第 ' + str(current['step']) + ' 阶段 · ' + ROLE_LABELS.get(current['role'], current['role']) + ' · ' \
             + native_state_label(current)
-    return dict(state=state, badge=STATES[state], headline=headline, stage=stage)
+    badge = ('接续停止待处理' if state == 'service_error'
+        and ((current or {}).get('native_failure') or {}).get('category') != 'permanent' else STATES[state])
+    return dict(state=state, badge=badge, headline=headline, stage=stage)
 
 
 def exhausted_limits(view, used_steps):

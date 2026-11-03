@@ -21,6 +21,10 @@ def test_fork_page_requires_maintenance_and_never_creates_from_get(tmp_path):
     status, page, _ = ui.get('/nodes/200/fork', host=ui.host, cookie=cookie)
     assert status == 200 and b'/control/fork-preview' in page
     assert b'/control/fork-create' not in page
+    text = page.decode()
+    assert '选择第 200 阶段会重做第 200 阶段' in text
+    assert '不会重跑前一阶段' in text and '新分支须填写新的有限预算' in text
+    assert '原尝试不删除，已用预算不退还' in text
     _, _, headers = ui.get('/view?' + urlencode({'token': ui.read_token}), host=ui.host)
     with pytest.raises(PermissionError):
         ui.get('/nodes/200/fork', host=ui.host, cookie=headers['Set-Cookie'])
@@ -82,6 +86,47 @@ def test_real_ui_creates_paused_child_and_opens_explicit_start_page(tmp_path):
     status, _, headers = ui.get(link, host=ui.host, cookie=cookie)
     assert status == 200 and 'Set-Cookie' in headers
     assert c.read(child / 'host-runtime/fork/receipt.json')['state'] == 'paused'
+
+
+def test_failed_unsealed_current_task_forks_its_exact_inputs_into_paused_child(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import contracts as c, controller
+    from test_history_handoff import finish
+    parent, key = prepare(tmp_path, enabled=False)
+    finish(parent, 1, 'H', [], action='analyze')
+    # Accept the exact native intent, but never publish an A2 scientific seal.
+    with monkeypatch.context() as patch:
+        patch.setattr(c, 'seal_result', lambda root, step: None)
+        _, _, record = finish(parent, 2, 'A', [1])
+    c.write(record / 'native-outcome.json', dict(returncode=1, native_started=False,
+        stop_reason='native_failure_event', terminal_observed=False, cleanup='observed_group_cleaned',
+        native_failure=dict(category='permanent', codes=['insufficient_quota'], statuses=[429])))
+    (record / 'science-output.json').unlink()
+    c.write(record / 'automatic-recovery.json', dict(status='stopped', reason='automatic_recovery_permanent_failure'))
+    with controller._writer(parent):
+        pass
+    originals = {path: path.read_bytes() for path in (parent / 'jobs/001.json', parent / 'jobs/002.json',
+        parent / 'native-evidence/001/result-identity.json', record / 'native-intent.json', record / 'native-outcome.json')}
+    assert not (record / 'result-identity.json').exists()
+    ui, cookie = session(parent, key)
+    page = ui.get('/', host=ui.host, cookie=cookie)[1].decode()
+    assert '放弃本次尝试并分支重做' in page and 'href="/nodes/2/fork"' in page
+    child = tmp_path / 'failed-task-branch'
+    value = draft(ui, cookie, 'fork-preview', child)
+    value['step'] = '2'
+    status, page, _ = post(ui, cookie, 'fork-preview', value)
+    assert status == 200 and b'/control/fork-create' in page
+    assert not child.exists()
+    value.update(expected_preview_id=re.search(rb'name="expected_preview_id" value="([^"]+)"', page)[1].decode())
+    value.update(control_fields(ui, cookie, 'fork-create'))
+    status, page, _ = post(ui, cookie, 'fork-create', value)
+    assert status == 200 and '新分支已创建并暂停' in page.decode()
+    manifest = c.read(child / 'host-runtime/fork/manifest.json')
+    assert manifest['bootstrap']['next_step'] == 2
+    assert [row['step'] for row in manifest['prefix_entries']] == [1]
+    assert (child / 'pause.request').exists() and not (child / 'native-evidence').exists()
+    assert c.read(child / 'host-runtime/fork/receipt.json')['state'] == 'paused'
+    assert {path: path.read_bytes() for path in originals} == originals
+    assert not (record / 'result-identity.json').exists()
 
 
 def test_web_reconciles_exact_published_request_after_ui_failure_and_parent_removal(tmp_path, monkeypatch):

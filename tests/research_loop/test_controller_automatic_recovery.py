@@ -202,6 +202,44 @@ def test_uncomparable_utc_deadline_gets_one_bounded_wait(recovery):
     assert 'not comparable' in contracts.read(path)['limitation']
 
 
+def test_stopped_unknown_schedule_retries_with_bounded_wait_without_refund(recovery, monkeypatch):
+    scene = recovery
+    scene.decision.update(reason='native_temporary', delay_seconds=120.)
+    scene.decision['counters'].update(continues=1, retries=2, wait_seconds=13.)
+    path, saved = controller._recovery_state(scene.root, 1, scene.decision)
+    saved.update(status='stopped', action='stop', reason='automatic_recovery_unknown_failure',
+        next_attempt_at=None, delay_seconds=0., local_wait_seconds=4., service_wait_seconds=17.)
+    contracts.write(path, saved)
+    # Exercise the production keyword-only inventory boundary while reusing
+    # this fixture's narrow arbitration and admission stubs.
+    original_decision = controller.continuation.automatic_decision
+    original_start = controller.continuation.automatic_start
+
+    def decide(root, step, *, inventory):
+        assert inventory is None
+        return original_decision(root, step)
+
+    def start(root, step, selected, *, inventory, recovery_wait):
+        assert inventory is None
+        original_start(root, step, selected, recovery_wait=recovery_wait)
+
+    monkeypatch.setattr(controller.continuation, 'automatic_decision', decide)
+    monkeypatch.setattr(controller.continuation, 'automatic_start', start)
+    controller._wait_automatic_recovery(scene.root, 1, scene.decision, inventory=None)
+    after = contracts.read(path)
+    assert sum(scene.sleeps) == scene.policy['initial_backoff_seconds']
+    assert all(0 < seconds <= 1. for seconds in scene.sleeps)
+    assert after['local_wait_seconds'] == saved['local_wait_seconds'] + sum(scene.sleeps) == 34.
+    assert after['service_wait_seconds'] == saved['service_wait_seconds'] + sum(scene.sleeps) == 47.
+    assert after['retry_count'] == saved['retry_count'] == 2
+    assert after['continue_count'] == saved['continue_count'] == 1
+    assert after['action'] == 'retry' and after['reason'] == 'native_temporary'
+    assert after['status'] == 'started' and len(scene.launches) == 1
+    assert scene.launches[0]['waited_seconds'] == 34.  # The fixture also verifies ready before start.
+    assert [phase for phase, _ in scene.phases] == ['waiting', 'advance']
+    assert 'not comparable' in after['limitation'] and len(scene.snapshots) == 1
+
+
 def test_wait_hint_exceeding_remaining_wait_budget_stops_before_sleep(recovery):
     scene = recovery
     scene.policy['max_wait_seconds'] = 8.

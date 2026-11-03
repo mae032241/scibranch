@@ -40,6 +40,156 @@ def test_service_backoff_presentation_remains_active_and_pausable(tmp_path):
     assert ui_view.status_summary(paused, snapshot['view'])['state'] == 'paused'
 
 
+def test_permanent_failure_overview_offers_pause_and_exact_current_task_fork(tmp_path, monkeypatch):
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    snapshot = ui._snapshot()
+    node = dict(step=2, role='W', state='automatic_recovery_stopped', returncode=1,
+        terminal_observed=False, cleanup='observed_group_cleaned', continuations=0,
+        automatic_recovery=dict(status='stopped', reason='automatic_recovery_permanent_failure'),
+        native_failure=dict(category='permanent', codes=['insufficient_quota'], statuses=[429],
+            message='private-token /private/provider https://private.invalid'))
+    snapshot.update(conclusion=None, final=None, operation=None, operations=[])
+    snapshot['view'].update(nodes=[node], paused=False, correction={})
+    monkeypatch.setattr(ui, '_snapshot', lambda **options: snapshot)
+    page = ui.get('/', host=ui.host, cookie=cookie)[1].decode()
+    hero = re.search(r'<div id="live-hero">(.*?)<div id="live-usage">', page, re.S)[1]
+    assert '服务错误待处理' in hero and '永久服务错误：服务配额、余额或计费上限不足' in hero
+    assert 'insufficient_quota：服务配额、余额或计费上限不足' in hero
+    assert '增加本研究的 tokens 预算不会恢复服务账户额度' in hero
+    assert 'action="/control/pause"' in hero and 'action="/control/start"' not in hero
+    assert 'href="/nodes/2/fork"' in hero and '放弃本次尝试并分支重做' in hero
+    assert '不会重跑前一阶段' in hero and '新分支须声明新预算，创建后保持暂停' in hero
+    assert '原尝试不删除，已用预算不退还' in hero
+    assert 'private-token' not in page and '/private/provider' not in page and 'https://private.invalid' not in page
+    assert not (root / 'pause.request').exists()
+    _, _, read_headers = ui.get('/view?' + urlencode({'token': ui.read_token}), host=ui.host)
+    read_page = ui.get('/', host=ui.host, cookie=read_headers['Set-Cookie'])[1].decode()
+    assert '服务错误待处理' in read_page and '处理建议' in read_page
+    assert 'action="/control/' not in read_page and '/nodes/2/fork' not in read_page
+    assert 'native-evidence/002/native-outcome.json' not in read_page
+    snapshot['view']['paused'] = True
+    paused_hero = str(ui._dashboard_parts(ui._browser(cookie), snapshot)['live-hero'])
+    assert '研究已暂停' in paused_hero and 'action="/control/continue"' not in paused_hero
+    assert 'href="/nodes/2/fork"' in paused_hero
+
+
+@pytest.mark.parametrize('state, cleanup', [
+    ('running', 'observed_group_cleaned'), ('unknown', 'observed_group_cleaned'),
+    ('waiting', 'observed_group_cleaned'), ('automatic_recovery_waiting', 'observed_group_cleaned'),
+    ('automatic_recovery_stopped', 'unknown'),
+])
+def test_failure_attention_keeps_active_or_uncertain_execution_out_of_branch_exit(tmp_path, state, cleanup):
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    snapshot = ui._snapshot()
+    node = dict(step=2, role='W', state=state, returncode=1, cleanup=cleanup,
+        native_failure=dict(category='permanent', codes=['invalid_api_key'], statuses=[401]))
+    snapshot.update(conclusion=None, final=None, operation=None)
+    snapshot['view'].update(nodes=[node], paused=False, correction={})
+    status = ui._status(snapshot, {})
+    attention = repr(ui._attention(ui._browser(cookie), True, snapshot, status))
+    assert '/nodes/2/fork' not in attention and '放弃本次尝试并分支重做' not in attention
+    assert '认证失败或凭据无效' in attention
+
+
+@pytest.mark.parametrize('category, reason, expected', [
+    ('unknown', 'automatic_recovery_unknown_failure', '原生错误原因未识别'),
+    ('temporary', 'automatic_recovery_retry_limit', '自动接续次数或等待额度已用尽'),
+])
+def test_confirmed_stopped_failure_keeps_pause_and_fork_preview_available(tmp_path, category, reason, expected):
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    snapshot = ui._snapshot()
+    node = dict(step=2, role='W', state='automatic_recovery_stopped', returncode=1,
+        cleanup='observed_group_cleaned', native_failure=dict(category=category, codes=[], statuses=[]),
+        automatic_recovery=dict(status='stopped', reason=reason))
+    snapshot.update(conclusion=None, final=None, operation=None)
+    snapshot['view'].update(nodes=[node], paused=False, correction={})
+    hero = str(ui._dashboard_parts(ui._browser(cookie), snapshot)['live-hero'])
+    assert expected in hero and '接续停止待处理' in hero and 'tone-bad' in hero
+    assert '永久' not in hero
+    assert 'action="/control/pause"' in hero and 'action="/control/start"' not in hero
+    assert 'href="/nodes/2/fork"' in hero and '放弃本次尝试并分支重做' in hero
+    assert '预览仍会核对在途或未知外部调用' in hero
+    assert not (root / 'pause.request').exists()
+
+
+@pytest.mark.parametrize('workspace_host', [False, True])
+@pytest.mark.parametrize('category, code, expected', [
+    ('permanent', 'insufficient_quota', '服务错误待处理'),
+    ('unknown', None, '接续停止待处理'),
+])
+def test_serving_failed_task_exit_obeys_standalone_maintenance_handoff(tmp_path, workspace_host, category, code, expected):
+    from scidiscovery.research_loop import contracts as c
+    from scidiscovery.research_loop.instance_ui import _host_lock
+    root, key = prepare(tmp_path, enabled=False)
+    c.build_job(root, 1, 'H', [])
+    record = root / 'native-evidence/001'
+    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json')))
+    c.write(record / 'native-outcome.json', dict(returncode=1, native_started=False,
+        terminal_observed=False, cleanup='observed_group_cleaned', stop_reason='native_failure_event',
+        native_failure=dict(category=category, codes=[code] if code else [], statuses=[])))
+    c.write(record / 'automatic-recovery.json', dict(status='stopped',
+        reason='automatic_recovery_permanent_failure' if category == 'permanent' else 'automatic_recovery_unknown_failure'))
+    if workspace_host:
+        host = InstanceUI(tmp_path, secret_file=key, workspace=True, instance_roots=[root])
+        host.host = '127.0.0.1:18753'
+        ui = host._child(1)
+        assert ui.workspace_host is host
+    else:
+        host = ui = InstanceUI(root, secret_file=key)
+        ui.host = '127.0.0.1:18753'
+    host._serving = ui._serving = True
+    originals = {path: path.read_bytes() for path in (root / 'jobs/001.json',
+        record / 'native-intent.json', record / 'native-outcome.json', record / 'automatic-recovery.json')}
+    with _host_lock(host.root, workspace=host.workspace):
+        _, _, headers = ui.get('/manage?' + urlencode({'token': ui.management_token}), host=ui.host)
+        cookie = headers['Set-Cookie']
+        overview = ui.get('/', host=ui.host, cookie=cookie)[1].decode()
+        hero = re.search(r'<div id="live-hero">(.*?)<div id="live-usage">', overview, re.S)[1]
+        detail = ui.get('/nodes/1', host=ui.host, cookie=cookie)[1].decode()
+        fork_page = ui.get('/nodes/1/fork', host=ui.host, cookie=cookie)[1].decode()
+        assert expected in hero and 'action="/control/pause"' in hero
+        if category == 'unknown':
+            assert '永久' not in hero
+        for page in (hero, detail):
+            if workspace_host:
+                assert '放弃本次尝试并分支重做' in page and 'href="/nodes/1/fork"' in page
+                assert '在工作台打开本实例以预览分支' not in page
+            else:
+                assert '放弃本次尝试并分支重做' not in page
+                assert '在工作台打开本实例以预览分支' in page
+                assert '查看工作台分支操作说明' in page and 'href="/nodes/1/fork"' in page
+        assert ('action="/control/fork-preview"' in fork_page) is workspace_host
+        assert ('分支暂不可用' in fork_page) is not workspace_host
+    assert {path: path.read_bytes() for path in originals} == originals
+    assert not (root / 'pause.request').exists() and not (record / 'result-identity.json').exists()
+
+
+@pytest.mark.parametrize('category, code', [
+    ('temporary', 'rate_limit_exceeded'), ('incomplete', 'turn_interrupted'),
+])
+def test_paused_temporary_or_incomplete_failure_keeps_paused_status_and_continue(tmp_path, category, code):
+    from scidiscovery.research_loop import ui_view
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    snapshot = ui._snapshot()
+    node = dict(step=2, role='W', state='automatic_recovery_paused', returncode=1,
+        terminal_observed=False, cleanup='observed_group_cleaned',
+        native_failure=dict(category=category, codes=[code], statuses=[429] if category == 'temporary' else []),
+        automatic_recovery=dict(status='paused', reason='native_' + category, retry_count=1, continue_count=1))
+    snapshot.update(conclusion=None, final=None, operation=None)
+    snapshot['view'].update(nodes=[node], paused=True, correction={})
+    status = ui._status(snapshot, {})
+    assert status['state'] == 'paused' and status['badge'] == '已暂停'
+    assert ui_view.native_failure_guidance(node) is None
+    hero = str(ui._dashboard_parts(ui._browser(cookie), snapshot)['live-hero'])
+    assert 'action="/control/continue"' in hero
+    assert '服务错误待处理' not in hero and '接续停止待处理' not in hero
+    assert '自动接续已停止' not in hero and '放弃本次尝试并分支重做' not in hero
+
+
 def session(root, key):
     ui = InstanceUI(root, secret_file=key); ui.host = '127.0.0.1:18753'
     _, _, headers = ui.get('/manage?' + urlencode({'token': ui.management_token}), host=ui.host)

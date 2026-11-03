@@ -270,7 +270,7 @@ def understanding(items):
 def hero(header, status, *, primary=None, attention=(), notices=(), stage_note=None):
     """Header with status badge, headline and one primary action slot."""
     tone = {'completed': 'ok', 'active': 'active', 'waiting': 'warn', 'unknown': 'warn', 'budget_exhausted': 'bad',
-            'final': 'warn', 'error': 'bad', 'pause_requested': 'warn', 'paused': 'neutral'}.get(status.get('state'), 'neutral')
+            'final': 'warn', 'error': 'bad', 'service_error': 'bad', 'pause_requested': 'warn', 'paused': 'neutral'}.get(status.get('state'), 'neutral')
     body = '<section class="hero overview-head"><div class="head-main">'
     if header and 'error' in header:
         body += error_inline(header, what='研究标题')
@@ -326,7 +326,7 @@ def instance_card(row):
                     + path_details
                     + link('重试', row['retry'], cls='secondary-link') + '</article>')
     tone = {'completed': 'ok', 'active': 'active', 'waiting': 'warn', 'unknown': 'warn', 'budget_exhausted': 'bad',
-            'error': 'bad'}.get(row['state'], 'neutral')
+            'error': 'bad', 'service_error': 'bad'}.get(row['state'], 'neutral')
     tokens = row['tokens']
     return Safe('<article class="instance-card"><h3>' + esc(row['title']) + '</h3><p class="note">' + esc(row['heading']) + '</p>'
                 + '<p class="head-status">' + badge(row['badge'], tone) + ' <span class="headline">' + esc(row['headline']) + '</span></p>'

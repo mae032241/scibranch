@@ -110,6 +110,8 @@ def _native_message(layers):
         if not isinstance(message, str):continue
         if message == 'Quota exceeded. Check your plan and billing details.':
             matched.append(('insufficient_quota', None, 'codex_exec_quota_v1'))
+        elif message == 'Selected model is at capacity. Please try a different model.':
+            matched.append(('capacity_exceeded', None, 'codex_exec_model_capacity_v1'))
         elif message == 'exceeded retry limit, last status: 429 Too Many Requests':
             matched.append(('rate_limit_exceeded', 429, 'codex_exec_http_429_v1'))
         elif re.fullmatch(r'unexpected status 503 Service Unavailable: [^\r\n]{1,4096}, url: https?://[^\s]{1,2048}', message):

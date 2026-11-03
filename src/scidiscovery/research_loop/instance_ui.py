@@ -1100,6 +1100,18 @@ class InstanceUI:
                     elapsed=ui_view.elapsed_text(entry['prepared_at']), label=entry['label'], messages=list(entry['messages']),
                     href='/nodes/' + str(step) + '/progress?attempt=' + str(attempt))
 
+    def _failure_fork_exit(self, step):
+        """Show the existing maintenance handoff before offering a fork preview."""
+        href = '/nodes/' + str(step) + '/fork'
+        if self._maintenance_blocked():
+            return ui.Safe('<p>在工作台打开本实例以预览分支：独立实例网页服务正在持有维护锁，'
+                '请先关闭该服务，再从工作台按完整目录加载本实例。</p><p>'
+                + ui.link('查看工作台分支操作说明', href) + '</p>')
+        return ui.Safe('<p>' + ui.link('放弃本次尝试并分支重做', href, cls='secondary-button') + '</p>'
+            '<p>先预览分支：保留第 ' + str(step) + ' 阶段开始前的已完成成果，'
+            '用该阶段原始输入重做当前任务；不会重跑前一阶段。新分支须声明新预算，创建后保持暂停。'
+            '预览仍会核对在途或未知外部调用；原尝试不删除，已用预算不退还。</p>')
+
     def _attention(self, token, manager, snapshot, status):
         view = snapshot['view']
         display = status['display']
@@ -1116,7 +1128,9 @@ class InstanceUI:
                 display['current'] and display['current'].get('native_failure')
                 and display['current']['state'] not in ui_view.SEALED):
             current = display['current']
-            item = dict(text=status['headline'] + '；请核对原任务，不会自动重新提交。',
+            failure_help = ui_view.native_failure_guidance(current)
+            item = dict(text=(failure_help['summary'] + '。请按下方建议处理；原件和已用预算保留。'
+                if failure_help else status['headline'] + '；请核对原任务，不会自动重新提交。'),
                 href='/nodes/' + str(current['step']), action='查看原任务与续接条件')
             details = ui.facts(ui_view.native_facts(current, ui_view.cleaner(self.root)))
             if manager:
@@ -1125,6 +1139,17 @@ class InstanceUI:
                 if attempt:
                     record += '/continuations/' + f'{attempt:03d}'
                 details += '<p class="note">本机原生诊断（相对实例目录）：<code>' + record + '/native-outcome.json</code></p>'
+                if failure_help:
+                    details += '<p class="note">需要详细原因时，请维护者在宿主机查看该次诊断；公开页面仅显示安全错误类别和已知错误码。</p>'
+                    if view.get('paused'):
+                        details += '<p>研究已暂停；当前失败尝试及此前成果均已保留。</p>'
+                    elif status['state'] != 'service_error':
+                        details += self._control_form(token, 'pause')
+                    if (not display['active'] and not display['waiting']
+                            and ui_view.native_failure_fork_available(current)):
+                        details += self._failure_fork_exit(current['step'])
+                elif current.get('native_failure') and (current['native_failure'].get('category') == 'unknown'):
+                    details += '<p>错误原因尚未识别，请维护者在宿主机核对本次诊断和原调用状态；不要盲目重试。</p>'
                 if ui_view.native_completed(current):
                     command = 'scid-research worker-resume --root ' + shlex.quote(str(self.root)) + ' --step ' + str(current['step'])
                     details += ('<p>使用上方“收集封存并继续研究”处理同一原任务；需要补填输出时仍按原 Worker 修复条件与预算执行。</p>'
@@ -1158,6 +1183,10 @@ class InstanceUI:
         state = status['state']
         view = snapshot['view']
         current = status['display']['current']
+        if state == 'service_error':
+            if manager and not view.get('paused'):
+                return ui.Safe(self._form(token, 'pause', '', '暂停研究'))
+            return ui.link('查看错误与处理方式', '/nodes/' + str(current['step']), cls='primary')
         if state == 'unsealed' and manager and ui_view.native_completed(current):
             return ui.Safe(self._form(token, 'resume', '<input type="hidden" name="step" value="'
                 + str(current['step']) + '">', '收集封存并继续研究'))
@@ -1397,8 +1426,16 @@ class InstanceUI:
                 body += '<p><a href="/results/' + str(node['step']) + '">阅读阶段结论</a> · <a href="' + base + '/science">完整结论原文</a> · <a href="' + base + '/materials">下载研究文件</a></p>'
             else:
                 body += '<p><a href="' + base + '/progress?attempt=' + str(node.get('continuations', 0)) + '">查看此阶段公开进度</a></p>'
+            if node.get('native_failure') and node['state'] not in ui_view.SEALED:
+                failure_help = ui_view.native_failure_guidance(node)
+                if failure_help:
+                    body += ui.facts([dict(label='错误含义', value='；'.join(failure_help['explanations'])),
+                        *[dict(label='处理建议', value=advice) for advice in failure_help['advice']]])
             if 'maintenance' in self.browser.verify(browser_token, instance_id=self.instance).scopes:
-                body += '<p><a href="' + base + '/fork">从这里分叉</a></p>'
+                if ui_view.native_failure_fork_available(node):
+                    body += self._failure_fork_exit(node['step'])
+                elif node['state'] in ui_view.SEALED:
+                    body += '<p><a href="' + base + '/fork">从这里分叉</a></p>'
             body += '</article>'
         if view.get('next_after') is not None:
             body += '<a href="/?after=' + str(view['next_after']) + '">查看后续阶段</a>'
@@ -1414,6 +1451,9 @@ class InstanceUI:
             draft = attempted
             reconcile = True
         body = self._navigation() + '<p>重新执行所选逻辑任务，继承它开始前的准确输入。创建后保持暂停，请在新实例显式开始。</p>'
+        body += ('<p>选择第 ' + str(step) + ' 阶段会重做第 ' + str(step) + ' 阶段，保留它开始前的已完成成果；'
+            '不会重跑前一阶段。若要从更早任务重做，请先打开该阶段记录的分支入口。'
+            '原尝试不删除，已用预算不退还；新分支须填写新的有限预算，预览会核对是否存在在途或未知外部调用。</p>')
         body += '<p class="note">方向指引保持原文；正式审查的中立输入限制优先。历史许可不授予新执行权限。</p>'
         if problem:
             body += problem.markup()

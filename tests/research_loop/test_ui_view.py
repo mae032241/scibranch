@@ -162,6 +162,76 @@ def test_status_matrix_maps_existing_presentation_without_new_control_semantics(
     assert summary()['state'] == 'idle' and '第 4 阶段 · W · 实验 · 已有阶段结论' == summary()['stage']
 
 
+@pytest.mark.parametrize('code, meaning, action', [
+    ('invalid_api_key', '认证失败或凭据无效', '重新登录'),
+    ('permission_denied', '账户或组织权限不足', '模型访问权限'),
+    ('insufficient_quota', '服务配额、余额或计费上限不足', '增加本研究的 tokens 预算不会恢复'),
+    ('model_not_found', '所选模型或服务资源不可用', '分支重做不会自动换模型'),
+    ('invalid_configuration', '请求格式、参数或启动器配置不兼容', '检查宿主启动器版本'),
+    ('invalid_json_schema', '请求格式、参数或启动器配置不兼容', '不能靠补填阶段结论修复'),
+    ('context_length_exceeded', '原任务上下文超过模型容量', '分支重做保留原始输入'),
+])
+def test_permanent_failure_help_uses_existing_safe_codes_with_concrete_actions(code, meaning, action):
+    node = dict(native_failure=dict(category='permanent', codes=[code], statuses=[429],
+        message='private-token /private/provider https://private.invalid'))
+    guidance = ui_view.native_failure_guidance(node)
+    assert meaning in guidance['summary']
+    assert code + '：' in '；'.join(guidance['explanations'])
+    assert action in '；'.join(guidance['advice'])
+    assert 'private' not in repr(guidance)
+    facts = ui_view.native_facts(node, lambda text, limit=16384: str(text)[:limit])
+    assert any(row['label'] == '处理建议' and action in row['value'] for row in facts)
+
+
+def test_unknown_permanent_failure_points_to_host_diagnostics_without_echoing_raw_text():
+    guidance = ui_view.native_failure_guidance(dict(native_failure=dict(category='permanent',
+        codes=['private-token /private/provider'], statuses=[])))
+    assert '具体原因尚未识别' in guidance['summary']
+    assert '宿主机核对本次原生诊断' in guidance['advice'][0]
+    assert 'private' not in repr(guidance)
+    assert ui_view.native_failure_guidance(dict(native_failure=dict(category='temporary', codes=['rate_limit_exceeded']))) is None
+
+
+@pytest.mark.parametrize('paused', [False, True])
+def test_stopped_permanent_failure_is_actionable_even_when_paused(paused):
+    node = dict(step=4, role='W', state='automatic_recovery_stopped', returncode=1,
+        terminal_observed=False, cleanup='observed_group_cleaned',
+        automatic_recovery=dict(status='stopped'),
+        native_failure=dict(category='permanent', codes=['insufficient_quota'], statuses=[429]))
+    presentation = dict(current=node, state=node['state'], active=False, waiting=False, completed=False)
+    value = ui_view.status_summary(presentation, dict(paused=paused))
+    assert value['state'] == 'service_error' and value['badge'] == '服务错误待处理'
+    assert '配额、余额或计费上限不足' in value['headline']
+    assert ('研究已暂停' in value['headline']) is paused
+    assert ui_view.native_failure_fork_available(node)
+    for state in ('running', 'unknown', 'waiting', 'automatic_recovery_waiting', 'seal_present_unverified'):
+        assert not ui_view.native_failure_fork_available(dict(node, state=state))
+    assert not ui_view.native_failure_fork_available(dict(node, cleanup='unknown'))
+    assert not ui_view.native_failure_fork_available(dict(node, returncode=None))
+
+
+@pytest.mark.parametrize('category, reason, expected', [
+    ('unknown', 'automatic_recovery_unknown_failure', '原生错误原因未识别'),
+    ('temporary', 'automatic_recovery_retry_limit', '自动接续次数或等待额度已用尽'),
+    ('incomplete', 'automatic_recovery_continue_limit', '自动接续次数或等待额度已用尽'),
+])
+def test_confirmed_stopped_unclassified_or_limited_failure_has_help_without_claiming_permanence(category, reason, expected):
+    node = dict(step=4, role='W', state='automatic_recovery_stopped', returncode=1,
+        cleanup='observed_group_cleaned', native_failure=dict(category=category, codes=[], statuses=[]),
+        automatic_recovery=dict(status='stopped', reason=reason))
+    help_value = ui_view.native_failure_guidance(node)
+    assert expected in help_value['summary'] and '永久' not in repr(help_value)
+    assert '宿主' in help_value['advice'][0] and ui_view.native_failure_fork_available(node)
+    value = ui_view.status_summary(dict(current=node, state=node['state'], active=False,
+        waiting=False, completed=False), dict(paused=False))
+    assert value['state'] == 'service_error' and value['badge'] == '接续停止待处理'
+    assert expected in value['headline']
+    for state in ('running', 'unknown', 'waiting', 'automatic_recovery_waiting', 'automatic_recovery_paused'):
+        assert ui_view.native_failure_guidance(dict(node, state=state)) is None
+        assert not ui_view.native_failure_fork_available(dict(node, state=state))
+    assert ui_view.native_failure_guidance(dict(node, cleanup='unknown')) is None
+
+
 def test_usage_cards_mark_overrun_unknown_usage_and_waiting():
     view = dict(budget=dict(max_tokens=5000000, max_seconds=10800.0, consumed_seconds=2636.5, waiting_seconds=600, max_steps=80),
                 usage=dict(observed_tokens=5846087, unknown_steps=[3, 4]),
