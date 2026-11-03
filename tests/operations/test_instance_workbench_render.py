@@ -249,3 +249,47 @@ def test_archive_download_progress_is_distinct_from_verified_files():
     value = _execution_progress(node)
     assert "下载结果归档" in value and "123456 字节" in value
     assert "结果文件已校验" in value and "0.0%" in value
+
+
+def test_result_page_prioritizes_best_metrics_image_and_collapses_provenance():
+    from scidiscovery.artifact_agent.approval_ui.workbench_render import render_scientific_result
+    overview = _overview()
+    overview["scientific_result"] = {"state": "selected", "key": "artifact:result", "run_name": "compare",
+        "disposition": "no_accepted_model", "summary": "long formal summary", "best_available": ["opaque-alias"],
+        "candidates": [{"candidate": "opaque-alias", "artifact_name": "long/artifact/path.output", "scientific": "rejected",
+            "execution": "succeeded", "evidence": "complete", "mechanism": "ambiguous",
+            "metrics": [{"key": "joint", "value": 3.121875, "meets_threshold": False, "artifact_name": "score", "json_pointer": "/joint"}]}],
+        "comparison_contract": {"criteria": [{"key": "joint", "label": "联合误差", "relation": "le", "threshold": 1.0, "unit": "dimensionless"}]},
+        "figures": [{"source_key": "image", "artifact_id": "safe-image", "label": "Al / Ga overlay"}], "main_figure": "image"}
+    page = render_scientific_result(overview).decode()
+    assert "纳入集合中尚无已接受模型" in page and "候选 1 · 未达标 / 拒绝" in page
+    assert page.index("3.121875") < page.index("result-primary-figure") < page.index("long formal summary")
+    assert "loading='eager'" in page and "result-metric" in page
+    assert "≈ 3.12188" in page and "原始数值：3.121875" in page and "无量纲" in page
+    assert "候选原件 →" in page and "nodes/artifact%3Along%2Fartifact%2Fpath.output" in page
+    assert "class='research-panel' open" not in page
+    assert "workbench.js" not in page and "trajectory-list" not in page
+    assert "科学结果 / Best" in page and "打开原图" in page
+    overview["display_node"] = {"key": "run:compare"}
+    overview["presentation"] = {"sections": [{"title": "result", "items": [{"label": "summary", "value": "long formal summary"}]}]}
+    progress = render_workbench(overview, browse_base="/instance/instance-a", csrf_token="").decode()
+    assert "long formal summary" not in progress and "3.121875" not in progress
+    assert "href='/instance/instance-a/results'" in progress
+    for state in ("unorganized", "unavailable"):
+        overview["scientific_result"] = {"state": state}
+        assert "3.121875" not in render_scientific_result(overview).decode()
+    overview["scientific_result"] = {"state": "selected", "candidates": [], "best_available": []}
+    page = render_scientific_result(overview).decode()
+    assert "暂无符合证据条件" in page and "未绑定比较图件" in page
+
+
+def test_result_ties_preserve_all_best_and_archived_page_is_read_only():
+    from scidiscovery.artifact_agent.approval_ui.workbench_render import render_scientific_result
+    overview = _overview()
+    overview["storage"] = {"storage_state": "archived"}
+    overview["scientific_result"] = {"state": "selected", "best_available": ["one", "two"],
+        "candidates": [{"candidate": "one", "scientific": "accepted"}, {"candidate": "two", "scientific": "accepted"}],
+        "disposition": "accepted_model"}
+    page = render_scientific_result(overview).decode()
+    assert "候选 1、候选 2" in page and "已归档 · 只读" in page
+    assert "workbench.js" not in page and "<form" not in page

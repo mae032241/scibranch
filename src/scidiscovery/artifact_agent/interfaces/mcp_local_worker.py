@@ -435,7 +435,7 @@ class LocalWorkerMCPRouter:
                 "A required experiment service is unavailable."
             )
         terminal = self._run_id is not None and self.runs.status(self._run_id).state in {"completed", "failed"}
-        if self._run_id is None or terminal:
+        if self._run_id is None or self._workspace is None or terminal:
             try:
                 opener = self.runs.reopen if self._bound_run_id else self.runs.open
                 status, workspace = opener(

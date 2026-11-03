@@ -200,6 +200,14 @@ class ArtifactCatalogInput(NamedReadInput):
     parent_limit: int = Field(default=16, ge=1, le=32)
 
 
+class RunDiagnosticInput(NamedInput):
+    diagnostic_name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+    action: Literal["status", "cancel", "collect", "read"] = "status"
+    file_name: str | None = Field(default=None, min_length=1, max_length=1024)
+    offset: int = Field(default=0, ge=0)
+    max_bytes: int = Field(default=8192, ge=1, le=32768)
+
+
 class RunStatusInput(NamedInput, StageReadQuery):
     intent: Literal["decision", "status", "navigation", "full"] = Field(default="decision",
         description="decision reads bounded sealed conclusions and scheduler signal after completion, using frozen decision fields for historical Runs; older records without those fields return an explicit unavailable default and bounded field index. status reads lifecycle and optional saved diagnostics; navigation lists exact fields, scientific input names and a page of already sealed public evidence names even while running or after failure; full explicitly reads the complete sealed scientific output. Sealed materials are not final conclusions. Active or failed Runs never expose draft science.")
@@ -312,6 +320,7 @@ ROOT_TOOLS = (
     RootTool("operation_preflight", "Optional check without creating. Invoke independently checks admission; this does not reserve resources or authorize execution.", OperationCallInput),
     RootTool("operation_invoke", "Validate and create one Agent, Transform, Effect or Approval from the compiled catalog; no prior preflight required. Success preserves dispatch configuration, exact outputs or approval URLs by executor kind; use the returned detail entry for Run context.", OperationCallInput),
     RootTool("run_list", "List task names, states and recovery/contract flags within the configured page byte budget. Read one run_status for dispatch configuration or conclusions. limit is a maximum; continue with next_before.", RunListInput),
+    RootTool("run_diagnostic", "Observe, cancel, collect or read an exact task-managed diagnostic by its owning Run name and diagnostic_name, including after task completion or failure. Never submits a job. Collection seals a separate bounded delivery, preserving the final report; read pages its receipt or exact file_name without logs in status. Unknown status returns recovery.code and the exact owner/name route: tcad_debug_legacy_retirement_confirmation_required needs the named administrator submission_recovery command after all old submitters stop; tcad_debug_retirement_protocol_unavailable requires backend repair. Cancel may report tcad_debug_retirement_busy or tcad_debug_retirement_failed and retains budget. Administrator confirmation only enables retirement; an exact persistent remote fence is still required before release. Root accepts no private ledger paths or administrator assertions.", RunDiagnosticInput, surface="execution"),
     RootTool("run_status", "Read a Run with one intent: decision (default), status, navigation or full. Explicit stage_offset=0 lists sealed stages even while running; stage_reference reads an exact material. Stages never establish final completion or qualification.", RunStatusInput),
     RootTool("run_record_failure", "Record failure of one running minimal Run.", RunFailureInput),
     RootTool("approval_list", "List named reviews in this scheduler instance.", ApprovalListInput),
@@ -664,6 +673,8 @@ class RootMCPRouter:
                     details=validation_diagnostics(error, schema=tool.schema()["inputSchema"])) from error
         values = {field: getattr(parsed, field) for field in type(parsed).model_fields}
         try:
+            if name == "run_diagnostic":
+                return self._with_attention(self.facade.run_diagnostic(**parsed.model_dump()))
             if name == "run_status":
                 return self._with_attention(self.facade.run_status(**parsed.model_dump(exclude_unset=True)))
             # Presentation options are never part of an immutable operation request.

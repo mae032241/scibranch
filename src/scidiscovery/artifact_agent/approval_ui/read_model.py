@@ -150,6 +150,31 @@ class InstanceReadModel:
             recent["next_cursor"] = self._cursor(instance_id, last)
         return result
 
+    def scientific_result(self, instance_id: str) -> dict[str, Any]:
+        """Read the exact selection without loading progress or writing UI caches."""
+        from ..service.scientific_results import current_result
+        result = {"instance": asdict(self.bindings.get_instance(instance_id=instance_id)), "gaps": []}
+        try:
+            result["scientific_result"] = current_result(artifacts=self.artifacts, runs=self.runs,
+                bindings=self.bindings, instance_id=instance_id)
+        except (ValueError, *_READ_ERRORS) as error:
+            result["scientific_result"] = {"state": "unavailable", "reason": type(error).__name__}
+            result["gaps"].append(gap("selected_scientific_result_unavailable"))
+        return result
+
+    def is_current_scientific_result_node(self, instance_id: str, key: str) -> bool:
+        from ...general_science_results import RESULT_KIND
+        selection = next((item for item in self.bindings.scientific_selections(instance=instance_id, limit=101)
+                          if item.kind == RESULT_KIND), None)
+        if selection is None or selection.artifact_ref is None:
+            return False
+        binding = self._binding(instance_id, key)
+        if binding.namespace == "artifact":
+            return self.artifacts.get_by_id(binding.object_id).ref == selection.artifact_ref
+        if binding.namespace == "run":
+            return self._run(instance_id, binding.object_id).output_ref == selection.artifact_ref
+        return False
+
     def trajectory(self, instance_id: str, page: int = 1) -> dict[str, Any]:
         limit = 10
         self.bindings.get_instance(instance_id=instance_id)
@@ -413,21 +438,22 @@ class InstanceReadModel:
             return (run.output_ref,), controls
         manifest_ref, manifest = manifests[0]
         result = [run.output_ref, manifest_ref]
-        result.extend(self._presentation_file_refs(output, manifest))
+        images, downloads = self._presentation_file_refs(output, manifest)
+        result.extend((*images, *downloads))
         return tuple(dict.fromkeys(result)), controls
 
     def _presentation_file_refs(self, report, manifest):
         """Resolve published attachments and cited images through one exact manifest."""
         if (report.content_encoding != "identity" or manifest.content_encoding != "identity"
                 or report.size_bytes > MAX_SOURCE_BYTES or manifest.size_bytes > MAX_SOURCE_BYTES):
-            return ()
+            return (), ()
         try:
             report_payload = json.loads(self.artifacts.read(report.ref), parse_constant=_reject_constant)
             manifest_payload = json.loads(self.artifacts.read(manifest.ref), parse_constant=_reject_constant)
         except (ValueError, UnicodeError, RecursionError, *_READ_ERRORS):
-            return ()
+            return (), ()
         if not isinstance(report_payload, dict) or not isinstance(manifest_payload, dict):
-            return ()
+            return (), ()
         citations = {}
         evidence = report_payload.get("evidence")
         if isinstance(evidence, list):
@@ -439,7 +465,7 @@ class InstanceReadModel:
                 citations.setdefault(item["source_key"], []).append(item)
         records, bindings = manifest_payload.get("records"), manifest_payload.get("bindings")
         if not isinstance(records, list) or not isinstance(bindings, dict):
-            return ()
+            return (), ()
         by_alias = {}
         for record in records:
             if isinstance(record, dict) and isinstance(record.get("alias"), str):
@@ -449,6 +475,10 @@ class InstanceReadModel:
         for alias, matches in by_alias.items():
             if len(matches) == 1 and matches[0].get("output_port") == "attachments":
                 citations[alias] = [None]
+            elif len(matches) == 1 and matches[0].get("media_type") in {"image/png", "image/jpeg", "text/csv"}:
+                # Published tool files need the same priority as attachments.
+                # Their identity still has to pass the binding/parent checks below.
+                citations.setdefault(alias, [None])
         result, downloads = [], []
         if report.schema_id == "scidiscovery.layered-diagnosis.v1":
             # Inputs are immutable evidence too. Resolve only exact references
@@ -480,7 +510,7 @@ class InstanceReadModel:
             parent_matches = [parent for parent in manifest.parent_refs
                               if parent.model_dump(mode="json") == reference]
             port = "attachments" if record.get("output_port") == "attachments" else "tool_evidence"
-            if ((port != "attachments" and media not in {"image/png", "image/jpeg"}) or not isinstance(reference, dict)
+            if ((port != "attachments" and media not in {"image/png", "image/jpeg", "text/csv"}) or not isinstance(reference, dict)
                     or len(parent_matches) != 1 or not isinstance(binding, dict)
                     or binding.get("port_name") != port
                     or binding.get("artifact_ref") != reference):
@@ -495,12 +525,13 @@ class InstanceReadModel:
             if port == "attachments" and image.labels.get("operation_output_port") != "attachments":
                 continue
             (result if media in {"image/png", "image/jpeg"} else downloads).append(parent_matches[0])
-        return tuple((*result, *downloads))
+        return tuple(result), tuple(downloads)
 
     def _focused_presentation_refs(self, subject_refs):
         """Prioritize exact focused reports with uniquely bound evidence."""
         # Frozen/direct subjects are always read before any lineage expansion.
         result, controls = list(dict.fromkeys(subject_refs)), {}
+        manifests_for_display, images, downloads = [], [], []
         for subject_ref in subject_refs:
             try:
                 report = self.artifacts.catalog(subject_ref)
@@ -529,6 +560,20 @@ class InstanceReadModel:
                         and tuple(labels.get(key) for key in (
                             "operation_id", "operation_version", "operation_digest")) == operation):
                     manifests.append((manifest_ref, manifest))
+            if len(manifests) > 1 and self.runs is not None:
+                # A resumed output can directly retain predecessor manifests.
+                # Prove ownership by the exact persisted output, not by shared
+                # Operation identity, labels, names, or the most recent Run.
+                owned = []
+                for manifest_ref, manifest in manifests:
+                    try:
+                        producer = self.runs.status(manifest.labels["tool_producer_run"])
+                    except _READ_ERRORS:
+                        scan_complete = False
+                        continue
+                    if producer.state == "completed" and producer.output_ref == subject_ref:
+                        owned.append((manifest_ref, manifest))
+                manifests = owned
             controls[report.artifact_id] = {
                 "presentation_manifest_match_count": len(manifests),
                 "presentation_manifest_scan_complete": scan_complete,
@@ -536,9 +581,14 @@ class InstanceReadModel:
             if not scan_complete or len(manifests) != 1:
                 continue
             manifest_ref, manifest = manifests[0]
-            result.append(manifest_ref)
-            result.extend(self._presentation_file_refs(report, manifest))
-        return tuple(dict.fromkeys(result)), controls
+            controls[report.artifact_id]["selected_run_id"] = manifest.labels["tool_producer_run"]
+            manifests_for_display.append(manifest_ref)
+            pictures, files = self._presentation_file_refs(report, manifest)
+            images.extend(pictures)
+            downloads.extend(files)
+        # Prioritize across the entire frozen cohort, not one report at a time.
+        # A CSV preview for subject A must never preempt subject B's picture.
+        return tuple(dict.fromkeys((*result, *manifests_for_display, *images, *downloads))), controls
 
     def _family_views(self, instance_id, artifact_id):
         envelope = self.artifacts.get_by_id(artifact_id)

@@ -25,6 +25,7 @@ from .transport_logs import preserve_log
 from .collection_download import HEADER_LIMIT, unpack_results
 from scidiscovery.plugin_runtime.collection import CollectionContext, run_bounded
 from scidiscovery.plugin_runtime.workspace import atomic_json
+from scidiscovery.plugin_runtime.submission import SubmissionNotCreated
 from scidiscovery.plugin_runtime.diagnostics import exception_facts
 
 from .execution_control import FileDescriptor, SolverCapabilitySnapshot, TCADJobSpec
@@ -424,7 +425,11 @@ class SSHTCADTransport:
             }
         if operation in {"submit", "submit_retirable"}:
             marker = self._read_marker(payload["submission"])
-            value = self._rpc("tcad_" + operation, {"submission": marker["remote_submission"], "authorization": payload.get("authorization")})
+            try:
+                value = self._rpc("tcad_" + operation, {"submission": marker["remote_submission"], "authorization": payload.get("authorization")})
+            except SubmissionNotCreated as error:
+                # The remote job digest differs from the local transport marker.
+                raise SubmissionNotCreated(payload["submission"]["sha256"], error.reason) from error
             return {"run_id": value["run_id"], "state": value["state"]}
         if operation == "status":
             value = self._rpc("tcad_status", {"run_id": payload["run_id"]})
@@ -613,6 +618,11 @@ class SSHTCADTransport:
         if response.get("id") != request_id:
             raise RuntimeError("remote TCAD response identity differs")
         if "error" in response:
+            if tool in {"tcad_submit", "tcad_submit_retirable"}:
+                rejection = SubmissionNotCreated.from_wire(response["error"].get("data", {}).get("submission_rejection"),
+                    expected_sha256=arguments["submission"]["sha256"])
+                if rejection is not None:
+                    raise rejection
             if tool == "tcad_submission_protocol":
                 raise RemoteRunnerUpgradeRequired("Remote runner cannot confirm submission/retirement protocol support; upgrade the runner before submitting.")
             if tool == "tcad_execution_policy" and response["error"].get("message") == "unknown runner tool":
@@ -781,6 +791,8 @@ def main(argv: list[str] | None = None) -> int:
             "engineering": exception_facts(error, layer="ssh_transport", action=operation),
             "payload": {},
         }
+        if isinstance(error, SubmissionNotCreated):
+            response["submission_rejection"] = error.wire()
         if isinstance(error, SSHTransportConfigurationError):
             response["error_code"] = "tcad_transport_configuration_invalid"
         elif isinstance(error, RemoteRunnerUpgradeRequired):

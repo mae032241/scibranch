@@ -501,7 +501,9 @@ def render_presentation(presentation: dict | None, *, evidence_href: EvidenceHre
                 picture = (f"<a href='{html.escape(href, quote=True)}' target='_blank' "
                     "rel='noopener'>打开原图</a>")
             cards.append("<figure class='figure-card'><div class='figure-number'>图件 " + str(index+1) + "</div>" + picture
-                + "<figcaption>" + label + download + render_source(figure.get("source"), evidence_href) + "</figcaption></figure>")
+                + "<figcaption>" + label + download + render_source(figure.get("source"), evidence_href)
+                + "".join(render_source(ref, evidence_href) for ref in figure.get("additional_sources", ()))
+                + "</figcaption></figure>")
         figure_body = "<div class='figure-grid'>" + "".join(cards) + "</div>"
         if len(figures) > 8:
             figure_body = "<p>内嵌预览前 8 张；其余图件可逐项打开原图。</p>" + figure_body

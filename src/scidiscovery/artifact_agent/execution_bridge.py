@@ -155,10 +155,17 @@ class ExecutionBridge:
         if recovered is None:
             if before_submit is not None:
                 before_submit()
-            if admission is None:
-                external_run_id, external_state = adapter.submit(submission)
-            else:
-                external_run_id, external_state = adapter.submit(submission, authorization=admission)
+            from ..plugin_runtime.submission import SubmissionNotCreated
+            try:
+                if admission is None:
+                    external_run_id, external_state = adapter.submit(submission)
+                else:
+                    external_run_id, external_state = adapter.submit(submission, authorization=admission)
+            except SubmissionNotCreated as error:
+                if error.submission_sha256 != submission.sha256:
+                    raise ExecutionServiceError("Submission rejection identity differs; preserve its reservation") from error
+                self.executions.release_rejected_submission(execution_id, submission_sha256=submission.sha256)
+                raise
         else:
             if before_submit is not None:
                 before_submit()

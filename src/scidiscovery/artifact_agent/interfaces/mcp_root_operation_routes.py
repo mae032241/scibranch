@@ -10,7 +10,7 @@ from ..schema.approval import ApprovalOption, CompiledApprovalIdentity, ReviewDo
 from ..schema.artifact import ArtifactRegistration
 from ..schema.common import canonical_sha256
 from ..service.scheduler_bindings import SchedulerNameConflict
-from ..service.run_records import RunAttemptLimit
+from ..service.run_records import RunAttemptLimit, RunSlotBusy, RunCapacityBusy
 from ...operation_contract import contract_diagnostic
 from ...operations.invoke import (
     ApprovalProjectorContext,
@@ -318,6 +318,7 @@ class RootOperationRoutes:
             bound, on_conflict, resume_from=resume_from, draft_from=draft_from, max_attempts=max_attempts
         )
         if target.existing_object_id is not None:
+            self.runs.prepare_queued(target.existing_object_id)
             return self.run_status(name=target.name)
         output_name = _derived_name(target.name, "output")
         output_logical_name = _derived_name(target.logical_name, "output")
@@ -339,6 +340,12 @@ class RootOperationRoutes:
             )
         except RunAttemptLimit as error:
             raise _attempt_limit_error(error) from error
+        except RunSlotBusy as error:
+            code = "run_capacity_busy" if isinstance(error, RunCapacityBusy) else "run_revision_conflict"
+            result = OperationInvocationError(code, message=str(error))
+            result.details = (contract_diagnostic(code, phase="input_admission",
+                affected_action="invoke", message=str(error), repairable=True),)
+            raise result from error
         except Exception as error:
             raise OperationEngineeringError("local_run_creation_failed") from error
         self._bind_target("run", target, run_id, fingerprint)

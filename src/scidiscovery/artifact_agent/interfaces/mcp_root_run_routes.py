@@ -131,6 +131,13 @@ class RootRunRoutes:
                     intent="status", output_paths=[], index_offset=0, index_limit=16))
         return {"runs": items, "next_before": None}
 
+    def run_diagnostic(self, *, name, diagnostic_name, action="status", file_name=None, offset=0, max_bytes=8192):
+        if self.runs is None or self.runs.experiment_executions is None:
+            raise RootToolError("Task diagnostic control is unavailable")
+        run = self.runs.status(self._resolve("run", name))
+        return self.runs.experiment_executions.diagnostic_control(run, name=diagnostic_name, action=action,
+            file_name=file_name, offset=offset, max_bytes=max_bytes)
+
     def run_status(self, *, name: str, **arguments) -> dict[str, Any]:
         from .mcp_root import parse_run_status_arguments
         request = parse_run_status_arguments({"name": name, **arguments})
@@ -217,6 +224,10 @@ class RootRunRoutes:
             result["diagnostic_summary"] = self.runs.diagnostic_summary(value)
         attention = self.runs.submission_attention(value)
         if attention is not None:
+            for issue in attention.get("issues", ()):
+                if "diagnostic_name" in issue:
+                    issue["read_request"] = {"name": "run_diagnostic", "surface": "execution", "arguments": {
+                        "name": name, "diagnostic_name": issue["diagnostic_name"], "action": "status"}}
             result["attention_required"] = attention
         if intent != "status" and value.state != "completed":
             result["content_unavailable"] = "run_not_completed"
@@ -324,7 +335,9 @@ class RootRunRoutes:
             visible = set()
         if "bound_inputs" in result:
             result["bound_inputs"] = [item for item in result["bound_inputs"] if item["port"] in visible]
-        if value.state == "queued":
+        if value.state == "queued" and not value.workspace_ready:
+            result["preparation"] = "in_progress; retry the identical operation_invoke to recover interrupted preparation"
+        if value.state == "queued" and value.workspace_ready:
             result["dispatch"] = {
                 "agent_type": value.agent_type,
                 "instruction": "Spawn the returned agent_type with execution_profile.profile model and reasoning_effort, without parent history. Ask it to wait for attachment; use worker_attach with this Run name and the actual platform thread ID, then ask it to open its assignment. A formal reviewer must be a different Agent from its subject author. Do not relay scientific results through chat.",

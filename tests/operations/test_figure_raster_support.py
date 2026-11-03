@@ -84,6 +84,134 @@ def test_neighbor_continuity_rejects_isolated_nearest_guide_distractor():
     assert next(point for point in points if point.pixel_x_raw == 14).pixel_y_raw == 18
 
 
+def test_tail_connected_frame_cannot_erase_disconnected_anchored_front():
+    image = Image.new("RGB", (80, 80), "white")
+    draw = ImageDraw.Draw(image)
+    draw.line((2, 12, 22, 12), fill="black")
+    draw.line((26, 17, 43, 34), fill="black")
+    draw.line((47, 50, 58, 61), fill="black")
+    draw.line((2, 76, 77, 76), fill="black")  # Same-color plot frame.
+    draw.line((62, 66, 77, 66), fill="black")
+    draw.line((70, 66, 70, 76), fill="black")  # Tail/frame connection.
+    seeds = ((12, 12), (32, 23), (52, 55), (63, 66), (68, 66), (75, 66))
+    trace = _assert_horizontal_mirror(image, seeds)
+    points = {p.pixel_x_raw: p for p in trace.points}
+    for x, y in seeds:
+        assert points[x].pixel_y_subpixel == pytest.approx(y, abs=0.5)
+        assert not points[x].identity_ambiguous
+    for x in (23, 24, 25, 44, 45, 46):
+        # A remote frame is not evidence for bridging a real missing segment.
+        assert x not in points
+
+
+@pytest.mark.parametrize("frame", [False, True])
+@pytest.mark.parametrize("mirror", [False, True])
+def test_each_actual_anchor_recovers_its_full_segment_through_remote_frame(frame, mirror):
+    image = Image.new("RGB", (42, 42), "white")
+    draw = ImageDraw.Draw(image)
+    draw.line((2, 12, 20, 12), fill="black")
+    draw.line([(25, 4), (36, 12), (38, 12)], fill="black")
+    expected = {x: y for x in range(2, 40) for y in range(3, 40)
+        if image.getpixel((x, y)) == (0, 0, 0)}
+    if frame:
+        draw.line([(2, 12), (2, 35), (38, 35), (38, 12)], fill="black")
+    seeds = ((18, 12), (31, 8), (36, 12))
+    if mirror:
+        image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        seeds = tuple((41 - x, y) for x, y in reversed(seeds))
+    trace = _trace(image, seeds)
+    points = {41 - p.pixel_x_raw if mirror else p.pixel_x_raw: p for p in trace.points}
+    assert points.keys() == expected.keys()
+    for x, y in expected.items():
+        # A vertical frame joins the stroke at its end; all other columns
+        # retain the exact target pixel, including x=25..29 before the guide.
+        if frame and x in (2, 38):
+            continue
+        assert points[x].pixel_y_raw == y
+        assert not points[x].identity_ambiguous
+        assert points[x].interpolation_eligible
+    assert all(p.pixel_y_raw < 35 for p in points.values())
+    assert trace.max_gap_px == 4
+    ImageDraw.Draw(image).line((2, 1, 7, 1), fill="black")  # Legend binding.
+    source, request = _source_request(image, [_series(seeds=seeds)])
+    files, _ = build_digitized_figure_bundle(source, request)
+    rows = _rows(files)
+    assert {(41 - int(row["pixel_x_raw"]) if mirror else int(row["pixel_x_raw"]),
+        int(row["pixel_y_raw"])) for row in rows} == {
+        (x, p.pixel_y_raw) for x, p in points.items()}
+    bundle, _ = normalize_figure_evidence(
+        manifest_content=files["figure_manifest/evidence.json"][0],
+        validation_report_content=files["validation_reports/validation_report.json"][0],
+        curve_tables={"curve_table__main__black": files["curve_tables/main--black.csv"][0]})
+    from curve_score.schema import _raw_value_at
+    gap_x = (41 - 23 if mirror else 23) - 2  # Calibration maps pixel x to x - 2.
+    with pytest.raises(ValueError, match="interpolation_outside_supported_interval"):
+        _raw_value_at(bundle.series[0], gap_x, "linear_y")
+
+
+@pytest.mark.parametrize("distractor_width", [1, 2, 3, 8])
+def test_anchor_connected_curvature_is_not_replaced_by_guide_nearest_short_line(distractor_width):
+    image = Image.new("RGB", (30, 30), "white")
+    draw = ImageDraw.Draw(image)
+    draw.line([(2, 18), (14, 10), (27, 18)], fill="black")
+    draw.line((14, 18, 14 + distractor_width - 1, 18), fill="black")
+    trace = _assert_horizontal_mirror(image, ((2, 18), (27, 18)))
+    points = {p.pixel_x_raw: p for p in trace.points}
+    assert set(points) == set(range(2, 28))
+    assert points[14].pixel_y_raw == 10
+    assert all(points[x].pixel_y_raw < 18 for x in range(14, 14 + distractor_width))
+    assert all(not p.identity_ambiguous for p in points.values())
+
+
+@pytest.mark.parametrize("seed_x", [20.5, 20.500001, 21.0])
+@pytest.mark.parametrize("mirror", [False, True])
+def test_half_pixel_anchor_preserves_curved_support_in_both_directions(seed_x, mirror):
+    image = Image.new("RGB", (42, 32), "white")
+    draw = ImageDraw.Draw(image)
+    draw.line([(2, 18), (16, 18), (20, 11), (21, 10), (21, 8), (24, 8)], fill="black")
+    draw.line((32, 8, 38, 8), fill="black")
+    draw.line((10, 8, 14, 8), fill="black")  # Short guide-nearest distractor.
+    seeds = ((seed_x, 8), (36, 8))
+    if mirror:
+        image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        seeds = tuple((41 - x, y) for x, y in reversed(seeds))
+    points = {41 - p.pixel_x_raw if mirror else p.pixel_x_raw: p
+        for p in _trace(image, seeds).points}
+    for x, y in ((12, 18), (23, 8), (35, 8)):
+        assert points[x].pixel_y_raw == y
+        assert not points[x].identity_ambiguous
+        assert points[x].interpolation_eligible
+        assert points[x].pixel_y_support_ranges == ((float(y), float(y)),)
+    assert all(x not in points for x in range(25, 32))
+    ImageDraw.Draw(image).line((2, 1, 7, 1), fill="black")
+    source, request = _source_request(image, [_series(seeds=seeds)])
+    files, _ = build_digitized_figure_bundle(source, request)
+    rows = {41 - int(row["pixel_x_raw"]) if mirror else int(row["pixel_x_raw"]): row
+        for row in _rows(files)}
+    assert rows[12]["pixel_y_raw"] == "18"
+    assert rows[12]["quantitative_measurement_claim_eligible"] == "1"
+    assert rows[12]["interpolation_eligible"] == "1"
+    bundle, _ = normalize_figure_evidence(
+        manifest_content=files["figure_manifest/evidence.json"][0],
+        validation_report_content=files["validation_reports/validation_report.json"][0],
+        curve_tables={"curve_table__main__black": files["curve_tables/main--black.csv"][0]})
+    from curve_score.schema import _raw_value_at
+    plateau_x = (41 - 12.5 if mirror else 12.5) - 2
+    # The existing y calibration maps pixel 29 to 0 and pixel 3 to 27.
+    assert _raw_value_at(bundle.series[0], plateau_x, "linear_y") == pytest.approx(11 * 27 / 26)
+    gap_x = (41 - 28 if mirror else 28) - 2
+    with pytest.raises(ValueError, match="interpolation_outside_supported_interval"):
+        _raw_value_at(bundle.series[0], gap_x, "linear_y")
+
+
+def test_singleton_weighted_center_stays_in_exact_pixel_support():
+    image = Image.new("RGB", (30, 130), "white")
+    ImageDraw.Draw(image).line((2, 114, 27, 114), fill=(0, 3, 5))
+    trace = _trace(image, ((2, 114), (27, 114)))
+    assert len(trace.points) == 26
+    assert all(p.pixel_y_support_min <= p.pixel_y_subpixel <= p.pixel_y_support_max for p in trace.points)
+
+
 def test_guide_selected_short_curve_is_not_replaced_by_long_unrelated_curve():
     image = Image.new("RGB", (30, 30), "white")
     draw = ImageDraw.Draw(image)
@@ -180,6 +308,76 @@ def test_mirrored_competing_paths_preserve_identity_and_interpolation_eligibilit
     point = next(p for p in trace.points if p.pixel_x_raw == 15)
     assert point.identity_ambiguous is unclear
     assert point.interpolation_eligible is not unclear
+
+
+def _closed_anchor_branches():
+    image = Image.new("RGB", (44, 32), "white")
+    draw = ImageDraw.Draw(image)
+    draw.line([(2, 10), (4, 8), (18, 8), (20, 10), (22, 8), (36, 8),
+        (38, 10), (40, 10)], fill="black")
+    draw.line([(2, 10), (4, 12), (36, 12), (38, 10)], fill="black")
+    # A remote frame puts both branches into one component without making the
+    # lower branch pass through the interior seed on the upper branch.
+    draw.line([(2, 10), (2, 25), (40, 25), (40, 10)], fill="black")
+    return image
+
+
+@pytest.mark.parametrize("first_seed", [(20, 10), (20, 10.25), (19, 9)])
+@pytest.mark.parametrize("mirror", [False, True])
+def test_competing_branch_cannot_borrow_an_anchor_it_does_not_visit(first_seed, mirror):
+    image = _closed_anchor_branches()
+    seeds = (first_seed, (38, 10))
+    if mirror:
+        image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        seeds = tuple((43 - x, y) for x, y in reversed(seeds))
+    seed_x = 43 - first_seed[0] if mirror else first_seed[0]
+    point = next(p for p in _trace(image, seeds).points if p.pixel_x_raw == seed_x)
+    assert point.pixel_y_raw == int(first_seed[1])
+    assert not point.identity_ambiguous
+    assert point.interpolation_eligible
+    assert point.pixel_y_support_ranges == ((float(int(first_seed[1])),) * 2,)
+    ImageDraw.Draw(image).line((2, 1, 7, 1), fill="black")
+    source, request = _source_request(image, [_series(seeds=seeds)])
+    files, _ = build_digitized_figure_bundle(source, request)
+    rows = {int(row["pixel_x_raw"]): row for row in _rows(files)}
+    assert rows[seed_x]["quantitative_measurement_claim_eligible"] == "1"
+    assert rows[seed_x]["interpolation_eligible"] == "1"
+    bundle, _ = normalize_figure_evidence(
+        manifest_content=files["figure_manifest/evidence.json"][0],
+        validation_report_content=files["validation_reports/validation_report.json"][0],
+        curve_tables={"curve_table__main__black": files["curve_tables/main--black.csv"][0]})
+    from curve_score.schema import _raw_value_at
+    next_x = seed_x + (-1 if mirror else 1)
+    # Read an interior value through the production CSV and normalizer path.
+    assert _raw_value_at(bundle.series[0], (seed_x + next_x) / 2 - 2, "linear_y") == pytest.approx(
+        (float(rows[seed_x]["y_value"]) + float(rows[next_x]["y_value"])) / 2)
+
+
+@pytest.mark.parametrize("first_seed_x", [2, 2.5])
+@pytest.mark.parametrize("mirror", [False, True])
+def test_closed_branches_with_the_same_actual_anchors_remain_ambiguous(mirror, first_seed_x):
+    image = _closed_anchor_branches()
+    seeds = ((first_seed_x, 10), (38, 10))
+    if mirror:
+        image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        seeds = tuple((43 - x, y) for x, y in reversed(seeds))
+    x = 23 if mirror else 20
+    point = next(p for p in _trace(image, seeds).points if p.pixel_x_raw == x)
+    assert point.identity_ambiguous
+    assert not point.interpolation_eligible
+    assert point.pixel_y_support_ranges == ((10.0, 10.0), (12.0, 12.0))
+    ImageDraw.Draw(image).line((2, 1, 7, 1), fill="black")
+    source, request = _source_request(image, [_series(seeds=seeds)])
+    files, _ = build_digitized_figure_bundle(source, request)
+    row = next(row for row in _rows(files) if int(row["pixel_x_raw"]) == x)
+    assert row["quantitative_measurement_claim_eligible"] == row["interpolation_eligible"] == "0"
+    bundle, _ = normalize_figure_evidence(
+        manifest_content=files["figure_manifest/evidence.json"][0],
+        validation_report_content=files["validation_reports/validation_report.json"][0],
+        curve_tables={"curve_table__main__black": files["curve_tables/main--black.csv"][0]})
+    from curve_score.schema import _raw_value_at
+    with pytest.raises(ValueError, match="interpolation_curve_unavailable"):
+        _raw_value_at(bundle.series[0], x - 2 + (-0.5 if mirror else 0.5), "linear_y")
 
 
 def _normalized_sloped_curve(use_limits=()):
@@ -844,3 +1042,20 @@ def test_synthetic_raster_local_candidates_do_not_imply_physical_multivalued_beh
         assert sum(channel ** 2 for channel in pixel) <= 24 ** 2
         assert any(low <= point.pixel_y_subpixel <= high for low, high in point.pixel_y_support_ranges)
         assert math.isfinite(point.local_slope) and math.isfinite(point.y_localization_uncertainty_px)
+
+
+@pytest.mark.parametrize("notch",[False,True])
+@pytest.mark.parametrize("mirror",[False,True])
+def test_reacquired_frame_does_not_inherit_distant_target_anchor_span(notch,mirror):
+    image=Image.new("RGB",(30,30),"white"); d=ImageDraw.Draw(image)
+    for a,b in [(2,6),(13,16),(22,27)]: d.line((a,10,b,10),fill="black")
+    d.line([(2,25),(7,25),(9,11),(12,25),(17,25),(20,11),(22,25),(27,25)] if notch else [(2,25),(27,25)],fill="black")
+    for x in [4,24]: d.line((x,10,x,25),fill="black")
+    seeds=((4,10),(15,10),(24,10))
+    if mirror:
+        image=image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        seeds=tuple((29-x,y) for x,y in reversed(seeds))
+    trace=_trace(image, seeds)
+    byx={29-p.pixel_x_raw if mirror else p.pixel_x_raw:p for p in trace.points}
+    assert byx[15].pixel_y_raw==10,[(x,p.pixel_y_raw,p.identity_ambiguous,p.interpolation_eligible) for x,p in sorted(byx.items())]
+    assert not byx[15].identity_ambiguous

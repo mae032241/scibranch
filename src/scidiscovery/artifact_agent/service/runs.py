@@ -21,6 +21,7 @@ from ...operations.tooling import operation_worker_tools
 from ...operations.catalog import CompiledCatalog
 from ...operations.invoke import (
     BoundOperationCall,
+    BoundInput,
     InvocationArtifact,
     preflight_operation,
     operation_output_validation_contract,
@@ -67,7 +68,9 @@ from .run_records import (
     RunNotFound,
     RunAttemptLimit,
     RunSlotBusy,
+    RunCapacityBusy,
     RunStateConflict,
+    RunPreparationBusy,
     RunStatus,
     completion_receipt_json,
     expired,
@@ -324,6 +327,18 @@ class RunService(ToolEvidenceMixin):
         with self._connect() as connection:
             self._attach_scheduler(connection)
             connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute("SELECT run_id, output_binding_fingerprint FROM runs WHERE instance_id=? AND output_binding_name=?",
+                (instance_id, output_binding_name)).fetchone()
+            if existing is not None:
+                if existing["output_binding_fingerprint"] != output_binding_fingerprint:
+                    raise RunStateConflict("The requested task output name already belongs to a different request")
+                connection.execute("COMMIT")
+                existing_id = str(existing["run_id"])
+                self.prepare_queued(existing_id)
+                return existing_id
+            active_count = connection.execute("SELECT COUNT(*) FROM runs WHERE state IN ('queued','running')").fetchone()[0]
+            if active_count >= self.agent_settings.scheduling.max_active_runs:
+                raise RunCapacityBusy("Configured task capacity is full; no Run was created. Wait for existing work to finish, then retry the same request.")
             frozen_inputs = self.current.freeze(connection, instance_id, raw_inputs,
                 compiled=compiled, origins=self.input_origins(instance_id))
             active_revision = active_direct_revision_ports(
@@ -383,6 +398,10 @@ class RunService(ToolEvidenceMixin):
                 scheduler_budget = (source.recovery_policy or {}).get("scheduler_max_attempts")
             if scheduler_budget is not None:
                 recovery_policy.update(max_attempts=scheduler_budget, scheduler_max_attempts=scheduler_budget)
+            recovery_policy["preparation_recovery_digest"] = recovery_digest
+            recovery_policy["preparation_input_provenance"] = {
+                item.source_name: {'historical': item.artifact.historical, 'labels': dict(item.artifact.labels)}
+                for item in bound.inputs}
             request_digest = canonical_sha256(
                 {
                     "operation_id": compiled.spec.operation_id,
@@ -420,9 +439,9 @@ class RunService(ToolEvidenceMixin):
                         output_binding_name, output_logical_name,
                         output_revision, output_binding_fingerprint,
                         request_digest, resume_from_run_id, draft_from_run_id, recovery_policy_json,
-                        state, created_at, deadline_at, execution_profile_json, decision_fields_json
+                        state, created_at, deadline_at, execution_profile_json, decision_fields_json, workspace_ready
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                              ?, ?, 'queued', ?, ?, ?, ?)
+                              ?, ?, 'queued', ?, ?, ?, ?, 0)
                     """,
                     (
                         run_id,
@@ -450,77 +469,127 @@ class RunService(ToolEvidenceMixin):
                         canonical_json(compiled.spec.decision_fields),
                     ),
                 )
-            except sqlite3.IntegrityError as error:
+            except sqlite3.IntegrityError:
                 connection.execute("ROLLBACK")
-                raise RunSlotBusy(
-                    "this compiled Operation already has an unopened or running Run"
-                ) from error
+                raise  # An unrelated database constraint is not a capacity result.
             connection.execute("COMMIT")
-        try:
-            materialized_inputs = tuple(
-                WorkspaceInput(
-                    name=item.source_name,
-                    media_type=item.media_type,
-                    content=self.artifacts.read(item.artifact_ref),
-                )
-                for item in frozen_inputs
-                if item.exposure not in {"handoff_only", "file_reference"}
-                and next(port for port in compiled.spec.inputs if port.name == item.port_name).agent_visible
-            )
-            input_bytes = {item.name: item.content for item in materialized_inputs}
-            direct_revision = active_direct_revision_ports(
-                compiled, (item.port_name for item in frozen_inputs)
-            )
-            workspace_hooks = operation_workspace_hooks(compiled)
-            revision_workspace_mode = _revision_workspace_mode(
-                direct_revision, workspace_hooks
-            )
-            initial_output = (
-                revision_draft_json(bound, input_bytes)
-                if revision_workspace_mode == "result_copy"
-                else None
-            )
-            if (
-                initial_output is not None
-                and len(initial_output) > compiled.spec.limits.max_output_bytes
-            ):
-                raise RunError("revision draft exceeds the compiled output limit")
-            workspace = self.backend.prepare(
-                run_id=run_id,
-                inputs=materialized_inputs,
-                assignment=assignment_json(
-                    bound,
-                    frozen_inputs,
-                    tool_names=self.backend.assignment_tool_names(compiled),
-                    recovery_relative_path=(
-                        "recovery-draft" if recovery_digest is not None else None
-                    ),
-                    revision_workspace_mode=revision_workspace_mode,
-                    prior_source_bindings=dict(self.prior_source_bindings(self.status(run_id))),
-                    deadline_at=deadline_at,
-                    attachment_settings=recovery_policy.get("attachments"),
-                ),
-                result_schema=result_schema_json(
-                    compiled,
-                    input_source_ports={
-                        item.source_name: item.port_name for item in frozen_inputs
-                    },
-                ),
-                recovery_digest=recovery_digest,
-                initial_output=initial_output,
-            )
-            self._materialize_workspace(compiled, run_id, workspace)
-        except Exception as error:
-            self.record_failure(
-                run_id,
-                reason=f"workspace preparation failed: {str(error)[:512] if isinstance(error, RunCheckerError) else type(error).__name__}",
-                category=error.category if isinstance(error, RunCheckerError) else "runtime_failure",
-                expected_state="queued",
-                expected_last_activity_at=None,
-            )
-            # The Run already exists. Return its identity so Root can bind its
-            # requested name and expose the persisted failure through run_status.
+        self.prepare_queued(run_id)
         return run_id
+
+    def prepare_queued(self, run_id: str) -> bool:
+        """Recover frozen preparation under a cross-process lock, before dispatch.
+
+        Readiness is persisted after all workspace hooks finish. A crashed
+        preparer releases its OS lock; replay rebuilds only the never-opened
+        workspace. A concurrent replay returns without dispatching it.
+        """
+        import fcntl
+        locks = self.database_path.parent / 'preparation-locks'
+        locks.mkdir(exist_ok=True, mode=0o700)
+        with (locks / (run_id + '.lock')).open('a+') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            with self._connect() as connection:
+                row = self._row(connection, run_id)
+                value = self._status_from_row(row)
+                if value.workspace_ready or value.state != 'queued':
+                    return value.workspace_ready
+                if expired(value.deadline_at):
+                    self.record_failure(run_id, reason='Run deadline expired during preparation',
+                        expected_state='queued', expected_last_activity_at=None, timed_out=True)
+                    return False
+                instruction = str(row['instruction'])
+                resume_from = row['resume_from_run_id']
+            compiled = self._compiled(value)
+            frozen_inputs = value.inputs
+            recovery_policy = value.recovery_policy or {}
+            deadline_at = value.deadline_at
+            recovery_source = resume_from or value.draft_from_run_id
+            recovery_digest = recovery_policy.get('preparation_recovery_digest',
+                (self.status(recovery_source).recovery_draft or {}).get('draft_digest') if recovery_source else None)
+            provenance = recovery_policy.get('preparation_input_provenance', {})
+            bound = BoundOperationCall(compiled=compiled, name=value.output_binding_name,
+                inputs=tuple(BoundInput(item.port_name, item.source_name, item.artifact_name,
+                    InvocationArtifact(artifact_name=item.artifact_name, ref=item.artifact_ref,
+                        schema_id=self.artifacts.catalog(item.artifact_ref).schema_id,
+                        media_type=item.media_type, size_bytes=self.artifacts.catalog(item.artifact_ref).size_bytes,
+                        labels=tuple(provenance.get(item.source_name, {}).get('labels',
+                            self.artifacts.catalog(item.artifact_ref).labels).items()),
+                        historical=provenance.get(item.source_name, {}).get('historical', False),
+                        parent_refs=self.artifacts.catalog(item.artifact_ref).parent_refs,
+                        producer_run_id=item.producer_run_id),
+                    item.exposure, item.usage) for item in frozen_inputs),
+                instruction=instruction, execution_profile=value.execution_profile,
+                require_execution_review=bool(recovery_policy.get('require_execution_review')))
+            # Only unready queued work may be reset; no Worker has opened it.
+            reset = getattr(self.backend, 'discard_preparation', None)
+            if callable(reset):
+                reset(run_id)
+            try:
+                materialized_inputs = tuple(
+                    WorkspaceInput(
+                        name=item.source_name,
+                        media_type=item.media_type,
+                        content=self.artifacts.read(item.artifact_ref),
+                    )
+                    for item in frozen_inputs
+                    if item.exposure not in {"handoff_only", "file_reference"}
+                    and next(port for port in compiled.spec.inputs if port.name == item.port_name).agent_visible
+                )
+                input_bytes = {item.name: item.content for item in materialized_inputs}
+                direct_revision = active_direct_revision_ports(
+                    compiled, (item.port_name for item in frozen_inputs)
+                )
+                workspace_hooks = operation_workspace_hooks(compiled)
+                revision_workspace_mode = _revision_workspace_mode(
+                    direct_revision, workspace_hooks
+                )
+                initial_output = (
+                    revision_draft_json(bound, input_bytes)
+                    if revision_workspace_mode == "result_copy"
+                    else None
+                )
+                if (
+                    initial_output is not None
+                    and len(initial_output) > compiled.spec.limits.max_output_bytes
+                ):
+                    raise RunError("revision draft exceeds the compiled output limit")
+                workspace = self.backend.prepare(
+                    run_id=run_id,
+                    inputs=materialized_inputs,
+                    assignment=assignment_json(
+                        bound,
+                        frozen_inputs,
+                        tool_names=self.backend.assignment_tool_names(compiled),
+                        recovery_relative_path=(
+                            "recovery-draft" if recovery_digest is not None else None
+                        ),
+                        revision_workspace_mode=revision_workspace_mode,
+                        prior_source_bindings=dict(self.prior_source_bindings(self.status(run_id))),
+                        deadline_at=deadline_at,
+                        attachment_settings=recovery_policy.get("attachments"),
+                    ),
+                    result_schema=result_schema_json(
+                        compiled,
+                        input_source_ports={
+                            item.source_name: item.port_name for item in frozen_inputs
+                        },
+                    ),
+                    recovery_digest=recovery_digest,
+                    initial_output=initial_output,
+                )
+                self._materialize_workspace(compiled, run_id, workspace)
+
+                with self._connect() as connection:
+                    connection.execute("UPDATE runs SET workspace_ready=1 WHERE run_id=? AND state='queued'", (run_id,))
+            except Exception as error:
+                self.record_failure(run_id,
+                    reason=f"workspace preparation failed: {str(error)[:512] if isinstance(error, RunCheckerError) else type(error).__name__}",
+                    category=error.category if isinstance(error, RunCheckerError) else "runtime_failure",
+                    expected_state="queued", expected_last_activity_at=None)
+            return self.status(run_id).workspace_ready
 
     def revision_successor(
         self, *, instance_id: str, operation_digest: str, base_ref: ArtifactRef
@@ -634,6 +703,8 @@ class RunService(ToolEvidenceMixin):
                     allow_running=allow_running, selected_run_id=str(selected["run_id"]), trusted_caller=trusted_caller)
 
     def _open_selected(self, *, operation_id, operation_digest, allow_running, selected_run_id, trusted_caller=None):
+        if not self.prepare_queued(selected_run_id):
+            raise RunPreparationBusy(selected_run_id)
         now = timestamp()
         expired_run: tuple[str, str, str | None] | None = None
         with self._connect() as connection:
@@ -2230,8 +2301,9 @@ class RunService(ToolEvidenceMixin):
                     completed_at TEXT,
                     last_activity_at TEXT
                 );
-                CREATE UNIQUE INDEX IF NOT EXISTS one_active_run_per_operation
-                    ON runs(operation_digest) WHERE state IN ('queued','running');
+                DROP INDEX IF EXISTS one_active_run_per_operation;
+                CREATE INDEX IF NOT EXISTS active_run_capacity
+                    ON runs(state) WHERE state IN ('queued','running');
                 CREATE TABLE IF NOT EXISTS run_activity (
                     run_id TEXT NOT NULL,
                     activity TEXT NOT NULL,
@@ -2249,7 +2321,7 @@ class RunService(ToolEvidenceMixin):
             from .run_attention import NOTICE_SCHEMA
             connection.executescript(NOTICE_SCHEMA)
             for table, columns in {
-                "runs": {"draft_from_run_id": "TEXT", "recovery_policy_json": "BLOB",
+                "runs": {"workspace_ready": "INTEGER NOT NULL DEFAULT 1", "draft_from_run_id": "TEXT", "recovery_policy_json": "BLOB",
                          **{name: value[0] for name, value in EXECUTION_SETTINGS_COLUMNS["runs"].items()},
                          **{name: value[0] for name, value in RUN_READ_COLUMNS.items()}},
                 "run_activity": {"diagnostic_json": "BLOB"},
@@ -2258,6 +2330,10 @@ class RunService(ToolEvidenceMixin):
                 for name, kind in columns.items():
                     if name not in existing:
                         connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
+                        if table == 'runs' and name == 'workspace_ready':
+                            # Legacy queued records have no durable completion
+                            # proof. Rebuild before dispatch; never reset opened work.
+                            connection.execute("UPDATE runs SET workspace_ready=0 WHERE state='queued'")
             connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS run_attention_notice
                 ON run_activity(run_id) WHERE activity='attention_notice'""")
             connection.execute("""CREATE INDEX IF NOT EXISTS run_attention_open_notice

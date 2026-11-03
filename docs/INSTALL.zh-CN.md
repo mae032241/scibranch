@@ -566,3 +566,34 @@ PYTHONPATH="${SCID_INSTALL_ROOT:-/opt/scidiscovery}/site" "${SCID_PYTHON:-python
 
 终态查询短暂失败不会立即按上限扣账。管理员可在 `agent-settings.json` 的 `lifecycle` 中设置
 `terminal_observation_failure_limit`（默认 3，正整数）；连续失败达到阈值才估算，成功查询重置计数。
+
+全局任务容量通过 `agent-settings.json` 的 `scheduling.max_active_runs` 配置，
+默认 32，统计 queued 和 running 的任务；它与 Operation 类型、请求幂等无关。
+等待中的父任务也占名额，因此应为它的独立审查任务保留余量。Native Worker
+派发继续遵守调度器的串行策略。容量满时不会创建 Run，返回可修复的
+`run_capacity_busy`，释放名额后可重试原请求。调低上限不会删除已有活动任务。
+
+TCAD 在创建前因容量拒绝提交时返回绑定精确提交身份的结构化结果。安装时应
+同时升级随包提供的远端 runner；旧 runner 的无类型错误仍保守视为提交未知。
+实验可封存带限制说明的 blocked/inconclusive 报告，未决诊断与预算预留继续保留。
+Worker 退出后，Root 可在 execution 面调用 `run_diagnostic`，提供所属 Run 名称和
+精确 `diagnostic_name`，查询、取消、采集或分页读取。仅在精确远端封禁成功后释放未提交额度；
+发现已有作业时取消原作业。旧预留若未冻结支持封禁的信息，继续保留额度并需要
+管理员恢复；多次查询不到不能证明旧请求不会迟到。采集单独封存诊断交付，不改写最终科学报告。
+
+旧未知诊断可使用已有管理员恢复命令：将 `--execution-id` 换为
+`--diagnostic-ledger`、`--diagnostic-name` 和 `--run-id`。命令为
+`python -m scidiscovery.artifact_agent.interfaces.submission_recovery
+--state-root <state> --diagnostic-ledger <ledger> --diagnostic-name <name>
+--run-id <owner> --confirm-old-submitters-stopped --reason <reason>`。
+必须实际停止所有旧本地与远端提交者后才能确认；命令只持久记录 UID、理由和
+精确提交摘要，不释放额度。之后仍由 `run_diagnostic(action="cancel")` 获取
+远端封禁证明。该命令不暴露为 Agent/MCP 工具。
+
+回滚到不支持 `scheduling` 的旧版前，需要移除该配置节。旧版还会重建按
+Operation 全局唯一的索引，若同一 Operation 有多条 queued/running 任务，
+不能直接回滚，应先结束这些任务。升级本身不改写冻结合同，也不删除已有 Run。
+
+任务工作区具有持久准备完成门：所有准备与领域钩子完成后，queued 任务才提供派发指令。准备进程中断时，重复完全相同的 operation_invoke 请求即可恢复；Worker 打开也遵守同一门。升级时旧 queued 记录先重建后派发，running 记录不重建。
+
+`run_diagnostic(action="collect")` 可在所属任务结束后采集迟到的原诊断终态，独立封存交付回执及文件，不启动新求解、不改写原科学报告。`action="read"` 通过 offset/max_bytes 分页读取回执或其中精确 file_name；默认 8192 字节、最大 32768 字节。未交付终态保留提醒，采集或发布失败后可按原身份重试。

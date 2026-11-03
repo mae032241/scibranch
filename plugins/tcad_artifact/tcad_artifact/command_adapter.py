@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from scidiscovery.plugin_runtime.submission import SubmissionNotCreated
+
 import hashlib
 import json
 import os
@@ -376,6 +378,11 @@ class CommandTCADExecutorAdapter:
                     "Ask the administrator to upgrade the remote runner and validate its configuration. "
                     "This read-only discovery did not submit a job. Do not retry execution before repair."),
             }
+            if operation in {"submit", "submit_retirable"}:
+                rejection = SubmissionNotCreated.from_wire(response.get("submission_rejection"),
+                    expected_sha256=payload["submission"]["sha256"])
+                if rejection is not None:
+                    raise rejection
             code = response.get("error_code")
             if isinstance(code, str) and code in safe_messages:
                 # Reconstruct a declared safe diagnostic; never trust wire messages,

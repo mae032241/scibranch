@@ -138,7 +138,9 @@ def projection(items):
     # Never expose execution IDs, scope/bindings or engineering bodies to Root.
     return {'code':active[0]['code'], 'action':ACTION, 'total':len(active),
         'issues':[{'code':item['code'], 'first_seen_at':item['first_seen_at'],
-            'last_seen_at':item['last_seen_at']} for item in active[:8]],
+            'last_seen_at':item['last_seen_at'],
+            **({'diagnostic_name':item['scope'].removeprefix('diagnostic:')}
+               if item['scope'].startswith('diagnostic:') else {})} for item in active[:8]],
         'has_more':len(active)>8}
 
 

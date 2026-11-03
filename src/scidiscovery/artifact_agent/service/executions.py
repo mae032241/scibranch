@@ -847,6 +847,21 @@ class ExecutionService:
             if row["external_run_id"] is None and prepared is None:
                 connection.execute("DELETE FROM execution_budget_reservations WHERE execution_id=? AND consumed_json IS NULL", (execution_id,))
 
+    def release_rejected_submission(self, execution_id, *, submission_sha256):
+        """A typed exact pre-creation rejection clears preparation and reservation."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._row(connection, execution_id)
+            prepared = connection.execute("SELECT descriptor_json FROM execution_prepared_submissions WHERE execution_id=?",
+                (execution_id,)).fetchone()
+            if row["external_run_id"] is not None or prepared is None:
+                raise ExecutionStateConflict("Rejected submission identity is no longer unsubmitted")
+            descriptor = LocalFileDescriptor.model_validate_json(prepared["descriptor_json"], strict=True)
+            if descriptor.sha256 != submission_sha256:
+                raise ExecutionStateConflict("Rejected submission identity differs")
+            connection.execute("DELETE FROM execution_prepared_submissions WHERE execution_id=?", (execution_id,))
+            connection.execute("DELETE FROM execution_budget_reservations WHERE execution_id=? AND consumed_json IS NULL", (execution_id,))
+
     def authorization(self, execution_id: str) -> dict:
         with self._connect() as connection:
             row = self._row(connection, execution_id)

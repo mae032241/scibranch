@@ -148,7 +148,14 @@ class ExperimentExecution:
                         "if it is already active, read status until collected, then resubmit the report. Do not rerun the solver."
                         if status.state in {'succeeded', 'failed', 'cancelled'} else
                         f"Execution {name!r} is {status.state}. Read worker_experiment_execute(action='status', name={name!r}); finish it or call action='cancel' with the same name, then resubmit the unchanged report.")))
-        blockers.extend(active)
+        for diagnostic in active:
+            if diagnostic["code"] == "experiment_diagnostic_submission_unknown":
+                name = diagnostic.get("path", "").removeprefix("$.diagnostics.")
+                incomplete.append("diagnostic:" + name)
+                self.runs.record_attention(run.run_id, scope="diagnostic:" + name,
+                    code="experiment_diagnostic_submission_unknown")
+            else:
+                blockers.append(diagnostic)
         if blockers:
             from ...operation_contract import bounded_diagnostics
             raise RunOutputError("Outstanding experiment work must finish before final delivery.",
@@ -164,7 +171,224 @@ class ExperimentExecution:
             return
         raise RunOutputError('Execution results were not delivered.', details=(contract_diagnostic(
             'experiment_collection_incomplete', phase='protocol', affected_action='submit', repairable=True,
-            message=f"Result collection or exact implementation binding is incomplete for {list(names)[:8]!r}. Submit outcome blocked/inconclusive with limitations explaining the missing delivery or binding. Root can inspect retained results and choose recovery; retry collection only if collection actually failed. Do not rerun the solver or claim completed delivery."),))
+            message=f"Result collection or exact implementation binding is incomplete for {list(names)[:8]!r}. Submit outcome blocked/inconclusive with limitations explaining the missing delivery, binding or unresolved diagnostic. This does not release diagnostic reservations. Root can use run_diagnostic on the owning task and exact diagnostic name for status/cancel after the report is sealed; retry collection only if collection actually failed. Do not rerun the solver or claim completed delivery."),))
+
+    def diagnostic_control(self, run, *, name, action, file_name=None, offset=0, max_bytes=8192):
+        """Observe/cancel existing diagnostic work, never start replacement work."""
+        if self.services_for is not None:
+            self.worker_services.update(self.services_for(run.operation_id))
+        ancestors = self.task_lineage(run)
+        run_ids = {item.run_id for item in ancestors}
+        inputs = tuple(binding for item in ancestors for binding in item.inputs)
+        matches = []
+        for service in {id(item): item for item in self.worker_services.values()}.values():
+            reader = getattr(service, "experiment_diagnostic_status", None)
+            if callable(reader):
+                result = reader(run_ids, inputs, name=name,
+                    recovery_route=lambda owner, diagnostic: self.diagnostic_recovery_route(run, owner, diagnostic))
+                if result.get("state") != "not_created":
+                    matches.append((service, result))
+        if not matches:
+            return {"name": name, "state": "not_created", "submission": "not_submitted"}
+        if len(matches) != 1:
+            raise ToolInputError("experiment_diagnostic_ambiguous", "This diagnostic name identifies multiple transports; retain the original identities and ask the administrator to repair the binding.")
+        service, result = matches[0]
+        if action == "cancel":
+            service.experiment_activity(run_ids, inputs, cancel=True, name=name)
+            result = service.experiment_diagnostic_status(run_ids, inputs, name=name,
+                recovery_route=lambda owner, diagnostic: self.diagnostic_recovery_route(run, owner, diagnostic))
+        if action == "collect":
+            from ...agent_execution_settings import ExecutionIOSettings
+            limits = ExecutionIOSettings.model_validate((run.recovery_policy or {}).get('execution_io', {}))
+            result = service.experiment_diagnostic_collect(run_ids, inputs, name=name,
+                run_id=run.run_id, operation_id=run.operation_id, seconds=limits.file_timeout_seconds,
+                publish=lambda receipt, files: self._publish_diagnostic_delivery(run, name, receipt, files))
+        if action == "read":
+            return self._read_diagnostic_delivery(run, result, file_name=file_name, offset=offset, max_bytes=max_bytes)
+        unresolved = result.get("submission") == "unknown"
+        active = result.get("state") in {"accepted", "running", "cancelling"}
+        pending_delivery = (result.get('delivery_pending') or
+            not result.get('delivery') and result.get('state') in {'succeeded', 'failed', 'cancelled'}
+            and result.get('submission') == 'submitted')
+        # Preserve attention after scientific completion; exact recovery clears
+        # only this diagnostic's issue in its lineage.
+        for owner in ancestors:
+            self.runs.record_attention(owner.run_id, scope="diagnostic:" + name,
+                code=("experiment_diagnostic_submission_unknown" if unresolved else
+                    "experiment_diagnostic_running" if active else
+                    "experiment_diagnostic_results_pending" if pending_delivery else None))
+        return self._public_diagnostic_projection(result)
+
+    def diagnostic_recovery_route(self, run, owner_id, name):
+        """Resolve a control identity only within the caller's exact instance."""
+        owner = self.runs.status(owner_id)
+        if owner.instance_id != run.instance_id:
+            return {'code': 'experiment_diagnostic_owner_unavailable'}
+        owner_name = self.runs.scheduler_bindings.find_name(instance=run.instance_id,
+            namespace='run', object_id=owner_id)
+        if owner_name is None:
+            return {'code': 'experiment_diagnostic_owner_unavailable'}
+        instance = self.runs.scheduler_bindings.get_instance(instance_id=run.instance_id)
+        return {'owner_name': owner_name, 'diagnostic_name': name,
+            'request': {'name': 'run_diagnostic', 'surface': 'execution',
+                'arguments': {'name': owner_name, 'diagnostic_name': name, 'action': 'cancel'}},
+            'administrator': {'module': 'scidiscovery.artifact_agent.interfaces.submission_recovery',
+                'arguments': ['--instance', instance.name, '--run-name', owner_name,
+                    '--diagnostic-name', name],
+                'instruction': 'An administrator must stop all old local and remote submitters, then supply the configured --state-root, --confirm-old-submitters-stopped and an audited --reason. This only enables exact remote retirement; retry the Root cancel request afterward.'}}
+
+    @staticmethod
+    def _public_diagnostic_projection(value):
+        """Withhold unsafe fields explicitly; private diagnostic originals stay exact."""
+        from ...plugin_runtime.workspace import validate_publication_content, WorkspaceOutputError
+        result, restricted = {}, []
+        for field, content in value.items():
+            try:
+                validate_publication_content(field, canonical_json(content), "application/json")
+            except WorkspaceOutputError:
+                restricted.append(field)
+                if field == "summary":
+                    result[field] = "Diagnostic summary withheld by the public-content boundary; original retained privately."
+            else:
+                result[field] = content
+        if restricted:
+            result["restricted_fields"] = restricted
+        return result
+
+    def _publish_diagnostic_delivery(self, run, name, receipt, files):
+        """Seal takeover output independently of an already final scientific report."""
+        from ..schema.refs import ActorRef, ArtifactRef
+        from ...plugin_runtime.workspace import validate_publication_content, WorkspaceOutputError
+        proof = receipt['proof']
+        implementation = ArtifactRef.model_validate(proof['implementation_ref'])
+        self.runs.artifacts.verify(implementation)
+        owner = self.runs.status(proof['run_id'])
+        parents = (implementation,)
+        labels = {'scientific_claim_admissible': 'false', 'source_origin': 'development_diagnostic'}
+        key = hashlib.sha256(canonical_json({'owner': proof['run_id'], 'name': name,
+            'submission': receipt['submission']['sha256']})).hexdigest()
+        base = 'diagnostic.' + key
+        creator = ActorRef(actor_type='service', actor_id='experiment_execution')
+        entries = []
+        for ordinal, item in enumerate(files):
+            if item['relative_path'] == f'reports/diagnostic-{name}.json':
+                continue  # Private control proof: public receipt retains scientific diagnostics only.
+            raw = item['path'].read_bytes()
+            if len(raw) != item['size_bytes'] or hashlib.sha256(raw).hexdigest() != item['sha256']:
+                raise ValueError('Retained diagnostic differs from its verified receipt')
+            entry = {'file_name': item['relative_path'], 'media_type': item['media_type'],
+                'size_bytes': item['size_bytes'], 'sha256': item['sha256']}
+            try:
+                validate_publication_content('file_identity', canonical_json(entry), 'application/json')
+            except WorkspaceOutputError:
+                entry = self._public_diagnostic_projection(entry)
+                entry.setdefault('file_name', 'restricted_file_' + str(ordinal))
+                entry.update(publication='restricted', reason='public_content_boundary',
+                    original_retained_privately=True)
+                entries.append(entry)
+                continue
+            try:
+                validate_publication_content(entry['file_name'], raw, item['media_type'])
+            except WorkspaceOutputError:
+                entry.update(publication='restricted', reason='public_content_boundary',
+                    original_retained_privately=True)
+                entries.append(entry)
+                continue
+            registration = ArtifactRegistration(kind='diagnostic_file', schema_id='scidiscovery.opaque.v1',
+                payload_schema_version=1, media_type=item['media_type'], creator=creator, parent_refs=parents, labels=labels)
+            envelope = self.runs.artifacts.register_file(item['path'], registration,
+                expected_sha256=item['sha256'], expected_size=item['size_bytes'],
+                idempotency_key='diagnostic-delivery:' + key + ':file:' + str(ordinal))
+            artifact_name = base + '.file.' + str(ordinal)
+            self.runs.scheduler_bindings.bind(instance=run.instance_id, namespace='artifact',
+                name=artifact_name, object_id=envelope.artifact_id)
+            entries.append({**entry, 'artifact_name': artifact_name, 'publication': 'original'})
+        response = receipt['response']
+        manifest = self._public_diagnostic_projection({'schema_version': 1, 'diagnostic_name': name,
+            'owning_task': owner.output_binding_name.removesuffix('.output'),
+            'development_only': True, 'scientific_claim_admissible': False,
+            **{key: response[key] for key in
+                ('mode', 'state', 'diagnostic_layer', 'summary', 'exit_code', 'missing_outputs') if key in response}})
+        manifest.setdefault('diagnostic_name', 'diagnostic-' + key[:16])
+        manifest.setdefault('owning_task', 'task-' + hashlib.sha256(owner.run_id.encode()).hexdigest()[:16])
+        manifest['files'] = entries
+        manifest_bytes = canonical_json(manifest)
+        validate_publication_content('diagnostic_receipt', manifest_bytes, 'application/json')
+        envelope = self.runs.artifacts.register(manifest_bytes,
+            ArtifactRegistration(kind='diagnostic_delivery', schema_id='scidiscovery.diagnostic-delivery.v1',
+                payload_schema_version=1, media_type='application/json', creator=creator, labels=labels,
+                parent_refs=tuple(dict.fromkeys((*parents, *(self.runs.artifacts.get_by_id(
+                    self.runs.scheduler_bindings.resolve(instance=run.instance_id, namespace='artifact', name=item['artifact_name'])).ref for item in entries if 'artifact_name' in item))))),
+            idempotency_key='diagnostic-delivery:' + key + ':receipt')
+        self.runs.scheduler_bindings.bind(instance=run.instance_id, namespace='artifact',
+            name=base + '.receipt', object_id=envelope.artifact_id)
+        return {'artifact_name': base + '.receipt', 'file_count': len(entries),
+            'restricted_file_count': sum(item['publication'] == 'restricted' for item in entries)}
+
+    def _read_diagnostic_delivery(self, run, result, *, file_name, offset, max_bytes):
+        import base64
+        from ...plugin_runtime.workspace import validate_publication_content, WorkspaceOutputError
+        delivery = result.get('delivery')
+        if not delivery:
+            raise ToolInputError('experiment_diagnostic_not_delivered',
+                'This diagnostic has no sealed takeover delivery; collect the exact diagnostic first.')
+        receipt_id = self.runs.scheduler_bindings.resolve(instance=run.instance_id,
+            namespace='artifact', name=delivery['artifact_name'])
+        receipt_envelope = self.runs.artifacts.get_by_id(receipt_id)
+        manifest_raw = self.runs.artifacts.read(receipt_envelope.ref)
+        manifest = json.loads(manifest_raw)
+        public_manifest = self._public_diagnostic_projection({key: value for key, value in manifest.items() if key != 'files'})
+        public_entries = []
+        for index, original in enumerate(manifest.get('files', ())):
+            entry = self._public_diagnostic_projection(original)
+            if 'file_name' not in entry or ('artifact_name' in original and 'artifact_name' not in entry):
+                entry.setdefault('file_name', 'restricted_file_' + str(index))
+                entry.update(publication='restricted', reason='public_content_boundary', original_retained_privately=True)
+            public_entries.append(entry)
+        public_manifest['files'] = public_entries
+        envelope = receipt_envelope
+        public_name = file_name
+        restricted = False
+        projected = False
+        if file_name is not None:
+            pair = next(((original, public) for original, public in zip(manifest.get('files', ()), public_entries)
+                if file_name in {original.get('file_name'), public.get('file_name')}), None)
+            if pair is None:
+                raise ToolInputError('experiment_diagnostic_file_unknown', 'Choose an exact file_name from the sealed receipt.')
+            selected, visible = pair
+            public_name = visible['file_name']
+            restricted = visible.get('publication') == 'restricted'
+            if not restricted:
+                envelope = self.runs.artifacts.get_by_id(self.runs.scheduler_bindings.resolve(
+                    instance=run.instance_id, namespace='artifact', name=selected['artifact_name']))
+                content = self.runs.artifacts.read(envelope.ref)
+                try:
+                    # Check the complete immutable object, never a page fragment.
+                    validate_publication_content('diagnostic_file', content, envelope.media_type)
+                except WorkspaceOutputError:
+                    restricted = True
+        else:
+            try:
+                validate_publication_content('diagnostic_receipt', manifest_raw, 'application/json')
+            except WorkspaceOutputError:
+                projected = True
+                public_manifest.update(publication='restricted_projection', original_retained_privately=True)
+                content = canonical_json(public_manifest)
+                validate_publication_content('diagnostic_receipt_projection', content, 'application/json')
+            else:
+                content = manifest_raw
+        metadata = self._public_diagnostic_projection({'artifact_name': delivery['artifact_name'],
+            'receipt_sha256': receipt_envelope.sha256, 'file_name': public_name, 'media_type': envelope.media_type})
+        if restricted:
+            return {**metadata, 'publication': 'restricted', 'reason': 'public_content_boundary',
+                'original_retained_privately': True}
+        raw = content[offset:offset + max_bytes]
+        textual = envelope.media_type.startswith('text/') or envelope.media_type == 'application/json'
+        return {**metadata, 'offset': offset,
+            'next_offset': offset + len(raw) if offset + len(raw) < len(content) else None,
+            **({'publication': 'restricted_projection', 'original_retained_privately': True} if projected else {}),
+            'encoding': 'utf-8' if textual else 'base64',
+            'content': raw.decode('utf-8', errors='replace') if textual else base64.b64encode(raw).decode('ascii')}
 
     def _execution_owner(self, execution_id):
         envelope = self.executions.artifacts.get_by_id(self.executions.request_artifact_id(execution_id))
@@ -916,6 +1140,7 @@ class _TaskExperimentTools:
         from dataclasses import replace
         run = self.__scope(context)
         service = context.require_service(service_name)
+        context.state['diagnostic_recovery_route'] = lambda owner, name: self.__coordinator.diagnostic_recovery_route(run, owner, name)
         private = service.exchange_root / "experiment-workspaces" / self.__coordinator.task_origin(run)
         private.mkdir(parents=True, exist_ok=True, mode=0o700)
         return replace(context, workspace=private, output_directory=private / "output")

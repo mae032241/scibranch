@@ -132,6 +132,9 @@ def _column_candidates(
         subpixel_y = sum(
             y * weight for y, weight in zip(group, weights)
         ) / sum(weights)
+        # A positive weighted mean is inside its support mathematically; keep
+        # floating-point rounding from placing a singleton just outside it.
+        subpixel_y = min(float(group[-1]), max(float(group[0]), subpixel_y))
         raw_y = min(group, key=lambda y: (abs(y - subpixel_y), y))
         result.append(
             {
@@ -166,9 +169,10 @@ def _identity_supported_columns(columns, seeds, fallback):
     """Admit disconnected strokes by guide identity, never by their length.
 
     A component anchored anywhere can extend beyond the seed endpoints. Other
-    components can retain dashed/occluded pieces near the guide. Overlapping
-    alternatives supported by fewer anchors cannot displace the anchored stroke
-    with a single isolated nearest-guide pixel.
+    components can retain dashed/occluded pieces near the guide.
+    Disconnected segments must not compete by a global anchor count: a frame
+    connected to the tail can otherwise erase the plateau and falling edge.
+    Identity precedence is resolved after continuous paths have been grown.
     """
     parents = {}
 
@@ -195,7 +199,7 @@ def _identity_supported_columns(columns, seeds, fallback):
         if distance <= GUIDE_REACQUISITION_DISTANCE_PX]
     guide_limit = min(GUIDE_REACQUISITION_DISTANCE_PX,
         max(supported_seed_errors, default=0.0) + AMBIGUITY_SCORE_MARGIN_PX)
-    anchor_counts, admitted = {}, set()
+    admitted = set()
     for key, nodes in components.items():
         component_columns = {}
         for x, j in nodes:
@@ -204,18 +208,14 @@ def _identity_supported_columns(columns, seeds, fallback):
             GUIDE_REACQUISITION_DISTANCE_PX, nearest + 0.5)
             for candidate in component_columns.get(int(math.floor(x + 0.5)), ()))
             for (x, y), nearest in zip(seeds, seed_distances))
-        anchor_counts[key] = anchors
         if anchors or any(_guide_distance(candidate, guide_y(seeds, x, fallback))
                 <= guide_limit
                 for x, j in nodes for candidate in (columns[x][j],)):
             admitted.add(key)
     result = {}
     for x, candidates in columns.items():
-        available = [(candidate, root((x, j))) for j, candidate in enumerate(candidates)
+        result[x] = [candidate for j, candidate in enumerate(candidates)
             if root((x, j)) in admitted]
-        best_anchor_count = max((anchor_counts[key] for _, key in available), default=0)
-        result[x] = [candidate for candidate, key in available
-            if anchor_counts[key] == best_anchor_count]
     retained = {id(candidate) for candidates in result.values() for candidate in candidates}
     retained_components = []
     for nodes in components.values():
@@ -237,12 +237,13 @@ def _continuous_paths(columns, seeds, fallback):
     identity. Disconnected components retain their own observed gaps.
     """
     _, guide_limit, components = _identity_supported_columns(columns, seeds, fallback)
+    seed_anchors = tuple((int(math.floor(x + 0.5)), y) for x, y in seeds)
+    identity_support = {}
     candidates_by_x = {}
     for component in components:
         midpoint = (min(component) + max(component)) / 2
         sites = []
-        for seed_x, seed_y in seeds:
-            x = int(math.floor(seed_x + 0.5))
+        for x, seed_y in seed_anchors:
             candidates = component.get(x, ())
             nearest = min((_guide_distance(candidate, seed_y) for candidate in candidates), default=math.inf)
             if nearest <= guide_limit:
@@ -253,12 +254,17 @@ def _continuous_paths(columns, seeds, fallback):
                 nearest = min(_guide_distance(candidate, y) for candidate in candidates)
                 if nearest <= guide_limit:
                     sites.append(((nearest, abs(x - midpoint)), x, y))
+            if sites:
+                best = min(score for score, _, _ in sites)
+                sites = [site for site in sites if site[0] == best]
         if not sites:
             continue
-        best = min(score for score, _, _ in sites)
-        for score, anchor_x, anchor_y in sites:
-            if score != best:
-                continue
+        # Each real anchor must recover both sides of its own stroke. A remote
+        # frame can join separately ending strokes into one raster component;
+        # growth from one seed then only reacquires the others near the guide.
+        # Guide-only components still use their best sites above, rather than
+        # promoting every near-guide pixel to an independent identity anchor.
+        for _, anchor_x, anchor_y in sites:
             nearest = min(_guide_distance(candidate, anchor_y) for candidate in component[anchor_x])
             anchor_candidates = [candidate for candidate in component[anchor_x]
                 if _guide_distance(candidate, anchor_y) <= nearest + 0.5]
@@ -267,15 +273,32 @@ def _continuous_paths(columns, seeds, fallback):
                     if direction * (x - anchor_x) >= 0}
                 side[direction * anchor_x] = anchor_candidates
                 side_seeds = seeds if direction > 0 else tuple((-x, y) for x, y in reversed(seeds))
-                selected, competing, _ = _grow_columns(side, side_seeds, fallback, guide_limit)
-                for x, candidate in selected.items():
+                # Round identity columns in the original image coordinates:
+                # negating a half-pixel guide first would move its anchor by one.
+                side_anchors = tuple((direction * x, y) for x, y in seed_anchors)
+                path_support = {}
+                _, competing, _ = _grow_columns(side, side_seeds, fallback, guide_limit, path_support,
+                    seed_anchors=side_anchors)
+                for x, alternatives in competing.items():
                     actual_x = direction * x
-                    candidates_by_x.setdefault(actual_x, []).extend(competing[x])
+                    for alternative in alternatives:
+                        key = (actual_x, id(alternative))
+                        identity_support[key] = max(identity_support.get(key, 0),
+                            path_support[x, id(alternative)])
+                    candidates_by_x.setdefault(actual_x, []).extend(alternatives)
     selected, competing, segment_ids = {}, {}, {}
     previous = None
     for x in sorted(candidates_by_x):
         alternatives = sorted({id(candidate): candidate for candidate in candidates_by_x[x]}.values(),
             key=lambda candidate: candidate["subpixel_y"])
+        # A trajectory connecting actual identity anchors outranks a disconnected
+        # guide-nearest stroke inside that span. Outside it, directly anchored
+        # trajectories still outrank guide-only reacquisition. Never use distance
+        # to a straight interpolated guide to erase the curve's real curvature.
+        # Equal identity support remains ambiguous, including competing branches.
+        best_support = max(identity_support[x, id(candidate)] for candidate in alternatives)
+        alternatives = [candidate for candidate in alternatives
+            if identity_support[x, id(candidate)] == best_support]
         chosen = min(alternatives, key=lambda candidate: (
             abs(candidate["subpixel_y"] - guide_y(seeds, x, fallback)), candidate["subpixel_y"]))
         selected[x], competing[x] = chosen, alternatives
@@ -286,7 +309,7 @@ def _continuous_paths(columns, seeds, fallback):
     return selected, competing, segment_ids
 
 
-def _grow_columns(columns, seeds, fallback, guide_limit):
+def _grow_columns(columns, seeds, fallback, guide_limit, identity_support=None, *, seed_anchors=None):
     """Select connected identity-supported paths, including natural endings.
 
     Forward/backward costs constrain choices within each retained segment.
@@ -298,6 +321,11 @@ def _grow_columns(columns, seeds, fallback, guide_limit):
     segment = []
     forward, parents = [], []
     reacquiring = False
+    seed_columns = {}
+    if seed_anchors is None:
+        seed_anchors = tuple((int(math.floor(x + 0.5)), y) for x, y in seeds)
+    for seed_x, seed_y in seed_anchors:
+        seed_columns.setdefault(seed_x, []).append(seed_y)
 
     def finish():
         if not segment:
@@ -314,30 +342,45 @@ def _grow_columns(columns, seeds, fallback, guide_limit):
         # tolerance too. On equal costs prefer the completion closest to the
         # selected path, so an unrelated tied branch cannot inflate tolerance.
         prefix_differences = [[math.inf] * len(columns[x]) for x in segment]
+        prefix_anchors = [[math.inf] * len(columns[x]) for x in segment]
+        actual_anchors = [[any(_guide_distance(candidate, y) <= guide_limit
+            for y in seed_columns.get(x, ())) for candidate in columns[x]] for x in segment]
         for i, x in enumerate(segment):
             for j, candidate in enumerate(columns[x]):
                 if not math.isfinite(forward[i][j]):
                     continue
                 differences = 0
+                anchor = x if actual_anchors[i][j] else math.inf
                 if i:
                     unary = abs(candidate["subpixel_y"] - guide_y(seeds, x, fallback))
-                    differences = min((prefix_differences[i - 1][k]
+                    predecessors = [k
                         for k, other in enumerate(columns[segment[i - 1]])
                         if _connected(other, candidate) and math.isclose(
-                            forward[i - 1][k] + unary, forward[i][j], rel_tol=1e-12, abs_tol=1e-9)),
+                            forward[i - 1][k] + unary, forward[i][j], rel_tol=1e-12, abs_tol=1e-9)]
+                    differences = min((prefix_differences[i - 1][k] for k in predecessors),
                         default=math.inf)
+                    anchor = min(anchor, min((prefix_anchors[i - 1][k] for k in predecessors),
+                        default=math.inf))
                 prefix_differences[i][j] = differences + int(j != chosen[i])
+                prefix_anchors[i][j] = anchor
         backward = [[math.inf] * len(columns[x]) for x in segment]
         suffix_differences = [[math.inf] * len(columns[x]) for x in segment]
+        suffix_anchors = [[-math.inf] * len(columns[x]) for x in segment]
         backward[-1] = [0.0] * len(columns[segment[-1]])
         suffix_differences[-1] = [0] * len(columns[segment[-1]])
+        suffix_anchors[-1] = [segment[-1] if anchored else -math.inf for anchored in actual_anchors[-1]]
         for i in range(len(segment) - 2, -1, -1):
             x, next_x = segment[i], segment[i + 1]
             for j, candidate in enumerate(columns[x]):
                 values = [(abs(other["subpixel_y"] - guide_y(seeds, next_x, fallback))
-                    + backward[i + 1][k], suffix_differences[i + 1][k] + int(k != chosen[i + 1]))
+                    + backward[i + 1][k], suffix_differences[i + 1][k] + int(k != chosen[i + 1]), k)
                     for k, other in enumerate(columns[next_x]) if _connected(candidate, other)]
-                backward[i][j], suffix_differences[i][j] = min(values, default=(math.inf, math.inf))
+                backward[i][j], suffix_differences[i][j] = min(
+                    ((cost, differences) for cost, differences, _ in values), default=(math.inf, math.inf))
+                anchor = max((suffix_anchors[i + 1][k] for cost, _, k in values
+                    if math.isfinite(cost) and math.isclose(cost, backward[i][j], rel_tol=1e-12, abs_tol=1e-9)),
+                    default=-math.inf)
+                suffix_anchors[i][j] = max(anchor, x if actual_anchors[i][j] else -math.inf)
         segment_id = segment[0]
         for i, x in enumerate(segment):
             selected[x] = columns[x][chosen[i]]
@@ -345,6 +388,17 @@ def _grow_columns(columns, seeds, fallback, guide_limit):
                 if math.isfinite(forward[i][j] + backward[i][j]) and
                 forward[i][j] + backward[i][j] - best_cost <= AMBIGUITY_SCORE_MARGIN_PX * max(
                     1, prefix_differences[i][j] + suffix_differences[i][j])]
+            if identity_support is not None:
+                # Each candidate's optimal prefix and suffix meet at this pixel,
+                # so their anchors belong to one realizable path through it.
+                # Reacquired segments start fresh. Selected-path anchors and
+                # anchors on a mutually exclusive branch cannot be borrowed.
+                for j, candidate in enumerate(columns[x]):
+                    left, right = prefix_anchors[i][j], suffix_anchors[i][j]
+                    identity_support[x, id(candidate)] = (
+                        3 if left <= x <= right and left < right
+                        else 2 if actual_anchors[i][j]
+                        else 1 if math.isfinite(left) or math.isfinite(right) else 0)
             segment_ids[x] = segment_id
 
     for x, candidates in columns.items():

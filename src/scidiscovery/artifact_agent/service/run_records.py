@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from ..schema.common import canonical_json
 from ..schema.refs import ArtifactRef
 from ..schema.run_signal import SchedulerSignal
+from ...operation_contract import DiagnosticError, contract_diagnostic
 
 
 # Additive read metadata only; NULL preserves records created before this field.
@@ -35,6 +36,15 @@ class RunStateConflict(RunError):
         self.run_id = run_id
 
 
+class RunPreparationBusy(RunStateConflict, DiagnosticError):
+    """An exact queued assignment exists but cannot yet be opened."""
+    def __init__(self, run_id):
+        message = "Workspace preparation is in progress. Retry opening this same assignment after preparation completes; do not create another task."
+        RunStateConflict.__init__(self, message, run_id=run_id)
+        self.details = (contract_diagnostic('run_preparation_pending', phase='protocol',
+            affected_action='tool_call', repairable=True, message=message),)
+
+
 class RunAttemptLimit(RunStateConflict):
     def __init__(self, used: int, limit: int) -> None:
         self.used = used
@@ -48,6 +58,10 @@ class RunContractUnavailable(RunStateConflict):
 
 class RunSlotBusy(RunError):
     pass
+
+
+class RunCapacityBusy(RunSlotBusy):
+    """Configured task capacity has no available slot."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +124,7 @@ class RunStatus:
     recovery_candidate_digest: str | None
     recovery_draft: dict[str, Any] | None
     request_digest: str
+    workspace_ready: bool = True
     draft_from_run_id: str | None = None
     recovery_policy: dict[str, Any] | None = None
     execution_profile: dict[str, Any] | None = None
@@ -167,6 +182,7 @@ def status_from_row(row: sqlite3.Row) -> RunStatus:
                            else _json_object(row["execution_profile_json"], "stored execution profile")),
         decision_fields=(None if "decision_fields_json" not in row.keys() or row["decision_fields_json"] is None
                          else tuple(json.loads(row["decision_fields_json"]))),
+        workspace_ready=bool(row["workspace_ready"]) if "workspace_ready" in row.keys() else True,
         request_digest=str(row["request_digest"]),
         draft_from_run_id=row["draft_from_run_id"],
         recovery_policy=(None if row["recovery_policy_json"] is None else

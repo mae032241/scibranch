@@ -288,3 +288,19 @@ def test_clear_offline_clients_removes_only_transient_rows_and_bindings(home):
     assert task.state=='running' and s.approvals.status(pending.approval_id).status=='pending'
     s.bindings.client_heartbeat(session_key=A)
     assert [row['session_key'] for row in s.bindings.clients()]==[B]
+
+
+def test_instance_results_route_reuses_read_grant_without_changing_selection(home):
+    s, ui, base = home
+    token, cookie, _ = enter(ui, base)
+    status, headers, _ = request(base, 'POST', '/instances/access', form={
+        'capability': token, 'csrf': ui.session_id, 'scope': 'read', 'instance_id': s.a})
+    assert status == 303
+    read_cookie = headers['Set-Cookie'].split(';', 1)[0]
+    before = s.bindings.scientific_selections(instance=s.a, limit=101)
+    status, _, page = request(base, 'GET', '/instance/' + s.a + '/results', cookie=read_cookie)
+    assert status == 200 and '科学结果 / Best' in page and '科学结果尚未整理' in page
+    assert 'workbench.js' not in page
+    assert s.bindings.scientific_selections(instance=s.a, limit=101) == before
+    assert request(base, 'GET', '/instance/' + s.b + '/results', cookie=read_cookie)[0] == 403
+    assert request(base, 'GET', '/instance/' + s.a + '/results')[0] == 403

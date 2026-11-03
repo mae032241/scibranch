@@ -14,7 +14,23 @@ def _intake_files(result, intake, artifacts):
     family = intake.get("family", {})
     if family.get("operation_id") != "science.evidence.extract.figure.v3":
         return
+    # The bounded cohort cannot overrule an authoritative ownership lookup.
+    # In particular, a truncated historical singleton is not a current manifest.
+    if (family.get("presentation_manifest_scan_complete") is False
+            or ("presentation_manifest_match_count" in family
+                and family["presentation_manifest_match_count"] != 1)):
+        add_gap(result, "figure_intake_manifest_missing_or_ambiguous", intake)
+        return
     parents = [item.get("ref") for item in intake.get("provenance", ())]
+    if not family.get("selected_run_id") and (
+            intake.get("parent_count", len(parents)) > len(parents)
+            or any(isinstance(ref, Mapping)
+                and ref.get("schema_id") == "scidiscovery.tool-evidence-manifest.v1"
+                and not any(a.get("ref") == ref for a in artifacts) for ref in parents)):
+        # Ancestor reports may have no explicit owner projection. Their missing
+        # manifest parents still forbid uniqueness inferred from a partial view.
+        add_gap(result, "figure_intake_manifest_incomplete", intake)
+        return
     manifests = [a for a in artifacts
         if a.get("schema_id") == "scidiscovery.tool-evidence-manifest.v1"
         and a.get("ref") in parents

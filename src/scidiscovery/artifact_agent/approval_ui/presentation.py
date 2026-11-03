@@ -228,6 +228,25 @@ def build_presentation(artifacts, *, focus_artifact_ids=None, task_artifact_ids=
     result["parameter_scope_ids"] = [artifact["artifact_id"] for artifact in cohort
         if artifact["artifact_id"] in focus | tasks]
     result["parameters"].sort(key=lambda item: item.get("source", {}).get("artifact_id") not in focus | tasks)
+    # Providers may reach the same immutable picture through several revisions.
+    # Count/display it once, retaining each exact publication link. Prefer the
+    # selected report's manifest over historical publication captions/sources.
+    primary = set(focus)
+    for artifact in cohort:
+        if artifact["artifact_id"] in focus:
+            owner = artifact.get("family", {}).get("selected_run_id")
+            primary.update(a["artifact_id"] for a in cohort if owner
+                and a.get("family", {}).get("tool_producer_run") == owner
+                and a.get("family", {}).get("operation_output_port") == "recovery_manifest_output")
+    result["figures"].sort(key=lambda f: f["source"]["artifact_id"] not in primary)
+    figures = {}
+    for figure in result["figures"]:
+        existing = figures.setdefault(figure["artifact_id"], figure)
+        if existing is not figure and figure["source"] != existing["source"]:
+            sources = existing.setdefault("additional_sources", [])
+            if figure["source"] not in sources:
+                sources.append(figure["source"])
+    result["figures"] = list(figures.values())
     for key, maximum in (("sections", 64), ("parameters", 128), ("figures", 32), ("gaps", 64)):
         if len(result[key]) > maximum:
             result[key] = result[key][:maximum]

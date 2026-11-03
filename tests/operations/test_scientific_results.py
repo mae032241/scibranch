@@ -212,7 +212,7 @@ def test_real_optional_worker_seals_selects_reads_and_renders_scientific_result(
     from scidiscovery.artifact_agent.schema.artifact import ArtifactRegistration
     from scidiscovery.artifact_agent.interfaces.mcp_local_worker import LocalWorkerMCPRouter
     from scidiscovery.artifact_agent.interfaces.mcp_root_shared import RootToolError
-    from scidiscovery.artifact_agent.approval_ui.workbench_render import render_workbench
+    from scidiscovery.artifact_agent.approval_ui.workbench_render import render_workbench, render_scientific_result
     from scidiscovery.artifact_agent.approval_ui.read_model import InstanceReadModel
     runtime, root, catalog, connections, instance = _real_experiment(tmp_path, monkeypatch)
     actor = runtime.runs.service_actor
@@ -288,16 +288,20 @@ def test_real_optional_worker_seals_selects_reads_and_renders_scientific_result(
         approvals=runtime.approvals, executions=runtime.executions, operation_catalog=catalog)
     overview = model.overview(instance.instance_id)
     assert overview["scientific_result"]["artifact_name"] == "synthesis.output"
-    html = render_workbench(overview, browse_base="/instance/" + instance.instance_id, csrf_token="").decode()
+    html = render_scientific_result(overview).decode()
     assert "最佳可用不等于 accepted" in html and "3.121875" in html
-    assert html.count("?format=image") == 4  # one image + open-original link per distinct figure
+    assert html.count("?format=image") == 6  # image, image link and explicit original link per distinct figure
     assert "分析原件" in html and "方法 / 实现" in html and "实际运行 / 收集证据" in html
     assert candidate_page["items"][0]["method_names"] and candidate_page["items"][0]["observation_names"]
     assert overview["scientific_result"]["candidates"][0]["evidence_readiness"] == "complete"
     overview["display_node"] = {"key": "artifact:synthesis.output"}
     overview["presentation"] = {"sections": [{"title": "Scientific result", "items": [
         {"label": "summary", "value": "Best available remains rejected.", "source": {"artifact_id": "formal", "json_pointer": "/summary"}}]}]}
-    assert render_workbench(overview, browse_base="/instance/" + instance.instance_id, csrf_token="").decode().count("Best available remains rejected.") == 1
+    assert render_workbench(overview, browse_base="/instance/" + instance.instance_id, csrf_token="").decode().count("Best available remains rejected.") == 0
+    assert model.is_current_scientific_result_node(instance.instance_id, "artifact:synthesis.output")
+    assert model.is_current_scientific_result_node(instance.instance_id, "run:synthesis")
+    assert not model.is_current_scientific_result_node(instance.instance_id, "run:observe")
+    assert model.scientific_result(instance.instance_id)["scientific_result"] == overview["scientific_result"]
     # A new related result never replaces the current best, and contract revision
     # remains a distinct need-to-update signal.
     new_contract = freeze("v7.revision", {"changed": True})

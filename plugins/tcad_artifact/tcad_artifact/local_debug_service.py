@@ -14,6 +14,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from scidiscovery.artifact_agent.operation_tool_context import OperationToolContext
+from scidiscovery.plugin_runtime.submission import SubmissionNotCreated
 from scidiscovery.operation_contract import contract_diagnostic
 from scidiscovery.artifact_agent.schema.common import canonical_json, canonical_sha256
 from scidiscovery.artifact_agent.schema.role_result import parse_role_result
@@ -204,6 +205,13 @@ class LocalTCADDebugService:
             context.state["debug_policy"] = self.adapter.policy.model_dump(mode="json")
             try:
                 response = self._run_locked(context, run_name=run_name, mode=mode, output_names=output_names)
+                if getattr(context, 'collect_only', False):
+                    record = context.state['runs'][run_name]
+                    if record.get('state') == 'collected' and not record.get('control_delivery'):
+                        root = self._receipt_directory(context, run_name, record['run_id'])
+                        receipt = json.loads((root / 'receipt.json').read_bytes())
+                        files = [{**item, 'path': root / item['sha256']} for item in receipt['proof']['files']]
+                        record['control_delivery'] = context.state['control_publish'](receipt, files)
                 return debug_response(context, run_name, response)
             finally:
                 self._save_budget(context)
@@ -244,6 +252,49 @@ class LocalTCADDebugService:
             if name in ledger.get("reservations", {}):
                 reservations[name] = deepcopy(ledger["reservations"][name])
         return runs, reservations, locations
+
+    def experiment_diagnostic_status(self, run_ids, inputs, *, name, recovery_route=None):
+        """Control takeover remains available after the owning Worker terminates."""
+        from types import SimpleNamespace
+        subjects = {alias: next((item.artifact_ref for item in inputs if item.port_name == alias), None)
+            for alias in ("research_objective", "scientific_skeleton", "experiment_plan")}
+        def input_ref(alias):
+            if subjects.get(alias) is None:
+                raise KeyError(alias)
+            return subjects[alias]
+        context = SimpleNamespace(input_ref=input_ref, recovery_authorized=lambda owner: owner in run_ids,
+            task_scoped=True, state={'diagnostic_recovery_route': recovery_route},
+            recovery_scope=lambda: ("", tuple(run_ids), tuple((item.port_name, item.artifact_ref) for item in inputs)))
+        return self.status(context, run_name=name)
+
+    def experiment_diagnostic_collect(self, run_ids, inputs, *, name, run_id,
+                                      operation_id, seconds, publish):
+        """Collect one existing exact diagnostic; never admit a solver request.
+
+        Reuse retained receipts on retries. Scientific task output is untouched;
+        the callback seals an independent control delivery before it is marked
+        delivered in the original budget ledger.
+        """
+        from types import SimpleNamespace
+        subjects = {alias: next((item.artifact_ref for item in inputs if item.port_name == alias), None)
+            for alias in ("research_objective", "scientific_skeleton", "experiment_plan")}
+        def input_ref(alias):
+            if subjects.get(alias) is None:
+                raise KeyError(alias)
+            return subjects[alias]
+        workspace = self.exchange_root / 'takeover' / canonical_sha256({'run': run_id, 'name': name})
+        workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
+        context = SimpleNamespace(input_ref=input_ref, recovery_authorized=lambda owner: owner in run_ids,
+            recovery_scope=lambda: (run_id, tuple(run_ids), tuple((item.port_name, item.artifact_ref) for item in inputs)),
+            run_id=run_id, operation_id=operation_id, workspace=workspace, state={},
+            remaining_seconds=seconds, record_activity=lambda _: None, collect_only=True)
+        # Mode comes from the owned immutable submission, never the caller.
+        observed = self.experiment_diagnostic_status(run_ids, inputs, name=name)
+        if observed.get('state') == 'not_created' or observed.get('submission') == 'not_submitted':
+            return observed
+        context.state['control_publish'] = publish
+        self.run(context, run_name=name, mode=observed['mode'])
+        return self.experiment_diagnostic_status(run_ids, inputs, name=name)
 
     def experiment_pending_diagnostics(self, run_ids, inputs):
         pending = []
@@ -291,15 +342,53 @@ class LocalTCADDebugService:
                 continue
             external = record.get("external_run_id")
             if external is None:
-                found = self.adapter.lookup_submission(LocalFileDescriptor.model_validate_json(json.dumps(reservation["submission"]), strict=True))
+                try:
+                    found = self.adapter.lookup_submission(LocalFileDescriptor.model_validate_json(json.dumps(reservation["submission"]), strict=True))
+                except Exception:
+                    if pending is None or cancel:
+                        raise  # A failed query cannot grant cancellation or absence.
+                    active = True
+                    pending.append(contract_diagnostic("experiment_diagnostic_submission_unknown", phase="protocol",
+                        affected_action="submit", repairable=False, path="$.diagnostics." + alias,
+                        message=f"Diagnostic {alias!r} submission cannot be observed while its service is unavailable. Its exact identity and allowance remain reserved; only a limited blocked/inconclusive report can be sealed. Root can query or cancel this exact diagnostic through run_diagnostic after service recovery."))
+                    continue
+                if found is None and cancel:
+                    # lookup absence alone is never sufficient. Retirement fences
+                    # any delayed submit under the executor's creation lock.
+                    retire = getattr(self.adapter, "retire_submission", None)
+                    if not callable(retire):
+                        raise _continuation_error('tcad_debug_retirement_protocol_unavailable',
+                            f"Diagnostic {alias!r} requires a backend supporting exact-submission retirement. Its allowance remains reserved.", repairable=False)
+                    if reservation.get("retirement_supported") is not True:
+                        raise _continuation_error('tcad_debug_legacy_retirement_confirmation_required',
+                            f"Diagnostic {alias!r} predates the retirement protocol. An administrator must stop all old local and remote submitters and use the named submission_recovery entry returned by Root run_diagnostic status; then retry this exact cancellation. Its allowance remains reserved.", repairable=False)
+                    try:
+                        validator = getattr(self.adapter, 'validate_submission_protocol', None)
+                        if callable(validator):
+                            validator()
+                    except Exception as error:
+                        raise _continuation_error('tcad_debug_retirement_protocol_unavailable',
+                            f"Diagnostic {alias!r} backend retirement protocol is unavailable. Restore the backend protocol and retry this exact cancellation; its allowance remains reserved.", repairable=False) from error
+                    try:
+                        found = retire(LocalFileDescriptor.model_validate_json(json.dumps(reservation["submission"]), strict=True))
+                    except Exception as error:
+                        busy = str(error).startswith('Submission is still in progress;')
+                        raise _continuation_error('tcad_debug_retirement_busy' if busy else 'tcad_debug_retirement_failed',
+                            f"Diagnostic {alias!r} exact retirement {'is busy' if busy else 'was not confirmed'}. Retry Root run_diagnostic cancel for its original owner/name after service recovery; its allowance remains reserved.", repairable=False) from error
+                    if found is None:
+                        record = {**record, "state": "cancelled", "submission_absent": True,
+                            "actual_wall_seconds": 0, "absence_reason": "retired"}
+                        before = records.get(alias, reservation["record"])
+                        ledger["reserved_wall_seconds"] = ledger.get("reserved_wall_seconds", 0) - before.get(
+                            "actual_wall_seconds", before.get("reserved_wall_seconds", 0))
+                        records[alias] = record
+                        reservation["record"] = record
+                        continue
                 if found is None:
-                    if cancel:
-                        raise _continuation_error("tcad_debug_submission_unknown",
-                            f"Cancellation of diagnostic {alias!r} could not be confirmed. The executor has not yet exposed this exact submission; an earlier submit may still be processing. Its identity and allowance remain reserved. Retry status with the same name after service recovery, then cancel the confirmed job; do not start a replacement.", repairable=False)
                     active = True
                     if pending is not None:
-                        pending.append(contract_diagnostic("experiment_diagnostics_pending", phase="protocol",
-                            affected_action="submit", repairable=True,
+                        pending.append(contract_diagnostic("experiment_diagnostic_submission_unknown", phase="protocol",
+                            affected_action="submit", repairable=False, path="$.diagnostics." + alias,
                             message=f"Diagnostic {alias!r} has an uncertain submission. Read worker_experiment_debug(action='status', name={alias!r}) after service recovery, then finish or cancel the confirmed job; its allowance remains reserved."))
                     continue
                 external, state = found
@@ -316,6 +405,17 @@ class LocalTCADDebugService:
                     affected_action="submit", repairable=True,
                     message=f"Diagnostic {alias!r} is {record['state']}. Read worker_experiment_debug(action='status', name={alias!r}); finish it or call action='cancel' with the same name, then resubmit the unchanged report."))
             if cancel:
+                reader = getattr(self.adapter, "status_details", None)
+                if record["state"] in _TERMINAL and callable(reader):
+                    try:
+                        observed = reader(record["external_run_id"])
+                    except Exception:
+                        observed = {}  # Keep its known reservation without usage proof.
+                    if observed.get("state") in _TERMINAL:
+                        elapsed = (observed.get("consumed_budget") or {}).get("wall_time_seconds")
+                        if elapsed is None:
+                            elapsed = (observed.get("progress") or {}).get("elapsed_seconds")
+                        _settle_wall_usage(ledger, record, elapsed)
                 records[alias] = record
         if cancel:
             atomic_json(path, ledger)
@@ -341,34 +441,70 @@ class LocalTCADDebugService:
             for path in sorted(set(paths)):
                 if path.exists():
                     lock = stack.enter_context(path.with_suffix(".lock").open("a+"))
-                    fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX if getattr(context, "task_scoped", False) else fcntl.LOCK_SH)
             ledgers = {str(path): json.loads(path.read_bytes()) for path in paths if path.exists()}
-            runs, reservations, _ = self._owned_budget(context, ledgers, run_name=run_name)
+            runs, reservations, locations = self._owned_budget(context, ledgers, run_name=run_name)
             ledger = {"runs": runs, "reservations": reservations}
             reservation = ledger.get("reservations", {}).get(run_name)
             record = ledger.get("runs", {}).get(run_name)
             if record is None and reservation is None:
                 return absent
             record = record or reservation["record"]
+            if getattr(context, "task_scoped", False) and not context.recovery_authorized(record.get("run_id", "")):
+                return absent
             if record.get("submission_absent"):
                 return {"name": run_name, "state": "cancelled", "submission": "not_submitted", "allowance_reserved": False}
             external = record.get("external_run_id")
             state = record["state"]
             details = {}
+            def persist_observation(external, state, details):
+                if not getattr(context, "task_scoped", False) or external is None:
+                    return
+                from scidiscovery.plugin_runtime.workspace import atomic_json
+                path, alias = locations[run_name]
+                original = ledgers[path]
+                retained_state = 'collected' if record.get('state') == 'collected' and state in _TERMINAL else _state(state)
+                record.update(external_run_id=external, state=retained_state)
+                if state in _TERMINAL:
+                    elapsed = (details.get("consumed_budget") or {}).get("wall_time_seconds")
+                    if elapsed is None:
+                        elapsed = (details.get("progress") or {}).get("elapsed_seconds")
+                    _settle_wall_usage(original, record, elapsed)
+                original.setdefault("runs", {})[alias] = record
+                if alias in original.get("reservations", {}):
+                    original["reservations"][alias]["record"] = record
+                atomic_json(Path(path), original)
             try:
                 if external is None and state not in _TERMINAL:
                     from scidiscovery.artifact_agent.schema.execution import LocalFileDescriptor
                     found = self.adapter.lookup_submission(LocalFileDescriptor.model_validate_json(
                         json.dumps(reservation["submission"]), strict=True))
                     if found is None:
-                        return {"name": run_name, "state": "submission_unknown", "submission": "unknown",
+                        code = 'tcad_debug_legacy_retirement_confirmation_required' if reservation.get('retirement_supported') is not True else 'tcad_debug_exact_retirement_required'
+                        validator = getattr(self.adapter, 'validate_submission_protocol', None)
+                        try:
+                            if not callable(getattr(self.adapter, 'retire_submission', None)):
+                                raise RuntimeError('retirement unavailable')
+                            if callable(validator):
+                                validator()
+                        except Exception:
+                            code = 'tcad_debug_retirement_protocol_unavailable'
+                        route = getattr(context, 'state', {}).get('diagnostic_recovery_route')
+                        recovery = route(record['run_id'], run_name) if callable(route) else {}
+                        return {"name": run_name, "mode": record['mode'], "state": "submission_unknown", "submission": "unknown",
                             "allowance_reserved": True,
-                            "instruction": "The exact submission is not yet visible; an earlier submit may still be processing. Retry status with the same name after service recovery; do not start a replacement."}
+                            'recovery': {**recovery, 'code': code},
+                            "instruction": "The exact submission is not yet visible. Root can cancel its exact original owner/name after the indicated recovery; budget stays reserved until persistent exact retirement is confirmed."}
                     external, state = found
-                if state not in _TERMINAL:
+                    # Persist the recovered identity even if the next remote
+                    # status query fails. It must never be refunded as absent.
+                    persist_observation(external, state, {})
+                if state not in _TERMINAL or (getattr(context, "task_scoped", False)
+                        and external is not None and "actual_wall_seconds" not in record):
                     reader = getattr(self.adapter, "status_details", None)
                     details = reader(external) if callable(reader) else {"state": self.adapter.status(external)}
                     state = details["state"]
+                persist_observation(external, state, details)
             except Exception as error:
                 from scidiscovery.operation_contract import DiagnosticError, contract_diagnostic
                 message = ("Diagnostic status could not be confirmed. This read-only query did not submit a job. "
@@ -378,8 +514,11 @@ class LocalTCADDebugService:
             response = record.get("response", {})
             from scidiscovery.plugin_runtime.experiment import progress_summary
             progress = details.get("progress", response.get("progress"))
-            return {"name": run_name, "mode": record["mode"], "state": _state(state),
-                "submission": "submitted", "allowance_reserved": True,
+            return {"name": run_name, "mode": record["mode"], "state": record["state"] if getattr(context, "task_scoped", False) else _state(state),
+                "submission": "submitted", "allowance_reserved": "actual_wall_seconds" not in record,
+                **({'delivery_pending': not bool(record.get('control_delivery'))}
+                   if record.get('control_collection') else {}),
+                **({'delivery': record['control_delivery']} if record.get('control_delivery') else {}),
                 **({"progress": progress_summary(progress)} if isinstance(progress, dict) else {}),
                 **{key: response[key] for key in ("summary", "exit_code", "missing_outputs") if key in response}}
 
@@ -439,7 +578,28 @@ class LocalTCADDebugService:
                         "The exact reserved submission is not yet visible; an earlier submit may still be processing. Its identity and allowance remain reserved. Retry status with the same name after service recovery, then finish or cancel the confirmed job; do not start a replacement.", repairable=False)
                 record = {**pending["record"], "external_run_id": found[0], "state": _state(found[1])}
             runs[run_name] = record
+        if record is None and getattr(context, 'collect_only', False):
+            raise _continuation_error('tcad_debug_not_created',
+                'No owned diagnostic exists with this exact name; collection never submits work.')
+        if record is not None and getattr(context, 'collect_only', False):
+            record['control_collection'] = True
         if record is None:
+            # A new name cannot be used to bypass an uncertain original request.
+            pending_records = ((alias, runs.get(alias, item["record"])) for alias, item in reservations.items())
+            for alias, item in pending_records:
+                if (not item.get("submission_absent")
+                    and item.get("external_run_id") is None
+                    and item.get("state") not in _TERMINAL
+                    and ("experiment_implementation_ref" not in context.state
+                        or item.get("implementation_ref") == context.state["experiment_implementation_ref"])
+                    ):
+                    route = context.state.get('diagnostic_recovery_route')
+                    recovery = route(item['run_id'], alias) if callable(route) else {}
+                    owner = recovery.get('owner_name')
+                    instruction = (f"Root must call run_diagnostic(surface='execution', name={owner!r}, diagnostic_name={alias!r}, action='status'), then follow its exact cancellation/recovery route. "
+                        if owner else f"Root must resolve the original owning Run and call run_diagnostic for diagnostic_name={alias!r}. ")
+                    raise _continuation_error("tcad_debug_submission_unknown",
+                        f"No new diagnostic was submitted. Original diagnostic {alias!r} is uncertain. " + instruction + "Its allowance remains reserved.", repairable=False)
             if debug_budget(context)["remaining_runs"] == 0:
                 raise _budget_error(context, "tcad_debug_attempts_exhausted", "max_runs")
             self._refresh_budget_usage(context)
@@ -456,7 +616,7 @@ class LocalTCADDebugService:
             raise _continuation_error("tcad_debug_implementation_mismatch",
                 "This diagnostic name belongs to a different sealed implementation; use its original implementation or a new diagnostic name.")
         if isinstance(record.get("response"), dict) or (self._receipt_directory(context, run_name, record["run_id"]) / "receipt.json").is_file():
-            return self._restore_receipt(context, run_name, record)
+            return self._restore_receipt(context, run_name, record, validate=not getattr(context, "collect_only", False))
         if not context.recovery_authorized(record["run_id"]):
             raise _continuation_error("tcad_debug_owner_mismatch",
                 "This diagnostic has no retained result and belongs to another task. Use read-only status; recover the owning task to collect or cancel it.")
@@ -560,6 +720,9 @@ class LocalTCADDebugService:
         exchange.mkdir(parents=True, mode=0o700)
         submission_started = False
         try:
+            validate_protocol = getattr(self.adapter, "validate_submission_protocol", None)
+            if callable(validate_protocol):
+                validate_protocol()
             prepared = self.adapter.prepare(
                 project=project,
                 capability=capability,
@@ -597,12 +760,25 @@ class LocalTCADDebugService:
             }
             context.state["reserved_wall_seconds"] = used + prepared.wall_time_seconds
             context.state.setdefault("reservations", {})[run_name] = {
-                "submission": submission.model_dump(mode="json"), "record": pending_record}
+                "submission": submission.model_dump(mode="json"), "record": pending_record,
+                "retirement_supported": callable(getattr(self.adapter, "retire_submission", None))}
             self._save_budget(context)
             submission_started = True
             external_run_id, state = self.adapter.submit(submission)
         except Exception as error:
             from scidiscovery.operation_contract import DiagnosticError
+            if (submission_started and isinstance(error, SubmissionNotCreated)
+                    and error.submission_sha256 == submission.sha256):
+                rejected = {**pending_record, "state": "cancelled", "submission_absent": True,
+                    "actual_wall_seconds": 0, "absence_reason": error.reason}
+                context.state["runs"][run_name] = rejected
+                context.state["reservations"][run_name]["record"] = rejected
+                self._save_budget(context)
+                message = ("The executor rejected this exact diagnostic before creating a job because capacity is full. "
+                    "No solver was launched and its allowance was released. Wait for the existing work to finish, then use a new diagnostic name."
+                    if error.reason == "capacity_exhausted" else
+                    "This exact diagnostic was not created; its allowance was released. Repair the local capability/binding or retired identity before using a new diagnostic name.")
+                raise _continuation_error("tcad_debug_not_submitted", message, repairable=True) from error
             if isinstance(error, DiagnosticError) and not submission_started:
                 raise
             raise _continuation_error(

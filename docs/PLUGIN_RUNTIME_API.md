@@ -227,6 +227,7 @@ Other similarly named encoders have different owners and remain separate:
 | `scidiscovery.plugin_runtime.collection` | Supplied `CollectionContext` deadlines/cancellation/progress, bounded streaming `run_bounded`, owned-child parent watch | Execution supervisor, grants, cancellation decisions, Run lifecycle, DB and leases |
 | `scidiscovery.plugin_runtime.diagnostics` | Redacted bounded exception facts and declared failure value types | Diagnostic storage, host traceback capture, qualification and retry decisions |
 | `scidiscovery.plugin_runtime.results` | Mechanical draft copies and handoff projections on the supplied workspace request | Final output validation, sealing and lifecycle |
+| `scidiscovery.plugin_runtime.submission` | `SubmissionNotCreated`: typed pre-creation rejection with exact descriptor SHA and a bounded reason; transport must verify and translate identities | Reservation release, retry policy, exact lookup and retirement fencing; untyped errors remain uncertain |
 | `scidiscovery.plugin_runtime.transport` | Generic `MCPRouter`, JSON-RPC parsing/error values, bounded Unix socket client/daemon | Root/Worker routers, tools/registration, authentication and compiled action authority |
 | `scidiscovery.plugin_runtime.observation` | `RECORD_DIR`, `normalize_log`, `materialize_launcher` for the optional Worker-executed stdlib launcher | Launch/stop authorization, Run lifecycle and interpretation of observations; other module functions are implementation details |
 | `scidiscovery.plugin_runtime.presentation` | Pure JSON field/section/gap/source/parameter/citation constructors, bounded row windows and ancestry within the supplied cohort | Authorized input cohort, provider discovery, output/source validation, aggregate bounds and rendering |
@@ -341,3 +342,5 @@ Worker form preserves scientific rules, source aliases and byte limits while
 omitting input admission metadata, internal port/checker dependencies and Operation
 identity. Full form reading never switches to the sealed artifact schema. Plain
 finalizers retain the fields they have not declared and implemented as derived.
+
+Task-managed diagnostic providers may expose `experiment_diagnostic_collect` for exact Root takeover of existing jobs. It uses the frozen original collection limits and immutable retained receipt, calls the control publisher only after verified collection, and marks delivery only after publication succeeds. It must never create or authorize a submission.

@@ -29,6 +29,7 @@ def run_intent_projection(value, *, intent):
         "content_unavailable",
         "sealed_stages",
         "dispatch",
+        "preparation",
         "reason",
         "scientific_result_semantics",
     )
@@ -541,7 +542,7 @@ def root_response(name, value, arguments, *, read_settings=None):
             result = pick(result, "name", "state", "operation_id", "agent_type", "execution_profile",
                 "operation_version", "operation_digest",
                 "deadline_at", "output_artifact_name", "draft_from", "recovery", "normalized_request",
-                "diagnostics", "missing_inputs", "review_url", "approval_name", "dispatch")
+                "diagnostics", "missing_inputs", "review_url", "approval_name", "dispatch", "preparation")
             result["detail"] = {"tool": "run_status", "name": result.get("name"), "intent": "navigation"}
         # Transform/effect/approval returns already expose output identities and exact review URLs.
         return {**value, "result": result}

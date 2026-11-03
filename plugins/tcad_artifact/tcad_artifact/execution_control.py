@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from scidiscovery.plugin_runtime.submission import SubmissionNotCreated
+
 from scidiscovery.operation_contract import declared_violation
 
 import hashlib
@@ -455,7 +457,7 @@ class TCADExecutionFacade:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if connection.execute("SELECT 1 FROM retired_submissions WHERE job_sha256=?", (digest,)).fetchone():
-                raise ExecutionToolError("this exact submission was permanently retired")
+                raise SubmissionNotCreated(submission.sha256, "submission_retired")
             previous = connection.execute(
                 "SELECT run_id FROM submissions WHERE job_sha256 = ?", (digest,)
             ).fetchone()
@@ -470,7 +472,7 @@ class TCADExecutionFacade:
             ).fetchone()["count"]
             if active >= self.policy.max_concurrent_runs:
                 connection.execute("ROLLBACK")
-                raise ExecutionToolError("TCAD concurrent run limit is reached")
+                raise SubmissionNotCreated(submission.sha256, "capacity_exhausted")
             connection.execute(
                 """
                 INSERT INTO submissions (
@@ -883,7 +885,12 @@ class TCADExecutionRouter:
         except ValidationError as error:
             raise ExecutionToolError(f"invalid arguments for {name}: {error}") from error
         values = {field: getattr(parsed, field) for field in type(parsed).model_fields}
-        return getattr(self.facade, name)(**values)
+        try:
+            return getattr(self.facade, name)(**values)
+        except SubmissionNotCreated as error:
+            # This is the private TCAD control protocol. Do not attach private
+            # descriptor identities to generic Root/Worker error responses.
+            return {"submission_rejection": error.wire()}
 
 
 def _file_identity(path, chunk_bytes):

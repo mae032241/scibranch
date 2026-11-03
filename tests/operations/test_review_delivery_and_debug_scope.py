@@ -159,14 +159,17 @@ def test_invisible_submission_cannot_be_retired_without_permanent_absence(tmp_pa
     monkeypatch.setattr(service.adapter, "lookup_submission", lambda _: None)
     with pytest.raises(DiagnosticError) as caught:
         f.worker.call_tool("worker_experiment_debug", {"action": "cancel", "name": "uncertain"})
-    assert caught.value.details[0]["code"] == "tcad_debug_submission_unknown"
+    assert caught.value.details[0]["code"] == "tcad_debug_retirement_protocol_unavailable"
     after = json.loads(path.read_bytes())
     assert after["reserved_wall_seconds"] == before
     assert "actual_wall_seconds" not in after["reservations"]["uncertain"]["record"]
     status = f.worker.call_tool("worker_experiment_debug", {"action": "status", "name": "uncertain"})
     assert status["allowance_reserved"] is True and status["submission"] == "unknown"
     monkeypatch.setattr(service.adapter, "submit", submit)
-    assert debug(f, "additional")["budget"]["created_runs"] == 2
+    with pytest.raises(DiagnosticError) as caught:
+        debug(f, "additional")
+    assert caught.value.details[0]["code"] == "tcad_debug_submission_unknown"
+    assert "additional" not in json.loads(path.read_bytes())["reservations"]
 
 
 @pytest.mark.process_e2e

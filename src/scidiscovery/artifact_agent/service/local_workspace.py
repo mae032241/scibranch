@@ -138,7 +138,7 @@ class LocalTrustedBackend:
         binding = self._binding_path(run_id)
         if binding.exists():
             raise WorkspaceError("Run workspace already exists")
-        workspace_name = f"workspace_{uuid.uuid4().hex}"
+        workspace_name = "workspace_" + hashlib.sha256(run_id.encode()).hexdigest()[:32]
         run_root = self.root / "workspaces" / workspace_name
         input_root = run_root / "inputs"
         schema_root = run_root / "schema"
@@ -185,6 +185,20 @@ class LocalTrustedBackend:
             output_directory=output_root,
             input_paths=input_paths,
         )
+
+    def discard_preparation(self, run_id: str) -> None:
+        """Reset an interrupted, control-fenced preparation before Worker open."""
+        binding = self._binding_path(run_id)
+        root = (self._run_root(run_id) if binding.exists() else
+            self.root / 'workspaces' / ('workspace_' + hashlib.sha256(run_id.encode()).hexdigest()[:32]))
+        if root.is_symlink():
+            raise WorkspaceError("preparation workspace is unsafe")
+        if root.exists():
+            for directory in (root, *root.rglob('*')):
+                if not directory.is_symlink() and directory.is_dir():
+                    directory.chmod(directory.stat().st_mode | 0o700)
+            shutil.rmtree(root, ignore_errors=False)
+        binding.unlink(missing_ok=True)
 
     def open(self, run_id: str) -> OpenWorkspace:
         root = self._run_root(run_id)

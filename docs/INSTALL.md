@@ -650,3 +650,42 @@ or MCP tool; the documented SEC-002 same-UID isolation limitation still applies.
 Transient terminal-query failures retain reservations until
 `lifecycle.terminal_observation_failure_limit` consecutive failures (default 3,
 positive integer) in `agent-settings.json`; a successful query resets the counter.
+
+Task capacity is configured globally in `agent-settings.json` as
+`scheduling.max_active_runs` (default 32; includes queued and running tasks).
+It is independent of Operation identity and request idempotence. Waiting parent
+tasks also occupy a slot: leave room for their independent review tasks. Native
+Worker dispatch continues to follow the scheduler's serial execution policy.
+Capacity rejection creates no Run
+and returns a repairable `run_capacity_busy`; retry the same request after a slot
+is released. Existing active tasks are retained when lowering the limit.
+
+TCAD pre-creation capacity rejections are typed and bound to the exact submission.
+Upgrade the bundled remote runner together with control to receive this protocol;
+older untyped errors remain uncertain. Diagnostic reservations survive a limited
+blocked/inconclusive report. Use `run_diagnostic` on the execution surface with
+the owning Run name and exact `diagnostic_name` for status/cancel/collect/read after its Worker
+exits. Cancel releases allowance only after exact remote retirement, or cancels
+the recovered existing job. Legacy reservations without frozen retirement support
+retain their allowance and require administrator recovery; repeated absent lookup
+never proves an old request cannot arrive. Collection seals a separate diagnostic delivery without changing the final scientific report.
+
+For legacy uncertain diagnostics, the existing administrator recovery command
+also accepts `--diagnostic-ledger`, `--diagnostic-name` and `--run-id` instead of
+`--execution-id`. Invoke `python -m
+scidiscovery.artifact_agent.interfaces.submission_recovery --state-root <state>
+--diagnostic-ledger <ledger> --diagnostic-name <name> --run-id <owner>
+--confirm-old-submitters-stopped --reason <reason>` only after all old local and
+remote submitters have actually stopped. It records UID/reason/exact digest but
+releases no allowance. The ordinary `run_diagnostic(action="cancel")` must still
+obtain remote retirement proof. The command is not an Agent/MCP tool.
+
+Rolling back to a version that does not support `scheduling` requires removing
+that configuration section. An old version also recreates the Operation-wide
+unique index: do not roll back while multiple queued/running tasks share an
+Operation digest. Finish those tasks first. Upgrading does not alter their frozen
+contracts or remove existing Runs.
+
+Task workspace readiness is durable: queued work is dispatched only after preparation and all domain hooks finish. An interrupted preparation can be recovered by repeating the identical operation_invoke request; Worker open uses the same recovery gate. Upgrade marks legacy queued work unready and rebuilds it before dispatch; running work is preserved.
+
+`run_diagnostic(action="collect")` can collect existing late terminal results after the owning task has ended, without starting a solver or changing its sealed report. `action="read"` pages the separate immutable delivery receipt or an exact `file_name`; status contains no file bodies. Collection and publication retries reuse the same original identity.

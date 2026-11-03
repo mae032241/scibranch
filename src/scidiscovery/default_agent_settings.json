@@ -10,6 +10,7 @@
   "execution_io": {"approval_wait_budget_seconds": 86400},
   "budget_extensions": {"max_seconds_per_decision": 21600, "max_total_seconds_per_pool": 86400},
   "diagnostics": {"max_records": 1024, "max_total_bytes": 67108864, "retention_seconds": 604800},
+  "scheduling": {"max_active_runs": 32},
   "lifecycle": {"interval_seconds": 30, "batch_size": 32, "terminal_observation_failure_limit": 3},
   "presentation": {
     "enabled": true,

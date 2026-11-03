@@ -62,7 +62,8 @@ def test_retirement_that_finds_job_cancels_without_refunding_unknown_usage(tmp_p
     assert f.runtime.executions.budget_accounting(eid)["actual"] == {}
 
 
-def test_remote_retirement_fences_submit_still_validating(tmp_path, monkeypatch):
+@pytest.mark.parametrize('method', ['tcad_submit', 'tcad_submit_retirable'])
+def test_remote_retirement_fences_submit_still_validating(tmp_path, monkeypatch, method):
     from tcad_artifact import remote_runner_py36 as runner
     job = {"tool_profile": "fixture", "solver_kind": "sprocess", "capability_sha256": "a"*64,
         "input_archive": {"local_path": str(tmp_path / "archive"), "sha256": "b"*64, "size_bytes": 0}}
@@ -84,7 +85,7 @@ def test_remote_retirement_fences_submit_still_validating(tmp_path, monkeypatch)
     failures = []
     def submit():
         response = runner._rpc(config, {"request": {"jsonrpc": "2.0", "id": 1,
-            "method": "tools/call", "params": {"name": "tcad_submit_retirable", "arguments": {"submission": {}}}}})
+            "method": "tools/call", "params": {"name": method, "arguments": {"submission": {}}}}})
         if "error" in response:
             failures.append(response["error"])
     thread = threading.Thread(target=submit)

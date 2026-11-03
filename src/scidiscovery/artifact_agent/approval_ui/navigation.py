@@ -5,6 +5,7 @@ from urllib.parse import quote
 
 def navigation(instance_id: str | None = None) -> str:
     current = ("<a href='/instance/" + quote(instance_id, safe="") + "'>当前实例</a>"
+               + "<a href='/instance/" + quote(instance_id, safe="") + "/results'>科学结果 / Best</a>"
                + "<a href='/instance/" + quote(instance_id, safe="") + "/settings'>Agent 设置</a>"
                if instance_id else "")
     return ("<nav class='global-navigation' aria-label='全局导航'>"

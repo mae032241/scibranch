@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from scidiscovery.plugin_runtime.submission import SubmissionNotCreated
+
 import hashlib
 import json
 import time
@@ -154,6 +156,9 @@ class TCADExecutorAdapter:
                 )
             },
         )
+        rejection = SubmissionNotCreated.from_wire(value.get("submission_rejection"), expected_sha256=submission.sha256)
+        if rejection is not None:
+            raise rejection
         return str(value["run_id"]), str(value["state"])
 
     def lookup_submission(
@@ -238,6 +243,11 @@ class TCADExecutorAdapter:
         if response.get("id") != request_id:
             raise RuntimeError("TCAD control response identity differs")
         if "error" in response:
+            if tool in {"tcad_submit", "tcad_submit_retirable"}:
+                rejection = SubmissionNotCreated.from_wire(response["error"].get("data", {}).get("submission_rejection"),
+                    expected_sha256=arguments["submission"]["sha256"])
+                if rejection is not None:
+                    raise rejection
             error = RuntimeError(str(response["error"].get("message", "TCAD call failed")))
             detail = response["error"].get("data", {}).get("engineering")
             if isinstance(detail, dict):

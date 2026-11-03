@@ -32,6 +32,12 @@ CREDENTIAL_LABEL_RE = re.compile(
 )
 
 
+class _SubmissionNotCreated(RuntimeError):
+    def __init__(self, digest, reason):
+        self.digest, self.reason = digest, reason
+        RuntimeError.__init__(self, "this exact submission was permanently retired" if reason == "submission_retired" else "remote runner concurrent limit is reached")
+
+
 class _Cancelled(Exception):
     pass
 
@@ -368,7 +374,10 @@ def _rpc(config, payload):
         return {
             "jsonrpc": "2.0",
             "id": request.get("id"),
-            "error": {"code": -32000, "message": str(error)},
+            "error": {"code": -32000, "message": str(error),
+                **({"data": {"submission_rejection": {"state": "not_created",
+                    "submission_sha256": error.digest, "reason": error.reason}}}
+                   if isinstance(error, _SubmissionNotCreated) else {})},
         }
 
 
@@ -444,13 +453,13 @@ def _submit(config, descriptor, authorization=None):
         if os.path.isdir(run_dir):
             return _status(config, run_id)
         if os.path.exists(os.path.join(config["state_root"], "retired_submissions", digest)):
-            raise RuntimeError("this exact submission was permanently retired")
+            raise _SubmissionNotCreated(digest, "submission_retired")
         active = 0
         for name in os.listdir(runs_root):
             if os.path.isfile(os.path.join(runs_root, name, "running")):
                 active += 1
         if active >= config["max_concurrent_runs"]:
-            raise RuntimeError("remote runner concurrent limit is reached")
+            raise _SubmissionNotCreated(digest, "capacity_exhausted")
         os.mkdir(run_dir, 0o770)
         work_dir = os.path.join(run_dir, "work")
         os.mkdir(work_dir, 0o750)

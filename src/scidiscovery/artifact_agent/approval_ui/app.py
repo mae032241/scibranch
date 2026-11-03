@@ -234,7 +234,8 @@ class ApprovalUI:
                 return self._handle_instance_api(handler, parts, query)
             if len(parts) == 4 and parts[0] in {"review", "instance"} and parts[2] == "evidence":
                 return self._handle_evidence(handler, parts, query)
-            if len(parts) == 4 and parts[0] == "instance" and parts[2] in {"nodes", "diagnostics"}:
+            if ((len(parts) == 4 and parts[0] == "instance" and parts[2] in {"nodes", "diagnostics"})
+                    or (len(parts) == 3 and parts[0] == "instance" and parts[2] == "results")):
                 return self._handle_workbench(handler, parts, query)
             if len(parts) == 2 and parts[0] == "instance":
                 if self.bindings is None:
@@ -557,13 +558,17 @@ class ApprovalUI:
     def _handle_workbench(self, handler, parts, query):
         if self.read_model is None or self.browser_access is None:
             return self._error(handler, HTTPStatus.NOT_FOUND)
-        from .workbench_render import render_workbench, render_node, render_diagnostic
+        from .workbench_render import render_workbench, render_node, render_diagnostic, render_scientific_result
         instance_id = parts[1]
         access = self._browser_grant(handler, instance_id)
         model = self._model(instance_id)
         summary_unavailable_reason = self._summary_unavailable_reason(instance_id, access)
         can_retry_summary = summary_unavailable_reason is None
-        if len(parts) == 2:
+        if len(parts) == 3 and parts[2] == "results":
+            view = model.scientific_result(instance_id)
+            view["storage"] = self._storage_status(instance_id)
+            body = render_scientific_result(view, csrf_token=self.session_id)
+        elif len(parts) == 2:
             try:
                 page = int(_one(query, "page") or "1")
                 if page < 1:
@@ -589,6 +594,7 @@ class ApprovalUI:
             if display:
                 if not selected_key:
                     display = model.node_metadata(instance_id, display["key"])
+                display["is_current_scientific_result"] = model.is_current_scientific_result_node(instance_id, display["key"])
                 view["display_node"] = {**display, "sealed_stages": model.stage_deliveries(instance_id, display["key"])}
                 view["presentation"] = self._workbench_presentation(instance_id, display["key"])
             self._workbench_objectives(model, instance_id, view)
@@ -615,6 +621,7 @@ class ApprovalUI:
                 view["review_url"] = model.approvals.status(binding.object_id).review_path
                 from .approval_focus import execution_budget
                 view["approval_authorization"] = execution_budget(model, binding.object_id)
+            view["is_current_scientific_result"] = model.is_current_scientific_result_node(instance_id, key)
             body = render_node(view, instance_id=instance_id,
                 csrf_token=self.session_id, can_retry_summary=can_retry_summary,
                 summary_unavailable_reason=summary_unavailable_reason,

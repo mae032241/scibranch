@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from scidiscovery.plugin_runtime.submission import SubmissionNotCreated
+
 import hashlib
 import json
 import os
@@ -347,7 +349,7 @@ class TCADDevelopmentDebugBridge:
         with self._binding_lock:
             binding = self._submission_bindings.get(key)
         if binding is None:
-            raise ValueError("development debug transport submission is not bound")
+            raise SubmissionNotCreated(submission.sha256, "local_validation_failed")
         profile_id, solver_kind, capability_sha256 = binding
         snapshot = next(
             (
@@ -360,7 +362,7 @@ class TCADDevelopmentDebugBridge:
             None,
         )
         if snapshot is None:
-            raise ValueError("development debug capability is no longer active")
+            raise SubmissionNotCreated(submission.sha256, "local_validation_failed")
         result = self.adapter.submit(submission)
         with self._binding_lock:
             self._submission_bindings.pop(key, None)
@@ -410,6 +412,17 @@ class TCADDevelopmentDebugBridge:
 
     def lookup_submission(self, submission):
         return self.adapter.lookup_submission(submission)
+
+    def validate_submission_protocol(self):
+        validate = getattr(self.adapter, "validate_submission_protocol", None)
+        if callable(validate):
+            validate()
+
+    def retire_submission(self, submission):
+        method = getattr(self.adapter, "retire_submission", None)
+        if not callable(method):
+            raise RuntimeError("Diagnostic transport cannot confirm retirement; retain its reservation")
+        return method(submission)
 
     def status(self, external_run_id: str) -> str:
         return str(self.status_details(external_run_id)["state"])

@@ -147,6 +147,7 @@ class ExecutionSubmission:
                 save({"state": "pending"})
 
             def run():
+                nonlocal may_have_submitted
                 try:
                     if recover_only:
                         prepared = self.executions.prepared_submission(execution_id)
@@ -166,6 +167,11 @@ class ExecutionSubmission:
                     save(result)
                 except Exception as error:
                     from ..execution_bridge import ExecutionAuthorizationRequired
+                    from ...plugin_runtime.submission import SubmissionNotCreated
+                    if isinstance(error, SubmissionNotCreated) and self.executions.prepared_submission(execution_id) is None:
+                        # The bridge verified the exact rejection before clearing
+                        # the prepared identity and its reservation.
+                        may_have_submitted = False
                     state = "unknown" if may_have_submitted else "failed"
                     if isinstance(error, ExecutionAuthorizationRequired):
                         state = "awaiting_authorization"
