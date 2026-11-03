@@ -1,14 +1,16 @@
-# TCAD 执行与传输合同
+# SciBranch TCAD 执行与传输合同
 
 本页拥有当前 TCAD 领域执行接口、transport 和收集边界。控制职责见
-[架构](ARCHITECTURE.zh-CN.md)，真实 solver 资格见[资格状态](TCAD_QUALIFICATION_STATUS.zh-CN.md)。
+[架构](ARCHITECTURE.zh-CN.md)，真实 solver 资格见插件的[资格边界](../plugins/tcad_artifact/README.zh-CN.md#资格边界)。
 
 ## 1. 接口与权限
 
 `tcad_artifact` 通过 `scidiscovery.execution_interfaces` 注册 `tcad_execution`。
 薄实例在准备时冻结精确配置、实现和能力；`TCADManagedExecution` 消费可信宿主 gate，
 没有 gate 时拒绝 production。配置选择 `socket` 或 `command` transport。
-这些领域 daemon/MCP/SSH 后端提供执行能力，不承担科研调度。
+这些领域 daemon/socket/SSH 后端提供执行能力，不承担科研调度。
+新 socket-backed preparation 在准入或提交前明确拒绝；准确旧调用的查询仍受支持。
+新受管执行使用 command transport。
 
 当前受管接口接受经校验的 execution package V2 或 V3。V3 原生实现与非空输入
 通过宿主编译及精确冻结原件绑定；缺少所需输入能力时拒绝，不猜测文件来源。
@@ -123,7 +125,7 @@ preflight 成功不成为 production 执行、科学资格或下游正式证据�
 
 本地 adapter 可通过受限 socket 调用独立 TCAD controller。远端 Windows/VMware 配置
 可复用管理员配置的 OpenSSH 和无第三方依赖的 Python 3.6 runner；不要求 VM 安装
-SciDiscovery 服务或新增 sudo/端口代理。
+SciBranch 服务或新增 sudo/端口代理。
 真实调试与 production 仍需要可用许可证、管理员私有 profile 和可达 transport。
 确定性 executable 或合成 transport 只证明所选工程行为，不证明 Sentaurus 可用、
 deck 科学正确或仿真结果准确。

@@ -1,4 +1,0 @@
-interface:
-  display_name: "SciDiscovery Decision Corpus"
-  short_description: "Maintain current design truth and historical decisions"
-  default_prompt: "Use $scid-decision-corpus-maintenance to reconcile current design documentation with historical plans and audits."

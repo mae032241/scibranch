@@ -1,10 +1,10 @@
-# Install the thin research CLI
+# Install SciBranch
 
 [简体中文](INSTALL.zh-CN.md) | English
 
 The supported host platform is Linux with POSIX filesystem/locking behavior. Native Windows is unsupported and WSL2 is unverified. No Windows adaptation is installed.
 
-The installer builds and publishes `scid-research`, `scid-experiment` and selected
+The SciBranch installer builds and publishes `scid-research`, `scid-experiment` and selected
 plugins offline. Operators must provide dependencies beforehand. Installation does
 not contact a model, create a research instance or start services.
 `SCID_DEPLOY_MODE` accepts only `thin`; other values fail before filesystem changes.
@@ -25,7 +25,18 @@ python3.12 -m venv "$HOME/.local/share/scidiscovery-python"
   'packaging>=23,<27' 'setuptools>=68' wheel
 ```
 
-Then, from the source checkout, install the application offline. The optional Cov
+Clone the current source from the [SciBranch repository](https://github.com/mae032241/scibranch):
+
+```sh
+git clone https://github.com/mae032241/scibranch.git
+cd scibranch
+```
+
+`main` carries the current product, `dev` carries ongoing development, and
+`maintenance/v0.1` retains the older product line. See the
+[release policy](RELEASE.md#branches-and-tags) before selecting a historical version.
+
+From the source checkout, install the application offline. The optional Cov
 adapter is selected explicitly in this example:
 
 ```sh
@@ -63,6 +74,8 @@ The defaults are `SCID_INSTALL_ROOT=$HOME/.local/share/scidiscovery` (containing
 `site/` and `skills/`), `SCID_BIN_ROOT=$HOME/.local/bin`, and
 `SCID_BACKUP_ROOT=$HOME/.local/state/scidiscovery/install`. Installation creates
 the command directory if needed; `--dry-run` only checks and writes nothing.
+The Python package remains `scidiscovery`; its name, the `scid-*` commands and
+these installation paths remain stable under the SciBranch project name.
 Override these `SCID_*` settings explicitly with canonical absolute paths when
 needed, choosing directories writable by the current user.
 The core supplies `local_execution:command` without installing Cov. Select
@@ -77,7 +90,8 @@ use that interpreter's installed metadata. Active extras and direct URL dependen
 are rejected because this offline check cannot validate their closure or origin.
 Package probing also imports the browser/UI entry points. No external dependencies
 are fetched.
-All bundled Skills are copied as ordinary files to `$SCID_INSTALL_ROOT/skills`,
+Bundled runtime Skills from the repository's root `skills/` directory are copied
+as ordinary files to `$SCID_INSTALL_ROOT/skills`,
 independently of pip's temporary build tree. Skill discovery locates this directory
 from the actual CLI installation prefix; neither `[skills].root` nor
 `SCID_SKILLS_ROOT` is a supported override. Publishing Skills does not enable
@@ -122,7 +136,7 @@ preserved and reported. These commands do not stop or modify
 leftover host services or delete databases and historical results.
 
 See the [CLI guide](ROOTLESS_CLI.zh-CN.md) for research, UI, approval and recovery.
-See [native trial preparation](NATIVE_TRIAL_LAUNCH.zh-CN.md) for model, execution
+See the [configuration reference](RESEARCH_CONFIGURATION.md) for model, execution
 environment and permission requirements. Successful installation does not qualify
 a real model, browser or solver. Prepare model/bootstrap access, Cov training data
 and the scientific execution environment separately; installation starts no research.

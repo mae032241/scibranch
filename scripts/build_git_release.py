@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a clean, identity-free SciDiscovery Git source repository."""
+"""Build a clean, identity-free SciBranch Git source repository."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ ROOT_FILES = (
     "CHANGELOG.md",
     ".gitignore",
     "CONTRIBUTING.md",
+    "LICENSE",
     "NOTICE.md",
     "README.md",
     "README.zh-CN.md",
@@ -43,19 +44,15 @@ SOURCE_TREES = (
 
 DOCUMENTS = (
     "docs/README.md",
-    "docs/NATIVE_TRIAL_LAUNCH.zh-CN.md",
     "docs/ARCHITECTURE.md",
     "docs/ARCHITECTURE.zh-CN.md",
     "docs/PLUGIN_RUNTIME_API.md",
-    "docs/TCAD_QUALIFICATION_STATUS.md",
-    "docs/TCAD_QUALIFICATION_STATUS.zh-CN.md",
     "docs/INSTALL.md",
     "docs/INSTALL.zh-CN.md",
     "docs/RELEASE.md",
     "docs/RELEASE.zh-CN.md",
     "docs/ROOTLESS_CLI.zh-CN.md",
     "docs/RESEARCH_CONFIGURATION.md",
-    "docs/role-result-json-protocol-v1.md",
     "docs/tcad_transport_contract.md",
 )
 
@@ -67,6 +64,7 @@ TOOLS = (
     "scripts/acceptance/behavior_card.py",
     "scripts/acceptance/worker_evidence_view.py",
     "scripts/verify_lifecycle_fixes.py",
+    "scripts/verify_g1_g3.py",
     "scripts/prepare_covshift_local.py",
     "scripts/prepare_nbody_local.py",
     "scripts/native_usage_audit.py",
@@ -85,6 +83,8 @@ TOOLS = (
 
 IGNORED_NAMES = {
     ".git",
+    ".agent",
+    ".agents",
     ".pytest_cache",
     "__pycache__",
     "build",
@@ -140,7 +140,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("dist/scidiscovery-agent"),
+        default=Path("dist/scibranch"),
         help="clean repository directory",
     )
     parser.add_argument("--force", action="store_true")

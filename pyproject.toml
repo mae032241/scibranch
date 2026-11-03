@@ -5,8 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "scidiscovery"
 version = "0.1.1"
-description = "Portable, evidence-bound scientific discovery orchestration"
+description = "SciBranch: portable, evidence-bound scientific discovery orchestration"
 readme = "README.md"
+license = {file = "LICENSE"}
+classifiers = ["License :: OSI Approved :: MIT License"]
 requires-python = ">=3.10"
 dependencies = [
   "packaging>=23,<27",
@@ -15,6 +17,12 @@ dependencies = [
   "pydantic>=2,<3",
   "tomli>=2; python_version < '3.11'",
 ]
+
+[project.urls]
+Homepage = "https://github.com/mae032241/scibranch"
+Repository = "https://github.com/mae032241/scibranch"
+Issues = "https://github.com/mae032241/scibranch/issues"
+Changelog = "https://github.com/mae032241/scibranch/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 test = [

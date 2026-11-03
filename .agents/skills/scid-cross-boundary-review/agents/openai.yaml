@@ -1,4 +1,0 @@
-interface:
-  display_name: "SciDiscovery Boundary Review"
-  short_description: "Review lifecycle, authority, and plugin boundaries"
-  default_prompt: "Use $scid-cross-boundary-review to review this change across SciDiscovery control and scientific boundaries."

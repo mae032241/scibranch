@@ -80,11 +80,10 @@ open_browser = false
 # approval_secret_file = "private/operator.key"
 
 # Framework Skills are empty by default. Uncomment explicit sets and role/Worker
-# bindings to select installed bundles. Source is read-only and frozen per instance;
-# a new bundle/version requires a new instance. Installation wrappers select their
-# own persistent skills directory; root below overrides that default.
-# [skills]
-# root = "/opt/scidiscovery-thin/skills"
+# bindings to select installed bundles. The loaded CLI installation owns the
+# read-only skills directory; [skills] accepts only sets, with no root override.
+# Sets and the installation source binding are frozen per instance. Restore a
+# missing bundle in that installation; use a new instance to change the binding.
 # [skills.sets.tcad]
 # items = ["sentaurus-tcad-code"]
 # [skills.sets.analysis]

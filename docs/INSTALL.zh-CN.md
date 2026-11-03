@@ -1,10 +1,10 @@
-# 安装薄科研 CLI
+# 安装 SciBranch
 
 简体中文 | [English](INSTALL.md)
 
 支持宿主为 Linux，依赖 POSIX 文件系统和锁语义。原生 Windows 不支持，WSL2 未验证；安装器不提供 Windows 适配。
 
-安装器支持 `scid-research` 与 `scid-experiment`，离线构建并发布应用与选定插件。
+SciBranch 安装器支持 `scid-research` 与 `scid-experiment`，离线构建并发布应用与选定插件。
 依赖须由操作员预先提供；安装不连接模型、创建科研实例或启动服务。
 `SCID_DEPLOY_MODE` 仅接受 `thin`，其他值在修改文件前失败。
 
@@ -21,6 +21,16 @@ python3.12 -m venv "$HOME/.local/share/scidiscovery-python"
   'cryptography>=42,<47' 'jsonschema>=4,<5' 'pydantic>=2,<3' \
   'packaging>=23,<27' 'setuptools>=68' wheel
 ```
+
+从 [SciBranch 仓库](https://github.com/mae032241/scibranch)克隆当前源码：
+
+```sh
+git clone https://github.com/mae032241/scibranch.git
+cd scibranch
+```
+
+`main` 承载现行产品，`dev` 用于继续开发，`maintenance/v0.1` 保留旧产品线。
+选择历史版本前，先阅读[分支与标签规则](RELEASE.zh-CN.md#branches-and-tags)。
 
 再从源码 checkout 离线安装应用。下例显式选择可选 Cov adapter：
 
@@ -49,6 +59,7 @@ namespace launcher 只读挂载声明的 runtime 路径。新实例仍有明确�
 默认 `SCID_INSTALL_ROOT=$HOME/.local/share/scidiscovery`（包含 `site/` 和 `skills/`），
 `SCID_BIN_ROOT=$HOME/.local/bin`，`SCID_BACKUP_ROOT=$HOME/.local/state/scidiscovery/install`。
 安装时按需创建命令目录；`--dry-run` 只预检，不写文件。
+Python 包名仍为 `scidiscovery`；包名、`scid-*` 命令与这些安装路径不随 SciBranch 项目名称改变。
 这些 `SCID_*` 路径可显式覆盖，须为规范绝对路径，并选择当前用户可写的目录。
 核心提供 `local_execution:command`，不安装 Cov。需要 Cov 时选择
 `SCID_PLUGINS=cov_execution`，安装独立发行包 `scidiscovery-cov-execution`；
@@ -57,7 +68,8 @@ namespace launcher 只读挂载声明的 runtime 路径。新实例仍有明确�
 安装器在发布前使用 `SCID_PYTHON` 核对 core 与所选插件的运行、构建依赖版本及 marker。
 本次一起安装的包之间按源码版本核对，外部依赖按该解释器的已安装元数据核对；
 生效的 extras 和直接 URL 依赖会明确拒绝，因为离线检查不能确认其完整依赖或来源。
-发布前还实际导入 browser/UI，不下载外部依赖。全部 Skill 作为普通文件持久发布到 `$SCID_INSTALL_ROOT/skills`，
+发布前还实际导入 browser/UI，不下载外部依赖。仓库根目录 `skills/` 中随附的运行时 Skill
+作为普通文件持久发布到 `$SCID_INSTALL_ROOT/skills`，
 Skill 来源由实际 CLI 安装前缀自动定位，不支持 `[skills].root` 或 `SCID_SKILLS_ROOT` 覆盖；
 pip 临时源码不是安装资源。发布 Skill 不会启用它们，须按角色或命名 Worker 显式选择集合。
 图像能力按 Skill 的 `requirements.txt` 和 CLI preflight 提供 Pillow；只有 PDF 图像提取需要 Poppler pdfimages。
@@ -85,7 +97,7 @@ SCID_PYTHON="$HOME/.local/share/scidiscovery-python/bin/python" \
 这些命令不停止或修改用户主机上残存的旧服务，不删除数据库或历史成果。
 
 运行实例、UI、批准与恢复见[CLI 指南](ROOTLESS_CLI.zh-CN.md)。
-模型、执行环境与权限的准备见[原生试验指南](NATIVE_TRIAL_LAUNCH.zh-CN.md)；
+模型、执行环境与权限的准备见[配置参考](RESEARCH_CONFIGURATION.md)；
 安装成功不证明真实模型、浏览器或求解器资格。模型/bootstrap 访问、Cov 训练数据和科学执行环境须另行准备；
 安装不启动研究。
 

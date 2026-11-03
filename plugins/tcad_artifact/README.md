@@ -1,4 +1,4 @@
-# TCAD execution plugin
+# SciBranch TCAD execution plugin
 
 [简体中文](README.zh-CN.md) | English
 
@@ -17,6 +17,8 @@ own configuration file. Preparation checks command/SSH schemas, referenced local
 files and optional `implementation_compilation.capability_snapshot_path` without
 contacting a backend or creating adapter state. Settings freeze with the instance;
 editing the top-level plugin file does not amend an existing instance.
+New socket-backed preparation is rejected before admission or submission; exact
+old-call queries remain supported. Use command transport for new managed execution.
 
 This adapter retains execution schemas, project materializers, transport and policy
 checks. Curve/PLX/log analysis belongs to the [curve-analysis Skill](../../skills/curve-analysis/SKILL.md).
@@ -35,7 +37,7 @@ unavailable lookup does not authorize another submission.
 
 The accepted `TCADJobSpec` binds an archive descriptor and member manifest, a
 deployment-owned tool profile, trusted execution purpose, resource limits and
-expected outputs. Job protocol schema version 4 includes `collect_generated_outputs`
+expected outputs. Job protocol schema version 5 includes `collect_generated_outputs`
 and wall, CPU, memory, output and total storage limits. Control and runner must use
 compatible protocols. Solver capability snapshots use `tcad.solver-capability.v2`;
 private executable paths, environments and fixed arguments remain outside the
@@ -103,6 +105,55 @@ control files, sockets and secrets. See [Security](../../SECURITY.md).
 Solver projects declare physical code, inputs, parameters and raw TDR/PLX/PLT/log
 outputs. Parsers and curve scoring derive observations and metrics; Workers own
 scientific conclusions. Native solver, SSH and scientific-chain qualification must
-bind the exact implementation and environment; see
-[TCAD qualification](../../docs/TCAD_QUALIFICATION_STATUS.md).
+bind the exact implementation and environment.
 The plugin does not distribute Synopsys executables or licenses.
+
+## Qualification boundary
+
+This section owns the current TCAD qualification boundary. The
+[architecture](../../docs/ARCHITECTURE.md) owns control responsibilities; the
+[transport contract](../../docs/tcad_transport_contract.md) owns domain execution
+and collection behavior.
+
+The thin research loop can freeze a selected TCAD execution interface, retain exact
+prepared inputs and collected originals, request independent review of an exact
+subject, bind execution permission and account for finite resources. Optional native
+implementation compilation supplies nonempty input chains. Self-contained V2
+packages and declared observer sources can contribute verified input bindings and
+authorship within their frozen declared scope. Missing or incomplete source
+declarations retain uncertainty; they do not establish that arbitrary native or
+solver file reads are closed.
+
+Focused source, synthetic-process and loopback HTTP checks cover selected binding,
+review, budget, original-call recovery and collection paths. They do not qualify
+all combinations, installed solver behavior, physical models or scientific claims.
+Removing the old Run/SQL host and checking wheel/source packaging adds no solver
+qualification.
+
+The maintained evidence does not establish a real Sentaurus SProcess or SDevice
+execution/collection/parser loop, a qualified TDR metadata provider, or a
+figure-specific scientific claim. This is an evidence boundary, not a current probe
+of this host's executables, licenses or remote runners. Mock outputs, synthetic
+PLX/PLT fixtures, historical solver results and passing engineering test counts
+cannot establish those qualifications.
+
+Promotion requires evidence bound to the exact candidate and controlled runner:
+
+- Provide a usable solver license and freeze solver capability, release evidence,
+  approved executable/arguments, environment and exact input package; reject
+  capability drift before execution.
+- Complete an authorized real SProcess smoke through execution, collection and
+  parsing. Retain exact input/output originals and their bindings, original logs,
+  release and parser evidence, failures, limitations and the independent review
+  required by the selected contract. Control uses the architecture's reference
+  contract; this step does not require scientific-file hashes.
+- Qualify SDevice separately with a usable license, real TDR evidence and a qualified
+  metadata provider. SProcess success does not supply this qualification.
+- Assess physical-model or figure claims from the exact scientific evidence and
+  applicability conditions; execution success and parser acceptance alone do not
+  establish scientific correctness.
+
+Execution permission follows the frozen policy or exact human decision. Scientific
+review, solver qualification and execution authorization remain separate. The
+[release scope](../../docs/RELEASE.md) describes other unqualified deployment and
+recovery paths.

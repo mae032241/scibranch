@@ -1,4 +1,4 @@
-# 测试分组与资源边界
+# SciBranch 测试分组与资源边界
 
 当前优先保护薄层的真实职责：原调用身份、执行事实、恢复不重放、候选交付、预算与单写者。不要以旧测试数量或旧安装矩阵定义验收范围。
 
@@ -20,7 +20,7 @@
 
 安装组不运行科学实验、H/W/A、daemon业务、评分或恢复矩阵；这些检查回到对应功能组。一个选定cohort只建一次环境、安装一次，不切换环境删除后再重建。默认core验证无可选领域执行器；涉及Cov插件入口时显式选cov，涉及TCAD交付元数据时显式选tcad。其余旧包装组合未验证，不构造新矩阵补齐。
 
-`tests/installation/check_source_release.py` 是**单独显式选择**的源码发布包检查，名称不匹配默认测试发现。它检查发布文件、原件hash与manifest，不运行发布包中的pytest或安装检查。源码发布与wheel是不同交付路径，不能以一个冒充另一个；不在默认安装烟顺带构建整份源码发布包。
+`tests/installation/check_source_release.py` 是**单独显式选择**的源码发布包检查，名称不匹配默认测试发现。它检查发布文件、手册原件字节与manifest，不运行发布包中的pytest或安装检查。源码发布与wheel是不同交付路径，不能以一个冒充另一个；不在默认安装烟顺带构建整份源码发布包。开发工具目录 `.agents/`、`.agent/` 与本地维护指令不进入源码发布；根目录 `skills/` 是运行时资产，随其脚本、引用和功能 fixture 保留。
 
 默认 installed 组只发现 `test_packaging.py`；core cohort 同时验证已安装产物的旧平台入口、模块和文件退役，不再另外构建或解包同一个 core wheel。`check_source_release.py` 仍须按源码发布差异显式选择，属于独立交付路径，安装检查通过不代表源码发布清单已验证。
 
@@ -97,7 +97,13 @@ python scripts/run_tests.py --lane process --output .trial/r6-handoff-bindings \
 `tests/operations/` 仅保留真实执行、传输、预算和恢复负控；确定性算法检查在 `tests/skills/`，
 使用随资产保留的功能 fixture，不需要旧宿主。Skill 选择、冻结与生命周期检查在 `test_skill_supply.py`。未运行的源码、安装、真实平台资格分别记为未验证，不将静态审查写成动态通过。
 
-G1/G3 延后 CLI 检查由用户在 G3 后独立运行。`python scripts/verify_g1_g3.py --list` 只静态列出精确节点，不导入 pytest/产品或启动子进程。显式文件 `tests/research_loop/check_g1_g3_cli_validation.py` 不参与默认发现；本轮协调者只可选择脚本 `SOURCE_NODES` 列出的九个纯 source 节点。进程、组件批次及真实模型入口留给用户独立执行。所有动态选择串行复用现有 `run_tests.py` 默认资源限制，首个失败即停，不自动重试；没有安装、全量或 stress 扩张。
+## 原生模型与离线用量核对
+
+真实模型试验从 [CLI](../docs/ROOTLESS_CLI.zh-CN.md) 的显式 `prepare` / `run` 和冻结 launcher 开始，单独选定目标、公开输入、模型配置、实例根目录及有限预算；保留原生权限，不复制私有认证或修改共享配置。原生输出、计量、封存和科学结论分别记录。
+
+`scripts/native_usage_audit.py` 仅离线、只读核对显式指定的确切原始线程日志，不扫描私有会话目录，不公开会话正文。缺测保持未知；cached input 已包含在 input 中，不重复累加。指定日志的离线汇总不代替实时预算，也不证明所有参与线程均已覆盖。
+
+G1/G3 工程检查通过 `scripts/verify_g1_g3.py` 显式选择。`python scripts/verify_g1_g3.py --list` 只静态列出精确节点，不导入 pytest/产品或启动子进程。显式文件 `tests/research_loop/check_g1_g3_cli_validation.py` 不参与默认发现；脚本 `SOURCE_NODES` 列出九个纯 source 节点。进程、组件批次及真实模型入口分别选择，真实模型需要独立范围、权限和预算。所有动态选择串行复用现有 `run_tests.py` 默认资源限制，首个失败即停，不自动重试；不自动扩大到安装、全量或 stress 检查。
 
 `python scripts/verify_g1_g3.py --output .trial/<新目录>` 的默认 `all` 仍只有 source 报告逻辑和 sandbox 启动依赖检查，不调用模型。`--case sandbox-startup` 自行构造 bwrap 与惰性 payload，只证明依赖层；不能覆盖完整 production namespace 或真实 W。`--case components` 依次选择五个限定批次，也可单选 `git-component`、`cleanup-component`、`fork-component`、`retirement-component`、`delete-component`。这些批次引用现有精确节点，报告写明真实 Git、argv 或合成控制记录的层级：同进程捕获变稿不等于 V2 两进程屏障，模拟 replay 不等于真实工程检查，CLI/API 六入口退役不等于 HTTP/UI 动态验收。
 

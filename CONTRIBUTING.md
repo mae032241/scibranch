@@ -1,13 +1,19 @@
-# Contributing
+# Contributing to SciBranch
+
+The project is maintained at [mae032241/scibranch](https://github.com/mae032241/scibranch).
+Start with the [README](README.md), [architecture](docs/ARCHITECTURE.md) and
+[CLI guide](docs/ROOTLESS_CLI.zh-CN.md) for current behavior.
 
 ## Branch responsibilities / 分支职责
 
-- `main`: fixes for existing functionality, with the necessary regression tests
-  and documentation updates. / 现有功能的 Bug 修复，以及必要的回归测试和文档更新。
-- `dev`: new features and their supporting architecture changes. / 新功能开发及其配套架构调整。
-- Land fixes affecting `main` on `main`, then carry them into `dev`. Bugs confined
-  to unreleased `dev` features stay on `dev`. / 影响 main 的缺陷先在 main 修复，再同步到 dev；仅涉及 dev 未发布功能的问题在 dev 修复。
-- Keep unrelated feature changes out of routine bug-fix synchronization. / 日常修复同步不得将无关新功能带入 main。
+- `main`: the current published source line. / 当前公开源码主线。
+- `dev`: active development, promoted to `main` after review and scoped checks.
+  / 当前开发线，经审查和范围内检查后同步到 main。
+- `maintenance/v0.1`: bounded fixes for the original `v0.1` baseline; carry
+  applicable fixes forward to the current line. / 原 v0.1 基线的维护修复；适用修复同步到当前主线。
+- Published tags retain their original commits. Use a new tag for a patch
+  release, and keep unrelated development out of maintenance updates.
+  / 已发布标签保持原提交；补丁发布使用新标签，维护更新不夹带无关开发。
 
 1. Keep research control changes separate from domain algorithms and adapters.
    Preserve exact input/implementation identities, consumed budgets and original-call recovery.
@@ -22,11 +28,19 @@
    machine-specific absolute paths.
 6. Update both English and Chinese README or installation documents when their
    shared behavior changes.
+7. Keep local maintenance tools in ignored `.agents/` or `.agent/` directories.
+   Runtime bundles under `skills/` are product assets and ship with their helpers,
+   references and fixtures; preserve their original bytes.
 
 Real TCAD output is evidence only for the exact reviewed project and execution
-contract. Unit tests and mock adapters do not qualify scientific claims.
+contract. Unit tests and mock adapters do not qualify scientific claims. See the
+[TCAD qualification boundary](plugins/tcad_artifact/README.md#qualification-boundary).
 
 Keep current usage and boundary rules in maintained reference documents. Development
 plans, audits, handoffs and run evidence remain local ignored records. Functional
 fixtures belong under tests or acceptance tools, with their consumers and release
 manifest updated together. Source maintenance does not require a research instance.
+
+Project-owned source code uses the [MIT License](LICENSE). Review
+[NOTICE.md](NOTICE.md) for the separate rights and unresolved redistribution
+permissions of bundled third-party references.

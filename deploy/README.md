@@ -1,4 +1,6 @@
-# Application deployment
+# SciBranch deployment
+
+[简体中文](README.zh-CN.md) | English
 
 `install.sh` publishes `scid-research` and `scid-experiment` from local source and
 selected plugins. `install` requires absent targets; `reinstall` updates the same
@@ -19,6 +21,7 @@ publication restores the original directories and matching wrappers.
 It requires separate administrator configuration and deployment authorization;
 see the [transport contract](../docs/tcad_transport_contract.md).
 
-The persistent Skill source is `$SCID_INSTALL_ROOT/skills`, located automatically
+Runtime Skills ship from the repository's root `skills/` directory. The persistent
+installed source is `$SCID_INSTALL_ROOT/skills`, located automatically
 from the actual CLI installation prefix. `[skills].root` and `SCID_SKILLS_ROOT`
 are unsupported. Published Skills require explicit role or named Worker selection.

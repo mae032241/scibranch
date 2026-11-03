@@ -1,4 +1,0 @@
-interface:
-  display_name: "SciDiscovery Simplification Audit"
-  short_description: "Find evidence-backed ways to reduce framework complexity"
-  default_prompt: "Use $scid-find-simplifications to identify high-confidence simplifications in the current SciDiscovery design."

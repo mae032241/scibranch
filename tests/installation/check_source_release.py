@@ -8,12 +8,18 @@ import os
 import re
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 
 def test_git_release_builder_emits_clean_manifested_source(tmp_path: Path) -> None:
     project_root = Path(__file__).resolve().parents[2]
-    output = tmp_path / "scidiscovery-agent"
+    output = tmp_path / "scibranch"
     completed = subprocess.run(
         [
             sys.executable,
@@ -30,11 +36,22 @@ def test_git_release_builder_emits_clean_manifested_source(tmp_path: Path) -> No
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
+    license_bytes = (output / "LICENSE").read_bytes()
+    assert license_bytes == (project_root / "LICENSE").read_bytes()
+    license_text = license_bytes.decode("utf-8")
+    assert license_text.startswith("MIT License\n\nCopyright (c) 2026 mae032241 and contributors\n")
+    assert "Permission is hereby granted, free of charge" in license_text
+    assert "The above copyright notice and this permission notice shall be included" in license_text
+    assert 'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND' in license_text
+    metadata = tomllib.loads((output / "pyproject.toml").read_text())['project']
+    assert metadata['license'] == {'file': 'LICENSE'}
+    assert 'License :: OSI Approved :: MIT License' in metadata['classifiers']
     assert (output / "README.md").is_file()
     assert (output / "README.zh-CN.md").is_file()
     assert (output / "docs/INSTALL.md").is_file()
     assert (output / "docs/INSTALL.zh-CN.md").is_file()
-    assert (output / "docs/TCAD_QUALIFICATION_STATUS.md").is_file()
+    assert (output / "plugins/tcad_artifact/README.md").is_file()
+    assert (output / "plugins/tcad_artifact/README.zh-CN.md").is_file()
     assert not (output / "plugins/table_observation").exists()
     for relative in ("plugins/cov_execution/cov_execution/launcher.py",
                      "scripts/acceptance/rootless_cov_launcher.py",
@@ -65,7 +82,11 @@ def test_git_release_builder_emits_clean_manifested_source(tmp_path: Path) -> No
     # Process records and superseded architecture snapshots are local archives.
     for relative in ("docs/plans", "docs/history", "docs/architecture",
                                   "docs/SCIENTIFIC_PAPER_EVIDENCE_QUALIFICATION.zh-CN.md",
-                     ".trial", "AGENTS.md"):
+                     ".trial", "AGENTS.md", ".agent", ".agents",
+                     "docs/NATIVE_TRIAL_LAUNCH.zh-CN.md",
+                     "docs/TCAD_QUALIFICATION_STATUS.md",
+                     "docs/TCAD_QUALIFICATION_STATUS.zh-CN.md",
+                     "docs/role-result-json-protocol-v1.md"):
         assert not (output / relative).exists()
     assert (output / "deploy/install_transaction.py").is_file()
     assert not (output / "deploy/init_workspace.sh").exists()
@@ -106,11 +127,18 @@ def test_git_release_builder_emits_clean_manifested_source(tmp_path: Path) -> No
         if path.is_file() and path != manifest
     }
     assert output.with_suffix(".tar.gz").is_file()
+    with tarfile.open(output.with_suffix(".tar.gz"), "r:gz") as archive:
+        license_member = archive.extractfile(f"{output.name}/LICENSE")
+        assert license_member is not None
+        with license_member:
+            assert license_member.read() == license_bytes
     # Independent consumer requirements: do not derive these from the builder's
     # own allowlists, which previously made missing CI/test inputs invisible.
     required = (
+        "LICENSE",
         "docs/PLUGIN_RUNTIME_API.md", "tests/conftest.py",
         "scripts/acceptance/worker_evidence_view.py", "scripts/verify_lifecycle_fixes.py",
+        "scripts/verify_g1_g3.py",
         "tests/operations/test_remote_runner_recovery.py", "tests/operations/tcad_policy_fixtures.py",
         "scripts/run_tests.py", "scripts/test_resources.json", "scripts/test_resources_ci.json",
         "scripts/installed_candidates.py", "scripts/probe_native_code_mode.py",

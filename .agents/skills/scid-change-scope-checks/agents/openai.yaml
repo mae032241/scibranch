@@ -1,4 +1,0 @@
-interface:
-  display_name: "SciDiscovery Change Checks"
-  short_description: "Select focused checks from the exact change scope"
-  default_prompt: "Use $scid-change-scope-checks to select and run the smallest credible checks for the current diff."

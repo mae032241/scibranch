@@ -1,4 +1,4 @@
-# Execution adapter API
+# SciBranch execution adapter API
 
 The supported extension seam is the installed `scidiscovery.execution_interfaces`
 entry-point group. Core supplies `local_execution:command`; optional packages
@@ -129,7 +129,7 @@ Python module implementing selective native Skill loading and the final scientif
 read-only namespace. The generic loader
 resolves a unique declaration through the existing execution entry points and
 freezes provider/interface/module identity in `native_capabilities.native_launcher_contract`,
-including when no Skills are selected. Protocol 26 keeps this registered launcher
+including when no Skills are selected. Protocol 29 keeps this registered launcher
 on the host for preparation and its original submission service; its final scientific
 launch must apply the shared-input read-only mounts after all writable mappings.
 Other launcher argv retain the generic final-process protection. This declares native loading capability;
@@ -207,9 +207,10 @@ automatic migration, restoration or owner reactivation. Ordinary checkpoint capt
 validation and original-call recovery remain; checkpoints do not retain or restore
 lost drafts.
 
-Real default native, registered Cov, Codex/namespace, replay/model, solver and SSH
-validation remains deferred until G3 and an independent user CLI run. Source support
-alone establishes neither scientific qualification nor a real sandbox guarantee.
+Focused source and synthetic checks do not establish complete live validation of
+default native, registered Cov, Codex/namespace, replay/model, solver or SSH paths.
+Those paths need their own exact independent CLI evidence. Source support alone
+establishes neither scientific qualification nor a real sandbox guarantee.
 
 ## Deterministic scientific assets
 
@@ -257,5 +258,5 @@ TCAD retains the independent daemon/socket and SSH command transport. The unused
 `tcad-control-mcp` stdio console is retired; socket JSON-RPC remains available for
 exact old-call queries under the preparation limitation above. See the
 [TCAD transport contract](tcad_transport_contract.md) and
-[qualification status](TCAD_QUALIFICATION_STATUS.md). Installed transport discovery,
+[qualification boundary](../plugins/tcad_artifact/README.md#qualification-boundary). Installed transport discovery,
 source tests or successful installation do not qualify a real solver or remote host.

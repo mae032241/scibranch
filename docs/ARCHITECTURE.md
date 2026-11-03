@@ -1,4 +1,4 @@
-# Current architecture: thin H/W/A/E control
+# SciBranch architecture: thin H/W/A/E control
 
 [简体中文](ARCHITECTURE.zh-CN.md) | English
 
@@ -8,15 +8,15 @@ host-owned Git code capture. Declared project bases use ordinary Git worktree
 checks, without control reading or hashing every base file. Approval/idempotency helpers must
 not traverse scientific files, code, logs, observations, inputs, results, Skills or
 archives. Explicit scientific tools may use their own algorithms
-on selected evidence; that is separate from control identity. Protocol 28 uses
+on selected evidence; that is separate from control identity. Protocol 29 uses
 `record_ref = {"path": "/absolute/original"}` and
 `file_ref = {"path": "/absolute/original", "size_bytes": N}`. Control bindings use
 `*_ref` fields; paths, producers and lifecycle identities replace content digests.
 Legacy retained object paths use UUIDs, without content deduplication or hash caches.
 Fork manifest v2 retains this reference contract. Independent archive and whole-instance
-cold checkpoint packages are retired. Only current protocol 28 instances with
+cold checkpoint packages are retired. Only current protocol 29 instances with
 worker/lineage view 1, soft budgets and final-A policy v1 are supported. Earlier
-formats are rejected without compatibility reading, migration or owner reactivation. One-off engineering rescue commands, their historical execution exceptions and derived correction of old usage receipts are retired. Instances relying on those rescue records are unsupported; current same-session attempt metering, ordinary restart recovery and budget-amendment continuation remain supported. Read-only Linux mounts protect selected
+formats are rejected without compatibility reading, migration or owner reactivation. One-off engineering rescue commands, their historical execution exceptions and derived correction of old usage receipts are retired. Instances relying on those rescue records are unsupported; bounded `worker-closeout`, current same-session attempt metering, ordinary restart recovery and budget-amendment continuation remain supported under their own gates. Read-only Linux mounts protect selected
 inputs in the scientific namespace; trusted same-UID code remains a soft boundary,
 without protection against deliberate same-UID rewrites or content-tamper detection.
 
@@ -150,7 +150,7 @@ scientific response; this neither changes the sealed W declaration nor
 requires another experiment or registration. Tasks without H search commitments
 do not invent mechanism coverage.
 
-Protocol 28 H `search_plan.focus` uses `{"index": 1, "action": "screen"}`:
+Protocol 29 H `search_plan.focus` uses `{"index": 1, "action": "screen"}`:
 `index` is a 1-based integer selecting the same payload's `commitments`, on the
 first H and every revision. `null` is allowed only with `screen`, retaining shallow
 screening across mechanisms; an empty commitment list requires that null screen.
@@ -262,7 +262,7 @@ hints describe the current repair allowance: `remaining_observed_tokens`,
 `remaining_active_seconds` and `previous_consumed_observed_tokens` retain consumed
 usage; `token_usage_unknown` preserves missing metering. That allowance neither
 requests nor authorizes replay of an earlier experiment. New prompts use these
-field names. Protocol 27 instances are rejected without compatibility reading or migration.
+field names. Earlier protocol instances are rejected without compatibility reading or migration.
 
 Budget choices use current ordinary-work availability and the runtime
 `work/budget-status.json`. With protected FINAL, provider-reported consumption
@@ -445,9 +445,10 @@ bridge, backend or replay effects preserve the original reconciliation boundary.
 A capture/export interrupted before any preparation binding or accepted record is
 preserved: absent records or empty directories do not prove safe cleanup.
 
-The fork and deletion rules below describe their source behavior. Real default native,
-registered Cov, Codex/namespace, replay/model, solver and SSH validation is deferred
-until G3 and an independent user CLI run. Source changes establish neither scientific
+The fork and deletion rules below describe their source behavior. Focused source and
+synthetic checks do not establish complete live validation of default native,
+registered Cov, Codex/namespace, replay/model, solver or SSH paths. Those paths need
+their own exact independent CLI evidence. Source changes establish neither scientific
 qualification nor a real sandbox guarantee.
 
 The default local command backend resolves the selected Codex installation's native
@@ -530,7 +531,7 @@ an explicit, file-scoped working copy under `work/`, never a pre-copied input tr
 Source ownership is supplied by its lifecycle, not inferred from mode or link
 count. Mode 0400 alone is not hostile same-user write isolation.
 
-Protocol 28 protects shared inputs at the final native launch boundary with Linux
+Protocol 29 protects shared inputs at the final native launch boundary with Linux
 read-only mounts, including custom protocol argv. An exactly registered module
 launcher retains host preparation and submission service ownership, then applies
 the same protection at its final scientific namespace. Its provider/module identity
@@ -660,7 +661,7 @@ Deterministic curve and figure algorithms are self-contained Skill scripts;
   scientific explanation; its rows, `keep`, rationale and evidence-step formatting
   do not grant or gate delivery. Actual audit and delivery actions still require
   an exact available candidate, qualification and execution permission. Null
-  does not authorize delivery. Protocol 28 rejects earlier frozen protocols without
+  does not authorize delivery. Protocol 29 rejects earlier frozen protocols without
   migrating their original bytes.
 - One advancing writer per instance; read views neither call models nor own scientific/budget state.
 - Exact immutable originals, configuration and calls; revisions inherit no prior qualification or approval.
@@ -697,8 +698,12 @@ selection. Changed conditions limit comparisons; procedure-level evidence must
 not silently become evidence for a different saved artifact. Before ordinary work
 closes, A may request a small affordable comparison of complete procedures using
 shared conditions and useful repetitions. This advice adds no quota, score-based
-default or acceptance gate. FINAL uses existing evidence, and authors may reject
-all candidates or report missing comparisons with a finite conclusion.
+default or acceptance gate. Ordinary A assessments and non-protected closeout
+may reject all candidates or report missing comparisons with a finite conclusion.
+Protected FINAL uses existing evidence and its frozen response options: retained
+delivery-source items require `deliver` with an exact candidate reference;
+otherwise the response is `finish`. These options do not waive original,
+qualification or execution-permission checks, or establish scientific success.
 
 H uses A's evidence, limitations and exact references to decide mechanism changes
 and the next minimal discriminator, checking concrete conflicts as needed rather
@@ -914,7 +919,7 @@ exact identity checks and independent execution authorization still apply.
 Shared budget checks for new nodes remain unchanged. Author
 closeout token permits are also soft targets; their finite time limits remain
 enforced. Actual usage remains accounted without creating a new shared allowance.
-Protocol 28 accepts only soft node settings and final-A policy v1. Older protocols,
+Protocol 29 accepts only soft node settings and final-A policy v1. Older protocols,
 hard settings and missing final-A policies are rejected without migration. A denied start
 advances the existing control journal to durable `FINAL` (`closeout_begin` mode
 `final`); it never reclassifies an ordinary A as final from the remaining balance.
@@ -1308,7 +1313,8 @@ Source/HTTP/synthetic-process checks do not qualify real browsers, native Codex 
 TCAD solvers or power-loss recovery. Retirement grants none of these qualifications and does
 not operate existing host services, databases or external jobs.
 
-TCAD-specific promotion evidence is defined in the [qualification status](TCAD_QUALIFICATION_STATUS.md).
+TCAD-specific promotion evidence is defined in the plugin's
+[qualification boundary](../plugins/tcad_artifact/README.md#qualification-boundary).
 
 See the [CLI guide](ROOTLESS_CLI.zh-CN.md), [installation](INSTALL.md) and [release scope](RELEASE.md).
 

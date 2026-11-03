@@ -1,4 +1,4 @@
-# Research configuration and agent backends / 研究配置与 Agent 后端
+# SciBranch research configuration and agent backends / 研究配置与 Agent 后端
 
 `scid-research` is the application core. The optional instance webpage uses the
 same preparation defaults, frozen settings, controller, ledgers and read views;
@@ -90,7 +90,7 @@ saving a configuration does not recover the clock or reset consumption.
 无法核对未闭合区间，这些操作仍可使用。新节点应用配置、实际预算修订和执行仍须通过
 原有时钟与预算校验；保存配置不会恢复时钟或重置消费。
 
-Current instances use protocol 28. H selects a mechanism with the 1-based
+Current instances use protocol 29. H selects a mechanism with the 1-based
 `search_plan.focus.index` into the same payload's `commitments`, on initial and
 revised plans. Null is only a multi-mechanism shallow `screen`. Reusing a mechanism
 requires its canonical `existing_ref` in that payload; omitted mechanisms retain
@@ -98,12 +98,12 @@ breadth. A/W use task-provided exact stable references such as `h001.m1` rather
 than display labels. See the [CLI examples](ROOTLESS_CLI.zh-CN.md#机制编号与精确引用).
 Repair advice reports the remaining repair allowance and prior consumed usage; it
 does not authorize replaying old experiments. New prompts use the explicit remaining
-and consumed-usage field names. Protocol 27 instances are unsupported, without compatibility reading or migration. Never
+and consumed-usage field names. Earlier protocol instances are unsupported, without compatibility reading or migration. Never
 change an old instance's settings version to bypass the contract.
 
-当前实例采用协议 28；首次 H 与每次修订都以同次 commitments 的 1 起始编号选机制，
+当前实例采用协议 29；首次 H 与每次修订都以同次 commitments 的 1 起始编号选机制，
 后续 A/W 使用任务给出的稳定精确引用。null screen 保留多机制浅筛，遗漏机制不删除广度。
-补正剩余额度不代表重跑旧实验，新提示显式区分剩余量和既有消费；协议 27 实例拒绝读取，不迁移、不手改旧实例版本。
+补正剩余额度不代表重跑旧实验，新提示显式区分剩余量和既有消费；更早协议实例拒绝读取，不迁移、不手改旧实例版本。
 
 ## Declaration fields / 声明字段
 
@@ -127,10 +127,11 @@ argv elements are literal native arguments, so use absolute paths for their inpu
 | `permissions` | `workspace`: `read-only`, `workspace-write` (default), or `danger-full-access`; `network`: boolean (default false); `web`: `disabled` (default), `cached`, or `live`; `subagents`: boolean (default false) |
 | `agent.native.sandbox_workspace_write` | Codex-specific / Codex 专用: `writable_roots` (path array), `network_access`, `exclude_tmpdir_env_var`, `exclude_slash_tmp`; network declarations must agree / 网络声明须一致 |
 | `agent.native.features` | Codex-specific / Codex 专用: `fast_mode` (boolean) |
-| `budget` | Required finite / 必填有限值: `max_tokens`, `max_seconds`, `max_steps`; optional / 可选: `max_output_item_bytes`, `max_output_total_bytes`, `candidate_extra_slots`, `portfolio_review_after_cycles`, `node_targets`, `role_shares`, `breadth`, `correction` |
+| `budget` | Required finite / 必填有限值: `max_tokens`, `max_seconds`, `max_steps`; optional / 可选: `max_output_item_bytes`, `max_output_total_bytes`, `candidate_extra_slots`, `portfolio_review_after_cycles`, `node_targets`, `role_shares`, `breadth`, `correction`, `storage` |
 | `budget.node_targets.H`, `.W`, `.A`, `.E` | Complete role targets with `max_observed_tokens` and `max_seconds`; advisory, no increase to totals / 四角色完整目标，软提示，不增加总额 |
 | `budget.breadth` | `max_w_seconds`, `max_w_observed_tokens`, `max_requested_repairs`; optional positive integer / 可选正整数 `initial_calls` |
 | `budget.correction` | `review_after`, `pause_after` (explicit optional correction policy / 显式可选补正策略) |
+| `budget.storage` | Existing storage-policy object: `version = 1`, `enabled`, and optional positive `max_scan_entries`, `max_files`, `max_file_bytes`, `max_total_bytes`, `max_instance_bytes`; disabled by default. See [managed retention limits](ROOTLESS_CLI.zh-CN.md#受管本地实验). / 既有存储策略对象，默认关闭；启用至少声明一项正整数额度，未列维度不限制。 |
 | `executor` | `mode` (`local` or `external`), `config` (existing `executor`/`configuration` object), `resource_policy` (existing cumulative allowance contract) |
 | `delivery` | Existing frozen delivery-policy object; optional adapter paths `adapter.adapter`, `adapter.source_roots` and path-like `adapter.launcher_argv[0]` resolve relative to TOML / 既有交付策略对象，上述路径相对 TOML |
 | `policies` | Boolean / 布尔值: `formal_review`, `execution_authority`, `candidate_audit`, `decision_contract`; existing contract objects / 既有合同对象: `selection`, `resume`, `history_observer`; `worker_context`: `same_session` or `new_context` |

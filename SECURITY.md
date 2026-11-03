@@ -1,4 +1,9 @@
-# Security
+# SciBranch security
+
+Report public, non-sensitive defects through
+[SciBranch issues](https://github.com/mae032241/scibranch/issues). A private
+security-reporting channel is not specified in this repository; keep sensitive
+details out of public reports.
 
 Do not report simulator license data, private keys, live service secrets, or
 confidential scientific inputs in a public issue.

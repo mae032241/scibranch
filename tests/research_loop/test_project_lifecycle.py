@@ -36,9 +36,10 @@ for relative in ('config.txt','untracked.txt','ignored.txt','.git/new','src/main
 
 
 def _native_sandbox():
-    return Path(os.environ.get('SCID_TEST_NATIVE_SANDBOX',
-        '/home/da/.nvm/versions/node/v25.2.1/lib/node_modules/@openai/codex/node_modules/'
-        '@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex'))
+    declared = os.environ.get('SCID_TEST_NATIVE_SANDBOX')
+    if not declared:
+        pytest.skip('Set SCID_TEST_NATIVE_SANDBOX to an exact native sandbox ELF path')
+    return Path(declared)
 
 
 def _base(tmp_path):

@@ -1,45 +1,45 @@
-# SciDiscovery 科学发现 Agent
+# SciBranch
+
+**面向迭代式科学发现的开放框架。**
 
 简体中文 | [English](README.md)
 
-当前框架仅支持 Linux，依赖 POSIX 文件/锁语义及 Linux namespace；原生 Windows 不支持，WSL2 未验证。Skill 来源绑定与角色选择是通用合同，只读 namespace 挂载是 Linux backend 实现。
+原创软件按 [MIT 许可证](LICENSE)开源。
 
-SciDiscovery 是以 CLI 为核心、提供 Codex 与显式 Agent 协议后端的科研框架。
-它围绕明确目标与冻结输入运行 H/W/A/E 线程，提供有限共享预算、科学结果封存及原调用恢复。科学 Worker 负责模型选择与结论；
-确定性控制负责身份、输入绑定、资格校验、预算和执行权限。
+SciBranch 将研究目标推进为一个迭代循环：探索多条假设路线、实施实验、独立评估证据，
+再决定下一步研究方向。它连接科学 Agent 与受管执行，保留可追溯的输入和成果，
+并支持查看、暂停、继续研究，以及从历史任务创建新分支。
 
-候选指标、审计回执和可用性供科学作者判断。控制保留观察顺序和全部候选；A 必须明确命名
-交付对象，并以已绑定证据说明理由。控制不提供科学排名或默认选择。
+科学 Worker 负责模型选择与结论。控制层负责精确身份、冻结输入、有限预算、执行权限和
+已知调用的恢复。控制保留候选和证据，科学评估负责比较并选择交付对象。
 
-本地结果 `candidates` 列出全部可由 A 选择的保留模型，每项须绑定不同的精确保留成果；身份由原调用和 artifact 路径决定，不随列表重排变化。指标和科学说明可缺失。可选说明与比较表不构成交付准入；
-坏条目局部诊断并保留原件，紧凑预览提供完整留存内容的读取入口。
+当前是面向 Linux 的工程原型，依赖 POSIX 文件/锁语义与 Linux namespace。
+原生 Windows 不支持，WSL2 未验证。命令或求解器运行成功，只支持其精确实验与验证合同
+实际建立的结论。
 
-当前是工程原型。命令或求解器运行成功，只支持其精确输入、实验和验证合同实际建立的结论。
+## 从假设到证据
 
-## 可以做什么
+- **探索竞争路线。** 围绕明确目标与输入运行科学线程，由独立评估指引后续迭代。
+- **运行真实实验。** 使用受管本地执行或显式选择的领域适配器，分别声明权限与有限执行限制。
+- **查看研究过程和成果。** 通过 CLI 或可选实例网页读取封存结果、保留成果和限制说明。
+- **有依据地继续或分支。** 暂停和续接实例、恢复已知调用，或从精确历史逻辑任务创建暂停分支，
+  并为新分支声明新的有限预算。
 
-| 入口 | 用途 |
-| --- | --- |
-| `scid-research` | 准备实例，运行、查看、暂停和继续研究，收束并导出结果。 |
-| `scid-research start` | 为明确实例启动或连接 detached 控制进程。 |
-| `scid-research fork-preview` / `fork-create` | 从精确历史逻辑任务预览并创建暂停的新分支。 |
-| `scid-research instance-delete` | 按精确身份永久删除静止实例；同一操作通过持久回执核对。 |
-| `scid-research serve-ui` | 同一实例的可选网页，提供实例控制和封存结果分页。 |
-| `scid-research archive-*` / `checkpoint-*` | 导出和核验原件、恢复指定材料，或执行限定的同宿主冷迁移。 |
-| `scid-experiment` | 使用受管本地实验或声明的领域执行接口。 |
+受支持命令为管理研究实例的 `scid-research` 与管理实验的 `scid-experiment`。
+`scid-research serve-ui` 通过可选网页提供同一实例的控制与结果读取；网页服务退出后，
+detached 研究仍可继续。
 
-核心只安装本地执行接口。Cov 执行、回执、公开观察与交付由可选 `cov_execution` 插件提供，
-通过 `SCID_PLUGINS=cov_execution` 显式安装；执行器标识保持 `cov_execution:experiment`。
-可选 TCAD adapter 通过有界传输提供 detached solver 执行。确定性曲线评分和论文图提取迁为
-自包含的 `curve-analysis`、`scientific-paper-evidence` Skill，与 `sentaurus-tcad-code`
-一起持久安装到安装前缀的 `skills/`。按角色或命名 Worker 显式选择集合，实例冻结选中资产，
-节点只投影本角色集合；见[配置参考](docs/RESEARCH_CONFIGURATION.md)。Skill 不授予执行权限或科学资格。
-执行适配器合同见[接口参考](docs/PLUGIN_RUNTIME_API.md)。
+## 安装
 
-## 安装与开始使用
+克隆 [SciBranch 仓库](https://github.com/mae032241/scibranch)：
 
-推荐 Python 3.12（包支持 3.10+）。按[安装指南](docs/INSTALL.zh-CN.md)准备 Python 和运行、构建依赖，
-再以当前用户离线安装，无需 sudo：
+```sh
+git clone https://github.com/mae032241/scibranch.git
+cd scibranch
+```
+
+推荐 Python 3.12，包支持 Python 3.10+。按[安装指南](docs/INSTALL.zh-CN.md)
+准备带运行与构建依赖的 Python，再以当前用户离线安装：
 
 ```sh
 SCID_PYTHON=/absolute/python bash deploy/install.sh --dry-run
@@ -48,82 +48,52 @@ export PATH="$HOME/.local/bin:$PATH"
 scid-research --help
 ```
 
-默认代码与 Skill 前缀为 `$HOME/.local/share/scidiscovery`，命令目录为 `$HOME/.local/bin`，
-安装事务目录为 `$HOME/.local/state/scidiscovery/install`。安装按需创建命令目录；`--dry-run` 不写文件。
+安装器发布两个命令与随附的运行时 Skill。默认代码与 Skill 前缀仍为
+`$HOME/.local/share/scidiscovery`，命令目录为 `$HOME/.local/bin`，安装事务目录为
+`$HOME/.local/state/scidiscovery/install`。Python 包名仍为 `scidiscovery`；
+这些技术标识不随 SciBranch 项目名称改变。更新已有安装时，先停止其控制进程、Worker 和 UI，
+再使用 `reinstall`。依赖、可选插件、更新与卸载见[安装指南](docs/INSTALL.zh-CN.md)。
 
-安装发布 `scid-research`、`scid-experiment`；`install` 用于目标尚不存在的首次安装，
-`reinstall` 在停止原控制进程、Worker 和 UI 后更新原路径。通过 `SCID_PLUGINS`
-明确选择可选插件；依赖、路径设置与卸载见[安装指南](docs/INSTALL.zh-CN.md)。
+## 开始研究
 
-开始研究时，复制 [research.example.toml](research.example.toml)，声明目标、公开输入、后端权限及有限预算，
-依次运行 `scid-research config-check --config research.toml` 和 `scid-research prepare --config research.toml`。
-再以 `config-inspect --root /absolute/instance` 查看冻结设置，增加 `--view current` 查看当前生效与下一新节点待生效的配置；
-`start --root /absolute/instance` 后台推进。
-配置文件只影响新实例；已有实例保留冻结设置，详见[配置与后端参考](docs/RESEARCH_CONFIGURATION.md)。
-网页是复用同一状态与控制逻辑的可选入口；网页服务退出不会停止 detached 研究。
-[UI 合同](docs/ARCHITECTURE.zh-CN.md#实例-ui-的控制与显示)说明表单重试、显示缓存与翻译边界。
-`result`、`materials`、`artifact` 可通过 CLI 读取或下载精确封存结果。[CLI 指南](docs/ROOTLESS_CLI.zh-CN.md)
-包含命令、策略示例、结果读取与恢复规则。单项 `codex` launcher 默认使用本地实验；W
-运行期间由原生宿主自动处理普通文件提交并返回响应。受管本地命令需要受支持的原生权限投影，
-前提及明确不支持的情形见 CLI 指南。external 执行仍由声明的 launcher 负责。
-执行另需冻结配置及授权；科研预算、独立审查和用户陈述均不授予执行权限。
+将 [research.example.toml](research.example.toml) 复制为 `research.toml`，声明目标、
+精确公开输入、后端权限与有限预算，并创建声明所指向的文件。然后校验和准备实例：
 
-静止的当前协议实例可在精确逻辑步骤 N 处分支，不要求最近 A 已结束研究。新分支在新
-session 中从该任务首次输入重跑，显式声明新的有限预算。必要控制、准确代码版本及当前
-草稿分别转移；科学数据与输出保持对实际原件的直接引用，删除科学原件可能使相应消费不可用。
-科学可见范围仍由所选原任务的冻结输入限定。创建后保持暂停，
-须显式 `start --continue` 才推进。历史科学投入、来源限制及未知成本仍保留；既有审查或执行许可
-不授权新对象。语义见[架构](docs/ARCHITECTURE.zh-CN.md#历史任务分支)，操作见
-[CLI 指南](docs/ROOTLESS_CLI.zh-CN.md#从历史任务创建分支)。
+```sh
+scid-research config-check --config research.toml
+scid-research prepare --config research.toml
+scid-research config-inspect --root /absolute/path/to/research-instance
+scid-research start --root /absolute/path/to/research-instance
+```
 
-H/W/A/E 单节点 token 预算统一为软目标：触线时提示收口，不仅因达线拒绝新受管实验或强制转 A，原节点可以完成原结果。实际 input+output 完整记账，不预付整个节点 token 额度。机制选择在 H 使用同次 commitments 的 1 起始编号，A/W 使用 `h001.m1` 等稳定精确引用，显示 label 不参与匹配。当前协议 28 仅接受 soft 节点设置及冻结的最终 A 完成策略。旧实例格式不受支持，不提供兼容读取或迁移。单次执行的有限时间、权限与清理限制仍有效。
+`--root` 使用 `prepare` 创建的精确实例根目录。配置文件修改影响新实例，已有实例保留其冻结设置。
+[配置参考](docs/RESEARCH_CONFIGURATION.md)说明后端、权限、预算与 Skill 选择；
+[CLI 指南](docs/ROOTLESS_CLI.zh-CN.md)说明结果读取、UI、暂停与继续、历史任务分支及恢复。
 
-新实例冻结一次最终 A 完成策略：共享 token、总时间或步数预算不足、为零或已经超出，
-均不据此拒绝最终 A 的进入、完成及其自身明确授权的交付。仅计费用量缺失或未对齐也不阻挡
-已核实的原始终态返回及该交付；未知用量保持未知，不补造零账。仍须原生完成事件、退出码 0
-和已确认清理。已观测用量与未知部分分别记账，原共享上限不增加；
-原单次调用的有限时间、执行权限及其他执行限制仍有效，详见[当前架构](docs/ARCHITECTURE.zh-CN.md)。
-显式提高额度阈值后，下一次 run 可在完整准入足够、原执行及外部效果已知且静止时，从 FINAL 前保存的待执行 normal 路由恢复。新物理编号保留先前最终 A、提交和全部消费；再次预算不足时进入新的 FINAL 周期，各周期只运行一次最终 A。降低阈值或增加后仍不足不会恢复。
+核心提供 `local_execution:command`。通过 `SCID_PLUGINS=cov_execution` 显式选择可选 Cov 执行，
+或通过 `SCID_PLUGINS=tcad_artifact` 选择 TCAD adapter。运行时 Skill 位于仓库根目录的 `skills/`，
+并持久发布到安装前缀的 `skills/`，须按角色或命名 Worker 显式选择。
+Skill 不授予执行权限或科学资格，详见[接口参考](docs/PLUGIN_RUNTIME_API.md)与
+[配置参考](docs/RESEARCH_CONFIGURATION.md)。
 
-科学回答只必填 `summary`、`scientific_result`、`limitations`，H/A 另填路由
-`next_action`、`route_reason`，W 另填 `stage_intent`；其余科学内容开放。
-广度优先保留机制声明、明确处置和焦点、真实调用机会及独立 W→A 投入计数。
-A 在普通科学正文中说明竞争路线、候选准则及未答问题，不再另填组合、覆盖或准则清单。
-精确候选身份和交付资格仍须核对，详见[架构](docs/ARCHITECTURE.zh-CN.md)。
-标准 `codex` 的 CLI prepare 默认最多两次仅输出补填，保留原 native home、配置、权限与认证。
-显式策略优先；自定义 launcher 与直接 controller API 调用仍须显式修复策略。
-该默认值不授权失败任务或科学工作的续跑。
+## 文档与支持边界
 
-Worker 写普通科学文件，使用薄实验提交与等待接口。其提示词不增加哈希计算、比对、校验或
-哈希清单工作；控制程序按[架构的哈希白名单](docs/ARCHITECTURE.zh-CN.md)在宿主私有空间保留精确路径、producer 与大小引用。
-已有 Git 工程可按[工程配置主合同](docs/RESEARCH_CONFIGURATION.md#declared-projects--声明工程)
-声明只读基础和准确 editable、scratch、output 目录；未声明 `[project]` 时沿用 `code/` 流程。
+[文档入口](docs/README.md) · [CLI 指南](docs/ROOTLESS_CLI.zh-CN.md) ·
+[当前架构](docs/ARCHITECTURE.zh-CN.md) · [发布范围](docs/RELEASE.zh-CN.md) ·
+[安全边界](SECURITY.md) · [贡献指南](CONTRIBUTING.md)
 
-操作侧证据导出工具将默认省略元数据限制在 8 KiB 内，并按需链接到每页不超过 16 KiB
-的完整科学详情；这一限制只针对省略部分，不针对整个证据索引。详情描述缺失材料，
-`not_available_in_this_view` 不提供被省略原件。读取入口见[当前架构](docs/ARCHITECTURE.zh-CN.md)。
+当前运行时只接受协议 **29** 的实例，不提供旧格式兼容读取或迁移。单节点 token 目标为软目标，
+共享准入预算与有限执行限制仍受约束。完成、权限、候选与恢复的详细合同由
+[架构](docs/ARCHITECTURE.zh-CN.md)定义。
 
-## 文档与开发
+Worker 与宿主同权限进程受到信任，控制层属于软边界。实际访问取决于声明的后端与权限投影。
+科研预算、审查和用户陈述均不授予执行权限。未知外部提交须按原调用核对，不得自动重提。
 
-[文档入口](docs/README.md) · [当前架构](docs/ARCHITECTURE.zh-CN.md) ·
-[发布范围](docs/RELEASE.zh-CN.md) · [安全边界](SECURITY.md) · [贡献指南](CONTRIBUTING.md)
+浏览器、真实原生线程续接、TCAD solver 和实际掉电恢复需要精确候选及环境的证据，
+源码测试不能建立这些资格；跨宿主完整灾备不在当前支持范围。历史包保持只读，
+独立归档包与整实例冷检查点迁移命令已退役。
 
-现行控制器位于 `src/scidiscovery/research_loop/`，领域算法、合同与 adapter 位于 `plugins/`。
-按[测试分组](tests/README.md)串行、受监督运行精确目标；功能测试不构建或安装包。
-`scripts/build_git_release.py` 从显式选择的源码、当前参考文档、工具和功能 fixture
-生成源码包及逐文件路径与大小 manifest。
-
-开发计划、审计、交接与试验输出作为本地工作资料保存，不进入长期源码跟踪或源码发布。
-当前用法和行为由代码及当前参考文档定义。
-
-## 支持边界
-
-当前信任 Worker 与宿主同权限进程，控制层属于软边界。浏览器、真实原生线程续接、TCAD
-solver 和实际掉电恢复需要精确候选及环境的证据；源码测试不能建立这些资格。
-默认受管本地子进程及显式 science launcher 提供各自声明的文件视图，不对泛原生执行
-承诺统一物理隔离。权限摘要分别记录请求值、实际策略与实施方式；不受限 Codex 不能强制离线，
-protocol launcher 的实际访问保持未知，详见[配置参考](docs/RESEARCH_CONFIGURATION.md)。
-跨宿主完整灾备不在支持范围。冻结实例保留原实现身份；未知外部提交须先按原调用身份核对。
-
-受支持的应用入口为上述两个命令。旧 `scid`、Root/MCP 应用、平台角色生成及 legacy systemd
-应用安装不可用。分发源码包前，按[分发声明](NOTICE.md)核对软件许可和随附参考资料限制。
+源码维护入口为 `src/scidiscovery/research_loop/` 中的控制器、`plugins/` 中的适配器，
+以及 `skills/` 中的运行时科学工具和指导。按[测试分组](tests/README.md)选择精确目标并串行检查。
+开发计划、审计、交接与试验输出作为本地工作资料保存。分发源码前，按
+[分发声明](NOTICE.md)核对随附第三方资料的原有版权和分发条款。

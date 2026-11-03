@@ -1,7 +1,7 @@
-# 无 Root 的科研 CLI
+# SciBranch 科研 CLI
 
 `scid-research` 直接启动新的 H/W/A/证据原生线程；控制程序执行科学角色选择的路由。
-控制程序拥有原件绑定、预算和执行权限，H/W/A/E 拥有科学判断。CLI 是应用核心，实例 UI 是复用原实例状态与公共逻辑的可选入口；来源声明、正式审查和执行授权按准备配置启用。当前能力与资格边界见[架构](ARCHITECTURE.zh-CN.md)和[TCAD 资格](TCAD_QUALIFICATION_STATUS.zh-CN.md)。
+控制程序拥有原件绑定、预算和执行权限，H/W/A/E 拥有科学判断。CLI 是应用核心，实例 UI 是复用原实例状态与公共逻辑的可选入口；来源声明、正式审查和执行授权按准备配置启用。当前能力与资格边界见[架构](ARCHITECTURE.zh-CN.md)和[TCAD 资格](../plugins/tcad_artifact/README.zh-CN.md#资格边界)。
 
 ## 安装入口
 
@@ -101,7 +101,6 @@ outputs = ["out"]
 显式配置文件须为 JSON 对象（`{}` 可用，`null` 和数组拒绝）；配置只接受 H/W/A/E 及 `model`、`reasoning_effort`、`service_tier` 非空字符串，模型名没有白名单。
 准备时展开并冻结完整四角色配置；job、native intent 和实际 argv 使用同一 profile，原 session 的修复和 fragment 恢复也保持原值。
 修改原配置文件不影响已准备实例；不传该选项时保留全局配置行为。未知角色、无效配置或原件绑定不一致在原生提交前拒绝，不自动换模型。
-rootless cov launcher 的 operator 配置应声明相同全局值与 `role_profiles`（可为等价的稀疏配置）；它核对冻结实例，再生成匹配的 CODEX_HOME 配置，拒绝不一致的 model/effort/tier 参数。
 这些记录证明请求参数一致，不代替服务端实际模型或计费观测。
 
 ## 可选 Skill 选择
@@ -149,7 +148,7 @@ W 的 `--mechanism 1` 使用冻结目录中的正整数编号，控制绑定准�
 窄输出补正只修改诊断指出的 JSON/布局字段，返回完整原 JSON，其余科学计划保持原义。
 提示中的 `remaining_observed_tokens`、`remaining_active_seconds` 与
 `previous_consumed_observed_tokens` 是本次补正的剩余额度及既有消费，`token_usage_unknown`
-保留计量未知；新的预算提示使用上述字段，不要求或授权重跑旧实验。协议 27 实例明确拒绝，
+保留计量未知；新的预算提示使用上述字段，不要求或授权重跑旧实验。更早协议实例明确拒绝，
 不提供兼容读取或迁移，也不能通过手改旧 `settings.json` 的版本继续运行。
 
 ## 后台推进与用户方向
@@ -252,12 +251,12 @@ BOOTTIME 或 elapsed 的 Unix 时间口径本地维护共享时间截止，仍�
 原 native 存活或进程身份未核清、原受管调用 running/unknown 时不启动替代 agent；沿既有
 原调用入口核对，不重 submit 未知执行，不退款或清零预算。配置保存仍只影响后续新节点，
 不修改正在恢复任务的原策略。上述自动恢复策略本身不改变科学输出合同或通用科学预算
-时钟；协议 28 的持续组合判断与最终覆盖合同见下文“文件与职责”。实际平台恢复资格
+时钟；协议 29 的持续组合判断与最终覆盖合同见下文“文件与职责”。实际平台恢复资格
 须另有准确原生证据，不能由源码检查推断。
 
 ## 从历史任务创建分支
 
-`fork-preview` 与 `fork-create` 接受严格静止、冻结协议 28 的明确父实例，以及精确逻辑步骤 N；
+`fork-preview` 与 `fork-create` 接受严格静止、冻结协议 29 的明确父实例，以及精确逻辑步骤 N；
 不要求最近 A 已返回 `finish` 或研究已完成。新分支从 N 首次冻结科学输入在新 session 重跑，
 N 输出和后缀不作为输入继承，不能选择任意 attempt 断点。普通、FINAL、正式审查、工程修复
 及已有 continuation 的任务边界见[架构中的分支语义](ARCHITECTURE.zh-CN.md#历史任务分支)。
@@ -489,7 +488,7 @@ protocol/自定义 launcher 权限为 hint_only、实际访问未知；详见[�
 
 资源账复用原 control ledger，换候选/重试不重置消耗。`budget-amend --execution-wall-seconds N --execution-storage-bytes N --authorization-note ...` 仅修订有限资源上限，不代替精确调用的执行决定；不得和科学token/时间修订参数混用。未知调用不退款、不重发，已接受调用的查询/取消不因W结束而被当成新提交拒绝。
 
-TCAD 支持可选编译、精确封存、正式审查与后继执行的非空输入绑定。工程接缝存在不证明真实 solver 已取得资格；所需证据见[TCAD 资格](TCAD_QUALIFICATION_STATUS.zh-CN.md)。旧实例不会静默升级或复制预算，本机 HTTP 与浏览器检查不能替代远端资格。
+TCAD 支持可选编译、精确封存、正式审查与后继执行的非空输入绑定。工程接缝存在不证明真实 solver 已取得资格；所需证据见[TCAD 资格](../plugins/tcad_artifact/README.zh-CN.md#资格边界)。旧实例不会静默升级或复制预算，本机 HTTP 与浏览器检查不能替代远端资格。
 
 ### 原调用恢复与节点保留
 
@@ -566,7 +565,7 @@ cold 包，也不从当前草稿或另一 run 猜造历史科学原件。
 
 ## 受管本地实验
 
-协议 28 的普通原生 Worker 同样需要实际可用的 Linux `bwrap` 只读挂载能力，以保护共享输入、
+协议 29 的普通原生 Worker 同样需要实际可用的 Linux `bwrap` 只读挂载能力，以保护共享输入、
 选定 Skill 与动态 collect/wake 目录。自定义 launcher 也须保护；准确注册的模块启动器
 在宿主准备后，于最终科学进程施加同一挂载。其 provider/module 身份无论是否选择 Skill
 均冻结；普通包装脚本不能据名字豁免。不能挂载时明确拒绝启动，
@@ -646,9 +645,9 @@ chmod 外部来源；公开逻辑路径在宿主上未必有文件 alias。历�
 `tcad_log` 及 facts 首写到既有节点/call 输出目录，manifest、transport-derived 文件、bindings
 和传输 spool 保持私有。新 socket preparation 在准入或提交前明确不支持，准确旧 call 查询仍受支持。
 
-上述恢复、分支、退役与删除规则描述源码行为；真实 default native、registered Cov、
-Codex/命名空间、replay/model、solver 及 SSH 验收留到 G3 后由用户独立 CLI 进行。
-当前源码改动不授科学资格，也不构成真实 sandbox 保证。
+上述恢复、分支、退役与删除规则描述源码行为；定向源码及合成检查不证明真实 default native、
+registered Cov、Codex/命名空间、replay/model、solver 或 SSH 路径已完成全部验收。
+这些路径仍须有各自精确的独立 CLI 证据；源码改动不授科学资格，也不构成真实 sandbox 保证。
 
 科学代码可生成可选的 `artifacts/result.json`：
 
@@ -711,7 +710,7 @@ token 参考轮数须有足够完整样本及已知余额；缺失或滞后如�
 普通结束/交付和 protected FINAL 的 final_coverage，每机制只必填 mechanism_ref、
 status（deep/screened_pending/ruled_out/unexplored）、reason，理由合并深度依据和未答问题；
 limitations 保留输入与资源缺口。准确覆盖完整冻结机制集合，不从候选或调用成功推断科学深度，
-也不授权新实验。当前协议 28 不支持更早协议的隐式读取或迁移。
+也不授权新实验。当前协议 29 不支持更早协议的隐式读取或迁移。
 
 广度预算应依据普通探索可用量及 `work/budget-status.json`；当前 protected FINAL 模式按 provider 已报告消费计算 token 余额，未知账单继续列为未知，不估算扣费，也不扣旧收口预留。旧预算内收口格式不受支持。真实执行未知仍须先按原调用核对。初始调用机会不预留实际资源，首次昂贵调用仍可能耗尽余额；使用已有执行配置 `max_seconds` 和 W 阶段时间/token 目标约束，控制不自动分配广度比例或强制科学机制数。
 初始/额外机会只保护初筛公平，不是所有后续调用的总额度。相同 H 范围与既有约束允许时，A 可用 `continue_w` 请求下一有限阶段；问题、机制或约束需要变化时才修订 H，明确次数限制和真实执行准入继续适用。
@@ -824,7 +823,7 @@ scid-research continue --root /absolute/path/new-instance
 ```
 
 同实例只有一个运行写者；status 不调用模型。pause 允许当前角色完成并封存，在下一节点前停止。
-N1a 已增加本地持久 runner：前台控制器退出后，已接受的原生节点继续运行并记录日志、用量和终态。
+本地持久 runner 在前台控制器退出后继续运行已接受的原生节点，并记录日志、用量和终态。
 再次 `run` 按任务引用、系统启动标识及进程启动身份核对同一 runner，并等待原完成通知，再封存和路由。
 `status` 区分 `prepared / running / native_not_submitted / native_outcome_unsealed / seal_present_unverified / unknown`；
 封存存在仍需 `run` 验证。原生成功但封存失败只重试封存；执行身份丢失、失败或缺量仍不自动重放。
@@ -910,7 +909,7 @@ runner 意外退出时，本地 watchdog 仅清理能精确核对的标准进程
 JSON 必须恰有 `H/W/A/E` 四个对象，每个对象恰有正整数 `max_observed_tokens`
 和正有限数 `max_seconds`。没有节点策略默认数值；操作者必须为每个角色明确冻结两项目标。
 应保留参数所依据的已观察成本或试用假设；历史最大完成事件不是下一次请求的成本保证。
-当前协议 28 的 `--node-budget-mode` 仅接受 `soft`；API prepare 同样拒绝 hard。旧协议实例不受支持，不提供兼容读取或迁移。
+当前协议 29 的 `--node-budget-mode` 仅接受 `soft`；API prepare 同样拒绝 hard。旧协议实例不受支持，不提供兼容读取或迁移。
 
 H/W/A/E 单节点 token 目标统一为软上限，W 的 token/time 目标分别取该策略与原 search policy 的较小值。
 启动前核对共享余额与原节点锚点，不预付整个节点 token 额度。运行中的节点达到 input+output
@@ -964,8 +963,10 @@ author closeout 使用本次已验证 permit 的 token 软目标与有限时间�
 预算达线不再新开科学 FINAL；外部仍仅原身份的有限 `submit` 和同操作 `confirm`，unknown 按原调用核对。
 FINAL 只有一次精确原始 A：基于已有已接受 W 给结论、明确选择，并在
 `summary / scientific_result / limitations` 说明未完成目标及缺失证据；共享 token、总时间或步数
-不足、为零或超额，以及仅用量未知，均不否决这次 A 或已有封存 W 的原授权交付；未知用量仍保留记账。若已有候选原件及交付权限，A 必须选择并授权原 host 提交，
-控制层输出真实的确认、失败或未知回执，不能由 A 编造提交成功。缺少 W、候选原件或交付权限时，
+不足、为零或超额，以及仅用量未知，均不否决这次 A 或已有封存 W 的原授权交付；未知用量仍保留记账。
+受保护 FINAL 按冻结响应选项收口：留存交付来源列表非空时须 `deliver` 并给出精确候选引用，
+否则为 `finish`；普通 A 与非受保护的 closeout 仍可拒绝全部候选。host 仅在原件、资格和交付权限
+通过后执行原授权提交，输出真实的确认、失败或未知回执，不能由 A 编造提交成功。缺少 W、候选原件或交付权限时，
 A 仍须给出结论和限制，host 明确输出未提交及原因。
 
 这次 A 若已观察到原 `turn.completed`、退出码 0、原进程组确认清理且科学输出完整，
@@ -1057,7 +1058,7 @@ scid-research closeout --root /绝对路径/实例 --export-only
 `exported_unsubmitted`、`closeout_unresolved`、`delivery_failed`、`delivery_unknown` 分别保留未提交、
 未决、失败和未知，不等同科研任务完成。FINAL 不以共享余额不足拒绝最终 A，实际未提交仍给明确原因，不伪装成操作者 export_only。暂时来源准备失败返回 `closeout_preparation_unavailable`，保留失败原件，重复 `run/closeout` 可在原预算内重试准备并复用已封存 A；它不固化为操作者 `export_only`。清理未知继续阻止任何新执行。`status` 由相同原件重建状态和最新收口 A 推荐；此前实际提交观察与当前确认结果仍分开。真实科学效果须另行验收。
 
-当前协议为 **26**，要求 worker/lineage view 1、soft 节点设置及最终 A 策略 v1。旧格式在解释任务前拒绝，不提供兼容读取、续接或迁移；新实例须重新 `prepare`。现存目录不由升级自动修改或删除。
+当前协议为 **29**，要求 worker/lineage view 1、soft 节点设置及最终 A 策略 v1。旧格式在解释任务前拒绝，不提供兼容读取、续接或迁移；新实例须重新 `prepare`。现存目录不由升级自动修改或删除。
 
 代码审阅、工程检查及交付按当前准确代码或科学 packet 绑定消费原件；缺少声明输入、所需能力或资格时明确不可用，不推断未声明依赖，也不将工程检查视为科学审计通过。
 

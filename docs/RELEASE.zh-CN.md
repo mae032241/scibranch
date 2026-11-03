@@ -1,18 +1,36 @@
-# 发布与验证范围
+# SciBranch 发布与验证范围
 
 简体中文 | [English](RELEASE.md)
+
+<a id="branches-and-tags"></a>
+## 分支与版本标签
+
+项目仓库为 [mae032241/scibranch](https://github.com/mae032241/scibranch)。
+
+| 引用 | 用途 |
+| --- | --- |
+| `main` | 现行产品线，接收经过审查的开发成果。 |
+| `dev` | 继续开发后续变更。 |
+| `maintenance/v0.1` | 保留旧产品线，承接有针对性的维护。 |
+| `v0.1` 等版本标签 | 某次发布的固定历史快照。 |
+
+维护分支可以继续推进，版本标签不会移动以跟随分支；后续修复应通过维护分支或新发布的标签获取。
+需要历史实现时应显式选择引用。当前文档描述 `main`，历史实现的行为与限制应以其对应引用内的文档为准。
+
+SciBranch 是项目名称。Python 包 `scidiscovery`、`scid-*` 命令、插件标识及默认安装路径
+保留已有技术名称。项目更名或分支变更不向冻结实例授予兼容性、执行权限或科学资格。
 
 <a id="current-status"></a>
 ## 支持范围
 
-应用提供 `scid-research`、`scid-experiment` 与按需启动的实例 UI。科研控制器使用原生科学线程、
+SciBranch 提供 `scid-research`、`scid-experiment` 与按需启动的实例 UI。科研控制器使用原生科学线程、
 明确实例根目录、冻结输入和有限预算。执行适配器保留安装接口，科学算法由选定 Skill 资产提供；
 非执行 registry 与 Operation 宿主已退役。[接口参考](PLUGIN_RUNTIME_API.md)说明保留合同。
 [当前架构](ARCHITECTURE.zh-CN.md)和[CLI 指南](ROOTLESS_CLI.zh-CN.md)定义行为、权限及恢复边界。
 
 源码、HTTP 与合成进程检查只建立其实际覆盖的行为，不证明真实原生线程续接、浏览器、TCAD
 solver、实际掉电或跨宿主恢复资格。当前信任 Worker 与宿主同权限进程；[安全说明](../SECURITY.md)
-描述软边界，[TCAD 资格](TCAD_QUALIFICATION_STATUS.zh-CN.md)描述领域限制。
+描述软边界，[TCAD 资格](../plugins/tcad_artifact/README.zh-CN.md#资格边界)描述领域限制。
 资格判定只适用于精确实现、输入与环境，新代码不能继承历史判定。
 
 <a id="publication-scope"></a>
@@ -24,9 +42,14 @@ solver、实际掉电或跨宿主恢复资格。当前信任 Worker 与宿主同
 需要保留候选时使用新输出目录。
 
 计划、审计、阶段结果、交接、旧规范与试验输出作为本地资料保存，不进入长期跟踪或源码发布。
+`.agents/` 中的本地开发助手工具和指令不发布；运行时科学 Skill 位于仓库根目录的 `skills/`，
+与运行时消费者一同发布。
 功能 fixture 位于 `tests/fixtures/` 或 `scripts/acceptance/fixtures/`，与消费者一同发布。
 研究数据库、凭据、私有数据、平台生成配置及本地 Agent 指令不发布。
-随附参考手册具有独立分发限制，见[分发声明](../NOTICE.md)；发布扫描和路径/大小清单不授予再分发权利，也不检测内容篡改；哈希白名单由[架构](ARCHITECTURE.zh-CN.md)定义。
+
+SciBranch 的原创软件按 [MIT 许可证](../LICENSE)发布。随附第三方资料（包括参考手册）
+保留原有版权及适用的分发条款，见[分发声明](../NOTICE.md)。发布扫描和路径/大小清单
+不核验第三方再分发许可，也不检测内容篡改；哈希白名单由[架构](ARCHITECTURE.zh-CN.md)定义。
 
 源码包含独立 `cov_execution` 插件及其消费者；核心 wheel 不注册 Cov 执行入口。
 

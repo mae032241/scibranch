@@ -1,4 +1,6 @@
-# 应用部署
+# SciBranch 部署
+
+简体中文 | [English](README.md)
 
 `install.sh` 从本地源码与选定插件发布 `scid-research`、`scid-experiment`。
 `install` 要求目标不存在；`reinstall` 更新原安装路径。两者都不创建实例、预算或服务。
@@ -14,5 +16,6 @@
 `install_ssh_tcad_runner.sh` 独立部署领域执行后端，另需明确管理员配置与部署授权；
 见[传输合同](../docs/tcad_transport_contract.md)。
 
-持久 Skill 来源为 `$SCID_INSTALL_ROOT/skills`，按实际 CLI 安装前缀自动定位；
+运行时 Skill 来自仓库根目录的 `skills/`，安装后的持久来源为 `$SCID_INSTALL_ROOT/skills`，
+按实际 CLI 安装前缀自动定位；
 不支持 `[skills].root` 或 `SCID_SKILLS_ROOT`。已发布 Skill 须由角色或命名 Worker 显式选择才启用。
