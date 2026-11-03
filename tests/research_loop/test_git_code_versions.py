@@ -55,6 +55,8 @@ def _project(tmp_path):
 @pytest.mark.process_e2e
 def test_project_capture_aggregates_only_declared_roots_and_preserves_empty_root_protocol(tmp_path, monkeypatch, helper):
     root, project, arguments = _project(tmp_path)
+    for name in ('src/empty', 'tools/only-empty/child', 'empty/only/descendants'):
+        (project / name).mkdir(parents=True)
     (project / 'undeclared').symlink_to(tmp_path / 'unreadable-missing')
     original_scandir = helper.os.scandir
     original_open = helper.os.open
@@ -76,10 +78,13 @@ def test_project_capture_aggregates_only_declared_roots_and_preserves_empty_root
     assert version['logical_root'] == 'project'
     assert version['entry'] == 'src/main.py'
     assert version['selection'] == 'directory'
+    assert set(helper.verify(root, step=7, call_id='call-1', code_version=version)) == {
+        'src/main.py', 'tools/helper.py'}
     export = helper.materialize(root, step=7, call_id='call-1', code_version=version)
     assert (export / 'src/main.py').read_bytes() == b'run\n'
     assert (export / 'tools/helper.py').read_bytes() == b'help\n'
-    assert not (export / 'empty').exists()
+    for name in ('src/empty', 'tools/only-empty', 'empty'):
+        assert not (export / name).exists()
     assert not (export / 'undeclared').exists()
     assert helper.materialize(root, step=7, call_id='call-1', code_version=version) == export
     assert scanned
@@ -298,9 +303,37 @@ def test_file_selection_is_complete_and_changed_same_call_refuses(tmp_path, help
 
 
 @pytest.mark.process_e2e
+def test_capture_ignores_empty_directory_branches_and_preserves_regular_files(tmp_path, helper):
+    root, code = _source(tmp_path)
+    for name in ('empty', 'nested/empty', 'only-empty/child/descendant'):
+        (code / name).mkdir(parents=True)
+    helper_bytes = b'#!/bin/sh\nprintf original\\n\n'
+    (code / 'nested/helper.sh').write_bytes(helper_bytes)
+    (code / 'nested/helper.sh').chmod(0o755)
+    (code / 'zero-byte').write_bytes(b'')
+
+    version = _capture(helper, root, code)
+    assert version['entry'] == 'main.py'
+    assert set(helper.verify(root, step=7, call_id='call-1', code_version=version)) == {
+        'main.py', 'nested/helper.sh', 'zero-byte'}
+    export = helper.materialize(root, step=7, call_id='call-1', code_version=version)
+    assert (export / 'main.py').read_bytes() == b"print('original')\r\n"
+    assert (export / 'nested/helper.sh').read_bytes() == helper_bytes
+    assert stat.S_IMODE((export / 'nested/helper.sh').stat().st_mode) == 0o555
+    assert (export / 'zero-byte').is_file()
+    assert (export / 'zero-byte').read_bytes() == b''
+    for name in ('empty', 'nested/empty', 'only-empty'):
+        assert (code / name).is_dir()
+        assert not (export / name).exists()
+    assert helper.materialize(root, step=7, call_id='call-1', code_version=version) == export
+    (code / 'empty').rmdir()
+    (code / 'new-empty').mkdir()
+    assert _capture(helper, root, code) == version
+
+
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('case', ['file_bytes', 'total_bytes', 'files', 'scan_entries',
-                                  'symlink_file', 'symlink_directory', 'fifo', 'git_component',
-                                  'empty_directory'])
+                                  'symlink_file', 'symlink_directory', 'fifo', 'git_component'])
 def test_preflight_rejects_bounds_and_nonregular_code_before_repository_writes(tmp_path, helper, case):
     root, code = _source(tmp_path)
     limits = {}
@@ -322,8 +355,6 @@ def test_preflight_rejects_bounds_and_nonregular_code_before_repository_writes(t
         os.mkfifo(code / 'pipe')
     elif case == 'git_component':
         (code / '.git').mkdir()
-    else:
-        (code / 'empty').mkdir()
     with pytest.raises(ValueError):
         _capture(helper, root, code, limits=limits)
     assert not (root / 'host-runtime').exists()

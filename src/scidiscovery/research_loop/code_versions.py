@@ -285,9 +285,6 @@ def _scan(code_root, entry, selection, policy, context, *, inventory=None):
             os.close(fd)
     if entry is not None and entry not in files:
         raise ValueError('Selected code entry is absent from the captured tree')
-    required = {parent.as_posix() for name in files for parent in Path(name).parents if str(parent) != '.'}
-    if set(directories) != {'.', *required}:
-        raise ValueError('Git cannot represent an empty selected code directory')
     return files, directories
 
 
