@@ -49,6 +49,14 @@ def hook_metadata(work,*,declared=None):
     return dict(data=[dict(cwd=str(work),hooks=hooks,warnings=[],errors=[])])
 
 
+def assert_ordinary_a_risk_keeps_normal_routing(text):
+    assert 'end this assessment' in text and 'retain unmet goals' in text
+    assert 'normal next_action' in text and 'evidence/shared balance' in text
+    assert 'Soft targets do not end research' in text
+    assert 'deliver' not in text and 'finish with gaps' not in text
+    assert 'No H/W/E' not in text and 'conclude now' not in text
+
+
 @pytest.mark.parametrize('first_dimension',['token','time'])
 def test_each_dimension_emits_once_per_logical_node_across_causes_and_attempts(tmp_path,first_dimension):
     path=save(tmp_path,published(dimension=first_dimension,target=False,near=True))
@@ -58,7 +66,7 @@ def test_each_dimension_emits_once_per_logical_node_across_causes_and_attempts(t
     value=c.read(path);value['updated_at_unix']=124.;save(tmp_path,value)
     assert notice.hook_output(tmp_path,0) is None
     text=first['hookSpecificOutput']['additionalContext']
-    assert 'at expiry' in text and 'eligible existing candidate or finish with gaps' in text and 'No H/W/E/extra FINAL' in text
+    assert_ordinary_a_risk_keeps_normal_routing(text)
     value=published(dimension=first_dimension,target=False,shared=True,expired=first_dimension=='time')
     save(tmp_path,value)
     assert notice.hook_output(tmp_path,0) is None
@@ -151,8 +159,18 @@ def test_first_risk_notice_is_bounded_and_keeps_scientific_permissions(role,dime
     assert notice.published_notices(value)==value['closeout_notices']
     assert dimension in text.lower()
     if role=='A':
-        assert 'eligible existing candidate or finish with gaps' in text and 'No H/W/E/extra FINAL' in text
-        assert ('conclude now' in text) is (risk=='expired')
+        if risk=='expired':
+            assert 'conclude now' in text and 'eligible existing candidate or finish with gaps' in text
+            assert 'No H/W/E/extra FINAL' in text
+        else:
+            assert_ordinary_a_risk_keeps_normal_routing(text)
+
+
+def test_exhausted_shared_token_budget_requires_ordinary_a_to_conclude_now():
+    text=published(target=False,shared=True)['closeout_notices']['token']['text']
+    assert 'Shared token budget reached' in text and 'conclude now' in text
+    assert 'eligible existing candidate or finish with gaps' in text and 'No H/W/E/extra FINAL' in text
+    assert 'normal next_action' not in text and len(text.encode())<=notice.MAX_NOTICE_BYTES
 
 
 @pytest.mark.parametrize('options,required',[

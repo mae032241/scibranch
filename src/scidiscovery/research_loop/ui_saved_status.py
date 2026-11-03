@@ -90,7 +90,7 @@ def used_steps(root, numbers=None, events=None):
 
 
 def final_return(root, events=None):
-    """Select the saved active FINAL cycle; old v1 returns remain historical."""
+    """Select a return belonging to the saved active FINAL cycle only."""
     events = events if events is not None else [c.read(path) for path in sorted((root / 'control-ledger').glob('*.json'))]
     active = None
     for event in events:
@@ -98,8 +98,10 @@ def final_return(root, events=None):
             active = event if event.get('mode') == 'final' else None
         elif event['kind'] == 'closeout_resume':
             active = None
+    if active is None:
+        return None
     return next((event for event in reversed(events) if event['kind'] == 'final_a_return'
-        and (event.get('version') == 1 or active is not None and event['step'] == active['first_step'])), None)
+        and event['seq'] > active['seq'] and event['step'] == active['first_step']), None)
 
 
 def _native_outcome(record, memo=None):
@@ -358,7 +360,14 @@ def closeout(root, events=None, numbers=None):
             else 'delivery_' + outcome.get('status', 'unknown'))
     value = dict(status=status, last_confirmed=confirmed[-1] if confirmed else None,
         current_actual='unknown' if unresolved or pending else (confirmed[-1] if confirmed else None),
-        goal_completion='not_asserted', used_steps=used_steps(root, numbers, events), source_cutoff=begin['source_cutoff'])
+        goal_completion='not_asserted', used_steps=used_steps(root, numbers, events), source_cutoff=begin['source_cutoff'],
+        mode=begin['mode'], authorization_step=begin.get('authorization_step'))
+    # The active accepted cycle owns the scientific source.  A direct delivery
+    # keeps its ordinary A author; it does not create a FINAL job at first_step.
+    source = final['step'] if final is not None else (
+        begin.get('authorization_step') if begin['mode'] == 'model' else None)
+    value['result_step'] = (source if type(source) is int and source in numbers
+        and (root / 'native-evidence' / f'{source:03d}' / 'result-identity.json').exists() else None)
     if final is not None and final['step'] in completed:
         record = root / 'native-evidence' / f'{final["step"]:03d}'
         seal = c.read(record / 'result-identity.json')
@@ -369,6 +378,15 @@ def closeout(root, events=None, numbers=None):
         if completion is not None:
             value['final_overrun'] = completion['final_overrun']
     return value
+
+
+def result(root):
+    """Load one saved result selection without rebuilding scientific history."""
+    events = [c.read(path) for path in sorted((root / 'control-ledger').glob('*.json'))]
+    numbers = visible_steps(root)
+    closeout_value = closeout(root, events, numbers)
+    return dict(closeout=closeout_value, result_step=(closeout_value or {}).get('result_step'),
+        latest_step=max(numbers, default=0))
 
 
 
@@ -482,9 +500,11 @@ def status(root, *, after=0, limit=None, memo=None):
              state='seal_present_unverified', inherited=True) for step in selected]
     last = selected[-1] if selected else after
     usage_value=_usage(root,numbers,memo);budget_value=_budget(root,settings,events)
+    closeout_value = closeout(root, events, numbers)
     return dict(portfolio_metrics=portfolio_metrics(root,numbers,usage_value,budget_value,memo=memo),instance=str(root), goal_id=settings['goal_id'], objective=settings['objective'],
         paused=(root / 'pause.request').exists(), nodes=nodes, usage=usage_value,
-        budget=budget_value, correction=_correction(root), closeout=closeout(root, events, numbers),
+        budget=budget_value, correction=_correction(root), closeout=closeout_value,
+        result_step=(closeout_value or {}).get('result_step'),
         closeout_preparation=None, goal_completion='not_asserted', after=after,
         used_steps=used_steps(root, numbers, events),
         **(dict(fork=dict(inherited_costs=manifest.get('inherited_costs',

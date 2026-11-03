@@ -924,10 +924,13 @@ reported shared token balance at or below that reference also prompts a notice.
 Shared active time prompts a notice only when strictly less than 10% of the total
 time limit remains. Token and time risks each receive one notice per logical node
 across resumes, at most two notices; a token notice does not suppress a later time
-notice. An ordinary A is advised early to conclude at expiry with `deliver` using an existing
-qualified candidate, or `finish` with the gaps retained when none is suitable,
-without opening another FINAL. These thresholds remain advice, not hard quotas or
-new reservations.
+notice. For ordinary A, node targets or unexhausted shared risk advise closing only
+the current assessment, retaining unmet goals and choosing the normal `next_action`
+from evidence and shared balance; node targets do not end research. Only when
+shared tokens or time are actually exhausted (remaining <= 0) must A immediately
+summarize existing results and `deliver` an eligible existing candidate or `finish`
+with gaps, without new H/W/E or another FINAL. These thresholds remain advice,
+not hard quotas or new reservations.
 Missing or stale budget advice does not grant allowance or deny execution;
 exact identity checks and independent execution authorization still apply.
 Shared budget checks for new nodes remain unchanged. Author

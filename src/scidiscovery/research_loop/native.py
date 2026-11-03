@@ -80,8 +80,11 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
                 if job['role'] in {'H','W'}:
                     prompt+=' Allow for suggested follow-up token targets in work/budget-status.json; no reservation/grant.'
                 else:
-                    prompt+=(' At shared time expiry, deliver an eligible existing candidate or finish with gaps. '
-                        'No new H/W/E/extra FINAL.')
+                    prompt+=(' Node targets/shared risk advise finishing the current assessment: retain unmet goals '
+                        'and choose normal next_action by evidence/shared balance (continue_w/revise_h/extract allowed); '
+                        'node targets do not end research. If shared tokens remaining<=0 or shared time remaining<=0, '
+                        'ordinary A must conclude now: summarize existing results and deliver an eligible existing candidate '
+                        'or finish with gaps, with no new H/W/E or extra FINAL; permissions hold.')
                 if job['role']=='W':prompt+=' Prefer 10-30s waits on pending originals within deadlines.'
     if budget_status:prompt+='\n'+json.dumps(budget_status,ensure_ascii=False,separators=(',',':'))
     if execution_interface is not None and not author and not output_only_wake:

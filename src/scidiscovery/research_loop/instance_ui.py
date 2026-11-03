@@ -861,16 +861,41 @@ class InstanceUI:
     def _latest_step(self):
         return max(saved_status.visible_steps(self.root), default=0)
 
-    def _final_step(self):
-        final = saved_status.final_return(self.root)
-        step = final['step'] if final is not None else self._latest_step()
-        if not step or not (self.root / 'native-evidence' / f'{step:03d}' / 'result-identity.json').exists():
+    @staticmethod
+    def _ordinary_assessment(job):
+        return (job['role'] == 'A' and job.get('purpose') != 'closeout'
+            and not any(job.get(key) for key in ('formal_review', 'final_report', 'final_only')))
+
+    @staticmethod
+    def _selected_result(saved, latest, conclusion, *, terminal=False):
+        """Use the active saved source, or the latest ordinary terminal finish."""
+        closeout = saved.get('closeout') or {}
+        if saved.get('result_step') is not None:
+            if (terminal and closeout.get('authorization_step') is not None
+                    and closeout.get('status') != 'delivery_confirmed'):
+                return None
+            return saved['result_step']
+        if closeout.get('mode') in {'model', 'final'}:
             return None
-        node = display.node(self.root, step)
-        if final is not None:
-            return step
-        job, payload = node['job'], node['payload']
-        return step if job['role'] == 'A' and not job.get('formal_review') and payload.get('next_action') == 'finish' else None
+        return (latest if conclusion and conclusion['step'] == latest
+            and conclusion['ordinary']
+            and conclusion['payload'].get('next_action') == 'finish' else None)
+
+    def _result_source(self):
+        saved = saved_status.result(self.root)
+        latest = saved['latest_step']
+        conclusion = None
+        if (saved['result_step'] is None
+                and (saved['closeout'] or {}).get('mode') not in {'model', 'final'} and latest and (
+                self.root / 'native-evidence' / f'{latest:03d}' / 'result-identity.json').exists()):
+            node = display.node(self.root, latest)
+            conclusion = dict(step=latest, role=node['job']['role'],
+                ordinary=self._ordinary_assessment(node['job']), payload=node['payload'])
+        saved['result_step'] = self._selected_result(saved, latest, conclusion)
+        return saved
+
+    def _final_step(self):
+        return self._result_source()['result_step']
 
     def _progress_value(self, step, attempt, cursor, *, tail=False):
         value = progress.read(self.root, step, attempt=attempt, cursor=cursor, tail=tail)
@@ -962,10 +987,11 @@ class InstanceUI:
                     if node['state'] == 'seal_present_unverified':
                         sealed = display.node(self.root, node['step'])
                         job, payload = sealed['job'], sealed['payload']
-                        conclusion = dict(step=node['step'], role=node['role'], ordinary=not job.get('formal_review') and job.get('purpose') != 'closeout', payload=payload)
+                        conclusion = dict(step=node['step'], role=node['role'],
+                            ordinary=self._ordinary_assessment(job), payload=payload)
                         break
                 operations = saved_status.operations(self.root, memo=self.status_memo)
-                final = self._final_step()
+                final = self._selected_result(view, latest, conclusion, terminal=True)
                 # One read-only projection per snapshot; components fail separately.
                 projection = self._guarded(ui_view.project, self.root, view, final_step=final, memo=self.view_memo,
                                              clean=ui_view.cleaner(self.root))
@@ -991,9 +1017,9 @@ class InstanceUI:
                     node = display.node(self.root, latest)
                     job = node['job']
                     conclusion = dict(step=latest, role=job['role'],
-                        ordinary=not job.get('formal_review') and job.get('purpose') != 'closeout', payload=node['payload'])
+                        ordinary=self._ordinary_assessment(job), payload=node['payload'])
                 operations = saved_status.operations(self.root, memo=self.status_memo)
-                return dict(view=view, conclusion=conclusion, final=self._final_step(),
+                return dict(view=view, conclusion=conclusion, final=self._selected_result(view, latest, conclusion, terminal=True),
                     operation=operations[-1] if operations else None, operations=operations[-20:],
                     ui=dict(header=ui_view.header(self.root, view['objective']),
                         used_steps=view.get('used_steps', (view.get('closeout') or {}).get('used_steps', latest))))
@@ -1677,7 +1703,7 @@ class InstanceUI:
         body += self._form(token, 'delete', fields, '确认永久删除此实例')
         return (problem.status if problem else 200), self._page('删除实例', body, live=False), {}
 
-    def _result_page(self, step, *, final=False):
+    def _result_page(self, step, *, closeout, final=False):
         clean = ui_view.cleaner(self.root)
         reader = ui_view.Reader(self.root, self.view_memo)
         node = reader.node(step)
@@ -1698,7 +1724,6 @@ class InstanceUI:
                 'W 的“本阶段实验”是封存观察中已接受的受管调用数，不等于独立实验设计数或科学覆盖。',
                 '本阶段候选按首次观察顺序列出；“最高/最低”只在同一口径内按作者声明方向取值，不代表科学排序。'))
             return 200, render.page('第 ' + str(step) + ' 阶段 · ' + label, body), {}
-        closeout = self._guarded(saved_status.closeout, self.root, clean=clean)
         closeout_error = closeout is not None and 'error' in closeout
         closeout = None if closeout_error else closeout
         mechanisms = self._guarded(ui_view.mechanism_labels, reader, range(1, step + 1))
@@ -1856,13 +1881,14 @@ class InstanceUI:
             if parsed.query:
                 raise ValueError('Exact final result page required')
             try:
-                final = self._final_step()
+                saved = self._result_source()
+                final = saved['result_step']
+                if final is not None:
+                    return self._result_page(final, final=True, closeout=saved['closeout'])
             except Exception as error:  # noqa: BLE001 - name the failure; other pages stay usable
                 failure = self._failure(error)
                 return 200, self._page('最终结果', self._navigation('/final-results') + '<section><h2>最终结论暂不可读</h2>'
                     + ui.error_inline(failure, what='最终结论') + '<a class="primary" href="/results">查看研究过程</a></section>'), {}
-            if final is not None:
-                return self._result_page(final, final=True)
             return 200, self._page('最终结果', self._navigation('/final-results') + '<section class="empty"><h2>最终综合结论尚未返回</h2><p>你可以先阅读已完成阶段的发现与局限。</p><a class="primary" href="/results">查看研究过程</a></section>'), {}
         if parsed.path=='/results':
             query=parse_qs(parsed.query,strict_parsing=True) if parsed.query else {}
@@ -1875,7 +1901,7 @@ class InstanceUI:
             number=parsed.path.removeprefix('/results/')
             if parsed.query or not number.isascii() or not number.isdecimal() or int(number)<=0:
                 raise ValueError('Exact sealed scientific result required')
-            return self._result_page(int(number))
+            return self._result_page(int(number), closeout=self._guarded(saved_status.closeout, self.root))
         if parsed.path == '/':
             query = parse_qs(parsed.query, strict_parsing=True) if parsed.query else {}
             if set(query) - {'after'} or any(len(values) != 1 for values in query.values()):

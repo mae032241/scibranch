@@ -8,15 +8,33 @@ from test_node_budget import instance, policy, target
 from test_soft_node_budget import start_clock
 
 
+def assert_a_risk_keeps_evidence_based_routing(text):
+    assert 'end this assessment' in text and 'retain unmet goals' in text
+    assert 'normal next_action' in text and 'evidence/shared balance' in text
+    assert 'Soft targets do not end research' in text
+    assert 'deliver' not in text and 'finish with gaps' not in text
+    assert 'No H/W/E' not in text and 'conclude now' not in text
+
+
+def assert_a_instruction_scopes_global_closeout(text):
+    assert 'current assessment' in text and 'unmet goals' in text
+    assert 'normal next_action' in text and 'evidence/shared balance' in text
+    assert all(action in text for action in ('continue_w','revise_h','extract'))
+    restricted=[sentence for sentence in text.split('. ') if 'no new H/W/E or extra FINAL' in sentence]
+    assert len(restricted)==1
+    assert restricted[0].startswith('If shared tokens remaining<=0 or shared time remaining<=0, ordinary A')
+    assert 'conclude now' in restricted[0] and 'eligible existing candidate or finish with gaps' in restricted[0]
+
+
 @pytest.fixture
 def advice(tmp_path, monkeypatch):
     def make(*, mode='soft', node=True, delivery=False, node_tokens=100, role='H',
-            role_targets=None, thinking_target=None):
+            role_targets=None, thinking_target=None, max_tokens=1000, max_seconds=120):
         public=tmp_path/'public';public.mkdir();objective=public/'objective.md';objective.write_text('Bounded scientific question.')
         root=tmp_path/'instance'
         reserve=(dict(closeout_a=dict(max_observed_tokens=10,max_seconds=1),inflight_tokens=5,
             cleanup_seconds=2,submit_seconds=0,confirm_seconds=0,adapter=None) if delivery else None)
-        controller.prepare(root,objective,public,['never-launch'],max_tokens=1000,max_seconds=120,max_steps=6,
+        controller.prepare(root,objective,public,['never-launch'],max_tokens=max_tokens,max_seconds=max_seconds,max_steps=6,
             model='fixture',reasoning_effort='high',search_policy=None,node_budget_mode=mode,
             node_budget_policy=(role_targets or policy(tokens=node_tokens,seconds=30)) if node else None,delivery_policy=reserve,
             role_budget_policy=dict(version=1,min_w_share=.65,max_thinking_share=.35,
@@ -84,6 +102,34 @@ def test_soft_target_remains_advisory_and_shared_balance_is_not_a_fresh_grant(ad
     assert hint['mode']=='soft' and hint['target_state']=='reached'
     assert hint['current_work_observed_tokens_remaining_upper_bound']==750
     assert published==[True]
+
+
+def test_a_node_target_with_r15_shared_balance_does_not_end_research(advice):
+    root,job,intent,limits,shared,_,publish=advice(role='A',node_tokens=300_000,
+        max_tokens=5_000_000,max_seconds=10_800)
+    shared.update(observed_tokens=3_145_974,accounted_tokens=3_145_974)
+    limits['seconds_remaining']=9341.
+    meter=dict(input_tokens=300_000,cached_input_tokens=0,output_tokens=1)
+    hint=publish(meter)
+    assert hint['target_state']=='reached'
+    assert hint['shared_observed_tokens_remaining_upper_bound']==1_854_026
+    assert hint['shared_active_seconds_remaining']==9341.
+    assert set(hint['closeout_notices'])=={'token'}
+    assert hint['closeout_notices']['token']['cause']=='node'
+    assert_a_risk_keeps_evidence_based_routing(hint['closeout_notices']['token']['text'])
+    assert_a_instruction_scopes_global_closeout(hint['instruction'])
+    assert budget.stop_node(root,job,intent,limits,meter) is None
+
+
+def test_a_shared_token_exhaustion_requires_immediate_conclusion(advice):
+    _,_,_,_,shared,_,publish=advice(role='A')
+    shared.update(observed_tokens=1000,accounted_tokens=1000)
+    hint=publish()
+    assert hint['shared_observed_tokens_remaining_upper_bound']==0
+    text=hint['closeout_notices']['token']['text']
+    assert hint['closeout_notices']['token']['cause']=='shared'
+    assert 'Shared token budget reached' in text and 'conclude now' in text
+    assert 'eligible existing candidate or finish with gaps' in text and 'No H/W/E/extra FINAL' in text
 
 
 @pytest.mark.parametrize('mode',['soft'])
@@ -214,12 +260,16 @@ def test_shared_time_risk_is_strictly_below_ten_percent(advice,seconds,alert):
     hint=publish()
     assert hint['target_state']=='within' and hint['shared_active_seconds_remaining']==seconds
     assert ('closeout_notices' in hint) is alert
-    assert 'At shared time expiry' in hint['instruction']
+    assert_a_instruction_scopes_global_closeout(hint['instruction'])
     if alert:
         text=hint['closeout_notices']['time']['text']
         assert set(hint['closeout_notices'])=={'time'}
         assert hint['closeout_notices']['time']['cause']=='shared'
-        assert 'eligible existing candidate or finish with gaps' in text and 'No H/W/E/extra FINAL' in text
+        if seconds<=0:
+            assert 'conclude now' in text and 'eligible existing candidate or finish with gaps' in text
+            assert 'No H/W/E/extra FINAL' in text
+        else:
+            assert_a_risk_keeps_evidence_based_routing(text)
         assert ('Shared time expired' in text) is (seconds<=0)
         assert budget_notice.published_notices(hint)==hint['closeout_notices']
 
@@ -244,6 +294,49 @@ def test_producer_keeps_token_and_time_risks_independent_through_resume(advice,f
     assert output==both['closeout_notices'][remaining]['text']
     if remaining=='time':assert 'Shared time expired' in output
     for attempt in (0,1,2,999):assert budget_notice.hook_output(work,attempt) is None
+
+
+def test_later_token_notice_concludes_when_shared_time_expired_after_its_notice(advice):
+    root,_,_,limits,_,_,publish=advice(role='A')
+    limits['seconds_remaining']=11.
+    first=publish()
+    assert set(first['closeout_notices'])=={'time'}
+    work=c.workspace(root,1)
+    assert_a_risk_keeps_evidence_based_routing(budget_notice.hook_output(work,0)['hookSpecificOutput']['additionalContext'])
+    limits['seconds_remaining']=0.
+    expired=publish()
+    assert set(expired['closeout_notices'])=={'time'}  # Time expiry does not invent a token-risk trigger.
+    assert budget_notice.hook_output(work,1) is None
+    both=publish(dict(input_tokens=80,cached_input_tokens=0,output_tokens=0))
+    assert set(both['closeout_notices'])=={'time','token'}
+    text=budget_notice.hook_output(work,2)['hookSpecificOutput']['additionalContext']
+    assert text==both['closeout_notices']['token']['text'] and both['closeout_notices']['token']['cause']=='shared'
+    assert 'Token budget risk' in text and 'Shared budget exhausted' in text
+    assert 'Shared token budget reached' not in text
+    assert 'conclude now' in text and 'eligible existing candidate or finish with gaps' in text
+    assert 'No H/W/E/extra FINAL' in text and budget_notice.hook_output(work,3) is None
+
+
+def test_later_time_notice_concludes_when_shared_tokens_exhausted_after_their_notice(advice,monkeypatch):
+    root,_,_,_,shared,_,publish=advice(role='A')
+    meter=dict(input_tokens=80,cached_input_tokens=0,output_tokens=0)
+    first=publish(meter)
+    assert set(first['closeout_notices'])=={'token'}
+    work=c.workspace(root,1)
+    assert_a_risk_keeps_evidence_based_routing(budget_notice.hook_output(work,0)['hookSpecificOutput']['additionalContext'])
+    shared.update(observed_tokens=1000,accounted_tokens=1000)
+    exhausted=publish(meter)
+    assert set(exhausted['closeout_notices'])=={'token'}  # Token exhaustion does not invent a time-risk trigger.
+    assert budget_notice.hook_output(work,1) is None
+    monkeypatch.setattr(budget,'_node_duration',lambda *args:24.)
+    both=publish(meter)
+    assert set(both['closeout_notices'])=={'time','token'}
+    text=budget_notice.hook_output(work,2)['hookSpecificOutput']['additionalContext']
+    assert text==both['closeout_notices']['time']['text'] and both['closeout_notices']['time']['cause']=='shared'
+    assert 'Time budget risk' in text and 'Shared budget exhausted' in text
+    assert 'Shared time expired' not in text and 'Shared time budget reached' not in text
+    assert 'conclude now' in text and 'eligible existing candidate or finish with gaps' in text
+    assert 'No H/W/E/extra FINAL' in text and budget_notice.hook_output(work,3) is None
 
 
 @pytest.mark.process_e2e
@@ -282,5 +375,5 @@ def test_soft_native_stdin_has_budget_advice_and_prelaunch_hint(tmp_path,role):
             'unknown tokens!=0','no grant','no control wrappers/hashes'):
         assert text in prompt
     if role in 'HW':assert 'Allow for suggested follow-up token targets' in prompt
-    if role=='A':assert 'At shared time expiry' in prompt and 'No new H/W/E/extra FINAL' in prompt
+    if role=='A':assert_a_instruction_scopes_global_closeout(prompt)
     assert c.read(execution.record(root,step)/'native-outcome.json')['stop_reason'] is None

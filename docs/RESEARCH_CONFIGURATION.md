@@ -717,9 +717,13 @@ advice for W, or at strictly less than 10% of shared active time remaining. Each
 logical node receives one token-risk and one time-risk notice across resumes, at
 most two notices; token advice does not suppress later time advice. Notices arrive
 at the next supported local tool boundary without interrupting the current request.
-Ordinary A is advised early to `deliver` an existing qualified candidate at expiry,
-or `finish` with gaps retained
-if none is suitable, without another FINAL. These are advisory thresholds, not new
+For ordinary A, node targets and unexhausted shared risk advise closing only the
+current assessment, retaining unmet goals and choosing the normal `next_action`
+from evidence and shared balance, including `continue_w`, `revise_h` or `extract`
+when justified. A node target does not end research. Only when shared tokens or
+shared time are actually exhausted (remaining <= 0) must ordinary A immediately
+summarize existing results and `deliver` an eligible existing candidate or `finish`
+with gaps, without new H/W/E or another FINAL. These are advisory thresholds, not new
 quotas, reservations, authorization or defaults. Missing billing coverage alone
 does not block advancement; reported lower bounds and unknown gaps remain, without
 refund, zero replacement or replay. Unknown execution still requires original-call
@@ -733,8 +737,11 @@ their completion policy; see [architecture](ARCHITECTURE.md).
 达到 80%、token 余额不高于 H 后续 W+A 或 W 后续 A 的既有建议量、或共享剩余 active time
 严格低于总时限的 10% 时提醒；每逻辑节点的 token、time 风险各一次，跨 resume 去重，最多
 两次，token 提醒不抑制后续 time 提醒；在下一受支持本地工具边界生效，不打断当前请求。
-普通 A 提前获知到期用已有合格候选 `deliver`，无合适候选则 `finish`
-并保留缺口，不另开 FINAL。阈值均为建议，不新增配额、预留、授权或默认配置。仅计费未知
+普通 A 遇到节点目标或尚未耗尽的共享风险时，只收口当前评估并保留未达目标，按证据与
+全局余额选择正常 `next_action`，有依据时仍可 `continue_w`、`revise_h` 或 `extract`；
+节点目标本身不终止研究。仅当共享 token 或共享时间实际耗尽（剩余量 <= 0）时，普通 A
+才须立即总结已有结果，用已有合格候选 `deliver`，无合适候选则 `finish` 并保留缺口，
+不新开 H/W/E 或额外 FINAL。阈值均为建议，不新增配额、预留、授权或默认配置。仅计费未知
 不阻断推进，已报下界与未知缺口保留，不补零、不退款、不授重放；真实执行未知仍须按原调用
 核对。共享准入、单次有限执行及 protected FINAL 原策略继续有效。
 

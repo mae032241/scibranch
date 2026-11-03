@@ -36,10 +36,12 @@ def public_channel(value):
 
 
 def closeout_notice(job, intent, *, dimension, target_reached, shared_reached, target_near=False,
-        shared_risk=False, shared_expired=False, followup_tokens=None, author=False, final_return=False):
+        shared_risk=False, shared_expired=False, shared_exhausted=False, followup_tokens=None,
+        author=False, final_return=False):
     """Render only already-loaded observations; unknown usage is never zero."""
     if dimension not in {'token', 'time'}:
         raise ValueError('Unknown budget advice dimension')
+    # Global exhaustion changes ordinary A's advice, not this dimension's trigger.
     if not (target_reached or target_near or shared_reached or shared_risk):
         return None
     cause = 'shared' if shared_reached or shared_risk else 'node'
@@ -60,10 +62,16 @@ def closeout_notice(job, intent, *, dimension, target_reached, shared_reached, t
         text = (risk+' Complete accepted final return now from existing results; retain gaps. '
             'No extra FINAL/new work; permissions hold; unknown usage != 0.')
     elif job['role'] == 'A' and not (job.get('purpose') == 'closeout' or job.get('final_report') or job.get('final_only')):
-        timing = ('Shared time expired. A: conclude now;' if shared_expired else
-            f'Shared {dimension} budget reached. A: conclude now;' if shared_reached else risk+' A: wrap up; at expiry')
-        text = (timing+' deliver an eligible existing candidate or finish with gaps. '
-            'No H/W/E/extra FINAL; permissions hold; unknown usage != 0.')
+        if shared_expired or shared_reached or shared_exhausted:
+            cause = 'shared'
+            timing = ('Shared time expired.' if shared_expired else
+                f'Shared {dimension} budget reached.' if shared_reached else risk+' Shared budget exhausted.')
+            text = (timing+' A: conclude now; deliver an eligible existing candidate or finish with gaps. '
+                'No H/W/E/extra FINAL; permissions hold; unknown usage != 0.')
+        else:
+            text = (risk+' A: end this assessment; retain unmet goals. '
+                'Choose normal next_action by evidence/shared balance. '
+                'Soft targets do not end research; permissions hold; unknown usage != 0.')
     elif followup_tokens:
         roles = '+'.join(followup_tokens)
         text = (risk+f' Wrap up for suggested {roles} token targets. '

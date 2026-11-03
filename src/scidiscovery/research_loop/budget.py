@@ -2631,8 +2631,11 @@ def write_node_hint(root, job, intent, limits, meter, *, observed, author_limits
             +', '.join(f'{role}={tokens}' for role,tokens in followup_tokens.items())
             +'; these are advice, not reserved tokens or authorization.')
     if ordinary and job['role']=='A':
-        hint['instruction'] += (' At shared time expiry, summarize existing evidence and deliver an eligible existing candidate '
-            'or finish with gaps. Do not route to H/W/E or start another FINAL.')
+        hint['instruction'] += (' Node targets/shared risk advise finishing the current assessment: retain unmet goals '
+            'and choose normal next_action by evidence/shared balance (continue_w/revise_h/extract allowed); '
+            'node targets do not end research. If shared tokens remaining<=0 or shared time remaining<=0, '
+            'ordinary A must conclude now: summarize existing results and deliver an eligible existing candidate '
+            'or finish with gaps, with no new H/W/E or extra FINAL; permissions hold.')
     if author:
         hint['instruction'] = ('The author token target is soft: finish this original scientific response at the target. '
             'The verified author permit finite time limit remains enforced. No new experiment is authorized; all actual usage is retained.')
@@ -2653,6 +2656,7 @@ def write_node_hint(root, job, intent, limits, meter, *, observed, author_limits
             target_near=target is not None and used is not None and used>=.8*target,
             shared_reached=shared_reached,shared_risk=shared_risk,
             shared_expired=dimension=='time' and shared_seconds<=0,
+            shared_exhausted=remaining<=0 or shared_seconds<=0,
             followup_tokens=followup_tokens if dimension=='token' else None,
             author=author,final_return=final_return is not None)
         if notice is not None:notices[dimension]=notice
